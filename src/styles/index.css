@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+:root {
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas",
+    monospace;
+}
+
+body {
+  font-family: var(--font-mono);
+  margin: 0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Disassembly row styling */
+.disasm-row:hover {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.disasm-address {
+  color: #9ca3af;
+}
+
+.disasm-bytes {
+  color: #6b7280;
+}
+
+.disasm-mnemonic {
+  color: #60a5fa;
+}
+
+.disasm-operands {
+  color: #d1d5db;
+}
+
+.disasm-comment {
+  color: #22c55e;
+}
+
+/* Hex view */
+.hex-byte {
+  color: #d1d5db;
+}
+
+.hex-byte.zero {
+  color: #4b5563;
+}
+
+.hex-ascii {
+  color: #a78bfa;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
