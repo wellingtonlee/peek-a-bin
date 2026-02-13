@@ -8,7 +8,22 @@ interface FileLoaderProps {
 
 export function FileLoader({ onFile, loading, error }: FileLoaderProps) {
   const [dragging, setDragging] = useState(false);
+  const [loadingExample, setLoadingExample] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const loadExample = useCallback(async () => {
+    setLoadingExample(true);
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}crackme100.exe`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buffer = await res.arrayBuffer();
+      onFile(buffer);
+    } catch (e) {
+      console.error("Failed to load example:", e);
+    } finally {
+      setLoadingExample(false);
+    }
+  }, [onFile]);
 
   const handleFile = useCallback(
     (file: File) => {
@@ -96,6 +111,13 @@ export function FileLoader({ onFile, loading, error }: FileLoaderProps) {
           className="hidden"
         />
       </div>
+      <button
+        onClick={loadExample}
+        disabled={loading || loadingExample}
+        className="mt-4 px-4 py-2 text-sm text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {loadingExample ? "Loading..." : "Try example: crackme100.exe"}
+      </button>
     </div>
   );
 }
