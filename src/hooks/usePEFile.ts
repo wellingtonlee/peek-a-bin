@@ -1,6 +1,6 @@
 import { createContext, useContext, useReducer, type Dispatch } from "react";
 import type { PEFile } from "../pe/types";
-import type { DisasmFunction, Instruction } from "../disasm/types";
+import type { DisasmFunction } from "../disasm/types";
 
 export type ViewTab =
   | "disassembly"
@@ -18,7 +18,6 @@ export interface AppState {
   currentAddress: number;
   functions: DisasmFunction[];
   disasmReady: boolean;
-  instructions: Instruction[];
   selectedSection: number;
 }
 
@@ -30,7 +29,6 @@ export type AppAction =
   | { type: "SET_ADDRESS"; address: number }
   | { type: "SET_FUNCTIONS"; functions: DisasmFunction[] }
   | { type: "SET_DISASM_READY" }
-  | { type: "SET_INSTRUCTIONS"; instructions: Instruction[] }
   | { type: "SET_SELECTED_SECTION"; index: number }
   | { type: "RESET" };
 
@@ -42,7 +40,6 @@ export const initialState: AppState = {
   currentAddress: 0,
   functions: [],
   disasmReady: false,
-  instructions: [],
   selectedSection: 0,
 };
 
@@ -68,8 +65,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, functions: action.functions };
     case "SET_DISASM_READY":
       return { ...state, disasmReady: true };
-    case "SET_INSTRUCTIONS":
-      return { ...state, instructions: action.instructions };
     case "SET_SELECTED_SECTION":
       return { ...state, selectedSection: action.index };
     case "RESET":

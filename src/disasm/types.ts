@@ -13,7 +13,3 @@ export interface DisasmFunction {
   size: number;
 }
 
-export interface DisasmRegion {
-  startAddress: number;
-  instructions: Instruction[];
-}

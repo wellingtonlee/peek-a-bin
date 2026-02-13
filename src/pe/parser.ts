@@ -50,12 +50,12 @@ export function rvaToFileOffset(rva: number, sections: SectionHeader[]): number 
 
     if (rva >= sectionStart && rva < sectionEnd) {
       const offset = rva - section.virtualAddress;
+      if (offset >= section.sizeOfRawData) return -1;
       return section.pointerToRawData + offset;
     }
   }
 
-  // If not in any section, assume RVA == file offset (rare case)
-  return rva;
+  return -1;
 }
 
 /**
@@ -238,7 +238,7 @@ function parseImports(
   const imports: ImportEntry[] = [];
   const importTableOffset = rvaToFileOffset(importDir.virtualAddress, sections);
 
-  if (importTableOffset >= view.byteLength) {
+  if (importTableOffset < 0 || importTableOffset >= view.byteLength) {
     return imports;
   }
 
@@ -260,7 +260,7 @@ function parseImports(
 
     // Read library name
     const nameOffset = rvaToFileOffset(nameRVA, sections);
-    if (nameOffset >= view.byteLength) {
+    if (nameOffset < 0 || nameOffset >= view.byteLength) {
       descriptorOffset += descriptorSize;
       continue;
     }
@@ -324,7 +324,7 @@ function parseExports(
   const exports: ExportEntry[] = [];
   const exportTableOffset = rvaToFileOffset(exportDir.virtualAddress, sections);
 
-  if (exportTableOffset + 40 > view.byteLength) {
+  if (exportTableOffset < 0 || exportTableOffset + 40 > view.byteLength) {
     return exports;
   }
 
@@ -337,6 +337,10 @@ function parseExports(
   const addressTableOffset = rvaToFileOffset(addressTableRVA, sections);
   const namePointerOffset = rvaToFileOffset(namePointerRVA, sections);
   const ordinalTableOffset = rvaToFileOffset(ordinalTableRVA, sections);
+
+  if (addressTableOffset < 0 || namePointerOffset < 0 || ordinalTableOffset < 0) {
+    return exports;
+  }
 
   // Walk name pointer table
   for (let i = 0; i < numberOfNames; i++) {
@@ -351,7 +355,7 @@ function parseExports(
     const ordinal = view.getUint16(ordinalPos, true);
 
     const nameOffset = rvaToFileOffset(nameRVA, sections);
-    if (nameOffset >= view.byteLength) continue;
+    if (nameOffset < 0 || nameOffset >= view.byteLength) continue;
 
     const name = readCString(view, nameOffset);
 
@@ -373,6 +377,7 @@ function parseExports(
 function extractStrings(
   view: DataView,
   sections: SectionHeader[],
+  imageBase: number,
   minLength = 4
 ): Map<number, string> {
   const strings = new Map<number, string>();
@@ -385,8 +390,10 @@ function extractStrings(
   if (!rdataSection) return strings;
 
   const start = rdataSection.pointerToRawData;
+  // Cap scan at 1MB to prevent UI freeze on huge sections
+  const scanLimit = 1024 * 1024;
   const end = Math.min(
-    start + rdataSection.sizeOfRawData,
+    start + Math.min(rdataSection.sizeOfRawData, scanLimit),
     view.byteLength
   );
 
@@ -412,7 +419,7 @@ function extractStrings(
         const str = String.fromCharCode(...chars);
         const rva =
           rdataSection.virtualAddress + (strStart - rdataSection.pointerToRawData);
-        strings.set(rva, str);
+        strings.set(imageBase + rva, str);
       }
     }
 
@@ -497,8 +504,11 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
-  // 9. Extract strings from .rdata
-  const strings = extractStrings(view, sections);
+  // 9. Extract strings from .rdata (keyed by VA for disassembler lookups)
+  const imageBase = typeof optionalHeader.imageBase === "bigint"
+    ? Number(optionalHeader.imageBase)
+    : optionalHeader.imageBase;
+  const strings = extractStrings(view, sections, imageBase);
 
   return {
     buffer,

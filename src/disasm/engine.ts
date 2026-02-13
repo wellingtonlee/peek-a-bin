@@ -28,14 +28,29 @@ export class DisassemblyEngine {
     };
 
     if (stringMap && stringMap.size > 0) {
-      const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
-      if (addressMatch) {
-        for (const addrStr of addressMatch) {
-          const addr = parseInt(addrStr, 16);
-          if (stringMap.has(addr)) {
-            const str = stringMap.get(addr)!;
-            instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
-            break;
+      // RIP-relative addressing: [rip + 0xNNNN] or [rip - 0xNNNN]
+      const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+      if (ripMatch) {
+        const sign = ripMatch[1] === '+' ? 1 : -1;
+        const disp = parseInt(ripMatch[2], 16);
+        const target = insn.address + insn.size + sign * disp;
+        if (stringMap.has(target)) {
+          const str = stringMap.get(target)!;
+          instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
+        }
+      }
+
+      // Absolute address references
+      if (!instruction.comment) {
+        const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+        if (addressMatch) {
+          for (const addrStr of addressMatch) {
+            const addr = parseInt(addrStr, 16);
+            if (stringMap.has(addr)) {
+              const str = stringMap.get(addr)!;
+              instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
+              break;
+            }
           }
         }
       }
@@ -135,16 +150,44 @@ export class DisassemblyEngine {
     return instructions;
   }
 
-  detectFunctions(bytes: Uint8Array, baseAddress: number, is64: boolean): DisasmFunction[] {
-    const functions: DisasmFunction[] = [];
+  detectFunctions(
+    bytes: Uint8Array,
+    baseAddress: number,
+    is64: boolean,
+    options?: {
+      exports?: { name: string; address: number }[];
+      entryPoint?: number;
+    }
+  ): DisasmFunction[] {
+    const addrSet = new Set<number>();
+    const nameMap = new Map<number, string>();
     const len = bytes.length;
+    const endAddress = baseAddress + len;
 
+    // Add entry point
+    if (options?.entryPoint !== undefined) {
+      const ep = options.entryPoint;
+      if (ep >= baseAddress && ep < endAddress) {
+        addrSet.add(ep);
+        nameMap.set(ep, 'entry_point');
+      }
+    }
+
+    // Add export addresses
+    if (options?.exports) {
+      for (const exp of options.exports) {
+        if (exp.address >= baseAddress && exp.address < endAddress) {
+          addrSet.add(exp.address);
+          nameMap.set(exp.address, exp.name);
+        }
+      }
+    }
+
+    // Prologue scanning
     for (let i = 0; i < len; i++) {
       let isFunctionStart = false;
 
       if (is64) {
-        // x64 patterns:
-        // 1. push rbp; mov rbp, rsp (0x55 0x48 0x89 0xE5)
         if (i + 3 < len &&
             bytes[i] === 0x55 &&
             bytes[i + 1] === 0x48 &&
@@ -152,14 +195,12 @@ export class DisassemblyEngine {
             bytes[i + 3] === 0xE5) {
           isFunctionStart = true;
         }
-        // 2. sub rsp, imm8 (0x48 0x83 0xEC XX)
         else if (i + 3 < len &&
                  bytes[i] === 0x48 &&
                  bytes[i + 1] === 0x83 &&
                  bytes[i + 2] === 0xEC) {
           isFunctionStart = true;
         }
-        // 3. sub rsp, imm32 (0x48 0x81 0xEC XX XX XX XX)
         else if (i + 6 < len &&
                  bytes[i] === 0x48 &&
                  bytes[i + 1] === 0x81 &&
@@ -167,16 +208,12 @@ export class DisassemblyEngine {
           isFunctionStart = true;
         }
       } else {
-        // x86 32-bit patterns:
-        // push ebp; mov ebp, esp
-        // Pattern 1: 0x55 0x8B 0xEC
         if (i + 2 < len &&
             bytes[i] === 0x55 &&
             bytes[i + 1] === 0x8B &&
             bytes[i + 2] === 0xEC) {
           isFunctionStart = true;
         }
-        // Pattern 2: 0x55 0x89 0xE5
         else if (i + 2 < len &&
                  bytes[i] === 0x55 &&
                  bytes[i + 1] === 0x89 &&
@@ -186,21 +223,57 @@ export class DisassemblyEngine {
       }
 
       if (isFunctionStart) {
-        const address = baseAddress + i;
-        functions.push({
-          name: `sub_${address.toString(16).toUpperCase()}`,
-          address: address,
-          size: 0, // Will be calculated below
-        });
+        addrSet.add(baseAddress + i);
       }
     }
 
-    // Calculate function sizes (distance to next function or end of bytes)
+    // For sections < 2MB, disassemble and collect call targets
+    if (len < 2 * 1024 * 1024 && this.initialized) {
+      const cs = is64 ? this.cs64 : this.cs32;
+      let offset = 0;
+      while (offset < len) {
+        const chunkEnd = Math.min(offset + DisassemblyEngine.CHUNK_SIZE, len);
+        const chunk = bytes.subarray(offset, chunkEnd);
+        try {
+          const insns = cs.disasm(chunk, { address: baseAddress + offset });
+          for (const insn of insns) {
+            if (insn.mnemonic === 'call') {
+              const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+              if (m) {
+                const target = parseInt(m[1], 16);
+                if (target >= baseAddress && target < endAddress) {
+                  addrSet.add(target);
+                }
+              }
+            }
+          }
+          if (insns.length === 0) {
+            offset += 1;
+          } else {
+            const lastInsn = insns[insns.length - 1];
+            const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
+            offset += decoded;
+          }
+        } catch {
+          offset += DisassemblyEngine.CHUNK_SIZE;
+        }
+      }
+    }
+
+    // Build sorted function list
+    const sortedAddrs = Array.from(addrSet).sort((a, b) => a - b);
+    const functions: DisasmFunction[] = sortedAddrs.map((addr) => ({
+      name: nameMap.get(addr) || `sub_${addr.toString(16).toUpperCase()}`,
+      address: addr,
+      size: 0,
+    }));
+
+    // Calculate sizes
     for (let i = 0; i < functions.length; i++) {
       if (i < functions.length - 1) {
         functions[i].size = functions[i + 1].address - functions[i].address;
       } else {
-        functions[i].size = (baseAddress + len) - functions[i].address;
+        functions[i].size = endAddress - functions[i].address;
       }
     }
 

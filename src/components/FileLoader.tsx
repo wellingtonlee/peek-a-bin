@@ -18,6 +18,9 @@ export function FileLoader({ onFile, loading, error }: FileLoaderProps) {
           onFile(reader.result);
         }
       };
+      reader.onerror = () => {
+        console.error("FileReader error:", reader.error);
+      };
       reader.readAsArrayBuffer(file);
     },
     [onFile],

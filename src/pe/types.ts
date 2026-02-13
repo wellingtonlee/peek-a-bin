@@ -167,5 +167,5 @@ export interface PEFile {
   sections: SectionHeader[];
   imports: ImportEntry[];
   exports: ExportEntry[];
-  strings: Map<number, string>; // RVA → string from .rdata
+  strings: Map<number, string>; // VA → string from .rdata
 }
