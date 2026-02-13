@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 
 interface FileLoaderProps {
-  onFile: (buffer: ArrayBuffer) => void;
+  onFile: (buffer: ArrayBuffer, fileName: string) => void;
   loading: boolean;
   error: string | null;
 }
@@ -17,7 +17,7 @@ export function FileLoader({ onFile, loading, error }: FileLoaderProps) {
       const res = await fetch(`${import.meta.env.BASE_URL}crackme100.exe`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buffer = await res.arrayBuffer();
-      onFile(buffer);
+      onFile(buffer, "crackme100.exe");
     } catch (e) {
       console.error("Failed to load example:", e);
     } finally {
@@ -30,7 +30,7 @@ export function FileLoader({ onFile, loading, error }: FileLoaderProps) {
       const reader = new FileReader();
       reader.onload = () => {
         if (reader.result instanceof ArrayBuffer) {
-          onFile(reader.result);
+          onFile(reader.result, file.name);
         }
       };
       reader.onerror = () => {

@@ -280,6 +280,25 @@ export class DisassemblyEngine {
     return functions;
   }
 
+  buildXrefMap(instructions: Instruction[]): Map<number, number[]> {
+    const xrefs = new Map<number, number[]>();
+    for (const insn of instructions) {
+      if (insn.mnemonic === 'call' || insn.mnemonic === 'jmp' || insn.mnemonic.startsWith('j')) {
+        const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+        if (m) {
+          const target = parseInt(m[1], 16);
+          let arr = xrefs.get(target);
+          if (!arr) {
+            arr = [];
+            xrefs.set(target, arr);
+          }
+          arr.push(insn.address);
+        }
+      }
+    }
+    return xrefs;
+  }
+
   clearCache(): void {
     this.cache.clear();
   }

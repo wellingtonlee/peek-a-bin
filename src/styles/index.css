@@ -56,6 +56,22 @@ body {
   color: #a78bfa;
 }
 
+/* Sidebar resize handle */
+.sidebar-handle {
+  cursor: col-resize;
+  width: 4px;
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+}
+
+.sidebar-handle:hover,
+.sidebar-handle.active {
+  background: rgba(59, 130, 246, 0.3);
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;

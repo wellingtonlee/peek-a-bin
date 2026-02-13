@@ -15,6 +15,7 @@ import { DisassemblyView } from "./components/DisassemblyView";
 import { HexView } from "./components/HexView";
 import { ImportsView } from "./components/ImportsView";
 import { ExportsView } from "./components/ExportsView";
+import { StringsView } from "./components/StringsView";
 import { AddressBar } from "./components/AddressBar";
 
 
@@ -28,6 +29,42 @@ export default function App() {
       .then(() => dispatch({ type: "SET_DISASM_READY" }))
       .catch((e) => dispatch({ type: "SET_ERROR", error: e instanceof Error ? e.message : "Failed to load disassembly engine" }));
   }, []);
+
+  // Set document title when file is loaded
+  useEffect(() => {
+    if (state.fileName) {
+      document.title = `${state.fileName} — Peek-a-Bin`;
+    } else {
+      document.title = "Peek-a-Bin";
+    }
+  }, [state.fileName]);
+
+  // Load persisted bookmarks + renames from localStorage
+  useEffect(() => {
+    if (!state.fileName) return;
+    try {
+      const raw = localStorage.getItem(`peek-a-bin:${state.fileName}`);
+      if (raw) {
+        const data = JSON.parse(raw);
+        dispatch({
+          type: "LOAD_PERSISTED",
+          bookmarks: data.bookmarks ?? [],
+          renames: data.renames ?? {},
+        });
+      }
+    } catch { /* ignore corrupt data */ }
+  }, [state.fileName]);
+
+  // Persist bookmarks + renames to localStorage
+  useEffect(() => {
+    if (!state.fileName) return;
+    try {
+      localStorage.setItem(
+        `peek-a-bin:${state.fileName}`,
+        JSON.stringify({ bookmarks: state.bookmarks, renames: state.renames }),
+      );
+    } catch { /* quota exceeded */ }
+  }, [state.fileName, state.bookmarks, state.renames]);
 
   // Run function detection when both PE file and disasm engine are ready
   useEffect(() => {
@@ -60,12 +97,12 @@ export default function App() {
   }, [state.peFile, state.disasmReady]);
 
   const handleFile = useCallback(
-    (buffer: ArrayBuffer) => {
+    (buffer: ArrayBuffer, fileName: string) => {
       dispatch({ type: "SET_LOADING" });
       try {
         bufferRef.current = buffer;
         const pe = parsePE(buffer);
-        dispatch({ type: "SET_PE_FILE", peFile: pe });
+        dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
       } catch (e) {
         dispatch({
           type: "SET_ERROR",
@@ -91,6 +128,8 @@ export default function App() {
         return <ExportsView />;
       case "hex":
         return <HexView />;
+      case "strings":
+        return <StringsView />;
       default:
         return null;
     }

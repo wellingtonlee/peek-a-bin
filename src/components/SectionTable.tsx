@@ -1,9 +1,21 @@
-import { useAppState } from "../hooks/usePEFile";
+import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import { sectionCharacteristicsToString } from "../pe/constants";
 
 export function SectionTable() {
-  const { peFile: pe } = useAppState();
+  const { peFile: pe, currentAddress } = useAppState();
+  const dispatch = useAppDispatch();
   if (!pe) return null;
+
+  const imageBase = pe.optionalHeader.imageBase;
+  const currentRva = currentAddress - imageBase;
+  const activeIdx = pe.sections.findIndex(
+    (s) => currentRva >= s.virtualAddress && currentRva < s.virtualAddress + s.virtualSize,
+  );
+
+  const handleClick = (sec: (typeof pe.sections)[number]) => {
+    dispatch({ type: "SET_ADDRESS", address: imageBase + sec.virtualAddress });
+    dispatch({ type: "SET_TAB", tab: "disassembly" });
+  };
 
   return (
     <div className="p-4 text-xs overflow-auto h-full">
@@ -23,7 +35,15 @@ export function SectionTable() {
         </thead>
         <tbody>
           {pe.sections.map((sec, i) => (
-            <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/50">
+            <tr
+              key={i}
+              onClick={() => handleClick(sec)}
+              className={`border-b border-gray-800 cursor-pointer transition-colors ${
+                i === activeIdx
+                  ? "bg-blue-900/30 hover:bg-blue-900/40"
+                  : "hover:bg-gray-800/50"
+              }`}
+            >
               <td className="py-2 pr-4 text-gray-200 font-semibold">
                 {sec.name}
               </td>

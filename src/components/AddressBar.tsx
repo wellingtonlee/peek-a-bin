@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { useAppState, useAppDispatch, type ViewTab } from "../hooks/usePEFile";
 
 const TABS: { id: ViewTab; label: string }[] = [
@@ -8,7 +8,18 @@ const TABS: { id: ViewTab; label: string }[] = [
   { id: "imports", label: "Imports" },
   { id: "exports", label: "Exports" },
   { id: "hex", label: "Hex" },
+  { id: "strings", label: "Strings" },
 ];
+
+const TAB_KEYS: Record<string, ViewTab> = {
+  "1": "disassembly",
+  "2": "headers",
+  "3": "sections",
+  "4": "imports",
+  "5": "exports",
+  "6": "hex",
+  "7": "strings",
+};
 
 export function AddressBar() {
   const state = useAppState();
@@ -18,7 +29,6 @@ export function AddressBar() {
   const invalidTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const handleGo = useCallback(() => {
-    // Strip 0x/0X prefix before parsing
     const cleaned = input.replace(/^0[xX]/, "");
     const addr = parseInt(cleaned, 16);
     if (!isNaN(addr) && cleaned.length > 0) {
@@ -45,6 +55,39 @@ export function AddressBar() {
     dispatch({ type: "RESET" });
   }, [dispatch]);
 
+  // Global keyboard shortcuts for tab switching and nav
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (document.activeElement?.tagName ?? "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+      // Tab shortcuts 1-6
+      const tab = TAB_KEYS[e.key];
+      if (tab) {
+        e.preventDefault();
+        dispatch({ type: "SET_TAB", tab });
+        return;
+      }
+
+      // Alt+Left/Right for navigation history
+      if (e.altKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        dispatch({ type: "NAV_BACK" });
+        return;
+      }
+      if (e.altKey && e.key === "ArrowRight") {
+        e.preventDefault();
+        dispatch({ type: "NAV_FORWARD" });
+        return;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [dispatch]);
+
+  const canGoBack = state.historyIndex > 0;
+  const canGoForward = state.historyIndex < state.addressHistory.length - 1;
+
   return (
     <div className="flex items-center gap-1 px-3 py-1.5 bg-gray-900 border-b border-gray-700 text-sm">
       <button
@@ -57,7 +100,27 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      {TABS.map((tab) => (
+      {/* Back / Forward */}
+      <button
+        onClick={() => dispatch({ type: "NAV_BACK" })}
+        disabled={!canGoBack}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
+        title="Back (Alt+Left)"
+      >
+        ◀
+      </button>
+      <button
+        onClick={() => dispatch({ type: "NAV_FORWARD" })}
+        disabled={!canGoForward}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
+        title="Forward (Alt+Right)"
+      >
+        ▶
+      </button>
+
+      <div className="w-px h-5 bg-gray-700 mx-1" />
+
+      {TABS.map((tab, i) => (
         <button
           key={tab.id}
           onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
@@ -66,6 +129,7 @@ export function AddressBar() {
               ? "bg-blue-600 text-white"
               : "text-gray-400 hover:text-white hover:bg-gray-700"
           }`}
+          title={`${tab.label} (${i + 1})`}
         >
           {tab.label}
         </button>
