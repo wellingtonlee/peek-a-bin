@@ -3,10 +3,12 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type SortKey = "address" | "length";
+type EncodingFilter = "all" | "ascii" | "utf16le";
 
 interface StringEntry {
   address: number;
   value: string;
+  encoding: "ascii" | "utf16le";
 }
 
 export function StringsView() {
@@ -16,12 +18,14 @@ export function StringsView() {
   const parentRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("address");
+  const [encodingFilter, setEncodingFilter] = useState<EncodingFilter>("all");
 
   const allStrings = useMemo((): StringEntry[] => {
     if (!pe) return [];
     const entries: StringEntry[] = [];
     pe.strings.forEach((value, address) => {
-      entries.push({ address, value });
+      const encoding = pe.stringTypes?.get(address) ?? "ascii";
+      entries.push({ address, value, encoding });
     });
     entries.sort((a, b) => a.address - b.address);
     return entries;
@@ -29,6 +33,9 @@ export function StringsView() {
 
   const filtered = useMemo(() => {
     let result = allStrings;
+    if (encodingFilter !== "all") {
+      result = result.filter((s) => s.encoding === encodingFilter);
+    }
     if (filter) {
       const q = filter.toLowerCase();
       result = result.filter(
@@ -41,7 +48,7 @@ export function StringsView() {
       result = [...result].sort((a, b) => b.value.length - a.value.length);
     }
     return result;
-  }, [allStrings, filter, sortKey]);
+  }, [allStrings, filter, sortKey, encodingFilter]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -60,6 +67,19 @@ export function StringsView() {
         <span className="font-semibold text-gray-300">Strings</span>
         <span>{filtered.length.toLocaleString()}{filter ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
         <div className="flex-1" />
+        {(["all", "ascii", "utf16le"] as EncodingFilter[]).map((enc) => (
+          <button
+            key={enc}
+            onClick={() => setEncodingFilter(enc)}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${
+              encodingFilter === enc
+                ? "bg-blue-600 text-white"
+                : "text-gray-500 hover:text-gray-300"
+            }`}
+          >
+            {enc === "all" ? "All" : enc === "ascii" ? "ASCII" : "UTF-16"}
+          </button>
+        ))}
         <button
           onClick={() => setSortKey(sortKey === "address" ? "length" : "address")}
           className="text-gray-500 hover:text-gray-300 px-1"
@@ -81,6 +101,7 @@ export function StringsView() {
         <div className="sticky top-0 z-10 flex items-center px-4 py-1 bg-gray-900 border-b border-gray-700 text-gray-500 font-semibold">
           <span className="w-36 shrink-0">VA</span>
           <span className="w-16 shrink-0 text-right pr-4">Length</span>
+          <span className="w-8 shrink-0">Enc</span>
           <span className="flex-1">String</span>
         </div>
 
@@ -118,6 +139,9 @@ export function StringsView() {
                 </span>
                 <span className="w-16 shrink-0 text-right pr-4 text-gray-500">
                   {entry.value.length}
+                </span>
+                <span className="w-8 shrink-0 text-gray-600 text-[10px]">
+                  {entry.encoding === "utf16le" ? "U16" : "ASC"}
                 </span>
                 <span className="flex-1 text-green-400 truncate font-mono" title={entry.value}>
                   {entry.value}

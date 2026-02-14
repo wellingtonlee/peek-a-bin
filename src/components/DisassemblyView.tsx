@@ -4,6 +4,7 @@ import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile"
 import { disasmEngine } from "../disasm/engine";
 import type { Instruction, DisasmFunction } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
+import { CallPanel } from "./CallPanel";
 
 interface XrefPopupState {
   x: number;
@@ -157,6 +158,8 @@ export function DisassemblyView() {
   const [crossSearching, setCrossSearching] = useState(false);
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(null);
+  const [editingComment, setEditingComment] = useState<{ address: number; value: string } | null>(null);
+  const [showCallPanel, setShowCallPanel] = useState(false);
 
   // Find which section contains the current address
   const sectionInfo = useMemo(() => {
@@ -220,6 +223,30 @@ export function DisassemblyView() {
     for (const b of state.bookmarks) s.add(b.address);
     return s;
   }, [state.bookmarks]);
+
+  // Sorted functions for binary search
+  const sortedFuncs = useMemo(() => {
+    return [...state.functions].sort((a, b) => a.address - b.address);
+  }, [state.functions]);
+
+  // Find current function for call panel
+  const currentFunc = useMemo((): DisasmFunction | null => {
+    const addr = state.currentAddress;
+    let lo = 0;
+    let hi = sortedFuncs.length - 1;
+    let best: DisasmFunction | null = null;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      const fn = sortedFuncs[mid];
+      if (fn.address <= addr) {
+        if (addr < fn.address + fn.size) best = fn;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best;
+  }, [state.currentAddress, sortedFuncs]);
 
   // Build display rows (with basic block separators)
   const rows: DisplayRow[] = useMemo(() => {
@@ -306,6 +333,19 @@ export function DisassemblyView() {
         return;
       }
 
+      if (e.key === ";") {
+        e.preventDefault();
+        const existing = state.comments[state.currentAddress] ?? "";
+        setEditingComment({ address: state.currentAddress, value: existing });
+        return;
+      }
+
+      if (e.key === "x" || e.key === "X") {
+        e.preventDefault();
+        setShowCallPanel((v) => !v);
+        return;
+      }
+
       if (e.key === "b" || e.key === "B") {
         e.preventDefault();
         dispatch({ type: "TOGGLE_BOOKMARK" });
@@ -352,7 +392,7 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, showSearch, showShortcuts, ctxMenu],
+    [currentIndex, rows, dispatch, showSearch, showShortcuts, ctxMenu, state.currentAddress, state.comments],
   );
 
   // Search logic
@@ -373,7 +413,8 @@ export function DisassemblyView() {
           if (name.toLowerCase().includes(q)) matches.push(i);
         } else if (row.kind === "insn") {
           const insn = row.insn;
-          const text = `${insn.address.toString(16)} ${insn.mnemonic} ${insn.opStr} ${insn.comment || ""}`;
+          const userComment = state.comments[insn.address] ?? "";
+          const text = `${insn.address.toString(16)} ${insn.mnemonic} ${insn.opStr} ${insn.comment || ""} ${userComment}`;
           if (text.toLowerCase().includes(q)) matches.push(i);
         }
       }
@@ -394,7 +435,7 @@ export function DisassemblyView() {
         setSearchMatchIdx(-1);
       }
     },
-    [rows, currentIndex, dispatch, state.renames],
+    [rows, currentIndex, dispatch, state.renames, state.comments],
   );
 
   const handleSearchNext = useCallback(() => {
@@ -508,6 +549,13 @@ export function DisassemblyView() {
     dispatch({ type: "TOGGLE_BOOKMARK", address: ctxMenu.insn.address });
     setCtxMenu(null);
   }, [ctxMenu, dispatch]);
+
+  const ctxAddComment = useCallback(() => {
+    if (!ctxMenu) return;
+    const existing = state.comments[ctxMenu.insn.address] ?? "";
+    setEditingComment({ address: ctxMenu.insn.address, value: existing });
+    setCtxMenu(null);
+  }, [ctxMenu, state.comments]);
 
   const ctxRenameFunction = useCallback(() => {
     if (!ctxMenu) return;
@@ -928,6 +976,34 @@ export function DisassemblyView() {
                     ; {insn.comment}
                   </span>
                 )}
+                {editingComment && editingComment.address === insn.address ? (
+                  <span className="ml-2 shrink-0">
+                    <input
+                      autoFocus
+                      className="bg-gray-800 border border-blue-500 rounded px-1 text-[#6ee7b7] text-xs font-mono outline-none w-48"
+                      value={editingComment.value}
+                      onChange={(e) => setEditingComment({ ...editingComment, value: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const val = editingComment.value.trim();
+                          if (val) {
+                            dispatch({ type: "SET_COMMENT", address: editingComment.address, text: val });
+                          } else {
+                            dispatch({ type: "DELETE_COMMENT", address: editingComment.address });
+                          }
+                          setEditingComment(null);
+                        }
+                        if (e.key === "Escape") setEditingComment(null);
+                        e.stopPropagation();
+                      }}
+                      onBlur={() => setEditingComment(null)}
+                    />
+                  </span>
+                ) : state.comments[insn.address] ? (
+                  <span className="disasm-user-comment ml-2 truncate max-w-xs" title={state.comments[insn.address]}>
+                    ; {state.comments[insn.address]}
+                  </span>
+                ) : null}
               </div>
             );
           })}
@@ -955,6 +1031,9 @@ export function DisassemblyView() {
               <div className="border-t border-gray-700 my-0.5" />
               <button onClick={ctxToggleBookmark} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
                 Toggle bookmark
+              </button>
+              <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+                Add/Edit comment
               </button>
               {ctxMenu && funcMap.has(ctxMenu.insn.address) && (
                 <button onClick={ctxRenameFunction} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
@@ -991,6 +1070,19 @@ export function DisassemblyView() {
         </div>
       </div>
 
+      {/* Call panel */}
+      {showCallPanel && currentFunc && (
+        <CallPanel
+          func={currentFunc}
+          xrefMap={xrefMap}
+          instructions={instructions}
+          functions={state.functions}
+          renames={state.renames}
+          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+          onClose={() => setShowCallPanel(false)}
+        />
+      )}
+
       {/* Shortcut legend overlay */}
       {showShortcuts && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowShortcuts(false)}>
@@ -1006,6 +1098,8 @@ export function DisassemblyView() {
                   ["/ or Ctrl+F", "Search in disassembly"],
                   ["Enter", "Next search result"],
                   ["Shift+Enter", "Previous search result"],
+                  [";", "Add/edit comment at current address"],
+                  ["X", "Toggle callers/callees panel"],
                   ["B", "Toggle bookmark at current address"],
                   ["↑ / ↓", "Navigate instructions"],
                   ["PgUp / PgDn", "Scroll 40 instructions"],

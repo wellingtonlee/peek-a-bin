@@ -168,4 +168,5 @@ export interface PEFile {
   imports: ImportEntry[];
   exports: ExportEntry[];
   strings: Map<number, string>; // VA → string from .rdata
+  stringTypes: Map<number, "ascii" | "utf16le">;
 }

@@ -43,6 +43,10 @@ body {
   color: #22c55e;
 }
 
+.disasm-user-comment {
+  color: #6ee7b7;
+}
+
 /* Hex view */
 .hex-byte {
   color: #d1d5db;

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useAppState, useAppDispatch, type ViewTab } from "../hooks/usePEFile";
+import { useAppState, useAppDispatch, type ViewTab, type Bookmark } from "../hooks/usePEFile";
 
 const TABS: { id: ViewTab; label: string }[] = [
   { id: "disassembly", label: "Disassembly" },
@@ -53,6 +53,43 @@ export function AddressBar() {
 
   const handleReset = useCallback(() => {
     dispatch({ type: "RESET" });
+  }, [dispatch]);
+
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = useCallback(() => {
+    const data = {
+      fileName: state.fileName,
+      exportedAt: new Date().toISOString(),
+      bookmarks: state.bookmarks,
+      renames: state.renames,
+      comments: state.comments,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.fileName ?? "annotations"}.annotations.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [state.fileName, state.bookmarks, state.renames, state.comments]);
+
+  const handleImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string);
+        const bookmarks: Bookmark[] = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+        const renames: Record<number, string> = data.renames && typeof data.renames === "object" ? data.renames : {};
+        const comments: Record<number, string> = data.comments && typeof data.comments === "object" ? data.comments : {};
+        dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
+      } catch { /* ignore bad JSON */ }
+    };
+    reader.readAsText(file);
+    // Reset input so same file can be re-imported
+    e.target.value = "";
   }, [dispatch]);
 
   // Global keyboard shortcuts for tab switching and nav
@@ -167,6 +204,30 @@ export function AddressBar() {
       >
         Go
       </button>
+
+      <div className="w-px h-5 bg-gray-700 mx-1" />
+
+      <button
+        onClick={handleExport}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="Export annotations (bookmarks, renames, comments)"
+      >
+        Export
+      </button>
+      <button
+        onClick={() => importInputRef.current?.click()}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="Import annotations from JSON file"
+      >
+        Import
+      </button>
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".json"
+        className="hidden"
+        onChange={handleImport}
+      />
     </div>
   );
 }

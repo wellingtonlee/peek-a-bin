@@ -30,6 +30,7 @@ export interface AppState {
   historyIndex: number;
   bookmarks: Bookmark[];
   renames: Record<number, string>;
+  comments: Record<number, string>;
 }
 
 export type AppAction =
@@ -47,7 +48,10 @@ export type AppAction =
   | { type: "SET_BOOKMARK_LABEL"; address: number; label: string }
   | { type: "RENAME_FUNCTION"; address: number; name: string }
   | { type: "CLEAR_RENAME"; address: number }
-  | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string> }
+  | { type: "SET_COMMENT"; address: number; text: string }
+  | { type: "DELETE_COMMENT"; address: number }
+  | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
+  | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -64,6 +68,7 @@ export const initialState: AppState = {
   historyIndex: -1,
   bookmarks: [],
   renames: {},
+  comments: {},
 };
 
 const MAX_HISTORY = 50;
@@ -148,8 +153,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const { [action.address]: _, ...rest } = state.renames;
       return { ...state, renames: rest };
     }
+    case "SET_COMMENT": {
+      return { ...state, comments: { ...state.comments, [action.address]: action.text } };
+    }
+    case "DELETE_COMMENT": {
+      const { [action.address]: _, ...rest } = state.comments;
+      return { ...state, comments: rest };
+    }
     case "LOAD_PERSISTED": {
-      return { ...state, bookmarks: action.bookmarks, renames: action.renames };
+      return { ...state, bookmarks: action.bookmarks, renames: action.renames, comments: action.comments };
+    }
+    case "IMPORT_ANNOTATIONS": {
+      const mergedBookmarks = [...state.bookmarks];
+      const existingAddrs = new Set(mergedBookmarks.map(b => b.address));
+      for (const b of action.bookmarks) {
+        if (!existingAddrs.has(b.address)) mergedBookmarks.push(b);
+      }
+      return {
+        ...state,
+        bookmarks: mergedBookmarks,
+        renames: { ...state.renames, ...action.renames },
+        comments: { ...state.comments, ...action.comments },
+      };
     }
     case "RESET":
       return initialState;

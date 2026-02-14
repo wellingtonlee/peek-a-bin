@@ -372,41 +372,31 @@ function parseExports(
 }
 
 /**
- * Scan .rdata section for strings
+ * Scan a section for ASCII strings
  */
-function extractStrings(
+function extractASCIIStrings(
   view: DataView,
-  sections: SectionHeader[],
+  section: SectionHeader,
   imageBase: number,
-  minLength = 4
+  minLength = 4,
 ): Map<number, string> {
   const strings = new Map<number, string>();
 
-  // Find .rdata or .data section
-  const rdataSection = sections.find(
-    (s) => s.name === '.rdata' || s.name === '.data' || s.name === '.rodata'
-  );
-
-  if (!rdataSection) return strings;
-
-  const start = rdataSection.pointerToRawData;
-  // Cap scan at 1MB to prevent UI freeze on huge sections
+  const start = section.pointerToRawData;
   const scanLimit = 1024 * 1024;
   const end = Math.min(
-    start + Math.min(rdataSection.sizeOfRawData, scanLimit),
-    view.byteLength
+    start + Math.min(section.sizeOfRawData, scanLimit),
+    view.byteLength,
   );
 
   let i = start;
   while (i < end) {
     const byte = view.getUint8(i);
 
-    // Check if printable ASCII
     if (byte >= 0x20 && byte <= 0x7e) {
       const strStart = i;
       const chars: number[] = [];
 
-      // Read until null or non-printable
       while (i < end) {
         const b = view.getUint8(i);
         if (b === 0) break;
@@ -417,13 +407,64 @@ function extractStrings(
 
       if (chars.length >= minLength) {
         const str = String.fromCharCode(...chars);
-        const rva =
-          rdataSection.virtualAddress + (strStart - rdataSection.pointerToRawData);
+        const rva = section.virtualAddress + (strStart - section.pointerToRawData);
         strings.set(imageBase + rva, str);
       }
     }
 
     i++;
+  }
+
+  return strings;
+}
+
+/**
+ * Scan a section for UTF-16LE strings
+ */
+function extractUTF16Strings(
+  view: DataView,
+  section: SectionHeader,
+  imageBase: number,
+  minLength = 4,
+): Map<number, string> {
+  const strings = new Map<number, string>();
+
+  const start = section.pointerToRawData;
+  const scanLimit = 1024 * 1024;
+  const end = Math.min(
+    start + Math.min(section.sizeOfRawData, scanLimit),
+    view.byteLength,
+  );
+
+  let i = start;
+  while (i + 1 < end) {
+    const lo = view.getUint8(i);
+    const hi = view.getUint8(i + 1);
+
+    // Check for [printable, 0x00] pattern
+    if (hi === 0 && lo >= 0x20 && lo <= 0x7e) {
+      const strStart = i;
+      const chars: number[] = [];
+
+      while (i + 1 < end) {
+        const clo = view.getUint8(i);
+        const chi = view.getUint8(i + 1);
+        if (chi === 0 && clo >= 0x20 && clo <= 0x7e) {
+          chars.push(clo);
+          i += 2;
+        } else {
+          break;
+        }
+      }
+
+      if (chars.length >= minLength) {
+        const str = String.fromCharCode(...chars);
+        const rva = section.virtualAddress + (strStart - section.pointerToRawData);
+        strings.set(imageBase + rva, str);
+      }
+    } else {
+      i += 2;
+    }
   }
 
   return strings;
@@ -504,11 +545,44 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
-  // 9. Extract strings from .rdata (keyed by VA for disassembler lookups)
+  // 9. Extract strings (keyed by VA for disassembler lookups)
   const imageBase = typeof optionalHeader.imageBase === "bigint"
     ? Number(optionalHeader.imageBase)
     : optionalHeader.imageBase;
-  const strings = extractStrings(view, sections, imageBase);
+
+  const strings = new Map<number, string>();
+  const stringTypes = new Map<number, "ascii" | "utf16le">();
+
+  const dataSectionNames = new Set([".rdata", ".data", ".rodata"]);
+
+  // ASCII strings from data sections (minLength 4)
+  for (const sec of sections) {
+    if (dataSectionNames.has(sec.name)) {
+      const asciiStrings = extractASCIIStrings(view, sec, imageBase, 4);
+      asciiStrings.forEach((v, k) => { strings.set(k, v); stringTypes.set(k, "ascii"); });
+    }
+  }
+
+  // ASCII strings from .text with higher threshold (minLength 8)
+  const textSection = sections.find(
+    (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
+  );
+  if (textSection) {
+    const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
+    textAscii.forEach((v, k) => {
+      if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "ascii"); }
+    });
+  }
+
+  // UTF-16LE strings from data sections
+  for (const sec of sections) {
+    if (dataSectionNames.has(sec.name)) {
+      const utf16Strings = extractUTF16Strings(view, sec, imageBase, 4);
+      utf16Strings.forEach((v, k) => {
+        if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "utf16le"); }
+      });
+    }
+  }
 
   return {
     buffer,
@@ -522,5 +596,6 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     imports,
     exports,
     strings,
+    stringTypes,
   };
 }

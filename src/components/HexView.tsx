@@ -1,14 +1,16 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { DataInspector } from "./DataInspector";
 
 const BYTES_PER_ROW = 16;
 
-function parseBytePattern(input: string): number[] | null {
+function parseBytePattern(input: string): (number | null)[] | null {
   const parts = input.trim().split(/\s+/);
   if (parts.length === 0 || (parts.length === 1 && parts[0] === "")) return null;
-  const bytes: number[] = [];
+  const bytes: (number | null)[] = [];
   for (const p of parts) {
+    if (p === "??" || p === "?") { bytes.push(null); continue; }
     const v = parseInt(p, 16);
     if (isNaN(v) || v < 0 || v > 255) return null;
     bytes.push(v);
@@ -18,14 +20,14 @@ function parseBytePattern(input: string): number[] | null {
 
 function findBytePatternMatches(
   data: Uint8Array,
-  pattern: number[],
+  pattern: (number | null)[],
 ): number[] {
   const matches: number[] = [];
   if (pattern.length === 0) return matches;
   const end = data.length - pattern.length;
   outer: for (let i = 0; i <= end; i++) {
     for (let j = 0; j < pattern.length; j++) {
-      if (data[i + j] !== pattern[j]) continue outer;
+      if (pattern[j] !== null && data[i + j] !== pattern[j]) continue outer;
     }
     matches.push(i);
     if (matches.length >= 1000) break;
@@ -42,6 +44,7 @@ export function HexView() {
   const [byteSearch, setByteSearch] = useState("");
   const [byteMatches, setByteMatches] = useState<Set<number>>(new Set());
   const [matchCount, setMatchCount] = useState(0);
+  const [selectedOffset, setSelectedOffset] = useState<number | null>(null);
 
   const sectionInfo = useMemo(() => {
     if (!pe) return null;
@@ -186,7 +189,7 @@ export function HexView() {
           type="text"
           value={byteSearch}
           onChange={(e) => setByteSearch(e.target.value)}
-          placeholder="Byte search (e.g. 4D 5A 90)..."
+          placeholder="Byte search (e.g. 4D 5A ?? 00)..."
           className="w-44 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />
         {byteSearch && matchCount > 0 && (
@@ -270,31 +273,55 @@ export function HexView() {
                   {addr.toString(16).toUpperCase().padStart(addrWidth, "0")}
                 </span>
                 <span className="hex-byte ml-2 flex-1">
-                  {hasHighlight
-                    ? hexParts.map((h, i) => (
-                        <span key={i}>
-                          {i > 0 ? " " : ""}
-                          <span className={highlightByte[i] ? "bg-yellow-600/50 text-yellow-200" : ""}>
-                            {h}
-                          </span>
+                  {hexParts.map((h, i) => {
+                    const byteOffset = offset + i;
+                    const isSelected = selectedOffset === byteOffset;
+                    const isHighlighted = highlightByte[i];
+                    let cls = "";
+                    if (isSelected) cls = "ring-1 ring-blue-500 rounded-sm bg-blue-900/40";
+                    else if (isHighlighted) cls = "bg-yellow-600/50 text-yellow-200";
+                    return (
+                      <span key={i}>
+                        {i > 0 ? " " : ""}
+                        <span
+                          className={`cursor-pointer ${cls}`}
+                          onClick={() => i < rowBytes.length && setSelectedOffset(byteOffset)}
+                        >
+                          {h}
                         </span>
-                      ))
-                    : hexParts.join(" ")}
+                      </span>
+                    );
+                  })}
                 </span>
                 <span className="hex-ascii ml-4" style={{ width: `${BYTES_PER_ROW}ch` }}>
-                  {hasHighlight
-                    ? asciiParts.map((c, i) => (
-                        <span key={i} className={highlightByte[i] ? "bg-yellow-600/50 text-yellow-200" : ""}>
-                          {c}
-                        </span>
-                      ))
-                    : asciiParts.join("")}
+                  {asciiParts.map((c, i) => {
+                    const byteOffset = offset + i;
+                    const isSelected = selectedOffset === byteOffset;
+                    const isHighlighted = highlightByte[i];
+                    let cls = "";
+                    if (isSelected) cls = "ring-1 ring-blue-500 rounded-sm bg-blue-900/40";
+                    else if (isHighlighted) cls = "bg-yellow-600/50 text-yellow-200";
+                    return (
+                      <span key={i} className={cls}>
+                        {c}
+                      </span>
+                    );
+                  })}
                 </span>
               </div>
             );
           })}
         </div>
       </div>
+
+      {/* Data Inspector */}
+      {selectedOffset !== null && sectionBytes && (
+        <DataInspector
+          offset={selectedOffset}
+          bytes={sectionBytes}
+          baseAddress={baseAddress}
+        />
+      )}
     </div>
   );
 }

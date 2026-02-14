@@ -50,6 +50,7 @@ export default function App() {
           type: "LOAD_PERSISTED",
           bookmarks: data.bookmarks ?? [],
           renames: data.renames ?? {},
+          comments: data.comments ?? {},
         });
       }
     } catch { /* ignore corrupt data */ }
@@ -61,10 +62,10 @@ export default function App() {
     try {
       localStorage.setItem(
         `peek-a-bin:${state.fileName}`,
-        JSON.stringify({ bookmarks: state.bookmarks, renames: state.renames }),
+        JSON.stringify({ bookmarks: state.bookmarks, renames: state.renames, comments: state.comments }),
       );
     } catch { /* quota exceeded */ }
-  }, [state.fileName, state.bookmarks, state.renames]);
+  }, [state.fileName, state.bookmarks, state.renames, state.comments]);
 
   // Run function detection when both PE file and disasm engine are ready
   useEffect(() => {
