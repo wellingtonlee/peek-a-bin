@@ -13,3 +13,20 @@ export interface DisasmFunction {
   size: number;
 }
 
+export interface Xref {
+  from: number;
+  type: 'call' | 'jmp' | 'branch' | 'data';
+}
+
+export interface StackVar {
+  offset: number;
+  size: number;
+  accessCount: number;
+  name: string;
+}
+
+export interface StackFrame {
+  frameSize: number;
+  vars: StackVar[];
+}
+

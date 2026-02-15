@@ -229,7 +229,8 @@ function parseImports(
   view: DataView,
   importDir: DataDirectory,
   sections: SectionHeader[],
-  is64: boolean
+  is64: boolean,
+  imageBase: number
 ): ImportEntry[] {
   if (!importDir.virtualAddress || !importDir.size) {
     return [];
@@ -267,12 +268,14 @@ function parseImports(
 
     const libraryName = readCString(view, nameOffset);
     const functions: string[] = [];
+    const iatAddresses: number[] = [];
 
     // Read import names from INT (Import Name Table)
     const thunkRVA = originalFirstThunk || firstThunk;
+    const thunkSize = is64 ? 8 : 4;
     if (thunkRVA) {
       let thunkOffset = rvaToFileOffset(thunkRVA, sections);
-      const thunkSize = is64 ? 8 : 4;
+      let funcIndex = 0;
 
       while (thunkOffset + thunkSize <= view.byteLength) {
         const thunkValue = is64
@@ -280,6 +283,10 @@ function parseImports(
           : BigInt(view.getUint32(thunkOffset, true));
 
         if (thunkValue === 0n) break;
+
+        // Compute IAT VA for this function
+        const iatVA = imageBase + firstThunk + funcIndex * thunkSize;
+        iatAddresses.push(iatVA);
 
         // Check if import by ordinal
         const ordinalFlag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
@@ -299,10 +306,11 @@ function parseImports(
         }
 
         thunkOffset += thunkSize;
+        funcIndex++;
       }
     }
 
-    imports.push({ libraryName, functions });
+    imports.push({ libraryName, functions, iatAddresses });
     descriptorOffset += descriptorSize;
   }
 
@@ -531,11 +539,16 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   );
 
   // 7. Parse Imports
+  const imageBase = typeof optionalHeader.imageBase === "bigint"
+    ? Number(optionalHeader.imageBase)
+    : optionalHeader.imageBase;
+
   const imports = parseImports(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_IMPORT] || { virtualAddress: 0, size: 0 },
     sections,
-    is64
+    is64,
+    imageBase
   );
 
   // 8. Parse Exports
@@ -546,10 +559,6 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   );
 
   // 9. Extract strings (keyed by VA for disassembler lookups)
-  const imageBase = typeof optionalHeader.imageBase === "bigint"
-    ? Number(optionalHeader.imageBase)
-    : optionalHeader.imageBase;
-
   const strings = new Map<number, string>();
   const stringTypes = new Map<number, "ascii" | "utf16le">();
 

@@ -1,6 +1,7 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { disasmEngine } from "../disasm/engine";
 
 type SortKey = "address" | "length";
 type EncodingFilter = "all" | "ascii" | "utf16le";
@@ -11,6 +12,13 @@ interface StringEntry {
   encoding: "ascii" | "utf16le";
 }
 
+interface XrefPopupState {
+  x: number;
+  y: number;
+  address: number;
+  sources: number[];
+}
+
 export function StringsView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
@@ -19,6 +27,9 @@ export function StringsView() {
   const [filter, setFilter] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("address");
   const [encodingFilter, setEncodingFilter] = useState<EncodingFilter>("all");
+  const [stringXrefs, setStringXrefs] = useState<Map<number, number[]> | null>(null);
+  const [xrefLoading, setXrefLoading] = useState(false);
+  const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
 
   const allStrings = useMemo((): StringEntry[] => {
     if (!pe) return [];
@@ -57,6 +68,42 @@ export function StringsView() {
     overscan: 30,
   });
 
+  // Dismiss xref popup on click outside or Escape
+  useEffect(() => {
+    if (!xrefPopup) return;
+    const dismiss = () => setXrefPopup(null);
+    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", keyDismiss);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", keyDismiss);
+    };
+  }, [xrefPopup]);
+
+  const handleLoadXrefs = useCallback(() => {
+    if (!pe || xrefLoading) return;
+    setXrefLoading(true);
+    setTimeout(() => {
+      try {
+        const stringAddrs = new Set(pe.strings.keys());
+        const allInsns: import("../disasm/types").Instruction[] = [];
+        for (const sec of pe.sections) {
+          if ((sec.characteristics & 0x20000000) === 0 && sec.name !== ".text") continue;
+          try {
+            const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
+            const base = pe.optionalHeader.imageBase + sec.virtualAddress;
+            const insns = disasmEngine.disassemble(bytes, base, pe.is64, pe.strings);
+            allInsns.push(...insns);
+          } catch { /* skip */ }
+        }
+        const xrefs = disasmEngine.buildDataXrefMap(allInsns, stringAddrs);
+        setStringXrefs(xrefs);
+      } catch { /* ignore */ }
+      setXrefLoading(false);
+    }, 0);
+  }, [pe, xrefLoading]);
+
   if (!pe) return null;
 
   const addrWidth = pe.is64 ? 16 : 8;
@@ -67,6 +114,26 @@ export function StringsView() {
         <span className="font-semibold text-gray-300">Strings</span>
         <span>{filtered.length.toLocaleString()}{filter ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
         <div className="flex-1" />
+        {!stringXrefs && (
+          <button
+            onClick={handleLoadXrefs}
+            disabled={xrefLoading}
+            className="px-2 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+          >
+            {xrefLoading ? (
+              <span className="flex items-center gap-1">
+                <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Loading...
+              </span>
+            ) : "Load xrefs"}
+          </button>
+        )}
+        {stringXrefs && (
+          <span className="text-[10px] text-green-400">Xrefs loaded</span>
+        )}
         {(["all", "ascii", "utf16le"] as EncodingFilter[]).map((enc) => (
           <button
             key={enc}
@@ -96,11 +163,12 @@ export function StringsView() {
         />
       </div>
 
-      <div ref={parentRef} className="flex-1 overflow-auto text-xs">
+      <div ref={parentRef} className="flex-1 overflow-auto text-xs relative">
         {/* Table header */}
         <div className="sticky top-0 z-10 flex items-center px-4 py-1 bg-gray-900 border-b border-gray-700 text-gray-500 font-semibold">
           <span className="w-36 shrink-0">VA</span>
           <span className="w-16 shrink-0 text-right pr-4">Length</span>
+          <span className="w-12 shrink-0 text-right pr-4">Xrefs</span>
           <span className="w-8 shrink-0">Enc</span>
           <span className="flex-1">String</span>
         </div>
@@ -115,6 +183,7 @@ export function StringsView() {
           {virtualizer.getVirtualItems().map((vItem) => {
             const entry = filtered[vItem.index];
             if (!entry) return null;
+            const xrefCount = stringXrefs?.get(entry.address)?.length ?? 0;
             return (
               <div
                 key={vItem.index}
@@ -140,6 +209,34 @@ export function StringsView() {
                 <span className="w-16 shrink-0 text-right pr-4 text-gray-500">
                   {entry.value.length}
                 </span>
+                <span className="w-12 shrink-0 text-right pr-4">
+                  {stringXrefs ? (
+                    xrefCount > 0 ? (
+                      <span
+                        className="text-gray-400 cursor-pointer hover:text-blue-400"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = (e.target as HTMLElement).getBoundingClientRect();
+                          const container = parentRef.current;
+                          if (!container) return;
+                          const cRect = container.getBoundingClientRect();
+                          setXrefPopup({
+                            x: rect.left - cRect.left + container.scrollLeft,
+                            y: rect.bottom - cRect.top + container.scrollTop,
+                            address: entry.address,
+                            sources: stringXrefs.get(entry.address)!,
+                          });
+                        }}
+                      >
+                        {xrefCount}
+                      </span>
+                    ) : (
+                      <span className="text-gray-600">&mdash;</span>
+                    )
+                  ) : (
+                    <span className="text-gray-700">&mdash;</span>
+                  )}
+                </span>
                 <span className="w-8 shrink-0 text-gray-600 text-[10px]">
                   {entry.encoding === "utf16le" ? "U16" : "ASC"}
                 </span>
@@ -150,6 +247,32 @@ export function StringsView() {
             );
           })}
         </div>
+
+        {/* Xref popup */}
+        {xrefPopup && (
+          <div
+            className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[220px] max-h-60 overflow-auto"
+            style={{ left: xrefPopup.x, top: xrefPopup.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 py-1 text-gray-400 border-b border-gray-700">
+              Xrefs to 0x{xrefPopup.address.toString(16).toUpperCase()}
+            </div>
+            {xrefPopup.sources.map((src, i) => (
+              <button
+                key={i}
+                className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
+                onClick={() => {
+                  dispatch({ type: "SET_ADDRESS", address: src });
+                  dispatch({ type: "SET_TAB", tab: "disassembly" });
+                  setXrefPopup(null);
+                }}
+              >
+                0x{src.toString(16).toUpperCase()}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

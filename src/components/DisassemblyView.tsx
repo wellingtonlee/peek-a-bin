@@ -2,20 +2,30 @@ import { useEffect, useRef, useMemo, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { disasmEngine } from "../disasm/engine";
-import type { Instruction, DisasmFunction } from "../disasm/types";
+import { disasmWorker } from "../workers/disasmClient";
+import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
 import { CallPanel } from "./CallPanel";
+import { buildIATLookup, parseOperandTargets } from "../disasm/operands";
+import { JumpArrows } from "./JumpArrows";
+import { InstructionDetail } from "./InstructionDetail";
+import { DisassemblyMinimap } from "./DisassemblyMinimap";
+import { analyzeStackFrame } from "../disasm/stack";
+import { CFGView } from "./CFGView";
+import { buildCFG, detectLoops } from "../disasm/cfg";
+import { inferSignature, type FunctionSignature } from "../disasm/signatures";
+import { Breadcrumbs } from "./Breadcrumbs";
 
 interface XrefPopupState {
   x: number;
   y: number;
   targetAddr: number;
-  sources: number[];
+  sources: Xref[];
 }
 
 type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
-  | { kind: "insn"; insn: Instruction }
+  | { kind: "insn"; insn: Instruction; blockIdx: number }
   | { kind: "separator" };
 
 function rowAddress(row: DisplayRow): number | null {
@@ -103,13 +113,51 @@ function tokenizeOperand(opStr: string): OpToken[] {
   return tokens;
 }
 
-function ColoredOperand({ opStr }: { opStr: string }) {
+interface ClickableTarget {
+  address: number;
+  display?: string;
+}
+
+function ColoredOperand({ opStr, targets, onNavigate }: {
+  opStr: string;
+  targets?: ClickableTarget[];
+  onNavigate?: (addr: number) => void;
+}) {
   const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
+
+  // Build a map of hex string → target for clickable tokens
+  const targetMap = useMemo(() => {
+    if (!targets || targets.length === 0) return null;
+    const m = new Map<string, ClickableTarget>();
+    for (const t of targets) {
+      // Match "0x" + hex representation (case-insensitive)
+      const hexStr = "0x" + t.address.toString(16);
+      m.set(hexStr.toLowerCase(), t);
+    }
+    return m;
+  }, [targets]);
+
   return (
     <>
-      {tokens.map((t, i) => (
-        t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>
-      ))}
+      {tokens.map((t, i) => {
+        // Check if this hex token is a navigable target
+        if (targetMap && onNavigate && t.text.startsWith("0x")) {
+          const target = targetMap.get(t.text.toLowerCase());
+          if (target) {
+            return (
+              <span
+                key={i}
+                className="text-blue-400 underline cursor-pointer hover:text-blue-300"
+                onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
+                title={target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`}
+              >
+                {t.text}
+              </span>
+            );
+          }
+        }
+        return t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>;
+      })}
     </>
   );
 }
@@ -160,6 +208,20 @@ export function DisassemblyView() {
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(null);
   const [editingComment, setEditingComment] = useState<{ address: number; value: string } | null>(null);
   const [showCallPanel, setShowCallPanel] = useState(false);
+  const [insnFilter, setInsnFilter] = useState<"all" | "calls" | "jumps" | "stringrefs" | "suspicious">("all");
+  const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null);
+  const [lastClickedRow, setLastClickedRow] = useState<number | null>(null);
+  const [showBlocks, setShowBlocks] = useState(false);
+  const [showArrows, setShowArrows] = useState(true);
+  const [showDetail, setShowDetail] = useState(false);
+  const [showMinimap, setShowMinimap] = useState(true);
+  const [showCFG, setShowCFG] = useState(false);
+
+  // Build IAT lookup map from imports
+  const iatMap = useMemo(() => {
+    if (!pe) return new Map<number, { lib: string; func: string }>();
+    return buildIATLookup(pe.imports);
+  }, [pe]);
 
   // Find which section contains the current address
   const sectionInfo = useMemo(() => {
@@ -173,35 +235,38 @@ export function DisassemblyView() {
     return null;
   }, [pe, state.currentAddress]);
 
-  // Disassemble the current section
+  // Disassemble the current section (off main thread via worker)
   useEffect(() => {
     if (!pe || !sectionInfo || !state.disasmReady) return;
 
+    let cancelled = false;
     setDisassembling(true);
-    const timer = setTimeout(() => {
-      try {
-        const sectionBytes = new Uint8Array(
-          pe.buffer,
-          sectionInfo.pointerToRawData,
-          sectionInfo.sizeOfRawData,
-        );
-        const baseAddr = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
-        const result = disasmEngine.disassemble(
-          sectionBytes,
-          baseAddr,
-          pe.is64,
-          pe.strings,
-        );
-        setInstructions(result);
-        setDisasmError(null);
-      } catch (e) {
-        setDisasmError(e instanceof Error ? e.message : "Disassembly failed");
-        setInstructions([]);
-      } finally {
-        setDisassembling(false);
-      }
-    }, 0);
-    return () => clearTimeout(timer);
+
+    const sectionBytes = new Uint8Array(
+      pe.buffer,
+      sectionInfo.pointerToRawData,
+      sectionInfo.sizeOfRawData,
+    );
+    const baseAddr = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
+
+    disasmWorker.disassemble(sectionBytes, baseAddr, pe.is64)
+      .then((result) => {
+        if (!cancelled) {
+          setInstructions(result);
+          setDisasmError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setDisasmError(e instanceof Error ? e.message : "Disassembly failed");
+          setInstructions([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDisassembling(false);
+      });
+
+    return () => { cancelled = true; };
   }, [pe, sectionInfo, state.disasmReady]);
 
   // Build funcMap for O(1) lookup
@@ -211,11 +276,28 @@ export function DisassemblyView() {
     return m;
   }, [state.functions]);
 
-  // Build xref map
-  const xrefMap = useMemo(() => {
-    if (instructions.length === 0) return new Map<number, number[]>();
-    return disasmEngine.buildXrefMap(instructions);
+  // Build typed xref map (off main thread via worker)
+  const [typedXrefMap, setTypedXrefMap] = useState<Map<number, Xref[]>>(new Map());
+  useEffect(() => {
+    if (instructions.length === 0) {
+      setTypedXrefMap(new Map());
+      return;
+    }
+    let cancelled = false;
+    disasmWorker.buildTypedXrefMap(instructions).then((map) => {
+      if (!cancelled) setTypedXrefMap(map);
+    });
+    return () => { cancelled = true; };
   }, [instructions]);
+
+  // Legacy xref map (address -> source addresses) for compatibility with CallPanel, JumpArrows, etc.
+  const xrefMap = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const [addr, xrefs] of typedXrefMap) {
+      m.set(addr, xrefs.map((x) => x.from));
+    }
+    return m;
+  }, [typedXrefMap]);
 
   // Bookmark address set for O(1) lookup
   const bookmarkSet = useMemo(() => {
@@ -248,19 +330,63 @@ export function DisassemblyView() {
     return best;
   }, [state.currentAddress, sortedFuncs]);
 
-  // Build display rows (with basic block separators)
+  // Loop detection for current function
+  const loopHeaders = useMemo(() => {
+    if (!currentFunc || instructions.length === 0 || typedXrefMap.size === 0) return new Map<number, number>();
+    const blocks = buildCFG(currentFunc, instructions, typedXrefMap);
+    const loops = detectLoops(blocks);
+    const m = new Map<number, number>();
+    for (const loop of loops) m.set(loop.headerAddr, loop.depth);
+    return m;
+  }, [currentFunc, instructions, typedXrefMap]);
+
+  // Function signature inference
+  const currentFuncSig = useMemo((): FunctionSignature | null => {
+    if (!currentFunc || instructions.length === 0 || !pe) return null;
+    return inferSignature(currentFunc, instructions, pe.is64);
+  }, [currentFunc, instructions, pe]);
+
+  // Build a map of function address -> signature for labels
+  const funcSigMap = useMemo(() => {
+    if (instructions.length === 0 || !pe) return new Map<number, FunctionSignature>();
+    const m = new Map<number, FunctionSignature>();
+    for (const fn of state.functions) {
+      const sig = inferSignature(fn, instructions, pe.is64);
+      if (sig.paramCount > 0) m.set(fn.address, sig);
+    }
+    return m;
+  }, [instructions, state.functions, pe]);
+
+  // Stack frame analysis (lazy, only when detail panel is open)
+  const stackFrame = useMemo(() => {
+    if (!showDetail || !currentFunc || instructions.length === 0) return null;
+    return analyzeStackFrame(currentFunc, instructions, pe?.is64 ?? true);
+  }, [showDetail, currentFunc, instructions, pe?.is64]);
+
+  // Build display rows (with basic block separators and block indices)
   const rows: DisplayRow[] = useMemo(() => {
     const result: DisplayRow[] = [];
     const separatorMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
+    const branchMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
+    let blockIdx = 0;
+    let prevWasBranch = false;
     for (let i = 0; i < instructions.length; i++) {
       const insn = instructions[i];
       const fn = funcMap.get(insn.address);
       if (fn) {
+        blockIdx++;
+        prevWasBranch = false;
         result.push({ kind: "label", fn });
       }
-      result.push({ kind: "insn", insn });
+      // Start new block if: this address is a branch target (xref exists), or previous was branch/ret
+      if (prevWasBranch || (xrefMap.has(insn.address) && !fn)) {
+        blockIdx++;
+      }
+      result.push({ kind: "insn", insn, blockIdx });
+      const mn = insn.mnemonic;
+      prevWasBranch = branchMnemonics.has(mn) || (mn.startsWith("j") && mn !== "jmp");
       // Insert separator after ret/retn/jmp/int3, unless next instruction is a function label
-      if (separatorMnemonics.has(insn.mnemonic)) {
+      if (separatorMnemonics.has(mn)) {
         const next = instructions[i + 1];
         if (next && !funcMap.has(next.address)) {
           result.push({ kind: "separator" });
@@ -268,7 +394,38 @@ export function DisassemblyView() {
       }
     }
     return result;
-  }, [instructions, funcMap]);
+  }, [instructions, funcMap, xrefMap]);
+
+  const SUSPICIOUS_MNEMONICS = useMemo(() => new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]), []);
+
+  const matchesFilter = useCallback((row: DisplayRow): boolean => {
+    if (insnFilter === "all") return true;
+    if (row.kind !== "insn") return true; // labels/separators always match
+    const insn = row.insn;
+    switch (insnFilter) {
+      case "calls": return insn.mnemonic === "call";
+      case "jumps": return insn.mnemonic === "jmp" || insn.mnemonic.startsWith("j");
+      case "stringrefs": return insn.comment != null || state.comments[insn.address] != null;
+      case "suspicious": return SUSPICIOUS_MNEMONICS.has(insn.mnemonic);
+      default: return true;
+    }
+  }, [insnFilter, state.comments, SUSPICIOUS_MNEMONICS]);
+
+  const filterMatchCount = useMemo(() => {
+    if (insnFilter === "all") return 0;
+    let count = 0;
+    for (const row of rows) {
+      if (row.kind === "insn" && matchesFilter(row)) count++;
+    }
+    return count;
+  }, [rows, insnFilter, matchesFilter]);
+
+  const isSelected = useCallback((rowIndex: number): boolean => {
+    if (!selectionRange) return false;
+    const lo = Math.min(selectionRange.start, selectionRange.end);
+    const hi = Math.max(selectionRange.start, selectionRange.end);
+    return rowIndex >= lo && rowIndex <= hi;
+  }, [selectionRange]);
 
   const currentIndex = useMemo(() => {
     if (rows.length === 0) return 0;
@@ -317,8 +474,42 @@ export function DisassemblyView() {
       if (e.key === "Escape") {
         if (showShortcuts) { setShowShortcuts(false); return; }
         if (ctxMenu) { setCtxMenu(null); return; }
-        (document.activeElement as HTMLElement)?.blur();
+        if (selectionRange) { setSelectionRange(null); return; }
+        // Pop breadcrumb if available, else navigate back
+        if (state.callStack.length > 0) {
+          const last = state.callStack[state.callStack.length - 1];
+          dispatch({ type: "SET_ADDRESS", address: last.address });
+          dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
+          return;
+        }
+        dispatch({ type: "NAV_BACK" });
         return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        if (selectionRange) {
+          e.preventDefault();
+          const lo = Math.min(selectionRange.start, selectionRange.end);
+          const hi = Math.max(selectionRange.start, selectionRange.end);
+          const lines: string[] = [];
+          for (let i = lo; i <= hi; i++) {
+            const row = rows[i];
+            if (!row) continue;
+            if (row.kind === "label") {
+              const name = getDisplayName(row.fn, state.renames);
+              lines.push(`\n; ──── ${name} ────`);
+            } else if (row.kind === "insn") {
+              const insn = row.insn;
+              const aw = pe?.is64 ? 16 : 8;
+              const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
+              const comment = insn.comment ? `  ; ${insn.comment}` : "";
+              const userComment = state.comments[insn.address] ? `  ; ${state.comments[insn.address]}` : "";
+              lines.push(`  ${addrHex}  ${insn.mnemonic} ${insn.opStr}${comment}${userComment}`);
+            }
+          }
+          navigator.clipboard.writeText(lines.join("\n"));
+          return;
+        }
       }
 
       if (
@@ -346,9 +537,46 @@ export function DisassemblyView() {
         return;
       }
 
+      if (e.key === "i" || e.key === "I") {
+        e.preventDefault();
+        setShowDetail((v) => !v);
+        return;
+      }
+
       if (e.key === "b" || e.key === "B") {
         e.preventDefault();
         dispatch({ type: "TOGGLE_BOOKMARK" });
+        return;
+      }
+
+      // Enter: follow branch target of current instruction
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const curRow = rows[currentIndex];
+        if (curRow && curRow.kind === "insn") {
+          const target = parseBranchTarget(curRow.insn.mnemonic, curRow.insn.opStr);
+          if (target !== null) {
+            const targetFn = funcMap.get(target);
+            if (targetFn) {
+              dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc ?? targetFn, state.renames) });
+            }
+            dispatch({ type: "SET_ADDRESS", address: target });
+          }
+        }
+        return;
+      }
+
+      // N: rename function containing current address
+      if (e.key === "n" || e.key === "N") {
+        e.preventDefault();
+        if (currentFunc) {
+          setRenamingLabel({ address: currentFunc.address, value: getDisplayName(currentFunc, state.renames) });
+          // Scroll to the function label
+          const labelIdx = rows.findIndex((r) => r.kind === "label" && r.fn.address === currentFunc.address);
+          if (labelIdx >= 0) {
+            virtualizer.scrollToIndex(labelIdx, { align: "center" });
+          }
+        }
         return;
       }
 
@@ -392,7 +620,7 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, showSearch, showShortcuts, ctxMenu, state.currentAddress, state.comments],
+    [currentIndex, rows, dispatch, showSearch, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack],
   );
 
   // Search logic
@@ -485,9 +713,14 @@ export function DisassemblyView() {
 
   const handleAddressClick = useCallback(
     (address: number) => {
+      // Push breadcrumb when clicking into a function target
+      const targetFn = funcMap.get(address);
+      if (targetFn && currentFunc) {
+        dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames) });
+      }
       dispatch({ type: "SET_ADDRESS", address });
     },
-    [dispatch],
+    [dispatch, funcMap, currentFunc, state.currentAddress, state.renames],
   );
 
   const handleDoubleClickAddr = useCallback(
@@ -639,6 +872,48 @@ export function DisassemblyView() {
         </span>
         <span>Size: 0x{sectionInfo.virtualSize.toString(16).toUpperCase()}</span>
         <span>{instructions.length.toLocaleString()} instructions</span>
+        <select
+          value={insnFilter}
+          onChange={(e) => setInsnFilter(e.target.value as typeof insnFilter)}
+          className="px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 text-[10px]"
+        >
+          <option value="all">All</option>
+          <option value="calls">Calls</option>
+          <option value="jumps">Jumps</option>
+          <option value="stringrefs">String refs</option>
+          <option value="suspicious">Suspicious</option>
+        </select>
+        {insnFilter !== "all" && (
+          <span className="text-gray-500 text-[10px]">({filterMatchCount} matches)</span>
+        )}
+        <div className="flex items-center gap-1 ml-2">
+          <button
+            onClick={() => setShowBlocks((v) => !v)}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showBlocks ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+          >
+            Blocks
+          </button>
+          <button
+            onClick={() => setShowArrows((v) => !v)}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showArrows ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+          >
+            Arrows
+          </button>
+          <button
+            onClick={() => setShowMinimap((v) => !v)}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showMinimap ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+          >
+            Map
+          </button>
+          <button
+            onClick={() => setShowCFG(true)}
+            disabled={!currentFunc}
+            className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 disabled:opacity-30"
+            title="Show control flow graph for current function"
+          >
+            CFG
+          </button>
+        </div>
         <div className="flex-1" />
         {showSearch && (
           <div className="flex items-center gap-1">
@@ -762,7 +1037,11 @@ export function DisassemblyView() {
         </div>
       )}
 
+      {/* Breadcrumb trail */}
+      <Breadcrumbs />
+
       {/* Disassembly content */}
+      <div className="flex flex-1 overflow-hidden">
       <div
         ref={parentRef}
         className="flex-1 overflow-auto text-xs leading-5 focus:outline-none"
@@ -774,8 +1053,19 @@ export function DisassemblyView() {
             height: `${virtualizer.getTotalSize()}px`,
             width: "100%",
             position: "relative",
+            paddingLeft: showArrows ? "40px" : undefined,
           }}
         >
+          {showArrows && (
+            <JumpArrows
+              visibleItems={virtualizer.getVirtualItems()}
+              rows={rows}
+              funcMap={funcMap}
+              currentFuncAddr={currentFunc?.address ?? null}
+              currentAddress={state.currentAddress}
+              rowHeight={20}
+            />
+          )}
           {virtualizer.getVirtualItems().map((vItem) => {
             const row = rows[vItem.index];
             if (!row) return null;
@@ -802,7 +1092,7 @@ export function DisassemblyView() {
 
             if (row.kind === "label") {
               const displayName = getDisplayName(row.fn, state.renames);
-              const xrefs = xrefMap.get(row.fn.address);
+              const xrefs = typedXrefMap.get(row.fn.address);
               const xrefCount = xrefs?.length ?? 0;
               const isBookmarked = bookmarkSet.has(row.fn.address);
 
@@ -863,27 +1153,42 @@ export function DisassemblyView() {
                   onDoubleClick={() => setRenamingLabel({ address: row.fn.address, value: displayName })}
                 >
                   {isBookmarked && <span className="text-yellow-300 mr-1">★</span>}
-                  <span>; ──── {displayName} ────</span>
-                  {xrefCount > 0 && (
-                    <span
-                      className="ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const rect = (e.target as HTMLElement).getBoundingClientRect();
-                        const container = parentRef.current;
-                        if (!container) return;
-                        const cRect = container.getBoundingClientRect();
-                        setXrefPopup({
-                          x: rect.left - cRect.left + container.scrollLeft,
-                          y: rect.bottom - cRect.top + container.scrollTop,
-                          targetAddr: row.fn.address,
-                          sources: xrefs!,
-                        });
-                      }}
-                    >
-                      ({xrefCount} xref{xrefCount !== 1 ? "s" : ""})
-                    </span>
-                  )}
+                  <span>; ──── {displayName}{(() => {
+                    const sig = funcSigMap.get(row.fn.address);
+                    return sig ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})` : "";
+                  })()} ────</span>
+                  {xrefCount > 0 && (() => {
+                    const counts: Record<string, number> = {};
+                    for (const x of xrefs!) {
+                      counts[x.type] = (counts[x.type] ?? 0) + 1;
+                    }
+                    const parts: string[] = [];
+                    if (counts.call) parts.push(`${counts.call} call${counts.call > 1 ? "s" : ""}`);
+                    if (counts.jmp) parts.push(`${counts.jmp} jmp`);
+                    if (counts.branch) parts.push(`${counts.branch} branch`);
+                    if (counts.data) parts.push(`${counts.data} data`);
+                    const label = parts.length > 0 ? parts.join(", ") : `${xrefCount} xref${xrefCount !== 1 ? "s" : ""}`;
+                    return (
+                      <span
+                        className="ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = (e.target as HTMLElement).getBoundingClientRect();
+                          const container = parentRef.current;
+                          if (!container) return;
+                          const cRect = container.getBoundingClientRect();
+                          setXrefPopup({
+                            x: rect.left - cRect.left + container.scrollLeft,
+                            y: rect.bottom - cRect.top + container.scrollTop,
+                            targetAddr: row.fn.address,
+                            sources: xrefs!,
+                          });
+                        }}
+                      >
+                        ({label})
+                      </span>
+                    );
+                  })()}
                 </div>
               );
             }
@@ -894,13 +1199,22 @@ export function DisassemblyView() {
               .join(" ");
 
             const isBookmarked = bookmarkSet.has(insn.address);
+            const isLoopHeader = loopHeaders.has(insn.address);
+            const loopDepth = loopHeaders.get(insn.address);
             const isCurrentAddr = insn.address === state.currentAddress;
             const isSearchMatch =
               searchMatches.length > 0 &&
               searchMatchIdx >= 0 &&
               searchMatches[searchMatchIdx] === vItem.index;
+            const rowSelected = isSelected(vItem.index);
+            const isDimmed = insnFilter !== "all" && !matchesFilter(row);
 
-            const branchTarget = parseBranchTarget(insn.mnemonic, insn.opStr);
+            const operandTargets = pe ? parseOperandTargets(
+              insn,
+              pe.optionalHeader.imageBase,
+              pe.optionalHeader.imageBase + pe.optionalHeader.sizeOfImage,
+              iatMap,
+            ) : [];
 
             return (
               <div
@@ -909,10 +1223,14 @@ export function DisassemblyView() {
                 className={`disasm-row flex px-4 ${
                   isSearchMatch
                     ? "bg-yellow-900/30"
-                    : isCurrentAddr
-                      ? "bg-blue-900/30"
-                      : ""
-                }`}
+                    : rowSelected
+                      ? "bg-indigo-900/25"
+                      : isCurrentAddr
+                        ? "bg-blue-900/30"
+                        : showBlocks && row.blockIdx % 2 === 1
+                          ? "bg-gray-800/15"
+                          : ""
+                } ${isDimmed ? "opacity-30" : ""}`}
                 style={{
                   position: "absolute",
                   top: 0,
@@ -920,8 +1238,20 @@ export function DisassemblyView() {
                   width: "100%",
                   height: "20px",
                   transform: `translateY(${vItem.start}px)`,
+                  borderLeft: isLoopHeader ? "2px solid #eab308" : undefined,
                 }}
+                title={isLoopHeader ? `Loop header (depth ${loopDepth})` : undefined}
                 onContextMenu={(e) => handleContextMenu(e, insn)}
+                onClick={(e) => {
+                  if (e.shiftKey) {
+                    e.preventDefault();
+                    const anchor = lastClickedRow ?? currentIndex;
+                    setSelectionRange({ start: anchor, end: vItem.index });
+                  } else {
+                    setSelectionRange(null);
+                    setLastClickedRow(vItem.index);
+                  }
+                }}
               >
                 <span className="w-4 shrink-0 text-center">
                   {isBookmarked && <span className="text-yellow-300">★</span>}
@@ -947,27 +1277,16 @@ export function DisassemblyView() {
                 >
                   {insn.mnemonic}
                 </span>
-                {branchTarget !== null ? (
-                  <span
-                    className="disasm-operands flex-1 text-blue-400 underline cursor-pointer hover:text-blue-300"
-                    onClick={() =>
-                      dispatch({
-                        type: "SET_ADDRESS",
-                        address: branchTarget,
-                      })
-                    }
-                    onDoubleClick={() => handleDoubleClickInsn(insn)}
-                  >
-                    {insn.opStr}
-                  </span>
-                ) : (
-                  <span
-                    className="disasm-operands flex-1"
-                    onDoubleClick={() => handleDoubleClickInsn(insn)}
-                  >
-                    <ColoredOperand opStr={insn.opStr} />
-                  </span>
-                )}
+                <span
+                  className="disasm-operands flex-1"
+                  onDoubleClick={() => handleDoubleClickInsn(insn)}
+                >
+                  <ColoredOperand
+                    opStr={insn.opStr}
+                    targets={operandTargets}
+                    onNavigate={handleAddressClick}
+                  />
+                </span>
                 {insn.comment && (
                   <span
                     className="disasm-comment ml-4 truncate max-w-xs"
@@ -1040,6 +1359,41 @@ export function DisassemblyView() {
                   Rename function
                 </button>
               )}
+              {selectionRange && (() => {
+                const lo = Math.min(selectionRange.start, selectionRange.end);
+                const hi = Math.max(selectionRange.start, selectionRange.end);
+                const count = hi - lo + 1;
+                return (
+                  <>
+                    <div className="border-t border-gray-700 my-0.5" />
+                    <button
+                      onClick={() => {
+                        const lines: string[] = [];
+                        for (let i = lo; i <= hi; i++) {
+                          const r = rows[i];
+                          if (!r) continue;
+                          if (r.kind === "label") {
+                            const name = getDisplayName(r.fn, state.renames);
+                            lines.push(`\n; ──── ${name} ────`);
+                          } else if (r.kind === "insn") {
+                            const ins = r.insn;
+                            const aw = pe?.is64 ? 16 : 8;
+                            const ah = ins.address.toString(16).toUpperCase().padStart(aw, "0");
+                            const c = ins.comment ? `  ; ${ins.comment}` : "";
+                            const uc = state.comments[ins.address] ? `  ; ${state.comments[ins.address]}` : "";
+                            lines.push(`  ${ah}  ${ins.mnemonic} ${ins.opStr}${c}${uc}`);
+                          }
+                        }
+                        navigator.clipboard.writeText(lines.join("\n"));
+                        setCtxMenu(null);
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
+                    >
+                      Copy selected ({count} rows)
+                    </button>
+                  </>
+                );
+              })()}
             </div>
           )}
 
@@ -1053,22 +1407,56 @@ export function DisassemblyView() {
               <div className="px-3 py-1 text-gray-400 border-b border-gray-700">
                 Xrefs to 0x{xrefPopup.targetAddr.toString(16).toUpperCase()}
               </div>
-              {xrefPopup.sources.map((src, i) => (
-                <button
-                  key={i}
-                  className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
-                  onClick={() => {
-                    dispatch({ type: "SET_ADDRESS", address: src });
-                    setXrefPopup(null);
-                  }}
-                >
-                  0x{src.toString(16).toUpperCase()}
-                </button>
-              ))}
+              {xrefPopup.sources.map((xref, i) => {
+                const typeColors: Record<string, string> = {
+                  call: "text-green-400",
+                  jmp: "text-red-400",
+                  branch: "text-orange-400",
+                  data: "text-purple-400",
+                };
+                const typeLabels: Record<string, string> = {
+                  call: "C",
+                  jmp: "J",
+                  branch: "B",
+                  data: "D",
+                };
+                return (
+                  <button
+                    key={i}
+                    className="w-full text-left px-3 py-1.5 hover:bg-gray-700 font-mono flex items-center gap-2"
+                    onClick={() => {
+                      dispatch({ type: "SET_ADDRESS", address: xref.from });
+                      setXrefPopup(null);
+                    }}
+                  >
+                    <span className={`${typeColors[xref.type] ?? "text-gray-400"} text-[10px] font-semibold w-3`}>
+                      {typeLabels[xref.type] ?? "?"}
+                    </span>
+                    <span className="text-blue-400">
+                      0x{xref.from.toString(16).toUpperCase()}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
       </div>
+      {showMinimap && (
+        <DisassemblyMinimap
+          rows={rows}
+          bookmarkSet={bookmarkSet}
+          searchMatches={searchMatches}
+          viewportStartIdx={virtualizer.range?.startIndex ?? 0}
+          viewportEndIdx={virtualizer.range?.endIndex ?? 0}
+          onScrollTo={(idx) => {
+            virtualizer.scrollToIndex(idx, { align: "center" });
+            const addr = rowAddress(rows[idx]);
+            if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
+          }}
+        />
+      )}
+      </div>{/* end flex wrapper for content + minimap */}
 
       {/* Call panel */}
       {showCallPanel && currentFunc && (
@@ -1080,6 +1468,50 @@ export function DisassemblyView() {
           renames={state.renames}
           onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
           onClose={() => setShowCallPanel(false)}
+        />
+      )}
+
+      {/* Instruction detail panel */}
+      {showDetail && (() => {
+        // Binary search for current instruction
+        let curInsn: Instruction | null = null;
+        let lo = 0, hi = instructions.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1;
+          if (instructions[mid].address === state.currentAddress) { curInsn = instructions[mid]; break; }
+          if (instructions[mid].address < state.currentAddress) lo = mid + 1;
+          else hi = mid - 1;
+        }
+        if (!curInsn && instructions.length > 0) {
+          // Use closest
+          const idx = Math.min(lo, instructions.length - 1);
+          curInsn = instructions[idx];
+        }
+        return curInsn ? (
+          <InstructionDetail
+            insn={curInsn}
+            typedXrefMap={typedXrefMap}
+            funcMap={funcMap}
+            iatMap={iatMap}
+            renames={state.renames}
+            sortedFuncs={sortedFuncs}
+            onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+            onClose={() => setShowDetail(false)}
+            stackFrame={stackFrame}
+            signature={currentFuncSig}
+          />
+        ) : null;
+      })()}
+
+      {/* CFG overlay */}
+      {showCFG && currentFunc && (
+        <CFGView
+          func={currentFunc}
+          instructions={instructions}
+          typedXrefMap={typedXrefMap}
+          currentAddress={state.currentAddress}
+          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+          onClose={() => setShowCFG(false)}
         />
       )}
 
@@ -1096,19 +1528,26 @@ export function DisassemblyView() {
                 {([
                   ["G", "Go to address (focus address bar)"],
                   ["/ or Ctrl+F", "Search in disassembly"],
-                  ["Enter", "Next search result"],
+                  ["Enter", "Follow branch / next search result"],
                   ["Shift+Enter", "Previous search result"],
+                  ["N", "Rename current function"],
+                  ["Esc", "Navigate back"],
                   [";", "Add/edit comment at current address"],
+                  ["I", "Toggle instruction detail panel"],
                   ["X", "Toggle callers/callees panel"],
                   ["B", "Toggle bookmark at current address"],
+                  ["Ctrl+P", "Command palette"],
+                  ["Ctrl+Z", "Undo annotation"],
+                  ["Ctrl+Shift+Z", "Redo annotation"],
                   ["↑ / ↓", "Navigate instructions"],
                   ["PgUp / PgDn", "Scroll 40 instructions"],
                   ["1–7", "Switch tabs"],
                   ["Alt+← / Alt+→", "Navigate back / forward"],
                   ["?", "Toggle this help"],
-                  ["Esc", "Dismiss / blur"],
                   ["Double-click addr", "Copy address"],
                   ["Double-click label", "Rename function"],
+                  ["Shift+Click", "Select range of instructions"],
+                  ["Ctrl/Cmd+C", "Copy selected instructions"],
                   ["Right-click", "Context menu"],
                 ] as [string, string][]).map(([key, desc]) => (
                   <tr key={key} className="border-b border-gray-700/50">

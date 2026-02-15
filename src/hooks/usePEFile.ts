@@ -16,6 +16,12 @@ export interface Bookmark {
   label: string;
 }
 
+export interface AnnotationSnapshot {
+  bookmarks: Bookmark[];
+  renames: Record<number, string>;
+  comments: Record<number, string>;
+}
+
 export interface AppState {
   peFile: PEFile | null;
   fileName: string | null;
@@ -31,6 +37,10 @@ export interface AppState {
   bookmarks: Bookmark[];
   renames: Record<number, string>;
   comments: Record<number, string>;
+  hexPatches: Map<number, number>;
+  annotationUndoStack: AnnotationSnapshot[];
+  annotationRedoStack: AnnotationSnapshot[];
+  callStack: { address: number; name: string }[];
 }
 
 export type AppAction =
@@ -52,6 +62,14 @@ export type AppAction =
   | { type: "DELETE_COMMENT"; address: number }
   | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
   | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
+  | { type: "PATCH_BYTE"; offset: number; value: number }
+  | { type: "UNDO_PATCH"; offset: number }
+  | { type: "CLEAR_PATCHES" }
+  | { type: "UNDO_ANNOTATION" }
+  | { type: "REDO_ANNOTATION" }
+  | { type: "PUSH_CALL_STACK"; address: number; name: string }
+  | { type: "POP_CALL_STACK"; index: number }
+  | { type: "CLEAR_CALL_STACK" }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -69,9 +87,24 @@ export const initialState: AppState = {
   bookmarks: [],
   renames: {},
   comments: {},
+  hexPatches: new Map(),
+  annotationUndoStack: [],
+  annotationRedoStack: [],
+  callStack: [],
 };
 
 const MAX_HISTORY = 50;
+const MAX_UNDO = 50;
+
+function snapshotAnnotations(state: AppState): AnnotationSnapshot {
+  return { bookmarks: state.bookmarks, renames: state.renames, comments: state.comments };
+}
+
+function pushUndo(state: AppState): Pick<AppState, "annotationUndoStack" | "annotationRedoStack"> {
+  const stack = [...state.annotationUndoStack, snapshotAnnotations(state)];
+  if (stack.length > MAX_UNDO) stack.shift();
+  return { annotationUndoStack: stack, annotationRedoStack: [] };
+}
 
 function pushHistory(state: AppState, address: number): Pick<AppState, "addressHistory" | "historyIndex"> {
   // Don't push if same as current
@@ -131,34 +164,41 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, currentAddress: state.addressHistory[idx], historyIndex: idx };
     }
     case "TOGGLE_BOOKMARK": {
+      const undo = pushUndo(state);
       const addr = action.address ?? state.currentAddress;
       const exists = state.bookmarks.findIndex((b) => b.address === addr);
       if (exists >= 0) {
-        return { ...state, bookmarks: state.bookmarks.filter((_, i) => i !== exists) };
+        return { ...state, ...undo, bookmarks: state.bookmarks.filter((_, i) => i !== exists) };
       }
-      return { ...state, bookmarks: [...state.bookmarks, { address: addr, label: "" }] };
+      return { ...state, ...undo, bookmarks: [...state.bookmarks, { address: addr, label: "" }] };
     }
     case "SET_BOOKMARK_LABEL": {
+      const undo = pushUndo(state);
       return {
         ...state,
+        ...undo,
         bookmarks: state.bookmarks.map((b) =>
           b.address === action.address ? { ...b, label: action.label } : b,
         ),
       };
     }
     case "RENAME_FUNCTION": {
-      return { ...state, renames: { ...state.renames, [action.address]: action.name } };
+      const undo = pushUndo(state);
+      return { ...state, ...undo, renames: { ...state.renames, [action.address]: action.name } };
     }
     case "CLEAR_RENAME": {
+      const undo = pushUndo(state);
       const { [action.address]: _, ...rest } = state.renames;
-      return { ...state, renames: rest };
+      return { ...state, ...undo, renames: rest };
     }
     case "SET_COMMENT": {
-      return { ...state, comments: { ...state.comments, [action.address]: action.text } };
+      const undo = pushUndo(state);
+      return { ...state, ...undo, comments: { ...state.comments, [action.address]: action.text } };
     }
     case "DELETE_COMMENT": {
+      const undo = pushUndo(state);
       const { [action.address]: _, ...rest } = state.comments;
-      return { ...state, comments: rest };
+      return { ...state, ...undo, comments: rest };
     }
     case "LOAD_PERSISTED": {
       return { ...state, bookmarks: action.bookmarks, renames: action.renames, comments: action.comments };
@@ -176,6 +216,57 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         comments: { ...state.comments, ...action.comments },
       };
     }
+    case "PATCH_BYTE": {
+      const next = new Map(state.hexPatches);
+      next.set(action.offset, action.value);
+      return { ...state, hexPatches: next };
+    }
+    case "UNDO_PATCH": {
+      const next = new Map(state.hexPatches);
+      next.delete(action.offset);
+      return { ...state, hexPatches: next };
+    }
+    case "CLEAR_PATCHES":
+      return { ...state, hexPatches: new Map() };
+    case "UNDO_ANNOTATION": {
+      if (state.annotationUndoStack.length === 0) return state;
+      const stack = [...state.annotationUndoStack];
+      const snapshot = stack.pop()!;
+      const redoStack = [...state.annotationRedoStack, snapshotAnnotations(state)];
+      if (redoStack.length > MAX_UNDO) redoStack.shift();
+      return {
+        ...state,
+        bookmarks: snapshot.bookmarks,
+        renames: snapshot.renames,
+        comments: snapshot.comments,
+        annotationUndoStack: stack,
+        annotationRedoStack: redoStack,
+      };
+    }
+    case "REDO_ANNOTATION": {
+      if (state.annotationRedoStack.length === 0) return state;
+      const stack = [...state.annotationRedoStack];
+      const snapshot = stack.pop()!;
+      const undoStack = [...state.annotationUndoStack, snapshotAnnotations(state)];
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      return {
+        ...state,
+        bookmarks: snapshot.bookmarks,
+        renames: snapshot.renames,
+        comments: snapshot.comments,
+        annotationUndoStack: undoStack,
+        annotationRedoStack: stack,
+      };
+    }
+    case "PUSH_CALL_STACK": {
+      const stack = [...state.callStack, { address: action.address, name: action.name }];
+      if (stack.length > 8) stack.shift();
+      return { ...state, callStack: stack };
+    }
+    case "POP_CALL_STACK":
+      return { ...state, callStack: state.callStack.slice(0, action.index) };
+    case "CLEAR_CALL_STACK":
+      return { ...state, callStack: [] };
     case "RESET":
       return initialState;
     default:

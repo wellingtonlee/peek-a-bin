@@ -1,5 +1,5 @@
 import { Const, Capstone, loadCapstone } from 'capstone-wasm';
-import type { Instruction, DisasmFunction } from './types';
+import type { Instruction, DisasmFunction, Xref } from './types';
 
 export class DisassemblyEngine {
   private cs32: any;
@@ -18,7 +18,7 @@ export class DisassemblyEngine {
 
   private static CHUNK_SIZE = 0x10000; // 64KB chunks to avoid WASM OOM
 
-  private mapInsn(insn: any, stringMap?: Map<number, string>): Instruction {
+  private mapInsn(insn: any, stringMap?: Map<number, string>, iatMap?: Map<number, { lib: string; func: string }>): Instruction {
     const instruction: Instruction = {
       address: insn.address,
       bytes: new Uint8Array(insn.bytes),
@@ -56,6 +56,30 @@ export class DisassemblyEngine {
       }
     }
 
+    // IAT import resolution
+    if (iatMap && iatMap.size > 0 && !instruction.comment) {
+      // Check RIP-relative target
+      const ripMatch2 = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+      if (ripMatch2) {
+        const sign = ripMatch2[1] === '+' ? 1 : -1;
+        const disp = parseInt(ripMatch2[2], 16);
+        const target = insn.address + insn.size + sign * disp;
+        const iat = iatMap.get(target);
+        if (iat) instruction.comment = `${iat.lib}!${iat.func}`;
+      }
+      // Check absolute addresses
+      if (!instruction.comment) {
+        const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+        if (addrMatches) {
+          for (const addrStr of addrMatches) {
+            const addr = parseInt(addrStr, 16);
+            const iat = iatMap.get(addr);
+            if (iat) { instruction.comment = `${iat.lib}!${iat.func}`; break; }
+          }
+        }
+      }
+    }
+
     return instruction;
   }
 
@@ -63,7 +87,8 @@ export class DisassemblyEngine {
     bytes: Uint8Array,
     baseAddress: number,
     is64: boolean,
-    stringMap?: Map<number, string>
+    stringMap?: Map<number, string>,
+    iatMap?: Map<number, { lib: string; func: string }>
   ): Instruction[] {
     const cacheKey = `${baseAddress}:${bytes.length}:${is64}`;
     if (this.cache.has(cacheKey)) {
@@ -85,7 +110,7 @@ export class DisassemblyEngine {
       try {
         const insns = cs.disasm(chunk, { address: baseAddress + offset });
         for (const insn of insns) {
-          instructions.push(this.mapInsn(insn, stringMap));
+          instructions.push(this.mapInsn(insn, stringMap, iatMap));
         }
 
         if (insns.length === 0) {
@@ -227,10 +252,24 @@ export class DisassemblyEngine {
       }
     }
 
-    // For sections < 2MB, disassemble and collect call targets
+    // Alignment padding heuristic: sequences of 2+ CC/90 followed by non-padding = function start
+    for (let i = 0; i < len; i++) {
+      if (bytes[i] === 0xCC || bytes[i] === 0x90) {
+        let padEnd = i + 1;
+        while (padEnd < len && (bytes[padEnd] === 0xCC || bytes[padEnd] === 0x90)) padEnd++;
+        if (padEnd - i >= 2 && padEnd < len && bytes[padEnd] !== 0xCC && bytes[padEnd] !== 0x90) {
+          addrSet.add(baseAddress + padEnd);
+        }
+        i = padEnd - 1; // skip past padding
+      }
+    }
+
+    // For sections < 2MB, disassemble and collect call targets + post-branch heuristic
+    const callTargets = new Set<number>();
     if (len < 2 * 1024 * 1024 && this.initialized) {
       const cs = is64 ? this.cs64 : this.cs32;
       let offset = 0;
+      let prevWasUnconditional = false;
       while (offset < len) {
         const chunkEnd = Math.min(offset + DisassemblyEngine.CHUNK_SIZE, len);
         const chunk = bytes.subarray(offset, chunkEnd);
@@ -243,12 +282,23 @@ export class DisassemblyEngine {
                 const target = parseInt(m[1], 16);
                 if (target >= baseAddress && target < endAddress) {
                   addrSet.add(target);
+                  callTargets.add(target);
                 }
               }
             }
+            // Post-unconditional-branch heuristic: if prev was ret/retn/jmp (not conditional),
+            // and this instruction is a known call target, it's likely a function start
+            if (prevWasUnconditional && callTargets.has(insn.address)) {
+              addrSet.add(insn.address);
+            }
+            const mn = insn.mnemonic;
+            prevWasUnconditional = mn === 'ret' || mn === 'retn' || (mn === 'jmp' && !mn.startsWith('j'));
+            // jmp is unconditional, but we need to be precise: mnemonic exactly 'jmp'
+            prevWasUnconditional = mn === 'ret' || mn === 'retn' || mn === 'jmp';
           }
           if (insns.length === 0) {
             offset += 1;
+            prevWasUnconditional = false;
           } else {
             const lastInsn = insns[insns.length - 1];
             const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
@@ -256,6 +306,7 @@ export class DisassemblyEngine {
           }
         } catch {
           offset += DisassemblyEngine.CHUNK_SIZE;
+          prevWasUnconditional = false;
         }
       }
     }
@@ -280,6 +331,35 @@ export class DisassemblyEngine {
     return functions;
   }
 
+  buildDataXrefMap(instructions: Instruction[], stringAddrs: Set<number>): Map<number, number[]> {
+    const xrefs = new Map<number, number[]>();
+    for (const insn of instructions) {
+      const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+      if (ripMatch) {
+        const sign = ripMatch[1] === '+' ? 1 : -1;
+        const disp = parseInt(ripMatch[2], 16);
+        const target = insn.address + insn.size + sign * disp;
+        if (stringAddrs.has(target)) {
+          let arr = xrefs.get(target);
+          if (!arr) { arr = []; xrefs.set(target, arr); }
+          arr.push(insn.address);
+        }
+      }
+      const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+      if (addressMatch) {
+        for (const addrStr of addressMatch) {
+          const addr = parseInt(addrStr, 16);
+          if (stringAddrs.has(addr)) {
+            let arr = xrefs.get(addr);
+            if (!arr) { arr = []; xrefs.set(addr, arr); }
+            arr.push(insn.address);
+          }
+        }
+      }
+    }
+    return xrefs;
+  }
+
   buildXrefMap(instructions: Instruction[]): Map<number, number[]> {
     const xrefs = new Map<number, number[]>();
     for (const insn of instructions) {
@@ -293,6 +373,68 @@ export class DisassemblyEngine {
             xrefs.set(target, arr);
           }
           arr.push(insn.address);
+        }
+      }
+    }
+    return xrefs;
+  }
+
+  buildTypedXrefMap(instructions: Instruction[]): Map<number, Xref[]> {
+    const xrefs = new Map<number, Xref[]>();
+    const conditionalJumps = new Set([
+      'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
+      'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns',
+      'jp', 'jnp', 'jcxz', 'jecxz', 'jrcxz',
+    ]);
+
+    for (const insn of instructions) {
+      const mn = insn.mnemonic;
+
+      // Direct branch/call targets
+      const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      if (directMatch) {
+        const target = parseInt(directMatch[1], 16);
+        let type: Xref['type'];
+        if (mn === 'call') type = 'call';
+        else if (mn === 'jmp') type = 'jmp';
+        else if (conditionalJumps.has(mn) || mn.startsWith('j')) type = 'branch';
+        else continue;
+
+        let arr = xrefs.get(target);
+        if (!arr) { arr = []; xrefs.set(target, arr); }
+        arr.push({ from: insn.address, type });
+        continue;
+      }
+
+      // RIP-relative references
+      const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+      if (ripMatch) {
+        const sign = ripMatch[1] === '+' ? 1 : -1;
+        const disp = parseInt(ripMatch[2], 16);
+        const target = insn.address + insn.size + sign * disp;
+        let type: Xref['type'];
+        if (mn === 'call') type = 'call';
+        else if (mn === 'jmp') type = 'jmp';
+        else type = 'data';
+
+        let arr = xrefs.get(target);
+        if (!arr) { arr = []; xrefs.set(target, arr); }
+        arr.push({ from: insn.address, type });
+        continue;
+      }
+
+      // Absolute address data references (mov, lea, etc. with hex addresses)
+      if (mn !== 'call' && mn !== 'jmp' && !mn.startsWith('j')) {
+        const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+        if (addrMatches) {
+          for (const addrStr of addrMatches) {
+            const addr = parseInt(addrStr, 16);
+            if (addr > 0x10000) { // only plausible addresses
+              let arr = xrefs.get(addr);
+              if (!arr) { arr = []; xrefs.set(addr, arr); }
+              arr.push({ from: insn.address, type: 'data' });
+            }
+          }
         }
       }
     }

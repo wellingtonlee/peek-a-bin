@@ -148,6 +148,7 @@ export interface ImportDescriptor {
 export interface ImportEntry {
   libraryName: string;
   functions: string[];
+  iatAddresses: number[];
 }
 
 export interface ExportEntry {
