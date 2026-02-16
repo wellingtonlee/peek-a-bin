@@ -15,3 +15,29 @@ export function computeEntropyBlocks(bytes: Uint8Array, blockSize = 256): number
   }
   return blocks;
 }
+
+export function computeSectionEntropy(bytes: Uint8Array): number {
+  if (bytes.length === 0) return 0;
+  const freq = new Uint32Array(256);
+  for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+  let entropy = 0;
+  for (let k = 0; k < 256; k++) {
+    if (freq[k] === 0) continue;
+    const p = freq[k] / bytes.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+export interface EntropyClassification {
+  label: string;
+  color: string;
+}
+
+export function classifyEntropy(avgEntropy: number): EntropyClassification {
+  if (avgEntropy < 1.0) return { label: "empty", color: "text-gray-500" };
+  if (avgEntropy < 4.0) return { label: "low - data/code", color: "text-green-400" };
+  if (avgEntropy < 6.5) return { label: "normal - code", color: "text-blue-400" };
+  if (avgEntropy < 7.5) return { label: "high - compressed?", color: "text-yellow-400" };
+  return { label: "very high - packed/encrypted?", color: "text-red-400" };
+}

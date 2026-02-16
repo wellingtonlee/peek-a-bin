@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useAppState, useAppDispatch, getDisplayName, type ViewTab, type Bookmark } from "../hooks/usePEFile";
+import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 
 const TABS: { id: ViewTab; label: string }[] = [
@@ -40,9 +41,7 @@ export function AddressBar() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const sortedFuncs = useMemo(() => {
-    return [...state.functions].sort((a, b) => a.address - b.address);
-  }, [state.functions]);
+  const sortedFuncs = useSortedFuncs();
 
   const exports = useMemo(() => {
     if (!state.peFile) return [];

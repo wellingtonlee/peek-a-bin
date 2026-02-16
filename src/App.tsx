@@ -1,4 +1,4 @@
-import { useReducer, useCallback, useEffect, useRef, useState } from "react";
+import { useReducer, useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
 import {
   appReducer,
   initialState,
@@ -6,7 +6,7 @@ import {
   AppDispatchContext,
   type ViewTab,
 } from "./hooks/usePEFile";
-import { parsePE } from "./pe/parser";
+import { parsePE, extractStrings } from "./pe/parser";
 import { disasmEngine } from "./disasm/engine";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
@@ -14,14 +14,15 @@ import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
-import { DisassemblyView } from "./components/DisassemblyView";
-import { HexView } from "./components/HexView";
+const DisassemblyView = lazy(() => import("./components/DisassemblyView").then(m => ({ default: m.DisassemblyView })));
+const HexView = lazy(() => import("./components/HexView").then(m => ({ default: m.HexView })));
 import { ImportsView } from "./components/ImportsView";
 import { ExportsView } from "./components/ExportsView";
 import { StringsView } from "./components/StringsView";
 import { AddressBar } from "./components/AddressBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 
 export default function App() {
@@ -119,6 +120,17 @@ export default function App() {
       .then((funcs) => dispatch({ type: "SET_FUNCTIONS", functions: funcs }));
   }, [state.peFile, state.disasmReady]);
 
+  // Re-configure worker when strings arrive (they load asynchronously after PE parse)
+  const stringsConfiguredRef = useRef(false);
+  useEffect(() => {
+    if (!state.peFile || !state.disasmReady) return;
+    if (state.peFile.strings.size === 0) { stringsConfiguredRef.current = false; return; }
+    if (stringsConfiguredRef.current) return;
+    stringsConfiguredRef.current = true;
+    const iatLookup = buildIATLookup(state.peFile.imports);
+    disasmWorker.configure(state.peFile.strings, iatLookup);
+  }, [state.peFile, state.peFile?.strings.size, state.disasmReady]);
+
   // Parse hash on file load — apply saved address/tab from URL
   const hashAppliedRef = useRef(false);
   useEffect(() => {
@@ -181,6 +193,15 @@ export default function App() {
         bufferRef.current = buffer;
         const pe = parsePE(buffer);
         dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
+        // Extract strings off the main thread via setTimeout to avoid blocking UI
+        setTimeout(() => {
+          const { strings, stringTypes } = extractStrings(
+            buffer,
+            pe.sections,
+            pe.optionalHeader.imageBase,
+          );
+          dispatch({ type: "SET_STRINGS", strings, stringTypes });
+        }, 0);
       } catch (e) {
         dispatch({
           type: "SET_ERROR",
@@ -191,26 +212,34 @@ export default function App() {
     [],
   );
 
+  const mountedTabs = useRef(new Set<string>());
+  if (state.peFile) mountedTabs.current.add(state.activeTab);
+
+  const tabComponents: { key: string; Component: React.ComponentType; isLazy?: boolean }[] = [
+    { key: "headers", Component: HeaderView },
+    { key: "sections", Component: SectionTable },
+    { key: "disassembly", Component: DisassemblyView, isLazy: true },
+    { key: "imports", Component: ImportsView },
+    { key: "exports", Component: ExportsView },
+    { key: "hex", Component: HexView, isLazy: true },
+    { key: "strings", Component: StringsView },
+  ];
+
   const renderMainView = () => {
     if (!state.peFile) return null;
-    switch (state.activeTab) {
-      case "headers":
-        return <HeaderView />;
-      case "sections":
-        return <SectionTable />;
-      case "disassembly":
-        return <DisassemblyView />;
-      case "imports":
-        return <ImportsView />;
-      case "exports":
-        return <ExportsView />;
-      case "hex":
-        return <HexView />;
-      case "strings":
-        return <StringsView />;
-      default:
-        return null;
-    }
+    return tabComponents.map(({ key, Component, isLazy }) =>
+      mountedTabs.current.has(key) ? (
+        <div key={key} className={state.activeTab === key ? "h-full" : "hidden"}>
+          {isLazy ? (
+            <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500 text-sm">Loading...</div>}>
+              <Component />
+            </Suspense>
+          ) : (
+            <Component />
+          )}
+        </div>
+      ) : null,
+    );
   };
 
   return (
@@ -223,7 +252,9 @@ export default function App() {
             <AddressBar />
             <div className="flex flex-1 overflow-hidden">
               <Sidebar />
-              <main className="flex-1 overflow-auto">{renderMainView()}</main>
+              <main className="flex-1 overflow-auto">
+                <ErrorBoundary>{renderMainView()}</ErrorBoundary>
+              </main>
             </div>
             <StatusBar />
           </div>

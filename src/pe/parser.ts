@@ -26,18 +26,16 @@ import {
   IMAGE_DIRECTORY_ENTRY_EXPORT,
 } from './constants';
 
+const textDecoder = new TextDecoder();
+
 /**
  * Read null-terminated ASCII string from buffer
  */
 function readCString(view: DataView, offset: number, maxLength = 1024): string {
-  const chars: number[] = [];
-  for (let i = 0; i < maxLength; i++) {
-    if (offset + i >= view.byteLength) break;
-    const byte = view.getUint8(offset + i);
-    if (byte === 0) break;
-    chars.push(byte);
-  }
-  return String.fromCharCode(...chars);
+  let end = offset;
+  const limit = Math.min(offset + maxLength, view.byteLength);
+  while (end < limit && view.getUint8(end) !== 0) end++;
+  return textDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + offset, end - offset));
 }
 
 /**
@@ -397,24 +395,22 @@ function extractASCIIStrings(
     view.byteLength,
   );
 
+  const buf = new Uint8Array(view.buffer, view.byteOffset);
   let i = start;
   while (i < end) {
-    const byte = view.getUint8(i);
+    const byte = buf[i];
 
     if (byte >= 0x20 && byte <= 0x7e) {
       const strStart = i;
-      const chars: number[] = [];
-
       while (i < end) {
-        const b = view.getUint8(i);
-        if (b === 0) break;
-        if (b < 0x20 || b > 0x7e) break;
-        chars.push(b);
+        const b = buf[i];
+        if (b === 0 || b < 0x20 || b > 0x7e) break;
         i++;
       }
 
-      if (chars.length >= minLength) {
-        const str = String.fromCharCode(...chars);
+      const len = i - strStart;
+      if (len >= minLength) {
+        const str = textDecoder.decode(buf.subarray(strStart, i));
         const rva = section.virtualAddress + (strStart - section.pointerToRawData);
         strings.set(imageBase + rva, str);
       }
@@ -444,29 +440,31 @@ function extractUTF16Strings(
     view.byteLength,
   );
 
+  const utf16Decoder = new TextDecoder("utf-16le");
+  const buf = new Uint8Array(view.buffer, view.byteOffset);
   let i = start;
   while (i + 1 < end) {
-    const lo = view.getUint8(i);
-    const hi = view.getUint8(i + 1);
+    const lo = buf[i];
+    const hi = buf[i + 1];
 
     // Check for [printable, 0x00] pattern
     if (hi === 0 && lo >= 0x20 && lo <= 0x7e) {
       const strStart = i;
-      const chars: number[] = [];
+      let charCount = 0;
 
       while (i + 1 < end) {
-        const clo = view.getUint8(i);
-        const chi = view.getUint8(i + 1);
+        const clo = buf[i];
+        const chi = buf[i + 1];
         if (chi === 0 && clo >= 0x20 && clo <= 0x7e) {
-          chars.push(clo);
+          charCount++;
           i += 2;
         } else {
           break;
         }
       }
 
-      if (chars.length >= minLength) {
-        const str = String.fromCharCode(...chars);
+      if (charCount >= minLength) {
+        const str = utf16Decoder.decode(buf.subarray(strStart, strStart + charCount * 2));
         const rva = section.virtualAddress + (strStart - section.pointerToRawData);
         strings.set(imageBase + rva, str);
       }
@@ -558,41 +556,6 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
-  // 9. Extract strings (keyed by VA for disassembler lookups)
-  const strings = new Map<number, string>();
-  const stringTypes = new Map<number, "ascii" | "utf16le">();
-
-  const dataSectionNames = new Set([".rdata", ".data", ".rodata"]);
-
-  // ASCII strings from data sections (minLength 4)
-  for (const sec of sections) {
-    if (dataSectionNames.has(sec.name)) {
-      const asciiStrings = extractASCIIStrings(view, sec, imageBase, 4);
-      asciiStrings.forEach((v, k) => { strings.set(k, v); stringTypes.set(k, "ascii"); });
-    }
-  }
-
-  // ASCII strings from .text with higher threshold (minLength 8)
-  const textSection = sections.find(
-    (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-  );
-  if (textSection) {
-    const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
-    textAscii.forEach((v, k) => {
-      if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "ascii"); }
-    });
-  }
-
-  // UTF-16LE strings from data sections
-  for (const sec of sections) {
-    if (dataSectionNames.has(sec.name)) {
-      const utf16Strings = extractUTF16Strings(view, sec, imageBase, 4);
-      utf16Strings.forEach((v, k) => {
-        if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "utf16le"); }
-      });
-    }
-  }
-
   return {
     buffer,
     is64,
@@ -604,7 +567,49 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections,
     imports,
     exports,
-    strings,
-    stringTypes,
+    strings: new Map(),
+    stringTypes: new Map(),
   };
+}
+
+/**
+ * Extract strings from PE sections (run separately from parsePE to avoid blocking UI)
+ */
+export function extractStrings(
+  buffer: ArrayBuffer,
+  sections: SectionHeader[],
+  imageBase: number,
+): { strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> } {
+  const view = new DataView(buffer);
+  const strings = new Map<number, string>();
+  const stringTypes = new Map<number, "ascii" | "utf16le">();
+  const dataSectionNames = new Set([".rdata", ".data", ".rodata"]);
+
+  for (const sec of sections) {
+    if (dataSectionNames.has(sec.name)) {
+      const asciiStrings = extractASCIIStrings(view, sec, imageBase, 4);
+      asciiStrings.forEach((v, k) => { strings.set(k, v); stringTypes.set(k, "ascii"); });
+    }
+  }
+
+  const textSection = sections.find(
+    (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
+  );
+  if (textSection) {
+    const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
+    textAscii.forEach((v, k) => {
+      if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "ascii"); }
+    });
+  }
+
+  for (const sec of sections) {
+    if (dataSectionNames.has(sec.name)) {
+      const utf16Strings = extractUTF16Strings(view, sec, imageBase, 4);
+      utf16Strings.forEach((v, k) => {
+        if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "utf16le"); }
+      });
+    }
+  }
+
+  return { strings, stringTypes };
 }

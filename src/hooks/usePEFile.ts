@@ -70,6 +70,7 @@ export type AppAction =
   | { type: "PUSH_CALL_STACK"; address: number; name: string }
   | { type: "POP_CALL_STACK"; index: number }
   | { type: "CLEAR_CALL_STACK" }
+  | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -267,6 +268,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, callStack: state.callStack.slice(0, action.index) };
     case "CLEAR_CALL_STACK":
       return { ...state, callStack: [] };
+    case "SET_STRINGS": {
+      if (!state.peFile) return state;
+      return {
+        ...state,
+        peFile: { ...state.peFile, strings: action.strings, stringTypes: action.stringTypes },
+      };
+    }
     case "RESET":
       return initialState;
     default:

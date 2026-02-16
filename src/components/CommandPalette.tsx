@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
-import type { DisasmFunction } from "../disasm/types";
+import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 
 interface CommandPaletteProps {
@@ -34,9 +34,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     }
   }, [open]);
 
-  const sortedFuncs = useMemo(() => {
-    return [...state.functions].sort((a, b) => a.address - b.address);
-  }, [state.functions]);
+  const sortedFuncs = useSortedFuncs();
 
   const results = useMemo((): ResultItem[] => {
     if (!pe || !query) return [];

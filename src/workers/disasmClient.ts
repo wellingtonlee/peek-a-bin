@@ -9,6 +9,8 @@ class DisasmWorkerClient {
   private worker: Worker | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
+  private disasmCache = new Map<string, Instruction[]>();
+  private xrefCache = new WeakMap<Instruction[], Map<number, Xref[]>>();
 
   private send(method: string, args: any = {}): Promise<any> {
     if (!this.worker) {
@@ -38,6 +40,8 @@ class DisasmWorkerClient {
     strings: Map<number, string>,
     iat: Map<number, { lib: string; func: string }>
   ): Promise<void> {
+    this.disasmCache.clear();
+    this.xrefCache = new WeakMap();
     await this.send('configure', {
       stringEntries: Array.from(strings.entries()),
       iatEntries: Array.from(iat.entries()),
@@ -45,7 +49,12 @@ class DisasmWorkerClient {
   }
 
   async disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Promise<Instruction[]> {
-    return this.send('disassemble', { bytes, baseAddress, is64 });
+    const key = `${baseAddress}:${is64}`;
+    const cached = this.disasmCache.get(key);
+    if (cached) return cached;
+    const result: Instruction[] = await this.send('disassemble', { bytes, baseAddress, is64 });
+    this.disasmCache.set(key, result);
+    return result;
   }
 
   async detectFunctions(
@@ -58,8 +67,12 @@ class DisasmWorkerClient {
   }
 
   async buildTypedXrefMap(instructions: Instruction[]): Promise<Map<number, Xref[]>> {
+    const cached = this.xrefCache.get(instructions);
+    if (cached) return cached;
     const entries: [number, Xref[]][] = await this.send('buildTypedXrefMap', { instructions });
-    return new Map(entries);
+    const result = new Map(entries);
+    this.xrefCache.set(instructions, result);
+    return result;
   }
 }
 

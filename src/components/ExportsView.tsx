@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type SortKey = "ordinal" | "name" | "address";
@@ -7,7 +7,14 @@ type SortDir = "asc" | "desc";
 export function ExportsView() {
   const { peFile: pe } = useAppState();
   const dispatch = useAppDispatch();
+  const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
+  const filterTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const handleFilterChange = useCallback((value: string) => {
+    setFilterInput(value);
+    clearTimeout(filterTimerRef.current);
+    filterTimerRef.current = setTimeout(() => setFilter(value), 250);
+  }, []);
   const [sortKey, setSortKey] = useState<SortKey>("ordinal");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -57,8 +64,8 @@ export function ExportsView() {
         </h2>
         <input
           type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          value={filterInput}
+          onChange={(e) => handleFilterChange(e.target.value)}
           placeholder="Filter..."
           className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />

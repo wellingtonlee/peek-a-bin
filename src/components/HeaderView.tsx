@@ -1,10 +1,17 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import {
   MachineTypes as MACHINE_TYPES,
   SubsystemNames as SUBSYSTEM_NAMES,
   DataDirectoryNames as DATA_DIR_NAMES,
 } from "../pe/constants";
+import {
+  parseRichHeader,
+  parseDebugDirectory,
+  validateChecksum,
+  computeImphash,
+  detectOverlay,
+} from "../pe/metadata";
 
 const COFF_CHARACTERISTICS: Record<number, string> = {
   0x0001: "RELOCS_STRIPPED",
@@ -103,6 +110,22 @@ export function HeaderView() {
     dispatch({ type: "SET_ADDRESS", address: entryVA });
     dispatch({ type: "SET_TAB", tab: "disassembly" });
   };
+
+  // --- Metadata computations ---
+  const richHeader = useMemo(() => parseRichHeader(pe.buffer), [pe.buffer]);
+  const debugInfo = useMemo(() => parseDebugDirectory(pe.buffer, pe), [pe]);
+  const checksum = useMemo(() => validateChecksum(pe.buffer, pe), [pe]);
+  const imphash = useMemo(() => computeImphash(pe.imports), [pe.imports]);
+  const overlay = useMemo(() => detectOverlay(pe.buffer, pe), [pe]);
+
+  const [copiedImphash, setCopiedImphash] = useState(false);
+  const copyImphash = useCallback(() => {
+    if (!imphash) return;
+    navigator.clipboard.writeText(imphash).then(() => {
+      setCopiedImphash(true);
+      setTimeout(() => setCopiedImphash(false), 800);
+    });
+  }, [imphash]);
 
   return (
     <div className="p-4 space-y-6 text-xs overflow-auto h-full">
@@ -225,6 +248,97 @@ export function HeaderView() {
             ))}
           </tbody>
         </table>
+      </section>
+
+      {/* Metadata */}
+      <section>
+        <h2 className="text-sm font-semibold text-gray-200 mb-2">Metadata</h2>
+        <table>
+          <tbody>
+            <Row label="Checksum Validation">
+              {checksum.expected === 0 ? (
+                <span className="text-gray-500">Not set (0x00000000)</span>
+              ) : checksum.valid ? (
+                <span className="text-green-400">Valid</span>
+              ) : (
+                <span className="text-red-400">
+                  Invalid (expected <CopyableHex value={checksum.expected} />, actual <CopyableHex value={checksum.actual} />)
+                </span>
+              )}
+            </Row>
+            <Row label="Imphash">
+              {imphash ? (
+                <span
+                  onClick={copyImphash}
+                  className={`font-mono cursor-pointer hover:underline transition-colors ${copiedImphash ? "text-green-400" : "text-blue-400"}`}
+                  title="Click to copy"
+                >
+                  {imphash}
+                </span>
+              ) : (
+                <span className="text-gray-500">No imports</span>
+              )}
+            </Row>
+            <Row label="Overlay">
+              {overlay ? (
+                <span>
+                  <span className="text-yellow-400">Detected</span>{" "}
+                  <span className="text-gray-400">
+                    at offset 0x{overlay.offset.toString(16).toUpperCase()}, {overlay.size.toLocaleString()} bytes
+                  </span>
+                </span>
+              ) : (
+                <span className="text-gray-500">None</span>
+              )}
+            </Row>
+          </tbody>
+        </table>
+
+        {/* Debug Info */}
+        {debugInfo.length > 0 && (
+          <div className="mt-3">
+            <h3 className="text-xs font-semibold text-gray-300 mb-1">Debug Info</h3>
+            <table>
+              <tbody>
+                {debugInfo.map((d, i) => (
+                  <tr key={i} className="border-b border-gray-800">
+                    <td className="py-1 pr-4 text-gray-400">{d.typeName}</td>
+                    <td className="py-1 text-gray-200">
+                      {d.pdbPath && <div className="text-green-400 font-mono">{d.pdbPath}</div>}
+                      {d.guid && <div className="text-gray-500 text-[10px]">GUID: {d.guid} Age: {d.age}</div>}
+                      {!d.pdbPath && !d.guid && <span className="text-gray-500">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Rich Header */}
+        {richHeader && richHeader.length > 0 && (
+          <div className="mt-3">
+            <h3 className="text-xs font-semibold text-gray-300 mb-1">Rich Header ({richHeader.length} entries)</h3>
+            <table className="w-full">
+              <thead>
+                <tr className="text-gray-400 border-b border-gray-700">
+                  <th className="text-left py-1 pr-4">Tool ID</th>
+                  <th className="text-left py-1 pr-4">Build ID</th>
+                  <th className="text-left py-1">Use Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {richHeader.map((entry, i) => (
+                  <tr key={i} className="border-b border-gray-800">
+                    <td className="py-1 pr-4 text-blue-400 font-mono">0x{entry.toolId.toString(16).toUpperCase()}</td>
+                    <td className="py-1 pr-4 text-gray-300 font-mono">{entry.buildId}</td>
+                    <td className="py-1 text-gray-400">{entry.useCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );

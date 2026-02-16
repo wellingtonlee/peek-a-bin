@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { Instruction, DisasmFunction, Xref, StackFrame } from "../disasm/types";
 import type { FunctionSignature } from "../disasm/signatures";
 import { getDisplayName } from "../hooks/usePEFile";
+import { binarySearchFunc } from "../hooks/useDerivedState";
 
 interface InstructionDetailProps {
   insn: Instruction;
@@ -166,22 +167,10 @@ export function InstructionDetail({
   const encoding = useMemo(() => breakdownEncoding(insn), [insn]);
 
   // Find containing function
-  const containingFunc = useMemo(() => {
-    let lo = 0;
-    let hi = sortedFuncs.length - 1;
-    let best: DisasmFunction | null = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      const fn = sortedFuncs[mid];
-      if (fn.address <= insn.address) {
-        if (insn.address < fn.address + fn.size) best = fn;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return best;
-  }, [insn.address, sortedFuncs]);
+  const containingFunc = useMemo(
+    () => binarySearchFunc(sortedFuncs, insn.address),
+    [insn.address, sortedFuncs],
+  );
 
   // Typed xrefs TO this instruction
   const xrefsTo = typedXrefMap.get(insn.address) ?? [];

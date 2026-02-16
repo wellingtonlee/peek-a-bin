@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { disasmEngine } from "../disasm/engine";
+import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction } from "../disasm/types";
 
 interface XrefPopupState {
@@ -14,7 +14,14 @@ export function ImportsView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const pe = state.peFile;
+  const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
+  const filterTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const handleFilterChange = useCallback((value: string) => {
+    setFilterInput(value);
+    clearTimeout(filterTimerRef.current);
+    filterTimerRef.current = setTimeout(() => setFilter(value), 250);
+  }, []);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [importXrefs, setImportXrefs] = useState<Map<number, number[]> | null>(null);
   const [xrefLoading, setXrefLoading] = useState(false);
@@ -36,7 +43,8 @@ export function ImportsView() {
   const handleLoadXrefs = useCallback(() => {
     if (!pe || xrefLoading) return;
     setXrefLoading(true);
-    setTimeout(() => {
+
+    (async () => {
       try {
         // Collect all IAT addresses
         const iatAddrs = new Set<number>();
@@ -44,14 +52,14 @@ export function ImportsView() {
           for (const addr of imp.iatAddresses) iatAddrs.add(addr);
         }
 
-        // Disassemble code sections
+        // Disassemble code sections (off main thread via worker)
         const allInsns: Instruction[] = [];
         for (const sec of pe.sections) {
           if ((sec.characteristics & 0x20000000) === 0 && sec.name !== ".text") continue;
           try {
             const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
             const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-            const insns = disasmEngine.disassemble(bytes, base, pe.is64, pe.strings);
+            const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
             allInsns.push(...insns);
           } catch { /* skip */ }
         }
@@ -59,7 +67,6 @@ export function ImportsView() {
         // Scan for references to IAT addresses
         const xrefs = new Map<number, number[]>();
         for (const insn of allInsns) {
-          // Check RIP-relative
           const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
           if (ripMatch) {
             const sign = ripMatch[1] === '+' ? 1 : -1;
@@ -71,7 +78,6 @@ export function ImportsView() {
               arr.push(insn.address);
             }
           }
-          // Check absolute addresses
           const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
           if (addrMatches) {
             for (const addrStr of addrMatches) {
@@ -87,7 +93,7 @@ export function ImportsView() {
         setImportXrefs(xrefs);
       } catch { /* ignore */ }
       setXrefLoading(false);
-    }, 0);
+    })();
   }, [pe, xrefLoading]);
 
   if (!pe) return null;
@@ -132,8 +138,8 @@ export function ImportsView() {
         </h2>
         <input
           type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          value={filterInput}
+          onChange={(e) => handleFilterChange(e.target.value)}
           placeholder="Filter..."
           className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />

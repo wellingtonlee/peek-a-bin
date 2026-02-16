@@ -1,43 +1,13 @@
 import { useMemo } from "react";
 import { useAppState, getDisplayName } from "../hooks/usePEFile";
-import type { DisasmFunction } from "../disasm/types";
+import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 
 export function StatusBar() {
   const state = useAppState();
   const pe = state.peFile;
 
-  const sortedFuncs = useMemo(() => {
-    return [...state.functions].sort((a, b) => a.address - b.address);
-  }, [state.functions]);
-
-  const containingFunc = useMemo((): DisasmFunction | null => {
-    const addr = state.currentAddress;
-    let lo = 0;
-    let hi = sortedFuncs.length - 1;
-    let best: DisasmFunction | null = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      const fn = sortedFuncs[mid];
-      if (fn.address <= addr) {
-        if (addr < fn.address + fn.size) best = fn;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return best;
-  }, [state.currentAddress, sortedFuncs]);
-
-  const sectionInfo = useMemo(() => {
-    if (!pe) return null;
-    const rva = state.currentAddress - pe.optionalHeader.imageBase;
-    for (const sec of pe.sections) {
-      if (rva >= sec.virtualAddress && rva < sec.virtualAddress + sec.virtualSize) {
-        return sec;
-      }
-    }
-    return null;
-  }, [pe, state.currentAddress]);
+  const containingFunc = useContainingFunc();
+  const sectionInfo = useSectionInfo();
 
   const fileOffset = useMemo(() => {
     if (!pe || !sectionInfo) return null;

@@ -12,7 +12,7 @@ const CHUNK_SIZE = 0x10000;
 function mapInsn(insn: any): Instruction {
   const instruction: Instruction = {
     address: insn.address,
-    bytes: new Uint8Array(insn.bytes),
+    bytes: insn.bytes,
     mnemonic: insn.mnemonic,
     opStr: insn.opStr,
     size: insn.size,

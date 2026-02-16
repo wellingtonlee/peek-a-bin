@@ -1,7 +1,7 @@
 import { useEffect, useRef, useMemo, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
-import { disasmEngine } from "../disasm/engine";
+import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
@@ -216,6 +216,7 @@ export function DisassemblyView() {
   const [showDetail, setShowDetail] = useState(false);
   const [showMinimap, setShowMinimap] = useState(true);
   const [showCFG, setShowCFG] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   // Build IAT lookup map from imports
   const iatMap = useMemo(() => {
@@ -224,16 +225,7 @@ export function DisassemblyView() {
   }, [pe]);
 
   // Find which section contains the current address
-  const sectionInfo = useMemo(() => {
-    if (!pe) return null;
-    const rva = state.currentAddress - pe.optionalHeader.imageBase;
-    for (const sec of pe.sections) {
-      if (rva >= sec.virtualAddress && rva < sec.virtualAddress + sec.virtualSize) {
-        return sec;
-      }
-    }
-    return null;
-  }, [pe, state.currentAddress]);
+  const sectionInfo = useSectionInfo();
 
   // Disassemble the current section (off main thread via worker)
   useEffect(() => {
@@ -307,28 +299,10 @@ export function DisassemblyView() {
   }, [state.bookmarks]);
 
   // Sorted functions for binary search
-  const sortedFuncs = useMemo(() => {
-    return [...state.functions].sort((a, b) => a.address - b.address);
-  }, [state.functions]);
+  const sortedFuncs = useSortedFuncs();
 
   // Find current function for call panel
-  const currentFunc = useMemo((): DisasmFunction | null => {
-    const addr = state.currentAddress;
-    let lo = 0;
-    let hi = sortedFuncs.length - 1;
-    let best: DisasmFunction | null = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      const fn = sortedFuncs[mid];
-      if (fn.address <= addr) {
-        if (addr < fn.address + fn.size) best = fn;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return best;
-  }, [state.currentAddress, sortedFuncs]);
+  const currentFunc = useContainingFunc(undefined, sortedFuncs);
 
   // Loop detection for current function
   const loopHeaders = useMemo(() => {
@@ -346,16 +320,19 @@ export function DisassemblyView() {
     return inferSignature(currentFunc, instructions, pe.is64);
   }, [currentFunc, instructions, pe]);
 
-  // Build a map of function address -> signature for labels
-  const funcSigMap = useMemo(() => {
-    if (instructions.length === 0 || !pe) return new Map<number, FunctionSignature>();
-    const m = new Map<number, FunctionSignature>();
-    for (const fn of state.functions) {
-      const sig = inferSignature(fn, instructions, pe.is64);
-      if (sig.paramCount > 0) m.set(fn.address, sig);
-    }
-    return m;
-  }, [instructions, state.functions, pe]);
+  // Lazy per-label signature cache (only compute for visible labels)
+  const sigCacheRef = useRef<{ insnsId: Instruction[]; cache: Map<number, FunctionSignature> }>({ insnsId: [], cache: new Map() });
+  if (sigCacheRef.current.insnsId !== instructions) {
+    sigCacheRef.current = { insnsId: instructions, cache: new Map() };
+  }
+  const getSigForFunc = (fn: DisasmFunction): FunctionSignature | null => {
+    if (!pe || instructions.length === 0) return null;
+    const cached = sigCacheRef.current.cache.get(fn.address);
+    if (cached) return cached;
+    const sig = inferSignature(fn, instructions, pe.is64);
+    if (sig.paramCount > 0) sigCacheRef.current.cache.set(fn.address, sig);
+    return sig.paramCount > 0 ? sig : null;
+  };
 
   // Stack frame analysis (lazy, only when detail panel is open)
   const stackFrame = useMemo(() => {
@@ -445,10 +422,10 @@ export function DisassemblyView() {
     }
   }, [currentIndex, rows.length]);
 
-  // Dismiss context menu / xref popup on click outside or Escape
+  // Dismiss context menu / xref popup / export menu on click outside or Escape
   useEffect(() => {
-    if (!ctxMenu && !xrefPopup) return;
-    const dismiss = () => { setCtxMenu(null); setXrefPopup(null); };
+    if (!ctxMenu && !xrefPopup && !showExportMenu) return;
+    const dismiss = () => { setCtxMenu(null); setXrefPopup(null); setShowExportMenu(false); };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -456,7 +433,7 @@ export function DisassemblyView() {
       window.removeEventListener("click", dismiss);
       window.removeEventListener("keydown", keyDismiss);
     };
-  }, [ctxMenu, xrefPopup]);
+  }, [ctxMenu, xrefPopup, showExportMenu]);
 
   // Keyboard navigation
   const handleKeyDown = useCallback(
@@ -682,20 +659,20 @@ export function DisassemblyView() {
     if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
   }, [searchMatches, searchMatchIdx, rows, dispatch]);
 
-  // Cross-section search
+  // Cross-section search (off main thread via worker)
   const handleCrossSearch = useCallback(() => {
     if (!pe || !searchQuery || crossSearching) return;
     setCrossSearching(true);
     const q = searchQuery.toLowerCase();
-    const results: CrossSectionResult[] = [];
 
-    setTimeout(() => {
+    (async () => {
+      const results: CrossSectionResult[] = [];
       for (const sec of pe.sections) {
-        if (sec === sectionInfo) continue; // already searched current
+        if (sec === sectionInfo) continue;
         try {
           const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
           const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-          const insns = disasmEngine.disassemble(bytes, base, pe.is64, pe.strings);
+          const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
           for (const insn of insns) {
             const text = `${insn.mnemonic} ${insn.opStr} ${insn.comment || ""}`;
             if (text.toLowerCase().includes(q)) {
@@ -708,7 +685,7 @@ export function DisassemblyView() {
       }
       setCrossResults(results);
       setCrossSearching(false);
-    }, 0);
+    })();
   }, [pe, searchQuery, sectionInfo, crossSearching]);
 
   const handleAddressClick = useCallback(
@@ -816,6 +793,61 @@ export function DisassemblyView() {
     [],
   );
 
+  const handleExportAsm = useCallback((mode: "function" | "section") => {
+    setShowExportMenu(false);
+    const aw = pe?.is64 ? 16 : 8;
+    const lines: string[] = [];
+
+    if (mode === "function" && currentFunc) {
+      const endAddr = currentFunc.address + currentFunc.size;
+      const name = getDisplayName(currentFunc, state.renames);
+      lines.push(`; ──── ${name} ────`);
+      for (const row of rows) {
+        if (row.kind === "insn") {
+          if (row.insn.address < currentFunc.address) continue;
+          if (row.insn.address >= endAddr) break;
+          const insn = row.insn;
+          const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
+          const comment = insn.comment ? `  ; ${insn.comment}` : "";
+          const userComment = state.comments[insn.address] ? `  ; ${state.comments[insn.address]}` : "";
+          lines.push(`  ${addrHex}  ${insn.mnemonic} ${insn.opStr}${comment}${userComment}`);
+        } else if (row.kind === "label") {
+          if (row.fn.address >= currentFunc.address && row.fn.address < endAddr && row.fn.address !== currentFunc.address) {
+            lines.push(`\n; ──── ${getDisplayName(row.fn, state.renames)} ────`);
+          }
+        }
+      }
+    } else {
+      // Entire section
+      const totalLines = rows.filter(r => r.kind === "insn").length;
+      if (totalLines > 50000 && !confirm(`This will export ${totalLines.toLocaleString()} lines. Continue?`)) return;
+      for (const row of rows) {
+        if (row.kind === "label") {
+          const name = getDisplayName(row.fn, state.renames);
+          lines.push(`\n; ──── ${name} ────`);
+        } else if (row.kind === "insn") {
+          const insn = row.insn;
+          const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
+          const comment = insn.comment ? `  ; ${insn.comment}` : "";
+          const userComment = state.comments[insn.address] ? `  ; ${state.comments[insn.address]}` : "";
+          lines.push(`  ${addrHex}  ${insn.mnemonic} ${insn.opStr}${comment}${userComment}`);
+        }
+      }
+    }
+
+    const text = lines.join("\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const label = mode === "function" && currentFunc
+      ? getDisplayName(currentFunc, state.renames).replace(/[^a-zA-Z0-9_]/g, "_")
+      : sectionInfo?.name ?? "section";
+    a.href = url;
+    a.download = `${state.fileName ?? "export"}_${label}.asm`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [pe, currentFunc, rows, state.renames, state.comments, state.fileName, sectionInfo]);
+
   if (!pe) return null;
 
   if (disassembling) {
@@ -913,6 +945,32 @@ export function DisassemblyView() {
           >
             CFG
           </button>
+          <div className="relative">
+            <button
+              onClick={() => setShowExportMenu((v) => !v)}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600"
+              title="Export disassembly as .asm file"
+            >
+              Export
+            </button>
+            {showExportMenu && (
+              <div className="absolute top-full left-0 mt-0.5 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 text-[10px] min-w-[140px]">
+                <button
+                  onClick={() => handleExportAsm("function")}
+                  disabled={!currentFunc}
+                  className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200 disabled:opacity-30 disabled:cursor-default"
+                >
+                  Current function
+                </button>
+                <button
+                  onClick={() => handleExportAsm("section")}
+                  className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
+                >
+                  Entire section
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex-1" />
         {showSearch && (
@@ -1154,7 +1212,7 @@ export function DisassemblyView() {
                 >
                   {isBookmarked && <span className="text-yellow-300 mr-1">★</span>}
                   <span>; ──── {displayName}{(() => {
-                    const sig = funcSigMap.get(row.fn.address);
+                    const sig = getSigForFunc(row.fn);
                     return sig ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})` : "";
                   })()} ────</span>
                   {xrefCount > 0 && (() => {

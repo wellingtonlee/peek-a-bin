@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { disasmEngine } from "../disasm/engine";
+import { disasmWorker } from "../workers/disasmClient";
 
 type SortKey = "address" | "length";
 type EncodingFilter = "all" | "ascii" | "utf16le";
@@ -24,7 +24,14 @@ export function StringsView() {
   const dispatch = useAppDispatch();
   const pe = state.peFile;
   const parentRef = useRef<HTMLDivElement>(null);
+  const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
+  const filterTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const handleFilterChange = useCallback((value: string) => {
+    setFilterInput(value);
+    clearTimeout(filterTimerRef.current);
+    filterTimerRef.current = setTimeout(() => setFilter(value), 250);
+  }, []);
   const [sortKey, setSortKey] = useState<SortKey>("address");
   const [encodingFilter, setEncodingFilter] = useState<EncodingFilter>("all");
   const [stringXrefs, setStringXrefs] = useState<Map<number, number[]> | null>(null);
@@ -84,7 +91,8 @@ export function StringsView() {
   const handleLoadXrefs = useCallback(() => {
     if (!pe || xrefLoading) return;
     setXrefLoading(true);
-    setTimeout(() => {
+
+    (async () => {
       try {
         const stringAddrs = new Set(pe.strings.keys());
         const allInsns: import("../disasm/types").Instruction[] = [];
@@ -93,15 +101,40 @@ export function StringsView() {
           try {
             const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
             const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-            const insns = disasmEngine.disassemble(bytes, base, pe.is64, pe.strings);
+            const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
             allInsns.push(...insns);
           } catch { /* skip */ }
         }
-        const xrefs = disasmEngine.buildDataXrefMap(allInsns, stringAddrs);
+        // Build data xref map inline
+        const xrefs = new Map<number, number[]>();
+        for (const insn of allInsns) {
+          const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+          if (ripMatch) {
+            const sign = ripMatch[1] === '+' ? 1 : -1;
+            const disp = parseInt(ripMatch[2], 16);
+            const target = insn.address + insn.size + sign * disp;
+            if (stringAddrs.has(target)) {
+              let arr = xrefs.get(target);
+              if (!arr) { arr = []; xrefs.set(target, arr); }
+              arr.push(insn.address);
+            }
+          }
+          const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+          if (addrMatches) {
+            for (const addrStr of addrMatches) {
+              const addr = parseInt(addrStr, 16);
+              if (stringAddrs.has(addr)) {
+                let arr = xrefs.get(addr);
+                if (!arr) { arr = []; xrefs.set(addr, arr); }
+                arr.push(insn.address);
+              }
+            }
+          }
+        }
         setStringXrefs(xrefs);
       } catch { /* ignore */ }
       setXrefLoading(false);
-    }, 0);
+    })();
   }, [pe, xrefLoading]);
 
   if (!pe) return null;
@@ -112,7 +145,7 @@ export function StringsView() {
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-4 py-1.5 bg-gray-800/50 border-b border-gray-700 text-xs text-gray-400 shrink-0">
         <span className="font-semibold text-gray-300">Strings</span>
-        <span>{filtered.length.toLocaleString()}{filter ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
+        <span>{filtered.length.toLocaleString()}{filterInput ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
         <div className="flex-1" />
         {!stringXrefs && (
           <button
@@ -156,8 +189,8 @@ export function StringsView() {
         </button>
         <input
           type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          value={filterInput}
+          onChange={(e) => handleFilterChange(e.target.value)}
           placeholder="Filter strings..."
           className="w-56 px-2 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />

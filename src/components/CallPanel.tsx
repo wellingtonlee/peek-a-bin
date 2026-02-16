@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { getDisplayName } from "../hooks/usePEFile";
+import { binarySearchFunc } from "../hooks/useDerivedState";
 
 interface CallPanelProps {
   func: DisasmFunction;
@@ -32,23 +33,7 @@ export function CallPanel({
     return m;
   }, [functions]);
 
-  // Find function containing an address
-  const findContainingFunc = (addr: number): DisasmFunction | null => {
-    let lo = 0;
-    let hi = sortedFuncs.length - 1;
-    let best: DisasmFunction | null = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      const fn = sortedFuncs[mid];
-      if (fn.address <= addr) {
-        if (addr < fn.address + fn.size) best = fn;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return best;
-  };
+  const findContainingFunc = (addr: number) => binarySearchFunc(sortedFuncs, addr);
 
   // Callers: xrefs to this function's address, resolved to containing function
   const callers = useMemo(() => {

@@ -151,9 +151,11 @@ export function CFGView({
           <svg
             width="100%"
             height="100%"
+            overflow="visible"
             style={{
               transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
               transformOrigin: "0 0",
+              overflow: "visible",
             }}
           >
             <defs>
