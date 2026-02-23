@@ -2,6 +2,10 @@ import { useEffect, useRef, useMemo, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
+import { useDisassemblyRows, binarySearchRows, rowAddress } from "../hooks/useDisassemblyRows";
+import { useDisassemblySearch } from "../hooks/useDisassemblySearch";
+import type { DisplayRow } from "../hooks/useDisassemblyRows";
+import type { CrossSectionResult } from "../hooks/useDisassemblySearch";
 import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
@@ -11,49 +15,18 @@ import { JumpArrows } from "./JumpArrows";
 import { InstructionDetail } from "./InstructionDetail";
 import { DisassemblyMinimap } from "./DisassemblyMinimap";
 import { analyzeStackFrame } from "../disasm/stack";
+import { MNEMONIC_HINTS } from "../disasm/mnemonics";
 import { CFGView } from "./CFGView";
-import { buildCFG, detectLoops } from "../disasm/cfg";
 import { inferSignature, type FunctionSignature } from "../disasm/signatures";
 import { Breadcrumbs } from "./Breadcrumbs";
+import { rvaToFileOffset } from "../pe/parser";
+import { XrefPanel } from "./XrefPanel";
 
 interface XrefPopupState {
   x: number;
   y: number;
   targetAddr: number;
   sources: Xref[];
-}
-
-type DisplayRow =
-  | { kind: "label"; fn: DisasmFunction }
-  | { kind: "insn"; insn: Instruction; blockIdx: number }
-  | { kind: "separator" };
-
-function rowAddress(row: DisplayRow): number | null {
-  if (row.kind === "insn") return row.insn.address;
-  if (row.kind === "label") return row.fn.address;
-  return null;
-}
-
-function binarySearchRows(rows: DisplayRow[], address: number): number {
-  let lo = 0;
-  let hi = rows.length - 1;
-  let best = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >>> 1;
-    const row = rows[mid];
-    const rowAddr = rowAddress(row);
-    if (rowAddr === null) {
-      hi = mid - 1;
-      continue;
-    }
-    if (rowAddr <= address) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return best;
 }
 
 function parseBranchTarget(mnemonic: string, opStr: string): number | null {
@@ -179,31 +152,45 @@ interface ContextMenuState {
   insn: Instruction;
 }
 
-// --- Cross-section search result ---
-interface CrossSectionResult {
-  section: SectionHeader;
-  address: number;
-  text: string;
-}
-
 export function DisassemblyView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const pe = state.peFile;
   const parentRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [instructions, setInstructions] = useState<Instruction[]>([]);
-  const [disasmError, setDisasmError] = useState<string | null>(null);
-  const [disassembling, setDisassembling] = useState(false);
-  const [showSearch, setShowSearch] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchMatches, setSearchMatches] = useState<number[]>([]);
-  const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+
+  // Sorted functions for binary search
+  const sortedFuncs = useSortedFuncs();
+  // Find current function for call panel
+  const currentFunc = useContainingFunc(undefined, sortedFuncs);
+  const sectionInfo = useSectionInfo();
+
+  // Core row computation hook
+  const {
+    instructions,
+    rows,
+    funcMap,
+    xrefMap,
+    typedXrefMap,
+    loopHeaders,
+    loops,
+    bookmarkSet,
+    disassembling,
+    disasmError,
+  } = useDisassemblyRows(currentFunc);
+
+  const currentIndex = useMemo(() => {
+    if (rows.length === 0) return 0;
+    return binarySearchRows(rows, state.currentAddress);
+  }, [rows, state.currentAddress]);
+
+  // Search hook
+  const search = useDisassemblySearch(rows, currentIndex);
+
+  // Local UI states
   const [copiedAddr, setCopiedAddr] = useState<number | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [crossResults, setCrossResults] = useState<CrossSectionResult[] | null>(null);
-  const [crossSearching, setCrossSearching] = useState(false);
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(null);
   const [editingComment, setEditingComment] = useState<{ address: number; value: string } | null>(null);
@@ -217,6 +204,7 @@ export function DisassemblyView() {
   const [showMinimap, setShowMinimap] = useState(true);
   const [showCFG, setShowCFG] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showXrefPanel, setShowXrefPanel] = useState(false);
 
   // Build IAT lookup map from imports
   const iatMap = useMemo(() => {
@@ -224,95 +212,19 @@ export function DisassemblyView() {
     return buildIATLookup(pe.imports);
   }, [pe]);
 
-  // Find which section contains the current address
-  const sectionInfo = useSectionInfo();
-
-  // Disassemble the current section (off main thread via worker)
-  useEffect(() => {
-    if (!pe || !sectionInfo || !state.disasmReady) return;
-
-    let cancelled = false;
-    setDisassembling(true);
-
-    const sectionBytes = new Uint8Array(
-      pe.buffer,
-      sectionInfo.pointerToRawData,
-      sectionInfo.sizeOfRawData,
-    );
-    const baseAddr = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
-
-    disasmWorker.disassemble(sectionBytes, baseAddr, pe.is64)
-      .then((result) => {
-        if (!cancelled) {
-          setInstructions(result);
-          setDisasmError(null);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setDisasmError(e instanceof Error ? e.message : "Disassembly failed");
-          setInstructions([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setDisassembling(false);
-      });
-
-    return () => { cancelled = true; };
-  }, [pe, sectionInfo, state.disasmReady]);
-
-  // Build funcMap for O(1) lookup
-  const funcMap = useMemo(() => {
-    const m = new Map<number, DisasmFunction>();
-    for (const fn of state.functions) m.set(fn.address, fn);
-    return m;
-  }, [state.functions]);
-
-  // Build typed xref map (off main thread via worker)
-  const [typedXrefMap, setTypedXrefMap] = useState<Map<number, Xref[]>>(new Map());
-  useEffect(() => {
-    if (instructions.length === 0) {
-      setTypedXrefMap(new Map());
-      return;
-    }
-    let cancelled = false;
-    disasmWorker.buildTypedXrefMap(instructions).then((map) => {
-      if (!cancelled) setTypedXrefMap(map);
-    });
-    return () => { cancelled = true; };
-  }, [instructions]);
-
-  // Legacy xref map (address -> source addresses) for compatibility with CallPanel, JumpArrows, etc.
-  const xrefMap = useMemo(() => {
-    const m = new Map<number, number[]>();
-    for (const [addr, xrefs] of typedXrefMap) {
-      m.set(addr, xrefs.map((x) => x.from));
-    }
-    return m;
-  }, [typedXrefMap]);
-
-  // Bookmark address set for O(1) lookup
-  const bookmarkSet = useMemo(() => {
-    const s = new Set<number>();
-    for (const b of state.bookmarks) s.add(b.address);
-    return s;
-  }, [state.bookmarks]);
-
-  // Sorted functions for binary search
-  const sortedFuncs = useSortedFuncs();
-
-  // Find current function for call panel
-  const currentFunc = useContainingFunc(undefined, sortedFuncs);
-
-  // Loop detection for current function
-  const loopHeaders = useMemo(() => {
-    if (!currentFunc || instructions.length === 0 || typedXrefMap.size === 0) return new Map<number, number>();
-    const blocks = buildCFG(currentFunc, instructions, typedXrefMap);
-    const loops = detectLoops(blocks);
+  // Loop body map: insn address → max loop depth
+  const loopBodyMap = useMemo(() => {
     const m = new Map<number, number>();
-    for (const loop of loops) m.set(loop.headerAddr, loop.depth);
+    for (const loop of loops) {
+      if (loop.bodyAddrs) {
+        for (const addr of loop.bodyAddrs) {
+          const existing = m.get(addr) ?? 0;
+          m.set(addr, Math.max(existing, loop.depth + 1));
+        }
+      }
+    }
     return m;
-  }, [currentFunc, instructions, typedXrefMap]);
+  }, [loops]);
 
   // Function signature inference
   const currentFuncSig = useMemo((): FunctionSignature | null => {
@@ -339,39 +251,6 @@ export function DisassemblyView() {
     if (!showDetail || !currentFunc || instructions.length === 0) return null;
     return analyzeStackFrame(currentFunc, instructions, pe?.is64 ?? true);
   }, [showDetail, currentFunc, instructions, pe?.is64]);
-
-  // Build display rows (with basic block separators and block indices)
-  const rows: DisplayRow[] = useMemo(() => {
-    const result: DisplayRow[] = [];
-    const separatorMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
-    const branchMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
-    let blockIdx = 0;
-    let prevWasBranch = false;
-    for (let i = 0; i < instructions.length; i++) {
-      const insn = instructions[i];
-      const fn = funcMap.get(insn.address);
-      if (fn) {
-        blockIdx++;
-        prevWasBranch = false;
-        result.push({ kind: "label", fn });
-      }
-      // Start new block if: this address is a branch target (xref exists), or previous was branch/ret
-      if (prevWasBranch || (xrefMap.has(insn.address) && !fn)) {
-        blockIdx++;
-      }
-      result.push({ kind: "insn", insn, blockIdx });
-      const mn = insn.mnemonic;
-      prevWasBranch = branchMnemonics.has(mn) || (mn.startsWith("j") && mn !== "jmp");
-      // Insert separator after ret/retn/jmp/int3, unless next instruction is a function label
-      if (separatorMnemonics.has(mn)) {
-        const next = instructions[i + 1];
-        if (next && !funcMap.has(next.address)) {
-          result.push({ kind: "separator" });
-        }
-      }
-    }
-    return result;
-  }, [instructions, funcMap, xrefMap]);
 
   const SUSPICIOUS_MNEMONICS = useMemo(() => new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]), []);
 
@@ -404,11 +283,6 @@ export function DisassemblyView() {
     return rowIndex >= lo && rowIndex <= hi;
   }, [selectionRange]);
 
-  const currentIndex = useMemo(() => {
-    if (rows.length === 0) return 0;
-    return binarySearchRows(rows, state.currentAddress);
-  }, [rows, state.currentAddress]);
-
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
@@ -438,12 +312,8 @@ export function DisassemblyView() {
   // Keyboard navigation
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (showSearch && e.key === "Escape") {
-        setShowSearch(false);
-        setSearchQuery("");
-        setSearchMatches([]);
-        setSearchMatchIdx(-1);
-        setCrossResults(null);
+      if (search.showSearch && e.key === "Escape") {
+        search.resetSearch();
         parentRef.current?.focus();
         return;
       }
@@ -514,6 +384,12 @@ export function DisassemblyView() {
         return;
       }
 
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        setShowXrefPanel((v) => !v);
+        return;
+      }
+
       if (e.key === "i" || e.key === "I") {
         e.preventDefault();
         setShowDetail((v) => !v);
@@ -568,14 +444,14 @@ export function DisassemblyView() {
 
       if ((e.ctrlKey || e.metaKey) && e.key === "f") {
         e.preventDefault();
-        setShowSearch(true);
+        search.setShowSearch(true);
         setTimeout(() => searchInputRef.current?.focus(), 0);
         return;
       }
 
       if (e.key === "/") {
         e.preventDefault();
-        setShowSearch(true);
+        search.setShowSearch(true);
         setTimeout(() => searchInputRef.current?.focus(), 0);
         return;
       }
@@ -597,96 +473,8 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, showSearch, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack],
+    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack],
   );
-
-  // Search logic
-  const handleSearch = useCallback(
-    (query: string, direction: 1 | -1 = 1) => {
-      setCrossResults(null);
-      if (!query) {
-        setSearchMatches([]);
-        setSearchMatchIdx(-1);
-        return;
-      }
-      const q = query.toLowerCase();
-      const matches: number[] = [];
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        if (row.kind === "label") {
-          const name = getDisplayName(row.fn, state.renames);
-          if (name.toLowerCase().includes(q)) matches.push(i);
-        } else if (row.kind === "insn") {
-          const insn = row.insn;
-          const userComment = state.comments[insn.address] ?? "";
-          const text = `${insn.address.toString(16)} ${insn.mnemonic} ${insn.opStr} ${insn.comment || ""} ${userComment}`;
-          if (text.toLowerCase().includes(q)) matches.push(i);
-        }
-      }
-      setSearchMatches(matches);
-      if (matches.length > 0) {
-        let idx = matches.findIndex((m) => m >= currentIndex);
-        if (idx === -1) idx = 0;
-        if (direction === -1) {
-          idx = idx - 1;
-          if (idx < 0) idx = matches.length - 1;
-        }
-        setSearchMatchIdx(idx);
-        const matchAddr = rowAddress(rows[matches[idx]]);
-        if (matchAddr !== null) {
-          dispatch({ type: "SET_ADDRESS", address: matchAddr });
-        }
-      } else {
-        setSearchMatchIdx(-1);
-      }
-    },
-    [rows, currentIndex, dispatch, state.renames, state.comments],
-  );
-
-  const handleSearchNext = useCallback(() => {
-    if (searchMatches.length === 0) return;
-    const next = (searchMatchIdx + 1) % searchMatches.length;
-    setSearchMatchIdx(next);
-    const addr = rowAddress(rows[searchMatches[next]]);
-    if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
-  }, [searchMatches, searchMatchIdx, rows, dispatch]);
-
-  const handleSearchPrev = useCallback(() => {
-    if (searchMatches.length === 0) return;
-    const prev = (searchMatchIdx - 1 + searchMatches.length) % searchMatches.length;
-    setSearchMatchIdx(prev);
-    const addr = rowAddress(rows[searchMatches[prev]]);
-    if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
-  }, [searchMatches, searchMatchIdx, rows, dispatch]);
-
-  // Cross-section search (off main thread via worker)
-  const handleCrossSearch = useCallback(() => {
-    if (!pe || !searchQuery || crossSearching) return;
-    setCrossSearching(true);
-    const q = searchQuery.toLowerCase();
-
-    (async () => {
-      const results: CrossSectionResult[] = [];
-      for (const sec of pe.sections) {
-        if (sec === sectionInfo) continue;
-        try {
-          const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
-          const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-          const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
-          for (const insn of insns) {
-            const text = `${insn.mnemonic} ${insn.opStr} ${insn.comment || ""}`;
-            if (text.toLowerCase().includes(q)) {
-              results.push({ section: sec, address: insn.address, text: text.trim() });
-              if (results.length >= 100) break;
-            }
-          }
-        } catch { /* skip bad sections */ }
-        if (results.length >= 100) break;
-      }
-      setCrossResults(results);
-      setCrossSearching(false);
-    })();
-  }, [pe, searchQuery, sectionInfo, crossSearching]);
 
   const handleAddressClick = useCallback(
     (address: number) => {
@@ -754,6 +542,17 @@ export function DisassemblyView() {
     setCtxMenu(null);
   }, [ctxMenu]);
 
+  const ctxShowInHex = useCallback(() => {
+    if (!ctxMenu || !pe) return;
+    const rva = ctxMenu.insn.address - pe.optionalHeader.imageBase;
+    const fileOffset = rvaToFileOffset(rva, pe.sections);
+    if (fileOffset >= 0) {
+      dispatch({ type: "SET_ADDRESS", address: ctxMenu.insn.address });
+      dispatch({ type: "SET_TAB", tab: "hex" });
+    }
+    setCtxMenu(null);
+  }, [ctxMenu, pe, dispatch]);
+
   const ctxToggleBookmark = useCallback(() => {
     if (!ctxMenu) return;
     dispatch({ type: "TOGGLE_BOOKMARK", address: ctxMenu.insn.address });
@@ -784,9 +583,15 @@ export function DisassemblyView() {
       const container = parentRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
+      const rawX = e.clientX - rect.left + container.scrollLeft;
+      const rawY = e.clientY - rect.top + container.scrollTop;
+      // Clamp so popup stays visible within the container viewport
+      const popW = 180, popH = 300;
+      const maxX = container.scrollLeft + rect.width - popW - 8;
+      const maxY = container.scrollTop + rect.height - popH - 8;
       setCtxMenu({
-        x: e.clientX - rect.left + container.scrollLeft,
-        y: e.clientY - rect.top + container.scrollTop,
+        x: Math.max(0, Math.min(rawX, maxX)),
+        y: Math.max(0, Math.min(rawY, maxY)),
         insn,
       });
     },
@@ -945,6 +750,13 @@ export function DisassemblyView() {
           >
             CFG
           </button>
+          <button
+            onClick={() => setShowXrefPanel((v) => !v)}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showXrefPanel ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+            title="Toggle cross-reference panel (R)"
+          >
+            Xrefs
+          </button>
           <div className="relative">
             <button
               onClick={() => setShowExportMenu((v) => !v)}
@@ -973,52 +785,58 @@ export function DisassemblyView() {
           </div>
         </div>
         <div className="flex-1" />
-        {showSearch && (
+        {search.showSearch && (
           <div className="flex items-center gap-1">
             <input
               ref={searchInputRef}
               type="text"
-              value={searchQuery}
+              value={search.searchQuery}
               onChange={(e) => {
-                setSearchQuery(e.target.value);
-                handleSearch(e.target.value);
+                const value = e.target.value;
+                search.setSearchQuery(value);
+                clearTimeout(search.searchDebounceRef.current);
+                search.searchDebounceRef.current = setTimeout(() => search.handleSearch(value), 150);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  if (e.shiftKey) handleSearchPrev();
-                  else if (searchMatches.length > 0) handleSearchNext();
-                  else handleSearch(searchQuery);
+                  clearTimeout(search.searchDebounceRef.current);
+                  if (e.shiftKey) search.handleSearchPrev();
+                  else if (search.searchMatches.length > 0) search.handleSearchNext();
+                  else search.handleSearch(search.searchQuery);
                 }
                 if (e.key === "Escape") {
-                  setShowSearch(false);
-                  setSearchQuery("");
-                  setSearchMatches([]);
-                  setSearchMatchIdx(-1);
-                  setCrossResults(null);
+                  clearTimeout(search.searchDebounceRef.current);
+                  search.resetSearch();
                   parentRef.current?.focus();
                 }
                 e.stopPropagation();
               }}
-              placeholder="Search..."
-              className="w-48 px-2 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+              placeholder="Search... (/regex/)"
+              title={search.searchRegexError ? "Invalid regex" : "Substring search, or /regex/ for regex"}
+              className={`w-48 px-2 py-0.5 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 focus:outline-none ${
+                search.searchRegexError ? "border-red-500" : "border-gray-600 focus:border-blue-500"
+              }`}
             />
-            {searchMatches.length > 0 && (
+            {search.searchMatches.length > 0 && (
               <span className="text-gray-500 text-[10px]">
-                {searchMatchIdx + 1}/{searchMatches.length}
+                {search.searchMatchIdx + 1}/{search.searchMatches.length}
               </span>
             )}
-            {searchQuery && searchMatches.length === 0 && !crossResults && (
+            {search.searchRegexError && (
+              <span className="text-red-400 text-[10px]">Invalid regex</span>
+            )}
+            {search.searchQuery && !search.searchRegexError && search.searchMatches.length === 0 && !search.crossResults && (
               <span className="text-red-400 text-[10px]">No matches</span>
             )}
             <button
-              onClick={handleSearchPrev}
+              onClick={search.handleSearchPrev}
               className="px-1 py-0.5 text-gray-400 hover:text-white"
               title="Previous (Shift+Enter)"
             >
               ▲
             </button>
             <button
-              onClick={handleSearchNext}
+              onClick={search.handleSearchNext}
               className="px-1 py-0.5 text-gray-400 hover:text-white"
               title="Next (Enter)"
             >
@@ -1026,11 +844,7 @@ export function DisassemblyView() {
             </button>
             <button
               onClick={() => {
-                setShowSearch(false);
-                setSearchQuery("");
-                setSearchMatches([]);
-                setSearchMatchIdx(-1);
-                setCrossResults(null);
+                search.resetSearch();
                 parentRef.current?.focus();
               }}
               className="px-1 py-0.5 text-gray-400 hover:text-white"
@@ -1042,11 +856,11 @@ export function DisassemblyView() {
       </div>
 
       {/* Cross-section search prompt */}
-      {showSearch && searchQuery && searchMatches.length === 0 && !crossResults && !crossSearching && (
+      {search.showSearch && search.searchQuery && search.searchMatches.length === 0 && !search.crossResults && !search.crossSearching && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs flex items-center gap-2">
           <span className="text-gray-400">No matches in {sectionInfo.name}.</span>
           <button
-            onClick={handleCrossSearch}
+            onClick={search.handleCrossSearch}
             className="text-blue-400 hover:text-blue-300 hover:underline"
           >
             Search all sections?
@@ -1055,7 +869,7 @@ export function DisassemblyView() {
       )}
 
       {/* Cross-section search loading */}
-      {crossSearching && (
+      {search.crossSearching && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs text-gray-400 flex items-center gap-2">
           <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
@@ -1066,19 +880,15 @@ export function DisassemblyView() {
       )}
 
       {/* Cross-section search results */}
-      {crossResults && crossResults.length > 0 && (
+      {search.crossResults && search.crossResults.length > 0 && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
-          <div className="text-gray-400 mb-1">{crossResults.length} result{crossResults.length !== 1 ? "s" : ""} in other sections:</div>
-          {crossResults.map((r, i) => (
+          <div className="text-gray-400 mb-1">{search.crossResults.length} result{search.crossResults.length !== 1 ? "s" : ""} in other sections:</div>
+          {search.crossResults.map((r: CrossSectionResult, i: number) => (
             <button
               key={i}
               onClick={() => {
                 dispatch({ type: "SET_ADDRESS", address: r.address });
-                setCrossResults(null);
-                setShowSearch(false);
-                setSearchQuery("");
-                setSearchMatches([]);
-                setSearchMatchIdx(-1);
+                search.resetSearch();
               }}
               className="block w-full text-left hover:bg-gray-700/50 rounded px-1 py-0.5 truncate"
             >
@@ -1089,7 +899,7 @@ export function DisassemblyView() {
           ))}
         </div>
       )}
-      {crossResults && crossResults.length === 0 && (
+      {search.crossResults && search.crossResults.length === 0 && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs text-gray-500">
           No matches found in any section.
         </div>
@@ -1259,11 +1069,12 @@ export function DisassemblyView() {
             const isBookmarked = bookmarkSet.has(insn.address);
             const isLoopHeader = loopHeaders.has(insn.address);
             const loopDepth = loopHeaders.get(insn.address);
+            const bodyDepth = loopBodyMap.get(insn.address);
             const isCurrentAddr = insn.address === state.currentAddress;
             const isSearchMatch =
-              searchMatches.length > 0 &&
-              searchMatchIdx >= 0 &&
-              searchMatches[searchMatchIdx] === vItem.index;
+              search.searchMatches.length > 0 &&
+              search.searchMatchIdx >= 0 &&
+              search.searchMatches[search.searchMatchIdx] === vItem.index;
             const rowSelected = isSelected(vItem.index);
             const isDimmed = insnFilter !== "all" && !matchesFilter(row);
 
@@ -1273,6 +1084,16 @@ export function DisassemblyView() {
               pe.optionalHeader.imageBase + pe.optionalHeader.sizeOfImage,
               iatMap,
             ) : [];
+
+            // Loop border styling: header takes priority, then body depth
+            let borderStyle: string | undefined;
+            if (isLoopHeader) {
+              borderStyle = "2px solid #eab308"; // gold
+            } else if (bodyDepth !== undefined) {
+              if (bodyDepth >= 3) borderStyle = "2px solid rgba(239, 68, 68, 0.3)"; // red-500/30
+              else if (bodyDepth === 2) borderStyle = "2px solid rgba(249, 115, 22, 0.3)"; // orange-500/30
+              else borderStyle = "2px solid rgba(234, 179, 8, 0.3)"; // yellow-500/30
+            }
 
             return (
               <div
@@ -1296,9 +1117,9 @@ export function DisassemblyView() {
                   width: "100%",
                   height: "20px",
                   transform: `translateY(${vItem.start}px)`,
-                  borderLeft: isLoopHeader ? "2px solid #eab308" : undefined,
+                  borderLeft: borderStyle,
                 }}
-                title={isLoopHeader ? `Loop header (depth ${loopDepth})` : undefined}
+                title={isLoopHeader ? `Loop header (depth ${loopDepth})` : bodyDepth !== undefined ? `Loop body (depth ${bodyDepth})` : undefined}
                 onContextMenu={(e) => handleContextMenu(e, insn)}
                 onClick={(e) => {
                   if (e.shiftKey) {
@@ -1331,6 +1152,7 @@ export function DisassemblyView() {
                 </span>
                 <span
                   className={`disasm-mnemonic w-16 shrink-0 ${mnemonicClass(insn.mnemonic)}`}
+                  title={MNEMONIC_HINTS[insn.mnemonic]}
                   onDoubleClick={() => handleDoubleClickInsn(insn)}
                 >
                   {insn.mnemonic}
@@ -1404,6 +1226,9 @@ export function DisassemblyView() {
               <div className="border-t border-gray-700 my-0.5" />
               <button onClick={ctxGoTo} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
                 Go to address...
+              </button>
+              <button onClick={ctxShowInHex} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+                Show in Hex
               </button>
               <div className="border-t border-gray-700 my-0.5" />
               <button onClick={ctxToggleBookmark} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
@@ -1504,9 +1329,10 @@ export function DisassemblyView() {
         <DisassemblyMinimap
           rows={rows}
           bookmarkSet={bookmarkSet}
-          searchMatches={searchMatches}
+          searchMatches={search.searchMatches}
           viewportStartIdx={virtualizer.range?.startIndex ?? 0}
           viewportEndIdx={virtualizer.range?.endIndex ?? 0}
+          loopRanges={loops}
           onScrollTo={(idx) => {
             virtualizer.scrollToIndex(idx, { align: "center" });
             const addr = rowAddress(rows[idx]);
@@ -1561,12 +1387,25 @@ export function DisassemblyView() {
         ) : null;
       })()}
 
+      {/* Xref summary panel */}
+      {showXrefPanel && (
+        <XrefPanel
+          typedXrefMap={typedXrefMap}
+          funcMap={funcMap}
+          sortedFuncs={sortedFuncs}
+          pe={pe}
+          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+          onClose={() => setShowXrefPanel(false)}
+        />
+      )}
+
       {/* CFG overlay */}
       {showCFG && currentFunc && (
         <CFGView
           func={currentFunc}
           instructions={instructions}
           typedXrefMap={typedXrefMap}
+          jumpTables={disasmWorker.jumpTables}
           currentAddress={state.currentAddress}
           onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
           onClose={() => setShowCFG(false)}
@@ -1593,6 +1432,7 @@ export function DisassemblyView() {
                   [";", "Add/edit comment at current address"],
                   ["I", "Toggle instruction detail panel"],
                   ["X", "Toggle callers/callees panel"],
+                  ["R", "Toggle cross-reference panel"],
                   ["B", "Toggle bookmark at current address"],
                   ["Ctrl+P", "Command palette"],
                   ["Ctrl+Z", "Undo annotation"],

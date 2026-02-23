@@ -1,11 +1,139 @@
-import { Const, Capstone, loadCapstone } from 'capstone-wasm';
+import { Const, Capstone, loadCapstone as _loadCapstone } from 'capstone-wasm';
+
+// Runtime accepts an options object with instantiateWasm hook, but the
+// published types omit the parameter under bundler module resolution.
+const loadCapstone = _loadCapstone as (args?: Record<string, any>) => Promise<void>;
 import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
+import { extractStrings } from '../pe/parser';
+import type { SectionHeader } from '../pe/types';
 
 let cs32: any;
 let cs64: any;
 let initialized = false;
 let stringMap: Map<number, string> = new Map();
 let iatMap: Map<number, { lib: string; func: string }> = new Map();
+
+// --- IndexedDB WASM module cache ---
+const IDB_NAME = 'peek-a-bin-wasm';
+const IDB_STORE = 'modules';
+const IDB_KEY = 'capstone-v1';
+
+function openIDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getCachedModule(): Promise<WebAssembly.Module | null> {
+  try {
+    const db = await openIDB();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      req.onsuccess = () => resolve(req.result instanceof WebAssembly.Module ? req.result : null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function cacheModule(mod: WebAssembly.Module): Promise<void> {
+  try {
+    const db = await openIDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(mod, IDB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // IDB write failed — non-fatal
+  }
+}
+
+async function deleteCachedModule(): Promise<void> {
+  try {
+    const db = await openIDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(IDB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+async function loadCapstoneWithCache(): Promise<void> {
+  const cached = await getCachedModule();
+  if (cached) {
+    // Fast path: instantiate from cached module.
+    // Promise.race ensures we reject if instantiation fails (stale/corrupt module)
+    // instead of hanging forever waiting for receiveInstance.
+    let onError: (err: unknown) => void;
+    const errorSignal = new Promise<never>((_, reject) => { onError = reject; });
+    try {
+      await Promise.race([
+        loadCapstone({
+          instantiateWasm(imports: WebAssembly.Imports, receiveInstance: (instance: WebAssembly.Instance) => void) {
+            WebAssembly.instantiate(cached, imports).then(
+              instance => receiveInstance(instance),
+              err => onError!(err),
+            );
+            return {};
+          },
+        }),
+        errorSignal,
+      ]);
+      return; // cached module worked
+    } catch {
+      await deleteCachedModule(); // stale — fall through to cold path
+    }
+  }
+
+  // Cold path: let Emscripten handle fetch + compile via its default
+  // instantiateAsync pipeline (has streaming → ArrayBuffer fallback).
+  // Don't provide locateFile — in module workers, Emscripten's scriptDirectory
+  // is empty (it checks importScripts which doesn't exist in module workers),
+  // so our locateFile callback would receive an empty scriptDir and produce a
+  // wrong relative URL. Without hooks, Emscripten resolves the WASM URL
+  // correctly via new URL("capstone.wasm", import.meta.url).
+  await loadCapstone();
+
+  // Background: fetch + compile the WASM and cache for next visit.
+  // Retrieve the URL Emscripten already fetched from the Performance API.
+  try {
+    const entry = performance.getEntriesByType('resource')
+      .find(e => e.name.endsWith('.wasm'));
+    if (entry) {
+      fetch(entry.name)
+        .then(r => r.arrayBuffer())
+        .then(buf => WebAssembly.compile(buf))
+        .then(mod => cacheModule(mod))
+        .catch(() => {}); // non-fatal
+    }
+  } catch {
+    // Performance API unavailable — skip caching
+  }
+}
+
+// Start WASM loading eagerly at module evaluation time
+const initPromise = (async () => {
+  try {
+    await loadCapstoneWithCache();
+  } catch {
+    // IDB or instantiateWasm hook failed — fall back to default loading
+    await loadCapstone();
+  }
+  cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
+  cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
+  initialized = true;
+})();
 
 const CHUNK_SIZE = 0x10000;
 
@@ -96,12 +224,17 @@ function disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Ins
   return instructions;
 }
 
+interface DetectResult {
+  functions: DisasmFunction[];
+  jumpTables: [number, number[]][];  // jmp addr → target VAs
+}
+
 function detectFunctions(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
   options?: { exports?: { name: string; address: number }[]; entryPoint?: number }
-): DisasmFunction[] {
+): DetectResult {
   const addrSet = new Set<number>();
   const nameMap = new Map<number, string>();
   const len = bytes.length;
@@ -159,10 +292,14 @@ function detectFunctions(
 
   // Call target collection for sections < 2MB
   const callTargets = new Set<number>();
+  const jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
   if (len < 2 * 1024 * 1024 && initialized) {
     const cs = is64 ? cs64 : cs32;
     let offset = 0;
     let prevWasUnconditional = false;
+    // Track recent instructions for jump table pattern detection
+    const recentInsns: { address: number; mnemonic: string; opStr: string; size: number }[] = [];
+    const MAX_RECENT = 8;
     while (offset < len) {
       const chunkEnd = Math.min(offset + CHUNK_SIZE, len);
       const chunk = bytes.subarray(offset, chunkEnd);
@@ -182,8 +319,88 @@ function detectFunctions(
           if (prevWasUnconditional && callTargets.has(insn.address)) {
             addrSet.add(insn.address);
           }
+
+          // Jump table detection: indirect jmp with [reg*4 + base] or [rip + disp]
+          if (insn.mnemonic === 'jmp' && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
+            // Look for cmp reg, imm in recent instructions to get max case count
+            let maxCases = 0;
+            for (let ri = recentInsns.length - 1; ri >= 0; ri--) {
+              const prev = recentInsns[ri];
+              if (prev.mnemonic === 'cmp') {
+                const immMatch = prev.opStr.match(/,\s*0x([0-9a-fA-F]+)$/);
+                if (immMatch) {
+                  maxCases = parseInt(immMatch[1], 16) + 1;
+                } else {
+                  const decMatch = prev.opStr.match(/,\s*(\d+)$/);
+                  if (decMatch) maxCases = parseInt(decMatch[1], 10) + 1;
+                }
+                break;
+              }
+            }
+
+            if (maxCases > 0 && maxCases <= 512) {
+              // Try to extract table base address
+              let tableBase = 0;
+              const ptrSize = is64 ? 8 : 4;
+
+              // Pattern: jmp qword ptr [reg*8 + base] or jmp dword ptr [reg*4 + base]
+              const scaleMatch = insn.opStr.match(/\[.*\*\d\s*\+\s*0x([0-9a-fA-F]+)\]/);
+              if (scaleMatch) {
+                tableBase = parseInt(scaleMatch[1], 16);
+              }
+
+              // Pattern: jmp qword ptr [rip + disp] (PIC jump tables, less common for switch)
+              if (!tableBase && is64) {
+                const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+                if (ripMatch) {
+                  const sign = ripMatch[1] === '+' ? 1 : -1;
+                  const disp = parseInt(ripMatch[2], 16);
+                  tableBase = insn.address + insn.size + sign * disp;
+                }
+              }
+
+              if (tableBase) {
+                // Convert table base VA to file offset and read entries
+                const tableRVA = tableBase - baseAddress;
+                if (tableRVA >= 0 && tableRVA < len) {
+                  // For 32-bit tables or absolute entries
+                  const targets: number[] = [];
+                  for (let c = 0; c < maxCases; c++) {
+                    const entryOffset = tableRVA + c * ptrSize;
+                    if (entryOffset + ptrSize > len) break;
+                    let target: number;
+                    if (ptrSize === 8) {
+                      // Read as two 32-bit values to avoid BigInt
+                      const lo = bytes[entryOffset] | (bytes[entryOffset + 1] << 8) |
+                                 (bytes[entryOffset + 2] << 16) | ((bytes[entryOffset + 3]) << 24);
+                      const hi = bytes[entryOffset + 4] | (bytes[entryOffset + 5] << 8) |
+                                 (bytes[entryOffset + 6] << 16) | ((bytes[entryOffset + 7]) << 24);
+                      target = (hi * 0x100000000) + (lo >>> 0);
+                    } else {
+                      target = bytes[entryOffset] | (bytes[entryOffset + 1] << 8) |
+                               (bytes[entryOffset + 2] << 16) | ((bytes[entryOffset + 3]) << 24);
+                      target = target >>> 0;
+                    }
+                    // Validate target falls within text section
+                    if (target >= baseAddress && target < endAddress) {
+                      targets.push(target);
+                    } else {
+                      break; // Invalid entry, stop reading
+                    }
+                  }
+                  if (targets.length >= 2) {
+                    jumpTables.set(insn.address, targets);
+                    for (const t of targets) addrSet.add(t);
+                  }
+                }
+              }
+            }
+          }
+
           const mn = insn.mnemonic;
           prevWasUnconditional = mn === 'ret' || mn === 'retn' || mn === 'jmp';
+          recentInsns.push({ address: insn.address, mnemonic: insn.mnemonic, opStr: insn.opStr, size: insn.size });
+          if (recentInsns.length > MAX_RECENT) recentInsns.shift();
         }
         if (insns.length === 0) {
           offset += 1;
@@ -215,7 +432,10 @@ function detectFunctions(
     }
   }
 
-  return functions;
+  return {
+    functions,
+    jumpTables: Array.from(jumpTables.entries()),
+  };
 }
 
 function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]][] {
@@ -278,10 +498,84 @@ function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]][] {
   return Array.from(xrefs.entries());
 }
 
+function buildAllXrefs(
+  bytes: Uint8Array,
+  baseAddress: number,
+  is64: boolean,
+  stringAddrs: number[],
+  iatAddrs: number[],
+): { stringXrefs: [number, number[]][]; importXrefs: [number, number[]][] } {
+  const stringSet = new Set(stringAddrs);
+  const iatSet = new Set(iatAddrs);
+  const strXrefs = new Map<number, number[]>();
+  const impXrefs = new Map<number, number[]>();
+
+  const cs = is64 ? cs64 : cs32;
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    const chunkEnd = Math.min(offset + CHUNK_SIZE, bytes.length);
+    const chunk = bytes.subarray(offset, chunkEnd);
+    try {
+      const insns = cs.disasm(chunk, { address: baseAddress + offset });
+      for (const insn of insns) {
+        // RIP-relative addressing
+        const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+        if (ripMatch) {
+          const sign = ripMatch[1] === '+' ? 1 : -1;
+          const disp = parseInt(ripMatch[2], 16);
+          const target = insn.address + insn.size + sign * disp;
+          if (stringSet.has(target)) {
+            let arr = strXrefs.get(target);
+            if (!arr) { arr = []; strXrefs.set(target, arr); }
+            arr.push(insn.address);
+          }
+          if (iatSet.has(target)) {
+            let arr = impXrefs.get(target);
+            if (!arr) { arr = []; impXrefs.set(target, arr); }
+            arr.push(insn.address);
+          }
+        }
+        // Direct address references
+        const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+        if (addrMatches) {
+          for (const addrStr of addrMatches) {
+            const addr = parseInt(addrStr, 16);
+            if (stringSet.has(addr)) {
+              let arr = strXrefs.get(addr);
+              if (!arr) { arr = []; strXrefs.set(addr, arr); }
+              arr.push(insn.address);
+            }
+            if (iatSet.has(addr)) {
+              let arr = impXrefs.get(addr);
+              if (!arr) { arr = []; impXrefs.set(addr, arr); }
+              arr.push(insn.address);
+            }
+          }
+        }
+      }
+      if (insns.length === 0) {
+        offset += 1;
+      } else {
+        const lastInsn = insns[insns.length - 1];
+        const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
+        offset += decoded;
+      }
+    } catch {
+      offset += CHUNK_SIZE;
+    }
+  }
+
+  return {
+    stringXrefs: Array.from(strXrefs.entries()),
+    importXrefs: Array.from(impXrefs.entries()),
+  };
+}
+
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'detectFunctions' | 'buildTypedXrefMap';
+  method: 'init' | 'configure' | 'disassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings';
   args: any;
 }
 
@@ -292,12 +586,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
     switch (method) {
       case 'init':
-        if (!initialized) {
-          await loadCapstone();
-          cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
-          cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
-          initialized = true;
-        }
+        await initPromise;
         result = true;
         break;
 
@@ -319,6 +608,19 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       case 'buildTypedXrefMap':
         result = buildTypedXrefMap(args.instructions);
         break;
+
+      case 'buildAllXrefs':
+        result = buildAllXrefs(args.bytes, args.baseAddress, args.is64, args.stringAddrs, args.iatAddrs);
+        break;
+
+      case 'extractStrings': {
+        const { strings, stringTypes } = extractStrings(args.buffer, args.sections as SectionHeader[], args.imageBase);
+        result = {
+          strings: Array.from(strings.entries()),
+          stringTypes: Array.from(stringTypes.entries()),
+        };
+        break;
+      }
     }
 
     self.postMessage({ id, result });

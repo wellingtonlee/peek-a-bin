@@ -26,7 +26,7 @@ const TAB_KEYS: Record<string, ViewTab> = {
 interface Suggestion {
   label: string;
   address: number;
-  category: "function" | "export";
+  category: "function" | "export" | "bookmark";
 }
 
 export function AddressBar() {
@@ -38,8 +38,11 @@ export function AddressBar() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [suggestionIdx, setSuggestionIdx] = useState(-1);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef<HTMLDivElement>(null);
+  const addressInputRef = useRef<HTMLInputElement>(null);
 
   const sortedFuncs = useSortedFuncs();
 
@@ -50,6 +53,45 @@ export function AddressBar() {
       address: state.peFile!.optionalHeader.imageBase + e.address,
     }));
   }, [state.peFile]);
+
+  // Recent addresses (deduplicated, most recent first, max 15)
+  const recentAddresses = useMemo(() => {
+    const seen = new Set<number>();
+    const result: { address: number; funcName: string | null }[] = [];
+    for (let i = state.addressHistory.length - 1; i >= 0; i--) {
+      const addr = state.addressHistory[i];
+      if (seen.has(addr)) continue;
+      seen.add(addr);
+      // Find containing function
+      let funcName: string | null = null;
+      let lo = 0, hi = sortedFuncs.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        if (sortedFuncs[mid].address <= addr) { lo = mid + 1; } else { hi = mid - 1; }
+      }
+      if (hi >= 0) {
+        const fn = sortedFuncs[hi];
+        if (addr < fn.address + fn.size) {
+          funcName = getDisplayName(fn, state.renames);
+        }
+      }
+      result.push({ address: addr, funcName });
+      if (result.length >= 15) break;
+    }
+    return result;
+  }, [state.addressHistory, sortedFuncs, state.renames]);
+
+  // Close history dropdown on outside click
+  useEffect(() => {
+    if (!showHistory) return;
+    const handler = (e: MouseEvent) => {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setShowHistory(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showHistory]);
 
   const computeSuggestions = useCallback((query: string) => {
     if (!query || query.length < 1) {
@@ -84,10 +126,23 @@ export function AddressBar() {
       }
     }
 
+    // Match bookmarks (cap 3)
+    count = 0;
+    for (const bm of state.bookmarks) {
+      if (count >= 3) break;
+      const label = bm.label || `0x${bm.address.toString(16).toUpperCase()}`;
+      if (fuzzyMatch(query, label) || bm.address.toString(16).includes(query.replace(/^0x/i, ""))) {
+        if (!results.some((r) => r.address === bm.address)) {
+          results.push({ label, address: bm.address, category: "bookmark" });
+          count++;
+        }
+      }
+    }
+
     setSuggestions(results.slice(0, 8));
     setSuggestionIdx(-1);
     setShowSuggestions(results.length > 0);
-  }, [sortedFuncs, exports, state.renames]);
+  }, [sortedFuncs, exports, state.renames, state.bookmarks]);
 
   const handleInputChange = useCallback((value: string) => {
     setInput(value);
@@ -247,6 +302,18 @@ export function AddressBar() {
         dispatch({ type: "REDO_ANNOTATION" });
         return;
       }
+
+      if (e.key === "g" || e.key === "G") {
+        e.preventDefault();
+        addressInputRef.current?.focus();
+        return;
+      }
+
+      if (e.altKey && (e.key === "h" || e.key === "H")) {
+        e.preventDefault();
+        setShowHistory((v) => !v);
+        return;
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -338,15 +405,52 @@ export function AddressBar() {
         VA: 0x{state.currentAddress.toString(16).toUpperCase().padStart(state.peFile?.is64 ? 16 : 8, "0")}
       </span>
 
+      {/* Recent addresses dropdown */}
+      <div ref={historyRef} className="relative">
+        <button
+          onClick={() => setShowHistory((v) => !v)}
+          className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+          title="Recent addresses (Alt+H)"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
+          </svg>
+        </button>
+        {showHistory && recentAddresses.length > 0 && (
+          <div className="absolute top-full right-0 mt-0.5 w-80 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-80 overflow-auto">
+            <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">Recent Addresses</div>
+            {recentAddresses.map((entry, i) => (
+              <button
+                key={`${entry.address}-${i}`}
+                className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
+                onClick={() => {
+                  dispatch({ type: "SET_ADDRESS", address: entry.address });
+                  dispatch({ type: "SET_TAB", tab: "disassembly" });
+                  setShowHistory(false);
+                }}
+              >
+                <span className="text-blue-400 font-mono text-[10px] shrink-0">
+                  0x{entry.address.toString(16).toUpperCase()}
+                </span>
+                {entry.funcName && (
+                  <span className="text-gray-500 truncate">{entry.funcName}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Address input with autocomplete */}
       <div ref={containerRef} className="relative">
         <input
+          ref={addressInputRef}
           type="text"
           value={input}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true); }}
-          placeholder="Go to address (hex)..."
+          placeholder="Go to address (G)"
           className={`w-48 px-2 py-1 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 text-xs focus:outline-none focus:border-blue-500 transition-colors ${
             invalid ? "border-red-500" : "border-gray-600"
           }`}

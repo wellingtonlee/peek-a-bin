@@ -64,11 +64,28 @@ export function HexView() {
   const [byteMatches, setByteMatches] = useState<Set<number>>(new Set());
   const [matchCount, setMatchCount] = useState(0);
   const [selectedOffset, setSelectedOffset] = useState<number | null>(null);
+  const [selectionEnd, setSelectionEnd] = useState<number | null>(null);
   const [editingByte, setEditingByte] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [showEntropy, setShowEntropy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [entropyTooltip, setEntropyTooltip] = useState<{ x: number; blockIdx: number; offset: number; endOffset: number; value: number } | null>(null);
+
+  // Selection range helpers
+  const selectionRange = useMemo((): { start: number; end: number } | null => {
+    if (selectedOffset === null) return null;
+    if (selectionEnd === null) return { start: selectedOffset, end: selectedOffset };
+    const start = Math.min(selectedOffset, selectionEnd);
+    const end = Math.max(selectedOffset, selectionEnd);
+    return { start, end };
+  }, [selectedOffset, selectionEnd]);
+
+  const selectionCount = selectionRange ? selectionRange.end - selectionRange.start + 1 : 0;
+
+  const isInSelection = useCallback((offset: number): boolean => {
+    if (!selectionRange) return false;
+    return offset >= selectionRange.start && offset <= selectionRange.end;
+  }, [selectionRange]);
 
   const sectionInfo = useMemo(() => {
     if (!pe) return null;
@@ -246,6 +263,27 @@ export function HexView() {
     return sectionBytes[localOffset];
   }, [sectionBytes]);
 
+  // Keyboard: Ctrl/Cmd+C to copy selection, Esc to clear
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && selectionRange) {
+        setSelectedOffset(null);
+        setSelectionEnd(null);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c" && selectionRange && sectionBytes) {
+        e.preventDefault();
+        const parts: string[] = [];
+        for (let i = selectionRange.start; i <= selectionRange.end; i++) {
+          parts.push(getByteValue(i).toString(16).toUpperCase().padStart(2, "0"));
+        }
+        navigator.clipboard.writeText(parts.join(" "));
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selectionRange, sectionBytes, getByteValue]);
+
   // Build sorted patches list for diff table
   const patchesList = useMemo(() => {
     if (!sectionInfo || !sectionBytes || !pe) return [];
@@ -310,7 +348,7 @@ export function HexView() {
             if (e.key === "Enter") handleGoTo();
             if (e.key === "Escape") (e.target as HTMLElement).blur();
           }}
-          placeholder="Go to offset..."
+          placeholder="Offset or VA (hex)"
           className="w-32 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />
 
@@ -332,6 +370,13 @@ export function HexView() {
           <span className="text-red-400 text-[10px]">No matches</span>
         )}
 
+        {selectionCount > 1 && (
+          <>
+            <div className="w-px h-4 bg-gray-700 mx-1" />
+            <span className="text-blue-400 text-[10px]">{selectionCount} bytes selected</span>
+          </>
+        )}
+
         <div className="w-px h-4 bg-gray-700 mx-1" />
 
         <button
@@ -339,6 +384,17 @@ export function HexView() {
           className={`px-2 py-1 rounded text-[10px] ${showEntropy ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}
         >
           Entropy
+        </button>
+
+        <button
+          onClick={() => {
+            dispatch({ type: "SET_ADDRESS", address: state.currentAddress });
+            dispatch({ type: "SET_TAB", tab: "disassembly" });
+          }}
+          className="px-2 py-1 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600"
+          title="Show current address in disassembly view"
+        >
+          Disasm
         </button>
 
         {state.hexPatches.size > 0 && (
@@ -497,7 +553,7 @@ export function HexView() {
                   {hexParts.map((h, i) => {
                     const byteOffset = offset + i;
                     const fileOffset = sectionInfo ? sectionInfo.pointerToRawData + byteOffset : -1;
-                    const isSelected = selectedOffset === byteOffset;
+                    const isSelected = isInSelection(byteOffset);
                     const isHighlighted = highlightByte[i];
                     const isPatch = patchedByte[i];
                     const isEditing = editingByte === fileOffset;
@@ -551,7 +607,15 @@ export function HexView() {
                         )}
                         <span
                           className={`cursor-pointer ${cls}`}
-                          onClick={() => i < rowLen && setSelectedOffset(byteOffset)}
+                          onClick={(e) => {
+                            if (i >= rowLen) return;
+                            if (e.shiftKey && selectedOffset !== null) {
+                              setSelectionEnd(byteOffset);
+                            } else {
+                              setSelectedOffset(byteOffset);
+                              setSelectionEnd(null);
+                            }
+                          }}
                           onDoubleClick={() => {
                             if (i < rowLen && sectionInfo) {
                               const fo = sectionInfo.pointerToRawData + byteOffset;
@@ -569,7 +633,7 @@ export function HexView() {
                 <span className="hex-ascii ml-4" style={{ width: `${BYTES_PER_ROW}ch` }}>
                   {asciiParts.map((c, i) => {
                     const byteOffset = offset + i;
-                    const isSelected = selectedOffset === byteOffset;
+                    const isSelected = isInSelection(byteOffset);
                     const isHighlighted = highlightByte[i];
                     const isPatch = patchedByte[i];
                     let cls = "";
@@ -595,7 +659,7 @@ export function HexView() {
       </div>
 
       {/* Data Inspector */}
-      {selectedOffset !== null && sectionBytes && (
+      {selectedOffset !== null && selectionEnd === null && sectionBytes && (
         <DataInspector
           offset={selectedOffset}
           bytes={sectionBytes}

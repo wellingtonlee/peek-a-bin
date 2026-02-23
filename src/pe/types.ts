@@ -157,6 +157,26 @@ export interface ExportEntry {
   address: number;
 }
 
+export interface TLSDirectory {
+  startAddressOfRawData: number;
+  endAddressOfRawData: number;
+  addressOfIndex: number;
+  addressOfCallBacks: number;
+  callbacks: number[];
+  sizeOfZeroFill: number;
+  characteristics: number;
+}
+
+export interface RelocationEntry {
+  type: number;
+  offset: number;
+}
+
+export interface RelocationBlock {
+  virtualAddress: number;
+  entries: RelocationEntry[];
+}
+
 export interface PEFile {
   buffer: ArrayBuffer;
   is64: boolean;
@@ -168,6 +188,8 @@ export interface PEFile {
   sections: SectionHeader[];
   imports: ImportEntry[];
   exports: ExportEntry[];
+  tlsDirectory?: TLSDirectory;
+  relocations?: RelocationBlock[];
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
 }

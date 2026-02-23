@@ -117,6 +117,23 @@ export const IMAGE_DOS_SIGNATURE = 0x5a4d; // "MZ"
 // PE Signature
 export const IMAGE_NT_SIGNATURE = 0x4550; // "PE\0\0"
 
+// Base Relocation Types
+export const IMAGE_REL_BASED_ABSOLUTE = 0;
+export const IMAGE_REL_BASED_HIGH = 1;
+export const IMAGE_REL_BASED_LOW = 2;
+export const IMAGE_REL_BASED_HIGHLOW = 3;
+export const IMAGE_REL_BASED_HIGHADJ = 4;
+export const IMAGE_REL_BASED_DIR64 = 10;
+
+export const RelocTypeNames: Record<number, string> = {
+  [IMAGE_REL_BASED_ABSOLUTE]: 'ABSOLUTE',
+  [IMAGE_REL_BASED_HIGH]: 'HIGH',
+  [IMAGE_REL_BASED_LOW]: 'LOW',
+  [IMAGE_REL_BASED_HIGHLOW]: 'HIGHLOW',
+  [IMAGE_REL_BASED_HIGHADJ]: 'HIGHADJ',
+  [IMAGE_REL_BASED_DIR64]: 'DIR64',
+};
+
 // Import Flags
 export const IMAGE_ORDINAL_FLAG32 = 0x80000000;
 export const IMAGE_ORDINAL_FLAG64 = 0x8000000000000000n;

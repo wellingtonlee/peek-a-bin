@@ -6,8 +6,7 @@ import {
   AppDispatchContext,
   type ViewTab,
 } from "./hooks/usePEFile";
-import { parsePE, extractStrings } from "./pe/parser";
-import { disasmEngine } from "./disasm/engine";
+import { parsePE } from "./pe/parser";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
 import { FileLoader } from "./components/FileLoader";
@@ -107,6 +106,7 @@ export default function App() {
 
     // Configure worker with maps once, then detect functions off-thread
     const iatLookup = buildIATLookup(pe.imports);
+    dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
     disasmWorker.configure(pe.strings, iatLookup)
       .then(() => disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
         exports: pe.exports
@@ -117,7 +117,26 @@ export default function App() {
           .map((e) => ({ name: e.name, address: pe.optionalHeader.imageBase + e.address })),
         entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
       }))
-      .then((funcs) => dispatch({ type: "SET_FUNCTIONS", functions: funcs }));
+      .then((funcs) => {
+        dispatch({ type: "SET_FUNCTIONS", functions: funcs });
+
+        // Auto-build xrefs in background after function detection
+        const stringAddrs = Array.from(pe.strings.keys());
+        const iatAddrs: number[] = [];
+        for (const imp of pe.imports) {
+          for (const addr of imp.iatAddresses) iatAddrs.push(addr);
+        }
+        if (stringAddrs.length > 0 || iatAddrs.length > 0) {
+          dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
+          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs)
+            .then(({ stringXrefs, importXrefs }) => {
+              dispatch({ type: "SET_XREFS", stringXrefs, importXrefs });
+              dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
+            });
+        } else {
+          dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
+        }
+      });
   }, [state.peFile, state.disasmReady]);
 
   // Re-configure worker when strings arrive (they load asynchronously after PE parse)
@@ -127,9 +146,33 @@ export default function App() {
     if (state.peFile.strings.size === 0) { stringsConfiguredRef.current = false; return; }
     if (stringsConfiguredRef.current) return;
     stringsConfiguredRef.current = true;
-    const iatLookup = buildIATLookup(state.peFile.imports);
-    disasmWorker.configure(state.peFile.strings, iatLookup);
-  }, [state.peFile, state.peFile?.strings.size, state.disasmReady]);
+    const pe = state.peFile;
+    const buffer = bufferRef.current;
+    const iatLookup = buildIATLookup(pe.imports);
+    disasmWorker.configure(pe.strings, iatLookup);
+
+    // Re-build xrefs now that strings are available
+    if (buffer && state.functions.length > 0) {
+      const textSection = pe.sections.find(
+        (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
+      );
+      if (textSection) {
+        const sectionBytes = new Uint8Array(buffer, textSection.pointerToRawData, textSection.sizeOfRawData);
+        const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
+        const stringAddrs = Array.from(pe.strings.keys());
+        const iatAddrs: number[] = [];
+        for (const imp of pe.imports) {
+          for (const addr of imp.iatAddresses) iatAddrs.push(addr);
+        }
+        if (stringAddrs.length > 0 || iatAddrs.length > 0) {
+          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs)
+            .then(({ stringXrefs, importXrefs }) => {
+              dispatch({ type: "SET_XREFS", stringXrefs, importXrefs });
+            });
+        }
+      }
+    }
+  }, [state.peFile, state.peFile?.strings.size, state.disasmReady, state.functions.length, dispatch]);
 
   // Parse hash on file load — apply saved address/tab from URL
   const hashAppliedRef = useRef(false);
@@ -188,21 +231,22 @@ export default function App() {
 
   const handleFile = useCallback(
     (buffer: ArrayBuffer, fileName: string) => {
+      dispatch({ type: "RESET" });
+      stringsConfiguredRef.current = false;
       dispatch({ type: "SET_LOADING" });
+      dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
       try {
         bufferRef.current = buffer;
         const pe = parsePE(buffer);
         dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
-        // Extract strings off the main thread via setTimeout to avoid blocking UI
-        setTimeout(() => {
-          const { strings, stringTypes } = extractStrings(
-            buffer,
-            pe.sections,
-            pe.optionalHeader.imageBase,
-          );
-          dispatch({ type: "SET_STRINGS", strings, stringTypes });
-        }, 0);
+        // Extract strings off the main thread via worker
+        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
+        disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase)
+          .then(({ strings, stringTypes }) => {
+            dispatch({ type: "SET_STRINGS", strings, stringTypes });
+          });
       } catch (e) {
+        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "idle" });
         dispatch({
           type: "SET_ERROR",
           error: e instanceof Error ? e.message : "Failed to parse PE file",

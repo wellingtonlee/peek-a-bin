@@ -1,6 +1,8 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import type { DisasmFunction } from "../disasm/types";
 
 type SortMode = "address" | "alpha";
 
@@ -23,7 +25,14 @@ export function Sidebar() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const pe = state.peFile;
+  const [filterInput, setFilterInput] = useState("");
   const [filter, setFilter] = useState("");
+  const filterTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const handleFilterChange = useCallback((value: string) => {
+    setFilterInput(value);
+    clearTimeout(filterTimerRef.current);
+    filterTimerRef.current = setTimeout(() => setFilter(value), 250);
+  }, []);
   const [sort, setSort] = useState<SortMode>("address");
   const listRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(loadWidth);
@@ -94,6 +103,27 @@ export function Sidebar() {
     return fns;
   }, [state.functions, state.renames, filter, sort]);
 
+  const handleExportCSV = useCallback(() => {
+    if (state.functions.length === 0) return;
+    const header = "Address,Name,Size";
+    const rows = state.functions.map((fn: DisasmFunction) => {
+      const name = getDisplayName(fn, state.renames);
+      // Escape CSV: wrap in quotes if contains comma or quote
+      const escapedName = name.includes(",") || name.includes('"')
+        ? `"${name.replace(/"/g, '""')}"`
+        : name;
+      return `0x${fn.address.toString(16).toUpperCase()},${escapedName},${fn.size}`;
+    });
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.fileName ?? "pe"}_functions.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [state.functions, state.renames, state.fileName]);
+
   const virtualizer = useVirtualizer({
     count: filteredFunctions.length,
     getScrollElement: () => listRef.current,
@@ -138,7 +168,6 @@ export function Sidebar() {
             <li key={i}>
               <button
                 onClick={() => {
-                  dispatch({ type: "SET_SELECTED_SECTION", index: i });
                   dispatch({
                     type: "SET_ADDRESS",
                     address: pe.optionalHeader.imageBase + sec.virtualAddress,
@@ -233,22 +262,32 @@ export function Sidebar() {
         <div className="flex items-center justify-between">
           <h3 className="text-gray-400 uppercase tracking-wider text-[10px] font-semibold">
             Functions ({filteredFunctions.length}
-            {filter && filteredFunctions.length !== state.functions.length
+            {filterInput && filteredFunctions.length !== state.functions.length
               ? `/${state.functions.length}`
               : ""})
           </h3>
-          <button
-            onClick={() => setSort(sort === "address" ? "alpha" : "address")}
-            className="text-[10px] text-gray-500 hover:text-gray-300 px-1"
-            title={sort === "address" ? "Sort: by address" : "Sort: alphabetical"}
-          >
-            {sort === "address" ? "Addr" : "A-Z"}
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={handleExportCSV}
+              disabled={state.functions.length === 0}
+              className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
+              title="Export functions as CSV"
+            >
+              CSV
+            </button>
+            <button
+              onClick={() => setSort(sort === "address" ? "alpha" : "address")}
+              className="text-[10px] text-gray-500 hover:text-gray-300 px-1"
+              title={sort === "address" ? "Sort: by address" : "Sort: alphabetical"}
+            >
+              {sort === "address" ? "Addr" : "A-Z"}
+            </button>
+          </div>
         </div>
         <input
           type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          value={filterInput}
+          onChange={(e) => handleFilterChange(e.target.value)}
           placeholder="Filter functions..."
           className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-[11px]"
         />

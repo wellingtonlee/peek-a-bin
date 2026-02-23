@@ -6,6 +6,7 @@ interface CFGViewProps {
   func: DisasmFunction;
   instructions: Instruction[];
   typedXrefMap: Map<number, Xref[]>;
+  jumpTables?: Map<number, number[]>;
   currentAddress: number;
   onNavigate: (addr: number) => void;
   onClose: () => void;
@@ -21,6 +22,7 @@ export function CFGView({
   func,
   instructions,
   typedXrefMap,
+  jumpTables,
   currentAddress,
   onNavigate,
   onClose,
@@ -32,9 +34,9 @@ export function CFGView({
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
   const { blocks, edges } = useMemo(() => {
-    const cfg = buildCFG(func, instructions, typedXrefMap);
+    const cfg = buildCFG(func, instructions, typedXrefMap, jumpTables);
     return layoutCFG(cfg);
-  }, [func, instructions, typedXrefMap]);
+  }, [func, instructions, typedXrefMap, jumpTables]);
 
   // Find bounds for centering
   useEffect(() => {

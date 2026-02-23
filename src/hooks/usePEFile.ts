@@ -22,6 +22,8 @@ export interface AnnotationSnapshot {
   comments: Record<number, string>;
 }
 
+export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "building-xrefs" | "extracting-strings" | "ready";
+
 export interface AppState {
   peFile: PEFile | null;
   fileName: string | null;
@@ -31,7 +33,6 @@ export interface AppState {
   currentAddress: number;
   functions: DisasmFunction[];
   disasmReady: boolean;
-  selectedSection: number;
   addressHistory: number[];
   historyIndex: number;
   bookmarks: Bookmark[];
@@ -41,6 +42,9 @@ export interface AppState {
   annotationUndoStack: AnnotationSnapshot[];
   annotationRedoStack: AnnotationSnapshot[];
   callStack: { address: number; name: string }[];
+  stringXrefs: Map<number, number[]> | null;
+  importXrefs: Map<number, number[]> | null;
+  analysisPhase: AnalysisPhase;
 }
 
 export type AppAction =
@@ -51,7 +55,6 @@ export type AppAction =
   | { type: "SET_ADDRESS"; address: number }
   | { type: "SET_FUNCTIONS"; functions: DisasmFunction[] }
   | { type: "SET_DISASM_READY" }
-  | { type: "SET_SELECTED_SECTION"; index: number }
   | { type: "NAV_BACK" }
   | { type: "NAV_FORWARD" }
   | { type: "TOGGLE_BOOKMARK"; address?: number }
@@ -71,6 +74,8 @@ export type AppAction =
   | { type: "POP_CALL_STACK"; index: number }
   | { type: "CLEAR_CALL_STACK" }
   | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
+  | { type: "SET_XREFS"; stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]> }
+  | { type: "SET_ANALYSIS_PHASE"; phase: AnalysisPhase }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -82,7 +87,6 @@ export const initialState: AppState = {
   currentAddress: 0,
   functions: [],
   disasmReady: false,
-  selectedSection: 0,
   addressHistory: [],
   historyIndex: -1,
   bookmarks: [],
@@ -92,6 +96,9 @@ export const initialState: AppState = {
   annotationUndoStack: [],
   annotationRedoStack: [],
   callStack: [],
+  stringXrefs: null,
+  importXrefs: null,
+  analysisPhase: "idle",
 };
 
 const MAX_HISTORY = 50;
@@ -152,8 +159,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, functions: action.functions };
     case "SET_DISASM_READY":
       return { ...state, disasmReady: true };
-    case "SET_SELECTED_SECTION":
-      return { ...state, selectedSection: action.index };
     case "NAV_BACK": {
       if (state.historyIndex <= 0) return state;
       const idx = state.historyIndex - 1;
@@ -275,8 +280,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         peFile: { ...state.peFile, strings: action.strings, stringTypes: action.stringTypes },
       };
     }
+    case "SET_XREFS":
+      return { ...state, stringXrefs: action.stringXrefs, importXrefs: action.importXrefs };
+    case "SET_ANALYSIS_PHASE":
+      return { ...state, analysisPhase: action.phase };
     case "RESET":
-      return initialState;
+      return { ...initialState, disasmReady: state.disasmReady };
     default:
       return state;
   }

@@ -12,6 +12,9 @@ import type {
   SectionHeader,
   ImportEntry,
   ExportEntry,
+  TLSDirectory,
+  RelocationBlock,
+  RelocationEntry,
   PEFile,
 } from './types';
 import { normalizeOptionalHeader } from './types';
@@ -24,6 +27,8 @@ import {
   IMAGE_ORDINAL_FLAG64,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
+  IMAGE_DIRECTORY_ENTRY_TLS,
+  IMAGE_DIRECTORY_ENTRY_BASERELOC,
 } from './constants';
 
 const textDecoder = new TextDecoder();
@@ -296,7 +301,7 @@ function parseImports(
           const nameTableRVA = Number(thunkValue);
           const nameTableOffset = rvaToFileOffset(nameTableRVA, sections);
 
-          if (nameTableOffset + 2 < view.byteLength) {
+          if (nameTableOffset >= 0 && nameTableOffset + 2 < view.byteLength) {
             // Skip hint (2 bytes)
             const funcName = readCString(view, nameTableOffset + 2);
             functions.push(funcName);
@@ -477,6 +482,105 @@ function extractUTF16Strings(
 }
 
 /**
+ * Parse TLS Directory
+ */
+function parseTLSDirectory(
+  view: DataView,
+  tlsDir: DataDirectory,
+  sections: SectionHeader[],
+  is64: boolean,
+  imageBase: number
+): TLSDirectory | undefined {
+  if (!tlsDir.virtualAddress || !tlsDir.size) return undefined;
+
+  const offset = rvaToFileOffset(tlsDir.virtualAddress, sections);
+  if (offset < 0) return undefined;
+
+  const ptrSize = is64 ? 8 : 4;
+  const structSize = is64 ? 40 : 24;
+  if (offset + structSize > view.byteLength) return undefined;
+
+  const readPtr = (o: number): number =>
+    is64 ? Number(view.getBigUint64(o, true)) : view.getUint32(o, true);
+
+  const startAddressOfRawData = readPtr(offset);
+  const endAddressOfRawData = readPtr(offset + ptrSize);
+  const addressOfIndex = readPtr(offset + ptrSize * 2);
+  const addressOfCallBacks = readPtr(offset + ptrSize * 3);
+  const sizeOfZeroFill = view.getUint32(offset + ptrSize * 4, true);
+  const characteristics = view.getUint32(offset + ptrSize * 4 + 4, true);
+
+  // Walk callback array (null-terminated VA pointers)
+  const callbacks: number[] = [];
+  if (addressOfCallBacks) {
+    const cbRVA = addressOfCallBacks - imageBase;
+    const cbOffset = rvaToFileOffset(cbRVA, sections);
+    if (cbOffset >= 0) {
+      let pos = cbOffset;
+      for (let i = 0; i < 256; i++) { // safety limit
+        if (pos + ptrSize > view.byteLength) break;
+        const cbAddr = readPtr(pos);
+        if (cbAddr === 0) break;
+        callbacks.push(cbAddr);
+        pos += ptrSize;
+      }
+    }
+  }
+
+  return {
+    startAddressOfRawData,
+    endAddressOfRawData,
+    addressOfIndex,
+    addressOfCallBacks,
+    callbacks,
+    sizeOfZeroFill,
+    characteristics,
+  };
+}
+
+/**
+ * Parse Base Relocations
+ */
+function parseBaseRelocations(
+  view: DataView,
+  relocDir: DataDirectory,
+  sections: SectionHeader[]
+): RelocationBlock[] | undefined {
+  if (!relocDir.virtualAddress || !relocDir.size) return undefined;
+
+  const baseOffset = rvaToFileOffset(relocDir.virtualAddress, sections);
+  if (baseOffset < 0) return undefined;
+
+  const blocks: RelocationBlock[] = [];
+  let pos = baseOffset;
+  const endPos = baseOffset + relocDir.size;
+
+  while (pos + 8 <= view.byteLength && pos < endPos) {
+    const virtualAddress = view.getUint32(pos, true);
+    const sizeOfBlock = view.getUint32(pos + 4, true);
+
+    if (virtualAddress === 0 || sizeOfBlock < 8) break;
+
+    const entryCount = (sizeOfBlock - 8) / 2;
+    const entries: RelocationEntry[] = [];
+
+    for (let i = 0; i < entryCount; i++) {
+      const entryPos = pos + 8 + i * 2;
+      if (entryPos + 2 > view.byteLength) break;
+      const value = view.getUint16(entryPos, true);
+      const type = (value >> 12) & 0xF;
+      const entryOffset = value & 0xFFF;
+      entries.push({ type, offset: entryOffset });
+    }
+
+    blocks.push({ virtualAddress, entries });
+    pos += sizeOfBlock;
+  }
+
+  return blocks.length > 0 ? blocks : undefined;
+}
+
+/**
  * Main PE Parser
  */
 export function parsePE(buffer: ArrayBuffer): PEFile {
@@ -556,6 +660,22 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
+  // 9. Parse TLS Directory
+  const tlsDirectory = parseTLSDirectory(
+    view,
+    dataDirectories[IMAGE_DIRECTORY_ENTRY_TLS] || { virtualAddress: 0, size: 0 },
+    sections,
+    is64,
+    imageBase
+  );
+
+  // 10. Parse Base Relocations
+  const relocations = parseBaseRelocations(
+    view,
+    dataDirectories[IMAGE_DIRECTORY_ENTRY_BASERELOC] || { virtualAddress: 0, size: 0 },
+    sections
+  );
+
   return {
     buffer,
     is64,
@@ -567,6 +687,8 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections,
     imports,
     exports,
+    tlsDirectory,
+    relocations,
     strings: new Map(),
     stringTypes: new Map(),
   };

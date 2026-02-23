@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { disasmWorker } from "../workers/disasmClient";
-import type { Instruction } from "../disasm/types";
+import { clampPopup } from "../utils/clampPopup";
 
 interface XrefPopupState {
   x: number;
@@ -23,8 +22,7 @@ export function ImportsView() {
     filterTimerRef.current = setTimeout(() => setFilter(value), 250);
   }, []);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [importXrefs, setImportXrefs] = useState<Map<number, number[]> | null>(null);
-  const [xrefLoading, setXrefLoading] = useState(false);
+  const importXrefs = state.importXrefs;
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
 
   // Dismiss popup
@@ -39,62 +37,6 @@ export function ImportsView() {
       window.removeEventListener("keydown", keyDismiss);
     };
   }, [xrefPopup]);
-
-  const handleLoadXrefs = useCallback(() => {
-    if (!pe || xrefLoading) return;
-    setXrefLoading(true);
-
-    (async () => {
-      try {
-        // Collect all IAT addresses
-        const iatAddrs = new Set<number>();
-        for (const imp of pe.imports) {
-          for (const addr of imp.iatAddresses) iatAddrs.add(addr);
-        }
-
-        // Disassemble code sections (off main thread via worker)
-        const allInsns: Instruction[] = [];
-        for (const sec of pe.sections) {
-          if ((sec.characteristics & 0x20000000) === 0 && sec.name !== ".text") continue;
-          try {
-            const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
-            const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-            const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
-            allInsns.push(...insns);
-          } catch { /* skip */ }
-        }
-
-        // Scan for references to IAT addresses
-        const xrefs = new Map<number, number[]>();
-        for (const insn of allInsns) {
-          const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-          if (ripMatch) {
-            const sign = ripMatch[1] === '+' ? 1 : -1;
-            const disp = parseInt(ripMatch[2], 16);
-            const target = insn.address + insn.size + sign * disp;
-            if (iatAddrs.has(target)) {
-              let arr = xrefs.get(target);
-              if (!arr) { arr = []; xrefs.set(target, arr); }
-              arr.push(insn.address);
-            }
-          }
-          const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
-          if (addrMatches) {
-            for (const addrStr of addrMatches) {
-              const addr = parseInt(addrStr, 16);
-              if (iatAddrs.has(addr)) {
-                let arr = xrefs.get(addr);
-                if (!arr) { arr = []; xrefs.set(addr, arr); }
-                arr.push(insn.address);
-              }
-            }
-          }
-        }
-        setImportXrefs(xrefs);
-      } catch { /* ignore */ }
-      setXrefLoading(false);
-    })();
-  }, [pe, xrefLoading]);
 
   if (!pe) return null;
 
@@ -150,24 +92,15 @@ export function ImportsView() {
           </span>
         )}
         <div className="flex-1" />
-        {!importXrefs && (
-          <button
-            onClick={handleLoadXrefs}
-            disabled={xrefLoading}
-            className="px-2 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
-          >
-            {xrefLoading ? (
-              <span className="flex items-center gap-1">
-                <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Loading...
-              </span>
-            ) : "Load xrefs"}
-          </button>
-        )}
-        {importXrefs && (
+        {!importXrefs ? (
+          <span className="text-[10px] text-gray-500 flex items-center gap-1">
+            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            Xrefs loading...
+          </span>
+        ) : (
           <span className="text-[10px] text-green-400">Xrefs loaded</span>
         )}
       </div>
@@ -202,9 +135,10 @@ export function ImportsView() {
                             onClick={(e) => {
                               e.stopPropagation();
                               const rect = (e.target as HTMLElement).getBoundingClientRect();
+                              const clamped = clampPopup(rect.left, rect.bottom, 220, 240);
                               setXrefPopup({
-                                x: rect.left,
-                                y: rect.bottom,
+                                x: clamped.x,
+                                y: clamped.y,
                                 funcName: fn.name,
                                 sources: importXrefs.get(fn.iatAddr)!,
                               });

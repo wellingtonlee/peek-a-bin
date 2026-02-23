@@ -4,6 +4,7 @@ import {
   MachineTypes as MACHINE_TYPES,
   SubsystemNames as SUBSYSTEM_NAMES,
   DataDirectoryNames as DATA_DIR_NAMES,
+  RelocTypeNames as RELOC_TYPE_NAMES,
 } from "../pe/constants";
 import {
   parseRichHeader,
@@ -93,6 +94,123 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <td className="py-1 pr-4 text-gray-400 whitespace-nowrap">{label}</td>
       <td className="py-1 text-gray-200">{children}</td>
     </tr>
+  );
+}
+
+function TLSSection() {
+  const { peFile: pe } = useAppState();
+  const dispatch = useAppDispatch();
+  const [open, setOpen] = useState(true);
+
+  if (!pe?.tlsDirectory) return null;
+  const tls = pe.tlsDirectory;
+  const addrWidth = pe.is64 ? 16 : 8;
+
+  const navigateTo = (addr: number) => {
+    dispatch({ type: "SET_ADDRESS", address: addr });
+    dispatch({ type: "SET_TAB", tab: "disassembly" });
+  };
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen(!open)}
+        className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
+      >
+        <span className="text-[8px]">{open ? "▼" : "▶"}</span>
+        TLS Directory
+        <span className="text-gray-500 font-normal ml-1">
+          ({tls.callbacks.length} callback{tls.callbacks.length !== 1 ? "s" : ""})
+        </span>
+      </button>
+      {open && (
+        <table>
+          <tbody>
+            <Row label="Raw Data Start">
+              <CopyableHex value={tls.startAddressOfRawData} width={addrWidth} />
+            </Row>
+            <Row label="Raw Data End">
+              <CopyableHex value={tls.endAddressOfRawData} width={addrWidth} />
+            </Row>
+            <Row label="Address of Index">
+              <CopyableHex value={tls.addressOfIndex} width={addrWidth} />
+            </Row>
+            <Row label="Address of Callbacks">
+              <CopyableHex value={tls.addressOfCallBacks} width={addrWidth} />
+            </Row>
+            <Row label="Size of Zero Fill">{tls.sizeOfZeroFill}</Row>
+            <Row label="Characteristics">
+              <CopyableHex value={tls.characteristics} />
+            </Row>
+            {tls.callbacks.length > 0 && (
+              <Row label="Callbacks">
+                <div className="space-y-0.5">
+                  {tls.callbacks.map((cb, i) => (
+                    <div key={i}>
+                      <button
+                        onClick={() => navigateTo(cb)}
+                        className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer font-mono"
+                      >
+                        0x{cb.toString(16).toUpperCase().padStart(addrWidth, "0")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </Row>
+            )}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+function RelocationsSection() {
+  const { peFile: pe } = useAppState();
+  const [open, setOpen] = useState(false);
+
+  if (!pe?.relocations) return null;
+  const blocks = pe.relocations;
+  const totalEntries = blocks.reduce((sum, b) => sum + b.entries.length, 0);
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen(!open)}
+        className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
+      >
+        <span className="text-[8px]">{open ? "▼" : "▶"}</span>
+        Base Relocations
+        <span className="text-gray-500 font-normal ml-1">
+          ({blocks.length} block{blocks.length !== 1 ? "s" : ""}, {totalEntries.toLocaleString()} entries)
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-1">
+          {blocks.map((block, i) => {
+            const typeCounts: Record<number, number> = {};
+            for (const entry of block.entries) {
+              typeCounts[entry.type] = (typeCounts[entry.type] || 0) + 1;
+            }
+            const typeStr = Object.entries(typeCounts)
+              .map(([t, c]) => `${RELOC_TYPE_NAMES[Number(t)] ?? `Type${t}`}: ${c}`)
+              .join(", ");
+
+            return (
+              <div key={i} className="border-b border-gray-800 py-1">
+                <span className="text-blue-400 font-mono">
+                  0x{block.virtualAddress.toString(16).toUpperCase().padStart(8, "0")}
+                </span>
+                <span className="text-gray-500 ml-2">
+                  {block.entries.length} entries
+                </span>
+                <div className="text-gray-400 text-[10px] ml-2">{typeStr}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -340,6 +458,12 @@ export function HeaderView() {
           </div>
         )}
       </section>
+
+      {/* TLS Directory */}
+      <TLSSection />
+
+      {/* Base Relocations */}
+      <RelocationsSection />
     </div>
   );
 }

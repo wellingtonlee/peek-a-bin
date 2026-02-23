@@ -1,7 +1,6 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { disasmWorker } from "../workers/disasmClient";
 
 type SortKey = "address" | "length";
 type EncodingFilter = "all" | "ascii" | "utf16le";
@@ -34,8 +33,7 @@ export function StringsView() {
   }, []);
   const [sortKey, setSortKey] = useState<SortKey>("address");
   const [encodingFilter, setEncodingFilter] = useState<EncodingFilter>("all");
-  const [stringXrefs, setStringXrefs] = useState<Map<number, number[]> | null>(null);
-  const [xrefLoading, setXrefLoading] = useState(false);
+  const stringXrefs = state.stringXrefs;
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
 
   const allStrings = useMemo((): StringEntry[] => {
@@ -88,55 +86,6 @@ export function StringsView() {
     };
   }, [xrefPopup]);
 
-  const handleLoadXrefs = useCallback(() => {
-    if (!pe || xrefLoading) return;
-    setXrefLoading(true);
-
-    (async () => {
-      try {
-        const stringAddrs = new Set(pe.strings.keys());
-        const allInsns: import("../disasm/types").Instruction[] = [];
-        for (const sec of pe.sections) {
-          if ((sec.characteristics & 0x20000000) === 0 && sec.name !== ".text") continue;
-          try {
-            const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
-            const base = pe.optionalHeader.imageBase + sec.virtualAddress;
-            const insns = await disasmWorker.disassemble(bytes, base, pe.is64);
-            allInsns.push(...insns);
-          } catch { /* skip */ }
-        }
-        // Build data xref map inline
-        const xrefs = new Map<number, number[]>();
-        for (const insn of allInsns) {
-          const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-          if (ripMatch) {
-            const sign = ripMatch[1] === '+' ? 1 : -1;
-            const disp = parseInt(ripMatch[2], 16);
-            const target = insn.address + insn.size + sign * disp;
-            if (stringAddrs.has(target)) {
-              let arr = xrefs.get(target);
-              if (!arr) { arr = []; xrefs.set(target, arr); }
-              arr.push(insn.address);
-            }
-          }
-          const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
-          if (addrMatches) {
-            for (const addrStr of addrMatches) {
-              const addr = parseInt(addrStr, 16);
-              if (stringAddrs.has(addr)) {
-                let arr = xrefs.get(addr);
-                if (!arr) { arr = []; xrefs.set(addr, arr); }
-                arr.push(insn.address);
-              }
-            }
-          }
-        }
-        setStringXrefs(xrefs);
-      } catch { /* ignore */ }
-      setXrefLoading(false);
-    })();
-  }, [pe, xrefLoading]);
-
   if (!pe) return null;
 
   const addrWidth = pe.is64 ? 16 : 8;
@@ -147,24 +96,15 @@ export function StringsView() {
         <span className="font-semibold text-gray-300">Strings</span>
         <span>{filtered.length.toLocaleString()}{filterInput ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
         <div className="flex-1" />
-        {!stringXrefs && (
-          <button
-            onClick={handleLoadXrefs}
-            disabled={xrefLoading}
-            className="px-2 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
-          >
-            {xrefLoading ? (
-              <span className="flex items-center gap-1">
-                <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Loading...
-              </span>
-            ) : "Load xrefs"}
-          </button>
-        )}
-        {stringXrefs && (
+        {!stringXrefs ? (
+          <span className="text-[10px] text-gray-500 flex items-center gap-1">
+            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            Xrefs loading...
+          </span>
+        ) : (
           <span className="text-[10px] text-green-400">Xrefs loaded</span>
         )}
         {(["all", "ascii", "utf16le"] as EncodingFilter[]).map((enc) => (
@@ -253,9 +193,14 @@ export function StringsView() {
                           const container = parentRef.current;
                           if (!container) return;
                           const cRect = container.getBoundingClientRect();
+                          const popW = 220, popH = 240;
+                          const rawX = rect.left - cRect.left + container.scrollLeft;
+                          const rawY = rect.bottom - cRect.top + container.scrollTop;
+                          const maxX = container.scrollLeft + cRect.width - popW - 8;
+                          const maxY = container.scrollTop + cRect.height - popH - 8;
                           setXrefPopup({
-                            x: rect.left - cRect.left + container.scrollLeft,
-                            y: rect.bottom - cRect.top + container.scrollTop,
+                            x: Math.max(0, Math.min(rawX, maxX)),
+                            y: Math.max(0, Math.min(rawY, maxY)),
                             address: entry.address,
                             sources: stringXrefs.get(entry.address)!,
                           });

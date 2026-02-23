@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type SortKey = "ordinal" | "name" | "address";
@@ -17,6 +18,7 @@ export function ExportsView() {
   }, []);
   const [sortKey, setSortKey] = useState<SortKey>("ordinal");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const parentRef = useRef<HTMLDivElement>(null);
 
   if (!pe) return null;
 
@@ -56,8 +58,15 @@ export function ExportsView() {
     dispatch({ type: "SET_TAB", tab: "disassembly" });
   };
 
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 28,
+    overscan: 20,
+  });
+
   return (
-    <div className="p-4 text-xs overflow-auto h-full">
+    <div className="p-4 text-xs h-full flex flex-col">
       <div className="flex items-center gap-4 mb-3">
         <h2 className="text-sm font-semibold text-gray-200">
           Exports ({pe.exports.length})
@@ -83,46 +92,67 @@ export function ExportsView() {
             : "No exports match the filter."}
         </p>
       ) : (
-        <table className="w-full">
-          <thead>
-            <tr className="text-gray-400 border-b border-gray-700">
-              <th
-                className="text-left py-2 pr-4 cursor-pointer hover:text-gray-200 select-none"
-                onClick={() => toggleSort("ordinal")}
-              >
-                Ordinal{sortIndicator("ordinal")}
-              </th>
-              <th
-                className="text-left py-2 pr-4 cursor-pointer hover:text-gray-200 select-none"
-                onClick={() => toggleSort("name")}
-              >
-                Name{sortIndicator("name")}
-              </th>
-              <th
-                className="text-left py-2 cursor-pointer hover:text-gray-200 select-none"
-                onClick={() => toggleSort("address")}
-              >
-                VA{sortIndicator("address")}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((exp, i) => (
-              <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/50">
-                <td className="py-1.5 pr-4 text-gray-400">{exp.ordinal}</td>
-                <td className="py-1.5 pr-4 text-gray-200">{exp.name}</td>
-                <td className="py-1.5">
-                  <button
-                    onClick={() => handleNavigate(exp.address)}
-                    className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
+        <>
+          {/* Sticky header */}
+          <div className="flex text-gray-400 border-b border-gray-700 pb-1 mb-1 select-none shrink-0">
+            <div
+              className="w-16 shrink-0 cursor-pointer hover:text-gray-200"
+              onClick={() => toggleSort("ordinal")}
+            >
+              Ordinal{sortIndicator("ordinal")}
+            </div>
+            <div
+              className="flex-1 cursor-pointer hover:text-gray-200"
+              onClick={() => toggleSort("name")}
+            >
+              Name{sortIndicator("name")}
+            </div>
+            <div
+              className="w-32 shrink-0 cursor-pointer hover:text-gray-200"
+              onClick={() => toggleSort("address")}
+            >
+              VA{sortIndicator("address")}
+            </div>
+          </div>
+
+          {/* Virtualized rows */}
+          <div ref={parentRef} className="flex-1 overflow-auto">
+            <div
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                width: "100%",
+                position: "relative",
+              }}
+            >
+              {virtualizer.getVirtualItems().map((vItem) => {
+                const exp = filtered[vItem.index];
+                if (!exp) return null;
+                return (
+                  <div
+                    key={vItem.index}
+                    className="absolute left-0 w-full flex items-center hover:bg-gray-800/50"
+                    style={{
+                      top: 0,
+                      height: "28px",
+                      transform: `translateY(${vItem.start}px)`,
+                    }}
                   >
-                    0x{(imageBase + exp.address).toString(16).toUpperCase()}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                    <div className="w-16 shrink-0 text-gray-400">{exp.ordinal}</div>
+                    <div className="flex-1 text-gray-200 truncate">{exp.name}</div>
+                    <div className="w-32 shrink-0">
+                      <button
+                        onClick={() => handleNavigate(exp.address)}
+                        className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
+                      >
+                        0x{(imageBase + exp.address).toString(16).toUpperCase()}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
