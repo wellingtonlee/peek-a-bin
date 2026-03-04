@@ -21,12 +21,15 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 
 **Disassembly**
 - x86 and x64 disassembly via Capstone WASM
+- Hybrid recursive descent + linear sweep disassembly
+- Gap-fill regions visually dimmed to distinguish from control-flow-reachable code
 - Virtual scrolling for large binaries
 - Jump arrows showing control flow
 - Minimap for navigation overview
 
 **Advanced Analysis**
-- Function detection and boundary identification
+- Function detection via prologue scanning, call targets, and .pdata (x64 exception directory)
+- Precise function boundaries from .pdata when available
 - Cross-references (xrefs)
 - Stack frame reconstruction
 - Control flow graph (CFG) visualization
@@ -102,6 +105,8 @@ src/
 ## Architecture
 
 Peek-a-Bin runs entirely client-side. Files are parsed in the browser using a TypeScript PE parser, then disassembled via Capstone compiled to WebAssembly running in a Web Worker. The WASM binary is cached in IndexedDB after first load. Application state is managed with React Context and `useReducer`. Virtual scrolling (via @tanstack/react-virtual) keeps the UI responsive even for large binaries.
+
+Disassembly uses a hybrid approach: recursive descent from known entry points (exports, .pdata entries, detected prologues, call targets) followed by linear sweep to fill gaps. This avoids decoding embedded data as instructions while still providing full section coverage.
 
 ```
 File Drop → PE Parser (TS) → Capstone WASM (Worker) → React UI
