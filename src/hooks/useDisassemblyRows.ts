@@ -91,7 +91,25 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
 
     const baseAddr = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
 
-    disasmWorker.disassemble(bytesToDisasm, baseAddr, pe.is64)
+    // Use hybrid disassembly when functions are detected (seeds available)
+    let disasmPromise: Promise<Instruction[]>;
+    if (state.functions.length > 0) {
+      const pdataRanges = pe.runtimeFunctions?.map(rf => ({
+        beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
+        endAddress: pe.optionalHeader.imageBase + rf.endAddress,
+      }));
+      disasmPromise = disasmWorker.hybridDisassemble(
+        bytesToDisasm,
+        baseAddr,
+        pe.is64,
+        state.functions.map(f => f.address),
+        pdataRanges,
+      );
+    } else {
+      disasmPromise = disasmWorker.disassemble(bytesToDisasm, baseAddr, pe.is64);
+    }
+
+    disasmPromise
       .then((result) => {
         if (!cancelled) {
           setInstructions(result);
@@ -109,7 +127,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
       });
 
     return () => { cancelled = true; };
-  }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size]);
+  }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size, state.functions]);
 
   // Build funcMap for O(1) lookup
   const funcMap = useMemo(() => {

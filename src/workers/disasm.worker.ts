@@ -233,12 +233,27 @@ function detectFunctions(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
-  options?: { exports?: { name: string; address: number }[]; entryPoint?: number }
+  options?: {
+    exports?: { name: string; address: number }[];
+    entryPoint?: number;
+    pdataFunctions?: { beginAddress: number; endAddress: number }[];
+  }
 ): DetectResult {
   const addrSet = new Set<number>();
   const nameMap = new Map<number, string>();
+  const pdataEndMap = new Map<number, number>();
   const len = bytes.length;
   const endAddress = baseAddress + len;
+
+  // Integrate .pdata seeds
+  if (options?.pdataFunctions) {
+    for (const rf of options.pdataFunctions) {
+      if (rf.beginAddress >= baseAddress && rf.beginAddress < endAddress) {
+        addrSet.add(rf.beginAddress);
+        pdataEndMap.set(rf.beginAddress, rf.endAddress);
+      }
+    }
+  }
 
   if (options?.entryPoint !== undefined) {
     const ep = options.entryPoint;
@@ -268,6 +283,22 @@ function detectFunctions(
       } else if (i + 6 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x81 && bytes[i + 2] === 0xEC) {
         isFunctionStart = true;
       }
+      // push rbx; sub rsp, N (MSVC leaf/fastcall)
+      else if (i + 3 < len && bytes[i] === 0x53 && bytes[i + 1] === 0x48 && bytes[i + 2] === 0x83 && bytes[i + 3] === 0xEC) {
+        isFunctionStart = true;
+      }
+      // mov [rsp+8], rcx (SEH frame setup)
+      else if (i + 4 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x4C && bytes[i + 3] === 0x24 && bytes[i + 4] === 0x08) {
+        isFunctionStart = true;
+      }
+      // push rdi; push rsi; sub rsp, N (callee-save heavy)
+      else if (i + 4 < len && bytes[i] === 0x57 && bytes[i + 1] === 0x56 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+        isFunctionStart = true;
+      }
+      // sub rsp, N preceded by CC/90 padding (alignment)
+      else if (i > 0 && i + 3 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x83 && bytes[i + 2] === 0xEC && (bytes[i - 1] === 0xCC || bytes[i - 1] === 0x90)) {
+        isFunctionStart = true;
+      }
     } else {
       if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x8B && bytes[i + 2] === 0xEC) {
         isFunctionStart = true;
@@ -290,10 +321,10 @@ function detectFunctions(
     }
   }
 
-  // Call target collection for sections < 2MB
+  // Call target collection
   const callTargets = new Set<number>();
   const jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
-  if (len < 2 * 1024 * 1024 && initialized) {
+  if (initialized) {
     const cs = is64 ? cs64 : cs32;
     let offset = 0;
     let prevWasUnconditional = false;
@@ -425,7 +456,11 @@ function detectFunctions(
   }));
 
   for (let i = 0; i < functions.length; i++) {
-    if (i < functions.length - 1) {
+    // Use .pdata for precise function sizes when available
+    const pdataEnd = pdataEndMap.get(functions[i].address);
+    if (pdataEnd) {
+      functions[i].size = pdataEnd - functions[i].address;
+    } else if (i < functions.length - 1) {
       functions[i].size = functions[i + 1].address - functions[i].address;
     } else {
       functions[i].size = endAddress - functions[i].address;
@@ -436,6 +471,171 @@ function detectFunctions(
     functions,
     jumpTables: Array.from(jumpTables.entries()),
   };
+}
+
+function hybridDisassemble(
+  bytes: Uint8Array,
+  baseAddress: number,
+  is64: boolean,
+  seeds: number[],
+  pdataRanges?: { beginAddress: number; endAddress: number }[],
+): Instruction[] {
+  const cs = is64 ? cs64 : cs32;
+  const visited = new Set<number>();
+  const instructionMap = new Map<number, Instruction>();
+  const endAddress = baseAddress + bytes.length;
+
+  // Control-flow terminators
+  const terminators = new Set(['ret', 'retn', 'int3', 'ud2']);
+  const conditionalJumps = new Set([
+    'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
+    'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns',
+    'jp', 'jnp', 'jcxz', 'jecxz', 'jrcxz',
+  ]);
+
+  // Performance optimization: bulk-decode .pdata ranges with known boundaries
+  if (pdataRanges) {
+    for (const range of pdataRanges) {
+      if (range.beginAddress < baseAddress || range.endAddress > endAddress) continue;
+      const rangeOffset = range.beginAddress - baseAddress;
+      const rangeLen = range.endAddress - range.beginAddress;
+      if (rangeLen <= 0 || rangeOffset + rangeLen > bytes.length) continue;
+
+      const rangeBytes = bytes.subarray(rangeOffset, rangeOffset + rangeLen);
+      try {
+        const insns = cs.disasm(rangeBytes, { address: range.beginAddress });
+        for (const insn of insns) {
+          const mapped = mapInsn(insn);
+          mapped.source = 'recursive';
+          instructionMap.set(insn.address, mapped);
+          visited.add(insn.address);
+        }
+      } catch {
+        // Fall through to BFS for this range
+      }
+    }
+  }
+
+  // Phase 1: Recursive descent (BFS) for non-.pdata seeds
+  const workQueue = [...seeds];
+  while (workQueue.length > 0) {
+    const addr = workQueue.pop()!;
+    if (visited.has(addr)) continue;
+    if (addr < baseAddress || addr >= endAddress) continue;
+
+    visited.add(addr);
+    const offset = addr - baseAddress;
+    const sliceEnd = Math.min(offset + 15, bytes.length);
+    if (offset >= bytes.length) continue;
+
+    let insns: any[];
+    try {
+      insns = cs.disasm(bytes.subarray(offset, sliceEnd), { address: addr });
+    } catch {
+      continue;
+    }
+    if (!insns || insns.length === 0) continue;
+
+    const insn = insns[0];
+    const mapped = mapInsn(insn);
+    mapped.source = 'recursive';
+    instructionMap.set(addr, mapped);
+
+    const mn = insn.mnemonic;
+
+    if (terminators.has(mn)) {
+      // Stop this path
+      continue;
+    }
+
+    if (mn === 'jmp') {
+      // Unconditional jump — follow target, stop current path
+      const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      if (m) {
+        const target = parseInt(m[1], 16);
+        if (target >= baseAddress && target < endAddress) {
+          workQueue.push(target);
+        }
+      }
+      continue;
+    }
+
+    if (conditionalJumps.has(mn) || (mn.startsWith('j') && mn !== 'jmp')) {
+      // Conditional branch — queue target + fall-through
+      const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      if (m) {
+        const target = parseInt(m[1], 16);
+        if (target >= baseAddress && target < endAddress) {
+          workQueue.push(target);
+        }
+      }
+      workQueue.push(addr + insn.size);
+      continue;
+    }
+
+    if (mn === 'call') {
+      // Call — queue call target as seed + fall-through
+      const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      if (m) {
+        const target = parseInt(m[1], 16);
+        if (target >= baseAddress && target < endAddress) {
+          workQueue.push(target);
+        }
+      }
+      workQueue.push(addr + insn.size);
+      continue;
+    }
+
+    // Default: fall through to next instruction
+    workQueue.push(addr + insn.size);
+  }
+
+  // Phase 2: Gap fill — scan uncovered byte ranges
+  const coveredAddrs = new Set(instructionMap.keys());
+  let gapStart = -1;
+
+  for (let i = 0; i <= bytes.length; i++) {
+    const addr = baseAddress + i;
+    const isCovered = i < bytes.length && coveredAddrs.has(addr);
+
+    if (!isCovered && gapStart === -1 && i < bytes.length) {
+      gapStart = i;
+    } else if ((isCovered || i === bytes.length) && gapStart !== -1) {
+      const gapEnd = i;
+      const gapLen = gapEnd - gapStart;
+
+      // Skip tiny gaps or pure padding
+      if (gapLen >= 2) {
+        let allPadding = true;
+        for (let j = gapStart; j < gapEnd; j++) {
+          if (bytes[j] !== 0xCC && bytes[j] !== 0x90) {
+            allPadding = false;
+            break;
+          }
+        }
+
+        if (!allPadding) {
+          // Linear sweep this gap
+          const gapBytes = bytes.subarray(gapStart, gapEnd);
+          const gapBaseAddr = baseAddress + gapStart;
+          const gapInsns = disassemble(gapBytes, gapBaseAddr, is64);
+          for (const gi of gapInsns) {
+            if (!instructionMap.has(gi.address)) {
+              gi.source = 'gap-fill';
+              instructionMap.set(gi.address, gi);
+            }
+          }
+        }
+      }
+
+      gapStart = -1;
+    }
+  }
+
+  // Sort by address and return
+  const result = Array.from(instructionMap.values());
+  result.sort((a, b) => a.address - b.address);
+  return result;
 }
 
 function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]][] {
@@ -575,7 +775,7 @@ function buildAllXrefs(
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings';
+  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings';
   args: any;
 }
 
@@ -599,6 +799,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
       case 'disassemble':
         result = disassemble(args.bytes, args.baseAddress, args.is64);
+        break;
+
+      case 'hybridDisassemble':
+        result = hybridDisassemble(args.bytes, args.baseAddress, args.is64, args.seeds, args.pdataRanges);
         break;
 
       case 'detectFunctions':

@@ -27,9 +27,11 @@ import {
   IMAGE_ORDINAL_FLAG64,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
+  IMAGE_DIRECTORY_ENTRY_EXCEPTION,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
 } from './constants';
+import { parsePdata } from './pdata';
 
 const textDecoder = new TextDecoder();
 
@@ -676,6 +678,15 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
+  // 11. Parse .pdata (Exception Directory) — x64 only
+  const runtimeFunctions = is64
+    ? parsePdata(
+        buffer,
+        dataDirectories[IMAGE_DIRECTORY_ENTRY_EXCEPTION] || { virtualAddress: 0, size: 0 },
+        sections,
+      )
+    : undefined;
+
   return {
     buffer,
     is64,
@@ -689,6 +700,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     exports,
     tlsDirectory,
     relocations,
+    runtimeFunctions,
     strings: new Map(),
     stringTypes: new Map(),
   };

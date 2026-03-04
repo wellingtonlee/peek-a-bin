@@ -1077,6 +1077,7 @@ export function DisassemblyView() {
               search.searchMatches[search.searchMatchIdx] === vItem.index;
             const rowSelected = isSelected(vItem.index);
             const isDimmed = insnFilter !== "all" && !matchesFilter(row);
+            const isGapFill = insn.source === 'gap-fill';
 
             const operandTargets = pe ? parseOperandTargets(
               insn,
@@ -1109,7 +1110,7 @@ export function DisassemblyView() {
                         : showBlocks && row.blockIdx % 2 === 1
                           ? "bg-gray-800/15"
                           : ""
-                } ${isDimmed ? "opacity-30" : ""}`}
+                } ${isDimmed ? "opacity-30" : isGapFill ? "opacity-50" : ""}`}
                 style={{
                   position: "absolute",
                   top: 0,

@@ -5,6 +5,7 @@ export interface Instruction {
   opStr: string;
   size: number;
   comment?: string;  // for string reference annotations
+  source?: 'recursive' | 'gap-fill';
 }
 
 export interface DisasmFunction {

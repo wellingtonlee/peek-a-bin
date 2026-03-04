@@ -177,6 +177,12 @@ export interface RelocationBlock {
   entries: RelocationEntry[];
 }
 
+export interface RuntimeFunction {
+  beginAddress: number; // RVA
+  endAddress: number;   // RVA
+  unwindInfoAddress: number; // RVA
+}
+
 export interface PEFile {
   buffer: ArrayBuffer;
   is64: boolean;
@@ -190,6 +196,7 @@ export interface PEFile {
   exports: ExportEntry[];
   tlsDirectory?: TLSDirectory;
   relocations?: RelocationBlock[];
+  runtimeFunctions?: RuntimeFunction[];
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
 }

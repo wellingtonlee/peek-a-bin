@@ -6,6 +6,8 @@ const phaseLabels: Record<string, string> = {
   parsing: "Parsing PE...",
   "extracting-strings": "Extracting strings...",
   "detecting-functions": "Detecting functions...",
+  "recursive-descent": "Recursive descent...",
+  "gap-filling": "Gap filling...",
   "building-xrefs": "Building xrefs...",
 };
 

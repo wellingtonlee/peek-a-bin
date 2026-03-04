@@ -22,7 +22,7 @@ export interface AnnotationSnapshot {
   comments: Record<number, string>;
 }
 
-export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "building-xrefs" | "extracting-strings" | "ready";
+export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "recursive-descent" | "gap-filling" | "building-xrefs" | "extracting-strings" | "ready";
 
 export interface AppState {
   peFile: PEFile | null;

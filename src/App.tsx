@@ -106,6 +106,10 @@ export default function App() {
 
     // Configure worker with maps once, then detect functions off-thread
     const iatLookup = buildIATLookup(pe.imports);
+    const pdataFunctions = pe.runtimeFunctions?.map(rf => ({
+      beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
+      endAddress: pe.optionalHeader.imageBase + rf.endAddress,
+    }));
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
     disasmWorker.configure(pe.strings, iatLookup)
       .then(() => disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
@@ -116,6 +120,7 @@ export default function App() {
           })
           .map((e) => ({ name: e.name, address: pe.optionalHeader.imageBase + e.address })),
         entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
+        pdataFunctions,
       }))
       .then((funcs) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });

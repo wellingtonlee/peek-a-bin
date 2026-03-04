@@ -72,11 +72,30 @@ class DisasmWorkerClient {
     return result;
   }
 
+  async hybridDisassemble(
+    bytes: Uint8Array,
+    baseAddress: number,
+    is64: boolean,
+    seeds: number[],
+    pdataRanges?: { beginAddress: number; endAddress: number }[],
+  ): Promise<Instruction[]> {
+    const key = `hybrid:${baseAddress}:${is64}`;
+    const cached = this.disasmCache.get(key);
+    if (cached) return cached;
+    const result: Instruction[] = await this.send('hybridDisassemble', { bytes, baseAddress, is64, seeds, pdataRanges });
+    this.disasmCache.set(key, result);
+    return result;
+  }
+
   async detectFunctions(
     bytes: Uint8Array,
     baseAddress: number,
     is64: boolean,
-    options?: { exports?: { name: string; address: number }[]; entryPoint?: number }
+    options?: {
+      exports?: { name: string; address: number }[];
+      entryPoint?: number;
+      pdataFunctions?: { beginAddress: number; endAddress: number }[];
+    }
   ): Promise<DisasmFunction[]> {
     const result: { functions: DisasmFunction[]; jumpTables: [number, number[]][] } =
       await this.send('detectFunctions', { bytes, baseAddress, is64, options });
