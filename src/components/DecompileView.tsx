@@ -65,11 +65,15 @@ function tokenizeLine(line: string): Token[] {
 interface DecompileViewProps {
   code: string;
   loading?: boolean;
+  enhancing?: boolean;
+  enhanceError?: string;
   onNavigate?: (addr: number) => void;
+  onEnhance?: () => void;
+  onCancelEnhance?: () => void;
   onClose: () => void;
 }
 
-export function DecompileView({ code, loading, onNavigate, onClose }: DecompileViewProps) {
+export function DecompileView({ code, loading, enhancing, enhanceError, onNavigate, onEnhance, onCancelEnhance, onClose }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
 
   const lines = useMemo(() => {
@@ -106,6 +110,30 @@ export function DecompileView({ code, loading, onNavigate, onClose }: DecompileV
       <div className="flex items-center gap-2 px-3 py-1 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
         <span className="text-gray-300 font-semibold">Pseudocode</span>
         <div className="flex-1" />
+        {onEnhance && (
+          enhancing ? (
+            <button
+              onClick={onCancelEnhance}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
+              title="Cancel AI enhancement"
+            >
+              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Cancel
+            </button>
+          ) : (
+            <button
+              onClick={onEnhance}
+              disabled={loading}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60 disabled:opacity-30 disabled:cursor-default"
+              title="Enhance with AI"
+            >
+              Enhance with AI
+            </button>
+          )
+        )}
         <button
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
@@ -121,6 +149,13 @@ export function DecompileView({ code, loading, onNavigate, onClose }: DecompileV
           Close
         </button>
       </div>
+
+      {/* Error banner */}
+      {enhanceError && (
+        <div className="px-3 py-1.5 text-[10px] text-red-400 bg-red-900/30 border-b border-red-800/50 shrink-0">
+          {enhanceError}
+        </div>
+      )}
 
       {/* Content */}
       {loading ? (

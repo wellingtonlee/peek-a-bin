@@ -22,6 +22,8 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
 import { DecompileView } from "./DecompileView";
+import { hasApiKey, loadSettings } from "../llm/settings";
+import { streamEnhance } from "../llm/client";
 
 interface XrefPopupState {
   x: number;
@@ -209,6 +211,10 @@ export function DisassemblyView() {
   const [showDecompile, setShowDecompile] = useState(false);
   const [decompileResult, setDecompileResult] = useState<string>("");
   const [decompileLoading, setDecompileLoading] = useState(false);
+  const [enhancing, setEnhancing] = useState(false);
+  const [enhanceError, setEnhanceError] = useState("");
+  const enhanceAbortRef = useRef<AbortController | null>(null);
+  const originalCodeRef = useRef<string>("");
 
   // Build IAT lookup map from imports
   const iatMap = useMemo(() => {
@@ -652,6 +658,10 @@ export function DisassemblyView() {
     if (!showDecompile || !currentFunc) return;
     if (prevDecompFuncRef.current === currentFunc.address) return;
     prevDecompFuncRef.current = currentFunc.address;
+    // Cancel any in-progress enhancement
+    enhanceAbortRef.current?.abort();
+    setEnhancing(false);
+    setEnhanceError("");
     // Trigger decompile for new function
     if (!pe || instructions.length === 0) return;
     setDecompileLoading(true);
@@ -668,6 +678,33 @@ export function DisassemblyView() {
       setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
     }).finally(() => setDecompileLoading(false));
   }, [showDecompile, currentFunc?.address, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
+
+  const handleEnhance = useCallback(() => {
+    if (!hasApiKey()) {
+      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+      return;
+    }
+    const config = loadSettings();
+    originalCodeRef.current = decompileResult;
+    setEnhancing(true);
+    setEnhanceError("");
+    const controller = new AbortController();
+    enhanceAbortRef.current = controller;
+    streamEnhance(decompileResult, config, controller.signal, {
+      onToken: (accumulated) => setDecompileResult(accumulated),
+      onDone: () => setEnhancing(false),
+      onError: (error) => {
+        setDecompileResult(originalCodeRef.current);
+        setEnhanceError(error);
+        setEnhancing(false);
+      },
+    });
+  }, [decompileResult]);
+
+  const handleCancelEnhance = useCallback(() => {
+    enhanceAbortRef.current?.abort();
+    setEnhancing(false);
+  }, []);
 
   const handleExportAsm = useCallback((mode: "function" | "section") => {
     setShowExportMenu(false);
@@ -1425,7 +1462,11 @@ export function DisassemblyView() {
           <DecompileView
             code={decompileResult}
             loading={decompileLoading}
+            enhancing={enhancing}
+            enhanceError={enhanceError}
             onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+            onEnhance={handleEnhance}
+            onCancelEnhance={handleCancelEnhance}
             onClose={() => setShowDecompile(false)}
           />
         </div>

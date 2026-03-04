@@ -23,6 +23,7 @@ import { AddressBar } from "./components/AddressBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
+import { SettingsModal } from "./components/SettingsModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 
@@ -30,6 +31,7 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const bufferRef = useRef<ArrayBuffer | null>(null);
 
@@ -52,6 +54,12 @@ export default function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [paletteOpen]);
+
+  useEffect(() => {
+    const handler = () => setSettingsOpen(true);
+    window.addEventListener("peek-a-bin:open-settings", handler);
+    return () => window.removeEventListener("peek-a-bin:open-settings", handler);
+  }, []);
 
   useEffect(() => {
     disasmWorker.init()
@@ -322,6 +330,7 @@ export default function App() {
         )}
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
         <KeyboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );
