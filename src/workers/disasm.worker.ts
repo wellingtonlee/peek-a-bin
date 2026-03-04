@@ -3,9 +3,11 @@ import { Const, Capstone, loadCapstone as _loadCapstone } from 'capstone-wasm';
 // Runtime accepts an options object with instantiateWasm hook, but the
 // published types omit the parameter under bundler module resolution.
 const loadCapstone = _loadCapstone as (args?: Record<string, any>) => Promise<void>;
-import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
+import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/types';
+import type { FunctionSignature } from '../disasm/signatures';
 import { extractStrings } from '../pe/parser';
 import type { SectionHeader } from '../pe/types';
+import { decompileFunction } from '../disasm/decompile/pipeline';
 
 let cs32: any;
 let cs64: any;
@@ -775,7 +777,7 @@ function buildAllXrefs(
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings';
+  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction';
   args: any;
 }
 
@@ -823,6 +825,32 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           strings: Array.from(strings.entries()),
           stringTypes: Array.from(stringTypes.entries()),
         };
+        break;
+      }
+
+      case 'decompileFunction': {
+        const xrefEntries: [number, Xref[]][] = args.xrefEntries ?? [];
+        const xMap = new Map<number, Xref[]>(xrefEntries);
+        const jtEntries: [number, number[]][] = args.jumpTableEntries ?? [];
+        const jtMap = new Map<number, number[]>(jtEntries);
+        const iatEntries: [number, { lib: string; func: string }][] = args.iatEntries ?? [];
+        const iMap = new Map(iatEntries);
+        const strEntries: [number, string][] = args.stringEntries ?? [];
+        const sMap = new Map(strEntries);
+        const funcEntries: [number, { name: string; address: number }][] = args.funcEntries ?? [];
+        const fMap = new Map(funcEntries);
+        result = decompileFunction(
+          args.func as DisasmFunction,
+          args.instructions as Instruction[],
+          xMap,
+          args.stackFrame as StackFrame | null,
+          args.signature as FunctionSignature | null,
+          args.is64 as boolean,
+          jtMap,
+          iMap,
+          sMap,
+          fMap,
+        );
         break;
       }
     }

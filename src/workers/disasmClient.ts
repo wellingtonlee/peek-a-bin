@@ -1,4 +1,5 @@
-import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
+import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/types';
+import type { FunctionSignature } from '../disasm/signatures';
 import type { SectionHeader } from '../pe/types';
 
 interface PendingRequest {
@@ -12,6 +13,7 @@ class DisasmWorkerClient {
   private nextId = 1;
   private disasmCache = new Map<string, Instruction[]>();
   private xrefCache = new WeakMap<Instruction[], Map<number, Xref[]>>();
+  private decompileCache = new Map<number, string>();
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
 
   constructor() {
@@ -61,6 +63,7 @@ class DisasmWorkerClient {
   invalidateCache(): void {
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
+    this.decompileCache.clear();
   }
 
   async disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Promise<Instruction[]> {
@@ -138,6 +141,39 @@ class DisasmWorkerClient {
     const result = new Map(entries);
     this.xrefCache.set(instructions, result);
     return result;
+  }
+
+  async decompileFunction(
+    func: DisasmFunction,
+    instructions: Instruction[],
+    xrefMap: Map<number, Xref[]>,
+    stackFrame: StackFrame | null,
+    signature: FunctionSignature | null,
+    is64: boolean,
+    iatMap: Map<number, { lib: string; func: string }>,
+    stringMap: Map<number, string>,
+    funcMap: Map<number, { name: string; address: number }>,
+  ): Promise<string> {
+    const cached = this.decompileCache.get(func.address);
+    if (cached) return cached;
+    const result: string = await this.send('decompileFunction', {
+      func,
+      instructions,
+      xrefEntries: Array.from(xrefMap.entries()),
+      stackFrame,
+      signature,
+      is64,
+      jumpTableEntries: Array.from(this.jumpTables.entries()),
+      iatEntries: Array.from(iatMap.entries()),
+      stringEntries: Array.from(stringMap.entries()),
+      funcEntries: Array.from(funcMap.entries()),
+    });
+    this.decompileCache.set(func.address, result);
+    return result;
+  }
+
+  invalidateDecompileCache(): void {
+    this.decompileCache.clear();
   }
 }
 

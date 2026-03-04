@@ -21,6 +21,7 @@ import { inferSignature, type FunctionSignature } from "../disasm/signatures";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
+import { DecompileView } from "./DecompileView";
 
 interface XrefPopupState {
   x: number;
@@ -205,6 +206,9 @@ export function DisassemblyView() {
   const [showCFG, setShowCFG] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
+  const [showDecompile, setShowDecompile] = useState(false);
+  const [decompileResult, setDecompileResult] = useState<string>("");
+  const [decompileLoading, setDecompileLoading] = useState(false);
 
   // Build IAT lookup map from imports
   const iatMap = useMemo(() => {
@@ -393,6 +397,12 @@ export function DisassemblyView() {
       if (e.key === "i" || e.key === "I") {
         e.preventDefault();
         setShowDetail((v) => !v);
+        return;
+      }
+
+      if (e.key === "d" || e.key === "D") {
+        e.preventDefault();
+        handleDecompileToggle();
         return;
       }
 
@@ -598,6 +608,67 @@ export function DisassemblyView() {
     [],
   );
 
+  const handleDecompileToggle = useCallback(() => {
+    if (showDecompile) {
+      setShowDecompile(false);
+      return;
+    }
+    if (!currentFunc || !pe || instructions.length === 0) return;
+    setShowDecompile(true);
+    setDecompileLoading(true);
+
+    const sf = analyzeStackFrame(currentFunc, instructions, pe.is64);
+    const sig = inferSignature(currentFunc, instructions, pe.is64);
+
+    // Build funcMap entries for the worker
+    const funcEntries: [number, { name: string; address: number }][] = [];
+    for (const fn of state.functions) {
+      const name = getDisplayName(fn, state.renames);
+      funcEntries.push([fn.address, { name, address: fn.address }]);
+    }
+
+    disasmWorker.decompileFunction(
+      currentFunc,
+      instructions,
+      typedXrefMap,
+      sf,
+      sig,
+      pe.is64,
+      iatMap,
+      pe.strings ?? new Map(),
+      new Map(funcEntries),
+    ).then((result) => {
+      setDecompileResult(result);
+      setDecompileLoading(false);
+    }).catch((err) => {
+      setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
+      setDecompileLoading(false);
+    });
+  }, [showDecompile, currentFunc, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
+
+  // Re-decompile when function changes while panel is open
+  const prevDecompFuncRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!showDecompile || !currentFunc) return;
+    if (prevDecompFuncRef.current === currentFunc.address) return;
+    prevDecompFuncRef.current = currentFunc.address;
+    // Trigger decompile for new function
+    if (!pe || instructions.length === 0) return;
+    setDecompileLoading(true);
+    const sf = analyzeStackFrame(currentFunc, instructions, pe.is64);
+    const sig = inferSignature(currentFunc, instructions, pe.is64);
+    const funcEntries: [number, { name: string; address: number }][] = [];
+    for (const fn of state.functions) {
+      funcEntries.push([fn.address, { name: getDisplayName(fn, state.renames), address: fn.address }]);
+    }
+    disasmWorker.decompileFunction(
+      currentFunc, instructions, typedXrefMap, sf, sig, pe.is64,
+      iatMap, pe.strings ?? new Map(), new Map(funcEntries),
+    ).then(setDecompileResult).catch((err) => {
+      setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
+    }).finally(() => setDecompileLoading(false));
+  }, [showDecompile, currentFunc?.address, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
+
   const handleExportAsm = useCallback((mode: "function" | "section") => {
     setShowExportMenu(false);
     const aw = pe?.is64 ? 16 : 8;
@@ -749,6 +820,14 @@ export function DisassemblyView() {
             title="Show control flow graph for current function"
           >
             CFG
+          </button>
+          <button
+            onClick={handleDecompileToggle}
+            disabled={!currentFunc}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showDecompile ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
+            title="Decompile current function (D)"
+          >
+            Decompile
           </button>
           <button
             onClick={() => setShowXrefPanel((v) => !v)}
@@ -1341,6 +1420,16 @@ export function DisassemblyView() {
           }}
         />
       )}
+      {showDecompile && (
+        <div className="w-[45%] min-w-[300px] max-w-[60%] shrink-0">
+          <DecompileView
+            code={decompileResult}
+            loading={decompileLoading}
+            onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+            onClose={() => setShowDecompile(false)}
+          />
+        </div>
+      )}
       </div>{/* end flex wrapper for content + minimap */}
 
       {/* Call panel */}
@@ -1434,6 +1523,7 @@ export function DisassemblyView() {
                   ["I", "Toggle instruction detail panel"],
                   ["X", "Toggle callers/callees panel"],
                   ["R", "Toggle cross-reference panel"],
+                  ["D", "Toggle decompile panel"],
                   ["B", "Toggle bookmark at current address"],
                   ["Ctrl+P", "Command palette"],
                   ["Ctrl+Z", "Undo annotation"],
