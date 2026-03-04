@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+.git
+.github
+.claude
+.vscode
+.idea
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*

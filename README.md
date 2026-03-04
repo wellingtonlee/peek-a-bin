@@ -1,0 +1,112 @@
+# Peek-a-Bin
+
+Browser-based PE disassembler. All analysis client-side via WebAssembly.
+
+[![Deploy to GitHub Pages](https://github.com/wellingtonlee/peek-a-bin/actions/workflows/deploy.yml/badge.svg)](https://github.com/wellingtonlee/peek-a-bin//actions/workflows/deploy.yml)
+
+![Screenshot](docs/screenshot.png)
+
+**[Live Demo](https://wellingtonlee.github.io/peek-a-bin/)**
+
+## Features
+
+**File Loading**
+- Drag-and-drop PE files directly into the browser
+- Bundled demo binary for quick exploration
+
+**PE Analysis**
+- DOS/NT/optional headers with field descriptions
+- Section table with characteristics and entropy
+- Import and export directory parsing
+
+**Disassembly**
+- x86 and x64 disassembly via Capstone WASM
+- Virtual scrolling for large binaries
+- Jump arrows showing control flow
+- Minimap for navigation overview
+
+**Advanced Analysis**
+- Function detection and boundary identification
+- Cross-references (xrefs)
+- Stack frame reconstruction
+- Control flow graph (CFG) visualization
+
+**Navigation**
+- Command palette (Ctrl/Cmd+P)
+- Go-to-address
+- Breadcrumb trail
+
+**Annotations**
+- Bookmarks, renaming, and comments
+- Undo/redo support
+- Persisted in localStorage
+
+**Data Views**
+- Hex dump
+- Strings extraction
+- Data inspector
+
+## Tech Stack
+
+- React 19, TypeScript 5.7, Vite 6
+- Tailwind CSS 4
+- capstone-wasm (Capstone disassembly engine compiled to WASM)
+- @tanstack/react-virtual (virtual scrolling)
+- Web Workers for off-main-thread disassembly
+
+## Prerequisites
+
+- Node.js 20+
+- npm
+
+## Getting Started
+
+```bash
+git clone https://github.com/wellingtonlee/peek-a-bin.git
+cd peek-a-bin
+npm install
+npm run dev
+# http://localhost:5173/peek-a-bin/
+```
+
+## Production Build
+
+```bash
+npm run build
+npm run preview  # http://localhost:4173/peek-a-bin/
+```
+
+## Docker
+
+```bash
+docker build -t peek-a-bin .
+docker run -p 8080:80 peek-a-bin
+# http://localhost:8080/peek-a-bin/
+```
+
+## Project Structure
+
+```
+src/
+├── components/    # React UI components
+├── pe/            # PE file format parser
+├── disasm/        # Disassembly engine integration
+├── workers/       # Web Worker threads
+├── hooks/         # Custom React hooks
+├── utils/         # Shared utilities
+├── styles/        # Tailwind and global styles
+├── App.tsx        # Root application component
+└── main.tsx       # Entry point
+```
+
+## Architecture
+
+Peek-a-Bin runs entirely client-side. Files are parsed in the browser using a TypeScript PE parser, then disassembled via Capstone compiled to WebAssembly running in a Web Worker. The WASM binary is cached in IndexedDB after first load. Application state is managed with React Context and `useReducer`. Virtual scrolling (via @tanstack/react-virtual) keeps the UI responsive even for large binaries.
+
+```
+File Drop → PE Parser (TS) → Capstone WASM (Worker) → React UI
+```
+
+## License
+
+[MIT](LICENSE)
