@@ -18,6 +18,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - DOS/NT/optional headers with field descriptions
 - Section table with characteristics and entropy
 - Import and export directory parsing
+- Resource directory tree with version info, icon preview, and manifest display
 
 **Disassembly**
 - x86 and x64 disassembly via Capstone WASM
@@ -36,6 +37,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 
 **Navigation**
 - Command palette (Ctrl/Cmd+P)
+- Keyboard shortcuts panel (press `?`)
 - Go-to-address
 - Breadcrumb trail
 
@@ -43,11 +45,17 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Bookmarks, renaming, and comments
 - Undo/redo support
 - Persisted in localStorage
+- Unified export/import (bookmarks, renames, comments, hex patches, functions)
 
 **Data Views**
 - Hex dump
 - Strings extraction
 - Data inspector
+- Resource browser with download support
+
+**Offline / PWA**
+- Installable as a Progressive Web App
+- Full offline support — all assets including the disassembly engine are cached
 
 ## Tech Stack
 
@@ -55,6 +63,8 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Tailwind CSS 4
 - capstone-wasm (Capstone disassembly engine compiled to WASM)
 - @tanstack/react-virtual (virtual scrolling)
+- vite-plugin-pwa (service worker and offline caching)
+- Vitest (unit testing)
 - Web Workers for off-main-thread disassembly
 
 ## Prerequisites
@@ -72,12 +82,30 @@ npm run dev
 # http://localhost:5173/peek-a-bin/
 ```
 
+## Testing
+
+```bash
+npm test          # run all tests once
+npm run test:watch  # watch mode
+```
+
 ## Production Build
 
 ```bash
 npm run build
 npm run preview  # http://localhost:4173/peek-a-bin/
 ```
+
+## Offline / PWA Usage
+
+Peek-a-Bin is a Progressive Web App that works fully offline after the first visit.
+
+1. **Visit the app** in Chrome, Edge, or another PWA-capable browser (either the [live demo](https://wellingtonlee.github.io/peek-a-bin/) or a local `npm run preview` build).
+2. **Install it** — click the install icon in the browser address bar, or use the browser menu (e.g. "Install Peek-a-Bin..." in Chrome). On mobile, use "Add to Home Screen".
+3. **Use offline** — once installed, the app works without an internet connection. The service worker precaches all assets, including the ~2 MB Capstone WASM disassembly engine.
+4. **Updates** — the service worker auto-updates in the background. On the next visit after an update is available, the new version loads automatically.
+
+> **Note:** The PWA only caches the app itself. PE files you analyze are never uploaded or stored outside your browser — all processing is local.
 
 ## Docker
 
@@ -101,6 +129,21 @@ src/
 ├── App.tsx        # Root application component
 └── main.tsx       # Entry point
 ```
+
+## Keyboard Shortcuts
+
+Press `?` in the app to see all shortcuts. Key bindings include:
+
+| Key | Action |
+|-----|--------|
+| `1`–`8` | Switch tabs |
+| `G` | Go to address |
+| `?` | Keyboard shortcuts panel |
+| `Ctrl+P` | Command palette |
+| `Ctrl+F` | Search disassembly |
+| `B` | Toggle bookmark |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
+| `Alt+Left` / `Alt+Right` | Back / Forward |
 
 ## Architecture
 

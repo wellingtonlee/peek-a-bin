@@ -9,7 +9,8 @@ export type ViewTab =
   | "imports"
   | "exports"
   | "hex"
-  | "strings";
+  | "strings"
+  | "resources";
 
 export interface Bookmark {
   address: number;
@@ -65,6 +66,7 @@ export type AppAction =
   | { type: "DELETE_COMMENT"; address: number }
   | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
   | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
+  | { type: "IMPORT_FULL_ANALYSIS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string>; hexPatches: Map<number, number> }
   | { type: "PATCH_BYTE"; offset: number; value: number }
   | { type: "UNDO_PATCH"; offset: number }
   | { type: "CLEAR_PATCHES" }
@@ -220,6 +222,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         bookmarks: mergedBookmarks,
         renames: { ...state.renames, ...action.renames },
         comments: { ...state.comments, ...action.comments },
+      };
+    }
+    case "IMPORT_FULL_ANALYSIS": {
+      const undo = pushUndo(state);
+      const mergedBookmarks = [...state.bookmarks];
+      const existingAddrs = new Set(mergedBookmarks.map(b => b.address));
+      for (const b of action.bookmarks) {
+        if (!existingAddrs.has(b.address)) mergedBookmarks.push(b);
+      }
+      return {
+        ...state,
+        ...undo,
+        bookmarks: mergedBookmarks,
+        renames: { ...state.renames, ...action.renames },
+        comments: { ...state.comments, ...action.comments },
+        hexPatches: new Map([...state.hexPatches, ...action.hexPatches]),
       };
     }
     case "PATCH_BYTE": {

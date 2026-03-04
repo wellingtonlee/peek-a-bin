@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { VitePWA } from "vite-plugin-pwa";
 import { resolve } from "path";
 import { copyFileSync, mkdirSync } from "fs";
 
@@ -22,7 +23,16 @@ function capstoneWasmPlugin() {
 
 export default defineConfig({
   base: "/peek-a-bin/",
-  plugins: [react(), tailwindcss(), capstoneWasmPlugin()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    capstoneWasmPlugin(),
+    VitePWA({
+      registerType: "autoUpdate",
+      workbox: { globPatterns: ["**/*.{js,css,html,wasm,png,svg}"] },
+      manifest: false,
+    }),
+  ],
   optimizeDeps: {
     exclude: ["capstone-wasm"],
   },

@@ -134,6 +134,30 @@ export const RelocTypeNames: Record<number, string> = {
   [IMAGE_REL_BASED_DIR64]: 'DIR64',
 };
 
+// Resource Types
+export const RT_CURSOR = 1;
+export const RT_BITMAP = 2;
+export const RT_ICON = 3;
+export const RT_MENU = 4;
+export const RT_DIALOG = 5;
+export const RT_STRING = 6;
+export const RT_FONTDIR = 7;
+export const RT_FONT = 8;
+export const RT_ACCELERATOR = 9;
+export const RT_RCDATA = 10;
+export const RT_MESSAGETABLE = 11;
+export const RT_GROUP_CURSOR = 12;
+export const RT_GROUP_ICON = 14;
+export const RT_VERSION = 16;
+export const RT_MANIFEST = 24;
+
+export const ResourceTypeNames: Record<number, string> = {
+  1: "Cursor", 2: "Bitmap", 3: "Icon", 4: "Menu", 5: "Dialog",
+  6: "String Table", 7: "Font Directory", 8: "Font", 9: "Accelerator",
+  10: "RC Data", 11: "Message Table", 12: "Group Cursor",
+  14: "Group Icon", 16: "Version Info", 24: "Manifest",
+};
+
 // Import Flags
 export const IMAGE_ORDINAL_FLAG32 = 0x80000000;
 export const IMAGE_ORDINAL_FLAG64 = 0x8000000000000000n;

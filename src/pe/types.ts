@@ -183,6 +183,17 @@ export interface RuntimeFunction {
   unwindInfoAddress: number; // RVA
 }
 
+export interface ResourceNode {
+  id: number | string;
+  children?: ResourceNode[];
+  dataEntry?: { rva: number; size: number; codePage: number };
+}
+
+export interface ResourceTree {
+  root: ResourceNode[];
+  entries: { type: number | string; name: number | string; lang: number; rva: number; size: number }[];
+}
+
 export interface PEFile {
   buffer: ArrayBuffer;
   is64: boolean;
@@ -197,6 +208,7 @@ export interface PEFile {
   tlsDirectory?: TLSDirectory;
   relocations?: RelocationBlock[];
   runtimeFunctions?: RuntimeFunction[];
+  resources?: ResourceTree;
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
 }

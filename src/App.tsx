@@ -18,29 +18,40 @@ const HexView = lazy(() => import("./components/HexView").then(m => ({ default: 
 import { ImportsView } from "./components/ImportsView";
 import { ExportsView } from "./components/ExportsView";
 import { StringsView } from "./components/StringsView";
+import { ResourcesView } from "./components/ResourcesView";
 import { AddressBar } from "./components/AddressBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
+import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const bufferRef = useRef<ArrayBuffer | null>(null);
 
-  // Ctrl+P / Cmd+P to open command palette
+  // Ctrl+P / Cmd+P to open command palette, ? to open shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "p") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+        return;
+      }
+      if (e.key === "?") {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+        if (paletteOpen) return;
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [paletteOpen]);
 
   useEffect(() => {
     disasmWorker.init()
@@ -272,6 +283,7 @@ export default function App() {
     { key: "exports", Component: ExportsView },
     { key: "hex", Component: HexView, isLazy: true },
     { key: "strings", Component: StringsView },
+    { key: "resources", Component: ResourcesView },
   ];
 
   const renderMainView = () => {
@@ -309,6 +321,7 @@ export default function App() {
           </div>
         )}
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+        <KeyboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );

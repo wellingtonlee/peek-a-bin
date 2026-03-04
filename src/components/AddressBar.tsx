@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useAppState, useAppDispatch, getDisplayName, type ViewTab, type Bookmark } from "../hooks/usePEFile";
+import { serializeState, validateImport } from "../utils/exportSchema";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 
@@ -11,6 +12,7 @@ const TABS: { id: ViewTab; label: string }[] = [
   { id: "exports", label: "Exports" },
   { id: "hex", label: "Hex" },
   { id: "strings", label: "Strings" },
+  { id: "resources", label: "Resources" },
 ];
 
 const TAB_KEYS: Record<string, ViewTab> = {
@@ -21,6 +23,7 @@ const TAB_KEYS: Record<string, ViewTab> = {
   "5": "exports",
   "6": "hex",
   "7": "strings",
+  "8": "resources",
 };
 
 interface Suggestion {
@@ -235,21 +238,15 @@ export function AddressBar() {
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const handleExport = useCallback(() => {
-    const data = {
-      fileName: state.fileName,
-      exportedAt: new Date().toISOString(),
-      bookmarks: state.bookmarks,
-      renames: state.renames,
-      comments: state.comments,
-    };
+    const data = serializeState(state);
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${state.fileName ?? "annotations"}.annotations.json`;
+    a.download = `${state.fileName ?? "analysis"}-analysis.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [state.fileName, state.bookmarks, state.renames, state.comments]);
+  }, [state]);
 
   const handleImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -258,11 +255,42 @@ export function AddressBar() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result as string);
-        const bookmarks: Bookmark[] = Array.isArray(data.bookmarks) ? data.bookmarks : [];
-        const renames: Record<number, string> = data.renames && typeof data.renames === "object" ? data.renames : {};
-        const comments: Record<number, string> = data.comments && typeof data.comments === "object" ? data.comments : {};
-        dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
-      } catch { /* ignore bad JSON */ }
+        const validated = validateImport(data);
+        if (validated) {
+          // V1 schema: full analysis import
+          const renames: Record<number, string> = {};
+          for (const [k, v] of Object.entries(validated.renames)) {
+            renames[parseInt(k, 10)] = v;
+          }
+          const comments: Record<number, string> = {};
+          for (const [k, v] of Object.entries(validated.comments)) {
+            comments[parseInt(k, 10)] = v;
+          }
+          const hexPatches = new Map<number, number>();
+          for (const [offset, value] of validated.hexPatches) {
+            if (value >= 0 && value <= 255) {
+              hexPatches.set(offset, value);
+            }
+          }
+          dispatch({
+            type: "IMPORT_FULL_ANALYSIS",
+            bookmarks: validated.bookmarks,
+            renames,
+            comments,
+            hexPatches,
+          });
+        } else if (data && (Array.isArray(data.bookmarks) || (data.renames && typeof data.renames === "object") || (data.comments && typeof data.comments === "object"))) {
+          // Legacy format: annotation-only import
+          const bookmarks: Bookmark[] = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+          const renames: Record<number, string> = data.renames && typeof data.renames === "object" ? data.renames : {};
+          const comments: Record<number, string> = data.comments && typeof data.comments === "object" ? data.comments : {};
+          dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
+        } else {
+          alert("Invalid analysis file format.");
+        }
+      } catch {
+        alert("Failed to parse the imported file.");
+      }
     };
     reader.readAsText(file);
     e.target.value = "";

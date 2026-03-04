@@ -27,11 +27,13 @@ import {
   IMAGE_ORDINAL_FLAG64,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
   IMAGE_DIRECTORY_ENTRY_EXCEPTION,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
 } from './constants';
 import { parsePdata } from './pdata';
+import { parseResourceDirectory } from './resources';
 
 const textDecoder = new TextDecoder();
 
@@ -678,7 +680,18 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     sections
   );
 
-  // 11. Parse .pdata (Exception Directory) — x64 only
+  // 11. Parse Resource Directory
+  let resources: import('./types').ResourceTree | undefined;
+  const resourceDir = dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+  if (resourceDir && resourceDir.virtualAddress > 0 && resourceDir.size > 0) {
+    try {
+      resources = parseResourceDirectory(buffer, resourceDir, sections);
+    } catch {
+      // silently ignore malformed resources
+    }
+  }
+
+  // 12. Parse .pdata (Exception Directory) — x64 only
   const runtimeFunctions = is64
     ? parsePdata(
         buffer,
@@ -701,6 +714,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     tlsDirectory,
     relocations,
     runtimeFunctions,
+    resources,
     strings: new Map(),
     stringTypes: new Map(),
   };
