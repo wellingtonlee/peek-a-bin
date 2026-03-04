@@ -1,5 +1,7 @@
 # Peek-a-Bin
 
+![Peek-a-Bin](docs/logo.png)
+
 Browser-based PE disassembler. All analysis client-side via WebAssembly.
 
 [![Deploy to GitHub Pages](https://github.com/wellingtonlee/peek-a-bin/actions/workflows/deploy.yml/badge.svg)](https://github.com/wellingtonlee/peek-a-bin//actions/workflows/deploy.yml)
