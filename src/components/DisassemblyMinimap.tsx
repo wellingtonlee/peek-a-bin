@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import type { DisasmFunction } from "../disasm/types";
 import type { Loop } from "../disasm/cfg";
+import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
 
 type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
@@ -15,6 +16,15 @@ interface DisassemblyMinimapProps {
   viewportEndIdx: number;
   loopRanges?: Loop[];
   onScrollTo: (rowIdx: number) => void;
+  // Graph mode props
+  mode?: "linear" | "graph";
+  graphBlocks?: LayoutBlock[];
+  graphEdges?: CFGEdge[];
+  graphPan?: { x: number; y: number };
+  graphZoom?: number;
+  graphViewport?: { width: number; height: number };
+  onGraphPanTo?: (pan: { x: number; y: number }) => void;
+  currentAddress?: number;
 }
 
 export function DisassemblyMinimap({
@@ -25,6 +35,14 @@ export function DisassemblyMinimap({
   viewportEndIdx,
   loopRanges,
   onScrollTo,
+  mode = "linear",
+  graphBlocks,
+  graphEdges,
+  graphPan,
+  graphZoom,
+  graphViewport,
+  onGraphPanTo,
+  currentAddress,
 }: DisassemblyMinimapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -38,13 +56,12 @@ export function DisassemblyMinimap({
   // Build a row index → loop depth map for the minimap
   const loopRowMap = useMemo(() => {
     if (!loopRanges || loopRanges.length === 0 || rows.length === 0) return null;
-    // Build address → row index lookup
     const addrToRowIdx = new Map<number, number>();
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       if (row.kind === "insn") addrToRowIdx.set(row.insn.address, i);
     }
-    const m = new Map<number, number>(); // row index → max depth
+    const m = new Map<number, number>();
     for (const loop of loopRanges) {
       if (!loop.bodyAddrs) continue;
       const depth = loop.depth + 1;
@@ -58,7 +75,16 @@ export function DisassemblyMinimap({
     return m;
   }, [loopRanges, rows]);
 
-  const draw = useCallback(() => {
+  // Find which block contains currentAddress (for graph mode highlighting)
+  const currentBlockId = useMemo(() => {
+    if (!graphBlocks || currentAddress === undefined) return -1;
+    for (const b of graphBlocks) {
+      if (currentAddress >= b.startAddr && currentAddress < b.endAddr) return b.id;
+    }
+    return -1;
+  }, [graphBlocks, currentAddress]);
+
+  const drawLinear = useCallback(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container || rows.length === 0) return;
@@ -75,7 +101,6 @@ export function DisassemblyMinimap({
 
     const rowsPerPixel = Math.max(1, rows.length / height);
 
-    // Draw rows
     for (let y = 0; y < height; y++) {
       const startRow = Math.floor(y * rowsPerPixel);
       const endRow = Math.min(Math.floor((y + 1) * rowsPerPixel), rows.length);
@@ -101,34 +126,31 @@ export function DisassemblyMinimap({
         }
       }
 
-      // Draw loop indicator on left edge (thin 3px bar)
       if (maxLoopDepth > 0) {
-        if (maxLoopDepth >= 3) ctx.fillStyle = "rgba(239, 68, 68, 0.5)"; // red
-        else if (maxLoopDepth === 2) ctx.fillStyle = "rgba(249, 115, 22, 0.5)"; // orange
-        else ctx.fillStyle = "rgba(234, 179, 8, 0.5)"; // yellow
+        if (maxLoopDepth >= 3) ctx.fillStyle = "rgba(239, 68, 68, 0.5)";
+        else if (maxLoopDepth === 2) ctx.fillStyle = "rgba(249, 115, 22, 0.5)";
+        else ctx.fillStyle = "rgba(234, 179, 8, 0.5)";
         ctx.fillRect(0, y, 3, 1);
       }
 
-      // Draw main content (offset by loop indicator)
       const contentX = 3;
       const contentW = width - contentX;
 
       if (hasBookmark) {
-        ctx.fillStyle = "rgb(250, 204, 21)"; // yellow-400
+        ctx.fillStyle = "rgb(250, 204, 21)";
         ctx.fillRect(contentX, y, contentW, 1);
       } else if (hasSearchMatch) {
-        ctx.fillStyle = "rgb(251, 146, 60)"; // orange-400
+        ctx.fillStyle = "rgb(251, 146, 60)";
         ctx.fillRect(contentX, y, contentW, 1);
       } else if (hasLabel) {
-        ctx.fillStyle = "rgb(250, 204, 21)"; // yellow-400
+        ctx.fillStyle = "rgb(250, 204, 21)";
         ctx.fillRect(contentX, y, contentW, 1);
       } else if (hasInsn) {
-        ctx.fillStyle = "rgb(55, 65, 81)"; // gray-700
+        ctx.fillStyle = "rgb(55, 65, 81)";
         ctx.fillRect(contentX, y, contentW, 1);
       }
     }
 
-    // Draw viewport indicator
     const vpStartY = Math.floor((viewportStartIdx / rows.length) * height);
     const vpEndY = Math.ceil((viewportEndIdx / rows.length) * height);
     const vpHeight = Math.max(4, vpEndY - vpStartY);
@@ -140,11 +162,78 @@ export function DisassemblyMinimap({
     ctx.strokeRect(0.5, vpStartY + 0.5, width - 1, vpHeight - 1);
   }, [rows, bookmarkSet, viewportStartIdx, viewportEndIdx, loopRowMap]);
 
+  const drawGraph = useCallback(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container || !graphBlocks || graphBlocks.length === 0) return;
+
+    const canvasH = container.clientHeight;
+    const canvasW = 20;
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+
+    // Compute graph bounds
+    const minX = Math.min(...graphBlocks.map(b => b.x));
+    const maxX = Math.max(...graphBlocks.map(b => b.x + b.w));
+    const minY = Math.min(...graphBlocks.map(b => b.y));
+    const maxY = Math.max(...graphBlocks.map(b => b.y + b.h));
+    const graphW = maxX - minX;
+    const graphH = maxY - minY;
+
+    if (graphW === 0 || graphH === 0) return;
+
+    const padding = 2;
+    const scaleX = (canvasW - padding * 2) / graphW;
+    const scaleY = (canvasH - padding * 2) / graphH;
+    const scale = Math.min(scaleX, scaleY);
+
+    const offsetX = padding + (canvasW - padding * 2 - graphW * scale) / 2;
+    const offsetY = padding + (canvasH - padding * 2 - graphH * scale) / 2;
+
+    // Draw blocks
+    for (const block of graphBlocks) {
+      const bx = offsetX + (block.x - minX) * scale;
+      const by = offsetY + (block.y - minY) * scale;
+      const bw = Math.max(1, block.w * scale);
+      const bh = Math.max(1, block.h * scale);
+
+      if (block.id === currentBlockId) {
+        ctx.fillStyle = "rgba(59, 130, 246, 0.6)"; // blue
+      } else {
+        ctx.fillStyle = "rgba(107, 114, 128, 0.5)"; // gray
+      }
+      ctx.fillRect(bx, by, bw, bh);
+    }
+
+    // Draw viewport rectangle
+    if (graphPan && graphZoom && graphViewport) {
+      // Viewport in graph coordinates
+      const vpGx = -graphPan.x / graphZoom;
+      const vpGy = -graphPan.y / graphZoom;
+      const vpGw = graphViewport.width / graphZoom;
+      const vpGh = graphViewport.height / graphZoom;
+
+      const vx = offsetX + (vpGx - minX) * scale;
+      const vy = offsetY + (vpGy - minY) * scale;
+      const vw = vpGw * scale;
+      const vh = vpGh * scale;
+
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.max(0, vx) + 0.5, Math.max(0, vy) + 0.5, Math.min(canvasW, vw), Math.min(canvasH, vh));
+    }
+  }, [graphBlocks, graphPan, graphZoom, graphViewport, currentBlockId]);
+
+  const draw = mode === "graph" ? drawGraph : drawLinear;
+
   useEffect(() => {
     draw();
   }, [draw]);
 
-  // Redraw on resize
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -154,6 +243,41 @@ export function DisassemblyMinimap({
   }, [draw]);
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (mode === "graph") {
+      if (!graphBlocks || graphBlocks.length === 0 || !onGraphPanTo || !graphZoom || !graphViewport) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const clickY = e.clientY - rect.top;
+      const clickX = e.clientX - rect.left;
+
+      const minX = Math.min(...graphBlocks.map(b => b.x));
+      const maxX = Math.max(...graphBlocks.map(b => b.x + b.w));
+      const minY = Math.min(...graphBlocks.map(b => b.y));
+      const maxY = Math.max(...graphBlocks.map(b => b.y + b.h));
+      const graphW = maxX - minX;
+      const graphH = maxY - minY;
+      if (graphW === 0 || graphH === 0) return;
+
+      const canvasW = 20;
+      const canvasH = rect.height;
+      const padding = 2;
+      const scaleX = (canvasW - padding * 2) / graphW;
+      const scaleY = (canvasH - padding * 2) / graphH;
+      const scale = Math.min(scaleX, scaleY);
+      const offsetX = padding + (canvasW - padding * 2 - graphW * scale) / 2;
+      const offsetY = padding + (canvasH - padding * 2 - graphH * scale) / 2;
+
+      const graphClickX = (clickX - offsetX) / scale + minX;
+      const graphClickY = (clickY - offsetY) / scale + minY;
+
+      onGraphPanTo({
+        x: graphViewport.width / 2 - graphClickX * graphZoom,
+        y: graphViewport.height / 2 - graphClickY * graphZoom,
+      });
+      return;
+    }
+
     const canvas = canvasRef.current;
     if (!canvas || rows.length === 0) return;
     const rect = canvas.getBoundingClientRect();
@@ -162,9 +286,13 @@ export function DisassemblyMinimap({
     if (rowIdx >= 0 && rowIdx < rows.length) {
       onScrollTo(rowIdx);
     }
-  }, [rows, onScrollTo]);
+  }, [mode, rows, onScrollTo, graphBlocks, graphZoom, graphViewport, onGraphPanTo]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (mode === "graph") {
+      setTooltip(null);
+      return;
+    }
     const canvas = canvasRef.current;
     if (!canvas || rows.length === 0) return;
     const rect = canvas.getBoundingClientRect();
@@ -182,7 +310,7 @@ export function DisassemblyMinimap({
       }
       setTooltip({ y: e.clientY - rect.top, text });
     }
-  }, [rows]);
+  }, [mode, rows]);
 
   return (
     <div

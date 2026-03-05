@@ -27,6 +27,8 @@ import { hasApiKey, loadSettings } from "../llm/settings";
 import { streamEnhance } from "../llm/client";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
+import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
+import { buildCFG, layoutCFG } from "../disasm/cfg";
 
 // Register family map: canonical → all members
 const REG_FAMILIES: Record<string, string[]> = {
@@ -83,147 +85,6 @@ interface XrefPopupState {
   y: number;
   targetAddr: number;
   sources: Xref[];
-}
-
-function parseBranchTarget(mnemonic: string, opStr: string): number | null {
-  if (
-    mnemonic === "call" ||
-    mnemonic === "jmp" ||
-    mnemonic.startsWith("j")
-  ) {
-    const m = opStr.match(/^0x([0-9a-fA-F]+)$/);
-    if (m) return parseInt(m[1], 16);
-  }
-  return null;
-}
-
-// --- Syntax coloring for operands ---
-interface OpToken { text: string; cls: string }
-
-const REG_NAMES = new Set([
-  "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15",
-  "eax","ebx","ecx","edx","esi","edi","ebp","esp",
-  "ax","bx","cx","dx","si","di","bp","sp",
-  "al","bl","cl","dl","ah","bh","ch","dh","sil","dil","bpl","spl",
-  "r8d","r9d","r10d","r11d","r12d","r13d","r14d","r15d",
-  "r8w","r9w","r10w","r11w","r12w","r13w","r14w","r15w",
-  "r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b",
-  "cs","ds","es","fs","gs","ss",
-  "rip","eip","ip",
-  "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7",
-  "xmm8","xmm9","xmm10","xmm11","xmm12","xmm13","xmm14","xmm15",
-  "ymm0","ymm1","ymm2","ymm3","ymm4","ymm5","ymm6","ymm7",
-]);
-
-function tokenizeOperand(opStr: string): OpToken[] {
-  if (!opStr) return [];
-  const tokens: OpToken[] = [];
-  // regex: memory brackets, hex immediates, register names, other
-  const re = /(\[|\])|(\b0x[0-9a-fA-F]+\b)|(\b[a-z][a-z0-9]{1,4}\b)|([^[\]a-z0-9]+|[0-9]+)/gi;
-  let m: RegExpExecArray | null;
-  let inBracket = false;
-  while ((m = re.exec(opStr)) !== null) {
-    const full = m[0];
-    if (full === "[") {
-      inBracket = true;
-      tokens.push({ text: "[", cls: "text-purple-400" });
-    } else if (full === "]") {
-      inBracket = false;
-      tokens.push({ text: "]", cls: "text-purple-400" });
-    } else if (m[2]) {
-      // hex immediate
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "text-yellow-300" });
-    } else if (m[3] && REG_NAMES.has(full.toLowerCase())) {
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "text-cyan-400" });
-    } else {
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "" });
-    }
-  }
-  return tokens;
-}
-
-interface ClickableTarget {
-  address: number;
-  display?: string;
-}
-
-function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick }: {
-  opStr: string;
-  targets?: ClickableTarget[];
-  onNavigate?: (addr: number) => void;
-  highlightRegs?: Set<string> | null;
-  onRegClick?: (regName: string) => void;
-}) {
-  const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
-  const [copiedTarget, setCopiedTarget] = useState<number | null>(null);
-
-  // Build a map of hex string → target for clickable tokens
-  const targetMap = useMemo(() => {
-    if (!targets || targets.length === 0) return null;
-    const m = new Map<string, ClickableTarget>();
-    for (const t of targets) {
-      // Match "0x" + hex representation (case-insensitive)
-      const hexStr = "0x" + t.address.toString(16);
-      m.set(hexStr.toLowerCase(), t);
-    }
-    return m;
-  }, [targets]);
-
-  return (
-    <>
-      {tokens.map((t, i) => {
-        // Check if this hex token is a navigable target
-        if (targetMap && onNavigate && t.text.startsWith("0x")) {
-          const target = targetMap.get(t.text.toLowerCase());
-          if (target) {
-            return (
-              <span
-                key={i}
-                className={`${copiedTarget === target.address ? "text-green-400" : "text-blue-400"} underline cursor-pointer hover:text-blue-300`}
-                onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  const hex = "0x" + target.address.toString(16).toUpperCase();
-                  navigator.clipboard.writeText(hex);
-                  setCopiedTarget(target.address);
-                  setTimeout(() => setCopiedTarget(null), 1000);
-                }}
-                title={target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`}
-              >
-                {t.text}
-              </span>
-            );
-          }
-        }
-        // Register highlighting
-        const isReg = REG_NAMES.has(t.text.toLowerCase());
-        const isHighlighted = isReg && highlightRegs?.has(t.text.toLowerCase());
-        const cls = isHighlighted ? `${t.cls} reg-highlight cursor-pointer` : isReg && onRegClick ? `${t.cls} cursor-pointer` : t.cls;
-        if (isReg && onRegClick) {
-          return (
-            <span
-              key={i}
-              className={cls}
-              onClick={(e) => { e.stopPropagation(); onRegClick(t.text); }}
-            >
-              {t.text}
-            </span>
-          );
-        }
-        return t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>;
-      })}
-    </>
-  );
-}
-
-// Mnemonic coloring
-function mnemonicClass(m: string): string {
-  if (m === "call") return "text-green-400 font-semibold";
-  if (m === "ret" || m === "retn") return "text-red-400 font-semibold";
-  if (m === "nop" || m === "int3") return "text-gray-600 font-semibold";
-  if (m === "jmp" || m.startsWith("j")) return "text-orange-400 font-semibold";
-  if (m === "push" || m === "pop") return "text-blue-300 font-semibold";
-  return "font-semibold";
 }
 
 // --- Context menu ---
@@ -284,7 +145,17 @@ export function DisassemblyView() {
   const [showArrows, setShowArrows] = useState(true);
   const [showDetail, setShowDetail] = useState(false);
   const [showMinimap, setShowMinimap] = useState(true);
-  const [showCFG, setShowCFG] = useState(false);
+  const [viewMode, setViewMode] = useState<"linear" | "graph">(() => {
+    try {
+      const v = localStorage.getItem("peek-a-bin:view-mode");
+      if (v === "graph") return "graph";
+    } catch {}
+    return "linear";
+  });
+  const [graphPan, setGraphPan] = useState({ x: 0, y: 0 });
+  const [graphZoom, setGraphZoom] = useState(0.8);
+  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<number>>(new Set());
+  const cfgContainerRef = useRef<HTMLDivElement>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
   const [highlightedReg, setHighlightedReg] = useState<string | null>(null);
@@ -425,15 +296,34 @@ export function DisassemblyView() {
     overscan: 50,
   });
 
+  // Persist viewMode
   useEffect(() => {
-    if (suppressScrollRef.current) {
+    try { localStorage.setItem("peek-a-bin:view-mode", viewMode); } catch {}
+  }, [viewMode]);
+
+  // Reset collapsed blocks on function change
+  useEffect(() => {
+    setCollapsedBlocks(new Set());
+  }, [currentFunc?.address]);
+
+  const handleToggleCollapse = useCallback((blockId: number) => {
+    setCollapsedBlocks(prev => {
+      const next = new Set(prev);
+      if (next.has(blockId)) next.delete(blockId);
+      else next.add(blockId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (viewMode === "linear" && suppressScrollRef.current) {
       suppressScrollRef.current = false;
       return;
     }
-    if (rows.length > 0 && currentIndex >= 0) {
+    if (viewMode === "linear" && rows.length > 0 && currentIndex >= 0) {
       virtualizer.scrollToIndex(currentIndex, { align: "center" });
     }
-  }, [currentIndex, rows.length]);
+  }, [currentIndex, rows.length, viewMode]);
 
   // Dispatch current instruction & block info for status bar
   useEffect(() => {
@@ -483,9 +373,9 @@ export function DisassemblyView() {
     };
   }, [ctxMenu, xrefPopup, showExportMenu]);
 
-  // Mouse back/forward buttons
+  // Mouse back/forward buttons (works in both linear and graph modes)
   useEffect(() => {
-    const el = parentRef.current;
+    const el = cfgContainerRef.current;
     if (!el) return;
     const handler = (e: MouseEvent) => {
       if (e.button === 3) { e.preventDefault(); dispatch({ type: "NAV_BACK" }); }
@@ -494,6 +384,19 @@ export function DisassemblyView() {
     el.addEventListener("mouseup", handler);
     return () => el.removeEventListener("mouseup", handler);
   }, [dispatch]);
+
+  // Build CFG block map for graph keyboard navigation (lazy, only called when needed)
+  const buildCFGForNav = useCallback(() => {
+    if (!currentFunc) return null;
+    const cfg = buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
+    const navBlocks = new Map<number, (typeof cfg)[0]>();
+    const addrToBlock = new Map<number, number>();
+    for (const b of cfg) {
+      navBlocks.set(b.id, b);
+      for (const insn of b.insns) addrToBlock.set(insn.address, b.id);
+    }
+    return { navBlocks, addrToBlock };
+  }, [currentFunc, instructions, typedXrefMap]);
 
   // Keyboard navigation
   const handleKeyDown = useCallback(
@@ -533,6 +436,27 @@ export function DisassemblyView() {
         document.activeElement?.tagName === "TEXTAREA"
       )
         return;
+
+      // Space: toggle linear ↔ graph view
+      if (e.key === " ") {
+        e.preventDefault();
+        if (currentFunc) {
+          setViewMode(v => v === "graph" ? "linear" : "graph");
+        }
+        return;
+      }
+
+      // 0: zoom-to-fit in graph mode
+      if (e.key === "0" && viewMode === "graph") {
+        e.preventDefault();
+        const el = cfgContainerRef.current;
+        if (el) {
+          // CFGView sets __zoomToFit on the first child with overflow-hidden
+          const cfgEl = el.querySelector('.cfg-container') as any;
+          if (cfgEl?.__zoomToFit) cfgEl.__zoomToFit();
+        }
+        return;
+      }
 
       if (e.key === "?") {
         e.preventDefault();
@@ -631,6 +555,48 @@ export function DisassemblyView() {
         return;
       }
 
+      // Graph mode arrow key navigation
+      if (viewMode === "graph" && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab")) {
+        e.preventDefault();
+        // Build block data from CFG
+        const cfg = buildCFGForNav();
+        if (!cfg) return;
+        const { navBlocks, addrToBlock } = cfg;
+        const curBlockId = addrToBlock.get(state.currentAddress);
+        if (curBlockId === undefined) return;
+        const curBlock = navBlocks.get(curBlockId);
+        if (!curBlock) return;
+
+        if (e.key === "Tab") {
+          // Cycle through successor blocks
+          if (curBlock.succs.length > 0) {
+            const succBlock = navBlocks.get(curBlock.succs[0]);
+            if (succBlock) dispatch({ type: "SET_ADDRESS", address: succBlock.startAddr });
+          }
+          return;
+        }
+
+        const insnIdx = curBlock.insns.findIndex((insn: Instruction) => insn.address === state.currentAddress);
+        if (e.key === "ArrowDown") {
+          if (insnIdx < curBlock.insns.length - 1) {
+            dispatch({ type: "SET_ADDRESS", address: curBlock.insns[insnIdx + 1].address });
+          } else if (curBlock.succs.length > 0) {
+            // Move to fallthrough successor (last in succs for conditional, first otherwise)
+            const ftIdx = curBlock.succs.length > 1 ? curBlock.succs.length - 1 : 0;
+            const succBlock = navBlocks.get(curBlock.succs[ftIdx]);
+            if (succBlock) dispatch({ type: "SET_ADDRESS", address: succBlock.startAddr });
+          }
+        } else if (e.key === "ArrowUp") {
+          if (insnIdx > 0) {
+            dispatch({ type: "SET_ADDRESS", address: curBlock.insns[insnIdx - 1].address });
+          } else if (curBlock.preds.length > 0) {
+            const predBlock = navBlocks.get(curBlock.preds[0]);
+            if (predBlock) dispatch({ type: "SET_ADDRESS", address: predBlock.insns[predBlock.insns.length - 1].address });
+          }
+        }
+        return;
+      }
+
       const scrollAmount =
         e.key === "PageUp" || e.key === "PageDown" ? 40 : 1;
 
@@ -648,7 +614,7 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack],
+    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack, viewMode],
   );
 
   const handleAddressClick = useCallback(
@@ -755,22 +721,21 @@ export function DisassemblyView() {
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, insn: Instruction) => {
       e.preventDefault();
-      const container = parentRef.current;
+      const container = viewMode === "graph" ? cfgContainerRef.current : parentRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      const rawX = e.clientX - rect.left + container.scrollLeft;
-      const rawY = e.clientY - rect.top + container.scrollTop;
-      // Clamp so popup stays visible within the container viewport
+      const rawX = e.clientX - rect.left;
+      const rawY = e.clientY - rect.top;
       const popW = 180, popH = 300;
-      const maxX = container.scrollLeft + rect.width - popW - 8;
-      const maxY = container.scrollTop + rect.height - popH - 8;
+      const maxX = rect.width - popW - 8;
+      const maxY = rect.height - popH - 8;
       setCtxMenu({
-        x: Math.max(0, Math.min(rawX, maxX)),
-        y: Math.max(0, Math.min(rawY, maxY)),
+        x: Math.max(0, Math.min(rawX + (viewMode === "linear" ? container.scrollLeft : 0), viewMode === "linear" ? maxX + container.scrollLeft : maxX)),
+        y: Math.max(0, Math.min(rawY + (viewMode === "linear" ? container.scrollTop : 0), viewMode === "linear" ? maxY + container.scrollTop : maxY)),
         insn,
       });
     },
-    [],
+    [viewMode],
   );
 
   const handleDecompileToggle = useCallback(() => {
@@ -928,6 +893,14 @@ export function DisassemblyView() {
     URL.revokeObjectURL(url);
   }, [pe, currentFunc, rows, state.renames, state.comments, state.fileName, sectionInfo]);
 
+  // Compute graph layout blocks/edges for minimap (only in graph mode)
+  const { graphBlocksForMinimap, graphEdgesForMinimap } = useMemo(() => {
+    if (viewMode !== "graph" || !currentFunc) return { graphBlocksForMinimap: undefined, graphEdgesForMinimap: undefined };
+    const cfg = buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
+    const layout = layoutCFG(cfg);
+    return { graphBlocksForMinimap: layout.blocks, graphEdgesForMinimap: layout.edges };
+  }, [viewMode, currentFunc, instructions, typedXrefMap]);
+
   if (!pe) return null;
 
   if (disassembling) {
@@ -1018,12 +991,12 @@ export function DisassemblyView() {
             Map
           </button>
           <button
-            onClick={() => setShowCFG(true)}
+            onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
             disabled={!currentFunc}
-            className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 disabled:opacity-30"
-            title="Show control flow graph for current function"
+            className={`px-1.5 py-0.5 rounded text-[10px] ${viewMode === "graph" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
+            title="Toggle graph view (Space)"
           >
-            CFG
+            Graph
           </button>
           <button
             onClick={handleDecompileToggle}
@@ -1192,12 +1165,12 @@ export function DisassemblyView() {
       <Breadcrumbs />
 
       {/* Disassembly content */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden" ref={cfgContainerRef} tabIndex={0} onKeyDown={handleKeyDown}>
+      {viewMode === "linear" ? (
       <div
         ref={parentRef}
         className="flex-1 overflow-auto text-xs leading-5 focus:outline-none relative"
         tabIndex={0}
-        onKeyDown={handleKeyDown}
       >
         {/* Sticky function header */}
         {currentFunc && currentFuncLabelIndex >= 0 && (() => {
@@ -1625,6 +1598,76 @@ export function DisassemblyView() {
           )}
         </div>
       </div>
+      ) : currentFunc ? (
+      <CFGView
+        func={currentFunc}
+        instructions={instructions}
+        typedXrefMap={typedXrefMap}
+        jumpTables={disasmWorker.jumpTables}
+        currentAddress={state.currentAddress}
+        pe={pe}
+        onNavigate={(addr) => {
+          suppressScrollRef.current = true;
+          dispatch({ type: "SET_ADDRESS", address: addr });
+        }}
+        onAddressClick={handleAddressClick}
+        onDoubleClickAddr={handleDoubleClickAddr}
+        onContextMenu={handleContextMenu}
+        onRegClick={handleRegClick}
+        highlightRegs={highlightRegs}
+        copiedAddr={copiedAddr}
+        editingComment={editingComment}
+        onEditComment={setEditingComment}
+        comments={state.comments}
+        renames={state.renames}
+        bookmarkSet={bookmarkSet}
+        iatMap={iatMap}
+        pan={graphPan}
+        zoom={graphZoom}
+        onPanChange={setGraphPan}
+        onZoomChange={setGraphZoom}
+        collapsedBlocks={collapsedBlocks}
+        onToggleCollapse={handleToggleCollapse}
+        onCommentSubmit={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
+        onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
+      />
+      ) : (
+        <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
+          No function selected
+        </div>
+      )}
+      {/* Context menu (graph mode) */}
+      {viewMode === "graph" && ctxMenu && (
+        <div
+          className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button onClick={ctxCopyAddr} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy address
+          </button>
+          <button onClick={ctxCopyInsn} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy instruction
+          </button>
+          <button onClick={ctxCopyBytes} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy bytes
+          </button>
+          <div className="border-t border-gray-700 my-0.5" />
+          <button onClick={ctxGoTo} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Go to address...
+          </button>
+          <button onClick={ctxShowInHex} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Show in Hex
+          </button>
+          <div className="border-t border-gray-700 my-0.5" />
+          <button onClick={ctxToggleBookmark} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Toggle bookmark
+          </button>
+          <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Add/Edit comment
+          </button>
+        </div>
+      )}
       {showMinimap && (
         <DisassemblyMinimap
           rows={rows}
@@ -1638,6 +1681,14 @@ export function DisassemblyView() {
             const addr = rowAddress(rows[idx]);
             if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
           }}
+          mode={viewMode}
+          graphBlocks={viewMode === "graph" ? graphBlocksForMinimap : undefined}
+          graphEdges={viewMode === "graph" ? graphEdgesForMinimap : undefined}
+          graphPan={viewMode === "graph" ? graphPan : undefined}
+          graphZoom={viewMode === "graph" ? graphZoom : undefined}
+          graphViewport={viewMode === "graph" && cfgContainerRef.current ? { width: cfgContainerRef.current.clientWidth, height: cfgContainerRef.current.clientHeight } : undefined}
+          onGraphPanTo={viewMode === "graph" ? setGraphPan : undefined}
+          currentAddress={state.currentAddress}
         />
       )}
       {showDecompile && (
@@ -1731,19 +1782,6 @@ export function DisassemblyView() {
         />
       )}
 
-      {/* CFG overlay */}
-      {showCFG && currentFunc && (
-        <CFGView
-          func={currentFunc}
-          instructions={instructions}
-          typedXrefMap={typedXrefMap}
-          jumpTables={disasmWorker.jumpTables}
-          currentAddress={state.currentAddress}
-          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-          onClose={() => setShowCFG(false)}
-        />
-      )}
-
       {/* Shortcut legend overlay */}
       {showShortcuts && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowShortcuts(false)}>
@@ -1755,6 +1793,7 @@ export function DisassemblyView() {
             <table className="w-full">
               <tbody>
                 {([
+                  ["Space", "Toggle linear / graph view"],
                   ["G", "Go to address (focus address bar)"],
                   ["/ or Ctrl+F", "Search in disassembly"],
                   ["Enter", "Follow branch / next search result"],
@@ -1767,6 +1806,8 @@ export function DisassemblyView() {
                   ["R", "Toggle cross-reference panel"],
                   ["D", "Toggle decompile panel"],
                   ["B", "Toggle bookmark at current address"],
+                  ["0", "Zoom-to-fit (graph mode)"],
+                  ["Tab", "Cycle successor blocks (graph mode)"],
                   ["Ctrl+P", "Command palette"],
                   ["Ctrl+Z", "Undo annotation"],
                   ["Ctrl+Shift+Z", "Redo annotation"],

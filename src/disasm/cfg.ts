@@ -309,6 +309,15 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
   return loops;
 }
 
+export const CFG_LAYOUT = {
+  BLOCK_WIDTH: 320,
+  BLOCK_MIN_HEIGHT: 50,
+  INSN_HEIGHT: 16,
+  V_SPACING: 80,
+  H_SPACING: 50,
+  BLOCK_HEADER: 22,
+} as const;
+
 export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges: CFGEdge[] } {
   if (blocks.length === 0) return { blocks: [], edges: [] };
 
@@ -350,11 +359,7 @@ export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges:
     layerGroups.get(layer)!.push(block.id);
   }
 
-  const BLOCK_WIDTH = 200;
-  const BLOCK_MIN_HEIGHT = 40;
-  const INSN_HEIGHT = 14;
-  const V_SPACING = 60;
-  const H_SPACING = 30;
+  const { BLOCK_WIDTH, BLOCK_MIN_HEIGHT, INSN_HEIGHT, V_SPACING, H_SPACING, BLOCK_HEADER } = CFG_LAYOUT;
 
   const layoutBlocks: LayoutBlock[] = [];
 
@@ -369,7 +374,7 @@ export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges:
     let maxHeight = 0;
     for (const blockId of group) {
       const block = blocks[blockId];
-      const h = Math.max(BLOCK_MIN_HEIGHT, block.insns.length * INSN_HEIGHT + 24);
+      const h = Math.max(BLOCK_MIN_HEIGHT, block.insns.length * INSN_HEIGHT + BLOCK_HEADER + 4);
       maxHeight = Math.max(maxHeight, h);
 
       layoutBlocks.push({
