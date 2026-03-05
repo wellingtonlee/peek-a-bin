@@ -3,6 +3,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import type { DisasmFunction } from "../disasm/types";
+import { SkeletonRows } from "./Skeleton";
 
 type SortMode = "address" | "alpha";
 
@@ -294,7 +295,12 @@ export function Sidebar() {
       </div>
 
       {/* Virtualized functions list */}
-      <div ref={listRef} className="flex-1 overflow-auto">
+      {state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" ? (
+        <div className="flex-1 overflow-hidden">
+          <SkeletonRows count={20} />
+        </div>
+      ) : null}
+      <div ref={listRef} className={`flex-1 overflow-auto${state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" ? " hidden" : ""}`}>
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,

@@ -8,8 +8,13 @@ import { promoteVars } from './promote';
 import { emitFunction } from './emit';
 import { RegState } from './regstate';
 
+export interface DecompileResult {
+  code: string;
+  lineMap: [number, number][];  // serializable for worker transfer
+}
+
 /**
- * Full decompilation pipeline: instructions → pseudocode string.
+ * Full decompilation pipeline: instructions → pseudocode string + line map.
  */
 export function decompileFunction(
   func: DisasmFunction,
@@ -22,12 +27,12 @@ export function decompileFunction(
   iatMap: Map<number, { lib: string; func: string }>,
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
-): string {
+): DecompileResult {
   try {
     // 1. Build CFG + detect loops
     const blocks = buildCFG(func, instructions, xrefMap, jumpTables);
     if (blocks.length === 0) {
-      return `// ${func.name}: no instructions found`;
+      return { code: `// ${func.name}: no instructions found`, lineMap: [] };
     }
     const loops = detectLoops(blocks);
 
@@ -53,9 +58,16 @@ export function decompileFunction(
     // 5. Wrap in IRFunction with variable promotion
     const irFunc = promoteVars(func.name, func.address, structured, stackFrame, signature, is64);
 
-    // 6. Emit C text
-    return emitFunction(irFunc);
+    // 6. Emit C text + lineMap
+    const result = emitFunction(irFunc);
+    return {
+      code: result.code,
+      lineMap: Array.from(result.lineMap.entries()),
+    };
   } catch (err: any) {
-    return `// Decompilation error for ${func.name}: ${err?.message ?? String(err)}`;
+    return {
+      code: `// Decompilation error for ${func.name}: ${err?.message ?? String(err)}`,
+      lineMap: [],
+    };
   }
 }

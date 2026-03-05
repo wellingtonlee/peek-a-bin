@@ -7,13 +7,15 @@ import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/ty
 import type { FunctionSignature } from '../disasm/signatures';
 import { extractStrings } from '../pe/parser';
 import type { SectionHeader } from '../pe/types';
-import { decompileFunction } from '../disasm/decompile/pipeline';
+import { decompileFunction, type DecompileResult } from '../disasm/decompile/pipeline';
+import { isPlausibleIOCTL, formatIOCTL, detectIRPDispatches, type IRPDispatchEntry } from '../analysis/driver';
 
 let cs32: any;
 let cs64: any;
 let initialized = false;
 let stringMap: Map<number, string> = new Map();
 let iatMap: Map<number, { lib: string; func: string }> = new Map();
+let driverMode = false;
 
 // --- IndexedDB WASM module cache ---
 const IDB_NAME = 'peek-a-bin-wasm';
@@ -190,6 +192,20 @@ function mapInsn(insn: any): Instruction {
           const addr = parseInt(addrStr, 16);
           const iat = iatMap.get(addr);
           if (iat) { instruction.comment = `${iat.lib}!${iat.func}`; break; }
+        }
+      }
+    }
+  }
+
+  // IOCTL annotation (driver mode only)
+  if (driverMode && !instruction.comment) {
+    const hexMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+    if (hexMatches) {
+      for (const hexStr of hexMatches) {
+        const val = parseInt(hexStr, 16);
+        if (isPlausibleIOCTL(val)) {
+          const decoded = formatIOCTL(val);
+          if (decoded) { instruction.comment = decoded; break; }
         }
       }
     }
@@ -777,7 +793,7 @@ function buildAllXrefs(
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction';
+  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction' | 'detectIRPDispatches';
   args: any;
 }
 
@@ -796,6 +812,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         // Receive maps as entries arrays (Maps don't survive structured clone)
         stringMap = new Map(args.stringEntries);
         iatMap = new Map(args.iatEntries);
+        if (args.driverMode !== undefined) driverMode = args.driverMode;
         result = true;
         break;
 
@@ -827,6 +844,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         };
         break;
       }
+
+      case 'detectIRPDispatches':
+        result = detectIRPDispatches(args.instructions as Instruction[], args.is64 as boolean);
+        break;
 
       case 'decompileFunction': {
         const xrefEntries: [number, Xref[]][] = args.xrefEntries ?? [];

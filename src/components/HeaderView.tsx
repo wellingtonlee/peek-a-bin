@@ -97,6 +97,57 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+function SignatureSection() {
+  const { peFile: pe } = useAppState();
+  const [open, setOpen] = useState(true);
+
+  if (!pe) return null;
+  const cert = pe.certificate;
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen(!open)}
+        className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
+      >
+        <span className="text-[8px]">{open ? "\u25BC" : "\u25B6"}</span>
+        Digital Signature
+        {cert?.signed ? (
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">Signed</span>
+        ) : (
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-700 text-gray-400">Unsigned</span>
+        )}
+      </button>
+      {open && cert?.signed && (
+        <table>
+          <tbody>
+            {cert.subject && (
+              <Row label="Subject">{cert.subject}</Row>
+            )}
+            {cert.issuer && (
+              <Row label="Issuer">{cert.issuer}</Row>
+            )}
+            {cert.notBefore && (
+              <Row label="Valid From">{cert.notBefore}</Row>
+            )}
+            {cert.notAfter && (
+              <Row label="Valid Until">{cert.notAfter}</Row>
+            )}
+            <Row label="Signature Size">{cert.signatureSize.toLocaleString()} bytes</Row>
+            <Row label="Revision">0x{cert.revision.toString(16).toUpperCase().padStart(4, '0')}</Row>
+            <Row label="Certificate Type">
+              {cert.certificateType === 0x0002 ? 'PKCS#7 SignedData' : `0x${cert.certificateType.toString(16).toUpperCase()}`}
+            </Row>
+          </tbody>
+        </table>
+      )}
+      {open && !cert?.signed && (
+        <p className="text-gray-500 text-xs">No digital signature found in this binary.</p>
+      )}
+    </section>
+  );
+}
+
 function TLSSection() {
   const { peFile: pe } = useAppState();
   const dispatch = useAppDispatch();
@@ -458,6 +509,9 @@ export function HeaderView() {
           </div>
         )}
       </section>
+
+      {/* Digital Signature */}
+      <SignatureSection />
 
       {/* TLS Directory */}
       <TLSSection />

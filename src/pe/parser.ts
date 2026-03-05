@@ -34,6 +34,7 @@ import {
 } from './constants';
 import { parsePdata } from './pdata';
 import { parseResourceDirectory } from './resources';
+import { parseSecurityDirectory } from './authenticode';
 
 const textDecoder = new TextDecoder();
 
@@ -700,6 +701,14 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
       )
     : undefined;
 
+  // 13. Parse Authenticode / Security Directory
+  let certificate: import('./authenticode').CertificateInfo | undefined;
+  try {
+    certificate = parseSecurityDirectory(buffer, dataDirectories) ?? undefined;
+  } catch {
+    // silently ignore malformed certificates
+  }
+
   return {
     buffer,
     is64,
@@ -717,6 +726,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     resources,
     strings: new Map(),
     stringTypes: new Map(),
+    certificate,
   };
 }
 

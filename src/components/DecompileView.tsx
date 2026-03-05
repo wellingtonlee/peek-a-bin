@@ -1,4 +1,4 @@
-import { useMemo, useRef, useCallback } from "react";
+import { useMemo, useRef, useCallback, useEffect } from "react";
 
 // ── Syntax Highlighting ──
 
@@ -71,15 +71,22 @@ interface DecompileViewProps {
   onEnhance?: () => void;
   onCancelEnhance?: () => void;
   onClose: () => void;
+  highlightLines?: Set<number>;
+  onLineClick?: (lineNum: number) => void;
+  syncDisabled?: boolean;
 }
 
-export function DecompileView({ code, loading, enhancing, enhanceError, onNavigate, onEnhance, onCancelEnhance, onClose }: DecompileViewProps) {
+export function DecompileView({
+  code, loading, enhancing, enhanceError, onNavigate, onEnhance, onCancelEnhance, onClose,
+  highlightLines, onLineClick, syncDisabled,
+}: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
 
   const lines = useMemo(() => {
     if (!code) return [];
     return code.split("\n").map((line, i) => ({
-      num: i + 1,
+      num: i,
+      displayNum: i + 1,
       tokens: tokenizeLine(line),
     }));
   }, [code]);
@@ -104,11 +111,24 @@ export function DecompileView({ code, loading, enhancing, enhanceError, onNaviga
     [onNavigate],
   );
 
+  // Auto-scroll to first highlighted line
+  useEffect(() => {
+    if (!highlightLines || highlightLines.size === 0 || !preRef.current) return;
+    const firstLine = Math.min(...highlightLines);
+    const lineEl = preRef.current.querySelector(`[data-line="${firstLine}"]`);
+    if (lineEl) {
+      lineEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [highlightLines]);
+
   return (
     <div className="flex flex-col h-full border-l border-gray-700 bg-gray-900/95">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
         <span className="text-gray-300 font-semibold">Pseudocode</span>
+        {syncDisabled && (
+          <span className="text-gray-500 text-[10px] italic">(sync disabled)</span>
+        )}
         <div className="flex-1" />
         {onEnhance && (
           enhancing ? (
@@ -172,22 +192,30 @@ export function DecompileView({ code, loading, enhancing, enhanceError, onNaviga
           className="flex-1 overflow-auto px-3 py-2 text-xs leading-5 font-mono text-gray-200 select-text"
           onClick={handleClick}
         >
-          {lines.map((line) => (
-            <div key={line.num} className="flex hover:bg-gray-800/30">
-              <span className="inline-block w-8 text-right mr-3 text-gray-600 select-none shrink-0">
-                {line.num}
-              </span>
-              <span>
-                {line.tokens.map((tok, i) =>
-                  tok.cls ? (
-                    <span key={i} className={tok.cls}>{tok.text}</span>
-                  ) : (
-                    <span key={i}>{tok.text}</span>
-                  ),
-                )}
-              </span>
-            </div>
-          ))}
+          {lines.map((line) => {
+            const isHighlighted = highlightLines?.has(line.num);
+            return (
+              <div
+                key={line.num}
+                data-line={line.num}
+                className={`flex ${isHighlighted ? "bg-blue-900/30" : "hover:bg-gray-800/30"} ${onLineClick && !syncDisabled ? "cursor-pointer" : ""}`}
+                onClick={() => onLineClick?.(line.num)}
+              >
+                <span className="inline-block w-8 text-right mr-3 text-gray-600 select-none shrink-0">
+                  {line.displayNum}
+                </span>
+                <span>
+                  {line.tokens.map((tok, i) =>
+                    tok.cls ? (
+                      <span key={i} className={tok.cls}>{tok.text}</span>
+                    ) : (
+                      <span key={i}>{tok.text}</span>
+                    ),
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </pre>
       )}
     </div>

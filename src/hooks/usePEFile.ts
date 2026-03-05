@@ -1,6 +1,7 @@
 import { createContext, useContext, useReducer, type Dispatch } from "react";
 import type { PEFile } from "../pe/types";
 import type { DisasmFunction } from "../disasm/types";
+import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
 
 export type ViewTab =
   | "disassembly"
@@ -46,6 +47,10 @@ export interface AppState {
   stringXrefs: Map<number, number[]> | null;
   importXrefs: Map<number, number[]> | null;
   analysisPhase: AnalysisPhase;
+  currentInstruction: { bytes: number[]; size: number } | null;
+  currentBlock: { startAddr: number; endAddr: number } | null;
+  driverInfo: DriverInfo | null;
+  irpHandlers: IRPDispatchEntry[];
 }
 
 export type AppAction =
@@ -78,6 +83,10 @@ export type AppAction =
   | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
   | { type: "SET_XREFS"; stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]> }
   | { type: "SET_ANALYSIS_PHASE"; phase: AnalysisPhase }
+  | { type: "SET_CURRENT_INSTRUCTION"; instruction: { bytes: number[]; size: number } | null }
+  | { type: "SET_CURRENT_BLOCK"; block: { startAddr: number; endAddr: number } | null }
+  | { type: "SET_DRIVER_INFO"; driverInfo: DriverInfo }
+  | { type: "SET_IRP_HANDLERS"; handlers: IRPDispatchEntry[] }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -101,6 +110,10 @@ export const initialState: AppState = {
   stringXrefs: null,
   importXrefs: null,
   analysisPhase: "idle",
+  currentInstruction: null,
+  currentBlock: null,
+  driverInfo: null,
+  irpHandlers: [],
 };
 
 const MAX_HISTORY = 50;
@@ -302,6 +315,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, stringXrefs: action.stringXrefs, importXrefs: action.importXrefs };
     case "SET_ANALYSIS_PHASE":
       return { ...state, analysisPhase: action.phase };
+    case "SET_CURRENT_INSTRUCTION":
+      return { ...state, currentInstruction: action.instruction };
+    case "SET_CURRENT_BLOCK":
+      return { ...state, currentBlock: action.block };
+    case "SET_DRIVER_INFO":
+      return { ...state, driverInfo: action.driverInfo };
+    case "SET_IRP_HANDLERS":
+      return { ...state, irpHandlers: action.handlers };
     case "RESET":
       return { ...initialState, disasmReady: state.disasmReady };
     default:

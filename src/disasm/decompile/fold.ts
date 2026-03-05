@@ -1,6 +1,19 @@
 import type { IRExpr, IRStmt } from './ir';
 import { irConst, canonReg } from './ir';
 
+/** Shallow structural equality for simple expressions (reg, const, var). */
+function exprEq(a: IRExpr, b: IRExpr): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'const' && b.kind === 'const') return a.value === b.value;
+  if (a.kind === 'reg' && b.kind === 'reg') return canonReg(a.name) === canonReg(b.name);
+  if (a.kind === 'var' && b.kind === 'var') return a.name === b.name;
+  if (a.kind === 'binary' && b.kind === 'binary')
+    return a.op === b.op && exprEq(a.left, b.left) && exprEq(a.right, b.right);
+  if (a.kind === 'unary' && b.kind === 'unary')
+    return a.op === b.op && exprEq(a.operand, b.operand);
+  return false;
+}
+
 // ── Constant Folding ──
 
 function foldExpr(expr: IRExpr): IRExpr {
@@ -54,6 +67,23 @@ function foldExpr(expr: IRExpr): IRExpr {
       if (expr.op === '*' && left.value === 0) return irConst(0, left.size);
       // 1 * x → x
       if (expr.op === '*' && left.value === 1) return right;
+    }
+
+    // Same-operand patterns (after folding both sides)
+    if (exprEq(left, right)) {
+      // x - x → 0, x ^ x → 0
+      if (expr.op === '-' || expr.op === '^') return irConst(0, 4);
+      // x & x → x, x | x → x
+      if (expr.op === '&' || expr.op === '|') return left;
+    }
+
+    // Additional constant-right patterns
+    if (right.kind === 'const') {
+      // x & 0 → 0
+      if (expr.op === '&' && right.value === 0) return irConst(0, right.size);
+      // x | 0xFFFFFFFF → 0xFFFFFFFF
+      if (expr.op === '|' && (right.value === 0xFFFFFFFF || right.value === -1))
+        return irConst(right.value, right.size);
     }
 
     return { ...expr, left, right };

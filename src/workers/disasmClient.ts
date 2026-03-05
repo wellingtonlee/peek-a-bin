@@ -1,6 +1,7 @@
 import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/types';
 import type { FunctionSignature } from '../disasm/signatures';
 import type { SectionHeader } from '../pe/types';
+import type { IRPDispatchEntry } from '../analysis/driver';
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -13,7 +14,7 @@ class DisasmWorkerClient {
   private nextId = 1;
   private disasmCache = new Map<string, Instruction[]>();
   private xrefCache = new WeakMap<Instruction[], Map<number, Xref[]>>();
-  private decompileCache = new Map<number, string>();
+  private decompileCache = new Map<number, { code: string; lineMap: Map<number, number> }>();
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
 
   constructor() {
@@ -50,13 +51,15 @@ class DisasmWorkerClient {
 
   async configure(
     strings: Map<number, string>,
-    iat: Map<number, { lib: string; func: string }>
+    iat: Map<number, { lib: string; func: string }>,
+    options?: { driverMode?: boolean },
   ): Promise<void> {
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
     await this.send('configure', {
       stringEntries: Array.from(strings.entries()),
       iatEntries: Array.from(iat.entries()),
+      driverMode: options?.driverMode,
     });
   }
 
@@ -134,6 +137,10 @@ class DisasmWorkerClient {
     };
   }
 
+  async detectIRPDispatches(instructions: Instruction[], is64: boolean): Promise<IRPDispatchEntry[]> {
+    return this.send('detectIRPDispatches', { instructions, is64 });
+  }
+
   async buildTypedXrefMap(instructions: Instruction[]): Promise<Map<number, Xref[]>> {
     const cached = this.xrefCache.get(instructions);
     if (cached) return cached;
@@ -153,10 +160,10 @@ class DisasmWorkerClient {
     iatMap: Map<number, { lib: string; func: string }>,
     stringMap: Map<number, string>,
     funcMap: Map<number, { name: string; address: number }>,
-  ): Promise<string> {
+  ): Promise<{ code: string; lineMap: Map<number, number> }> {
     const cached = this.decompileCache.get(func.address);
     if (cached) return cached;
-    const result: string = await this.send('decompileFunction', {
+    const result: { code: string; lineMap: [number, number][] } = await this.send('decompileFunction', {
       func,
       instructions,
       xrefEntries: Array.from(xrefMap.entries()),
@@ -168,8 +175,9 @@ class DisasmWorkerClient {
       stringEntries: Array.from(stringMap.entries()),
       funcEntries: Array.from(funcMap.entries()),
     });
-    this.decompileCache.set(func.address, result);
-    return result;
+    const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
+    this.decompileCache.set(func.address, parsed);
+    return parsed;
   }
 
   invalidateDecompileCache(): void {

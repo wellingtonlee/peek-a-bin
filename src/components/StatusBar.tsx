@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { useAppState, getDisplayName } from "../hooks/usePEFile";
+import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
+import { Skeleton } from "./Skeleton";
 
 const phaseLabels: Record<string, string> = {
   parsing: "Parsing PE...",
@@ -10,6 +11,27 @@ const phaseLabels: Record<string, string> = {
   "gap-filling": "Gap filling...",
   "building-xrefs": "Building xrefs...",
 };
+
+const SECTION_CHAR_FLAGS: [number, string][] = [
+  [0x00000020, "CODE"],
+  [0x00000040, "INITIALIZED_DATA"],
+  [0x00000080, "UNINITIALIZED_DATA"],
+  [0x20000000, "EXECUTE"],
+  [0x40000000, "READ"],
+  [0x80000000, "WRITE"],
+  [0x02000000, "DISCARDABLE"],
+  [0x04000000, "NOT_CACHED"],
+  [0x08000000, "NOT_PAGED"],
+  [0x10000000, "SHARED"],
+];
+
+function decodeSectionChars(characteristics: number): string {
+  const flags: string[] = [];
+  for (const [bit, name] of SECTION_CHAR_FLAGS) {
+    if ((characteristics & bit) !== 0) flags.push(name);
+  }
+  return flags.join(" | ") || "NONE";
+}
 
 function Spinner() {
   return (
@@ -22,6 +44,7 @@ function Spinner() {
 
 export function StatusBar() {
   const state = useAppState();
+  const dispatch = useAppDispatch();
   const pe = state.peFile;
 
   const containingFunc = useContainingFunc();
@@ -42,15 +65,43 @@ export function StatusBar() {
   const isAnalyzing = phase !== "idle" && phase !== "ready";
   const phaseLabel = phaseLabels[phase];
 
+  const insnBytesStr = state.currentInstruction
+    ? `${state.currentInstruction.size}B: ${state.currentInstruction.bytes.map(b => b.toString(16).toUpperCase().padStart(2, "0")).join(" ")}`
+    : null;
+
+  const blockStr = state.currentBlock
+    ? `Block: 0x${state.currentBlock.startAddr.toString(16).toUpperCase()} – 0x${state.currentBlock.endAddr.toString(16).toUpperCase()}`
+    : null;
+
+  const sectionCharsTooltip = sectionInfo ? decodeSectionChars(sectionInfo.characteristics) : undefined;
+
   return (
     <div className="h-5 bg-gray-900 border-t border-gray-700 text-[10px] flex items-center px-4 text-gray-400 shrink-0 select-none">
       <span className="mr-4">
         <span className="text-gray-500">Function:</span>{" "}
-        <span className="text-gray-300">{funcName}</span>
+        {isAnalyzing && !containingFunc ? (
+          <span className="inline-block align-middle"><Skeleton width="60px" height="10px" /></span>
+        ) : containingFunc ? (
+          <button
+            className="text-gray-300 hover:text-blue-400 hover:underline"
+            onClick={() => {
+              dispatch({ type: "SET_ADDRESS", address: containingFunc.address });
+              dispatch({ type: "SET_TAB", tab: "disassembly" });
+            }}
+          >
+            {funcName}
+          </button>
+        ) : (
+          <span className="text-gray-300">---</span>
+        )}
       </span>
-      <span className="mr-4">
+      <span className="mr-4" title={sectionCharsTooltip}>
         <span className="text-gray-500">Section:</span>{" "}
-        <span className="text-gray-300">{sectionInfo?.name ?? "---"}</span>
+        {isAnalyzing && !sectionInfo ? (
+          <span className="inline-block align-middle"><Skeleton width="40px" height="10px" /></span>
+        ) : (
+          <span className="text-gray-300">{sectionInfo?.name ?? "---"}</span>
+        )}
       </span>
       <span className="mr-4">
         <span className="text-gray-500">RVA:</span>{" "}
@@ -62,10 +113,21 @@ export function StatusBar() {
           {fileOffset !== null ? `0x${fileOffset.toString(16).toUpperCase()}` : "---"}
         </span>
       </span>
+      {insnBytesStr && (
+        <span className="mr-4 font-mono text-gray-300">{insnBytesStr}</span>
+      )}
+      {blockStr && (
+        <span className="mr-4 text-gray-500">{blockStr}</span>
+      )}
       <div className="flex-1" />
       <span className="mr-4">
         <span className="text-gray-500">{state.functions.length}</span> functions
       </span>
+      {state.driverInfo?.isDriver && (
+        <span className="mr-4 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-900/40 text-amber-400 border border-amber-700/50">
+          KERNEL DRIVER
+        </span>
+      )}
       <span>
         {isAnalyzing ? (
           <span className="text-yellow-400">

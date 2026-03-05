@@ -69,6 +69,7 @@ export function HexView() {
   const [editValue, setEditValue] = useState("");
   const [showEntropy, setShowEntropy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
+  const [hexCtxMenu, setHexCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [entropyTooltip, setEntropyTooltip] = useState<{ x: number; blockIdx: number; offset: number; endOffset: number; value: number } | null>(null);
 
   // Selection range helpers
@@ -262,6 +263,52 @@ export function HexView() {
     if (!sectionBytes) return 0;
     return sectionBytes[localOffset];
   }, [sectionBytes]);
+
+  // Dismiss hex context menu on click outside or Escape
+  useEffect(() => {
+    if (!hexCtxMenu) return;
+    const dismiss = () => setHexCtxMenu(null);
+    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", keyDismiss);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", keyDismiss);
+    };
+  }, [hexCtxMenu]);
+
+  const handleHexContextMenu = useCallback((e: React.MouseEvent) => {
+    if (!selectionRange || !sectionBytes) return;
+    e.preventDefault();
+    setHexCtxMenu({ x: e.clientX, y: e.clientY });
+  }, [selectionRange, sectionBytes]);
+
+  const copyAsCArray = useCallback(() => {
+    if (!selectionRange || !sectionBytes) return;
+    const bytes: string[] = [];
+    for (let i = selectionRange.start; i <= selectionRange.end; i++) {
+      bytes.push(`0x${getByteValue(i).toString(16).toUpperCase().padStart(2, "0")}`);
+    }
+    navigator.clipboard.writeText(`unsigned char data[] = { ${bytes.join(", ")} };`);
+    setHexCtxMenu(null);
+  }, [selectionRange, sectionBytes, getByteValue]);
+
+  const copyAsHexString = useCallback(() => {
+    if (!selectionRange || !sectionBytes) return;
+    const parts: string[] = [];
+    for (let i = selectionRange.start; i <= selectionRange.end; i++) {
+      parts.push(getByteValue(i).toString(16).toLowerCase().padStart(2, "0"));
+    }
+    navigator.clipboard.writeText(parts.join(" "));
+    setHexCtxMenu(null);
+  }, [selectionRange, sectionBytes, getByteValue]);
+
+  const copySelectionAddress = useCallback(() => {
+    if (!selectionRange) return;
+    const addr = baseAddress + selectionRange.start;
+    navigator.clipboard.writeText(`0x${addr.toString(16).toUpperCase()}`);
+    setHexCtxMenu(null);
+  }, [selectionRange, baseAddress]);
 
   // Keyboard: Ctrl/Cmd+C to copy selection, Esc to clear
   useEffect(() => {
@@ -492,7 +539,7 @@ export function HexView() {
       </div>
 
       {/* Hex rows */}
-      <div ref={parentRef} className="flex-1 overflow-auto">
+      <div ref={parentRef} className="flex-1 overflow-auto relative" onContextMenu={handleHexContextMenu}>
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -657,6 +704,25 @@ export function HexView() {
           })}
         </div>
       </div>
+
+      {/* Hex context menu */}
+      {hexCtxMenu && selectionRange && (
+        <div
+          className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
+          style={{ left: hexCtxMenu.x, top: hexCtxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button onClick={copyAsCArray} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy as C byte array
+          </button>
+          <button onClick={copyAsHexString} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy as hex string
+          </button>
+          <button onClick={copySelectionAddress} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+            Copy address
+          </button>
+        </div>
+      )}
 
       {/* Data Inspector */}
       {selectedOffset !== null && selectionEnd === null && sectionBytes && (

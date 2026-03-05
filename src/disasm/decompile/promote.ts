@@ -1,7 +1,7 @@
 import type { StackFrame } from '../types';
 import type { FunctionSignature } from '../signatures';
 import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam } from './ir';
-import { irVar, canonReg } from './ir';
+import { irVar, canonReg, walkStmts } from './ir';
 
 // ── Size → C type mapping ──
 
@@ -183,6 +183,66 @@ function hasReturnValue(body: IRStmt[]): boolean {
   return false;
 }
 
+/**
+ * Infer variable types from access widths and cast signedness.
+ * Walks the pre-promotion body to find IRDeref stack accesses that map to
+ * known locals, then checks for IRCast wrappers to determine signedness.
+ */
+function inferVarTypes(
+  body: IRStmt[],
+  locals: IRLocal[],
+  is64: boolean,
+  varLookup: Map<number, string>,
+  paramLookup: Map<number, string>,
+): void {
+  const localsByName = new Map<string, IRLocal>();
+  for (const l of locals) localsByName.set(l.name, l);
+
+  // Track: varName → { minSize, signed: boolean | null }
+  const info = new Map<string, { minSize: number; signed: boolean | null }>();
+
+  walkStmts(body, (expr) => {
+    // Check for cast wrapping a stack deref: (int8_t)*(deref)
+    if (expr.kind === 'cast') {
+      const inner = expr.operand;
+      const sa = matchStackAccess(inner, is64);
+      if (sa) {
+        const name = (sa.isParam ? paramLookup : varLookup).get(sa.offset);
+        if (name && localsByName.has(name)) {
+          const entry = info.get(name) ?? { minSize: 8, signed: null };
+          const castSigned = expr.type.startsWith('int');
+          const castSize = parseInt(expr.type.replace(/\D/g, ''), 10) / 8 || 4;
+          entry.minSize = Math.min(entry.minSize, castSize);
+          if (entry.signed === null) entry.signed = castSigned;
+          else if (castSigned) entry.signed = true; // signed wins
+          info.set(name, entry);
+        }
+      }
+    }
+    // Track deref sizes for stack variables
+    if (expr.kind === 'deref') {
+      const sa = matchStackAccess(expr, is64);
+      if (sa) {
+        const name = (sa.isParam ? paramLookup : varLookup).get(sa.offset);
+        if (name && localsByName.has(name)) {
+          const entry = info.get(name) ?? { minSize: 8, signed: null };
+          entry.minSize = Math.min(entry.minSize, expr.size);
+          info.set(name, entry);
+        }
+      }
+    }
+  });
+
+  // Apply inferred types
+  for (const [name, { minSize, signed }] of info) {
+    const local = localsByName.get(name);
+    if (!local) continue;
+    const bits = minSize * 8;
+    const prefix = signed ? 'int' : 'uint';
+    local.type = `${prefix}${bits}_t`;
+  }
+}
+
 const FASTCALL_REGS = ['rcx', 'rdx', 'r8', 'r9'];
 
 /**
@@ -226,6 +286,9 @@ export function promoteVars(
       }
     }
   }
+
+  // Infer variable types from access patterns
+  inferVarTypes(body, locals, is64, varLookup, paramLookup);
 
   // Promote body
   const promoted = body.map(s => promoteStmt(s, is64, varLookup, paramLookup));

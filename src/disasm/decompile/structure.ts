@@ -242,13 +242,30 @@ export function structureCFG(
           const switchResult = structureSwitch(block, jtTargets);
           result.push(switchResult);
 
-          // Find convergence after switch
+          // Find convergence after switch — include successors of all case
+          // blocks and the default block when searching for the exit point
+          const caseBlockIds = new Set<number>(block.succs);
+          // Also include the default block if present
+          if (switchResult.kind === 'switch' && switchResult.defaultBody) {
+            for (const predId of block.preds) {
+              const pred = blockById.get(predId);
+              if (!pred) continue;
+              const lastInsn = pred.insns[pred.insns.length - 1];
+              if (lastInsn) {
+                const m = lastInsn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+                if (m) {
+                  const defBlock = blockByAddr.get(parseInt(m[1], 16));
+                  if (defBlock) caseBlockIds.add(defBlock.id);
+                }
+              }
+            }
+          }
           const exitCandidates = new Set<number>();
-          for (const succId of block.succs) {
+          for (const succId of caseBlockIds) {
             const succBlock = blockById.get(succId);
             if (succBlock) {
               for (const ss of succBlock.succs) {
-                if (!block.succs.includes(ss)) exitCandidates.add(ss);
+                if (!caseBlockIds.has(ss)) exitCandidates.add(ss);
               }
             }
           }
@@ -481,14 +498,44 @@ export function structureCFG(
 
   /** Structure a switch statement. */
   function structureSwitch(block: BasicBlock, targets: number[]): IRStmt {
-    // Try to find the comparison expression from the block
+    // Try to find the switch expression and default target from the predecessor
+    // block that performs the bounds check (cmp reg, N / ja default).
     let switchExpr: IRExpr = { kind: 'unknown', text: 'switch_expr' };
-    for (const insn of block.insns) {
-      if (insn.mnemonic === 'cmp') {
-        const parts = insn.opStr.split(',').map(s => s.trim());
-        if (parts.length >= 1) {
-          switchExpr = parseSimpleOperand(parts[0]);
-          break;
+    let defaultAddr: number | null = null;
+
+    // Walk predecessors looking for the bounds-check block (ends with ja/jae)
+    for (const predId of block.preds) {
+      const pred = blockById.get(predId);
+      if (!pred || pred.insns.length === 0) continue;
+      const lastInsn = pred.insns[pred.insns.length - 1];
+      const lastMn = lastInsn.mnemonic.toLowerCase();
+      if (lastMn === 'ja' || lastMn === 'jae') {
+        // Extract switch expression from cmp in this predecessor
+        for (const insn of pred.insns) {
+          if (insn.mnemonic.toLowerCase() === 'cmp') {
+            const parts = insn.opStr.split(',').map(s => s.trim());
+            if (parts.length >= 1) {
+              switchExpr = parseSimpleOperand(parts[0]);
+            }
+            break;
+          }
+        }
+        // The ja/jae target is the default case block
+        const m = lastInsn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+        if (m) defaultAddr = parseInt(m[1], 16);
+        break;
+      }
+    }
+
+    // Fallback: scan current block for cmp (original behavior)
+    if (switchExpr.kind === 'unknown') {
+      for (const insn of block.insns) {
+        if (insn.mnemonic.toLowerCase() === 'cmp') {
+          const parts = insn.opStr.split(',').map(s => s.trim());
+          if (parts.length >= 1) {
+            switchExpr = parseSimpleOperand(parts[0]);
+            break;
+          }
         }
       }
     }
@@ -507,6 +554,8 @@ export function structureCFG(
     for (const succId of block.succs) switchStopAt.add(succId);
 
     for (const [targetAddr, values] of targetToCase) {
+      // Skip if this is the default target — handle it separately
+      if (defaultAddr !== null && targetAddr === defaultAddr) continue;
       const targetBlock = blockByAddr.get(targetAddr);
       if (targetBlock && !visited.has(targetBlock.id)) {
         visited.add(targetBlock.id);
@@ -517,7 +566,20 @@ export function structureCFG(
       }
     }
 
-    return { kind: 'switch', expr: switchExpr, cases };
+    // Structure the default case body
+    let defaultBody: IRStmt[] | undefined;
+    if (defaultAddr !== null) {
+      const defaultBlock = blockByAddr.get(defaultAddr);
+      if (defaultBlock && !visited.has(defaultBlock.id)) {
+        visited.add(defaultBlock.id);
+        const body = liftedBlocks.get(defaultBlock.id) ?? [];
+        defaultBody = [...body, { kind: 'break' as const }];
+      } else {
+        defaultBody = [{ kind: 'break' as const }];
+      }
+    }
+
+    return { kind: 'switch', expr: switchExpr, cases, defaultBody };
   }
 
   // Start structuring from the entry block (id 0)

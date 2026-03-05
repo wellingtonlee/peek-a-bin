@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import { clampPopup } from "../utils/clampPopup";
+import { getApiRiskTag } from "../analysis/driver";
 
 interface XrefPopupState {
   x: number;
@@ -129,6 +130,15 @@ export function ImportsView() {
                     return (
                       <li key={j} className="text-gray-300 flex items-center gap-2">
                         <span>{fn.name}</span>
+                        {state.driverInfo?.isDriver && (() => {
+                          const risk = getApiRiskTag(fn.name);
+                          if (!risk) return null;
+                          return (
+                            <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${risk.colorClass}`}>
+                              {risk.category}
+                            </span>
+                          );
+                        })()}
                         {importXrefs && xrefCount > 0 && (
                           <span
                             className="text-gray-500 cursor-pointer hover:text-blue-400 text-[10px]"

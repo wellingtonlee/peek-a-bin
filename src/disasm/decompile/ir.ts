@@ -233,6 +233,37 @@ export function regSize(name: string): number {
   return REG_SIZES[name.toLowerCase()] ?? 4;
 }
 
+// ── Expression / Statement Walkers ──
+
+/** Recursively visit all sub-expressions in an expression tree. */
+export function walkExpr(expr: IRExpr, fn: (e: IRExpr) => void): void {
+  fn(expr);
+  switch (expr.kind) {
+    case 'binary': walkExpr(expr.left, fn); walkExpr(expr.right, fn); break;
+    case 'unary': walkExpr(expr.operand, fn); break;
+    case 'deref': walkExpr(expr.address, fn); break;
+    case 'call': expr.args.forEach(a => walkExpr(a, fn)); break;
+    case 'cast': walkExpr(expr.operand, fn); break;
+    case 'ternary': walkExpr(expr.condition, fn); walkExpr(expr.then, fn); walkExpr(expr.else, fn); break;
+  }
+}
+
+/** Walk all expressions inside a statement tree. */
+export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case 'assign': walkExpr(s.dest, fn); walkExpr(s.src, fn); break;
+      case 'store': walkExpr(s.address, fn); walkExpr(s.value, fn); break;
+      case 'call_stmt': walkExpr(s.call, fn); break;
+      case 'return': if (s.value) walkExpr(s.value, fn); break;
+      case 'if': walkExpr(s.condition, fn); walkStmts(s.thenBody, fn); if (s.elseBody) walkStmts(s.elseBody, fn); break;
+      case 'while': walkExpr(s.condition, fn); walkStmts(s.body, fn); break;
+      case 'do_while': walkExpr(s.condition, fn); walkStmts(s.body, fn); break;
+      case 'switch': walkExpr(s.expr, fn); s.cases.forEach(c => walkStmts(c.body, fn)); if (s.defaultBody) walkStmts(s.defaultBody, fn); break;
+    }
+  }
+}
+
 /** Canonical 64-bit parent of any x86 register (e.g. al→rax, r8d→r8) */
 export function canonReg(name: string): string {
   const lower = name.toLowerCase();

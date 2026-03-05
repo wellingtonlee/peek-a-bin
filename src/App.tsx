@@ -9,6 +9,7 @@ import {
 import { parsePE } from "./pe/parser";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
+import { detectDriver } from "./analysis/driver";
 import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
@@ -24,6 +25,7 @@ import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { SettingsModal } from "./components/SettingsModal";
+import { GoToAddressModal } from "./components/GoToAddressModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 
@@ -32,6 +34,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [goToOpen, setGoToOpen] = useState(false);
+  const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
 
   const bufferRef = useRef<ArrayBuffer | null>(null);
 
@@ -41,6 +45,11 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.key === "p") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "g") {
+        e.preventDefault();
+        setGoToOpen((v) => !v);
         return;
       }
       if (e.key === "?") {
@@ -123,6 +132,12 @@ export default function App() {
     );
     const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
 
+    // Driver detection
+    const driverInfo = detectDriver(pe);
+    if (driverInfo.isDriver) {
+      dispatch({ type: "SET_DRIVER_INFO", driverInfo });
+    }
+
     // Configure worker with maps once, then detect functions off-thread
     const iatLookup = buildIATLookup(pe.imports);
     const pdataFunctions = pe.runtimeFunctions?.map(rf => ({
@@ -130,7 +145,7 @@ export default function App() {
       endAddress: pe.optionalHeader.imageBase + rf.endAddress,
     }));
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
-    disasmWorker.configure(pe.strings, iatLookup)
+    disasmWorker.configure(pe.strings, iatLookup, { driverMode: driverInfo.isDriver })
       .then(() => disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
         exports: pe.exports
           .filter((e) => {
@@ -141,8 +156,31 @@ export default function App() {
         entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
         pdataFunctions,
       }))
-      .then((funcs) => {
+      .then(async (funcs) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });
+
+        // IRP dispatch detection for drivers
+        if (driverInfo.isDriver && funcs.length > 0) {
+          const entryVA = pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint;
+          const entryFunc = funcs.find(f => f.address === entryVA);
+          if (entryFunc) {
+            const entryOffset = entryFunc.address - baseAddr;
+            const entrySize = Math.min(entryFunc.size, sectionBytes.length - entryOffset);
+            if (entryOffset >= 0 && entrySize > 0) {
+              const entryBytes = sectionBytes.subarray(entryOffset, entryOffset + entrySize);
+              const entryInsns = await disasmWorker.disassemble(entryBytes, entryFunc.address, pe.is64);
+              const irpHandlers = await disasmWorker.detectIRPDispatches(entryInsns, pe.is64);
+              if (irpHandlers.length > 0) {
+                dispatch({ type: "SET_IRP_HANDLERS", handlers: irpHandlers });
+                for (const handler of irpHandlers) {
+                  if (handler.handlerAddress > 0) {
+                    dispatch({ type: "RENAME_FUNCTION", address: handler.handlerAddress, name: `${handler.irpName}_handler` });
+                  }
+                }
+              }
+            }
+          }
+        }
 
         // Auto-build xrefs in background after function detection
         const stringAddrs = Array.from(pe.strings.keys());
@@ -257,6 +295,7 @@ export default function App() {
     (buffer: ArrayBuffer, fileName: string) => {
       dispatch({ type: "RESET" });
       stringsConfiguredRef.current = false;
+      setDriverBannerDismissed(false);
       dispatch({ type: "SET_LOADING" });
       dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
       try {
@@ -319,6 +358,30 @@ export default function App() {
         ) : (
           <div className="flex flex-col h-screen">
             <AddressBar />
+            {state.driverInfo?.isDriver && !driverBannerDismissed && (
+              <div className="bg-amber-900/40 border-b border-amber-700/50 px-4 py-1.5 flex items-center gap-3 text-xs shrink-0">
+                <span className="font-bold text-amber-400 tracking-wide">KERNEL DRIVER</span>
+                <span className="text-amber-300/80">
+                  Subsystem: NATIVE{state.driverInfo.isWDM && ' | WDM'}
+                </span>
+                <span className="text-amber-300/60">
+                  {state.driverInfo.kernelImportCount} kernel APIs from {state.driverInfo.kernelModules.length} module{state.driverInfo.kernelModules.length !== 1 ? 's' : ''}
+                </span>
+                {state.irpHandlers.length > 0 && (
+                  <span className="text-amber-300/60">
+                    | {state.irpHandlers.length} IRP handler{state.irpHandlers.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+                <div className="flex-1" />
+                <button
+                  onClick={() => setDriverBannerDismissed(true)}
+                  className="text-amber-500 hover:text-amber-300 text-sm leading-none"
+                  title="Dismiss"
+                >
+                  &times;
+                </button>
+              </div>
+            )}
             <div className="flex flex-1 overflow-hidden">
               <Sidebar />
               <main className="flex-1 overflow-auto">
@@ -331,6 +394,7 @@ export default function App() {
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
         <KeyboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <GoToAddressModal open={goToOpen} onClose={() => setGoToOpen(false)} />
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );

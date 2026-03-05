@@ -22,8 +22,61 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
 import { DecompileView } from "./DecompileView";
+import { ResizeHandle } from "./ResizeHandle";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { streamEnhance } from "../llm/client";
+import type { PEFile } from "../pe/types";
+import { canonReg } from "../disasm/decompile/ir";
+
+// Register family map: canonical → all members
+const REG_FAMILIES: Record<string, string[]> = {
+  rax: ["rax", "eax", "ax", "al", "ah"],
+  rbx: ["rbx", "ebx", "bx", "bl", "bh"],
+  rcx: ["rcx", "ecx", "cx", "cl", "ch"],
+  rdx: ["rdx", "edx", "dx", "dl", "dh"],
+  rsi: ["rsi", "esi", "si", "sil"],
+  rdi: ["rdi", "edi", "di", "dil"],
+  rbp: ["rbp", "ebp", "bp", "bpl"],
+  rsp: ["rsp", "esp", "sp", "spl"],
+};
+for (let i = 8; i <= 15; i++) {
+  REG_FAMILIES[`r${i}`] = [`r${i}`, `r${i}d`, `r${i}w`, `r${i}b`];
+}
+
+function buildRegFamily(canon: string): Set<string> {
+  return new Set(REG_FAMILIES[canon] ?? [canon]);
+}
+
+function formatRangeCopy(
+  range: { start: number; end: number },
+  rows: DisplayRow[],
+  pe: PEFile | null,
+  renames: Record<number, string>,
+  comments: Record<number, string>,
+): string {
+  const lo = Math.min(range.start, range.end);
+  const hi = Math.max(range.start, range.end);
+  const aw = pe?.is64 ? 16 : 8;
+  const lines: string[] = [];
+  for (let i = lo; i <= hi; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    if (row.kind === "label") {
+      const name = getDisplayName(row.fn, renames);
+      lines.push(`; ──── ${name} ────`);
+    } else if (row.kind === "insn") {
+      const insn = row.insn;
+      const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
+      const bytesHex = Array.from(insn.bytes).map(b => b.toString(16).toUpperCase().padStart(2, "0")).join(" ").padEnd(24);
+      const mnem = insn.mnemonic.padEnd(8);
+      const ops = insn.opStr;
+      const c = insn.comment ? `  ; ${insn.comment}` : "";
+      const uc = comments[insn.address] ? `  ; ${comments[insn.address]}` : "";
+      lines.push(`${addrHex}  ${bytesHex}  ${mnem}${ops}${c}${uc}`);
+    }
+  }
+  return lines.join("\n");
+}
 
 interface XrefPopupState {
   x: number;
@@ -94,10 +147,12 @@ interface ClickableTarget {
   display?: string;
 }
 
-function ColoredOperand({ opStr, targets, onNavigate }: {
+function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick }: {
   opStr: string;
   targets?: ClickableTarget[];
   onNavigate?: (addr: number) => void;
+  highlightRegs?: Set<string> | null;
+  onRegClick?: (regName: string) => void;
 }) {
   const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
 
@@ -131,6 +186,21 @@ function ColoredOperand({ opStr, targets, onNavigate }: {
               </span>
             );
           }
+        }
+        // Register highlighting
+        const isReg = REG_NAMES.has(t.text.toLowerCase());
+        const isHighlighted = isReg && highlightRegs?.has(t.text.toLowerCase());
+        const cls = isHighlighted ? `${t.cls} reg-highlight cursor-pointer` : isReg && onRegClick ? `${t.cls} cursor-pointer` : t.cls;
+        if (isReg && onRegClick) {
+          return (
+            <span
+              key={i}
+              className={cls}
+              onClick={(e) => { e.stopPropagation(); onRegClick(t.text); }}
+            >
+              {t.text}
+            </span>
+          );
         }
         return t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>;
       })}
@@ -208,13 +278,59 @@ export function DisassemblyView() {
   const [showCFG, setShowCFG] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
+  const [highlightedReg, setHighlightedReg] = useState<string | null>(null);
   const [showDecompile, setShowDecompile] = useState(false);
+  const [decompileWidth, setDecompileWidth] = useState(() => {
+    try {
+      const v = localStorage.getItem("peek-a-bin:decompile-width");
+      if (v) { const n = parseInt(v, 10); if (n >= 250 && n <= 800) return n; }
+    } catch {}
+    return 500;
+  });
   const [decompileResult, setDecompileResult] = useState<string>("");
+  const [decompileLineMap, setDecompileLineMap] = useState<Map<number, number>>(new Map());
+  const [isAiEnhanced, setIsAiEnhanced] = useState(false);
   const [decompileLoading, setDecompileLoading] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState("");
   const enhanceAbortRef = useRef<AbortController | null>(null);
   const originalCodeRef = useRef<string>("");
+
+  // Decompiler ↔ ASM sync maps
+  const addrToLines = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const [line, addr] of decompileLineMap) {
+      const arr = m.get(addr);
+      if (arr) arr.push(line);
+      else m.set(addr, [line]);
+    }
+    return m;
+  }, [decompileLineMap]);
+
+  const decompileHighlightLines = useMemo(() => {
+    if (decompileLineMap.size === 0 || isAiEnhanced) return new Set<number>();
+    const lines = addrToLines.get(state.currentAddress);
+    return lines ? new Set(lines) : new Set<number>();
+  }, [addrToLines, state.currentAddress, isAiEnhanced, decompileLineMap.size]);
+
+  const handleDecompileLineClick = useCallback((lineNum: number) => {
+    if (isAiEnhanced) return;
+    const addr = decompileLineMap.get(lineNum);
+    if (addr !== undefined) {
+      dispatch({ type: "SET_ADDRESS", address: addr });
+    }
+  }, [decompileLineMap, isAiEnhanced, dispatch]);
+
+  // Register highlight family set
+  const highlightRegs = useMemo(() => {
+    if (!highlightedReg) return null;
+    return buildRegFamily(highlightedReg);
+  }, [highlightedReg]);
+
+  const handleRegClick = useCallback((regName: string) => {
+    const canon = canonReg(regName);
+    setHighlightedReg((prev) => prev === canon ? null : canon);
+  }, []);
 
   // Build IAT lookup map from imports
   const iatMap = useMemo(() => {
@@ -306,6 +422,31 @@ export function DisassemblyView() {
     }
   }, [currentIndex, rows.length]);
 
+  // Dispatch current instruction & block info for status bar
+  useEffect(() => {
+    const row = rows[currentIndex];
+    if (row && row.kind === "insn") {
+      dispatch({ type: "SET_CURRENT_INSTRUCTION", instruction: { bytes: Array.from(row.insn.bytes), size: row.insn.size } });
+      // Find block range from rows with same blockIdx
+      const blockIdx = row.blockIdx;
+      let startAddr = row.insn.address, endAddr = row.insn.address;
+      for (let i = currentIndex; i >= 0; i--) {
+        const r = rows[i];
+        if (!r || r.kind !== "insn" || r.blockIdx !== blockIdx) break;
+        startAddr = r.insn.address;
+      }
+      for (let i = currentIndex; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || r.kind !== "insn" || r.blockIdx !== blockIdx) break;
+        endAddr = r.insn.address + r.insn.size;
+      }
+      dispatch({ type: "SET_CURRENT_BLOCK", block: { startAddr, endAddr } });
+    } else {
+      dispatch({ type: "SET_CURRENT_INSTRUCTION", instruction: null });
+      dispatch({ type: "SET_CURRENT_BLOCK", block: null });
+    }
+  }, [currentIndex, rows, dispatch]);
+
   // Dismiss context menu / xref popup / export menu on click outside or Escape
   useEffect(() => {
     if (!ctxMenu && !xrefPopup && !showExportMenu) return;
@@ -329,6 +470,7 @@ export function DisassemblyView() {
       }
 
       if (e.key === "Escape") {
+        if (highlightedReg) { setHighlightedReg(null); return; }
         if (showShortcuts) { setShowShortcuts(false); return; }
         if (ctxMenu) { setCtxMenu(null); return; }
         if (selectionRange) { setSelectionRange(null); return; }
@@ -346,25 +488,7 @@ export function DisassemblyView() {
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         if (selectionRange) {
           e.preventDefault();
-          const lo = Math.min(selectionRange.start, selectionRange.end);
-          const hi = Math.max(selectionRange.start, selectionRange.end);
-          const lines: string[] = [];
-          for (let i = lo; i <= hi; i++) {
-            const row = rows[i];
-            if (!row) continue;
-            if (row.kind === "label") {
-              const name = getDisplayName(row.fn, state.renames);
-              lines.push(`\n; ──── ${name} ────`);
-            } else if (row.kind === "insn") {
-              const insn = row.insn;
-              const aw = pe?.is64 ? 16 : 8;
-              const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
-              const comment = insn.comment ? `  ; ${insn.comment}` : "";
-              const userComment = state.comments[insn.address] ? `  ; ${state.comments[insn.address]}` : "";
-              lines.push(`  ${addrHex}  ${insn.mnemonic} ${insn.opStr}${comment}${userComment}`);
-            }
-          }
-          navigator.clipboard.writeText(lines.join("\n"));
+          navigator.clipboard.writeText(formatRangeCopy(selectionRange, rows, pe, state.renames, state.comments));
           return;
         }
       }
@@ -644,10 +768,13 @@ export function DisassemblyView() {
       pe.strings ?? new Map(),
       new Map(funcEntries),
     ).then((result) => {
-      setDecompileResult(result);
+      setDecompileResult(result.code);
+      setDecompileLineMap(result.lineMap);
+      setIsAiEnhanced(false);
       setDecompileLoading(false);
     }).catch((err) => {
       setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
+      setDecompileLineMap(new Map());
       setDecompileLoading(false);
     });
   }, [showDecompile, currentFunc, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
@@ -674,8 +801,13 @@ export function DisassemblyView() {
     disasmWorker.decompileFunction(
       currentFunc, instructions, typedXrefMap, sf, sig, pe.is64,
       iatMap, pe.strings ?? new Map(), new Map(funcEntries),
-    ).then(setDecompileResult).catch((err) => {
+    ).then((result) => {
+      setDecompileResult(result.code);
+      setDecompileLineMap(result.lineMap);
+      setIsAiEnhanced(false);
+    }).catch((err) => {
       setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
+      setDecompileLineMap(new Map());
     }).finally(() => setDecompileLoading(false));
   }, [showDecompile, currentFunc?.address, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
 
@@ -691,7 +823,7 @@ export function DisassemblyView() {
     const controller = new AbortController();
     enhanceAbortRef.current = controller;
     streamEnhance(decompileResult, config, controller.signal, {
-      onToken: (accumulated) => setDecompileResult(accumulated),
+      onToken: (accumulated) => { setDecompileResult(accumulated); setIsAiEnhanced(true); },
       onDone: () => setEnhancing(false),
       onError: (error) => {
         setDecompileResult(originalCodeRef.current);
@@ -1216,7 +1348,7 @@ export function DisassemblyView() {
               <div
                 key={vItem.index}
                 data-index={vItem.index}
-                className={`disasm-row flex px-4 ${
+                className={`disasm-row group flex px-4 ${
                   isSearchMatch
                     ? "bg-yellow-900/30"
                     : rowSelected
@@ -1282,6 +1414,8 @@ export function DisassemblyView() {
                     opStr={insn.opStr}
                     targets={operandTargets}
                     onNavigate={handleAddressClick}
+                    highlightRegs={highlightRegs}
+                    onRegClick={handleRegClick}
                   />
                 </span>
                 {insn.comment && (
@@ -1294,13 +1428,16 @@ export function DisassemblyView() {
                 )}
                 {editingComment && editingComment.address === insn.address ? (
                   <span className="ml-2 shrink-0">
-                    <input
+                    <textarea
                       autoFocus
-                      className="bg-gray-800 border border-blue-500 rounded px-1 text-[#6ee7b7] text-xs font-mono outline-none w-48"
+                      rows={1}
+                      className="bg-gray-900/80 border border-blue-500 ring-1 ring-blue-500/50 rounded px-1.5 py-0.5 text-[#6ee7b7] text-xs font-mono outline-none w-64 resize-none align-middle"
+                      placeholder="Add comment..."
                       value={editingComment.value}
                       onChange={(e) => setEditingComment({ ...editingComment, value: e.target.value })}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
                           const val = editingComment.value.trim();
                           if (val) {
                             dispatch({ type: "SET_COMMENT", address: editingComment.address, text: val });
@@ -1316,8 +1453,15 @@ export function DisassemblyView() {
                     />
                   </span>
                 ) : state.comments[insn.address] ? (
-                  <span className="disasm-user-comment ml-2 truncate max-w-xs" title={state.comments[insn.address]}>
-                    ; {state.comments[insn.address]}
+                  <span
+                    className="disasm-user-comment ml-2 truncate max-w-xs"
+                    title={state.comments[insn.address]}
+                  >
+                    ; {state.comments[insn.address].includes("\n") ? state.comments[insn.address].split("\n")[0] + " [...]" : state.comments[insn.address]}
+                  </span>
+                ) : isCurrentAddr && !insn.comment ? (
+                  <span className="ml-2 text-gray-600 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity select-none">
+                    press ; to comment
                   </span>
                 ) : null}
               </div>
@@ -1368,23 +1512,7 @@ export function DisassemblyView() {
                     <div className="border-t border-gray-700 my-0.5" />
                     <button
                       onClick={() => {
-                        const lines: string[] = [];
-                        for (let i = lo; i <= hi; i++) {
-                          const r = rows[i];
-                          if (!r) continue;
-                          if (r.kind === "label") {
-                            const name = getDisplayName(r.fn, state.renames);
-                            lines.push(`\n; ──── ${name} ────`);
-                          } else if (r.kind === "insn") {
-                            const ins = r.insn;
-                            const aw = pe?.is64 ? 16 : 8;
-                            const ah = ins.address.toString(16).toUpperCase().padStart(aw, "0");
-                            const c = ins.comment ? `  ; ${ins.comment}` : "";
-                            const uc = state.comments[ins.address] ? `  ; ${state.comments[ins.address]}` : "";
-                            lines.push(`  ${ah}  ${ins.mnemonic} ${ins.opStr}${c}${uc}`);
-                          }
-                        }
-                        navigator.clipboard.writeText(lines.join("\n"));
+                        navigator.clipboard.writeText(formatRangeCopy(selectionRange, rows, pe, state.renames, state.comments));
                         setCtxMenu(null);
                       }}
                       className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
@@ -1458,18 +1586,36 @@ export function DisassemblyView() {
         />
       )}
       {showDecompile && (
-        <div className="w-[45%] min-w-[300px] max-w-[60%] shrink-0">
-          <DecompileView
-            code={decompileResult}
-            loading={decompileLoading}
-            enhancing={enhancing}
-            enhanceError={enhanceError}
-            onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-            onEnhance={handleEnhance}
-            onCancelEnhance={handleCancelEnhance}
-            onClose={() => setShowDecompile(false)}
+        <>
+          <ResizeHandle
+            orientation="horizontal"
+            onResize={(delta) => {
+              // Negative delta = dragging left = panel grows
+              setDecompileWidth((prev) => {
+                const newW = Math.max(250, Math.min(800, prev - delta));
+                return newW;
+              });
+            }}
+            onResizeEnd={() => {
+              try { localStorage.setItem("peek-a-bin:decompile-width", String(decompileWidth)); } catch {}
+            }}
           />
-        </div>
+          <div className="shrink-0" style={{ width: decompileWidth }}>
+            <DecompileView
+              code={decompileResult}
+              loading={decompileLoading}
+              enhancing={enhancing}
+              enhanceError={enhanceError}
+              onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+              onEnhance={handleEnhance}
+              onCancelEnhance={handleCancelEnhance}
+              onClose={() => setShowDecompile(false)}
+              highlightLines={decompileHighlightLines}
+              onLineClick={handleDecompileLineClick}
+              syncDisabled={isAiEnhanced}
+            />
+          </div>
+        </>
       )}
       </div>{/* end flex wrapper for content + minimap */}
 

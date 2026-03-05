@@ -223,11 +223,32 @@ export function liftBlock(
     // ── push / pop: handled implicitly, but we still track for x86 call args ──
     if (mn === 'push' || mn === 'pop') continue;
 
-    // ── mov / movzx / movsx ──
-    if (mn === 'mov' || mn === 'movzx' || mn === 'movsx' || mn === 'movsxd') {
+    // ── mov ──
+    if (mn === 'mov') {
       if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
       const dest = parseDestOperand(parts[0], insn, is64);
       const src = parseOperand(parts[1], insn, is64, regState);
+      if (dest.kind === 'deref') {
+        stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
+      } else {
+        stmts.push({ kind: 'assign', dest, src, addr: insn.address });
+        if (dest.kind === 'reg') regState.set(dest.name, src);
+      }
+      continue;
+    }
+
+    // ── movzx / movsx / movsxd → emit IRCast with type annotation ──
+    if (mn === 'movzx' || mn === 'movsx' || mn === 'movsxd') {
+      if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+      const dest = parseDestOperand(parts[0], insn, is64);
+      const srcRaw = parseOperand(parts[1], insn, is64, regState);
+      // Determine source width from prefix or register size
+      const srcSize = memPrefixSize(parts[1]) || (srcRaw.kind === 'reg' ? regSize(srcRaw.name) : (srcRaw.kind === 'deref' ? srcRaw.size : 4));
+      const signed = mn === 'movsx' || mn === 'movsxd';
+      const castType = signed
+        ? (srcSize === 1 ? 'int8_t' : srcSize === 2 ? 'int16_t' : 'int32_t')
+        : (srcSize === 1 ? 'uint8_t' : 'uint16_t');
+      const src: IRExpr = { kind: 'cast', type: castType, operand: srcRaw };
       if (dest.kind === 'deref') {
         stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
       } else {

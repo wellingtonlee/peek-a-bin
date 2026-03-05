@@ -37,6 +37,14 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Stack frame reconstruction
 - Control flow graph (CFG) visualization
 
+**Kernel Driver Analysis**
+- Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)
+- Dismissible amber banner and status bar badge for identified drivers
+- Suspicious kernel API flagging with color-coded categories (Process/Thread, Callback/Hook, Memory, Registry, Filesystem, Network, Object)
+- IOCTL code decoder — annotates device control codes inline in disassembly and decompiler output
+- IRP dispatch table detection — identifies MajorFunction handler assignments in DriverEntry and auto-renames handler functions
+- Authenticode / digital signature parsing — extracts signer subject, issuer, and validity dates from PKCS#7 SignedData without external ASN.1 libraries
+
 **Navigation**
 - Command palette (Ctrl/Cmd+P)
 - Keyboard shortcuts panel (press `?`)
@@ -121,8 +129,9 @@ docker run -p 8080:80 peek-a-bin
 
 ```
 src/
+├── analysis/      # Binary analysis modules (driver detection, IOCTL, IRP)
 ├── components/    # React UI components
-├── pe/            # PE file format parser
+├── pe/            # PE file format parser (headers, imports, authenticode)
 ├── disasm/        # Disassembly engine integration
 ├── workers/       # Web Worker threads
 ├── hooks/         # Custom React hooks

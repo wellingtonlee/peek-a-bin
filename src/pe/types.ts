@@ -211,4 +211,5 @@ export interface PEFile {
   resources?: ResourceTree;
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
+  certificate?: import('./authenticode').CertificateInfo;
 }
