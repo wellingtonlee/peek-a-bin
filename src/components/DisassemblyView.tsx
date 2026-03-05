@@ -155,6 +155,7 @@ function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick 
   onRegClick?: (regName: string) => void;
 }) {
   const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
+  const [copiedTarget, setCopiedTarget] = useState<number | null>(null);
 
   // Build a map of hex string → target for clickable tokens
   const targetMap = useMemo(() => {
@@ -178,8 +179,15 @@ function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick 
             return (
               <span
                 key={i}
-                className="text-blue-400 underline cursor-pointer hover:text-blue-300"
+                className={`${copiedTarget === target.address ? "text-green-400" : "text-blue-400"} underline cursor-pointer hover:text-blue-300`}
                 onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  const hex = "0x" + target.address.toString(16).toUpperCase();
+                  navigator.clipboard.writeText(hex);
+                  setCopiedTarget(target.address);
+                  setTimeout(() => setCopiedTarget(null), 1000);
+                }}
                 title={target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`}
               >
                 {t.text}
@@ -231,6 +239,7 @@ export function DisassemblyView() {
   const pe = state.peFile;
   const parentRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const suppressScrollRef = useRef(false);
 
   // Sorted functions for binary search
   const sortedFuncs = useSortedFuncs();
@@ -417,6 +426,10 @@ export function DisassemblyView() {
   });
 
   useEffect(() => {
+    if (suppressScrollRef.current) {
+      suppressScrollRef.current = false;
+      return;
+    }
     if (rows.length > 0 && currentIndex >= 0) {
       virtualizer.scrollToIndex(currentIndex, { align: "center" });
     }
@@ -447,6 +460,16 @@ export function DisassemblyView() {
     }
   }, [currentIndex, rows, dispatch]);
 
+  // Sticky function header: find label row index for current function
+  const currentFuncLabelIndex = useMemo(() => {
+    if (!currentFunc) return -1;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.kind === "label" && r.fn.address === currentFunc.address) return i;
+    }
+    return -1;
+  }, [rows, currentFunc]);
+
   // Dismiss context menu / xref popup / export menu on click outside or Escape
   useEffect(() => {
     if (!ctxMenu && !xrefPopup && !showExportMenu) return;
@@ -459,6 +482,18 @@ export function DisassemblyView() {
       window.removeEventListener("keydown", keyDismiss);
     };
   }, [ctxMenu, xrefPopup, showExportMenu]);
+
+  // Mouse back/forward buttons
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const handler = (e: MouseEvent) => {
+      if (e.button === 3) { e.preventDefault(); dispatch({ type: "NAV_BACK" }); }
+      if (e.button === 4) { e.preventDefault(); dispatch({ type: "NAV_FORWARD" }); }
+    };
+    el.addEventListener("mouseup", handler);
+    return () => el.removeEventListener("mouseup", handler);
+  }, [dispatch]);
 
   // Keyboard navigation
   const handleKeyDown = useCallback(
@@ -1160,10 +1195,28 @@ export function DisassemblyView() {
       <div className="flex flex-1 overflow-hidden">
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto text-xs leading-5 focus:outline-none"
+        className="flex-1 overflow-auto text-xs leading-5 focus:outline-none relative"
         tabIndex={0}
         onKeyDown={handleKeyDown}
       >
+        {/* Sticky function header */}
+        {currentFunc && currentFuncLabelIndex >= 0 && (() => {
+          const vItems = virtualizer.getVirtualItems();
+          const firstVisible = vItems.length > 0 ? vItems[0].index : 0;
+          if (currentFuncLabelIndex < firstVisible) {
+            const name = getDisplayName(currentFunc, state.renames);
+            return (
+              <div
+                className="sticky top-0 left-0 right-0 z-10 bg-gray-900/95 border-b border-gray-700/50 px-4 py-0.5 text-xs text-gray-300 cursor-pointer hover:text-white font-mono"
+                onClick={() => virtualizer.scrollToIndex(currentFuncLabelIndex, { align: "start" })}
+                title="Click to scroll to function header"
+              >
+                ▸ {name}
+              </div>
+            );
+          }
+          return null;
+        })()}
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -1378,6 +1431,8 @@ export function DisassemblyView() {
                   } else {
                     setSelectionRange(null);
                     setLastClickedRow(vItem.index);
+                    suppressScrollRef.current = true;
+                    dispatch({ type: "SET_ADDRESS", address: insn.address });
                   }
                 }}
               >

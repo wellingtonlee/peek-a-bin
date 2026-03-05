@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import { useContainingFunc } from "../hooks/useDerivedState";
 import type { DisasmFunction } from "../disasm/types";
 import { SkeletonRows } from "./Skeleton";
 
@@ -42,6 +43,10 @@ export function Sidebar() {
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
   const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(null);
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
+
+  // Active function highlight
+  const containingFunc = useContainingFunc();
+  const activeFuncAddr = containingFunc?.address ?? null;
 
   // Persist width
   useEffect(() => {
@@ -131,6 +136,18 @@ export function Sidebar() {
     estimateSize: () => 24,
     overscan: 20,
   });
+
+  const activeIndex = useMemo(() => {
+    if (activeFuncAddr === null) return -1;
+    return filteredFunctions.findIndex((fn) => fn.address === activeFuncAddr);
+  }, [filteredFunctions, activeFuncAddr]);
+
+  // Auto-scroll to active function (only when not filtering)
+  useEffect(() => {
+    if (activeIndex >= 0 && !filter) {
+      virtualizer.scrollToIndex(activeIndex, { align: "auto" });
+    }
+  }, [activeIndex, filter]);
 
   if (!pe) return null;
 
@@ -363,6 +380,10 @@ export function Sidebar() {
                   setRenamingFn({ address: fn.address, value: displayName });
                 }}
                 className={`absolute left-0 w-full text-left px-2 rounded hover:bg-gray-800 transition-colors truncate ${
+                  fn.address === activeFuncAddr
+                    ? "bg-blue-900/30 border-l-2 border-blue-400"
+                    : ""
+                } ${
                   isExport
                     ? "text-yellow-300 font-semibold"
                     : isHeuristic
