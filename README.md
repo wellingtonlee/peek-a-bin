@@ -35,7 +35,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Precise function boundaries from .pdata when available
 - Cross-references (xrefs)
 - Stack frame reconstruction
-- Control flow graph (CFG) visualization
+- Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, and pan/zoom
 
 **Kernel Driver Analysis**
 - Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)
@@ -147,12 +147,15 @@ Press `?` in the app to see all shortcuts. Key bindings include:
 
 | Key | Action |
 |-----|--------|
+| `Space` | Toggle linear / graph view |
 | `1`–`8` | Switch tabs |
 | `G` | Go to address |
 | `?` | Keyboard shortcuts panel |
 | `Ctrl+P` | Command palette |
 | `Ctrl+F` | Search disassembly |
 | `B` | Toggle bookmark |
+| `0` | Zoom-to-fit (graph mode) |
+| `Tab` | Cycle successor blocks (graph mode) |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
 | `Alt+Left` / `Alt+Right` | Back / Forward |
 

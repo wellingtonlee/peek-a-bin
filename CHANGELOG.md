@@ -4,6 +4,27 @@
 
 ### Added
 
+- **Inline graph view** — CFG is now an IDA Pro-style inline view togglable with `Space`, replacing the old modal overlay. Stays in graph mode across function changes; viewMode persisted to localStorage
+- **Full interaction parity in graph blocks** — clicking, context menus, keyboard navigation, comments (`;`), register highlighting, operand navigation, and bookmarks all work identically inside graph blocks
+- **Graph keyboard navigation** — `Arrow Up/Down` navigate within and across blocks, `Tab` cycles successor blocks, `Enter` follows branch targets, `0` zooms to fit the entire graph
+- **Collapsible blocks** — click a block header to collapse/expand it
+- **Graph minimap** — minimap transforms to show block rectangles with viewport indicator; click to pan the graph
+- **Zoom toward cursor** — mouse wheel zoom centers on the cursor position instead of the origin
+
+### Changed
+
+- CFG layout constants updated for better readability: wider blocks (320px), taller rows (16px), more spacing between blocks
+- Extracted shared disassembly utilities (`ColoredOperand`, `mnemonicClass`, `tokenizeOperand`, `parseBranchTarget`, `REG_NAMES`) into `src/components/shared.tsx` for reuse between linear and graph views
+- Toolbar "CFG" button replaced with a "Graph" toggle button that reflects active state
+
+### Removed
+
+- CFG modal overlay — replaced by the inline graph view
+
+---
+
+### Previously Added
+
 - **Kernel driver detection** — automatically identifies `.sys` drivers by checking for NATIVE subsystem, WDM_DRIVER DllCharacteristics flag, and imports from kernel modules (ntoskrnl.exe, hal.dll, ndis.sys, fltmgr.sys, etc.) (`src/analysis/driver.ts`)
 - **Driver banner and badge** — dismissible amber banner between address bar and tab content showing driver type, WDM status, and kernel API count; small amber badge in the status bar
 - **Suspicious kernel API flagging** — database of 50+ kernel APIs across 7 risk categories (Process/Thread, Callback/Hook, Memory, Registry, Filesystem, Network, Object) with color-coded inline tags in the Imports view
