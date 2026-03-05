@@ -74,6 +74,7 @@ export function CFGView({
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const draggingRef = useRef(false);
+  const graphInteractionRef = useRef(false);
 
   const { blocks, edges } = useMemo(() => {
     const cfg = buildCFG(func, instructions, typedXrefMap, jumpTables);
@@ -137,11 +138,48 @@ export function CFGView({
     });
   }, [blocks, onZoomChange, onPanChange]);
 
+  // Zoom toward viewport center (for zoom bar controls)
+  const zoomToCenter = useCallback((newZoom: number) => {
+    const container = containerRef.current;
+    if (!container) { onZoomChange(newZoom); return; }
+    const cx = container.clientWidth / 2;
+    const cy = container.clientHeight / 2;
+    const scale = newZoom / zoom;
+    onZoomChange(newZoom);
+    onPanChange({
+      x: cx - (cx - pan.x) * scale,
+      y: cy - (cy - pan.y) * scale,
+    });
+  }, [zoom, pan, onZoomChange, onPanChange]);
+
   // Expose zoomToFit on the container element for parent access
   useEffect(() => {
     const el = containerRef.current;
     if (el) (el as any).__zoomToFit = zoomToFit;
   }, [zoomToFit]);
+
+  // Auto-pan to current block when address changes externally
+  useEffect(() => {
+    if (currentBlockId < 0 || graphInteractionRef.current) {
+      graphInteractionRef.current = false;
+      return;
+    }
+    const block = blockMap.get(currentBlockId);
+    const container = containerRef.current;
+    if (!block || !container) return;
+    const cW = container.clientWidth;
+    const cH = container.clientHeight;
+    // Check if block center is visible in viewport
+    const bcx = block.x * zoom + pan.x + (block.w * zoom) / 2;
+    const bcy = block.y * zoom + pan.y + (block.h * zoom) / 2;
+    const margin = 50;
+    if (bcx >= margin && bcx <= cW - margin && bcy >= margin && bcy <= cH - margin) return;
+    // Center the block in the viewport
+    onPanChange({
+      x: cW / 2 - (block.x + block.w / 2) * zoom,
+      y: cH / 2 - (block.y + block.h / 2) * zoom,
+    });
+  }, [currentBlockId]);
 
   // Viewport culling
   const visibleBlockIds = useMemo(() => {
@@ -162,6 +200,12 @@ export function CFGView({
     }
     return ids;
   }, [blocks, pan, zoom, collapsedBlocks]);
+
+  // Wrap onNavigate to flag graph-internal navigation
+  const handleGraphNavigate = useCallback((addr: number) => {
+    graphInteractionRef.current = true;
+    onNavigate(addr);
+  }, [onNavigate]);
 
   // Pan handlers
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -189,21 +233,28 @@ export function CFGView({
     e.preventDefault();
     const container = containerRef.current;
     if (!container) return;
-    const rect = container.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
 
-    const oldZoom = zoom;
-    const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    const newZoom = Math.max(0.2, Math.min(3, oldZoom + delta));
-
-    // Zoom toward mouse position
-    const scale = newZoom / oldZoom;
-    onZoomChange(newZoom);
-    onPanChange({
-      x: mouseX - (mouseX - pan.x) * scale,
-      y: mouseY - (mouseY - pan.y) * scale,
-    });
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+scroll: zoom toward cursor
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const oldZoom = zoom;
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      const newZoom = Math.max(0.2, Math.min(3, oldZoom + delta));
+      const scale = newZoom / oldZoom;
+      onZoomChange(newZoom);
+      onPanChange({
+        x: mouseX - (mouseX - pan.x) * scale,
+        y: mouseY - (mouseY - pan.y) * scale,
+      });
+    } else {
+      // Regular scroll: pan
+      onPanChange({
+        x: pan.x - e.deltaX,
+        y: pan.y - e.deltaY,
+      });
+    }
   }, [zoom, pan, onZoomChange, onPanChange]);
 
   // Mouse back/forward
@@ -236,15 +287,42 @@ export function CFGView({
     <div
       ref={containerRef}
       className="cfg-container flex-1 overflow-hidden cursor-grab active:cursor-grabbing relative"
+      style={{ overscrollBehavior: "none", touchAction: "none" }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
       onWheel={handleWheel}
     >
-      {/* Zoom indicator */}
-      <div className="absolute top-2 right-2 z-10 text-[10px] text-gray-500 bg-gray-900/80 px-1.5 py-0.5 rounded">
-        {Math.round(zoom * 100)}%
+      {/* Zoom control bar */}
+      <div className="absolute top-2 right-2 z-10 flex items-center gap-1 bg-gray-900/80 px-1.5 py-0.5 rounded text-[10px] text-gray-400">
+        <button
+          className="hover:text-white px-0.5"
+          onClick={(e) => { e.stopPropagation(); zoomToCenter(Math.max(0.2, zoom - 0.1)); }}
+          title="Zoom out"
+        >−</button>
+        <input
+          type="range"
+          min="0.2"
+          max="3"
+          step="0.05"
+          value={zoom}
+          onChange={(e) => { zoomToCenter(parseFloat(e.target.value)); }}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          className="w-16 h-1 accent-gray-500 cursor-pointer"
+        />
+        <button
+          className="hover:text-white px-0.5"
+          onClick={(e) => { e.stopPropagation(); zoomToCenter(Math.min(3, zoom + 0.1)); }}
+          title="Zoom in"
+        >+</button>
+        <span className="w-7 text-center text-gray-500">{Math.round(zoom * 100)}%</span>
+        <button
+          className="hover:text-white px-0.5"
+          onClick={(e) => { e.stopPropagation(); zoomToFit(); }}
+          title="Fit to view"
+        >⊡</button>
       </div>
 
       <div
@@ -347,7 +425,7 @@ export function CFGView({
             onToggleCollapse={() => onToggleCollapse(block.id)}
             pe={pe}
             iatMap={iatMap}
-            onNavigate={onNavigate}
+            onNavigate={handleGraphNavigate}
             onAddressClick={onAddressClick}
             onDoubleClickAddr={onDoubleClickAddr}
             onContextMenu={onContextMenu}

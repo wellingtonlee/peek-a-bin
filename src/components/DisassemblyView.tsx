@@ -29,6 +29,7 @@ import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
 import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
+import { useSetGraphOverview } from "../hooks/useGraphOverview";
 
 // Register family map: canonical → all members
 const REG_FAMILIES: Record<string, string[]> = {
@@ -707,6 +708,13 @@ export function DisassemblyView() {
     setCtxMenu(null);
   }, [ctxMenu, state.comments]);
 
+  const ctxCopyComment = useCallback(() => {
+    if (!ctxMenu) return;
+    const comment = state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment;
+    if (comment) navigator.clipboard.writeText(comment);
+    setCtxMenu(null);
+  }, [ctxMenu, state.comments]);
+
   const ctxRenameFunction = useCallback(() => {
     if (!ctxMenu) return;
     // Find the function that owns this instruction
@@ -900,6 +908,31 @@ export function DisassemblyView() {
     const layout = layoutCFG(cfg);
     return { graphBlocksForMinimap: layout.blocks, graphEdgesForMinimap: layout.edges };
   }, [viewMode, currentFunc, instructions, typedXrefMap]);
+
+  // Publish graph data to sidebar overview context
+  const setGraphOverview = useSetGraphOverview();
+  useEffect(() => {
+    if (viewMode !== "graph" || !graphBlocksForMinimap || !graphEdgesForMinimap) {
+      setGraphOverview(null);
+      return;
+    }
+    const container = cfgContainerRef.current;
+    if (!container) { setGraphOverview(null); return; }
+    setGraphOverview({
+      blocks: graphBlocksForMinimap,
+      edges: graphEdgesForMinimap,
+      pan: graphPan,
+      zoom: graphZoom,
+      viewport: { width: container.clientWidth, height: container.clientHeight },
+      onPanTo: setGraphPan,
+      currentAddress: state.currentAddress,
+    });
+  }, [viewMode, graphBlocksForMinimap, graphEdgesForMinimap, graphPan, graphZoom, state.currentAddress, setGraphOverview]);
+
+  // Clear graph overview on unmount
+  useEffect(() => {
+    return () => setGraphOverview(null);
+  }, [setGraphOverview]);
 
   if (!pe) return null;
 
@@ -1526,6 +1559,11 @@ export function DisassemblyView() {
               <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
                 Add/Edit comment
               </button>
+              {ctxMenu && (state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment) && (
+                <button onClick={ctxCopyComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+                  Copy comment
+                </button>
+              )}
               {ctxMenu && funcMap.has(ctxMenu.insn.address) && (
                 <button onClick={ctxRenameFunction} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
                   Rename function
@@ -1666,6 +1704,11 @@ export function DisassemblyView() {
           <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
             Add/Edit comment
           </button>
+          {ctxMenu && (state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment) && (
+            <button onClick={ctxCopyComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+              Copy comment
+            </button>
+          )}
         </div>
       )}
       {showMinimap && (

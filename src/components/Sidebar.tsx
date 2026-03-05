@@ -5,6 +5,7 @@ import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile"
 import { useContainingFunc } from "../hooks/useDerivedState";
 import type { DisasmFunction } from "../disasm/types";
 import { SkeletonRows } from "./Skeleton";
+import { useGraphOverview } from "../hooks/useGraphOverview";
 
 type SortMode = "address" | "alpha";
 
@@ -43,6 +44,13 @@ export function Sidebar() {
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
   const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(null);
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
+  const [sectionsOpen, setSectionsOpen] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:sections-open") !== "false"; } catch { return true; }
+  });
+  const [graphOverviewOpen, setGraphOverviewOpen] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false"; } catch { return true; }
+  });
+  const graphOverview = useGraphOverview();
 
   // Active function highlight
   const containingFunc = useContainingFunc();
@@ -54,6 +62,14 @@ export function Sidebar() {
       localStorage.setItem("peek-a-bin:sidebar-width", String(width));
     } catch {}
   }, [width]);
+
+  // Persist sections/graph overview toggle
+  useEffect(() => {
+    try { localStorage.setItem("peek-a-bin:sections-open", String(sectionsOpen)); } catch {}
+  }, [sectionsOpen]);
+  useEffect(() => {
+    try { localStorage.setItem("peek-a-bin:graph-overview-open", String(graphOverviewOpen)); } catch {}
+  }, [graphOverviewOpen]);
 
   // Drag resize logic
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -178,30 +194,36 @@ export function Sidebar() {
 
       {/* Sections */}
       <div className="p-2 border-b border-gray-700">
-        <h3 className="text-gray-400 uppercase tracking-wider text-[10px] mb-1.5 font-semibold">
-          Sections
-        </h3>
-        <ul className="space-y-0.5">
-          {pe.sections.map((sec, i) => (
-            <li key={i}>
-              <button
-                onClick={() => {
-                  dispatch({
-                    type: "SET_ADDRESS",
-                    address: pe.optionalHeader.imageBase + sec.virtualAddress,
-                  });
-                  dispatch({ type: "SET_TAB", tab: "disassembly" });
-                }}
-                className="w-full text-left px-2 py-1 rounded hover:bg-gray-800 transition-colors flex justify-between"
-              >
-                <span className="text-gray-200">{sec.name}</span>
-                <span className="text-gray-500">
-                  {(sec.virtualSize >>> 0).toString(16)}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <button
+          onClick={() => setSectionsOpen(!sectionsOpen)}
+          className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
+        >
+          <span className="text-[8px]">{sectionsOpen ? "▼" : "▶"}</span>
+          Sections ({pe.sections.length})
+        </button>
+        {sectionsOpen && (
+          <ul className="mt-1.5 space-y-0.5">
+            {pe.sections.map((sec, i) => (
+              <li key={i}>
+                <button
+                  onClick={() => {
+                    dispatch({
+                      type: "SET_ADDRESS",
+                      address: pe.optionalHeader.imageBase + sec.virtualAddress,
+                    });
+                    dispatch({ type: "SET_TAB", tab: "disassembly" });
+                  }}
+                  className="w-full text-left px-2 py-1 rounded hover:bg-gray-800 transition-colors flex justify-between"
+                >
+                  <span className="text-gray-200">{sec.name}</span>
+                  <span className="text-gray-500">
+                    {(sec.virtualSize >>> 0).toString(16)}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Bookmarks panel (only show if bookmarks exist) */}
@@ -405,6 +427,22 @@ export function Sidebar() {
         </div>
       </div>
 
+      {/* Graph Overview */}
+      {graphOverview && (
+        <div className="p-2 border-t border-gray-700">
+          <button
+            onClick={() => setGraphOverviewOpen(!graphOverviewOpen)}
+            className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
+          >
+            <span className="text-[8px]">{graphOverviewOpen ? "▼" : "▶"}</span>
+            Graph Overview
+          </button>
+          {graphOverviewOpen && (
+            <GraphOverviewCanvas data={graphOverview} />
+          )}
+        </div>
+      )}
+
       {/* Info + collapse */}
       <div className="p-2 border-t border-gray-700 text-gray-500 flex items-center justify-between">
         <div>
@@ -421,5 +459,172 @@ export function Sidebar() {
         </button>
       </div>
     </aside>
+  );
+}
+
+// --- Graph Overview Canvas ---
+
+import type { GraphOverviewData } from "../hooks/useGraphOverview";
+
+function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  // Which block is "current"
+  const currentBlockId = useMemo(() => {
+    for (const b of data.blocks) {
+      for (const insn of b.insns) {
+        if (insn.address === data.currentAddress) return b.id;
+      }
+    }
+    return -1;
+  }, [data.blocks, data.currentAddress]);
+
+  // Graph bounds + scale computation (shared by draw + click)
+  const layout = useMemo(() => {
+    if (data.blocks.length === 0) return null;
+    const minX = Math.min(...data.blocks.map(b => b.x));
+    const maxX = Math.max(...data.blocks.map(b => b.x + b.w));
+    const minY = Math.min(...data.blocks.map(b => b.y));
+    const maxY = Math.max(...data.blocks.map(b => b.y + b.h));
+    return { minX, maxX, minY, maxY, graphW: maxX - minX, graphH: maxY - minY };
+  }, [data.blocks]);
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container || !layout || layout.graphW === 0 || layout.graphH === 0) return;
+
+    const canvasW = container.clientWidth;
+    const canvasH = 120;
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+
+    const padding = 4;
+    const scaleX = (canvasW - padding * 2) / layout.graphW;
+    const scaleY = (canvasH - padding * 2) / layout.graphH;
+    const scale = Math.min(scaleX, scaleY);
+
+    const offsetX = padding + (canvasW - padding * 2 - layout.graphW * scale) / 2;
+    const offsetY = padding + (canvasH - padding * 2 - layout.graphH * scale) / 2;
+
+    // Draw edges
+    ctx.strokeStyle = "rgba(107, 114, 128, 0.3)";
+    ctx.lineWidth = 0.5;
+    for (const edge of data.edges) {
+      const fromBlock = data.blocks.find(b => b.id === edge.from);
+      const toBlock = data.blocks.find(b => b.id === edge.to);
+      if (!fromBlock || !toBlock) continue;
+      const fx = offsetX + (fromBlock.x + fromBlock.w / 2 - layout.minX) * scale;
+      const fy = offsetY + (fromBlock.y + fromBlock.h - layout.minY) * scale;
+      const tx = offsetX + (toBlock.x + toBlock.w / 2 - layout.minX) * scale;
+      const ty = offsetY + (toBlock.y - layout.minY) * scale;
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+    }
+
+    // Draw blocks
+    for (const block of data.blocks) {
+      const bx = offsetX + (block.x - layout.minX) * scale;
+      const by = offsetY + (block.y - layout.minY) * scale;
+      const bw = Math.max(2, block.w * scale);
+      const bh = Math.max(1, block.h * scale);
+
+      ctx.fillStyle = block.id === currentBlockId
+        ? "rgba(59, 130, 246, 0.7)"
+        : "rgba(107, 114, 128, 0.5)";
+      ctx.fillRect(bx, by, bw, bh);
+    }
+
+    // Draw viewport rectangle
+    const vpGx = -data.pan.x / data.zoom;
+    const vpGy = -data.pan.y / data.zoom;
+    const vpGw = data.viewport.width / data.zoom;
+    const vpGh = data.viewport.height / data.zoom;
+
+    const vx = offsetX + (vpGx - layout.minX) * scale;
+    const vy = offsetY + (vpGy - layout.minY) * scale;
+    const vw = vpGw * scale;
+    const vh = vpGh * scale;
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(vx + 0.5, vy + 0.5, vw, vh);
+  }, [data, layout, currentBlockId]);
+
+  useEffect(() => { draw(); }, [draw]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [draw]);
+
+  const canvasToGraph = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!layout || layout.graphW === 0 || layout.graphH === 0) return null;
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    const canvasW = canvas.width;
+    const canvasH = 120;
+    const padding = 4;
+    const scaleX = (canvasW - padding * 2) / layout.graphW;
+    const scaleY = (canvasH - padding * 2) / layout.graphH;
+    const scale = Math.min(scaleX, scaleY);
+    const offsetX = padding + (canvasW - padding * 2 - layout.graphW * scale) / 2;
+    const offsetY = padding + (canvasH - padding * 2 - layout.graphH * scale) / 2;
+
+    const graphX = (clickX - offsetX) / scale + layout.minX;
+    const graphY = (clickY - offsetY) / scale + layout.minY;
+    return { graphX, graphY };
+  }, [layout]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const pt = canvasToGraph(e);
+    if (!pt) return;
+    draggingRef.current = true;
+    data.onPanTo({
+      x: data.viewport.width / 2 - pt.graphX * data.zoom,
+      y: data.viewport.height / 2 - pt.graphY * data.zoom,
+    });
+  }, [canvasToGraph, data]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!draggingRef.current) return;
+    const pt = canvasToGraph(e);
+    if (!pt) return;
+    data.onPanTo({
+      x: data.viewport.width / 2 - pt.graphX * data.zoom,
+      y: data.viewport.height / 2 - pt.graphY * data.zoom,
+    });
+  }, [canvasToGraph, data]);
+
+  const handleMouseUp = useCallback(() => {
+    draggingRef.current = false;
+  }, []);
+
+  return (
+    <div ref={containerRef} className="mt-1.5" style={{ height: 120 }}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: "100%", height: 120, cursor: "crosshair" }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      />
+    </div>
   );
 }

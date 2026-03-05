@@ -35,7 +35,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Precise function boundaries from .pdata when available
 - Cross-references (xrefs)
 - Stack frame reconstruction
-- Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, and pan/zoom
+- Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, pan/zoom, and sidebar graph overview minimap
 
 **Kernel Driver Analysis**
 - Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)

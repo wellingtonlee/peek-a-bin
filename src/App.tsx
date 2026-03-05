@@ -27,10 +27,12 @@ import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { SettingsModal } from "./components/SettingsModal";
 import { GoToAddressModal } from "./components/GoToAddressModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
 
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
+  const graphOverviewState = useGraphOverviewState();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -382,12 +384,14 @@ export default function App() {
                 </button>
               </div>
             )}
+            <GraphOverviewContext.Provider value={graphOverviewState}>
             <div className="flex flex-1 overflow-hidden">
               <Sidebar />
               <main className="flex-1 overflow-auto">
                 <ErrorBoundary>{renderMainView()}</ErrorBoundary>
               </main>
             </div>
+            </GraphOverviewContext.Provider>
             <StatusBar />
           </div>
         )}

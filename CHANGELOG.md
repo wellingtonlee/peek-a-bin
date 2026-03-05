@@ -9,7 +9,11 @@
 - **Graph keyboard navigation** — `Arrow Up/Down` navigate within and across blocks, `Tab` cycles successor blocks, `Enter` follows branch targets, `0` zooms to fit the entire graph
 - **Collapsible blocks** — click a block header to collapse/expand it
 - **Graph minimap** — minimap transforms to show block rectangles with viewport indicator; click to pan the graph
+- **Graph overview in sidebar** — IDA-style graph overview panel at the bottom of the sidebar showing all blocks, edges, and a viewport rectangle; click or drag to pan the main graph view; collapsible with state persisted to localStorage
 - **Zoom toward cursor** — mouse wheel zoom centers on the cursor position instead of the origin
+- **Copy comment** — context menu option to copy instruction/user comments to clipboard (both linear and graph mode)
+- **Collapsible sections panel** — sidebar sections panel can now be collapsed/expanded with state persisted to localStorage
+- **Trackpad swipe prevention** — graph view blocks browser back/forward navigation triggered by horizontal two-finger swipe gestures
 
 ### Changed
 

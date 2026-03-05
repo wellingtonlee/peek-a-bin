@@ -65,10 +65,10 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
   const loadExample = useCallback(async () => {
     setLoadingExample(true);
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}crackme100.exe`);
+      const res = await fetch(`${import.meta.env.BASE_URL}crackme01.exe`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buffer = await res.arrayBuffer();
-      onFile(buffer, "crackme100.exe");
+      onFile(buffer, "crackme01.exe");
     } catch (e) {
       console.error("Failed to load example:", e);
     } finally {
@@ -213,7 +213,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               disabled={loading || loadingExample}
               className="mt-3 text-sm text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loadingExample ? "Loading..." : "Try example: crackme100.exe"}
+              {loadingExample ? "Loading..." : "Try example: crackme01.exe"}
             </button>
           </>
         )}
