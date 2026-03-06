@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Decompile panel sub-tabs** — decompile panel now has three pill tabs: **Low Level** (existing built-in decompiler), **High Level** (Ghidra server with WASM fallback stub), and **AI** (enhance/explain using best available source); active tab remembered across function navigation; per-tab per-function caching; decompile state extracted into `useDecompileTabs` hook
+- **Ghidra decompilation server** — companion `ghidra-server/` with Dockerfile, FastAPI REST endpoints (`/ping`, `/binary`, `/decompile`), pyhidra integration; optional bearer token auth; binary uploaded once and cached by SHA-256
+
+### Fixed
+
+- **Ghidra Docker image** — Dockerfile now downloads and installs Ghidra 11.3.2 with JDK 21; forces `linux/amd64` platform (Ghidra has no `linux_arm_64` decompiler binary); fixes container crash on startup due to missing `GHIDRA_INSTALL_DIR`; native decompiler binaries `chmod +x` after unzip; `DecompInterface.openProgram()` return value checked; server error details now surfaced in client UI (2026-03-06 15:40)
+- **Decompilation server settings** — new "Decompilation Server" section in Settings modal with enable checkbox, server URL, and optional API key; stored in `peek-a-bin:decompile-server` localStorage key
+
 - **Data section view** — non-executable sections (`.rdata`, `.data`, etc.) now render as structured data directives instead of garbage disassembly: `db` with string literals (green, ASCII/UTF-16LE), `dd`/`dq` with clickable pointer targets and resolved labels (IAT imports, functions, strings), `dup` for padding runs, and raw `db` hex with ASCII preview; jump arrows, graph toggle, and decompiler are hidden for data sections; search and range copy fully supported
 - **Font size setting** — configurable monospace font size (10–16px) via slider in Settings modal; applied globally to disassembly, hex view, pseudocode, and CFG blocks via CSS custom property; persisted to localStorage
 - **Keyboard shortcuts panel update** — added missing shortcuts: `Space` (graph toggle), `;` (comment), `N` (rename), `X`/`R`/`I`/`D` (panel toggles), `Alt+H` (recent addresses); new Graph category with block navigation, Tab, Enter, and zoom-to-fit shortcuts

@@ -23,9 +23,7 @@ import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
 import { DecompileView } from "./DecompileView";
 import { ResizeHandle } from "./ResizeHandle";
-import { hasApiKey, loadSettings } from "../llm/settings";
-import { streamEnhance } from "../llm/client";
-import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
+import { useDecompileTabs } from "../hooks/useDecompileTabs";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
 import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
@@ -188,53 +186,6 @@ export function DisassemblyView() {
     } catch {}
     return 500;
   });
-  const [decompileResult, setDecompileResult] = useState<string>("");
-  const [decompileLineMap, setDecompileLineMap] = useState<Map<number, number>>(new Map());
-  const [isAiEnhanced, setIsAiEnhanced] = useState(false);
-  const [decompileLoading, setDecompileLoading] = useState(false);
-  const [enhancing, setEnhancing] = useState(false);
-  const [explaining, setExplaining] = useState(false);
-  const [enhanceError, setEnhanceError] = useState("");
-  const enhanceAbortRef = useRef<AbortController | null>(null);
-  const originalCodeRef = useRef<string>("");
-
-  // Decompiler ↔ ASM sync maps
-  const addrToLines = useMemo(() => {
-    const m = new Map<number, number[]>();
-    for (const [line, addr] of decompileLineMap) {
-      const arr = m.get(addr);
-      if (arr) arr.push(line);
-      else m.set(addr, [line]);
-    }
-    return m;
-  }, [decompileLineMap]);
-
-  const decompileHighlightLines = useMemo(() => {
-    if (decompileLineMap.size === 0 || isAiEnhanced) return new Set<number>();
-    // Exact match first
-    const lines = addrToLines.get(state.currentAddress);
-    if (lines) return new Set(lines);
-    // Fuzzy: find nearest mapped address <= currentAddress within current function
-    if (!currentFunc) return new Set<number>();
-    const funcStart = currentFunc.address;
-    const funcEnd = funcStart + currentFunc.size;
-    let bestAddr = -1;
-    for (const addr of addrToLines.keys()) {
-      if (addr <= state.currentAddress && addr >= funcStart && addr < funcEnd) {
-        if (addr > bestAddr) bestAddr = addr;
-      }
-    }
-    if (bestAddr >= 0) return new Set(addrToLines.get(bestAddr)!);
-    return new Set<number>();
-  }, [addrToLines, state.currentAddress, isAiEnhanced, decompileLineMap.size, currentFunc]);
-
-  const handleDecompileLineClick = useCallback((lineNum: number) => {
-    if (isAiEnhanced) return;
-    const addr = decompileLineMap.get(lineNum);
-    if (addr !== undefined) {
-      dispatch({ type: "SET_ADDRESS", address: addr });
-    }
-  }, [decompileLineMap, isAiEnhanced, dispatch]);
 
   // Register highlight family set
   const highlightRegs = useMemo(() => {
@@ -812,79 +763,7 @@ export function DisassemblyView() {
     [viewMode],
   );
 
-  const handleDecompileToggle = useCallback(() => {
-    if (showDecompile) {
-      setShowDecompile(false);
-      return;
-    }
-    if (!currentFunc || !pe || instructions.length === 0) return;
-    setShowDecompile(true);
-    setDecompileLoading(true);
-
-    const sf = analyzeStackFrame(currentFunc, instructions, pe.is64);
-    const sig = inferSignature(currentFunc, instructions, pe.is64);
-
-    // Build funcMap entries for the worker
-    const funcEntries: [number, { name: string; address: number }][] = [];
-    for (const fn of state.functions) {
-      const name = getDisplayName(fn, state.renames);
-      funcEntries.push([fn.address, { name, address: fn.address }]);
-    }
-
-    disasmWorker.decompileFunction(
-      currentFunc,
-      instructions,
-      typedXrefMap,
-      sf,
-      sig,
-      pe.is64,
-      iatMap,
-      pe.strings ?? new Map(),
-      new Map(funcEntries),
-    ).then((result) => {
-      setDecompileResult(result.code);
-      setDecompileLineMap(result.lineMap);
-      setIsAiEnhanced(false);
-      setDecompileLoading(false);
-    }).catch((err) => {
-      setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
-      setDecompileLineMap(new Map());
-      setDecompileLoading(false);
-    });
-  }, [showDecompile, currentFunc, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
-
-  // Re-decompile when function changes while panel is open
-  const prevDecompFuncRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!showDecompile || !currentFunc) return;
-    if (prevDecompFuncRef.current === currentFunc.address) return;
-    prevDecompFuncRef.current = currentFunc.address;
-    // Cancel any in-progress enhancement
-    enhanceAbortRef.current?.abort();
-    setEnhancing(false);
-    setEnhanceError("");
-    // Trigger decompile for new function
-    if (!pe || instructions.length === 0) return;
-    setDecompileLoading(true);
-    const sf = analyzeStackFrame(currentFunc, instructions, pe.is64);
-    const sig = inferSignature(currentFunc, instructions, pe.is64);
-    const funcEntries: [number, { name: string; address: number }][] = [];
-    for (const fn of state.functions) {
-      funcEntries.push([fn.address, { name: getDisplayName(fn, state.renames), address: fn.address }]);
-    }
-    disasmWorker.decompileFunction(
-      currentFunc, instructions, typedXrefMap, sf, sig, pe.is64,
-      iatMap, pe.strings ?? new Map(), new Map(funcEntries),
-    ).then((result) => {
-      setDecompileResult(result.code);
-      setDecompileLineMap(result.lineMap);
-      setIsAiEnhanced(false);
-    }).catch((err) => {
-      setDecompileResult(`// Error: ${err?.message ?? String(err)}`);
-      setDecompileLineMap(new Map());
-    }).finally(() => setDecompileLoading(false));
-  }, [showDecompile, currentFunc?.address, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
-
+  // Build assembly text for current function (used by AI enhancement)
   const buildFunctionAsm = useCallback((): string => {
     if (!currentFunc || !pe) return "";
     const aw = pe.is64 ? 16 : 8;
@@ -904,64 +783,74 @@ export function DisassemblyView() {
     return lines.join("\n");
   }, [currentFunc, pe, rows, state.renames, state.comments]);
 
-  const handleEnhance = useCallback(() => {
-    if (!hasApiKey()) {
-      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+  // Decompile tabs hook
+  const decompile = useDecompileTabs({
+    currentFunc,
+    pe,
+    instructions,
+    xrefMap: typedXrefMap,
+    iatMap,
+    functions: state.functions,
+    renames: state.renames,
+    buildFunctionAsm,
+  });
+
+  const handleDecompileToggle = useCallback(() => {
+    if (showDecompile) {
+      setShowDecompile(false);
       return;
     }
-    const config = loadSettings();
-    originalCodeRef.current = decompileResult;
-    const input = config.enhanceSource === "assembly" ? buildFunctionAsm() : decompileResult;
-    if (!input) return;
-    setEnhancing(true);
-    setEnhanceError("");
-    const controller = new AbortController();
-    enhanceAbortRef.current = controller;
-    streamEnhance(input, config, controller.signal, {
-      onToken: (accumulated) => { setDecompileResult(accumulated); setIsAiEnhanced(true); },
-      onDone: () => setEnhancing(false),
-      onError: (error) => {
-        setDecompileResult(originalCodeRef.current);
-        setEnhanceError(error);
-        setEnhancing(false);
-      },
-    });
-  }, [decompileResult, buildFunctionAsm]);
+    if (!currentFunc || !pe || instructions.length === 0) return;
+    setShowDecompile(true);
+    // Trigger the active tab (defaults to "low")
+    decompile.triggerTab(decompile.tabsState.activeTab);
+  }, [showDecompile, currentFunc, pe, instructions, decompile]);
 
-  const handleCancelEnhance = useCallback(() => {
-    enhanceAbortRef.current?.abort();
-    setEnhancing(false);
-    setExplaining(false);
-  }, []);
+  // Re-decompile when function changes while panel is open
+  const prevDecompFuncRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!showDecompile || !currentFunc) return;
+    if (prevDecompFuncRef.current === currentFunc.address) return;
+    prevDecompFuncRef.current = currentFunc.address;
+    decompile.resetForNewFunc();
+    decompile.triggerTab(decompile.tabsState.activeTab);
+  }, [showDecompile, currentFunc?.address, decompile]);
 
-  const handleExplain = useCallback(() => {
-    if (!hasApiKey()) {
-      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-      return;
+  // Decompiler ↔ ASM sync maps
+  const addrToLines = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const [line, addr] of decompile.activeLineMap) {
+      const arr = m.get(addr);
+      if (arr) arr.push(line);
+      else m.set(addr, [line]);
     }
-    enhanceAbortRef.current?.abort();
-    setEnhancing(false);
-    const config = loadSettings();
-    originalCodeRef.current = decompileResult;
-    if (!decompileResult) return;
-    setExplaining(true);
-    setEnhanceError("");
-    const controller = new AbortController();
-    enhanceAbortRef.current = controller;
-    streamEnhance(decompileResult, config, controller.signal, {
-      onToken: (accumulated) => {
-        const commented = accumulated.split("\n").map((l) => `// ${l}`).join("\n");
-        setDecompileResult(commented + "\n\n" + originalCodeRef.current);
-        setIsAiEnhanced(true);
-      },
-      onDone: () => setExplaining(false),
-      onError: (error) => {
-        setDecompileResult(originalCodeRef.current);
-        setEnhanceError(error);
-        setExplaining(false);
-      },
-    }, SYSTEM_PROMPT_EXPLAIN);
-  }, [decompileResult]);
+    return m;
+  }, [decompile.activeLineMap]);
+
+  const decompileHighlightLines = useMemo(() => {
+    if (decompile.activeLineMap.size === 0 || decompile.syncDisabled) return new Set<number>();
+    const lines = addrToLines.get(state.currentAddress);
+    if (lines) return new Set(lines);
+    if (!currentFunc) return new Set<number>();
+    const funcStart = currentFunc.address;
+    const funcEnd = funcStart + currentFunc.size;
+    let bestAddr = -1;
+    for (const addr of addrToLines.keys()) {
+      if (addr <= state.currentAddress && addr >= funcStart && addr < funcEnd) {
+        if (addr > bestAddr) bestAddr = addr;
+      }
+    }
+    if (bestAddr >= 0) return new Set(addrToLines.get(bestAddr)!);
+    return new Set<number>();
+  }, [addrToLines, state.currentAddress, decompile.syncDisabled, decompile.activeLineMap.size, currentFunc]);
+
+  const handleDecompileLineClick = useCallback((lineNum: number) => {
+    if (decompile.syncDisabled) return;
+    const addr = decompile.activeLineMap.get(lineNum);
+    if (addr !== undefined) {
+      dispatch({ type: "SET_ADDRESS", address: addr });
+    }
+  }, [decompile.activeLineMap, decompile.syncDisabled, dispatch]);
 
   const handleExportAsm = useCallback((mode: "function" | "section") => {
     setShowExportMenu(false);
@@ -1959,19 +1848,21 @@ export function DisassemblyView() {
           />
           <div className="shrink-0" style={{ width: decompileWidth }}>
             <DecompileView
-              code={decompileResult}
-              loading={decompileLoading}
-              enhancing={enhancing}
-              explaining={explaining}
-              enhanceError={enhanceError}
+              code={decompile.activeCode}
+              loading={decompile.activeLoading}
+              error={decompile.activeError}
+              activeTab={decompile.tabsState.activeTab}
+              onTabChange={(tab) => decompile.triggerTab(tab)}
+              highLevelEngine={decompile.tabsState.high.engine}
+              aiMode={decompile.tabsState.aiMode}
+              onEnhance={() => decompile.triggerAI("enhance")}
+              onExplain={() => decompile.triggerAI("explain")}
+              onCancelAI={decompile.cancelAI}
               onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-              onEnhance={handleEnhance}
-              onExplain={handleExplain}
-              onCancelEnhance={handleCancelEnhance}
               onClose={() => setShowDecompile(false)}
               highlightLines={decompileHighlightLines}
               onLineClick={handleDecompileLineClick}
-              syncDisabled={isAiEnhanced}
+              syncDisabled={decompile.syncDisabled}
             />
           </div>
         </>

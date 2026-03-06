@@ -1,4 +1,5 @@
 import { useMemo, useRef, useCallback, useEffect } from "react";
+import type { DecompileTab, HighLevelEngine } from "../decompile/types";
 
 // ── Syntax Highlighting ──
 
@@ -60,18 +61,28 @@ function tokenizeLine(line: string): Token[] {
   return tokens;
 }
 
+// ── Tab labels ──
+
+const TAB_LABELS: { key: DecompileTab; label: string }[] = [
+  { key: "low", label: "Low Level" },
+  { key: "high", label: "High Level" },
+  { key: "ai", label: "AI" },
+];
+
 // ── Component ──
 
 interface DecompileViewProps {
   code: string;
   loading?: boolean;
-  enhancing?: boolean;
-  explaining?: boolean;
-  enhanceError?: string;
-  onNavigate?: (addr: number) => void;
+  error?: string;
+  activeTab: DecompileTab;
+  onTabChange: (tab: DecompileTab) => void;
+  highLevelEngine?: HighLevelEngine;
+  aiMode?: "enhance" | "explain" | null;
   onEnhance?: () => void;
   onExplain?: () => void;
-  onCancelEnhance?: () => void;
+  onCancelAI?: () => void;
+  onNavigate?: (addr: number) => void;
   onClose: () => void;
   highlightLines?: Set<number>;
   onLineClick?: (lineNum: number) => void;
@@ -79,7 +90,8 @@ interface DecompileViewProps {
 }
 
 export function DecompileView({
-  code, loading, enhancing, explaining, enhanceError, onNavigate, onEnhance, onExplain, onCancelEnhance, onClose,
+  code, loading, error, activeTab, onTabChange, highLevelEngine, aiMode,
+  onEnhance, onExplain, onCancelAI, onNavigate, onClose,
   highlightLines, onLineClick, syncDisabled,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
@@ -123,18 +135,72 @@ export function DecompileView({
     }
   }, [highlightLines]);
 
+  const isStreaming = activeTab === "ai" && loading && aiMode != null;
+
+  // High level engine indicator
+  const highIndicator = activeTab === "high" && highLevelEngine
+    ? highLevelEngine === "none" ? "(not available)" : highLevelEngine === "retdec" ? "(retdec fallback)" : null
+    : null;
+
   return (
     <div className="flex flex-col h-full border-l border-gray-700 bg-gray-900/95">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
-        <span className="text-gray-300 font-semibold">Pseudocode</span>
+        {/* Pill tab group */}
+        <div className="flex bg-gray-900 rounded-md p-0.5">
+          {TAB_LABELS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => onTabChange(key)}
+              className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                activeTab === key
+                  ? "bg-gray-600 text-white"
+                  : "text-gray-500 hover:text-gray-300"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {highIndicator && (
+          <span className="text-gray-500 text-[10px] italic">{highIndicator}</span>
+        )}
+
         {syncDisabled && (
           <span className="text-gray-500 text-[10px] italic">(sync disabled)</span>
         )}
+
         <div className="flex-1" />
-        {(enhancing || explaining) ? (
+
+        {/* AI tab buttons */}
+        {activeTab === "ai" && !loading && (
+          <>
+            {onExplain && (
+              <button
+                onClick={onExplain}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-blue-800/60 text-blue-300 hover:bg-blue-700/60"
+                title="Explain with AI"
+              >
+                Explain
+              </button>
+            )}
+            {onEnhance && (
+              <button
+                onClick={onEnhance}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60"
+                title="Enhance with AI"
+              >
+                Enhance
+              </button>
+            )}
+          </>
+        )}
+
+        {/* Cancel button during AI streaming */}
+        {isStreaming && onCancelAI && (
           <button
-            onClick={onCancelEnhance}
+            onClick={onCancelAI}
             className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
             title="Cancel AI"
           >
@@ -144,30 +210,8 @@ export function DecompileView({
             </svg>
             Cancel
           </button>
-        ) : (
-          <>
-            {onExplain && (
-              <button
-                onClick={onExplain}
-                disabled={loading || enhancing || explaining}
-                className="px-1.5 py-0.5 rounded text-[10px] bg-blue-800/60 text-blue-300 hover:bg-blue-700/60 disabled:opacity-30 disabled:cursor-default"
-                title="Explain with AI"
-              >
-                Explain with AI
-              </button>
-            )}
-            {onEnhance && (
-              <button
-                onClick={onEnhance}
-                disabled={loading || enhancing || explaining}
-                className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60 disabled:opacity-30 disabled:cursor-default"
-                title="Enhance with AI"
-              >
-                Enhance with AI
-              </button>
-            )}
-          </>
         )}
+
         <button
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
@@ -185,20 +229,25 @@ export function DecompileView({
       </div>
 
       {/* Error banner */}
-      {enhanceError && (
+      {error && (
         <div className="px-3 py-1.5 text-[10px] text-red-400 bg-red-900/30 border-b border-red-800/50 shrink-0">
-          {enhanceError}
+          {error}
         </div>
       )}
 
       {/* Content */}
-      {loading ? (
+      {loading && !code ? (
         <div className="flex items-center justify-center flex-1 text-gray-500 text-sm gap-2">
           <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          Decompiling...
+          {activeTab === "ai" ? "Generating..." : "Decompiling..."}
+        </div>
+      ) : !code && activeTab === "ai" && !loading ? (
+        <div className="flex flex-col items-center justify-center flex-1 text-gray-500 text-sm gap-2 px-4 text-center">
+          <p>Choose <span className="text-blue-400">Explain</span> or <span className="text-purple-400">Enhance</span> above to generate AI-powered pseudocode.</p>
+          <p className="text-[10px] text-gray-600">Uses the best available decompilation as source.</p>
         </div>
       ) : (
         <pre

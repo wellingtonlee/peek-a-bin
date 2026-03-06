@@ -39,6 +39,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - PE anomaly detection — flags suspicious characteristics (WX sections, packer indicators, disabled ASLR/DEP, etc.) with severity-colored banners
 - Stack frame reconstruction
 - Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, pan/zoom, and sidebar graph overview minimap
+- Decompiler with sub-tabs — **Low Level** (built-in IR-based decompiler), **High Level** (optional Ghidra server), **AI** (LLM-powered enhance/explain); per-tab per-function caching and bidirectional assembly sync
 
 **Kernel Driver Analysis**
 - Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)
@@ -128,20 +129,71 @@ docker run -p 8080:80 peek-a-bin
 # http://localhost:8080/peek-a-bin/
 ```
 
+## Ghidra Decompilation Server (Optional)
+
+The **High Level** tab in the decompile panel can use a companion Ghidra server for higher-quality decompilation. The server wraps Ghidra's decompiler via [pyhidra](https://github.com/dod-cyber-crime-center/pyhidra) and exposes a REST API.
+
+### Quick Start
+
+```bash
+cd ghidra-server
+docker build -t peek-a-bin-ghidra .
+docker run -p 8765:8765 peek-a-bin-ghidra
+```
+
+To require an API key for authentication:
+
+```bash
+docker run -p 8765:8765 peek-a-bin-ghidra --api-key YOUR_SECRET
+```
+
+### Running Without Docker
+
+Requires Java 21+ and Python 3.10+:
+
+```bash
+cd ghidra-server
+pip install -r requirements.txt
+python server.py --port 8765
+```
+
+On first run, pyhidra will download and install Ghidra automatically.
+
+### Connecting Peek-a-Bin to the Server
+
+1. Open **Settings** in Peek-a-Bin (gear icon or via command palette)
+2. Check **Enable Ghidra server**
+3. Enter the server URL (default: `http://localhost:8765`)
+4. Enter the API key if the server was started with `--api-key`
+5. Click **Save**
+
+Once configured, the **High Level** tab in the decompile panel will send the binary to the Ghidra server and display Ghidra's decompiled output. Binaries are uploaded once and cached server-side by SHA-256 hash.
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/ping` | Health check, returns `{ version }` |
+| `POST` | `/api/v1/binary` | Upload PE binary (multipart), returns `{ projectId }` |
+| `POST` | `/api/v1/decompile` | Decompile function at address, returns `{ code, lineMap }` |
+
 ## Project Structure
 
 ```
 src/
 ├── analysis/      # Binary analysis modules (driver detection, IOCTL, IRP, anomaly detection)
 ├── components/    # React UI components
+├── decompile/     # Decompilation clients (Ghidra REST, WASM stub, types)
 ├── pe/            # PE file format parser (headers, imports, authenticode)
-├── disasm/        # Disassembly engine integration
+├── disasm/        # Disassembly engine integration and built-in decompiler
+├── llm/           # LLM integration (settings, streaming client, prompts)
 ├── workers/       # Web Worker threads
 ├── hooks/         # Custom React hooks
 ├── utils/         # Shared utilities
 ├── styles/        # Tailwind and global styles
 ├── App.tsx        # Root application component
 └── main.tsx       # Entry point
+ghidra-server/     # Optional Ghidra decompilation server (Docker + FastAPI)
 ```
 
 ## Keyboard Shortcuts

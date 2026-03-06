@@ -32,6 +32,36 @@ export function hasApiKey(): boolean {
   return loadSettings().apiKey.length > 0;
 }
 
+// ── Decompile Server Settings ──
+
+export interface DecompileServerSettings {
+  ghidraUrl: string;
+  apiKey: string;
+  enabled: boolean;
+}
+
+const DECOMPILE_SERVER_KEY = "peek-a-bin:decompile-server";
+
+const DECOMPILE_SERVER_DEFAULTS: DecompileServerSettings = {
+  ghidraUrl: "http://localhost:8765",
+  apiKey: "",
+  enabled: false,
+};
+
+export function loadDecompileServer(): DecompileServerSettings {
+  try {
+    const raw = localStorage.getItem(DECOMPILE_SERVER_KEY);
+    if (raw) return { ...DECOMPILE_SERVER_DEFAULTS, ...JSON.parse(raw) };
+  } catch { /* ignore corrupt */ }
+  return { ...DECOMPILE_SERVER_DEFAULTS };
+}
+
+export function saveDecompileServer(settings: DecompileServerSettings): void {
+  localStorage.setItem(DECOMPILE_SERVER_KEY, JSON.stringify(settings));
+}
+
+// ── Font Size ──
+
 const FONT_SIZE_KEY = "peek-a-bin:font-size";
 
 export function loadFontSize(): number {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { loadSettings, saveSettings, loadFontSize, saveFontSize, type LLMSettings } from "../llm/settings";
+import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, type LLMSettings, type DecompileServerSettings } from "../llm/settings";
 
 interface Props {
   open: boolean;
@@ -15,12 +15,14 @@ export function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
   const [showKey, setShowKey] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
+  const [decompServer, setDecompServer] = useState<DecompileServerSettings>(loadDecompileServer);
 
   useEffect(() => {
     if (open) {
       setSettings(loadSettings());
       setShowKey(false);
       setFontSize(loadFontSize());
+      setDecompServer(loadDecompileServer());
     }
   }, [open]);
 
@@ -40,6 +42,7 @@ export function SettingsModal({ open, onClose }: Props) {
   const handleSave = () => {
     saveSettings(settings);
     saveFontSize(fontSize);
+    saveDecompileServer(decompServer);
     onClose();
   };
 
@@ -52,7 +55,7 @@ export function SettingsModal({ open, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-gray-700">
-          <h2 className="text-sm font-semibold text-gray-200">LLM Settings</h2>
+          <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
         </div>
 
         <div className="px-4 py-3 space-y-3">
@@ -151,6 +154,41 @@ export function SettingsModal({ open, onClose }: Props) {
               />
               <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
             </div>
+          </div>
+
+          {/* Decompilation Server */}
+          <div>
+            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              Decompilation Server
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
+              <input
+                type="checkbox"
+                checked={decompServer.enabled}
+                onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
+                className="accent-blue-500"
+              />
+              Enable Ghidra server
+            </label>
+            {decompServer.enabled && (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={decompServer.ghidraUrl}
+                  onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
+                  placeholder="http://localhost:8765"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+                <input
+                  type="text"
+                  value={decompServer.apiKey}
+                  onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
+                  placeholder="API key (optional)"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            )}
+            <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
           </div>
 
           {/* Base URL (OpenAI only) */}
