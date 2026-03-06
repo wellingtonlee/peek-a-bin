@@ -4,6 +4,10 @@
 
 ### Added
 
+- **Recent files with instant re-open** — recently opened PE files are stored in IndexedDB (up to 5 entries, 50 MB cap) and shown on the file loader screen with file size, relative timestamp, and annotation summary; click to re-open instantly without re-browsing; remove button clears both IndexedDB and localStorage entries
+- **Callers/callees sidebar panel** — collapsible "Call Graph" panel in the sidebar (between Bookmarks and Functions) shows which functions call the active function and what it calls; built from call graph data extracted during xref analysis; click entries to navigate with call stack push
+- **PE anomaly detection** — automatic detection of 10 suspicious PE characteristics grouped by severity: critical (entry point in writable section, WX sections), warning (unusual entry point, packer section names, TLS callbacks, checksum mismatch, high code entropy), info (ASLR/DEP disabled, overlay data); shown as colored dismissible banners at the top of the Headers view
+- **Data cross-references** — references to `.data`, `.rdata`, and `.bss` addresses (globals, vtables, etc.) are now tracked globally during xref analysis; Hex view shows purple xref count badges on rows containing referenced addresses with click-to-popup listing all referencing instructions
 - **Escape navigates back in graph view** — pressing `Escape` in graph view pops the call stack breadcrumb or navigates back in history (same as the back arrow button), works globally without requiring focus on the graph container
 - **Leading-whitespace string stripping** — `.rdata` strings starting with whitespace/control characters (`\t`, `\n`, `\r`) are now detected by skipping leading whitespace bytes and extracting from the first printable character, for both ASCII and UTF-16LE scanners
 - **Inline graph view** — CFG is now an IDA Pro-style inline view togglable with `Space`, replacing the old modal overlay. Stays in graph mode across function changes; viewMode persisted to localStorage

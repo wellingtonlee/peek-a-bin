@@ -115,12 +115,25 @@ class DisasmWorkerClient {
     is64: boolean,
     stringAddrs: number[],
     iatAddrs: number[],
-  ): Promise<{ stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]> }> {
-    const result: { stringXrefs: [number, number[]][]; importXrefs: [number, number[]][] } =
-      await this.send('buildAllXrefs', { bytes, baseAddress, is64, stringAddrs, iatAddrs });
+    funcEntries?: [number, number][],
+    dataSections?: { va: number; size: number }[],
+  ): Promise<{
+    stringXrefs: Map<number, number[]>;
+    importXrefs: Map<number, number[]>;
+    callGraph: Map<number, number[]>;
+    dataXrefs: Map<number, number[]>;
+  }> {
+    const result: {
+      stringXrefs: [number, number[]][];
+      importXrefs: [number, number[]][];
+      callGraph: [number, number[]][];
+      dataXrefs: [number, number[]][];
+    } = await this.send('buildAllXrefs', { bytes, baseAddress, is64, stringAddrs, iatAddrs, funcEntries, dataSections });
     return {
       stringXrefs: new Map(result.stringXrefs),
       importXrefs: new Map(result.importXrefs),
+      callGraph: new Map(result.callGraph),
+      dataXrefs: new Map(result.dataXrefs),
     };
   }
 

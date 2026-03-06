@@ -48,6 +48,9 @@ export function Sidebar() {
   const [sectionsOpen, setSectionsOpen] = useState(() => {
     try { return localStorage.getItem("peek-a-bin:sections-open") !== "false"; } catch { return true; }
   });
+  const [callersOpen, setCallersOpen] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:callers-open") !== "false"; } catch { return true; }
+  });
   const [graphOverviewOpen, setGraphOverviewOpen] = useState(() => {
     try { return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false"; } catch { return true; }
   });
@@ -81,6 +84,9 @@ export function Sidebar() {
   useEffect(() => {
     try { localStorage.setItem("peek-a-bin:sections-open", String(sectionsOpen)); } catch {}
   }, [sectionsOpen]);
+  useEffect(() => {
+    try { localStorage.setItem("peek-a-bin:callers-open", String(callersOpen)); } catch {}
+  }, [callersOpen]);
   useEffect(() => {
     try { localStorage.setItem("peek-a-bin:graph-overview-open", String(graphOverviewOpen)); } catch {}
   }, [graphOverviewOpen]);
@@ -116,6 +122,27 @@ export function Sidebar() {
     for (const e of pe.exports) s.add(e.name);
     return s;
   }, [pe]);
+
+  // Callers/callees derivation
+  const { callers, callees } = useMemo(() => {
+    if (!state.callGraph || activeFuncAddr === null) return { callers: [], callees: [] };
+    // Callees: direct lookup
+    const calleeAddrs = state.callGraph.get(activeFuncAddr) ?? [];
+    // Callers: invert by scanning all entries
+    const callerAddrs: number[] = [];
+    for (const [funcAddr, targets] of state.callGraph) {
+      if (targets.includes(activeFuncAddr)) callerAddrs.push(funcAddr);
+    }
+    // Resolve to function objects
+    const funcMap = new Map(state.functions.map((f) => [f.address, f]));
+    const resolvedCallers = callerAddrs
+      .map((a) => funcMap.get(a))
+      .filter((f): f is DisasmFunction => f !== undefined);
+    const resolvedCallees = calleeAddrs
+      .map((a) => funcMap.get(a))
+      .filter((f): f is DisasmFunction => f !== undefined);
+    return { callers: resolvedCallers, callees: resolvedCallees };
+  }, [state.callGraph, activeFuncAddr, state.functions]);
 
   const filteredFunctions = useMemo(() => {
     let fns = state.functions;
@@ -341,6 +368,67 @@ export function Sidebar() {
               >
                 Delete
               </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Callers/Callees panel */}
+      {state.callGraph && activeFuncAddr !== null && (callers.length > 0 || callees.length > 0) && (
+        <div className="p-2 border-b border-gray-700">
+          <button
+            onClick={() => setCallersOpen(!callersOpen)}
+            className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
+          >
+            <span className="text-[8px]">{callersOpen ? "▼" : "▶"}</span>
+            Call Graph
+          </button>
+          {callersOpen && (
+            <div className="mt-1.5 space-y-1.5">
+              {callers.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">Callers ({callers.length})</div>
+                  <ul className="space-y-0.5">
+                    {callers.map((fn) => (
+                      <li key={fn.address}>
+                        <button
+                          onClick={() => {
+                            dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
+                            dispatch({ type: "SET_ADDRESS", address: fn.address });
+                            dispatch({ type: "SET_TAB", tab: "disassembly" });
+                          }}
+                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-blue-400 truncate transition-colors"
+                          title={`0x${fn.address.toString(16).toUpperCase()}`}
+                        >
+                          {getDisplayName(fn, state.renames)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {callees.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">Callees ({callees.length})</div>
+                  <ul className="space-y-0.5">
+                    {callees.map((fn) => (
+                      <li key={fn.address}>
+                        <button
+                          onClick={() => {
+                            dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
+                            dispatch({ type: "SET_ADDRESS", address: fn.address });
+                            dispatch({ type: "SET_TAB", tab: "disassembly" });
+                          }}
+                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-green-400 truncate transition-colors"
+                          title={`0x${fn.address.toString(16).toUpperCase()}`}
+                        >
+                          {getDisplayName(fn, state.renames)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>

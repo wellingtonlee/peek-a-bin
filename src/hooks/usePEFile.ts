@@ -2,6 +2,7 @@ import { createContext, useContext, useReducer, type Dispatch } from "react";
 import type { PEFile } from "../pe/types";
 import type { DisasmFunction } from "../disasm/types";
 import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
+import type { Anomaly } from "../analysis/anomalies";
 
 export type ViewTab =
   | "disassembly"
@@ -46,6 +47,9 @@ export interface AppState {
   callStack: { address: number; name: string }[];
   stringXrefs: Map<number, number[]> | null;
   importXrefs: Map<number, number[]> | null;
+  dataXrefs: Map<number, number[]> | null;
+  callGraph: Map<number, number[]> | null;
+  anomalies: Anomaly[];
   analysisPhase: AnalysisPhase;
   currentInstruction: { bytes: number[]; size: number } | null;
   currentBlock: { startAddr: number; endAddr: number } | null;
@@ -81,7 +85,9 @@ export type AppAction =
   | { type: "POP_CALL_STACK"; index: number }
   | { type: "CLEAR_CALL_STACK" }
   | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
-  | { type: "SET_XREFS"; stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]> }
+  | { type: "SET_XREFS"; stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]>; dataXrefs?: Map<number, number[]> }
+  | { type: "SET_CALL_GRAPH"; callGraph: Map<number, number[]> }
+  | { type: "SET_ANOMALIES"; anomalies: Anomaly[] }
   | { type: "SET_ANALYSIS_PHASE"; phase: AnalysisPhase }
   | { type: "SET_CURRENT_INSTRUCTION"; instruction: { bytes: number[]; size: number } | null }
   | { type: "SET_CURRENT_BLOCK"; block: { startAddr: number; endAddr: number } | null }
@@ -109,6 +115,9 @@ export const initialState: AppState = {
   callStack: [],
   stringXrefs: null,
   importXrefs: null,
+  dataXrefs: null,
+  callGraph: null,
+  anomalies: [],
   analysisPhase: "idle",
   currentInstruction: null,
   currentBlock: null,
@@ -312,7 +321,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case "SET_XREFS":
-      return { ...state, stringXrefs: action.stringXrefs, importXrefs: action.importXrefs };
+      return { ...state, stringXrefs: action.stringXrefs, importXrefs: action.importXrefs, dataXrefs: action.dataXrefs ?? state.dataXrefs };
+    case "SET_CALL_GRAPH":
+      return { ...state, callGraph: action.callGraph };
+    case "SET_ANOMALIES":
+      return { ...state, anomalies: action.anomalies };
     case "SET_ANALYSIS_PHASE":
       return { ...state, analysisPhase: action.phase };
     case "SET_CURRENT_INSTRUCTION":
@@ -324,7 +337,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "SET_IRP_HANDLERS":
       return { ...state, irpHandlers: action.handlers };
     case "RESET":
-      return { ...initialState, disasmReady: state.disasmReady };
+      return { ...initialState, disasmReady: state.disasmReady, callGraph: null, dataXrefs: null, anomalies: [] };
     default:
       return state;
   }

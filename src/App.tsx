@@ -10,6 +10,8 @@ import { parsePE } from "./pe/parser";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
 import { detectDriver } from "./analysis/driver";
+import { detectAnomalies } from "./analysis/anomalies";
+import { saveRecentFile } from "./utils/recentFiles";
 import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
@@ -190,16 +192,24 @@ export default function App() {
         for (const imp of pe.imports) {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
         }
-        if (stringAddrs.length > 0 || iatAddrs.length > 0) {
-          dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
-          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs)
-            .then(({ stringXrefs, importXrefs }) => {
-              dispatch({ type: "SET_XREFS", stringXrefs, importXrefs });
-              dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
-            });
-        } else {
-          dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
-        }
+        // Derive func entries for call graph
+        const funcEntries: [number, number][] = funcs.map(f => [f.address, f.size]);
+        // Derive data section ranges for data xrefs
+        const dataSections: { va: number; size: number }[] = pe.sections
+          .filter(s => {
+            const n = s.name.replace(/\0/g, "").trim().toLowerCase();
+            return n === ".data" || n === ".rdata" || n === ".bss" ||
+              ((s.characteristics & 0x40000000) !== 0 && (s.characteristics & 0x20000000) === 0); // readable, not executable
+          })
+          .map(s => ({ va: pe.optionalHeader.imageBase + s.virtualAddress, size: s.virtualSize }));
+
+        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
+        disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries, dataSections)
+          .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
+            dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
+            dispatch({ type: "SET_CALL_GRAPH", callGraph });
+            dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
+          });
       });
   }, [state.peFile, state.disasmReady]);
 
@@ -228,10 +238,19 @@ export default function App() {
         for (const imp of pe.imports) {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
         }
+        const funcEntries2: [number, number][] = state.functions.map(f => [f.address, f.size]);
+        const dataSections2: { va: number; size: number }[] = pe.sections
+          .filter(s => {
+            const n = s.name.replace(/\0/g, "").trim().toLowerCase();
+            return n === ".data" || n === ".rdata" || n === ".bss" ||
+              ((s.characteristics & 0x40000000) !== 0 && (s.characteristics & 0x20000000) === 0);
+          })
+          .map(s => ({ va: pe.optionalHeader.imageBase + s.virtualAddress, size: s.virtualSize }));
         if (stringAddrs.length > 0 || iatAddrs.length > 0) {
-          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs)
-            .then(({ stringXrefs, importXrefs }) => {
-              dispatch({ type: "SET_XREFS", stringXrefs, importXrefs });
+          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries2, dataSections2)
+            .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
+              dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
+              dispatch({ type: "SET_CALL_GRAPH", callGraph });
             });
         }
       }
@@ -304,6 +323,11 @@ export default function App() {
         bufferRef.current = buffer;
         const pe = parsePE(buffer);
         dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
+        // Run anomaly detection synchronously (fast)
+        const anomalies = detectAnomalies(pe);
+        if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+        // Save to IndexedDB for recent files
+        saveRecentFile(fileName, buffer);
         // Extract strings off the main thread via worker
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
         disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)

@@ -15,6 +15,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 **File Loading**
 - Drag-and-drop PE files directly into the browser
 - Bundled demo binary for quick exploration
+- Recent files stored in IndexedDB — click to instantly re-open without re-browsing
 
 **PE Analysis**
 - DOS/NT/optional headers with field descriptions
@@ -33,7 +34,9 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 **Advanced Analysis**
 - Function detection via prologue scanning, call targets, and .pdata (x64 exception directory)
 - Precise function boundaries from .pdata when available
-- Cross-references (xrefs)
+- Cross-references (xrefs) — string, import, and data section references
+- Callers/callees sidebar panel — shows which functions call the active function and what it calls
+- PE anomaly detection — flags suspicious characteristics (WX sections, packer indicators, disabled ASLR/DEP, etc.) with severity-colored banners
 - Stack frame reconstruction
 - Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, pan/zoom, and sidebar graph overview minimap
 
@@ -58,7 +61,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Unified export/import (bookmarks, renames, comments, hex patches, functions)
 
 **Data Views**
-- Hex dump
+- Hex dump with data xref indicators — purple badges show cross-reference counts, click to see referencing instructions
 - Strings extraction
 - Data inspector
 - Resource browser with download support
@@ -129,7 +132,7 @@ docker run -p 8080:80 peek-a-bin
 
 ```
 src/
-├── analysis/      # Binary analysis modules (driver detection, IOCTL, IRP)
+├── analysis/      # Binary analysis modules (driver detection, IOCTL, IRP, anomaly detection)
 ├── components/    # React UI components
 ├── pe/            # PE file format parser (headers, imports, authenticode)
 ├── disasm/        # Disassembly engine integration

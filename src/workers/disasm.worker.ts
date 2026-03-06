@@ -734,11 +734,53 @@ function buildAllXrefs(
   is64: boolean,
   stringAddrs: number[],
   iatAddrs: number[],
-): { stringXrefs: [number, number[]][]; importXrefs: [number, number[]][] } {
+  funcEntries?: [number, number][], // [addr, size] pairs for call graph
+  dataSections?: { va: number; size: number }[], // data section ranges for data xrefs
+): {
+  stringXrefs: [number, number[]][];
+  importXrefs: [number, number[]][];
+  callGraph: [number, number[]][];
+  dataXrefs: [number, number[]][];
+} {
   const stringSet = new Set(stringAddrs);
   const iatSet = new Set(iatAddrs);
   const strXrefs = new Map<number, number[]>();
   const impXrefs = new Map<number, number[]>();
+  const dataXrefs = new Map<number, number[]>();
+
+  // Call graph: build lookup structures
+  const funcAddrSet = new Set<number>();
+  const funcBounds: [number, number][] = []; // [start, end] sorted by start
+  const callGraphMap = new Map<number, Set<number>>(); // callerFunc → Set<calleeFunc>
+
+  if (funcEntries && funcEntries.length > 0) {
+    for (const [addr] of funcEntries) funcAddrSet.add(addr);
+    const sorted = [...funcEntries].sort((a, b) => a[0] - b[0]);
+    for (const [addr, size] of sorted) funcBounds.push([addr, addr + size]);
+  }
+
+  // Data section range check
+  const hasDataSections = dataSections && dataSections.length > 0;
+  const isInDataSection = (addr: number): boolean => {
+    if (!hasDataSections) return false;
+    for (const ds of dataSections!) {
+      if (addr >= ds.va && addr < ds.va + ds.size) return true;
+    }
+    return false;
+  };
+
+  // Binary search: which function contains this instruction address?
+  const findContainingFunc = (addr: number): number => {
+    if (funcBounds.length === 0) return -1;
+    let lo = 0, hi = funcBounds.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (addr < funcBounds[mid][0]) hi = mid - 1;
+      else if (addr >= funcBounds[mid][1]) lo = mid + 1;
+      else return funcBounds[mid][0];
+    }
+    return -1;
+  };
 
   const cs = is64 ? cs64 : cs32;
   let offset = 0;
@@ -749,12 +791,15 @@ function buildAllXrefs(
     try {
       const insns = cs.disasm(chunk, { address: baseAddress + offset });
       for (const insn of insns) {
+        const resolvedTargets: number[] = [];
+
         // RIP-relative addressing
         const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
         if (ripMatch) {
           const sign = ripMatch[1] === '+' ? 1 : -1;
           const disp = parseInt(ripMatch[2], 16);
           const target = insn.address + insn.size + sign * disp;
+          resolvedTargets.push(target);
           if (stringSet.has(target)) {
             let arr = strXrefs.get(target);
             if (!arr) { arr = []; strXrefs.set(target, arr); }
@@ -771,6 +816,7 @@ function buildAllXrefs(
         if (addrMatches) {
           for (const addrStr of addrMatches) {
             const addr = parseInt(addrStr, 16);
+            resolvedTargets.push(addr);
             if (stringSet.has(addr)) {
               let arr = strXrefs.get(addr);
               if (!arr) { arr = []; strXrefs.set(addr, arr); }
@@ -779,6 +825,33 @@ function buildAllXrefs(
             if (iatSet.has(addr)) {
               let arr = impXrefs.get(addr);
               if (!arr) { arr = []; impXrefs.set(addr, arr); }
+              arr.push(insn.address);
+            }
+          }
+        }
+
+        // Call graph tracking
+        if (insn.mnemonic === 'call' && funcBounds.length > 0) {
+          const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+          if (directMatch) {
+            const callTarget = parseInt(directMatch[1], 16);
+            if (funcAddrSet.has(callTarget)) {
+              const callerFunc = findContainingFunc(insn.address);
+              if (callerFunc >= 0) {
+                let callees = callGraphMap.get(callerFunc);
+                if (!callees) { callees = new Set(); callGraphMap.set(callerFunc, callees); }
+                callees.add(callTarget);
+              }
+            }
+          }
+        }
+
+        // Data xrefs: resolved targets in data sections not already string/import
+        if (hasDataSections) {
+          for (const target of resolvedTargets) {
+            if (!stringSet.has(target) && !iatSet.has(target) && isInDataSection(target)) {
+              let arr = dataXrefs.get(target);
+              if (!arr) { arr = []; dataXrefs.set(target, arr); }
               arr.push(insn.address);
             }
           }
@@ -798,9 +871,17 @@ function buildAllXrefs(
     }
   }
 
+  // Convert call graph sets to arrays
+  const callGraph: [number, number[]][] = [];
+  for (const [funcAddr, callees] of callGraphMap) {
+    callGraph.push([funcAddr, Array.from(callees)]);
+  }
+
   return {
     stringXrefs: Array.from(strXrefs.entries()),
     importXrefs: Array.from(impXrefs.entries()),
+    callGraph,
+    dataXrefs: Array.from(dataXrefs.entries()),
   };
 }
 
@@ -847,7 +928,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
 
       case 'buildAllXrefs':
-        result = buildAllXrefs(args.bytes, args.baseAddress, args.is64, args.stringAddrs, args.iatAddrs);
+        result = buildAllXrefs(args.bytes, args.baseAddress, args.is64, args.stringAddrs, args.iatAddrs, args.funcEntries, args.dataSections);
         break;
 
       case 'extractStrings': {

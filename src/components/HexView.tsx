@@ -71,6 +71,7 @@ export function HexView() {
   const [showDiff, setShowDiff] = useState(false);
   const [hexCtxMenu, setHexCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [entropyTooltip, setEntropyTooltip] = useState<{ x: number; blockIdx: number; offset: number; endOffset: number; value: number } | null>(null);
+  const [xrefPopup, setXrefPopup] = useState<{ addr: number; refs: number[]; x: number; y: number } | null>(null);
 
   // Selection range helpers
   const selectionRange = useMemo((): { start: number; end: number } | null => {
@@ -351,6 +352,38 @@ export function HexView() {
     list.sort((a, b) => a.fileOffset - b.fileOffset);
     return list;
   }, [state.hexPatches, sectionInfo, sectionBytes, baseAddress, pe]);
+
+  // Data xref lookup for current section
+  const rowXrefs = useMemo(() => {
+    if (!state.dataXrefs || !sectionInfo || !pe) return null;
+    const sectionVA = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
+    const sectionEnd = sectionVA + sectionInfo.virtualSize;
+    // Collect xrefs that fall in this section, keyed by row index
+    const map = new Map<number, { addr: number; count: number }[]>();
+    for (const [addr, refs] of state.dataXrefs) {
+      if (addr >= sectionVA && addr < sectionEnd) {
+        const localOffset = addr - sectionVA;
+        const rowIdx = Math.floor(localOffset / BYTES_PER_ROW);
+        let arr = map.get(rowIdx);
+        if (!arr) { arr = []; map.set(rowIdx, arr); }
+        arr.push({ addr, count: refs.length });
+      }
+    }
+    return map;
+  }, [state.dataXrefs, sectionInfo, pe]);
+
+  // Dismiss xref popup
+  useEffect(() => {
+    if (!xrefPopup) return;
+    const dismiss = () => setXrefPopup(null);
+    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", keyDismiss);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", keyDismiss);
+    };
+  }, [xrefPopup]);
 
   const addrWidth = pe?.is64 ? 16 : 8;
 
@@ -699,6 +732,21 @@ export function HexView() {
                     );
                   })}
                 </span>
+                {/* Data xref badges */}
+                {rowXrefs?.get(vItem.index)?.map((xref) => (
+                  <span
+                    key={xref.addr}
+                    className="ml-1 px-1 py-0 rounded bg-purple-900/50 text-purple-300 text-[9px] cursor-pointer hover:bg-purple-800/60 shrink-0"
+                    title={`${xref.count} xref(s) to 0x${xref.addr.toString(16).toUpperCase()}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const refs = state.dataXrefs?.get(xref.addr) ?? [];
+                      setXrefPopup({ addr: xref.addr, refs, x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    x{xref.count}
+                  </span>
+                ))}
               </div>
             );
           })}
@@ -721,6 +769,32 @@ export function HexView() {
           <button onClick={copySelectionAddress} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
             Copy address
           </button>
+        </div>
+      )}
+
+      {/* Data xref popup */}
+      {xrefPopup && (
+        <div
+          className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[200px] max-h-48 overflow-auto"
+          style={{ left: xrefPopup.x, top: xrefPopup.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1 text-gray-400 border-b border-gray-700 font-semibold">
+            Xrefs to 0x{xrefPopup.addr.toString(16).toUpperCase()} ({xrefPopup.refs.length})
+          </div>
+          {xrefPopup.refs.map((ref, i) => (
+            <button
+              key={i}
+              className="w-full text-left px-3 py-1 hover:bg-gray-700 text-blue-400 font-mono"
+              onClick={() => {
+                dispatch({ type: "SET_ADDRESS", address: ref });
+                dispatch({ type: "SET_TAB", tab: "disassembly" });
+                setXrefPopup(null);
+              }}
+            >
+              0x{ref.toString(16).toUpperCase()}
+            </button>
+          ))}
         </div>
       )}
 

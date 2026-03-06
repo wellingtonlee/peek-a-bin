@@ -265,6 +265,47 @@ function RelocationsSection() {
   );
 }
 
+function AnomalyBanners() {
+  const state = useAppState();
+  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  if (state.anomalies.length === 0) return null;
+
+  const severityConfig = {
+    critical: { bg: "bg-red-900/40", border: "border-red-700/50", text: "text-red-300", icon: "!!", label: "text-red-400" },
+    warning: { bg: "bg-amber-900/40", border: "border-amber-700/50", text: "text-amber-300", icon: "!", label: "text-amber-400" },
+    info: { bg: "bg-blue-900/40", border: "border-blue-700/50", text: "text-blue-300", icon: "i", label: "text-blue-400" },
+  };
+  const order: ("critical" | "warning" | "info")[] = ["critical", "warning", "info"];
+
+  return (
+    <div className="space-y-1 mb-4">
+      {order.map((severity) => {
+        const items = state.anomalies
+          .map((a, i) => ({ ...a, idx: i }))
+          .filter((a) => a.severity === severity && !dismissed.has(a.idx));
+        if (items.length === 0) return null;
+        const cfg = severityConfig[severity];
+        return items.map((a) => (
+          <div key={a.idx} className={`${cfg.bg} border-l-4 ${cfg.border} px-3 py-2 flex items-start gap-2 rounded-r text-xs`}>
+            <span className={`${cfg.label} font-bold text-sm leading-none mt-0.5 shrink-0 w-4 text-center`}>{cfg.icon}</span>
+            <div className="flex-1 min-w-0">
+              <span className={`${cfg.label} font-semibold`}>{a.title}</span>
+              <span className={`${cfg.text} ml-2`}>{a.detail}</span>
+            </div>
+            <button
+              onClick={() => setDismissed((prev) => new Set([...prev, a.idx]))}
+              className={`${cfg.label} hover:opacity-80 text-sm leading-none shrink-0`}
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        ));
+      })}
+    </div>
+  );
+}
+
 export function HeaderView() {
   const { peFile: pe } = useAppState();
   const dispatch = useAppDispatch();
@@ -298,6 +339,9 @@ export function HeaderView() {
 
   return (
     <div className="p-4 space-y-6 text-xs overflow-auto h-full">
+      {/* Anomaly Banners */}
+      <AnomalyBanners />
+
       {/* COFF Header */}
       <section>
         <h2 className="text-sm font-semibold text-gray-200 mb-2">

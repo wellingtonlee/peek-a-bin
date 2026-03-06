@@ -1,5 +1,11 @@
-import { useState, useCallback, useRef, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { AnalysisPhase } from "../hooks/usePEFile";
+import {
+  getRecentFiles as getRecentFilesFromIDB,
+  loadRecentFile,
+  deleteRecentFile,
+  type RecentFileEntry,
+} from "../utils/recentFiles";
 
 interface FileLoaderProps {
   onFile: (buffer: ArrayBuffer, fileName: string) => void;
@@ -11,6 +17,9 @@ interface FileLoaderProps {
 
 interface RecentFile {
   name: string;
+  size: number;
+  lastOpened: number;
+  hasBuffer: boolean;
   bookmarks: number;
   renames: number;
   comments: number;
@@ -23,6 +32,8 @@ const ANALYSIS_STEPS = [
   { label: "Building xrefs", phases: ["building-xrefs"] },
 ] as const;
 
+const KNOWN_LS_KEYS = new Set(["sidebar-width", "sections-open", "graph-overview-open", "callers-open"]);
+
 function getStepStatus(stepIndex: number, analysisPhase: AnalysisPhase): "done" | "active" | "pending" {
   const step = ANALYSIS_STEPS[stepIndex];
   if ((step.phases as readonly string[]).includes(analysisPhase)) return "active";
@@ -33,34 +44,85 @@ function getStepStatus(stepIndex: number, analysisPhase: AnalysisPhase): "done" 
   return stepIndex < activeStepIndex ? "done" : "pending";
 }
 
-function getRecentFiles(): RecentFile[] {
-  const files: RecentFile[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key || !key.startsWith("peek-a-bin:")) continue;
-    const name = key.slice("peek-a-bin:".length);
-    if (name === "sidebar-width") continue;
-    try {
-      const data = JSON.parse(localStorage.getItem(key)!);
-      const bookmarks = Array.isArray(data.bookmarks) ? data.bookmarks.length : 0;
-      const renames = data.renames ? Object.keys(data.renames).length : 0;
-      const comments = data.comments ? Object.keys(data.comments).length : 0;
-      if (bookmarks + renames + comments > 0) {
-        files.push({ name, bookmarks, renames, comments });
-      }
-    } catch { /* skip corrupt entries */ }
+function getLocalStorageAnnotations(name: string): { bookmarks: number; renames: number; comments: number } {
+  try {
+    const raw = localStorage.getItem(`peek-a-bin:${name}`);
+    if (!raw) return { bookmarks: 0, renames: 0, comments: 0 };
+    const data = JSON.parse(raw);
+    return {
+      bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks.length : 0,
+      renames: data.renames ? Object.keys(data.renames).length : 0,
+      comments: data.comments ? Object.keys(data.comments).length : 0,
+    };
+  } catch {
+    return { bookmarks: 0, renames: 0, comments: 0 };
   }
-  files.sort((a, b) => (b.bookmarks + b.renames + b.comments) - (a.bookmarks + a.renames + a.comments));
-  return files.slice(0, 5);
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return `${Math.floor(days / 7)}w ago`;
 }
 
 export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: FileLoaderProps) {
   const [dragging, setDragging] = useState(false);
   const [loadingExample, setLoadingExample] = useState(false);
+  const [loadingRecent, setLoadingRecent] = useState<string | null>(null);
+  const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-  const recentFiles = useMemo(getRecentFiles, []);
 
   const isAnalyzing = analysisPhase !== "idle" && analysisPhase !== "ready";
+
+  // Load recent files from IndexedDB + localStorage annotations
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const idbFiles = await getRecentFilesFromIDB();
+
+      // Also find localStorage-only entries (files with annotations but no buffer)
+      const idbNames = new Set(idbFiles.map((f) => f.name));
+      const lsOnlyFiles: RecentFileEntry[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith("peek-a-bin:")) continue;
+        const name = key.slice("peek-a-bin:".length);
+        if (KNOWN_LS_KEYS.has(name) || idbNames.has(name)) continue;
+        const ann = getLocalStorageAnnotations(name);
+        if (ann.bookmarks + ann.renames + ann.comments > 0) {
+          lsOnlyFiles.push({ name, size: 0, lastOpened: 0 });
+        }
+      }
+
+      if (cancelled) return;
+
+      const combined: RecentFile[] = idbFiles.map((f) => {
+        const ann = getLocalStorageAnnotations(f.name);
+        return { ...f, hasBuffer: true, ...ann };
+      });
+      for (const f of lsOnlyFiles) {
+        const ann = getLocalStorageAnnotations(f.name);
+        combined.push({ ...f, hasBuffer: false, ...ann });
+      }
+      // Sort by lastOpened (most recent first), then by annotation count for ls-only
+      combined.sort((a, b) => b.lastOpened - a.lastOpened || (b.bookmarks + b.renames + b.comments) - (a.bookmarks + a.renames + a.comments));
+      setRecentFiles(combined.slice(0, 5));
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const loadExample = useCallback(async () => {
     setLoadingExample(true);
@@ -75,6 +137,25 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       setLoadingExample(false);
     }
   }, [onFile]);
+
+  const handleRecentClick = useCallback(async (name: string) => {
+    setLoadingRecent(name);
+    try {
+      const buffer = await loadRecentFile(name);
+      if (buffer) {
+        onFile(buffer, name);
+      }
+    } finally {
+      setLoadingRecent(null);
+    }
+  }, [onFile]);
+
+  const handleRemoveRecent = useCallback(async (e: React.MouseEvent, name: string) => {
+    e.stopPropagation();
+    await deleteRecentFile(name);
+    try { localStorage.removeItem(`peek-a-bin:${name}`); } catch {}
+    setRecentFiles((prev) => prev.filter((f) => f.name !== name));
+  }, []);
 
   const handleFile = useCallback(
     (file: File) => {
@@ -236,10 +317,44 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               if (f.bookmarks > 0) parts.push(`${f.bookmarks} bookmark${f.bookmarks !== 1 ? "s" : ""}`);
               if (f.renames > 0) parts.push(`${f.renames} rename${f.renames !== 1 ? "s" : ""}`);
               if (f.comments > 0) parts.push(`${f.comments} comment${f.comments !== 1 ? "s" : ""}`);
+              const isLoading = loadingRecent === f.name;
               return (
-                <div key={f.name} className="flex items-center justify-between text-sm px-2 py-1">
-                  <span className="text-gray-400 font-mono text-xs">{f.name}</span>
-                  <span className="text-gray-600 text-xs">{parts.join(", ")}</span>
+                <div
+                  key={f.name}
+                  className={`flex items-center justify-between text-sm px-2 py-1.5 rounded group ${
+                    f.hasBuffer
+                      ? "cursor-pointer hover:bg-gray-800/60 transition-colors"
+                      : ""
+                  }`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (f.hasBuffer && !isLoading) handleRecentClick(f.name);
+                  }}
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className={`font-mono text-xs truncate ${f.hasBuffer ? "text-blue-400" : "text-gray-400"}`}>
+                      {f.name}
+                    </span>
+                    {isLoading && <span className="text-yellow-400 text-[10px] animate-pulse">loading...</span>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {f.size > 0 && (
+                      <span className="text-gray-600 text-[10px]">{formatFileSize(f.size)}</span>
+                    )}
+                    {f.lastOpened > 0 && (
+                      <span className="text-gray-600 text-[10px]">{formatRelativeTime(f.lastOpened)}</span>
+                    )}
+                    {parts.length > 0 && (
+                      <span className="text-gray-600 text-[10px]">{parts.join(", ")}</span>
+                    )}
+                    <button
+                      onClick={(e) => handleRemoveRecent(e, f.name)}
+                      className="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1"
+                      title="Remove from recent"
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
               );
             })}
