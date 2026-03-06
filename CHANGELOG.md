@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Data section view** — non-executable sections (`.rdata`, `.data`, etc.) now render as structured data directives instead of garbage disassembly: `db` with string literals (green, ASCII/UTF-16LE), `dd`/`dq` with clickable pointer targets and resolved labels (IAT imports, functions, strings), `dup` for padding runs, and raw `db` hex with ASCII preview; jump arrows, graph toggle, and decompiler are hidden for data sections; search and range copy fully supported
+- **Font size setting** — configurable monospace font size (10–16px) via slider in Settings modal; applied globally to disassembly, hex view, pseudocode, and CFG blocks via CSS custom property; persisted to localStorage
+- **Keyboard shortcuts panel update** — added missing shortcuts: `Space` (graph toggle), `;` (comment), `N` (rename), `X`/`R`/`I`/`D` (panel toggles), `Alt+H` (recent addresses); new Graph category with block navigation, Tab, Enter, and zoom-to-fit shortcuts
+
+- **Explain with AI** — new button in the Pseudocode panel header sends decompiled code to the LLM with an explanation prompt and streams the result back as `//` comments prepended to the pseudocode; mutually exclusive with Enhance (starting one cancels the other)
+
 - **Back-navigation preserves full view state** — pressing `Escape` to go back now restores viewMode (linear/graph), graph pan position, and zoom level, not just the address; works across function jumps (call stack), section changes, and graph↔linear transitions
 
 - **Recent files with instant re-open** — recently opened PE files are stored in IndexedDB (up to 5 entries, 50 MB cap) and shown on the file loader screen with file size, relative timestamp, and annotation summary; click to re-open instantly without re-browsing; remove button clears both IndexedDB and localStorage entries
@@ -22,6 +28,10 @@
 - **Copy comment** — context menu option to copy instruction/user comments to clipboard (both linear and graph mode)
 - **Collapsible sections panel** — sidebar sections panel can now be collapsed/expanded with state persisted to localStorage
 - **Trackpad swipe prevention** — graph view blocks browser back/forward navigation triggered by horizontal two-finger swipe gestures
+
+### Fixed
+
+- **Settings modal no longer dismissible by accident** — removed backdrop click and Escape key handlers; modal now only closes via Save or Cancel buttons
 
 ### Changed
 

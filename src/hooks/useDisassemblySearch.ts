@@ -97,6 +97,11 @@ export function useDisassemblySearch(
           const userComment = state.comments[insn.address] ?? "";
           const text = `${insn.address.toString(16)} ${insn.mnemonic} ${insn.opStr} ${insn.comment || ""} ${userComment}`;
           if (matcher(text)) matches.push(i);
+        } else if (row.kind === "data") {
+          const item = row.item;
+          const userComment = state.comments[item.address] ?? "";
+          const text = `${item.address.toString(16)} ${item.directive} ${item.stringValue ?? ""} ${item.pointerLabel ?? ""} ${userComment}`;
+          if (matcher(text)) matches.push(i);
         }
       }
       setSearchMatches(matches);

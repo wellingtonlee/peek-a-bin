@@ -5,7 +5,8 @@ import type { DisasmFunction } from "../disasm/types";
 type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
   | { kind: "insn"; insn: { address: number; mnemonic: string; opStr: string; size: number }; blockIdx: number }
-  | { kind: "separator" };
+  | { kind: "separator" }
+  | { kind: "data"; item: { address: number } };
 
 interface JumpArrowsProps {
   visibleItems: VirtualItem[];

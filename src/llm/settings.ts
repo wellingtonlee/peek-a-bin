@@ -31,3 +31,21 @@ export function saveSettings(settings: LLMSettings): void {
 export function hasApiKey(): boolean {
   return loadSettings().apiKey.length > 0;
 }
+
+const FONT_SIZE_KEY = "peek-a-bin:font-size";
+
+export function loadFontSize(): number {
+  try {
+    const raw = localStorage.getItem(FONT_SIZE_KEY);
+    if (raw) {
+      const n = parseInt(raw, 10);
+      if (n >= 10 && n <= 16) return n;
+    }
+  } catch {}
+  return 12;
+}
+
+export function saveFontSize(size: number): void {
+  localStorage.setItem(FONT_SIZE_KEY, String(size));
+  window.dispatchEvent(new CustomEvent("peek-a-bin:font-size-changed"));
+}

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { loadSettings, saveSettings, type LLMSettings } from "../llm/settings";
+import { loadSettings, saveSettings, loadFontSize, saveFontSize, type LLMSettings } from "../llm/settings";
 
 interface Props {
   open: boolean;
@@ -14,11 +14,13 @@ const PROVIDER_DEFAULTS: Record<string, { model: string; baseUrl: string }> = {
 export function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
   const [showKey, setShowKey] = useState(false);
+  const [fontSize, setFontSize] = useState(() => loadFontSize());
 
   useEffect(() => {
     if (open) {
       setSettings(loadSettings());
       setShowKey(false);
+      setFontSize(loadFontSize());
     }
   }, [open]);
 
@@ -37,6 +39,7 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const handleSave = () => {
     saveSettings(settings);
+    saveFontSize(fontSize);
     onClose();
   };
 
@@ -129,6 +132,25 @@ export function SettingsModal({ open, onClose }: Props) {
               ))}
             </div>
             <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
+          </div>
+
+          {/* Font Size */}
+          <div>
+            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              Font Size
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={10}
+                max={16}
+                step={1}
+                value={fontSize}
+                onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                className="flex-1 accent-blue-500"
+              />
+              <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
+            </div>
           </div>
 
           {/* Base URL (OpenAI only) */}

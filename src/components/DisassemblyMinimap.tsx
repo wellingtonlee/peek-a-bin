@@ -6,7 +6,8 @@ import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
 type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
   | { kind: "insn"; insn: { address: number }; blockIdx: number }
-  | { kind: "separator" };
+  | { kind: "separator" }
+  | { kind: "data"; item: { address: number } };
 
 interface DisassemblyMinimapProps {
   rows: DisplayRow[];

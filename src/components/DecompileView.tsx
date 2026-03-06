@@ -203,7 +203,8 @@ export function DecompileView({
       ) : (
         <pre
           ref={preRef}
-          className="flex-1 overflow-auto px-3 py-2 text-xs leading-5 font-mono text-gray-200 select-text"
+          className="flex-1 overflow-auto px-3 py-2 leading-5 font-mono text-gray-200 select-text"
+          style={{ fontSize: 'var(--mono-font-size)' }}
           onClick={handleClick}
         >
           {lines.map((line) => {

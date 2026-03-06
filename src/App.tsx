@@ -11,6 +11,7 @@ import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
 import { detectDriver } from "./analysis/driver";
 import { detectAnomalies } from "./analysis/anomalies";
+import { loadFontSize } from "./llm/settings";
 import { saveRecentFile } from "./utils/recentFiles";
 import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
@@ -40,6 +41,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
+  const [fontSize, setFontSize] = useState(() => loadFontSize());
 
   const bufferRef = useRef<ArrayBuffer | null>(null);
 
@@ -72,6 +74,12 @@ export default function App() {
     const handler = () => setSettingsOpen(true);
     window.addEventListener("peek-a-bin:open-settings", handler);
     return () => window.removeEventListener("peek-a-bin:open-settings", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setFontSize(loadFontSize());
+    window.addEventListener("peek-a-bin:font-size-changed", handler);
+    return () => window.removeEventListener("peek-a-bin:font-size-changed", handler);
   }, []);
 
   useEffect(() => {
@@ -382,7 +390,7 @@ export default function App() {
         {!state.peFile ? (
           <FileLoader onFile={handleFile} loading={state.loading} error={state.error} analysisPhase={state.analysisPhase} fileName={state.fileName} />
         ) : (
-          <div className="flex flex-col h-screen">
+          <div className="flex flex-col h-screen" style={{ '--mono-font-size': `${fontSize}px` } as React.CSSProperties}>
             <AddressBar />
             {state.driverInfo?.isDriver && !driverBannerDismissed && (
               <div className="bg-amber-900/40 border-b border-amber-700/50 px-4 py-1.5 flex items-center gap-3 text-xs shrink-0">

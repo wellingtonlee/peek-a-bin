@@ -2,18 +2,22 @@ import { useEffect, useRef, useMemo, useState } from "react";
 import { useAppState } from "./usePEFile";
 import { useSectionInfo } from "./useDerivedState";
 import { disasmWorker } from "../workers/disasmClient";
-import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
+import type { Instruction, DisasmFunction, Xref, DataItem } from "../disasm/types";
 import { buildCFG, detectLoops } from "../disasm/cfg";
 import type { Loop } from "../disasm/cfg";
+import { buildDataItems } from "../disasm/dataView";
+import { buildIATLookup } from "../disasm/operands";
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
   | { kind: "insn"; insn: Instruction; blockIdx: number }
-  | { kind: "separator" };
+  | { kind: "separator" }
+  | { kind: "data"; item: DataItem };
 
 export function rowAddress(row: DisplayRow): number | null {
   if (row.kind === "insn") return row.insn.address;
   if (row.kind === "label") return row.fn.address;
+  if (row.kind === "data") return row.item.address;
   return null;
 }
 
@@ -50,6 +54,7 @@ export interface UseDisassemblyRowsResult {
   bookmarkSet: Set<number>;
   disassembling: boolean;
   disasmError: string | null;
+  isExecutable: boolean;
 }
 
 export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisassemblyRowsResult {
@@ -61,9 +66,17 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
   const [disasmError, setDisasmError] = useState<string | null>(null);
   const [disassembling, setDisassembling] = useState(false);
 
+  const isExecutable = sectionInfo ? (sectionInfo.characteristics & 0x20000000) !== 0 : true;
+
   // Disassemble the current section (off main thread via worker)
   useEffect(() => {
     if (!pe || !sectionInfo || !state.disasmReady) return;
+
+    if (!isExecutable) {
+      setInstructions([]);
+      setDisassembling(false);
+      return;
+    }
 
     let cancelled = false;
     setDisassembling(true);
@@ -127,7 +140,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
       });
 
     return () => { cancelled = true; };
-  }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size, state.functions]);
+  }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size, state.functions, isExecutable]);
 
   // Build funcMap for O(1) lookup
   const funcMap = useMemo(() => {
@@ -209,8 +222,26 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     return m;
   }, [loops]);
 
+  // Data items for non-executable sections
+  const dataItems = useMemo((): DataItem[] => {
+    if (isExecutable || !pe || !sectionInfo) return [];
+    const bytes = new Uint8Array(pe.buffer, sectionInfo.pointerToRawData, sectionInfo.sizeOfRawData);
+    const baseAddress = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
+    const iatMap = buildIATLookup(pe.imports);
+    const funcAddrsMap = new Map<number, string>();
+    for (const fn of state.functions) funcAddrsMap.set(fn.address, fn.name);
+    const sectionRanges = pe.sections.map(s => ({
+      start: pe.optionalHeader.imageBase + s.virtualAddress,
+      end: pe.optionalHeader.imageBase + s.virtualAddress + s.virtualSize,
+    }));
+    return buildDataItems(bytes, baseAddress, pe.is64, pe.strings, pe.stringTypes, iatMap, funcAddrsMap, sectionRanges);
+  }, [isExecutable, pe, sectionInfo, state.functions]);
+
   // Build display rows (with basic block separators and block indices)
   const rows: DisplayRow[] = useMemo(() => {
+    if (!isExecutable) {
+      return dataItems.map(item => ({ kind: "data" as const, item }));
+    }
     const result: DisplayRow[] = [];
     const separatorMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
     const branchMnemonics = new Set(["ret", "retn", "jmp", "int3"]);
@@ -240,7 +271,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
       }
     }
     return result;
-  }, [instructions, funcMap, xrefTargetSet]);
+  }, [instructions, funcMap, xrefTargetSet, isExecutable, dataItems]);
 
   return {
     instructions,
@@ -253,5 +284,6 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     bookmarkSet,
     disassembling,
     disasmError,
+    isExecutable,
   };
 }

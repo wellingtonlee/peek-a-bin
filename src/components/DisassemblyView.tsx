@@ -77,6 +77,22 @@ function formatRangeCopy(
       const c = insn.comment ? `  ; ${insn.comment}` : "";
       const uc = comments[insn.address] ? `  ; ${comments[insn.address]}` : "";
       lines.push(`${addrHex}  ${bytesHex}  ${mnem}${ops}${c}${uc}`);
+    } else if (row.kind === "data") {
+      const item = row.item;
+      const addrHex = item.address.toString(16).toUpperCase().padStart(aw, "0");
+      let value = "";
+      if (item.directive === "dup") {
+        value = `${item.dupCount} dup(${item.dupByte === 0 ? "0" : `0x${item.dupByte!.toString(16)}`})`;
+      } else if (item.directive === "db" && item.stringValue != null) {
+        value = `"${item.stringValue}", 0`;
+      } else if ((item.directive === "dd" || item.directive === "dq") && item.pointerTarget != null) {
+        value = `0x${item.pointerTarget.toString(16).toUpperCase()}`;
+      } else {
+        value = Array.from(item.bytes).map(b => b.toString(16).toUpperCase().padStart(2, "0") + "h").join(", ");
+      }
+      const c = item.pointerLabel ? `  ; ${item.pointerLabel}` : item.stringValue ? `  ; ${item.stringType ?? ""}` : "";
+      const uc = comments[item.address] ? `  ; ${comments[item.address]}` : "";
+      lines.push(`${addrHex}  ${item.directive.padEnd(8)}${value}${c}${uc}`);
     }
   }
   return lines.join("\n");
@@ -122,6 +138,7 @@ export function DisassemblyView() {
     bookmarkSet,
     disassembling,
     disasmError,
+    isExecutable,
   } = useDisassemblyRows(currentFunc);
 
   const currentIndex = useMemo(() => {
@@ -1089,7 +1106,8 @@ export function DisassemblyView() {
           VA: 0x{sectionBaseVA.toString(16).toUpperCase()} – 0x{sectionEndVA.toString(16).toUpperCase()}
         </span>
         <span>Size: 0x{sectionInfo.virtualSize.toString(16).toUpperCase()}</span>
-        <span>{instructions.length.toLocaleString()} instructions</span>
+        <span>{isExecutable ? `${instructions.length.toLocaleString()} instructions` : "data section"}</span>
+        {isExecutable && (<>
         <select
           value={insnFilter}
           onChange={(e) => setInsnFilter(e.target.value as typeof insnFilter)}
@@ -1104,6 +1122,7 @@ export function DisassemblyView() {
         {insnFilter !== "all" && (
           <span className="text-gray-500 text-[10px]">({filterMatchCount} matches)</span>
         )}
+        </>)}
         <div className="flex items-center gap-1 ml-2">
           <button
             onClick={() => setShowBlocks((v) => !v)}
@@ -1125,7 +1144,7 @@ export function DisassemblyView() {
           </button>
           <button
             onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
-            disabled={!currentFunc}
+            disabled={!currentFunc || !isExecutable}
             className={`px-1.5 py-0.5 rounded text-[10px] ${viewMode === "graph" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
             title="Toggle graph view (Space)"
           >
@@ -1133,7 +1152,7 @@ export function DisassemblyView() {
           </button>
           <button
             onClick={handleDecompileToggle}
-            disabled={!currentFunc}
+            disabled={!currentFunc || !isExecutable}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showDecompile ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
             title="Decompile current function (D)"
           >
@@ -1302,7 +1321,8 @@ export function DisassemblyView() {
       {viewMode === "linear" ? (
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto text-xs leading-5 focus:outline-none relative"
+        className="flex-1 overflow-auto leading-5 focus:outline-none relative"
+        style={{ fontSize: 'var(--mono-font-size)' }}
         tabIndex={0}
       >
         {/* Sticky function header */}
@@ -1328,10 +1348,10 @@ export function DisassemblyView() {
             height: `${virtualizer.getTotalSize()}px`,
             width: "100%",
             position: "relative",
-            paddingLeft: showArrows ? "40px" : undefined,
+            paddingLeft: showArrows && isExecutable ? "40px" : undefined,
           }}
         >
-          {showArrows && (
+          {showArrows && isExecutable && (
             <JumpArrows
               visibleItems={virtualizer.getVirtualItems()}
               rows={rows}
@@ -1361,6 +1381,72 @@ export function DisassemblyView() {
                   }}
                 >
                   <div className="w-full border-t border-dashed border-gray-700/40" />
+                </div>
+              );
+            }
+
+            if (row.kind === "data") {
+              const item = row.item;
+              const addrHex = item.address.toString(16).toUpperCase().padStart(addrWidth, "0");
+              const bytesHex = Array.from(item.bytes.slice(0, 8)).map(b => b.toString(16).padStart(2, "0")).join(" ");
+              const isCurrentAddr = item.address === state.currentAddress;
+              const isBookmarked = bookmarkSet.has(item.address);
+
+              let directiveStr: React.ReactNode;
+              let commentStr: React.ReactNode = null;
+
+              if (item.directive === "dup") {
+                directiveStr = <span className="text-gray-500">{item.dupCount} dup({item.dupByte === 0 ? "0" : `0x${item.dupByte!.toString(16)}`})</span>;
+              } else if (item.directive === "db" && item.stringValue != null) {
+                const escaped = item.stringValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+                directiveStr = <span className="text-green-400">"{escaped}", 0</span>;
+                if (item.stringType) commentStr = <span className="text-gray-500 ml-4">; {item.stringType}</span>;
+              } else if ((item.directive === "dd" || item.directive === "dq") && item.pointerTarget != null) {
+                directiveStr = (
+                  <span
+                    className="text-blue-400 cursor-pointer hover:underline"
+                    onClick={(e) => { e.stopPropagation(); handleAddressClick(item.pointerTarget!); }}
+                  >
+                    0x{item.pointerTarget.toString(16).toUpperCase()}
+                  </span>
+                );
+                if (item.pointerLabel) commentStr = <span className="text-gray-500 ml-4">; {item.pointerLabel}</span>;
+              } else {
+                const hexStr = Array.from(item.bytes).map(b => b.toString(16).toUpperCase().padStart(2, "0") + "h").join(", ");
+                directiveStr = <span>{hexStr}</span>;
+                const ascii = Array.from(item.bytes).map(b => b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".").join("");
+                commentStr = <span className="text-gray-500 ml-4">; {ascii}</span>;
+              }
+
+              const userComment = state.comments[item.address];
+
+              return (
+                <div
+                  key={vItem.index}
+                  data-index={vItem.index}
+                  className={`disasm-row group flex px-4 ${isCurrentAddr ? "bg-blue-900/30" : ""}`}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    height: "20px",
+                    transform: `translateY(${vItem.start}px)`,
+                  }}
+                  onClick={() => {
+                    suppressScrollRef.current = true;
+                    dispatch({ type: "SET_ADDRESS", address: item.address });
+                  }}
+                >
+                  <span className="w-4 shrink-0 text-center">
+                    {isBookmarked && <span className="text-yellow-300">★</span>}
+                  </span>
+                  <span className="disasm-address w-36 shrink-0">{addrHex}</span>
+                  <span className="disasm-bytes w-44 shrink-0 truncate">{bytesHex}</span>
+                  <span className="text-cyan-400 w-16 shrink-0">{item.directive}</span>
+                  <span className="flex-1">{directiveStr}</span>
+                  {commentStr}
+                  {userComment && <span className="disasm-user-comment ml-2 truncate max-w-xs">; {userComment}</span>}
                 </div>
               );
             }
@@ -1906,7 +1992,7 @@ export function DisassemblyView() {
       )}
 
       {/* Instruction detail panel */}
-      {showDetail && (() => {
+      {showDetail && isExecutable && (() => {
         // Binary search for current instruction
         let curInsn: Instruction | null = null;
         let lo = 0, hi = instructions.length - 1;

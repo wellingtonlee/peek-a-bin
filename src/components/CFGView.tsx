@@ -528,7 +528,7 @@ function CFGBlock({
         borderRadius: 4,
         background: isCurrent ? "#1e3a5f" : "#1f2937",
         overflow: "hidden",
-        fontSize: "10px",
+        fontSize: "var(--mono-font-size, 10px)",
         fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace",
       }}
     >

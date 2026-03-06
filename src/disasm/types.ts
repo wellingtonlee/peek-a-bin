@@ -31,3 +31,16 @@ export interface StackFrame {
   vars: StackVar[];
 }
 
+export interface DataItem {
+  address: number;
+  directive: "db" | "dd" | "dq" | "dup";
+  size: number;           // bytes consumed
+  bytes: Uint8Array;      // raw bytes for hex column
+  stringValue?: string;
+  stringType?: "ascii" | "utf16le";
+  pointerTarget?: number;
+  pointerLabel?: string;
+  dupCount?: number;
+  dupByte?: number;
+}
+

@@ -24,6 +24,11 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { key: "Alt+\u2190/\u2192", action: "Back / Forward" },
       { key: "Enter", action: "Follow branch target" },
       { key: "Escape", action: "Close panel" },
+      { key: "X", action: "Toggle call panel" },
+      { key: "R", action: "Toggle xref panel" },
+      { key: "I", action: "Toggle instruction detail" },
+      { key: "D", action: "Toggle decompiler" },
+      { key: "Alt+H", action: "Recent addresses" },
     ],
   },
   {
@@ -51,6 +56,18 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     category: "Disassembly",
     shortcuts: [
       { key: "\u2191 / \u2193", action: "Navigate instructions" },
+      { key: "Space", action: "Toggle graph / linear view" },
+      { key: "; (semicolon)", action: "Add / edit comment" },
+      { key: "N", action: "Rename function" },
+    ],
+  },
+  {
+    category: "Graph",
+    shortcuts: [
+      { key: "\u2191 / \u2193", action: "Navigate within/across blocks" },
+      { key: "Tab", action: "Cycle successor blocks" },
+      { key: "Enter", action: "Follow branch target" },
+      { key: "0", action: "Zoom to fit" },
     ],
   },
 ];
