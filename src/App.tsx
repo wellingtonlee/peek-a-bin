@@ -306,7 +306,7 @@ export default function App() {
         dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
         // Extract strings off the main thread via worker
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
-        disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase)
+        disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)
           .then(({ strings, stringTypes }) => {
             dispatch({ type: "SET_STRINGS", strings, stringTypes });
           });

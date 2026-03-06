@@ -227,6 +227,8 @@ function disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Ins
       for (const insn of insns) {
         instructions.push(mapInsn(insn));
       }
+      // Defensive fallback: capstone-wasm normally throws on undecoded bytes,
+      // but keep this branch in case a future version returns empty instead.
       if (insns.length === 0) {
         offset += 1;
       } else {
@@ -235,7 +237,9 @@ function disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Ins
         offset += decoded;
       }
     } catch {
-      offset += CHUNK_SIZE;
+      // capstone-wasm throws when it can't decode the first byte (count=0);
+      // skip 1 byte instead of the whole chunk to avoid 64KB gaps.
+      offset += 1;
     }
   }
 
@@ -451,6 +455,7 @@ function detectFunctions(
           recentInsns.push({ address: insn.address, mnemonic: insn.mnemonic, opStr: insn.opStr, size: insn.size });
           if (recentInsns.length > MAX_RECENT) recentInsns.shift();
         }
+        // Defensive fallback (see disassemble())
         if (insns.length === 0) {
           offset += 1;
           prevWasUnconditional = false;
@@ -460,7 +465,8 @@ function detectFunctions(
           offset += decoded;
         }
       } catch {
-        offset += CHUNK_SIZE;
+        // capstone-wasm throws on undecoded first byte; skip 1 byte not 64KB
+        offset += 1;
         prevWasUnconditional = false;
       }
     }
@@ -609,12 +615,18 @@ function hybridDisassemble(
   }
 
   // Phase 2: Gap fill — scan uncovered byte ranges
-  const coveredAddrs = new Set(instructionMap.keys());
+  // Use a byte-level bitmap so interior bytes of multi-byte instructions
+  // (e.g. bytes 2-6 of a 6-byte `call dword ptr [...]`) are marked covered.
+  const covered = new Uint8Array(bytes.length);
+  for (const [addr, insn] of instructionMap) {
+    const start = addr - baseAddress;
+    const end = Math.min(start + insn.size, bytes.length);
+    for (let j = start; j < end; j++) covered[j] = 1;
+  }
   let gapStart = -1;
 
   for (let i = 0; i <= bytes.length; i++) {
-    const addr = baseAddress + i;
-    const isCovered = i < bytes.length && coveredAddrs.has(addr);
+    const isCovered = i < bytes.length && covered[i] === 1;
 
     if (!isCovered && gapStart === -1 && i < bytes.length) {
       gapStart = i;
@@ -772,6 +784,7 @@ function buildAllXrefs(
           }
         }
       }
+      // Defensive fallback (see disassemble())
       if (insns.length === 0) {
         offset += 1;
       } else {
@@ -780,7 +793,8 @@ function buildAllXrefs(
         offset += decoded;
       }
     } catch {
-      offset += CHUNK_SIZE;
+      // capstone-wasm throws on undecoded first byte; skip 1 byte not 64KB
+      offset += 1;
     }
   }
 
@@ -837,7 +851,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
 
       case 'extractStrings': {
-        const { strings, stringTypes } = extractStrings(args.buffer, args.sections as SectionHeader[], args.imageBase);
+        const { strings, stringTypes } = extractStrings(args.buffer, args.sections as SectionHeader[], args.imageBase, args.is64 as boolean | undefined);
         result = {
           strings: Array.from(strings.entries()),
           stringTypes: Array.from(stringTypes.entries()),

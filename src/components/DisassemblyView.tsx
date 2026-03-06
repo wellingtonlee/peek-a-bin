@@ -1668,6 +1668,15 @@ export function DisassemblyView() {
         onToggleCollapse={handleToggleCollapse}
         onCommentSubmit={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
         onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
+        onNavBack={() => {
+          if (state.callStack.length > 0) {
+            const last = state.callStack[state.callStack.length - 1];
+            dispatch({ type: "SET_ADDRESS", address: last.address });
+            dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
+          } else {
+            dispatch({ type: "NAV_BACK" });
+          }
+        }}
       />
       ) : (
         <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">

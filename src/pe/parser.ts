@@ -410,6 +410,16 @@ function extractASCIIStrings(
   while (i < end) {
     const byte = buf[i];
 
+    // Skip leading whitespace/control chars before printable ASCII
+    if (byte === 0x09 || byte === 0x0A || byte === 0x0D) {
+      let skip = i;
+      while (skip < end && (buf[skip] === 0x09 || buf[skip] === 0x0A || buf[skip] === 0x0D)) skip++;
+      if (skip < end && buf[skip] >= 0x20 && buf[skip] <= 0x7e) {
+        i = skip;
+        continue;
+      }
+    }
+
     if (byte >= 0x20 && byte <= 0x7e) {
       const strStart = i;
       while (i < end) {
@@ -456,6 +466,16 @@ function extractUTF16Strings(
   while (i + 1 < end) {
     const lo = buf[i];
     const hi = buf[i + 1];
+
+    // Skip leading whitespace/control char pairs before printable UTF-16LE
+    if (hi === 0 && (lo === 0x09 || lo === 0x0A || lo === 0x0D)) {
+      let skip = i;
+      while (skip + 1 < end && buf[skip + 1] === 0 && (buf[skip] === 0x09 || buf[skip] === 0x0A || buf[skip] === 0x0D)) skip += 2;
+      if (skip + 1 < end && buf[skip + 1] === 0 && buf[skip] >= 0x20 && buf[skip] <= 0x7e) {
+        i = skip;
+        continue;
+      }
+    }
 
     // Check for [printable, 0x00] pattern
     if (hi === 0 && lo >= 0x20 && lo <= 0x7e) {
@@ -737,6 +757,7 @@ export function extractStrings(
   buffer: ArrayBuffer,
   sections: SectionHeader[],
   imageBase: number,
+  is64?: boolean,
 ): { strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> } {
   const view = new DataView(buffer);
   const strings = new Map<number, string>();
@@ -766,6 +787,35 @@ export function extractStrings(
       utf16Strings.forEach((v, k) => {
         if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "utf16le"); }
       });
+    }
+  }
+
+  // Pointer indirection pass: scan .rdata/.data for pointers to known string VAs
+  const ptrSize = is64 ? 8 : 4;
+  const imageEnd = imageBase + Math.max(...sections.map(s => s.virtualAddress + s.virtualSize));
+
+  for (const sec of sections) {
+    if (!dataSectionNames.has(sec.name)) continue;
+    const start = sec.pointerToRawData;
+    const end = Math.min(start + Math.min(sec.sizeOfRawData, 1024 * 1024), view.byteLength);
+
+    for (let off = start; off + ptrSize <= end; off += ptrSize) {
+      let ptr: number;
+      if (ptrSize === 8) {
+        const lo = view.getUint32(off, true);
+        const hi = view.getUint32(off + 4, true);
+        ptr = hi * 0x100000000 + lo;
+      } else {
+        ptr = view.getUint32(off, true);
+      }
+      if (ptr >= imageBase && ptr < imageEnd && strings.has(ptr)) {
+        const pointerVA = imageBase + sec.virtualAddress + (off - sec.pointerToRawData);
+        if (!strings.has(pointerVA)) {
+          strings.set(pointerVA, strings.get(ptr)!);
+          const t = stringTypes.get(ptr);
+          if (t) stringTypes.set(pointerVA, t);
+        }
+      }
     }
   }
 

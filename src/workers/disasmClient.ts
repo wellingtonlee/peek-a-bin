@@ -128,9 +128,10 @@ class DisasmWorkerClient {
     buffer: ArrayBuffer,
     sections: SectionHeader[],
     imageBase: number,
+    is64?: boolean,
   ): Promise<{ strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }> {
     const result: { strings: [number, string][]; stringTypes: [number, "ascii" | "utf16le"][] } =
-      await this.send('extractStrings', { buffer, sections, imageBase });
+      await this.send('extractStrings', { buffer, sections, imageBase, is64 });
     return {
       strings: new Map(result.strings),
       stringTypes: new Map(result.stringTypes),

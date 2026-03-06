@@ -34,6 +34,7 @@ export interface CFGViewProps {
   onToggleCollapse: (blockId: number) => void;
   onCommentSubmit: (address: number, text: string) => void;
   onCommentDelete: (address: number) => void;
+  onNavBack?: () => void;
 }
 
 const EDGE_COLORS: Record<CFGEdge['type'], string> = {
@@ -70,6 +71,7 @@ export function CFGView({
   onToggleCollapse,
   onCommentSubmit,
   onCommentDelete,
+  onNavBack,
 }: CFGViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
@@ -268,6 +270,20 @@ export function CFGView({
     return () => el.removeEventListener("mouseup", handler);
   }, []);
 
+  // Escape key navigates back (window-level so it works without focus)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !editingComment && onNavBack) {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+        e.preventDefault();
+        onNavBack();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [editingComment, onNavBack]);
+
   // Edges filtered by visibility
   const visibleEdges = useMemo(() => {
     return edges.filter(e => visibleBlockIds.has(e.from) || visibleBlockIds.has(e.to));
@@ -376,8 +392,10 @@ export function CFGView({
             const toX = ox + toBlock.x + toBlock.w / 2;
             const toY = oy + toBlock.y;
 
-            const edgeIdx = edges.filter(e => e.from === edge.from).indexOf(edge);
-            const offset = (edgeIdx - 0.5) * 15;
+            // Small offset for multiple edges from same block to avoid overlap
+            const siblings = edges.filter(e => e.from === edge.from);
+            const edgeIdx = siblings.indexOf(edge);
+            const offset = siblings.length > 1 ? (edgeIdx - (siblings.length - 1) / 2) * 12 : 0;
 
             const color = EDGE_COLORS[edge.type];
             const markerId = edge.type === 'fallthrough' ? 'cfg-arrow-green'

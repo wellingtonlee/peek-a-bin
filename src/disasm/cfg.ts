@@ -1,4 +1,5 @@
 import type { Instruction, DisasmFunction, Xref } from './types';
+import dagre from '@dagrejs/dagre';
 
 export interface BasicBlock {
   id: number;
@@ -312,85 +313,28 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
 export const CFG_LAYOUT = {
   BLOCK_WIDTH: 320,
   BLOCK_MIN_HEIGHT: 50,
-  INSN_HEIGHT: 16,
-  V_SPACING: 80,
-  H_SPACING: 50,
+  INSN_HEIGHT: 14,
+  V_SPACING: 40,
+  H_SPACING: 30,
   BLOCK_HEADER: 22,
 } as const;
 
 export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges: CFGEdge[] } {
   if (blocks.length === 0) return { blocks: [], edges: [] };
 
-  // Topological layer assignment via BFS from entry
-  const layers = new Map<number, number>();
-  const queue: number[] = [0];
-  layers.set(0, 0);
-  const visited = new Set<number>();
-
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (visited.has(id)) continue;
-    visited.add(id);
-    const layer = layers.get(id)!;
-
-    for (const succ of blocks[id].succs) {
-      const existingLayer = layers.get(succ);
-      if (existingLayer === undefined || existingLayer < layer + 1) {
-        layers.set(succ, layer + 1);
-      }
-      if (!visited.has(succ)) {
-        queue.push(succ);
-      }
-    }
-  }
-
-  // Assign unvisited blocks
-  for (const block of blocks) {
-    if (!layers.has(block.id)) {
-      layers.set(block.id, 0);
-    }
-  }
-
-  // Group blocks by layer
-  const layerGroups = new Map<number, number[]>();
-  for (const block of blocks) {
-    const layer = layers.get(block.id)!;
-    if (!layerGroups.has(layer)) layerGroups.set(layer, []);
-    layerGroups.get(layer)!.push(block.id);
-  }
-
   const { BLOCK_WIDTH, BLOCK_MIN_HEIGHT, INSN_HEIGHT, V_SPACING, H_SPACING, BLOCK_HEADER } = CFG_LAYOUT;
 
-  const layoutBlocks: LayoutBlock[] = [];
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: 'TB', nodesep: H_SPACING, ranksep: V_SPACING, edgesep: 10 });
+  g.setDefaultEdgeLabel(() => ({}));
 
-  const sortedLayers = Array.from(layerGroups.keys()).sort((a, b) => a - b);
-  let y = 20;
-
-  for (const layer of sortedLayers) {
-    const group = layerGroups.get(layer)!;
-    const totalWidth = group.length * BLOCK_WIDTH + (group.length - 1) * H_SPACING;
-    let x = -totalWidth / 2;
-
-    let maxHeight = 0;
-    for (const blockId of group) {
-      const block = blocks[blockId];
-      const h = Math.max(BLOCK_MIN_HEIGHT, block.insns.length * INSN_HEIGHT + BLOCK_HEADER + 4);
-      maxHeight = Math.max(maxHeight, h);
-
-      layoutBlocks.push({
-        ...block,
-        x,
-        y,
-        w: BLOCK_WIDTH,
-        h,
-      });
-      x += BLOCK_WIDTH + H_SPACING;
-    }
-
-    y += maxHeight + V_SPACING;
+  // Add nodes
+  for (const block of blocks) {
+    const h = Math.max(BLOCK_MIN_HEIGHT, block.insns.length * INSN_HEIGHT + BLOCK_HEADER + 4);
+    g.setNode(String(block.id), { width: BLOCK_WIDTH, height: h });
   }
 
-  // Build edges
+  // Build edges — classify and add to dagre with weights
   const edges: CFGEdge[] = [];
   for (const block of blocks) {
     const lastInsn = block.insns[block.insns.length - 1];
@@ -401,7 +345,6 @@ export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges:
       if (mn === 'jmp') {
         type = 'jump';
       } else if (mn.startsWith('j') && mn !== 'jmp') {
-        // Check if this is the branch target or fallthrough
         const m = lastInsn.opStr.match(/^0x([0-9a-fA-F]+)$/);
         if (m && parseInt(m[1], 16) === blocks[succId].startAddr) {
           type = 'branch';
@@ -411,9 +354,22 @@ export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges:
       } else {
         type = 'fallthrough';
       }
+
+      // Fallthrough edges get higher weight to stay straight
+      const weight = type === 'fallthrough' ? 10 : 1;
+      g.setEdge(String(block.id), String(succId), { weight });
       edges.push({ from: block.id, to: succId, type });
     }
   }
+
+  dagre.layout(g);
+
+  // Read back positions (dagre gives center coords, convert to top-left)
+  const layoutBlocks: LayoutBlock[] = blocks.map(block => {
+    const node = g.node(String(block.id));
+    const h = Math.max(BLOCK_MIN_HEIGHT, block.insns.length * INSN_HEIGHT + BLOCK_HEADER + 4);
+    return { ...block, x: node.x - BLOCK_WIDTH / 2, y: node.y - h / 2, w: BLOCK_WIDTH, h };
+  });
 
   return { blocks: layoutBlocks, edges };
 }

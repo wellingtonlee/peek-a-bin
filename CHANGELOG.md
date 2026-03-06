@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Escape navigates back in graph view** — pressing `Escape` in graph view pops the call stack breadcrumb or navigates back in history (same as the back arrow button), works globally without requiring focus on the graph container
+- **Leading-whitespace string stripping** — `.rdata` strings starting with whitespace/control characters (`\t`, `\n`, `\r`) are now detected by skipping leading whitespace bytes and extracting from the first printable character, for both ASCII and UTF-16LE scanners
 - **Inline graph view** — CFG is now an IDA Pro-style inline view togglable with `Space`, replacing the old modal overlay. Stays in graph mode across function changes; viewMode persisted to localStorage
 - **Full interaction parity in graph blocks** — clicking, context menus, keyboard navigation, comments (`;`), register highlighting, operand navigation, and bookmarks all work identically inside graph blocks
 - **Graph keyboard navigation** — `Arrow Up/Down` navigate within and across blocks, `Tab` cycles successor blocks, `Enter` follows branch targets, `0` zooms to fit the entire graph
@@ -17,6 +19,7 @@
 
 ### Changed
 
+- **Compact graph spacing** — reduced vertical spacing (80→40), horizontal spacing (50→30), edge separation (20→10), and instruction line height (16→14px) for denser, more compact graph blocks
 - CFG layout constants updated for better readability: wider blocks (320px), taller rows (16px), more spacing between blocks
 - Extracted shared disassembly utilities (`ColoredOperand`, `mnemonicClass`, `tokenizeOperand`, `parseBranchTarget`, `REG_NAMES`) into `src/components/shared.tsx` for reuse between linear and graph views
 - Toolbar "CFG" button replaced with a "Graph" toggle button that reflects active state
