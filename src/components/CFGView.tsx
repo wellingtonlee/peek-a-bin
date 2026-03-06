@@ -34,6 +34,7 @@ export interface CFGViewProps {
   onToggleCollapse: (blockId: number) => void;
   onCommentSubmit: (address: number, text: string) => void;
   onCommentDelete: (address: number) => void;
+  restorePanZoom?: { pan: { x: number; y: number }; zoom: number } | null;
   onNavBack?: () => void;
 }
 
@@ -71,6 +72,7 @@ export function CFGView({
   onToggleCollapse,
   onCommentSubmit,
   onCommentDelete,
+  restorePanZoom,
   onNavBack,
 }: CFGViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,17 +104,34 @@ export function CFGView({
     return addrToBlockId.get(currentAddress) ?? -1;
   }, [addrToBlockId, currentAddress]);
 
-  // Auto-center on mount or function change
+  // Auto-center on mount or function change — pan to block containing currentAddress
   useEffect(() => {
     if (blocks.length === 0) return;
     const container = containerRef.current;
     if (!container) return;
-    const minX = Math.min(...blocks.map(b => b.x));
-    const maxX = Math.max(...blocks.map(b => b.x + b.w));
-    const minY = Math.min(...blocks.map(b => b.y));
-    const centerX = (minX + maxX) / 2;
+    graphInteractionRef.current = false;
+    // If restoring pan/zoom from navigation, use those values instead of auto-centering
+    if (restorePanZoom) {
+      onPanChange(restorePanZoom.pan);
+      onZoomChange(restorePanZoom.zoom);
+      return;
+    }
     const containerW = container.clientWidth;
-    onPanChange({ x: containerW / 2 - centerX * zoom, y: 20 - minY * zoom });
+    // Try to center on the block containing currentAddress
+    const targetBlockId = addrToBlockId.get(currentAddress);
+    const targetBlock = targetBlockId !== undefined ? blockMap.get(targetBlockId) : undefined;
+    if (targetBlock) {
+      onPanChange({
+        x: containerW / 2 - (targetBlock.x + targetBlock.w / 2) * zoom,
+        y: 40 - targetBlock.y * zoom,
+      });
+    } else {
+      const minX = Math.min(...blocks.map(b => b.x));
+      const maxX = Math.max(...blocks.map(b => b.x + b.w));
+      const minY = Math.min(...blocks.map(b => b.y));
+      const centerX = (minX + maxX) / 2;
+      onPanChange({ x: containerW / 2 - centerX * zoom, y: 20 - minY * zoom });
+    }
   }, [func.address, blocks.length]);
 
   // Zoom-to-fit callback
@@ -162,6 +181,7 @@ export function CFGView({
 
   // Auto-pan to current block when address changes externally
   useEffect(() => {
+    if (restorePanZoom) return;
     if (currentBlockId < 0 || graphInteractionRef.current) {
       graphInteractionRef.current = false;
       return;
@@ -181,7 +201,7 @@ export function CFGView({
       x: cW / 2 - (block.x + block.w / 2) * zoom,
       y: 40 - block.y * zoom,
     });
-  }, [currentBlockId]);
+  }, [currentBlockId, currentAddress]);
 
   // Viewport culling
   const visibleBlockIds = useMemo(() => {
@@ -269,20 +289,6 @@ export function CFGView({
     el.addEventListener("mouseup", handler);
     return () => el.removeEventListener("mouseup", handler);
   }, []);
-
-  // Escape key navigates back (window-level so it works without focus)
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !editingComment && onNavBack) {
-        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-        if (tag === "input" || tag === "textarea" || tag === "select") return;
-        e.preventDefault();
-        onNavBack();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [editingComment, onNavBack]);
 
   // Edges filtered by visibility
   const visibleEdges = useMemo(() => {
@@ -561,7 +567,7 @@ function CFGBlock({
         return (
           <div
             key={insn.address}
-            className={`flex items-center px-1 group ${isCurrentAddr ? "bg-blue-900/40" : "hover:bg-gray-700/30"}`}
+            className={`flex items-center px-1 group ${isCurrentAddr ? "bg-yellow-500/20 border-l-2 border-yellow-400" : "hover:bg-gray-700/30"}`}
             style={{ height: CFG_LAYOUT.INSN_HEIGHT, lineHeight: `${CFG_LAYOUT.INSN_HEIGHT}px` }}
             onClick={(e) => {
               e.stopPropagation();

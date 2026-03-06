@@ -156,6 +156,8 @@ export function DisassemblyView() {
   const [graphPan, setGraphPan] = useState({ x: 0, y: 0 });
   const [graphZoom, setGraphZoom] = useState(0.8);
   const [collapsedBlocks, setCollapsedBlocks] = useState<Set<number>>(new Set());
+  const [restorePanZoom, setRestorePanZoom] = useState<{ pan: { x: number; y: number }; zoom: number } | null>(null);
+  const navViewStateMapRef = useRef<Map<number, { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number }>>(new Map());
   const cfgContainerRef = useRef<HTMLDivElement>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
@@ -302,6 +304,26 @@ export function DisassemblyView() {
     try { localStorage.setItem("peek-a-bin:view-mode", viewMode); } catch {}
   }, [viewMode]);
 
+  // Clear restorePanZoom after it's consumed by CFGView
+  useEffect(() => {
+    if (restorePanZoom) setRestorePanZoom(null);
+  }, [restorePanZoom]);
+
+  // Window-level Space handler so toggle works regardless of focus
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== " ") return;
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (search.showSearch) return;
+      if (!currentFunc) return;
+      e.preventDefault();
+      setViewMode(v => v === "graph" ? "linear" : "graph");
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [search.showSearch, currentFunc]);
+
   // Reset collapsed blocks on function change
   useEffect(() => {
     setCollapsedBlocks(new Set());
@@ -416,9 +438,24 @@ export function DisassemblyView() {
         // Pop breadcrumb if available, else navigate back
         if (state.callStack.length > 0) {
           const last = state.callStack[state.callStack.length - 1];
+          if (last.viewSnapshot) {
+            setViewMode(last.viewSnapshot.viewMode);
+            setRestorePanZoom({ pan: last.viewSnapshot.graphPan, zoom: last.viewSnapshot.graphZoom });
+          }
           dispatch({ type: "SET_ADDRESS", address: last.address });
           dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
           return;
+        }
+        // NAV_BACK: restore view state if saved
+        {
+          const destAddr = state.historyIndex > 0 ? state.addressHistory[state.historyIndex - 1] : undefined;
+          if (destAddr !== undefined) {
+            const saved = navViewStateMapRef.current.get(destAddr);
+            if (saved) {
+              setViewMode(saved.viewMode);
+              setRestorePanZoom({ pan: saved.graphPan, zoom: saved.graphZoom });
+            }
+          }
         }
         dispatch({ type: "NAV_BACK" });
         return;
@@ -438,14 +475,7 @@ export function DisassemblyView() {
       )
         return;
 
-      // Space: toggle linear ↔ graph view
-      if (e.key === " ") {
-        e.preventDefault();
-        if (currentFunc) {
-          setViewMode(v => v === "graph" ? "linear" : "graph");
-        }
-        return;
-      }
+      // Space handled by window-level effect
 
       // 0: zoom-to-fit in graph mode
       if (e.key === "0" && viewMode === "graph") {
@@ -510,9 +540,11 @@ export function DisassemblyView() {
           const target = parseBranchTarget(curRow.insn.mnemonic, curRow.insn.opStr);
           if (target !== null) {
             const targetFn = funcMap.get(target);
+            const vs = { viewMode, graphPan, graphZoom };
             if (targetFn) {
-              dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc ?? targetFn, state.renames) });
+              dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc ?? targetFn, state.renames), viewSnapshot: vs });
             }
+            navViewStateMapRef.current.set(state.currentAddress, vs);
             dispatch({ type: "SET_ADDRESS", address: target });
           }
         }
@@ -615,7 +647,7 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack, viewMode],
+    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack, viewMode, graphPan, graphZoom, state.addressHistory, state.historyIndex],
   );
 
   const handleAddressClick = useCallback(
@@ -623,11 +655,13 @@ export function DisassemblyView() {
       // Push breadcrumb when clicking into a function target
       const targetFn = funcMap.get(address);
       if (targetFn && currentFunc) {
-        dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames) });
+        const vs = { viewMode, graphPan, graphZoom };
+        dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames), viewSnapshot: vs });
+        navViewStateMapRef.current.set(state.currentAddress, vs);
       }
       dispatch({ type: "SET_ADDRESS", address });
     },
-    [dispatch, funcMap, currentFunc, state.currentAddress, state.renames],
+    [dispatch, funcMap, currentFunc, state.currentAddress, state.renames, viewMode, graphPan, graphZoom],
   );
 
   const handleDoubleClickAddr = useCallback(
@@ -1668,12 +1702,25 @@ export function DisassemblyView() {
         onToggleCollapse={handleToggleCollapse}
         onCommentSubmit={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
         onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
+        restorePanZoom={restorePanZoom}
         onNavBack={() => {
           if (state.callStack.length > 0) {
             const last = state.callStack[state.callStack.length - 1];
+            if (last.viewSnapshot) {
+              setViewMode(last.viewSnapshot.viewMode);
+              setRestorePanZoom({ pan: last.viewSnapshot.graphPan, zoom: last.viewSnapshot.graphZoom });
+            }
             dispatch({ type: "SET_ADDRESS", address: last.address });
             dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
           } else {
+            const destAddr = state.historyIndex > 0 ? state.addressHistory[state.historyIndex - 1] : undefined;
+            if (destAddr !== undefined) {
+              const saved = navViewStateMapRef.current.get(destAddr);
+              if (saved) {
+                setViewMode(saved.viewMode);
+                setRestorePanZoom({ pan: saved.graphPan, zoom: saved.graphZoom });
+              }
+            }
             dispatch({ type: "NAV_BACK" });
           }
         }}

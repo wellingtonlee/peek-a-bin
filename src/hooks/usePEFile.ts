@@ -44,7 +44,7 @@ export interface AppState {
   hexPatches: Map<number, number>;
   annotationUndoStack: AnnotationSnapshot[];
   annotationRedoStack: AnnotationSnapshot[];
-  callStack: { address: number; name: string }[];
+  callStack: { address: number; name: string; viewSnapshot?: { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number } }[];
   stringXrefs: Map<number, number[]> | null;
   importXrefs: Map<number, number[]> | null;
   dataXrefs: Map<number, number[]> | null;
@@ -81,7 +81,7 @@ export type AppAction =
   | { type: "CLEAR_PATCHES" }
   | { type: "UNDO_ANNOTATION" }
   | { type: "REDO_ANNOTATION" }
-  | { type: "PUSH_CALL_STACK"; address: number; name: string }
+  | { type: "PUSH_CALL_STACK"; address: number; name: string; viewSnapshot?: { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number } }
   | { type: "POP_CALL_STACK"; index: number }
   | { type: "CLEAR_CALL_STACK" }
   | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
@@ -305,7 +305,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case "PUSH_CALL_STACK": {
-      const stack = [...state.callStack, { address: action.address, name: action.name }];
+      const entry: AppState["callStack"][0] = { address: action.address, name: action.name };
+      if (action.viewSnapshot) entry.viewSnapshot = action.viewSnapshot;
+      const stack = [...state.callStack, entry];
       if (stack.length > 8) stack.shift();
       return { ...state, callStack: stack };
     }

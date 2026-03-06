@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Back-navigation preserves full view state** — pressing `Escape` to go back now restores viewMode (linear/graph), graph pan position, and zoom level, not just the address; works across function jumps (call stack), section changes, and graph↔linear transitions
+
 - **Recent files with instant re-open** — recently opened PE files are stored in IndexedDB (up to 5 entries, 50 MB cap) and shown on the file loader screen with file size, relative timestamp, and annotation summary; click to re-open instantly without re-browsing; remove button clears both IndexedDB and localStorage entries
 - **Callers/callees sidebar panel** — collapsible "Call Graph" panel in the sidebar (between Bookmarks and Functions) shows which functions call the active function and what it calls; built from call graph data extracted during xref analysis; click entries to navigate with call stack push
 - **PE anomaly detection** — automatic detection of 10 suspicious PE characteristics grouped by severity: critical (entry point in writable section, WX sections), warning (unusual entry point, packer section names, TLS callbacks, checksum mismatch, high code entropy), info (ASLR/DEP disabled, overlay data); shown as colored dismissible banners at the top of the Headers view
