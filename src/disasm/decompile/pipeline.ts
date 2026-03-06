@@ -2,10 +2,14 @@ import type { Instruction, DisasmFunction, Xref, StackFrame } from '../types';
 import type { FunctionSignature } from '../signatures';
 import { buildCFG, detectLoops } from '../cfg';
 import { liftBlock } from './lifter';
-import { foldBlock, eliminateDeadStores } from './fold';
+import { foldBlock } from './fold';
+import { buildSSA } from './ssa';
+import { ssaOptimize } from './ssaopt';
+import { destroySSA } from './ssadestroy';
 import { structureCFG } from './structure';
 import { promoteVars } from './promote';
 import { emitFunction } from './emit';
+import { inferTypes } from './typeInfer';
 import { RegState } from './regstate';
 
 export interface DecompileResult {
@@ -15,6 +19,9 @@ export interface DecompileResult {
 
 /**
  * Full decompilation pipeline: instructions → pseudocode string + line map.
+ *
+ * buildCFG → liftBlock → [buildSSA → ssaOptimize → destroySSA] → foldBlock
+ * → structureCFG → promoteVars → emitFunction
  */
 export function decompileFunction(
   func: DisasmFunction,
@@ -36,29 +43,35 @@ export function decompileFunction(
     }
     const loops = detectLoops(blocks);
 
-    // 2. Lift each block
+    // 2. Lift each block (fresh RegState per block — SSA handles cross-block)
     const liftedBlocks = new Map<number, import('./ir').IRStmt[]>();
-    const regState = new RegState();
 
     for (const block of blocks) {
+      const regState = new RegState();
       const stmts = liftBlock(block, regState, is64, iatMap, stringMap, funcMap);
       liftedBlocks.set(block.id, stmts);
     }
 
-    // 3. Fold + dead store elimination per block
+    // 3. SSA: build → optimize → destroy
+    const ssaCtx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ssaCtx);
+    destroySSA(ssaCtx);
+
+    // 4. Fold per block (constant folding + single-use inlining, post-SSA)
     for (const [blockId, stmts] of liftedBlocks) {
-      let folded = foldBlock(stmts);
-      folded = eliminateDeadStores(folded);
-      liftedBlocks.set(blockId, folded);
+      liftedBlocks.set(blockId, foldBlock(stmts));
     }
 
-    // 4. Structure CFG → structured IR statements
+    // 5. Structure CFG → structured IR statements
     const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables);
 
-    // 5. Wrap in IRFunction with variable promotion
-    const irFunc = promoteVars(func.name, func.address, structured, stackFrame, signature, is64);
+    // 6. Type inference
+    const typeCtx = inferTypes(structured, iatMap);
 
-    // 6. Emit C text + lineMap
+    // 7. Wrap in IRFunction with variable promotion
+    const irFunc = promoteVars(func.name, func.address, structured, stackFrame, signature, is64, typeCtx);
+
+    // 8. Emit C text + lineMap
     const result = emitFunction(irFunc);
     return {
       code: result.code,

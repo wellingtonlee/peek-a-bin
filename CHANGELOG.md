@@ -4,6 +4,18 @@
 
 ### Added
 
+- **SSA-based decompiler** — full Static Single Assignment pass with phi nodes inserted between lift and structure phases; Cooper-Harvey-Kennedy dominator algorithm, pruned phi insertion with liveness, per-register versioning and renaming; SSA optimization passes (simplify phis, copy propagation, constant propagation, dead code elimination); SSA destruction with phi-to-copy lowering; cross-block value propagation now produces cleaner pseudocode with fewer redundant assignments (2026-03-06 17:59)
+- **Type inference engine** — forward + backward type propagation over decompiled IR; lattice types (int with signedness, float, ptr, bool, void); signed/unsigned inference from Jcc comparisons, cast annotations, and deref patterns; API-aware typing from ~50 Win32/C function signatures (VirtualAlloc, CreateFile, GetProcAddress, memcpy, etc.) (2026-03-06 17:59)
+- **Wider instruction lifting** — sign extensions (cdq, cqo, cdqe, cwde, cbw, cwd), div/idiv (quotient + remainder), single-operand mul (high-part eliminated by SSA DCE), xchg (SSA-correct swap without temp), rep movsb/stosb → memcpy/memset, basic FPU (fld/fst/fstp/fadd/fsub/fmul/fdiv on st0), SSE scalar ops (movss/addss/subss/mulss/divss/comiss on xmm registers) (2026-03-06 17:59)
+- **Short-circuit && / || detection** — consecutive conditional blocks sharing a common branch target are now collapsed into compound boolean expressions instead of nested if-else (2026-03-06 17:59)
+- **Multi-exit loop break detection** — conditional branches inside loop bodies targeting outside the loop are now emitted as `if (cond) break;` instead of gotos (2026-03-06 17:59)
+- **De Morgan negation for && / ||** — condition negation now applies De Morgan's law: `!(a && b)` → `!a || !b` (2026-03-06 17:59)
+- **for-loop emission** — `IRFor` statement type with init/condition/update/body emitted as `for (init; cond; update) { body }` (2026-03-06 17:59)
+
+### Changed
+
+- **Decompiler pipeline** — new pipeline: buildCFG → liftBlock (per-block RegState) → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → inferTypes → promoteVars → emitFunction; dead store elimination removed from fold.ts (now handled by SSA DCE) (2026-03-06 17:59)
+
 - **Decompile panel sub-tabs** — decompile panel now has three pill tabs: **Low Level** (existing built-in decompiler), **High Level** (Ghidra server with WASM fallback stub), and **AI** (enhance/explain using best available source); active tab remembered across function navigation; per-tab per-function caching; decompile state extracted into `useDecompileTabs` hook
 - **Ghidra decompilation server** — companion `ghidra-server/` with Dockerfile, FastAPI REST endpoints (`/ping`, `/binary`, `/decompile`), pyhidra integration; optional bearer token auth; binary uploaded once and cached by SHA-256
 

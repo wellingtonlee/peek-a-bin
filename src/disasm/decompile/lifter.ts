@@ -200,6 +200,23 @@ const CMOV_PATTERN = /^cmov(\w+)$/;
 
 const FASTCALL_REGS_64 = ['rcx', 'rdx', 'r8', 'r9'];
 
+const FPU_ARITH = new Map<string, BinaryOp>([
+  ['fadd', '+'], ['faddp', '+'], ['fiadd', '+'],
+  ['fsub', '-'], ['fsubp', '-'], ['fisub', '-'],
+  ['fmul', '*'], ['fmulp', '*'], ['fimul', '*'],
+  ['fdiv', '/'], ['fdivp', '/'], ['fidiv', '/'],
+]);
+
+const SSE_SCALAR = new Map<string, BinaryOp | null>([
+  ['movss', null], ['movsd', null],
+  ['addss', '+'], ['addsd', '+'],
+  ['subss', '-'], ['subsd', '-'],
+  ['mulss', '*'], ['mulsd', '*'],
+  ['divss', '/'], ['divsd', '/'],
+  ['comiss', null], ['comisd', null],
+  ['ucomiss', null], ['ucomisd', null],
+]);
+
 /**
  * Lift a single basic block's instructions to IR statements.
  */
@@ -358,12 +375,15 @@ export function liftBlock(
       continue;
     }
 
-    // ── cmp / test → flag state only ──
+    // ── cmp / test → flag state + eflags IR assignment ──
     if (mn === 'cmp' || mn === 'test') {
       if (parts.length >= 2) {
         const left = parseOperand(parts[0], insn, is64, regState);
         const right = parseOperand(parts[1], insn, is64, regState);
         regState.setFlags(mn as 'cmp' | 'test', left, right);
+        // Emit eflags definition for SSA cross-block propagation
+        const flagExpr = mn === 'cmp' ? irBinary('-', left, right) : irBinary('&', left, right);
+        stmts.push({ kind: 'assign', dest: irReg('eflags', 4), src: flagExpr, addr: insn.address });
       }
       continue;
     }
@@ -427,18 +447,191 @@ export function liftBlock(
       continue;
     }
 
-    // ── cdq / cdqe / cqo / cwde — sign-extend idioms ──
-    if (mn === 'cdq' || mn === 'cdqe' || mn === 'cqo' || mn === 'cwde' || mn === 'cbw' || mn === 'cwd') {
+    // ── Sign-extend idioms ──
+    if (mn === 'cdq') {
+      // edx = eax >> 31 (sign-extend eax into edx:eax)
+      const eaxVal = regState.getOrReg('eax', 4);
+      const result = irBinary('>>', eaxVal, irConst(31));
+      stmts.push({ kind: 'assign', dest: irReg('edx'), src: result, addr: insn.address });
+      regState.set('edx', result);
+      continue;
+    }
+    if (mn === 'cqo') {
+      // rdx = rax >> 63
+      const raxVal = regState.getOrReg('rax', 8);
+      const result = irBinary('>>', raxVal, irConst(63));
+      stmts.push({ kind: 'assign', dest: irReg('rdx'), src: result, addr: insn.address });
+      regState.set('rdx', result);
+      continue;
+    }
+    if (mn === 'cdqe') {
+      // rax = (int32_t)eax
+      const eaxVal = regState.getOrReg('eax', 4);
+      const result: IRExpr = { kind: 'cast', type: 'int32_t', operand: eaxVal };
+      stmts.push({ kind: 'assign', dest: irReg('rax'), src: result, addr: insn.address });
+      regState.set('rax', result);
+      continue;
+    }
+    if (mn === 'cwde') {
+      // eax = (int16_t)ax
+      const axVal = regState.getOrReg('ax', 2);
+      const result: IRExpr = { kind: 'cast', type: 'int16_t', operand: axVal };
+      stmts.push({ kind: 'assign', dest: irReg('eax'), src: result, addr: insn.address });
+      regState.set('eax', result);
+      continue;
+    }
+    if (mn === 'cbw') {
+      // ax = (int8_t)al
+      const alVal = regState.getOrReg('al', 1);
+      const result: IRExpr = { kind: 'cast', type: 'int8_t', operand: alVal };
+      stmts.push({ kind: 'assign', dest: irReg('ax'), src: result, addr: insn.address });
+      regState.set('ax', result);
+      continue;
+    }
+    if (mn === 'cwd') {
+      // dx = ax >> 15
+      const axVal = regState.getOrReg('ax', 2);
+      const result = irBinary('>>', axVal, irConst(15));
+      stmts.push({ kind: 'assign', dest: irReg('dx'), src: result, addr: insn.address });
+      regState.set('dx', result);
+      continue;
+    }
+
+    // ── div / idiv ──
+    if (mn === 'div' || mn === 'idiv') {
+      if (parts.length >= 1) {
+        const divisor = parseOperand(parts[0], insn, is64, regState);
+        const srcSize = divisor.kind === 'reg' ? regSize(divisor.name) : (divisor.kind === 'deref' ? divisor.size : 4);
+        const dividendHi = srcSize === 8 ? 'rdx' : srcSize === 2 ? 'dx' : 'edx';
+        const dividendLo = srcSize === 8 ? 'rax' : srcSize === 2 ? 'ax' : 'eax';
+        const loVal = regState.getOrReg(dividendLo, regSize(dividendLo));
+        const quotient = irBinary('/', loVal, divisor);
+        const remainder = irBinary('%', loVal, divisor);
+        stmts.push({ kind: 'assign', dest: irReg(dividendLo), src: quotient, addr: insn.address });
+        stmts.push({ kind: 'assign', dest: irReg(dividendHi), src: remainder, addr: insn.address });
+        regState.set(dividendLo, quotient);
+        regState.set(dividendHi, remainder);
+      } else {
+        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+      }
+      continue;
+    }
+
+    // ── mul (single-operand) ──
+    if (mn === 'mul') {
+      if (parts.length >= 1) {
+        const src = parseOperand(parts[0], insn, is64, regState);
+        const srcSize = src.kind === 'reg' ? regSize(src.name) : (src.kind === 'deref' ? src.size : 4);
+        const accLo = srcSize === 8 ? 'rax' : srcSize === 2 ? 'ax' : 'eax';
+        const accHi = srcSize === 8 ? 'rdx' : srcSize === 2 ? 'dx' : 'edx';
+        const loVal = regState.getOrReg(accLo, regSize(accLo));
+        const result = irBinary('*', loVal, src);
+        stmts.push({ kind: 'assign', dest: irReg(accLo), src: result, addr: insn.address });
+        regState.set(accLo, result);
+        // High part — SSA DCE will eliminate if unused
+        stmts.push({ kind: 'assign', dest: irReg(accHi), src: irBinary('>>', result, irConst(srcSize * 8)), addr: insn.address });
+        regState.set(accHi, irBinary('>>', result, irConst(srcSize * 8)));
+      } else {
+        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+      }
       continue;
     }
 
     // ── xchg ──
     if (mn === 'xchg' && parts.length >= 2) {
-      stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+      const a = parseDestOperand(parts[0], insn, is64);
+      const b = parseDestOperand(parts[1], insn, is64);
+      const aVal = parseOperand(parts[0], insn, is64, regState);
+      const bVal = parseOperand(parts[1], insn, is64, regState);
+      // tmp = a; a = b; b = tmp — SSA versions correctly
+      if (a.kind === 'reg' && b.kind === 'reg') {
+        stmts.push({ kind: 'assign', dest: a, src: bVal, addr: insn.address });
+        stmts.push({ kind: 'assign', dest: b, src: aVal, addr: insn.address });
+        regState.set(a.name, bVal);
+        regState.set(b.name, aVal);
+      } else {
+        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+      }
       continue;
     }
 
-    // ── Everything else: FPU, SSE, AVX, etc. → raw asm ──
+    // ── String ops: rep movsb → memcpy, rep stosb → memset ──
+    if (mn === 'rep' || insn.opStr.toLowerCase().startsWith('rep ')) {
+      const fullMn = mn === 'rep' ? insn.opStr.toLowerCase().split(/\s+/)[0] : mn;
+      const innerMn = mn === 'rep' ? insn.opStr.toLowerCase().replace(/^rep\s+/, '') : insn.opStr.toLowerCase();
+
+      if (innerMn.startsWith('movs')) {
+        const rdi = regState.getOrReg(is64 ? 'rdi' : 'edi', is64 ? 8 : 4);
+        const rsi = regState.getOrReg(is64 ? 'rsi' : 'esi', is64 ? 8 : 4);
+        const rcx = regState.getOrReg(is64 ? 'rcx' : 'ecx', is64 ? 8 : 4);
+        const call: IRCall = { kind: 'call', target: 'memcpy', args: [rdi, rsi, rcx] };
+        stmts.push({ kind: 'call_stmt', call, addr: insn.address });
+        continue;
+      }
+      if (innerMn.startsWith('stos')) {
+        const rdi = regState.getOrReg(is64 ? 'rdi' : 'edi', is64 ? 8 : 4);
+        const al = regState.getOrReg('al', 1);
+        const rcx = regState.getOrReg(is64 ? 'rcx' : 'ecx', is64 ? 8 : 4);
+        const call: IRCall = { kind: 'call', target: 'memset', args: [rdi, al, rcx] };
+        stmts.push({ kind: 'call_stmt', call, addr: insn.address });
+        continue;
+      }
+    }
+
+    // ── Basic FPU: fld/fst/fstp/fadd/fsub/fmul/fdiv ──
+    if (mn === 'fld' && parts.length >= 1) {
+      const src = parseOperand(parts[0], insn, is64, regState);
+      stmts.push({ kind: 'assign', dest: irReg('st0'), src, addr: insn.address });
+      regState.set('st0', src);
+      continue;
+    }
+    if ((mn === 'fst' || mn === 'fstp') && parts.length >= 1) {
+      const dest = parseDestOperand(parts[0], insn, is64);
+      const st0 = regState.getOrReg('st0', 10);
+      if (dest.kind === 'deref') {
+        stmts.push({ kind: 'store', address: dest.address, value: st0, size: dest.size, addr: insn.address });
+      } else {
+        stmts.push({ kind: 'assign', dest, src: st0, addr: insn.address });
+      }
+      continue;
+    }
+    if (FPU_ARITH.has(mn) && parts.length >= 1) {
+      const src = parseOperand(parts[0], insn, is64, regState);
+      const st0 = regState.getOrReg('st0', 10);
+      const op = FPU_ARITH.get(mn)!;
+      const result = irBinary(op, st0, src);
+      stmts.push({ kind: 'assign', dest: irReg('st0'), src: result, addr: insn.address });
+      regState.set('st0', result);
+      continue;
+    }
+
+    // ── SSE scalar: movss/addss/subss/mulss/divss/comiss ──
+    if (SSE_SCALAR.has(mn) && parts.length >= 2) {
+      const dest = parseDestOperand(parts[0], insn, is64);
+      const src = parseOperand(parts[1], insn, is64, regState);
+      if (mn === 'movss' || mn === 'movsd') {
+        if (dest.kind === 'deref') {
+          stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
+        } else {
+          stmts.push({ kind: 'assign', dest, src, addr: insn.address });
+          if (dest.kind === 'reg') regState.set(dest.name, src);
+        }
+      } else if (mn === 'comiss' || mn === 'comisd' || mn === 'ucomiss' || mn === 'ucomisd') {
+        // Comparison — sets eflags
+        regState.setFlags('cmp', parseOperand(parts[0], insn, is64, regState), src);
+        stmts.push({ kind: 'assign', dest: irReg('eflags', 4), src: irBinary('-', parseOperand(parts[0], insn, is64, regState), src), addr: insn.address });
+      } else {
+        // Arithmetic: addss/subss/mulss/divss
+        const op = SSE_SCALAR.get(mn)!;
+        const destVal = parseOperand(parts[0], insn, is64, regState);
+        const result = irBinary(op, destVal, src);
+        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
+        if (dest.kind === 'reg') regState.set(dest.name, result);
+      }
+      continue;
+    }
+
+    // ── Everything else: AVX, etc. → raw asm ──
     stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
   }
 

@@ -1,6 +1,8 @@
 import type { BasicBlock, Loop } from '../cfg';
 import type { IRStmt, IRExpr } from './ir';
+import { irBinary } from './ir';
 import { RegState } from './regstate';
+import { detectShortCircuit, detectMultiExitLoop } from './cfgpatterns';
 
 /**
  * Structure a CFG into high-level control flow (if/while/do-while/switch).
@@ -311,6 +313,32 @@ export function structureCFG(
         const convergenceSet = new Set(stopAt);
         if (convergence >= 0) convergenceSet.add(convergence);
 
+        // Check for short-circuit && / || pattern
+        const sc = detectShortCircuit(current, blockById, extractCondition, identifyBranches);
+        if (sc) {
+          const scConvergenceSet = new Set(stopAt);
+          const scConvergence = findConvergence(sc.trueTarget, sc.falseTarget, loopBody);
+          if (scConvergence >= 0) scConvergenceSet.add(scConvergence);
+
+          // Mark consumed blocks as visited
+          for (const cid of sc.consumedBlocks) visited.add(cid);
+
+          const thenBody = structureFrom(sc.trueTarget, scConvergenceSet, loopBody);
+          const elseBody = structureFrom(sc.falseTarget, scConvergenceSet, loopBody);
+          const scCond = sc.condition;
+
+          if (thenBody.length > 0 && elseBody.length > 0) {
+            result.push({ kind: 'if', condition: scCond, thenBody, elseBody });
+          } else if (thenBody.length > 0) {
+            result.push({ kind: 'if', condition: scCond, thenBody });
+          } else if (elseBody.length > 0) {
+            result.push({ kind: 'if', condition: RegState.negate(scCond), thenBody: elseBody });
+          }
+
+          current = scConvergence >= 0 ? scConvergence : null;
+          continue;
+        }
+
         // Check for simple patterns first:
         // 1. One branch returns → if-return pattern
         const branchBlock = blockById.get(branchTarget);
@@ -447,6 +475,12 @@ export function structureCFG(
       if (bodyStart !== null) {
         const loopStopAt = new Set<number>([header.id]);
         if (exitId !== null) loopStopAt.add(exitId);
+
+        // Detect multi-exit: conditional branches inside body targeting outside → break
+        const multiExits = detectMultiExitLoop(header, loop.bodyAddrs, blocks, blockById);
+        for (const exit of multiExits) {
+          loopStopAt.add(exit.exitTarget);
+        }
 
         const body = structureFrom(bodyStart, loopStopAt, loop.bodyAddrs);
 

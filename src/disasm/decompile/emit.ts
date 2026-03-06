@@ -16,12 +16,13 @@ const PREC: Record<string, number> = {
 };
 
 function opStr(op: BinaryOp): string {
-  // Map unsigned comparisons to readable form
   switch (op) {
     case 'u<': return '<';
     case 'u<=': return '<=';
     case 'u>': return '>';
     case 'u>=': return '>=';
+    case '&&': return '&&';
+    case '||': return '||';
     default: return op;
   }
 }
@@ -343,6 +344,22 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     case 'raw':
       push(`${pad}${stmt.text};`, addr);
       break;
+
+    case 'for': {
+      const initR = emitStmt(stmt.init, 0, structBases);
+      const initStr = initR.lines[0]?.trim().replace(/;$/, '') ?? '';
+      const updateR = emitStmt(stmt.update, 0, structBases);
+      const updateStr = updateR.lines[0]?.trim().replace(/;$/, '') ?? '';
+      const cond = emitExpr(stmt.condition, 0, structBases);
+      push(`${pad}for (${initStr}; ${cond}; ${updateStr}) {`);
+      for (const s of stmt.body) {
+        const r = emitStmt(s, level + 1, structBases);
+        lines.push(...r.lines);
+        addrs.push(...r.addrs);
+      }
+      push(`${pad}}`);
+      break;
+    }
 
     case 'break':
       push(`${pad}break;`);

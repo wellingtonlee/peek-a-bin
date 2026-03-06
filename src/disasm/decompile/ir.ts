@@ -10,6 +10,7 @@ export interface IRReg {
   kind: 'reg';
   name: string;
   size: number;
+  version?: number;
 }
 
 export interface IRVar {
@@ -22,7 +23,8 @@ export type BinaryOp =
   | '+' | '-' | '*' | '/' | '%'
   | '&' | '|' | '^' | '<<' | '>>' | '>>>'
   | '==' | '!=' | '<' | '<=' | '>' | '>='
-  | 'u<' | 'u<=' | 'u>' | 'u>=';
+  | 'u<' | 'u<=' | 'u>' | 'u>='
+  | '&&' | '||';
 
 export interface IRBinary {
   kind: 'binary';
@@ -156,14 +158,29 @@ export interface IRRaw {
   addr?: number;
 }
 
+export interface IRFor {
+  kind: 'for';
+  init: IRStmt;
+  condition: IRExpr;
+  update: IRStmt;
+  body: IRStmt[];
+}
+
 export interface IRBreak {
   kind: 'break';
 }
 
+export interface IRPhi {
+  kind: 'phi';
+  dest: IRReg;
+  operands: { blockId: number; value: IRReg }[];
+  addr?: number;
+}
+
 export type IRStmt =
   | IRAssign | IRStore | IRCallStmt | IRReturn
-  | IRIf | IRWhile | IRDoWhile | IRSwitch
-  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak;
+  | IRIf | IRWhile | IRDoWhile | IRFor | IRSwitch
+  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak | IRPhi;
 
 // ── Function Container ──
 
@@ -192,9 +209,11 @@ export function irConst(value: number, size = 4): IRConst {
   return { kind: 'const', value, size };
 }
 
-export function irReg(name: string, size = 0): IRReg {
+export function irReg(name: string, size = 0, version?: number): IRReg {
   if (!size) size = regSize(name);
-  return { kind: 'reg', name, size };
+  return version !== undefined
+    ? { kind: 'reg', name, size, version }
+    : { kind: 'reg', name, size };
 }
 
 export function irVar(name: string, size = 4): IRVar {
@@ -227,6 +246,10 @@ const REG_SIZES: Record<string, number> = {
   al: 1, bl: 1, cl: 1, dl: 1, ah: 1, bh: 1, ch: 1, dh: 1,
   sil: 1, dil: 1, bpl: 1, spl: 1,
   r8b: 1, r9b: 1, r10b: 1, r11b: 1, r12b: 1, r13b: 1, r14b: 1, r15b: 1,
+  eflags: 4,
+  xmm0: 16, xmm1: 16, xmm2: 16, xmm3: 16, xmm4: 16, xmm5: 16, xmm6: 16, xmm7: 16,
+  xmm8: 16, xmm9: 16, xmm10: 16, xmm11: 16, xmm12: 16, xmm13: 16, xmm14: 16, xmm15: 16,
+  st0: 10, st1: 10, st2: 10, st3: 10, st4: 10, st5: 10, st6: 10, st7: 10,
 };
 
 export function regSize(name: string): number {
@@ -260,6 +283,8 @@ export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
       case 'while': walkExpr(s.condition, fn); walkStmts(s.body, fn); break;
       case 'do_while': walkExpr(s.condition, fn); walkStmts(s.body, fn); break;
       case 'switch': walkExpr(s.expr, fn); s.cases.forEach(c => walkStmts(c.body, fn)); if (s.defaultBody) walkStmts(s.defaultBody, fn); break;
+      case 'for': walkStmts([s.init], fn); walkExpr(s.condition, fn); walkStmts([s.update], fn); walkStmts(s.body, fn); break;
+      case 'phi': for (const op of s.operands) walkExpr(op.value, fn); break;
     }
   }
 }

@@ -143,6 +143,8 @@ function foldStmt(stmt: IRStmt): IRStmt {
       return { ...stmt, condition: foldExpr(stmt.condition), body: stmt.body.map(foldStmt) };
     case 'switch':
       return { ...stmt, expr: foldExpr(stmt.expr), cases: stmt.cases.map(c => ({ ...c, body: c.body.map(foldStmt) })), defaultBody: stmt.defaultBody?.map(foldStmt) };
+    case 'for':
+      return { ...stmt, init: foldStmt(stmt.init), condition: foldExpr(stmt.condition), update: foldStmt(stmt.update), body: stmt.body.map(foldStmt) };
     default:
       return stmt;
   }
@@ -281,29 +283,4 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
   return result;
 }
 
-/**
- * Remove dead register stores: assignments to registers that are never read
- * before the next write. Only removes register assignments, never memory stores or calls.
- */
-export function eliminateDeadStores(stmts: IRStmt[]): IRStmt[] {
-  const result: IRStmt[] = [];
-  for (let i = 0; i < stmts.length; i++) {
-    const stmt = stmts[i];
-    if (stmt.kind === 'assign' && stmt.dest.kind === 'reg' && !hasSideEffects(stmt.src)) {
-      const canon = canonReg(stmt.dest.name);
-      let isRead = false;
-      for (let j = i + 1; j < stmts.length; j++) {
-        const s = stmts[j];
-        if (countReadsInStmt(s, canon) > 0) { isRead = true; break; }
-        if (s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === canon) break;
-        if (s.kind === 'call_stmt') { isRead = true; break; } // conservative: call might read
-        if (s.kind === 'return') { isRead = true; break; } // return might read
-      }
-      // If we reached end of block without a read, it might be read in a successor
-      // Be conservative and keep it if we hit end of block
-      if (!isRead && i + 1 < stmts.length) continue;
-    }
-    result.push(stmt);
-  }
-  return result;
-}
+// eliminateDeadStores removed — now handled by SSA dead code elimination

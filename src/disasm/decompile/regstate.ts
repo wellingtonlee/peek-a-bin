@@ -99,6 +99,9 @@ export class RegState {
       };
       const flipped = neg[cond.op];
       if (flipped) return irBinary(flipped, cond.left, cond.right);
+      // De Morgan: !(a && b) → !a || !b, !(a || b) → !a && !b
+      if (cond.op === '&&') return irBinary('||', RegState.negate(cond.left), RegState.negate(cond.right));
+      if (cond.op === '||') return irBinary('&&', RegState.negate(cond.left), RegState.negate(cond.right));
     }
     return irUnary('!', cond);
   }

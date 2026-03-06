@@ -2,6 +2,8 @@ import type { StackFrame } from '../types';
 import type { FunctionSignature } from '../signatures';
 import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam } from './ir';
 import { irVar, canonReg, walkStmts } from './ir';
+import type { TypeContext } from './typeInfer';
+import { typeToString } from './typeInfer';
 
 // ── Size → C type mapping ──
 
@@ -157,6 +159,14 @@ function promoteStmt(
         cases: stmt.cases.map(c => ({ ...c, body: c.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)) })),
         defaultBody: stmt.defaultBody?.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
       };
+    case 'for':
+      return {
+        ...stmt,
+        init: promoteStmt(stmt.init, is64, varLookup, paramLookup),
+        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
+        update: promoteStmt(stmt.update, is64, varLookup, paramLookup),
+        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+      };
     default:
       return stmt;
   }
@@ -256,6 +266,7 @@ export function promoteVars(
   stackFrame: StackFrame | null,
   signature: FunctionSignature | null,
   is64: boolean,
+  typeCtx?: TypeContext,
 ): IRFunction {
   // Build lookup maps from stack frame vars
   const varLookup = new Map<number, string>();  // offset → var name (locals)
@@ -289,6 +300,22 @@ export function promoteVars(
 
   // Infer variable types from access patterns
   inferVarTypes(body, locals, is64, varLookup, paramLookup);
+
+  // Apply type inference results from SSA-level analysis
+  if (typeCtx) {
+    for (const local of locals) {
+      const inferred = typeCtx.types.get(local.name);
+      if (inferred && inferred.kind !== 'unknown') {
+        local.type = typeToString(inferred);
+      }
+    }
+    for (const param of params) {
+      const inferred = typeCtx.types.get(param.name);
+      if (inferred && inferred.kind !== 'unknown') {
+        param.type = typeToString(inferred);
+      }
+    }
+  }
 
   // Promote body
   const promoted = body.map(s => promoteStmt(s, is64, varLookup, paramLookup));
