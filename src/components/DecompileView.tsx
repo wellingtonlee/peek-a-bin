@@ -66,9 +66,11 @@ interface DecompileViewProps {
   code: string;
   loading?: boolean;
   enhancing?: boolean;
+  explaining?: boolean;
   enhanceError?: string;
   onNavigate?: (addr: number) => void;
   onEnhance?: () => void;
+  onExplain?: () => void;
   onCancelEnhance?: () => void;
   onClose: () => void;
   highlightLines?: Set<number>;
@@ -77,7 +79,7 @@ interface DecompileViewProps {
 }
 
 export function DecompileView({
-  code, loading, enhancing, enhanceError, onNavigate, onEnhance, onCancelEnhance, onClose,
+  code, loading, enhancing, explaining, enhanceError, onNavigate, onEnhance, onExplain, onCancelEnhance, onClose,
   highlightLines, onLineClick, syncDisabled,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
@@ -130,29 +132,41 @@ export function DecompileView({
           <span className="text-gray-500 text-[10px] italic">(sync disabled)</span>
         )}
         <div className="flex-1" />
-        {onEnhance && (
-          enhancing ? (
-            <button
-              onClick={onCancelEnhance}
-              className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
-              title="Cancel AI enhancement"
-            >
-              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Cancel
-            </button>
-          ) : (
-            <button
-              onClick={onEnhance}
-              disabled={loading}
-              className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60 disabled:opacity-30 disabled:cursor-default"
-              title="Enhance with AI"
-            >
-              Enhance with AI
-            </button>
-          )
+        {(enhancing || explaining) ? (
+          <button
+            onClick={onCancelEnhance}
+            className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
+            title="Cancel AI"
+          >
+            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            Cancel
+          </button>
+        ) : (
+          <>
+            {onExplain && (
+              <button
+                onClick={onExplain}
+                disabled={loading || enhancing || explaining}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-blue-800/60 text-blue-300 hover:bg-blue-700/60 disabled:opacity-30 disabled:cursor-default"
+                title="Explain with AI"
+              >
+                Explain with AI
+              </button>
+            )}
+            {onEnhance && (
+              <button
+                onClick={onEnhance}
+                disabled={loading || enhancing || explaining}
+                className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60 disabled:opacity-30 disabled:cursor-default"
+                title="Enhance with AI"
+              >
+                Enhance with AI
+              </button>
+            )}
+          </>
         )}
         <button
           onClick={handleCopy}

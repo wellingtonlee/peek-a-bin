@@ -1,5 +1,5 @@
 import type { LLMSettings } from "./settings";
-import { SYSTEM_PROMPT } from "./prompt";
+import { SYSTEM_PROMPT, SYSTEM_PROMPT_ASM } from "./prompt";
 
 interface StreamCallbacks {
   onToken: (accumulated: string) => void;
@@ -12,10 +12,12 @@ export function streamEnhance(
   config: LLMSettings,
   signal: AbortSignal,
   callbacks: StreamCallbacks,
+  systemPrompt?: string,
 ): void {
   const { onToken, onDone, onError } = callbacks;
 
   const isAnthropic = config.provider === "anthropic";
+  const prompt = systemPrompt ?? (config.enhanceSource === "assembly" ? SYSTEM_PROMPT_ASM : SYSTEM_PROMPT);
 
   const url = isAnthropic
     ? "https://api.anthropic.com/v1/messages"
@@ -35,14 +37,14 @@ export function streamEnhance(
         model: config.model,
         max_tokens: 8192,
         stream: true,
-        system: SYSTEM_PROMPT,
+        system: prompt,
         messages: [{ role: "user", content: pseudocode }],
       })
     : JSON.stringify({
         model: config.model,
         stream: true,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: prompt },
           { role: "user", content: pseudocode },
         ],
       });

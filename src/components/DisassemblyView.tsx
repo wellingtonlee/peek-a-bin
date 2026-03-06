@@ -25,6 +25,7 @@ import { DecompileView } from "./DecompileView";
 import { ResizeHandle } from "./ResizeHandle";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { streamEnhance } from "../llm/client";
+import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
 import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
@@ -175,6 +176,7 @@ export function DisassemblyView() {
   const [isAiEnhanced, setIsAiEnhanced] = useState(false);
   const [decompileLoading, setDecompileLoading] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
+  const [explaining, setExplaining] = useState(false);
   const [enhanceError, setEnhanceError] = useState("");
   const enhanceAbortRef = useRef<AbortController | null>(null);
   const originalCodeRef = useRef<string>("");
@@ -192,9 +194,22 @@ export function DisassemblyView() {
 
   const decompileHighlightLines = useMemo(() => {
     if (decompileLineMap.size === 0 || isAiEnhanced) return new Set<number>();
+    // Exact match first
     const lines = addrToLines.get(state.currentAddress);
-    return lines ? new Set(lines) : new Set<number>();
-  }, [addrToLines, state.currentAddress, isAiEnhanced, decompileLineMap.size]);
+    if (lines) return new Set(lines);
+    // Fuzzy: find nearest mapped address <= currentAddress within current function
+    if (!currentFunc) return new Set<number>();
+    const funcStart = currentFunc.address;
+    const funcEnd = funcStart + currentFunc.size;
+    let bestAddr = -1;
+    for (const addr of addrToLines.keys()) {
+      if (addr <= state.currentAddress && addr >= funcStart && addr < funcEnd) {
+        if (addr > bestAddr) bestAddr = addr;
+      }
+    }
+    if (bestAddr >= 0) return new Set(addrToLines.get(bestAddr)!);
+    return new Set<number>();
+  }, [addrToLines, state.currentAddress, isAiEnhanced, decompileLineMap.size, currentFunc]);
 
   const handleDecompileLineClick = useCallback((lineNum: number) => {
     if (isAiEnhanced) return;
@@ -853,6 +868,25 @@ export function DisassemblyView() {
     }).finally(() => setDecompileLoading(false));
   }, [showDecompile, currentFunc?.address, pe, instructions, typedXrefMap, iatMap, state.functions, state.renames]);
 
+  const buildFunctionAsm = useCallback((): string => {
+    if (!currentFunc || !pe) return "";
+    const aw = pe.is64 ? 16 : 8;
+    const endAddr = currentFunc.address + currentFunc.size;
+    const name = getDisplayName(currentFunc, state.renames);
+    const lines: string[] = [`; ──── ${name} ────`];
+    for (const row of rows) {
+      if (row.kind !== "insn") continue;
+      if (row.insn.address < currentFunc.address) continue;
+      if (row.insn.address >= endAddr) break;
+      const insn = row.insn;
+      const addrHex = insn.address.toString(16).toUpperCase().padStart(aw, "0");
+      const comment = insn.comment ? `  ; ${insn.comment}` : "";
+      const uc = state.comments[insn.address] ? `  ; ${state.comments[insn.address]}` : "";
+      lines.push(`  ${addrHex}  ${insn.mnemonic} ${insn.opStr}${comment}${uc}`);
+    }
+    return lines.join("\n");
+  }, [currentFunc, pe, rows, state.renames, state.comments]);
+
   const handleEnhance = useCallback(() => {
     if (!hasApiKey()) {
       window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
@@ -860,11 +894,13 @@ export function DisassemblyView() {
     }
     const config = loadSettings();
     originalCodeRef.current = decompileResult;
+    const input = config.enhanceSource === "assembly" ? buildFunctionAsm() : decompileResult;
+    if (!input) return;
     setEnhancing(true);
     setEnhanceError("");
     const controller = new AbortController();
     enhanceAbortRef.current = controller;
-    streamEnhance(decompileResult, config, controller.signal, {
+    streamEnhance(input, config, controller.signal, {
       onToken: (accumulated) => { setDecompileResult(accumulated); setIsAiEnhanced(true); },
       onDone: () => setEnhancing(false),
       onError: (error) => {
@@ -873,12 +909,42 @@ export function DisassemblyView() {
         setEnhancing(false);
       },
     });
-  }, [decompileResult]);
+  }, [decompileResult, buildFunctionAsm]);
 
   const handleCancelEnhance = useCallback(() => {
     enhanceAbortRef.current?.abort();
     setEnhancing(false);
+    setExplaining(false);
   }, []);
+
+  const handleExplain = useCallback(() => {
+    if (!hasApiKey()) {
+      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+      return;
+    }
+    enhanceAbortRef.current?.abort();
+    setEnhancing(false);
+    const config = loadSettings();
+    originalCodeRef.current = decompileResult;
+    if (!decompileResult) return;
+    setExplaining(true);
+    setEnhanceError("");
+    const controller = new AbortController();
+    enhanceAbortRef.current = controller;
+    streamEnhance(decompileResult, config, controller.signal, {
+      onToken: (accumulated) => {
+        const commented = accumulated.split("\n").map((l) => `// ${l}`).join("\n");
+        setDecompileResult(commented + "\n\n" + originalCodeRef.current);
+        setIsAiEnhanced(true);
+      },
+      onDone: () => setExplaining(false),
+      onError: (error) => {
+        setDecompileResult(originalCodeRef.current);
+        setEnhanceError(error);
+        setExplaining(false);
+      },
+    }, SYSTEM_PROMPT_EXPLAIN);
+  }, [decompileResult]);
 
   const handleExportAsm = useCallback((mode: "function" | "section") => {
     setShowExportMenu(false);
@@ -1810,9 +1876,11 @@ export function DisassemblyView() {
               code={decompileResult}
               loading={decompileLoading}
               enhancing={enhancing}
+              explaining={explaining}
               enhanceError={enhanceError}
               onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
               onEnhance={handleEnhance}
+              onExplain={handleExplain}
               onCancelEnhance={handleCancelEnhance}
               onClose={() => setShowDecompile(false)}
               highlightLines={decompileHighlightLines}

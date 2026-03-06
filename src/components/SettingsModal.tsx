@@ -22,14 +22,6 @@ export function SettingsModal({ open, onClose }: Props) {
     }
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onClose(); }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -51,7 +43,6 @@ export function SettingsModal({ open, onClose }: Props) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50"
-      onClick={onClose}
     >
       <div
         className="w-[440px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
@@ -116,6 +107,28 @@ export function SettingsModal({ open, onClose }: Props) {
               onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
               className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
             />
+          </div>
+
+          {/* Enhance Source */}
+          <div>
+            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              Enhance Source
+            </label>
+            <div className="flex gap-3">
+              {(["pseudocode", "assembly"] as const).map((s) => (
+                <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="enhanceSource"
+                    checked={settings.enhanceSource === s}
+                    onChange={() => setSettings((prev) => ({ ...prev, enhanceSource: s }))}
+                    className="accent-blue-500"
+                  />
+                  {s === "pseudocode" ? "Pseudocode (default)" : "Assembly"}
+                </label>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
           </div>
 
           {/* Base URL (OpenAI only) */}

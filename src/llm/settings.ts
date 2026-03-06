@@ -3,6 +3,7 @@ export interface LLMSettings {
   apiKey: string;
   model: string;
   baseUrl: string;
+  enhanceSource: "pseudocode" | "assembly";
 }
 
 const STORAGE_KEY = "peek-a-bin:llm-settings";
@@ -12,6 +13,7 @@ const DEFAULTS: LLMSettings = {
   apiKey: "",
   model: "claude-sonnet-4-20250514",
   baseUrl: "https://api.openai.com",
+  enhanceSource: "pseudocode",
 };
 
 export function loadSettings(): LLMSettings {
