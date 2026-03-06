@@ -433,6 +433,13 @@ function extractASCIIStrings(
         const str = textDecoder.decode(buf.subarray(strStart, i));
         const rva = section.virtualAddress + (strStart - section.pointerToRawData);
         strings.set(imageBase + rva, str);
+        // Also map preceding whitespace addresses to this string
+        let ws = strStart - 1;
+        while (ws >= start && (buf[ws] === 0x09 || buf[ws] === 0x0A || buf[ws] === 0x0D)) {
+          const wsRva = section.virtualAddress + (ws - section.pointerToRawData);
+          strings.set(imageBase + wsRva, str);
+          ws--;
+        }
       }
     }
 
@@ -497,6 +504,14 @@ function extractUTF16Strings(
         const str = utf16Decoder.decode(buf.subarray(strStart, strStart + charCount * 2));
         const rva = section.virtualAddress + (strStart - section.pointerToRawData);
         strings.set(imageBase + rva, str);
+        // Also map preceding whitespace UTF-16 pairs to this string
+        let ws = strStart - 2;
+        while (ws >= start && ws + 1 < end && buf[ws + 1] === 0 &&
+               (buf[ws] === 0x09 || buf[ws] === 0x0A || buf[ws] === 0x0D)) {
+          const wsRva = section.virtualAddress + (ws - section.pointerToRawData);
+          strings.set(imageBase + wsRva, str);
+          ws -= 2;
+        }
       }
     } else {
       i += 2;

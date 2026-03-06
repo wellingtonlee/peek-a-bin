@@ -171,15 +171,15 @@ export function CFGView({
     if (!block || !container) return;
     const cW = container.clientWidth;
     const cH = container.clientHeight;
-    // Check if block center is visible in viewport
+    // Check if block top is visible in viewport
     const bcx = block.x * zoom + pan.x + (block.w * zoom) / 2;
-    const bcy = block.y * zoom + pan.y + (block.h * zoom) / 2;
+    const bty = block.y * zoom + pan.y;
     const margin = 50;
-    if (bcx >= margin && bcx <= cW - margin && bcy >= margin && bcy <= cH - margin) return;
-    // Center the block in the viewport
+    if (bcx >= margin && bcx <= cW - margin && bty >= margin && bty <= cH - margin) return;
+    // Top-align the block in the viewport with 40px margin
     onPanChange({
       x: cW / 2 - (block.x + block.w / 2) * zoom,
-      y: cH / 2 - (block.y + block.h / 2) * zoom,
+      y: 40 - block.y * zoom,
     });
   }, [currentBlockId]);
 

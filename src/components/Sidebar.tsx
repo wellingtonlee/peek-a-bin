@@ -43,6 +43,7 @@ export function Sidebar() {
   const [dragging, setDragging] = useState(false);
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
   const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(null);
+  const [bmCtxMenu, setBmCtxMenu] = useState<{ x: number; y: number; address: number; label: string } | null>(null);
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
   const [sectionsOpen, setSectionsOpen] = useState(() => {
     try { return localStorage.getItem("peek-a-bin:sections-open") !== "false"; } catch { return true; }
@@ -51,6 +52,19 @@ export function Sidebar() {
     try { return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false"; } catch { return true; }
   });
   const graphOverview = useGraphOverview();
+
+  // Dismiss bookmark context menu on click/Escape
+  useEffect(() => {
+    if (!bmCtxMenu) return;
+    const dismiss = () => setBmCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [bmCtxMenu]);
 
   // Active function highlight
   const containingFunc = useContainingFunc();
@@ -228,7 +242,7 @@ export function Sidebar() {
 
       {/* Bookmarks panel (only show if bookmarks exist) */}
       {state.bookmarks.length > 0 && (
-        <div className="p-2 border-b border-gray-700">
+        <div className="relative p-2 border-b border-gray-700">
           <button
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
@@ -239,7 +253,16 @@ export function Sidebar() {
           {bookmarksOpen && (
             <ul className="mt-1.5 space-y-0.5">
               {state.bookmarks.map((bm) => (
-                <li key={bm.address} className="flex items-center gap-1 group">
+                <li
+                  key={bm.address}
+                  className="flex items-center gap-1 group"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const rect = (e.currentTarget.closest('.relative') as HTMLElement).getBoundingClientRect();
+                    setBmCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, address: bm.address, label: bm.label });
+                  }}
+                >
                   <button
                     onClick={() => {
                       dispatch({ type: "SET_ADDRESS", address: bm.address });
@@ -293,6 +316,32 @@ export function Sidebar() {
                 </li>
               ))}
             </ul>
+          )}
+          {bmCtxMenu && (
+            <div
+              className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
+              style={{ left: bmCtxMenu.x, top: bmCtxMenu.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+                onClick={() => {
+                  setEditingBookmark({ address: bmCtxMenu.address, value: bmCtxMenu.label });
+                  setBmCtxMenu(null);
+                }}
+              >
+                Rename
+              </button>
+              <button
+                className="w-full text-left px-3 py-1 hover:bg-gray-700 text-red-400"
+                onClick={() => {
+                  dispatch({ type: "TOGGLE_BOOKMARK", address: bmCtxMenu.address });
+                  setBmCtxMenu(null);
+                }}
+              >
+                Delete
+              </button>
+            </div>
           )}
         </div>
       )}
