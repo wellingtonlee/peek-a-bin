@@ -18,7 +18,6 @@ interface UseDecompileTabsArgs {
   pe: PEFile | null;
   instructions: Instruction[];
   xrefMap: Map<number, Xref[]>;
-  iatMap: Map<number, { lib: string; func: string }>;
   functions: DisasmFunction[];
   renames: Record<number, string>;
   buildFunctionAsm: () => string;
@@ -45,7 +44,6 @@ export function useDecompileTabs({
   pe,
   instructions,
   xrefMap,
-  iatMap,
   functions,
   renames,
   buildFunctionAsm,
@@ -94,7 +92,7 @@ export function useDecompileTabs({
       }
       const result = await disasmWorker.decompileFunction(
         currentFunc, instructions, xrefMap, sf, sig, pe.is64,
-        iatMap, pe.strings ?? new Map(), new Map(funcEntries),
+        new Map(funcEntries),
         pe.runtimeFunctions,
       );
       lowCache.current.set(addr, result);
@@ -102,7 +100,7 @@ export function useDecompileTabs({
     } catch (err: any) {
       dispatch({ type: "LOAD_ERR", tab: "low", error: err?.message ?? String(err) });
     }
-  }, [currentFunc, pe, instructions, xrefMap, iatMap, functions, renames]);
+  }, [currentFunc, pe, instructions, xrefMap, functions, renames]);
 
   const decompileHigh = useCallback(async () => {
     if (!currentFunc || !pe) return;

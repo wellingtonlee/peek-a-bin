@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import { clampPopup } from "../utils/clampPopup";
 import { getApiRiskTag } from "../analysis/driver";
@@ -39,30 +39,38 @@ export function ImportsView() {
     };
   }, [xrefPopup]);
 
-  if (!pe) return null;
+  const filtered = useMemo(() => {
+    if (!pe) return [];
+    return pe.imports
+      .map((imp) => ({
+        ...imp,
+        functions: imp.functions.map((fn, idx) => ({ name: fn, iatAddr: imp.iatAddresses[idx] ?? 0 })).filter((f) =>
+          f.name.toLowerCase().includes(filter.toLowerCase()),
+        ),
+      }))
+      .filter(
+        (imp) =>
+          imp.functions.length > 0 ||
+          imp.libraryName.toLowerCase().includes(filter.toLowerCase()),
+      );
+  }, [pe, filter]);
 
-  const filtered = pe.imports
-    .map((imp) => ({
-      ...imp,
-      functions: imp.functions.map((fn, idx) => ({ name: fn, iatAddr: imp.iatAddresses[idx] ?? 0 })).filter((f) =>
-        f.name.toLowerCase().includes(filter.toLowerCase()),
-      ),
-    }))
-    .filter(
-      (imp) =>
-        imp.functions.length > 0 ||
-        imp.libraryName.toLowerCase().includes(filter.toLowerCase()),
+  const totalFunctions = useMemo(() => {
+    if (!pe) return 0;
+    return pe.imports.reduce(
+      (sum, imp) => sum + imp.functions.length,
+      0,
     );
+  }, [pe]);
 
-  const totalFunctions = pe.imports.reduce(
-    (sum, imp) => sum + imp.functions.length,
-    0,
-  );
+  const filteredFuncCount = useMemo(() =>
+    filtered.reduce(
+      (sum, imp) => sum + imp.functions.length,
+      0,
+    ),
+  [filtered]);
 
-  const filteredFuncCount = filtered.reduce(
-    (sum, imp) => sum + imp.functions.length,
-    0,
-  );
+  if (!pe) return null;
 
   const toggleCollapse = (lib: string) => {
     setCollapsed((prev) => {

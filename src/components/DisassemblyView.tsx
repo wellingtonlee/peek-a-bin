@@ -10,7 +10,7 @@ import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
 import { CallPanel } from "./CallPanel";
-import { buildIATLookup, parseOperandTargets } from "../disasm/operands";
+import { parseOperandTargets } from "../disasm/operands";
 import { JumpArrows } from "./JumpArrows";
 import { InstructionDetail } from "./InstructionDetail";
 import { DisassemblyMinimap } from "./DisassemblyMinimap";
@@ -30,6 +30,8 @@ import { canonReg } from "../disasm/decompile/ir";
 import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { useSetGraphOverview } from "../hooks/useGraphOverview";
+
+const _SUSPICIOUS_MNEMONICS = new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]);
 
 // Register family map: canonical → all members
 const REG_FAMILIES: Record<string, string[]> = {
@@ -211,11 +213,7 @@ export function DisassemblyView() {
     setHighlightedReg((prev) => prev === canon ? null : canon);
   }, []);
 
-  // Build IAT lookup map from imports
-  const iatMap = useMemo(() => {
-    if (!pe) return new Map<number, { lib: string; func: string }>();
-    return buildIATLookup(pe.imports);
-  }, [pe]);
+  const iatMap = state.iatMap;
 
   // Loop body map: insn address → max loop depth
   const loopBodyMap = useMemo(() => {
@@ -269,7 +267,7 @@ export function DisassemblyView() {
     return instructions[Math.min(lo, instructions.length - 1)];
   }, [showDetail, instructions, state.currentAddress]);
 
-  const SUSPICIOUS_MNEMONICS = useMemo(() => new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]), []);
+  const SUSPICIOUS_MNEMONICS = _SUSPICIOUS_MNEMONICS;
 
   const matchesFilter = useCallback((row: DisplayRow): boolean => {
     if (insnFilter === "all") return true;
@@ -984,7 +982,6 @@ export function DisassemblyView() {
     pe,
     instructions,
     xrefMap: typedXrefMap,
-    iatMap,
     functions: state.functions,
     renames: state.renames,
     buildFunctionAsm,

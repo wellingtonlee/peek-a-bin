@@ -165,6 +165,15 @@ class DisasmWorkerClient {
     return result;
   }
 
+  async configureDecompileMaps(
+    funcMap: Map<number, { name: string; address: number }>,
+  ): Promise<void> {
+    await this.send('configureDecompileMaps', {
+      funcEntries: Array.from(funcMap.entries()),
+      jumpTableEntries: Array.from(this.jumpTables.entries()),
+    });
+  }
+
   async decompileFunction(
     func: DisasmFunction,
     instructions: Instruction[],
@@ -172,8 +181,6 @@ class DisasmWorkerClient {
     stackFrame: StackFrame | null,
     signature: FunctionSignature | null,
     is64: boolean,
-    iatMap: Map<number, { lib: string; func: string }>,
-    stringMap: Map<number, string>,
     funcMap: Map<number, { name: string; address: number }>,
     runtimeFunctions?: import('../pe/types').RuntimeFunction[],
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
@@ -186,9 +193,6 @@ class DisasmWorkerClient {
       stackFrame,
       signature,
       is64,
-      jumpTableEntries: Array.from(this.jumpTables.entries()),
-      iatEntries: Array.from(iatMap.entries()),
-      stringEntries: Array.from(stringMap.entries()),
       funcEntries: Array.from(funcMap.entries()),
       runtimeFunctions,
     });

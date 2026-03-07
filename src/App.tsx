@@ -1,4 +1,4 @@
-import { useReducer, useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
+import { useReducer, useCallback, useEffect, useRef, useState, useMemo, lazy, Suspense } from "react";
 import {
   appReducer,
   initialState,
@@ -165,6 +165,7 @@ export default function App() {
 
     // Configure worker with maps once, then detect functions off-thread
     const iatLookup = buildIATLookup(pe.imports);
+    dispatch({ type: "SET_IAT_MAP", iatMap: iatLookup });
     const pdataFunctions = pe.runtimeFunctions?.map(rf => ({
       beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
       endAddress: pe.optionalHeader.imageBase + rf.endAddress,
@@ -187,6 +188,10 @@ export default function App() {
       }))
       .then(async (funcs) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });
+        // Pre-send func map + jump tables to worker for decompilation
+        const funcEntryMap = new Map<number, { name: string; address: number }>();
+        for (const fn of funcs) funcEntryMap.set(fn.address, { name: fn.name, address: fn.address });
+        disasmWorker.configureDecompileMaps(funcEntryMap);
 
         // IRP dispatch detection for drivers
         if (driverInfo.isDriver && funcs.length > 0) {
@@ -385,6 +390,12 @@ export default function App() {
     { key: "anomalies", Component: AnomaliesView },
   ];
 
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const closeGoTo = useCallback(() => setGoToOpen(false), []);
+  const fontStyle = useMemo(() => ({ '--mono-font-size': `${fontSize}px` } as React.CSSProperties), [fontSize]);
+
   const renderMainView = () => {
     if (!state.peFile) return null;
     return tabComponents.map(({ key, Component, isLazy }) =>
@@ -408,7 +419,7 @@ export default function App() {
         {!state.peFile ? (
           <FileLoader onFile={handleFile} loading={state.loading} error={state.error} analysisPhase={state.analysisPhase} fileName={state.fileName} />
         ) : (
-          <div className="flex flex-col h-screen app-bg" style={{ '--mono-font-size': `${fontSize}px` } as React.CSSProperties}>
+          <div className="flex flex-col h-screen app-bg" style={fontStyle}>
             <AddressBar />
             {state.driverInfo?.isDriver && !driverBannerDismissed && (
               <div className="bg-amber-900/40 border-b border-amber-700/50 px-4 py-1.5 flex items-center gap-3 text-xs shrink-0">
@@ -445,10 +456,10 @@ export default function App() {
             <StatusBar />
           </div>
         )}
-        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
-        <KeyboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
-        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-        <GoToAddressModal open={goToOpen} onClose={() => setGoToOpen(false)} />
+        <CommandPalette open={paletteOpen} onClose={closePalette} />
+        <KeyboardShortcuts open={shortcutsOpen} onClose={closeShortcuts} />
+        <SettingsModal open={settingsOpen} onClose={closeSettings} />
+        <GoToAddressModal open={goToOpen} onClose={closeGoTo} />
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );

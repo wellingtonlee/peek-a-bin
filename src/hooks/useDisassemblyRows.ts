@@ -6,7 +6,6 @@ import type { Instruction, DisasmFunction, Xref, DataItem } from "../disasm/type
 import { buildCFG, detectLoops } from "../disasm/cfg";
 import type { Loop } from "../disasm/cfg";
 import { buildDataItems } from "../disasm/dataView";
-import { buildIATLookup } from "../disasm/operands";
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
@@ -227,7 +226,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     if (isExecutable || !pe || !sectionInfo) return [];
     const bytes = new Uint8Array(pe.buffer, sectionInfo.pointerToRawData, sectionInfo.sizeOfRawData);
     const baseAddress = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
-    const iatMap = buildIATLookup(pe.imports);
+    const iatMap = state.iatMap;
     const funcAddrsMap = new Map<number, string>();
     for (const fn of state.functions) funcAddrsMap.set(fn.address, fn.name);
     const sectionRanges = pe.sections.map(s => ({

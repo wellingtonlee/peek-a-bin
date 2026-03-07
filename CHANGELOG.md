@@ -19,6 +19,12 @@
 
 ### Changed
 
+- **Performance: worker decompile maps** — iatMap, stringMap, and jumpTables are now stored in the worker and reused across decompile calls instead of being re-serialized every invocation (2026-03-07 16:33)
+- **Performance: deduplicate buildIATLookup** — IAT lookup map computed once in App.tsx and stored in AppState; DisassemblyView and useDisassemblyRows read from state instead of recomputing (2026-03-07 16:33)
+- **Performance: memoize GraphOverviewContext** — context value stabilized with useMemo to prevent unnecessary consumer re-renders (2026-03-07 16:33)
+- **Performance: memoize App.tsx callbacks/style** — 4 modal onClose handlers wrapped in useCallback, font-size style object wrapped in useMemo (2026-03-07 16:33)
+- **Performance: memoize ImportsView filtering** — filtered imports, totalFunctions, and filteredFuncCount wrapped in useMemo (2026-03-07 16:33)
+- **Performance: hoist SUSPICIOUS_MNEMONICS** — moved from useMemo inside component to module-level constant (2026-03-07 16:33)
 - **Shortcut legend** — `;` description now clarifies it works in both disassembly and pseudocode views (2026-03-07 14:58)
 
 ### Fixed

@@ -54,6 +54,7 @@ export interface AppState {
   analysisPhase: AnalysisPhase;
   currentInstruction: { bytes: number[]; size: number } | null;
   currentBlock: { startAddr: number; endAddr: number } | null;
+  iatMap: Map<number, { lib: string; func: string }>;
   driverInfo: DriverInfo | null;
   irpHandlers: IRPDispatchEntry[];
 }
@@ -92,6 +93,7 @@ export type AppAction =
   | { type: "SET_ANALYSIS_PHASE"; phase: AnalysisPhase }
   | { type: "SET_CURRENT_INSTRUCTION"; instruction: { bytes: number[]; size: number } | null }
   | { type: "SET_CURRENT_BLOCK"; block: { startAddr: number; endAddr: number } | null }
+  | { type: "SET_IAT_MAP"; iatMap: Map<number, { lib: string; func: string }> }
   | { type: "SET_DRIVER_INFO"; driverInfo: DriverInfo }
   | { type: "SET_IRP_HANDLERS"; handlers: IRPDispatchEntry[] }
   | { type: "RESET" };
@@ -122,6 +124,7 @@ export const initialState: AppState = {
   analysisPhase: "idle",
   currentInstruction: null,
   currentBlock: null,
+  iatMap: new Map(),
   driverInfo: null,
   irpHandlers: [],
 };
@@ -335,6 +338,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, currentInstruction: action.instruction };
     case "SET_CURRENT_BLOCK":
       return { ...state, currentBlock: action.block };
+    case "SET_IAT_MAP":
+      return { ...state, iatMap: action.iatMap };
     case "SET_DRIVER_INFO":
       return { ...state, driverInfo: action.driverInfo };
     case "SET_IRP_HANDLERS":

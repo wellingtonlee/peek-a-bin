@@ -17,6 +17,8 @@ let initialized = false;
 let stringMap: Map<number, string> = new Map();
 let iatMap: Map<number, { lib: string; func: string }> = new Map();
 let driverMode = false;
+let funcMap: Map<number, { name: string; address: number }> = new Map();
+let jumpTableMap: Map<number, number[]> = new Map();
 let structRegistry = new StructRegistry();
 
 // --- IndexedDB WASM module cache ---
@@ -1038,7 +1040,7 @@ function buildAllXrefs(
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction' | 'detectIRPDispatches' | 'resetStructRegistry';
+  method: 'init' | 'configure' | 'configureDecompileMaps' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction' | 'detectIRPDispatches' | 'resetStructRegistry';
   args: any;
 }
 
@@ -1061,6 +1063,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         structRegistry = new StructRegistry();
         result = true;
         break;
+
+      case 'configureDecompileMaps': {
+        const fEntries: [number, { name: string; address: number }][] = args.funcEntries ?? [];
+        funcMap = new Map(fEntries);
+        const jtEntries: [number, number[]][] = args.jumpTableEntries ?? [];
+        jumpTableMap = new Map(jtEntries);
+        result = true;
+        break;
+      }
 
       case 'disassemble':
         result = disassemble(args.bytes, args.baseAddress, args.is64);
@@ -1103,14 +1114,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       case 'decompileFunction': {
         const xrefEntries: [number, Xref[]][] = args.xrefEntries ?? [];
         const xMap = new Map<number, Xref[]>(xrefEntries);
-        const jtEntries: [number, number[]][] = args.jumpTableEntries ?? [];
-        const jtMap = new Map<number, number[]>(jtEntries);
-        const iatEntries: [number, { lib: string; func: string }][] = args.iatEntries ?? [];
-        const iMap = new Map(iatEntries);
-        const strEntries: [number, string][] = args.stringEntries ?? [];
-        const sMap = new Map(strEntries);
-        const funcEntries: [number, { name: string; address: number }][] = args.funcEntries ?? [];
-        const fMap = new Map(funcEntries);
+        // Use per-call funcMap if provided (includes renames), else fall back to stored
+        const fEntries: [number, { name: string; address: number }][] | undefined = args.funcEntries;
+        const fMap = fEntries ? new Map(fEntries) : funcMap;
         result = decompileFunction(
           args.func as DisasmFunction,
           args.instructions as Instruction[],
@@ -1118,9 +1124,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           args.stackFrame as StackFrame | null,
           args.signature as FunctionSignature | null,
           args.is64 as boolean,
-          jtMap,
-          iMap,
-          sMap,
+          jumpTableMap,
+          iatMap,
+          stringMap,
           fMap,
           structRegistry,
           args.runtimeFunctions,

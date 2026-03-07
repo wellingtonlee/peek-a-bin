@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect } from "react";
+import { createContext, useContext, useState, useMemo } from "react";
 import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
 
 export interface GraphOverviewData {
@@ -23,7 +23,7 @@ export const GraphOverviewContext = createContext<GraphOverviewState>({
 
 export function useGraphOverviewState(): GraphOverviewState {
   const [data, setData] = useState<GraphOverviewData | null>(null);
-  return { data, setData };
+  return useMemo(() => ({ data, setData }), [data, setData]);
 }
 
 export function useGraphOverview() {
