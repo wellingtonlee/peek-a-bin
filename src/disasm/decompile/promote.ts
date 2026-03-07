@@ -1,9 +1,74 @@
 import type { StackFrame } from '../types';
 import type { FunctionSignature } from '../signatures';
-import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam } from './ir';
+import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from './ir';
 import { irVar, canonReg, walkStmts } from './ir';
 import type { TypeContext } from './typeInfer';
 import { typeToString } from './typeInfer';
+
+// ── Type-based variable renaming ──
+
+const TYPE_BASED_NAMES: Record<string, string> = {
+  'HANDLE': 'hFile',
+  'NTSTATUS': 'status',
+  'HRESULT': 'hr',
+  'PVOID': 'pBuffer',
+  'BOOL': 'bResult',
+};
+
+function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr {
+  if (expr.kind === 'var') {
+    const newName = renameMap.get(expr.name);
+    if (newName) return { ...expr, name: newName };
+    return expr;
+  }
+  switch (expr.kind) {
+    case 'binary':
+      return { ...expr, left: renameVarsInExpr(expr.left, renameMap), right: renameVarsInExpr(expr.right, renameMap) };
+    case 'unary':
+      return { ...expr, operand: renameVarsInExpr(expr.operand, renameMap) };
+    case 'deref':
+      return { ...expr, address: renameVarsInExpr(expr.address, renameMap) };
+    case 'call':
+      return { ...expr, args: expr.args.map(a => renameVarsInExpr(a, renameMap)) } as IRExpr;
+    case 'ternary':
+      return { ...expr, condition: renameVarsInExpr(expr.condition, renameMap), then: renameVarsInExpr(expr.then, renameMap), else: renameVarsInExpr(expr.else, renameMap) };
+    case 'cast':
+      return { ...expr, operand: renameVarsInExpr(expr.operand, renameMap) };
+    case 'field_access':
+      return { ...expr, base: renameVarsInExpr(expr.base, renameMap) };
+    case 'array_access':
+      return { ...expr, base: renameVarsInExpr(expr.base, renameMap), index: renameVarsInExpr(expr.index, renameMap) };
+    default:
+      return expr;
+  }
+}
+
+function renameVarsInStmt(stmt: IRStmt, renameMap: Map<string, string>): IRStmt {
+  switch (stmt.kind) {
+    case 'assign':
+      return { ...stmt, dest: renameVarsInExpr(stmt.dest, renameMap), src: renameVarsInExpr(stmt.src, renameMap) };
+    case 'store':
+      return { ...stmt, address: renameVarsInExpr(stmt.address, renameMap), value: renameVarsInExpr(stmt.value, renameMap) };
+    case 'call_stmt':
+      return { ...stmt, call: renameVarsInExpr(stmt.call, renameMap) as IRCall };
+    case 'return':
+      return stmt.value ? { ...stmt, value: renameVarsInExpr(stmt.value, renameMap) } : stmt;
+    case 'if':
+      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), thenBody: stmt.thenBody.map(s => renameVarsInStmt(s, renameMap)), elseBody: stmt.elseBody?.map(s => renameVarsInStmt(s, renameMap)) };
+    case 'while':
+      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
+    case 'do_while':
+      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
+    case 'for':
+      return { ...stmt, init: renameVarsInStmt(stmt.init, renameMap), condition: renameVarsInExpr(stmt.condition, renameMap), update: renameVarsInStmt(stmt.update, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
+    case 'switch':
+      return { ...stmt, expr: renameVarsInExpr(stmt.expr, renameMap), cases: stmt.cases.map(c => ({ ...c, body: c.body.map(s => renameVarsInStmt(s, renameMap)) })), defaultBody: stmt.defaultBody?.map(s => renameVarsInStmt(s, renameMap)) };
+    case 'try':
+      return { ...stmt, body: stmt.body.map(s => renameVarsInStmt(s, renameMap)), handler: stmt.handler.map(s => renameVarsInStmt(s, renameMap)), filterExpr: stmt.filterExpr ? renameVarsInExpr(stmt.filterExpr, renameMap) : undefined };
+    default:
+      return stmt;
+  }
+}
 
 // ── Size → C type mapping ──
 
@@ -379,11 +444,27 @@ export function promoteVars(
   // Promote body
   const promoted = body.map(s => promoteStmt(s, is64, varLookup, paramLookup));
 
-  // Filter out register assignments that are just param saves (mov [rsp+shadow], rcx/rdx/r8/r9)
-  // These are captured in params already
+  // Type-based variable renaming
+  const renameMap = new Map<string, string>();
+  const allNames = new Set([...locals.map(l => l.name), ...params.map(p => p.name)]);
+  for (const local of locals) {
+    if (!local.name.startsWith('var_')) continue;
+    const prefix = TYPE_BASED_NAMES[local.type];
+    if (!prefix) continue;
+    let candidate = prefix;
+    let suffix = 2;
+    while (allNames.has(candidate)) {
+      candidate = `${prefix}${suffix++}`;
+    }
+    renameMap.set(local.name, candidate);
+    allNames.delete(local.name);
+    allNames.add(candidate);
+    local.name = candidate;
+  }
+  const finalBody = renameMap.size > 0 ? promoted.map(s => renameVarsInStmt(s, renameMap)) : promoted;
 
   // Determine return type
-  const returnType = hasReturnValue(promoted) ? 'int' : 'void';
+  const returnType = hasReturnValue(finalBody) ? 'int' : 'void';
 
   return {
     name,
@@ -391,6 +472,6 @@ export function promoteVars(
     returnType,
     params,
     locals,
-    body: promoted,
+    body: finalBody,
   };
 }

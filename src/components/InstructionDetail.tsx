@@ -217,7 +217,7 @@ export function InstructionDetail({
   const currentStackOffset = useMemo(() => parseStackOffset(insn.opStr), [insn.opStr]);
 
   return (
-    <div className="h-40 shrink-0 border-t border-gray-700 bg-gray-900 flex flex-col text-xs">
+    <div className="h-40 shrink-0 border-t border-theme panel-bg flex flex-col text-xs">
       <div className="flex items-center px-3 py-1 border-b border-gray-700 text-gray-400">
         <span className="font-semibold text-gray-300">
           Instruction Detail

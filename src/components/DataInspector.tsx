@@ -76,7 +76,7 @@ export function DataInspector({ offset, bytes, baseAddress }: DataInspectorProps
   const va = baseAddress + offset;
 
   return (
-    <div className="h-36 shrink-0 border-t border-gray-700 bg-gray-900/80 p-2 overflow-auto text-xs font-mono">
+    <div className="h-36 shrink-0 border-t border-theme panel-bg p-2 overflow-auto text-xs font-mono">
       <div className="text-gray-400 mb-1">
         Offset: 0x{offset.toString(16).toUpperCase()} (VA: 0x{va.toString(16).toUpperCase()})
       </div>

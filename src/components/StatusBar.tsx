@@ -76,7 +76,7 @@ export function StatusBar() {
   const sectionCharsTooltip = sectionInfo ? decodeSectionChars(sectionInfo.characteristics) : undefined;
 
   return (
-    <div className="h-5 bg-gray-900 border-t border-gray-700 text-[10px] flex items-center px-4 text-gray-400 shrink-0 select-none">
+    <div className="h-5 toolbar-bg border-t border-theme text-[10px] flex items-center px-4 text-gray-400 shrink-0 select-none">
       <span className="mr-4">
         <span className="text-gray-500">Function:</span>{" "}
         {isAnalyzing && !containingFunc ? (

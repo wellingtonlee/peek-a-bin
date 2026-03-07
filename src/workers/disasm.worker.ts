@@ -261,6 +261,7 @@ function detectFunctions(
     exports?: { name: string; address: number }[];
     entryPoint?: number;
     pdataFunctions?: { beginAddress: number; endAddress: number }[];
+    handlerAddresses?: number[];
   }
 ): DetectResult {
   const addrSet = new Set<number>();
@@ -275,6 +276,16 @@ function detectFunctions(
       if (rf.beginAddress >= baseAddress && rf.beginAddress < endAddress) {
         addrSet.add(rf.beginAddress);
         pdataEndMap.set(rf.beginAddress, rf.endAddress);
+      }
+    }
+  }
+
+  // Exception handler seeds from UNWIND_INFO
+  if (options?.handlerAddresses) {
+    for (const ha of options.handlerAddresses) {
+      if (ha >= baseAddress && ha < endAddress) {
+        addrSet.add(ha);
+        nameMap.set(ha, `__handler_${ha.toString(16)}`);
       }
     }
   }
@@ -323,11 +334,53 @@ function detectFunctions(
       else if (i > 0 && i + 3 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x83 && bytes[i + 2] === 0xEC && (bytes[i - 1] === 0xCC || bytes[i - 1] === 0x90)) {
         isFunctionStart = true;
       }
+      // REX push rbx; sub rsp, N (MSVC fastcall with REX prefix)
+      else if (i + 4 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x53 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+        isFunctionStart = true;
+      }
+      // REX push rbp; lea rbp, [rsp+N]
+      else if (i + 5 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x55 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x8D && bytes[i + 4] === 0x6C && bytes[i + 5] === 0x24) {
+        isFunctionStart = true;
+      }
+      // REX push rdi; sub rsp, N
+      else if (i + 4 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x57 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+        isFunctionStart = true;
+      }
+      // Short patterns requiring boundary guard
+      else if (i + 3 < len && (
+        // mov [rsp+8], rbx
+        (bytes[i] === 0x48 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x5C && bytes[i + 3] === 0x24) ||
+        // mov [rsp+N], r8
+        (bytes[i] === 0x4C && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x44 && bytes[i + 3] === 0x24)
+      )) {
+        const atBoundary = i === 0
+          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
+          || ((baseAddress + i) % 16 === 0);
+        if (atBoundary) isFunctionStart = true;
+      }
+      // mov rax, rsp (short, needs boundary guard)
+      else if (i + 2 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x8B && bytes[i + 2] === 0xC4) {
+        const atBoundary = i === 0
+          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
+          || ((baseAddress + i) % 16 === 0);
+        if (atBoundary) isFunctionStart = true;
+      }
     } else {
       if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x8B && bytes[i + 2] === 0xEC) {
         isFunctionStart = true;
       } else if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0xE5) {
         isFunctionStart = true;
+      }
+      // mov edi,edi; push ebp; mov ebp,esp (hotpatch prologue)
+      else if (i + 4 < len && bytes[i] === 0x8B && bytes[i + 1] === 0xFF && bytes[i + 2] === 0x55 && bytes[i + 3] === 0x8B && bytes[i + 4] === 0xEC) {
+        isFunctionStart = true;
+      }
+      // push imm8; push imm32 (SEH setup, needs boundary guard)
+      else if (i + 2 < len && bytes[i] === 0x6A && bytes[i + 2] === 0x68) {
+        const atBoundary = i === 0
+          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
+          || ((baseAddress + i) % 16 === 0);
+        if (atBoundary) isFunctionStart = true;
       }
     }
     if (isFunctionStart) addrSet.add(baseAddress + i);
@@ -337,8 +390,17 @@ function detectFunctions(
   for (let i = 0; i < len; i++) {
     if (bytes[i] === 0xCC || bytes[i] === 0x90) {
       let padEnd = i + 1;
-      while (padEnd < len && (bytes[padEnd] === 0xCC || bytes[padEnd] === 0x90)) padEnd++;
-      if (padEnd - i >= 2 && padEnd < len && bytes[padEnd] !== 0xCC && bytes[padEnd] !== 0x90) {
+      let hasCC = bytes[i] === 0xCC;
+      while (padEnd < len && (bytes[padEnd] === 0xCC || bytes[padEnd] === 0x90)) {
+        if (bytes[padEnd] === 0xCC) hasCC = true;
+        padEnd++;
+      }
+      const padLen = padEnd - i;
+      const minLen = hasCC ? 2 : 3;  // NOP-only runs need 3+
+      if (padLen >= minLen && padEnd < len
+          && bytes[padEnd] !== 0xCC && bytes[padEnd] !== 0x90
+          && bytes[padEnd] !== 0x00  // skip null (data)
+          && ((baseAddress + padEnd) % 4 === 0)) {  // alignment check
         addrSet.add(baseAddress + padEnd);
       }
       i = padEnd - 1;
@@ -490,6 +552,92 @@ function detectFunctions(
       functions[i].size = functions[i + 1].address - functions[i].address;
     } else {
       functions[i].size = endAddress - functions[i].address;
+    }
+  }
+
+  // --- Thunk detection ---
+  if (initialized && iatMap.size > 0) {
+    const cs = is64 ? cs64 : cs32;
+    for (const fn of functions) {
+      if (fn.name !== `sub_${fn.address.toString(16).toUpperCase()}`) continue;
+      if (fn.size > 16) continue;
+      const fnOffset = fn.address - baseAddress;
+      if (fnOffset < 0 || fnOffset + fn.size > len) continue;
+      const fnBytes = bytes.subarray(fnOffset, fnOffset + fn.size);
+      try {
+        const insns = cs.disasm(fnBytes, { address: fn.address });
+        // Find first non-padding instruction
+        let jmpInsn: { address: number; mnemonic: string; opStr: string; size: number } | null = null;
+        let meaningfulCount = 0;
+        for (const insn of insns) {
+          if (insn.mnemonic === 'nop' || insn.mnemonic === 'int3') continue;
+          meaningfulCount++;
+          if (insn.mnemonic === 'jmp' && meaningfulCount === 1) jmpInsn = insn;
+        }
+        if (jmpInsn && meaningfulCount === 1) {
+          let resolvedAddr: number | null = null;
+          if (is64) {
+            const ripMatch = jmpInsn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+            if (ripMatch) {
+              const sign = ripMatch[1] === '+' ? 1 : -1;
+              const disp = parseInt(ripMatch[2], 16);
+              resolvedAddr = jmpInsn.address + jmpInsn.size + sign * disp;
+            }
+          } else {
+            const addrMatch = jmpInsn.opStr.match(/\[0x([0-9a-fA-F]+)\]/);
+            if (addrMatch) resolvedAddr = parseInt(addrMatch[1], 16);
+          }
+          if (resolvedAddr !== null) {
+            const iat = iatMap.get(resolvedAddr);
+            if (iat) {
+              fn.name = iat.func;
+              fn.isThunk = true;
+            }
+          }
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  // --- Tail call detection ---
+  if (initialized) {
+    const cs = is64 ? cs64 : cs32;
+    const funcAddrSet = new Set(sortedAddrs);
+    const jumpTableTargets = new Set<number>();
+    for (const [, targets] of jumpTables) {
+      for (const t of targets) jumpTableTargets.add(t);
+    }
+    for (const fn of functions) {
+      // Disassemble last ~15 bytes to find the final instruction
+      const tailLen = Math.min(15, fn.size);
+      const tailOffset = fn.address + fn.size - tailLen - baseAddress;
+      if (tailOffset < 0 || tailOffset + tailLen > len) continue;
+      const tailBytes = bytes.subarray(tailOffset, tailOffset + tailLen);
+      try {
+        const insns = cs.disasm(tailBytes, { address: fn.address + fn.size - tailLen });
+        // Walk backward past nop/int3 to find last real instruction
+        let lastReal: { mnemonic: string; opStr: string } | null = null;
+        for (let i = insns.length - 1; i >= 0; i--) {
+          if (insns[i].mnemonic !== 'nop' && insns[i].mnemonic !== 'int3') {
+            lastReal = insns[i];
+            break;
+          }
+        }
+        if (lastReal && lastReal.mnemonic === 'jmp') {
+          const m = lastReal.opStr.match(/^0x([0-9a-fA-F]+)$/);
+          if (m) {
+            const target = parseInt(m[1], 16);
+            if (
+              funcAddrSet.has(target) &&
+              target !== fn.address &&
+              (target < fn.address || target >= fn.address + fn.size) &&
+              !jumpTableTargets.has(target)
+            ) {
+              fn.tailCallTarget = target;
+            }
+          }
+        }
+      } catch { /* skip */ }
     }
   }
 

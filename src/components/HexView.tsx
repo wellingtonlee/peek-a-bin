@@ -396,7 +396,7 @@ export function HexView() {
   return (
     <div className="flex flex-col h-full" style={{ fontSize: 'var(--mono-font-size)' }}>
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-700 bg-gray-900 flex-wrap">
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-theme toolbar-bg flex-wrap">
         <span className="text-gray-400">Section:</span>
         <select
           value={sectionInfo?.name ?? ""}

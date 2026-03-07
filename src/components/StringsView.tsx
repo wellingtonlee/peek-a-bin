@@ -138,7 +138,7 @@ export function StringsView() {
 
       <div ref={parentRef} className="flex-1 overflow-auto text-xs relative">
         {/* Table header */}
-        <div className="sticky top-0 z-10 flex items-center px-4 py-1 bg-gray-900 border-b border-gray-700 text-gray-500 font-semibold">
+        <div className="sticky top-0 z-10 flex items-center px-4 py-1 toolbar-bg border-b border-theme text-gray-500 font-semibold">
           <span className="w-36 shrink-0">VA</span>
           <span className="w-16 shrink-0 text-right pr-4">Length</span>
           <span className="w-12 shrink-0 text-right pr-4">Xrefs</span>

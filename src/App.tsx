@@ -12,6 +12,7 @@ import { buildIATLookup } from "./disasm/operands";
 import { detectDriver } from "./analysis/driver";
 import { detectAnomalies } from "./analysis/anomalies";
 import { loadFontSize } from "./llm/settings";
+import { loadTheme, applyTheme } from "./styles/themes";
 import { saveRecentFile } from "./utils/recentFiles";
 import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
@@ -42,6 +43,17 @@ export default function App() {
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
+
+  // Apply theme on mount and when changed
+  useEffect(() => {
+    applyTheme(loadTheme());
+  }, []);
+
+  useEffect(() => {
+    const handler = () => applyTheme(loadTheme());
+    window.addEventListener("peek-a-bin:theme-changed", handler);
+    return () => window.removeEventListener("peek-a-bin:theme-changed", handler);
+  }, []);
 
   const bufferRef = useRef<ArrayBuffer | null>(null);
 
@@ -156,6 +168,9 @@ export default function App() {
       beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
       endAddress: pe.optionalHeader.imageBase + rf.endAddress,
     }));
+    const handlerAddresses = pe.runtimeFunctions
+      ?.filter(rf => rf.handlerAddress !== undefined)
+      .map(rf => pe.optionalHeader.imageBase + rf.handlerAddress!) ?? [];
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
     disasmWorker.configure(pe.strings, iatLookup, { driverMode: driverInfo.isDriver })
       .then(() => disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
@@ -167,6 +182,7 @@ export default function App() {
           .map((e) => ({ name: e.name, address: pe.optionalHeader.imageBase + e.address })),
         entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
         pdataFunctions,
+        handlerAddresses,
       }))
       .then(async (funcs) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });
@@ -390,7 +406,7 @@ export default function App() {
         {!state.peFile ? (
           <FileLoader onFile={handleFile} loading={state.loading} error={state.error} analysisPhase={state.analysisPhase} fileName={state.fileName} />
         ) : (
-          <div className="flex flex-col h-screen" style={{ '--mono-font-size': `${fontSize}px` } as React.CSSProperties}>
+          <div className="flex flex-col h-screen app-bg" style={{ '--mono-font-size': `${fontSize}px` } as React.CSSProperties}>
             <AddressBar />
             {state.driverInfo?.isDriver && !driverBannerDismissed && (
               <div className="bg-amber-900/40 border-b border-amber-700/50 px-4 py-1.5 flex items-center gap-3 text-xs shrink-0">

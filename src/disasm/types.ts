@@ -12,6 +12,8 @@ export interface DisasmFunction {
   name: string;
   address: number;
   size: number;
+  tailCallTarget?: number;
+  isThunk?: boolean;
 }
 
 export interface Xref {

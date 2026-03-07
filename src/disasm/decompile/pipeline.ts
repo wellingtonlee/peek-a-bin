@@ -92,7 +92,7 @@ export function decompileFunction(
     }
 
     // 9. Emit C text + lineMap
-    const result = emitFunction(irFunc, typeCtx);
+    const result = emitFunction(irFunc, typeCtx, stringMap);
     return {
       code: result.code,
       lineMap: Array.from(result.lineMap.entries()),

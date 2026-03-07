@@ -199,7 +199,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
   );
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-gray-950">
+    <div className="flex flex-col items-center justify-center h-screen app-bg">
       {/* Branding */}
       <div className="mb-6 text-center">
         <h1 className="text-2xl font-bold text-gray-100">Peek-a-Bin</h1>

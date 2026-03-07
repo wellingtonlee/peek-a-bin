@@ -49,6 +49,7 @@ function formatHex(value: number): string {
 const COMPOUND_OPS = new Set<string>(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>', '>>>']);
 
 let _typeCtx: TypeContext | undefined;
+let _stringMap: Map<number, string> | undefined;
 
 function getExprType(expr: IRExpr): DecompType | undefined {
   if (!_typeCtx) return undefined;
@@ -88,6 +89,14 @@ function emitTypeIdiom(expr: IRExpr & { kind: 'binary' }): string | null {
 function emitExpr(expr: IRExpr, parentPrec = 0): string {
   switch (expr.kind) {
     case 'const': {
+      // String literal lookup
+      if (_stringMap) {
+        const str = _stringMap.get(expr.value);
+        if (str) {
+          const display = str.length > 40 ? str.substring(0, 37) + '...' : str;
+          return `"${display.replace(/"/g, '\\"')}"`;
+        }
+      }
       const hex = formatHex(expr.value);
       if (isPlausibleIOCTL(expr.value)) {
         const ioctlComment = formatIOCTL(expr.value);
@@ -441,8 +450,9 @@ export interface EmitFunctionResult {
   lineMap: Map<number, number>;  // line number (0-based) → instruction address
 }
 
-export function emitFunction(func: IRFunction, typeCtx?: TypeContext): EmitFunctionResult {
+export function emitFunction(func: IRFunction, typeCtx?: TypeContext, stringMap?: Map<number, string>): EmitFunctionResult {
   _typeCtx = typeCtx;
+  _stringMap = stringMap;
   const lines: string[] = [];
   const lineAddrs: (number | undefined)[] = [];
 
@@ -501,5 +511,6 @@ export function emitFunction(func: IRFunction, typeCtx?: TypeContext): EmitFunct
   }
 
   _typeCtx = undefined;
+  _stringMap = undefined;
   return { code: lines.join('\n'), lineMap };
 }

@@ -223,7 +223,7 @@ export function Sidebar() {
 
   if (collapsed) {
     return (
-      <aside className="w-10 bg-gray-900 border-r border-gray-700 flex flex-col items-center py-2 shrink-0">
+      <aside className="w-10 panel-bg border-r border-theme flex flex-col items-center py-2 shrink-0">
         <button
           onClick={() => setCollapsed(false)}
           className="text-gray-400 hover:text-white text-sm"
@@ -237,7 +237,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="bg-gray-900 border-r border-gray-700 flex flex-col overflow-hidden text-xs relative shrink-0"
+      className="panel-bg border-r border-theme flex flex-col overflow-hidden text-xs relative shrink-0"
       style={{ width }}
     >
       {/* Resize handle */}

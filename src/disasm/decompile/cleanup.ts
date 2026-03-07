@@ -11,8 +11,8 @@ import { RegState } from './regstate';
  */
 export function cleanupStructured(body: IRStmt[]): IRStmt[] {
   let result = body;
-  // Run cleanup passes until stable (max 3 iterations)
-  for (let i = 0; i < 3; i++) {
+  // Run cleanup passes until stable (max 5 iterations for deeply nested guards)
+  for (let i = 0; i < 5; i++) {
     const prev = result;
     result = cleanupPass(result);
     if (result.length === prev.length && result.every((s, j) => s === prev[j])) break;
@@ -73,11 +73,13 @@ function cleanupIf(
 
   // Guard clause flattening: if (cond) { ...; return; } else { rest } → if (cond) { ...; return; } rest
   if (elseBody && elseBody.length > 0 && endsWithTerminator(thenBody)) {
+    // Recursively clean the flattened result to handle nested guards
+    const flatResult = cleanupPass([
+      { kind: 'if', condition: stmt.condition, thenBody },
+      ...elseBody,
+    ]);
     return {
-      stmts: [
-        { kind: 'if', condition: stmt.condition, thenBody },
-        ...elseBody,
-      ],
+      stmts: flatResult,
       consumed: 0,
     };
   }

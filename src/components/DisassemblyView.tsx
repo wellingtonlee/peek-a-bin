@@ -180,6 +180,17 @@ export function DisassemblyView() {
   const [highlightedReg, setHighlightedReg] = useState<string | null>(null);
   const [showDecompile, setShowDecompile] = useState(false);
   const [reCenterTrigger, setReCenterTrigger] = useState(0);
+  const [scrollSyncEnabled, setScrollSyncEnabled] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:scroll-sync") !== "false"; } catch { return true; }
+  });
+  const [scrollSyncAddr, setScrollSyncAddr] = useState<number | null>(null);
+  const scrollSyncTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [compactMode, setCompactMode] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:density") === "compact"; } catch { return false; }
+  });
+  const [showBytes, setShowBytes] = useState(() => {
+    try { return localStorage.getItem("peek-a-bin:show-bytes") !== "false"; } catch { return true; }
+  });
   const [decompileWidth, setDecompileWidth] = useState(() => {
     try {
       const v = localStorage.getItem("peek-a-bin:decompile-width");
@@ -276,12 +287,42 @@ export function DisassemblyView() {
     return rowIndex >= lo && rowIndex <= hi;
   }, [selectionRange]);
 
+  const rowHeight = compactMode ? 16 : 20;
+  const sepHeight = compactMode ? 6 : 12;
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => rows[index]?.kind === "separator" ? 8 : 20,
+    estimateSize: (index) => rows[index]?.kind === "separator" ? sepHeight : rowHeight,
     overscan: 50,
   });
+
+  // Scroll-driven sync: update scrollSyncAddr from visible center instruction
+  useEffect(() => {
+    if (!scrollSyncEnabled || !showDecompile || viewMode !== "linear") return;
+    const el = parentRef.current;
+    if (!el) return;
+    const handler = () => {
+      clearTimeout(scrollSyncTimerRef.current);
+      scrollSyncTimerRef.current = setTimeout(() => {
+        const vItems = virtualizer.getVirtualItems();
+        if (vItems.length === 0) return;
+        // Pick center item
+        const centerItem = vItems[Math.floor(vItems.length / 2)];
+        const row = rows[centerItem.index];
+        if (row && row.kind === "insn") {
+          setScrollSyncAddr(row.insn.address);
+        } else if (row && row.kind === "data") {
+          setScrollSyncAddr(row.item.address);
+        }
+      }, 100);
+    };
+    el.addEventListener("scroll", handler, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", handler);
+      clearTimeout(scrollSyncTimerRef.current);
+    };
+  }, [scrollSyncEnabled, showDecompile, viewMode, rows, virtualizer]);
 
   // Persist viewMode
   useEffect(() => {
@@ -525,10 +566,20 @@ export function DisassemblyView() {
           if (target !== null) {
             const targetFn = funcMap.get(target);
             const vs = { viewMode, graphPan, graphZoom };
-            if (targetFn) {
-              dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc ?? targetFn, state.renames), viewSnapshot: vs });
+            if (currentFunc) {
+              dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames), viewSnapshot: vs });
             }
             navViewStateMapRef.current.set(state.currentAddress, vs);
+
+            // Auto-switch to linear when navigating to non-executable section from graph
+            if (viewMode === "graph" && pe) {
+              const rva = target - pe.optionalHeader.imageBase;
+              const sec = pe.sections.find(s => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize);
+              if (sec && !(sec.characteristics & 0x20000000)) {
+                setViewMode("linear");
+              }
+            }
+
             dispatch({ type: "SET_ADDRESS", address: target });
           }
         }
@@ -636,16 +687,26 @@ export function DisassemblyView() {
 
   const handleAddressClick = useCallback(
     (address: number) => {
-      // Push breadcrumb when clicking into a function target
-      const targetFn = funcMap.get(address);
-      if (targetFn && currentFunc) {
-        const vs = { viewMode, graphPan, graphZoom };
+      const vs = { viewMode, graphPan, graphZoom };
+      // Always save view state for back-navigation (not just function targets)
+      navViewStateMapRef.current.set(state.currentAddress, vs);
+
+      if (currentFunc) {
         dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames), viewSnapshot: vs });
-        navViewStateMapRef.current.set(state.currentAddress, vs);
       }
+
+      // Auto-switch to linear when navigating to non-executable section from graph
+      if (viewMode === "graph" && pe) {
+        const rva = address - pe.optionalHeader.imageBase;
+        const sec = pe.sections.find(s => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize);
+        if (sec && !(sec.characteristics & 0x20000000)) {
+          setViewMode("linear");
+        }
+      }
+
       dispatch({ type: "SET_ADDRESS", address });
     },
-    [dispatch, funcMap, currentFunc, state.currentAddress, state.renames, viewMode, graphPan, graphZoom],
+    [dispatch, currentFunc, state.currentAddress, state.renames, viewMode, graphPan, graphZoom, pe],
   );
 
   const handleDoubleClickAddr = useCallback(
@@ -744,6 +805,28 @@ export function DisassemblyView() {
     setCtxMenu(null);
   }, [ctxMenu, funcMap, state.renames]);
 
+  const ctxFollowTarget = useCallback(() => {
+    if (!ctxMenu) return;
+    const target = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
+    if (target !== null) handleAddressClick(target);
+    setCtxMenu(null);
+  }, [ctxMenu, handleAddressClick]);
+
+  const ctxShowXrefs = useCallback(() => {
+    if (!ctxMenu) return;
+    setShowXrefPanel(true);
+    setCtxMenu(null);
+  }, [ctxMenu]);
+
+  // Xref count map for context menu
+  const xrefCountMap = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const [addr, xrefs] of typedXrefMap) {
+      m.set(addr, xrefs.length);
+    }
+    return m;
+  }, [typedXrefMap]);
+
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, insn: Instruction) => {
       e.preventDefault();
@@ -832,22 +915,25 @@ export function DisassemblyView() {
     return m;
   }, [decompile.activeLineMap]);
 
+  // Use scrollSyncAddr when scroll-sync is active and decompile panel is open, otherwise use currentAddress
+  const syncAddr = (scrollSyncEnabled && showDecompile && scrollSyncAddr !== null) ? scrollSyncAddr : state.currentAddress;
+
   const decompileHighlightLines = useMemo(() => {
     if (decompile.activeLineMap.size === 0 || decompile.syncDisabled) return new Set<number>();
-    const lines = addrToLines.get(state.currentAddress);
+    const lines = addrToLines.get(syncAddr);
     if (lines) return new Set(lines);
     if (!currentFunc) return new Set<number>();
     const funcStart = currentFunc.address;
     const funcEnd = funcStart + currentFunc.size;
     let bestAddr = -1;
     for (const addr of addrToLines.keys()) {
-      if (addr <= state.currentAddress && addr >= funcStart && addr < funcEnd) {
+      if (addr <= syncAddr && addr >= funcStart && addr < funcEnd) {
         if (addr > bestAddr) bestAddr = addr;
       }
     }
     if (bestAddr >= 0) return new Set(addrToLines.get(bestAddr)!);
     return new Set<number>();
-  }, [addrToLines, state.currentAddress, decompile.syncDisabled, decompile.activeLineMap.size, currentFunc]);
+  }, [addrToLines, syncAddr, decompile.syncDisabled, decompile.activeLineMap.size, currentFunc]);
 
   const handleDecompileLineClick = useCallback((lineNum: number) => {
     if (decompile.syncDisabled) return;
@@ -1035,6 +1121,32 @@ export function DisassemblyView() {
             className={`px-1.5 py-0.5 rounded text-[10px] ${showMinimap ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
           >
             Map
+          </button>
+          <button
+            onClick={() => {
+              setShowBytes((v) => {
+                const next = !v;
+                try { localStorage.setItem("peek-a-bin:show-bytes", String(next)); } catch {}
+                return next;
+              });
+            }}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${showBytes ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+            title="Toggle bytes column"
+          >
+            Bytes
+          </button>
+          <button
+            onClick={() => {
+              setCompactMode((v) => {
+                const next = !v;
+                try { localStorage.setItem("peek-a-bin:density", next ? "compact" : "normal"); } catch {}
+                return next;
+              });
+            }}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${compactMode ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
+            title="Compact mode"
+          >
+            Compact
           </button>
           <button
             onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
@@ -1238,8 +1350,8 @@ export function DisassemblyView() {
       {viewMode === "linear" ? (
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto leading-5 focus:outline-none relative"
-        style={{ fontSize: 'var(--mono-font-size)' }}
+        className={`flex-1 overflow-auto leading-5 focus:outline-none relative ${compactMode ? "density-compact" : ""}`}
+        style={{ fontSize: 'var(--mono-font-size)', '--col-addr': pe.is64 ? '18ch' : '10ch' } as React.CSSProperties}
         tabIndex={0}
       >
         {/* Sticky function header */}
@@ -1275,7 +1387,7 @@ export function DisassemblyView() {
               funcMap={funcMap}
               currentFuncAddr={currentFunc?.address ?? null}
               currentAddress={state.currentAddress}
-              rowHeight={20}
+              rowHeight={rowHeight}
             />
           )}
           {virtualizer.getVirtualItems().map((vItem) => {
@@ -1287,17 +1399,18 @@ export function DisassemblyView() {
                 <div
                   key={`sep-${vItem.index}`}
                   data-index={vItem.index}
-                  className="flex items-center px-4"
+                  className="flex items-center"
                   style={{
                     position: "absolute",
                     top: 0,
                     left: 0,
                     width: "100%",
-                    height: "8px",
+                    height: `${sepHeight}px`,
                     transform: `translateY(${vItem.start}px)`,
+                    padding: "0 var(--row-px)",
                   }}
                 >
-                  <div className="w-full border-t border-dashed border-gray-700/40" />
+                  <div className="w-full border-t border-gray-700/20" style={{ margin: "0 1rem" }} />
                 </div>
               );
             }
@@ -1341,29 +1454,32 @@ export function DisassemblyView() {
                 <div
                   key={vItem.index}
                   data-index={vItem.index}
-                  className={`disasm-row group flex px-4 ${isCurrentAddr ? "bg-blue-900/30" : ""}`}
+                  className={`disasm-row group disasm-grid-data${!showBytes ? " hide-bytes" : ""} ${isCurrentAddr ? "bg-blue-900/30" : ""}`}
                   style={{
                     position: "absolute",
                     top: 0,
                     left: 0,
                     width: "100%",
-                    height: "20px",
+                    height: `${rowHeight}px`,
                     transform: `translateY(${vItem.start}px)`,
+                    padding: `0 var(--row-px)`,
                   }}
                   onClick={() => {
                     suppressScrollRef.current = true;
                     dispatch({ type: "SET_ADDRESS", address: item.address });
                   }}
                 >
-                  <span className="w-4 shrink-0 text-center">
+                  <span className="text-center">
                     {isBookmarked && <span className="text-yellow-300">★</span>}
                   </span>
-                  <span className="disasm-address w-36 shrink-0">{addrHex}</span>
-                  <span className="disasm-bytes w-44 shrink-0 truncate">{bytesHex}</span>
-                  <span className="text-cyan-400 w-16 shrink-0">{item.directive}</span>
-                  <span className="flex-1">{directiveStr}</span>
-                  {commentStr}
-                  {userComment && <span className="disasm-user-comment ml-2 truncate max-w-xs">; {userComment}</span>}
+                  <span className="disasm-address">{addrHex}</span>
+                  {showBytes && <span className="disasm-bytes truncate">{bytesHex}</span>}
+                  <span className="text-cyan-400">{item.directive}</span>
+                  <span>{directiveStr}</span>
+                  <span className="truncate flex items-center gap-1">
+                    {commentStr}
+                    {userComment && <span className="disasm-user-comment truncate max-w-xs">; {userComment}</span>}
+                  </span>
                 </div>
               );
             }
@@ -1379,14 +1495,17 @@ export function DisassemblyView() {
                   <div
                     key={`label-${vItem.index}`}
                     data-index={vItem.index}
-                    className="flex items-center px-4 text-yellow-400 text-[11px] font-mono border-t border-gray-700/50"
+                    className="flex items-center func-label text-[11px] font-mono border-t border-gray-700/50"
                     style={{
                       position: "absolute",
                       top: 0,
                       left: 0,
                       width: "100%",
-                      height: "20px",
+                      height: `${rowHeight}px`,
                       transform: `translateY(${vItem.start}px)`,
+                      paddingTop: "var(--label-pad-top)",
+                      paddingLeft: "var(--row-px)",
+                      paddingRight: "var(--row-px)",
                     }}
                   >
                     <span className="mr-1">; ────</span>
@@ -1419,14 +1538,17 @@ export function DisassemblyView() {
                 <div
                   key={`label-${vItem.index}`}
                   data-index={vItem.index}
-                  className="flex items-center px-4 text-yellow-400 text-[11px] font-mono border-t border-gray-700/50"
+                  className="flex items-center func-label text-[11px] font-mono border-t border-gray-700/50"
                   style={{
                     position: "absolute",
                     top: 0,
                     left: 0,
                     width: "100%",
-                    height: "20px",
+                    height: `${rowHeight}px`,
                     transform: `translateY(${vItem.start}px)`,
+                    paddingTop: "var(--label-pad-top)",
+                    paddingLeft: "var(--row-px)",
+                    paddingRight: "var(--row-px)",
                   }}
                   onDoubleClick={() => setRenamingLabel({ address: row.fn.address, value: displayName })}
                 >
@@ -1481,6 +1603,11 @@ export function DisassemblyView() {
             const loopDepth = loopHeaders.get(insn.address);
             const bodyDepth = loopBodyMap.get(insn.address);
             const isCurrentAddr = insn.address === state.currentAddress;
+            // Detect block boundary for top border
+            const isBlockStart = showBlocks && vItem.index > 0 && (() => {
+              const prevRow = rows[vItem.index - 1];
+              return prevRow && prevRow.kind === "insn" && prevRow.blockIdx !== row.blockIdx;
+            })();
             const isSearchMatch =
               search.searchMatches.length > 0 &&
               search.searchMatchIdx >= 0 &&
@@ -1551,7 +1678,7 @@ export function DisassemblyView() {
               <div
                 key={vItem.index}
                 data-index={vItem.index}
-                className={`disasm-row group flex px-4 ${
+                className={`disasm-row group disasm-grid${!showBytes ? " hide-bytes" : ""} ${
                   isSearchMatch
                     ? "bg-yellow-900/30"
                     : rowSelected
@@ -1567,9 +1694,11 @@ export function DisassemblyView() {
                   top: 0,
                   left: 0,
                   width: "100%",
-                  height: "20px",
+                  height: `${rowHeight}px`,
                   transform: `translateY(${vItem.start}px)`,
                   borderLeft: borderStyle,
+                  borderTop: isBlockStart ? "1px solid rgba(55,65,81,0.15)" : undefined,
+                  padding: `0 var(--row-px)`,
                 }}
                 title={isLoopHeader ? `Loop header (depth ${loopDepth})` : bodyDepth !== undefined ? `Loop body (depth ${bodyDepth})` : undefined}
                 onContextMenu={(e) => handleContextMenu(e, insn)}
@@ -1586,11 +1715,35 @@ export function DisassemblyView() {
                   }
                 }}
               >
-                <span className="w-4 shrink-0 text-center">
+                <span className="text-right pr-1 flex items-center justify-end gap-0.5">
                   {isBookmarked && <span className="text-yellow-300">★</span>}
+                  {(() => {
+                    const xrefs = typedXrefMap.get(insn.address);
+                    if (!xrefs || xrefs.length === 0 || funcMap.has(insn.address)) return null;
+                    return (
+                      <span
+                        className="text-gray-600 hover:text-blue-400 cursor-pointer text-[9px]"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = (e.target as HTMLElement).getBoundingClientRect();
+                          const container = parentRef.current;
+                          if (!container) return;
+                          const cRect = container.getBoundingClientRect();
+                          setXrefPopup({
+                            x: rect.left - cRect.left + container.scrollLeft,
+                            y: rect.bottom - cRect.top + container.scrollTop,
+                            targetAddr: insn.address,
+                            sources: xrefs,
+                          });
+                        }}
+                      >
+                        ×{xrefs.length}
+                      </span>
+                    );
+                  })()}
                 </span>
                 <span
-                  className={`disasm-address w-36 shrink-0 cursor-pointer hover:text-blue-400 ${
+                  className={`disasm-address cursor-pointer hover:text-blue-400 ${
                     copiedAddr === insn.address ? "text-green-400" : ""
                   }`}
                   onClick={() => handleAddressClick(insn.address)}
@@ -1601,18 +1754,20 @@ export function DisassemblyView() {
                     .toUpperCase()
                     .padStart(addrWidth, "0")}
                 </span>
-                <span className="disasm-bytes w-44 shrink-0 truncate">
-                  {bytesHex}
-                </span>
+                {showBytes && (
+                  <span className="disasm-bytes truncate">
+                    {bytesHex}
+                  </span>
+                )}
                 <span
-                  className={`disasm-mnemonic w-16 shrink-0 ${mnemonicClass(insn.mnemonic)}`}
+                  className={`disasm-mnemonic ${mnemonicClass(insn.mnemonic)}`}
                   title={MNEMONIC_HINTS[insn.mnemonic]}
                   onDoubleClick={() => handleDoubleClickInsn(insn)}
                 >
                   {insn.mnemonic}
                 </span>
                 <span
-                  className="disasm-operands flex-1"
+                  className="disasm-operands overflow-hidden"
                   onDoubleClick={() => handleDoubleClickInsn(insn)}
                 >
                   <ColoredOperand
@@ -1624,117 +1779,120 @@ export function DisassemblyView() {
                     tooltipData={tooltipData}
                   />
                 </span>
-                {insn.comment && (
-                  <span
-                    className="disasm-comment ml-4 truncate max-w-xs"
-                    title={insn.comment.length > 60 ? insn.comment : undefined}
-                  >
-                    ; {insn.comment}
-                  </span>
-                )}
-                {editingComment && editingComment.address === insn.address ? (
-                  <span className="ml-2 shrink-0">
-                    <textarea
-                      autoFocus
-                      rows={1}
-                      className="bg-gray-900/80 border border-blue-500 ring-1 ring-blue-500/50 rounded px-1.5 py-0.5 text-[#6ee7b7] text-xs font-mono outline-none w-64 resize-none align-middle"
-                      placeholder="Add comment..."
-                      value={editingComment.value}
-                      onChange={(e) => setEditingComment({ ...editingComment, value: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          const val = editingComment.value.trim();
-                          if (val) {
-                            dispatch({ type: "SET_COMMENT", address: editingComment.address, text: val });
-                          } else {
-                            dispatch({ type: "DELETE_COMMENT", address: editingComment.address });
+                <span className="truncate flex items-center gap-1">
+                  {insn.comment ? (
+                    <span
+                      className="disasm-comment truncate max-w-xs"
+                      title={insn.comment.length > 60 ? insn.comment : undefined}
+                    >
+                      ; {insn.comment}
+                    </span>
+                  ) : insn.mnemonic === 'jmp' && (() => {
+                    for (const t of operandTargets) {
+                      const targetFn = funcMap.get(t.address);
+                      if (targetFn && targetFn.address !== currentFunc?.address) {
+                        return (
+                          <span className="disasm-comment truncate max-w-xs">
+                            ; tail call → {getDisplayName(targetFn, state.renames)}
+                          </span>
+                        );
+                      }
+                    }
+                    return null;
+                  })()}
+                  {editingComment && editingComment.address === insn.address ? (
+                    <span className="shrink-0">
+                      <textarea
+                        autoFocus
+                        rows={1}
+                        className="bg-gray-900/80 border border-blue-500 ring-1 ring-blue-500/50 rounded px-1.5 py-0.5 text-[#6ee7b7] text-xs font-mono outline-none w-64 resize-none align-middle"
+                        placeholder="Add comment..."
+                        value={editingComment.value}
+                        onChange={(e) => setEditingComment({ ...editingComment, value: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            const val = editingComment.value.trim();
+                            if (val) {
+                              dispatch({ type: "SET_COMMENT", address: editingComment.address, text: val });
+                            } else {
+                              dispatch({ type: "DELETE_COMMENT", address: editingComment.address });
+                            }
+                            setEditingComment(null);
                           }
-                          setEditingComment(null);
-                        }
-                        if (e.key === "Escape") setEditingComment(null);
-                        e.stopPropagation();
-                      }}
-                      onBlur={() => setEditingComment(null)}
-                    />
-                  </span>
-                ) : state.comments[insn.address] ? (
-                  <span
-                    className="disasm-user-comment ml-2 truncate max-w-xs"
-                    title={state.comments[insn.address]}
-                  >
-                    ; {state.comments[insn.address].includes("\n") ? state.comments[insn.address].split("\n")[0] + " [...]" : state.comments[insn.address]}
-                  </span>
-                ) : isCurrentAddr && !insn.comment ? (
-                  <span className="ml-2 text-gray-600 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity select-none">
-                    press ; to comment
-                  </span>
-                ) : null}
+                          if (e.key === "Escape") setEditingComment(null);
+                          e.stopPropagation();
+                        }}
+                        onBlur={() => setEditingComment(null)}
+                      />
+                    </span>
+                  ) : state.comments[insn.address] ? (
+                    <span
+                      className="disasm-user-comment truncate max-w-xs"
+                      title={state.comments[insn.address]}
+                    >
+                      ; {state.comments[insn.address].includes("\n") ? state.comments[insn.address].split("\n")[0] + " [...]" : state.comments[insn.address]}
+                    </span>
+                  ) : isCurrentAddr && !insn.comment ? (
+                    <span className="text-gray-600 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity select-none">
+                      press ; to comment
+                    </span>
+                  ) : null}
+                </span>
               </div>
             );
           })}
 
           {/* Context menu */}
-          {ctxMenu && (
-            <div
-              className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
-              style={{ left: ctxMenu.x, top: ctxMenu.y }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button onClick={ctxCopyAddr} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Copy address
+          {ctxMenu && (() => {
+            const branchTarget = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
+            const xrefCount = xrefCountMap.get(ctxMenu.insn.address) ?? 0;
+            const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
+            const isFuncHead = funcMap.has(ctxMenu.insn.address);
+            const menuItem = (label: string, onClick: () => void, hint?: string) => (
+              <button onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
+                <span>{label}</span>
+                {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
               </button>
-              <button onClick={ctxCopyInsn} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Copy instruction
-              </button>
-              <button onClick={ctxCopyBytes} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Copy bytes
-              </button>
-              <div className="border-t border-gray-700 my-0.5" />
-              <button onClick={ctxGoTo} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Go to address...
-              </button>
-              <button onClick={ctxShowInHex} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Show in Hex
-              </button>
-              <div className="border-t border-gray-700 my-0.5" />
-              <button onClick={ctxToggleBookmark} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Toggle bookmark
-              </button>
-              <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                Add/Edit comment
-              </button>
-              {ctxMenu && (state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment) && (
-                <button onClick={ctxCopyComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                  Copy comment
-                </button>
-              )}
-              {ctxMenu && funcMap.has(ctxMenu.insn.address) && (
-                <button onClick={ctxRenameFunction} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-                  Rename function
-                </button>
-              )}
-              {selectionRange && (() => {
-                const lo = Math.min(selectionRange.start, selectionRange.end);
-                const hi = Math.max(selectionRange.start, selectionRange.end);
-                const count = hi - lo + 1;
-                return (
-                  <>
-                    <div className="border-t border-gray-700 my-0.5" />
-                    <button
-                      onClick={() => {
+            );
+            const sep = <div className="border-t border-gray-800 my-0.5" />;
+            return (
+              <div
+                className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
+                style={{ left: ctxMenu.x, top: ctxMenu.y }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {menuItem("Copy address", ctxCopyAddr)}
+                {menuItem("Copy instruction", ctxCopyInsn)}
+                {menuItem("Copy bytes", ctxCopyBytes)}
+                {sep}
+                {branchTarget !== null && menuItem("Follow target", ctxFollowTarget, "Enter")}
+                {xrefCount > 0 && menuItem(`Show xrefs (${xrefCount})`, ctxShowXrefs, "R")}
+                {(branchTarget !== null || xrefCount > 0) && sep}
+                {menuItem("Go to address...", ctxGoTo, "G")}
+                {menuItem("Show in Hex", ctxShowInHex)}
+                {sep}
+                {menuItem("Toggle bookmark", ctxToggleBookmark, "B")}
+                {menuItem("Add/Edit comment", ctxAddComment, ";")}
+                {hasComment && menuItem("Copy comment", ctxCopyComment)}
+                {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
+                {selectionRange && (() => {
+                  const lo = Math.min(selectionRange.start, selectionRange.end);
+                  const hi = Math.max(selectionRange.start, selectionRange.end);
+                  const count = hi - lo + 1;
+                  return (
+                    <>
+                      {sep}
+                      {menuItem(`Copy selected (${count} rows)`, () => {
                         navigator.clipboard.writeText(formatRangeCopy(selectionRange, rows, pe, state.renames, state.comments));
                         setCtxMenu(null);
-                      }}
-                      className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
-                    >
-                      Copy selected ({count} rows)
-                    </button>
-                  </>
-                );
-              })()}
-            </div>
-          )}
+                      })}
+                    </>
+                  );
+                })()}
+              </div>
+            );
+          })()}
 
           {/* Xref popup */}
           {xrefPopup && (
@@ -1759,6 +1917,26 @@ export function DisassemblyView() {
                   branch: "B",
                   data: "D",
                 };
+                // Binary search instructions for source instruction context
+                let srcInsn: Instruction | undefined;
+                if (instructions.length > 0) {
+                  let lo = 0, hi = instructions.length - 1;
+                  while (lo <= hi) {
+                    const mid = (lo + hi) >>> 1;
+                    if (instructions[mid].address === xref.from) { srcInsn = instructions[mid]; break; }
+                    if (instructions[mid].address < xref.from) lo = mid + 1; else hi = mid - 1;
+                  }
+                }
+                // Binary search sortedFuncs for containing function
+                let srcFunc: DisasmFunction | undefined;
+                if (sortedFuncs.length > 0) {
+                  let lo = 0, hi = sortedFuncs.length - 1;
+                  while (lo <= hi) {
+                    const mid = (lo + hi) >>> 1;
+                    if (sortedFuncs[mid].address <= xref.from) { srcFunc = sortedFuncs[mid]; lo = mid + 1; } else hi = mid - 1;
+                  }
+                  if (srcFunc && xref.from >= srcFunc.address + srcFunc.size) srcFunc = undefined;
+                }
                 return (
                   <button
                     key={i}
@@ -1774,6 +1952,16 @@ export function DisassemblyView() {
                     <span className="text-blue-400">
                       0x{xref.from.toString(16).toUpperCase()}
                     </span>
+                    {srcFunc && (
+                      <span className="text-gray-500 text-[10px] truncate max-w-[120px]">
+                        {getDisplayName(srcFunc, state.renames)}
+                      </span>
+                    )}
+                    {srcInsn && (
+                      <span className="text-gray-400 text-[10px] truncate max-w-[200px]">
+                        {srcInsn.mnemonic} {srcInsn.opStr}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -1843,42 +2031,41 @@ export function DisassemblyView() {
         </div>
       )}
       {/* Context menu (graph mode) */}
-      {viewMode === "graph" && ctxMenu && (
-        <div
-          className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
-          style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button onClick={ctxCopyAddr} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Copy address
+      {viewMode === "graph" && ctxMenu && (() => {
+        const branchTarget = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
+        const xrefCount = xrefCountMap.get(ctxMenu.insn.address) ?? 0;
+        const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
+        const isFuncHead = funcMap.has(ctxMenu.insn.address);
+        const menuItem = (label: string, onClick: () => void, hint?: string) => (
+          <button onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
+            <span>{label}</span>
+            {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
           </button>
-          <button onClick={ctxCopyInsn} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Copy instruction
-          </button>
-          <button onClick={ctxCopyBytes} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Copy bytes
-          </button>
-          <div className="border-t border-gray-700 my-0.5" />
-          <button onClick={ctxGoTo} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Go to address...
-          </button>
-          <button onClick={ctxShowInHex} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Show in Hex
-          </button>
-          <div className="border-t border-gray-700 my-0.5" />
-          <button onClick={ctxToggleBookmark} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Toggle bookmark
-          </button>
-          <button onClick={ctxAddComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-            Add/Edit comment
-          </button>
-          {ctxMenu && (state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment) && (
-            <button onClick={ctxCopyComment} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
-              Copy comment
-            </button>
-          )}
-        </div>
-      )}
+        );
+        const sep = <div className="border-t border-gray-800 my-0.5" />;
+        return (
+          <div
+            className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {menuItem("Copy address", ctxCopyAddr)}
+            {menuItem("Copy instruction", ctxCopyInsn)}
+            {menuItem("Copy bytes", ctxCopyBytes)}
+            {sep}
+            {branchTarget !== null && menuItem("Follow target", ctxFollowTarget, "Enter")}
+            {xrefCount > 0 && menuItem(`Show xrefs (${xrefCount})`, ctxShowXrefs, "R")}
+            {(branchTarget !== null || xrefCount > 0) && sep}
+            {menuItem("Go to address...", ctxGoTo, "G")}
+            {menuItem("Show in Hex", ctxShowInHex)}
+            {sep}
+            {menuItem("Toggle bookmark", ctxToggleBookmark, "B")}
+            {menuItem("Add/Edit comment", ctxAddComment, ";")}
+            {hasComment && menuItem("Copy comment", ctxCopyComment)}
+            {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
+          </div>
+        );
+      })()}
       {showMinimap && (
         <DisassemblyMinimap
           rows={rows}
@@ -1934,6 +2121,15 @@ export function DisassemblyView() {
               highlightLines={decompileHighlightLines}
               onLineClick={handleDecompileLineClick}
               syncDisabled={decompile.syncDisabled}
+              scrollSyncEnabled={scrollSyncEnabled}
+              onScrollSyncToggle={() => {
+                setScrollSyncEnabled((v) => {
+                  const next = !v;
+                  try { localStorage.setItem("peek-a-bin:scroll-sync", String(next)); } catch {}
+                  if (!next) setScrollSyncAddr(null);
+                  return next;
+                });
+              }}
             />
           </div>
         </>

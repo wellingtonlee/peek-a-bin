@@ -3,6 +3,19 @@
 :root {
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas",
     monospace;
+
+  /* Layout density */
+  --row-height: 20px;
+  --sep-height: 12px;
+  --label-pad-top: 8px;
+  --row-px: 1rem;
+}
+
+.density-compact {
+  --row-height: 16px;
+  --sep-height: 6px;
+  --label-pad-top: 2px;
+  --row-px: 0.5rem;
 }
 
 body {
@@ -18,42 +31,106 @@ body {
   flex-direction: column;
 }
 
+/* ── Theme utility classes ── */
+.app-bg { background: var(--t-bg); color: var(--t-text); }
+.panel-bg { background: var(--t-bg-secondary); }
+.toolbar-bg { background: var(--t-bg-tertiary); }
+.border-theme { border-color: var(--t-border); }
+.border-subtle { border-color: var(--t-border-subtle); }
+.text-theme-secondary { color: var(--t-text-secondary); }
+.text-theme-muted { color: var(--t-text-muted); }
+
+/* Disassembly grid layout */
+.disasm-grid {
+  display: grid;
+  grid-template-columns:
+    var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) var(--col-mnemonic, 8ch) 1fr auto;
+  align-items: baseline;
+}
+
+.disasm-grid.hide-bytes {
+  grid-template-columns:
+    var(--col-badge, 2.5ch) var(--col-addr) var(--col-mnemonic, 8ch) 1fr auto;
+}
+
+.disasm-grid-data {
+  display: grid;
+  grid-template-columns:
+    var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) 8ch 1fr auto;
+  align-items: baseline;
+}
+
+.disasm-grid-data.hide-bytes {
+  display: grid;
+  grid-template-columns:
+    var(--col-badge, 2.5ch) var(--col-addr) 8ch 1fr auto;
+  align-items: baseline;
+}
+
+.disasm-grid-label {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
 /* Disassembly row styling */
 .disasm-row:hover {
-  background-color: rgba(59, 130, 246, 0.1);
+  background-color: var(--t-bg-hover, rgba(59, 130, 246, 0.1));
 }
 
 .disasm-address {
-  color: #9ca3af;
+  color: var(--t-address, #9ca3af);
 }
 
 .disasm-bytes {
-  color: #6b7280;
+  color: var(--t-bytes, #6b7280);
 }
 
 .disasm-mnemonic {
-  color: #60a5fa;
+  color: var(--t-mnemonic, #60a5fa);
 }
 
 .disasm-operands {
-  color: #d1d5db;
+  color: var(--t-operands, #d1d5db);
 }
 
 .disasm-comment {
-  color: #22c55e;
+  color: var(--t-comment, #22c55e);
 }
 
 .disasm-user-comment {
-  color: #6ee7b7;
+  color: var(--t-user-comment, #6ee7b7);
 }
+
+/* ── Mnemonic theme classes ── */
+.mn-call { color: var(--t-mn-call, #4ade80); }
+.mn-ret { color: var(--t-mn-ret, #f87171); }
+.mn-jump { color: var(--t-mn-jump, #fb923c); }
+.mn-nop { color: var(--t-mn-nop, #4b5563); }
+.mn-stack { color: var(--t-mn-stack, #93c5fd); }
+
+/* ── Operand theme classes ── */
+.op-register { color: var(--t-op-register, #22d3ee); }
+.op-immediate { color: var(--t-op-immediate, #fde047); }
+.op-memory { color: var(--t-op-memory, #c084fc); }
+.op-target { color: var(--t-op-target, #60a5fa); }
+
+/* ── Decompiler theme classes ── */
+.dc-string { color: var(--t-string, #4ade80); }
+.dc-number { color: var(--t-number, #fde047); }
+.dc-keyword { color: var(--t-keyword, #c084fc); }
+.dc-type { color: var(--t-type-name, #60a5fa); }
+.dc-comment { color: var(--t-decomp-comment, #6b7280); }
+
+/* ── Function label ── */
+.func-label { color: var(--t-func-label, #facc15); }
 
 /* Hex view */
 .hex-byte {
-  color: #d1d5db;
+  color: var(--t-operands, #d1d5db);
 }
 
 .hex-byte.zero {
-  color: #4b5563;
+  color: var(--t-text-muted, #4b5563);
 }
 
 .hex-ascii {
@@ -83,16 +160,16 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #1f2937;
+  background: var(--t-scroll-track, #1f2937);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #4b5563;
+  background: var(--t-scroll-thumb, #4b5563);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
+  background: var(--t-text-muted, #6b7280);
 }
 
 /* Skeleton shimmer animation */

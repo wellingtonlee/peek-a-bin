@@ -316,7 +316,7 @@ export function DisassemblyMinimap({
   return (
     <div
       ref={containerRef}
-      className="w-5 shrink-0 border-l border-gray-700 bg-gray-900 relative cursor-pointer"
+      className="w-5 shrink-0 border-l border-theme panel-bg relative cursor-pointer"
     >
       <canvas
         ref={canvasRef}

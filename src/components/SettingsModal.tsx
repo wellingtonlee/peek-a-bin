@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, type LLMSettings, type DecompileServerSettings } from "../llm/settings";
+import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
 
 interface Props {
   open: boolean;
@@ -11,12 +12,13 @@ const PROVIDER_DEFAULTS: Record<string, { model: string; baseUrl: string }> = {
   openai: { model: "gpt-4o", baseUrl: "https://api.openai.com" },
 };
 
-type SettingsTab = "ai" | "ghidra" | "display";
+type SettingsTab = "ai" | "ghidra" | "display" | "theme";
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "ai", label: "AI" },
   { id: "ghidra", label: "Ghidra" },
   { id: "display", label: "Display" },
+  { id: "theme", label: "Theme" },
 ];
 
 export function SettingsModal({ open, onClose }: Props) {
@@ -25,6 +27,10 @@ export function SettingsModal({ open, onClose }: Props) {
   const [fontSize, setFontSize] = useState(() => loadFontSize());
   const [decompServer, setDecompServer] = useState<DecompileServerSettings>(loadDecompileServer);
   const [activeTab, setActiveTab] = useState<SettingsTab>("ai");
+  const [themeId, setThemeId] = useState(loadThemeId);
+  const [themes, setThemes] = useState(getAllThemes);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -32,6 +38,9 @@ export function SettingsModal({ open, onClose }: Props) {
       setShowKey(false);
       setFontSize(loadFontSize());
       setDecompServer(loadDecompileServer());
+      setThemeId(loadThemeId());
+      setThemes(getAllThemes());
+      setImportError(null);
     }
   }, [open]);
 
@@ -52,8 +61,57 @@ export function SettingsModal({ open, onClose }: Props) {
     saveSettings(settings);
     saveFontSize(fontSize);
     saveDecompileServer(decompServer);
+    saveThemeId(themeId);
+    window.dispatchEvent(new CustomEvent("peek-a-bin:theme-changed"));
     onClose();
   };
+
+  const handleImportTheme = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const theme = importTheme(reader.result as string);
+        saveCustomTheme(theme);
+        setThemes(getAllThemes());
+        setThemeId(theme.id);
+        setImportError(null);
+      } catch (err) {
+        setImportError(err instanceof Error ? err.message : "Invalid theme file");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const handleExportTheme = () => {
+    const theme = themes.find(t => t.id === themeId);
+    if (!theme) return;
+    const json = exportTheme(theme);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${theme.id}-theme.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDeleteTheme = (id: string) => {
+    deleteCustomTheme(id);
+    setThemes(getAllThemes());
+    if (themeId === id) setThemeId("dark");
+  };
+
+  // Preview theme colors as small swatches
+  const ThemeSwatches = ({ theme }: { theme: Theme }) => (
+    <div className="flex gap-0.5 mt-1">
+      {[theme.colors.bg, theme.colors.mnemonic, theme.colors.mnCall, theme.colors.mnRet, theme.colors.mnJump, theme.colors.opRegister, theme.colors.comment].map((c, i) => (
+        <div key={i} className="w-3 h-3 rounded-sm" style={{ background: c }} />
+      ))}
+    </div>
+  );
 
   return (
     <div
@@ -259,6 +317,71 @@ export function SettingsModal({ open, onClose }: Props) {
                   <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
                 </div>
               </div>
+            </>
+          )}
+
+          {/* Theme Tab */}
+          {activeTab === "theme" && (
+            <>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Color Theme
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {themes.map((theme) => {
+                    const isBuiltin = BUILTIN_THEMES.some(b => b.id === theme.id);
+                    return (
+                      <div
+                        key={theme.id}
+                        onClick={() => setThemeId(theme.id)}
+                        className={`relative p-2 rounded-lg border cursor-pointer transition-colors ${
+                          themeId === theme.id
+                            ? "border-blue-500 bg-blue-500/10"
+                            : "border-gray-600 hover:border-gray-500 bg-gray-900/50"
+                        }`}
+                      >
+                        <div className="text-xs text-gray-200 font-medium">{theme.name}</div>
+                        <ThemeSwatches theme={theme} />
+                        {!isBuiltin && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteTheme(theme.id); }}
+                            className="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-[10px]"
+                            title="Delete theme"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
+                >
+                  Import Theme
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json"
+                  onChange={handleImportTheme}
+                  className="hidden"
+                />
+                <button
+                  onClick={handleExportTheme}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
+                >
+                  Export Current
+                </button>
+              </div>
+
+              {importError && (
+                <p className="text-[10px] text-red-400">{importError}</p>
+              )}
             </>
           )}
         </div>

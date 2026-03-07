@@ -351,7 +351,7 @@ export function AddressBar() {
   const canGoForward = state.historyIndex < state.addressHistory.length - 1;
 
   return (
-    <div className="flex items-center gap-1 px-3 py-1.5 bg-gray-900 border-b border-gray-700 text-sm">
+    <div className="flex items-center gap-1 px-3 py-1.5 toolbar-bg border-b border-theme text-sm">
       <button
         onClick={handleReset}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"

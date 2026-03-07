@@ -29,16 +29,16 @@ export function tokenizeOperand(opStr: string): OpToken[] {
     const full = m[0];
     if (full === "[") {
       inBracket = true;
-      tokens.push({ text: "[", cls: "text-purple-400" });
+      tokens.push({ text: "[", cls: "op-memory" });
     } else if (full === "]") {
       inBracket = false;
-      tokens.push({ text: "]", cls: "text-purple-400" });
+      tokens.push({ text: "]", cls: "op-memory" });
     } else if (m[2]) {
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "text-yellow-300" });
+      tokens.push({ text: full, cls: inBracket ? "op-memory" : "op-immediate" });
     } else if (m[3] && REG_NAMES.has(full.toLowerCase())) {
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "text-cyan-400" });
+      tokens.push({ text: full, cls: inBracket ? "op-memory" : "op-register" });
     } else {
-      tokens.push({ text: full, cls: inBracket ? "text-purple-400" : "" });
+      tokens.push({ text: full, cls: inBracket ? "op-memory" : "" });
     }
   }
   return tokens;
@@ -95,7 +95,7 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
             return (
               <span
                 key={i}
-                className={`${copiedTarget === target.address ? "text-green-400" : "text-blue-400"} underline cursor-pointer hover:text-blue-300 relative`}
+                className={`${copiedTarget === target.address ? "text-green-400" : "op-target"} underline cursor-pointer hover:opacity-80 relative`}
                 ref={hoveredAddr === target.address ? tooltipRef : undefined}
                 onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
                 onDoubleClick={(e) => {
@@ -141,11 +141,11 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
 
 // --- Mnemonic coloring ---
 export function mnemonicClass(m: string): string {
-  if (m === "call") return "text-green-400 font-semibold";
-  if (m === "ret" || m === "retn") return "text-red-400 font-semibold";
-  if (m === "nop" || m === "int3") return "text-gray-600 font-semibold";
-  if (m === "jmp" || m.startsWith("j")) return "text-orange-400 font-semibold";
-  if (m === "push" || m === "pop") return "text-blue-300 font-semibold";
+  if (m === "call") return "mn-call font-semibold";
+  if (m === "ret" || m === "retn") return "mn-ret font-semibold";
+  if (m === "nop" || m === "int3") return "mn-nop font-semibold";
+  if (m === "jmp" || m.startsWith("j")) return "mn-jump font-semibold";
+  if (m === "push" || m === "pop") return "mn-stack font-semibold";
   return "font-semibold";
 }
 

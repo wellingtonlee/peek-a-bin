@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Theme system** — 4 built-in color themes (Dark, Light, IDA Pro, Terminal) with full CSS variable token system; all ~15 component files migrated from hardcoded Tailwind colors to theme-aware CSS classes; import/export custom themes as JSON; theme picker in Settings → Theme tab; mnemonic, operand, and decompiler syntax colors all themeable (2026-03-07 13:10)
+- **Compact mode** — toggleable density mode reduces row height (20→16px), separator height (12→6px), and padding; persists to localStorage; toolbar toggle button (2026-03-07 13:10)
+- **CSS grid column alignment** — instruction and data rows use CSS grid with `ch`-based column widths that scale with font size; 32-bit (10ch) and 64-bit (18ch) address columns; toggleable bytes column with toolbar button (2026-03-07 13:10)
+- **Context menu enhancements** — "Follow target" item for call/jmp instructions, "Show xrefs (N)" item with xref count; unified menu component for linear and graph modes (removes duplicated code); keyboard shortcut hints on right side; backdrop blur visual polish (2026-03-07 13:10)
+- **Scroll-synced split view** — scrolling disassembly auto-scrolls decompile panel to matching code region; separate `scrollSyncAddr` state avoids feedback loops with `SET_ADDRESS`; throttled (100ms) scroll handler; sync toggle button in decompile panel header; persists to localStorage (2026-03-07 13:10)
+- **Block boundary dividers** — when block tinting is enabled, a subtle top border marks the first instruction of each new basic block (2026-03-07 13:10)
+
+- **Decompiler output improvements** — cast elimination (double-cast always collapses, cast-on-const folded, same-size cast stripped); De-Morgan's law for `!(a && b)` / `!(a || b)`; comparison canonicalization (const on right); recursive guard clause flattening for deeply nested if/return/else chains; for-loop detection scans all body blocks for increment; do-while with leading break converted to while; string constant propagation into emitted call args; type-based variable naming (HANDLE→hFile, NTSTATUS→status, HRESULT→hr, PVOID→pBuffer, BOOL→bResult) (2026-03-07 12:33)
 - **Regex search UI hint** — `?` help icon next to search bar shows tooltip explaining `/regex/` and `/regex/i` syntax (2026-03-07 00:07)
 - **Search results grouping** — search matches grouped by function with match counts; clickable function names to navigate; shown when matches span 2+ functions (2026-03-07 00:07)
 - **Operand hover tooltips** — hovering clickable operand addresses shows contextual info: import names (`kernel32.dll!CreateFileW`), string previews, function names, section offsets; 200ms delay, auto-dismiss (2026-03-07 00:07)

@@ -112,25 +112,31 @@ export function detectForLoop(
 } | null {
   if (bodyBlocks.length === 0) return null;
 
-  // Find the last body block (likely contains the increment)
-  const lastBodyId = bodyBlocks[bodyBlocks.length - 1];
-  const lastBodyStmts = liftedBlocks.get(lastBodyId);
-  if (!lastBodyStmts || lastBodyStmts.length === 0) return null;
-
-  // Look for increment pattern: x = x + const or x = x - const
-  const lastStmt = lastBodyStmts[lastBodyStmts.length - 1];
-  if (lastStmt.kind !== 'assign') return null;
-  if (lastStmt.src.kind !== 'binary') return null;
-  if (lastStmt.src.op !== '+' && lastStmt.src.op !== '-') return null;
-  if (lastStmt.src.right.kind !== 'const') return null;
-
-  // Check the dest matches one of the operands (x = x + 1)
+  // Search all body blocks for increment pattern: x = x + const or x = x - const
+  let updateStmt: IRStmt | null = null;
+  let updateBlockId: number | null = null;
+  for (const bid of bodyBlocks) {
+    const stmts = liftedBlocks.get(bid);
+    if (!stmts || stmts.length === 0) continue;
+    const last = stmts[stmts.length - 1];
+    if (last.kind !== 'assign') continue;
+    if (last.src.kind !== 'binary') continue;
+    if (last.src.op !== '+' && last.src.op !== '-') continue;
+    if (last.src.right.kind !== 'const') continue;
+    const d = last.dest;
+    const sl = last.src.left;
+    const isInc =
+      (d.kind === 'reg' && sl.kind === 'reg' && d.name.toLowerCase() === sl.name.toLowerCase()) ||
+      (d.kind === 'var' && sl.kind === 'var' && d.name === sl.name);
+    if (isInc) {
+      updateStmt = last;
+      updateBlockId = bid;
+      break;
+    }
+  }
+  if (!updateStmt || updateBlockId === null || updateStmt.kind !== 'assign') return null;
+  const lastStmt = updateStmt;
   const dest = lastStmt.dest;
-  const srcLeft = lastStmt.src.left;
-  const isIncrement =
-    (dest.kind === 'reg' && srcLeft.kind === 'reg' && dest.name.toLowerCase() === srcLeft.name.toLowerCase()) ||
-    (dest.kind === 'var' && srcLeft.kind === 'var' && dest.name === srcLeft.name);
-  if (!isIncrement) return null;
 
   // Look for init: assignment to the same variable before the loop
   // Check the header's predecessors (not back-edges) for an init
@@ -166,7 +172,7 @@ export function detectForLoop(
   const bodyStmts: IRStmt[] = [];
   for (const bid of bodyBlocks) {
     const stmts = liftedBlocks.get(bid) ?? [];
-    if (bid === lastBodyId) {
+    if (bid === updateBlockId) {
       bodyStmts.push(...stmts.slice(0, -1)); // exclude increment
     } else {
       bodyStmts.push(...stmts);

@@ -110,6 +110,9 @@ export function CFGView({
     return addrToBlockId.get(currentAddress) ?? -1;
   }, [addrToBlockId, currentAddress]);
 
+  // Track whether we just consumed a restorePanZoom to avoid re-centering when it's cleared
+  const consumedRestoreRef = useRef(false);
+
   // Auto-center on mount or function change — pan to block containing currentAddress
   useEffect(() => {
     if (blocks.length === 0) return;
@@ -120,6 +123,12 @@ export function CFGView({
     if (restorePanZoom) {
       onPanChange(restorePanZoom.pan);
       onZoomChange(restorePanZoom.zoom);
+      consumedRestoreRef.current = true;
+      return;
+    }
+    // Skip auto-center on the re-fire caused by clearing restorePanZoom
+    if (consumedRestoreRef.current) {
+      consumedRestoreRef.current = false;
       return;
     }
     const containerW = container.clientWidth;
@@ -138,7 +147,7 @@ export function CFGView({
       const centerX = (minX + maxX) / 2;
       onPanChange({ x: containerW / 2 - centerX * zoom, y: 20 - minY * zoom });
     }
-  }, [func.address, blocks.length]);
+  }, [func.address, blocks.length, restorePanZoom]);
 
   // Re-center when decompile panel opens (container width changes)
   useEffect(() => {

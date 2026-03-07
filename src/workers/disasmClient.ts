@@ -101,6 +101,7 @@ class DisasmWorkerClient {
       exports?: { name: string; address: number }[];
       entryPoint?: number;
       pdataFunctions?: { beginAddress: number; endAddress: number }[];
+      handlerAddresses?: number[];
     }
   ): Promise<DisasmFunction[]> {
     const result: { functions: DisasmFunction[]; jumpTables: [number, number[]][] } =

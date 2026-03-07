@@ -549,6 +549,12 @@ export function structureCFG(
       loopCondition = extractCondition(backEdgeBlock);
     }
 
+    // do-while with leading break → while
+    if (body.length > 0 && body[0].kind === 'if' &&
+        body[0].thenBody.length === 1 && body[0].thenBody[0].kind === 'break' && !body[0].elseBody) {
+      return [{ kind: 'while', condition: RegState.negate(body[0].condition), body: body.slice(1) }];
+    }
+
     return [{ kind: 'do_while', condition: loopCondition, body }];
   }
 

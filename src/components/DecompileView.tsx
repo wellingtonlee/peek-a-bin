@@ -27,26 +27,26 @@ function tokenizeLine(line: string): Token[] {
     const text = m[0];
     if (m[1] || m[2]) {
       // String literal
-      tokens.push({ text, cls: "text-green-400" });
+      tokens.push({ text, cls: "dc-string" });
     } else if (m[3] || m[4]) {
       // Comment
-      tokens.push({ text, cls: "text-gray-500 italic" });
+      tokens.push({ text, cls: "dc-comment italic" });
     } else if (m[5]) {
       // Hex number
-      tokens.push({ text, cls: "text-yellow-300" });
+      tokens.push({ text, cls: "dc-number" });
     } else if (m[6]) {
       // Decimal number
-      tokens.push({ text, cls: "text-yellow-300" });
+      tokens.push({ text, cls: "dc-number" });
     } else if (m[7]) {
       // Identifier
       if (KEYWORDS.has(text)) {
-        tokens.push({ text, cls: "text-purple-400 font-semibold" });
+        tokens.push({ text, cls: "dc-keyword font-semibold" });
       } else if (TYPES.has(text)) {
-        tokens.push({ text, cls: "text-blue-400" });
+        tokens.push({ text, cls: "dc-type" });
       } else if (text.startsWith("sub_") || text.startsWith("loc_")) {
-        tokens.push({ text, cls: "text-blue-400 underline cursor-pointer hover:text-blue-300" });
+        tokens.push({ text, cls: "dc-type underline cursor-pointer hover:opacity-80" });
       } else if (text === "__asm") {
-        tokens.push({ text, cls: "text-gray-500 italic" });
+        tokens.push({ text, cls: "dc-comment italic" });
       } else {
         tokens.push({ text, cls: "" });
       }
@@ -55,7 +55,7 @@ function tokenizeLine(line: string): Token[] {
       tokens.push({ text, cls: "" });
     } else {
       // Operators / punctuation
-      tokens.push({ text, cls: "text-gray-400" });
+      tokens.push({ text, cls: "text-theme-secondary" });
     }
   }
   return tokens;
@@ -87,12 +87,15 @@ interface DecompileViewProps {
   highlightLines?: Set<number>;
   onLineClick?: (lineNum: number) => void;
   syncDisabled?: boolean;
+  scrollSyncEnabled?: boolean;
+  onScrollSyncToggle?: () => void;
 }
 
 export function DecompileView({
   code, loading, error, activeTab, onTabChange, highLevelEngine, aiMode,
   onEnhance, onExplain, onCancelAI, onNavigate, onClose,
   highlightLines, onLineClick, syncDisabled,
+  scrollSyncEnabled, onScrollSyncToggle,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
 
@@ -143,7 +146,7 @@ export function DecompileView({
     : null;
 
   return (
-    <div className="flex flex-col h-full border-l border-gray-700 bg-gray-900/95">
+    <div className="flex flex-col h-full border-l border-theme panel-bg">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
         {/* Pill tab group */}
@@ -212,6 +215,19 @@ export function DecompileView({
           </button>
         )}
 
+        {onScrollSyncToggle && (
+          <button
+            onClick={onScrollSyncToggle}
+            className={`px-1.5 py-0.5 rounded text-[10px] ${
+              scrollSyncEnabled
+                ? "bg-blue-600 text-white"
+                : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
+            }`}
+            title={scrollSyncEnabled ? "Scroll sync on — click to disable" : "Scroll sync off — click to enable"}
+          >
+            Sync
+          </button>
+        )}
         <button
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"

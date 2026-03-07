@@ -81,6 +81,19 @@ function foldExpr(expr: IRExpr): IRExpr {
       if (expr.op === '*' && left.value === 1) return right;
     }
 
+    // Canonicalize: const OP var/reg → var/reg reversed_OP const
+    if (left.kind === 'const' && right.kind !== 'const') {
+      const flipMap: Partial<Record<BinaryOp, BinaryOp>> = {
+        '==': '==', '!=': '!=',
+        '<': '>', '>': '<', '<=': '>=', '>=': '<=',
+        'u<': 'u>', 'u>': 'u<', 'u<=': 'u>=', 'u>=': 'u<=',
+      };
+      const flipped = flipMap[expr.op];
+      if (flipped !== undefined) {
+        return foldExpr({ kind: 'binary', op: flipped, left: right, right: left });
+      }
+    }
+
     // Same-operand patterns (after folding both sides)
     if (exprEq(left, right)) {
       // x - x → 0, x ^ x → 0
@@ -153,6 +166,22 @@ function foldExpr(expr: IRExpr): IRExpr {
       };
       const neg = negMap[operand.op];
       if (neg) return { ...operand, op: neg };
+      // De-Morgan: !(a && b) → !a || !b
+      if (operand.op === '&&') {
+        return foldExpr({
+          kind: 'binary', op: '||',
+          left: { kind: 'unary', op: '!', operand: operand.left },
+          right: { kind: 'unary', op: '!', operand: operand.right },
+        });
+      }
+      // De-Morgan: !(a || b) → !a && !b
+      if (operand.op === '||') {
+        return foldExpr({
+          kind: 'binary', op: '&&',
+          left: { kind: 'unary', op: '!', operand: operand.left },
+          right: { kind: 'unary', op: '!', operand: operand.right },
+        });
+      }
     }
     return { ...expr, operand };
   }
@@ -170,15 +199,21 @@ function foldExpr(expr: IRExpr): IRExpr {
     return { ...expr, condition: cond, then, else: els };
   }
 
-  // Double-cast removal: (T2)(T1)x where T1 size >= T2 size → (T2)x
+  // Cast simplification
   if (expr.kind === 'cast') {
     const operand = foldExpr(expr.operand);
+    // Double-cast removal: (T2)(T1)x → (T2)x
     if (operand.kind === 'cast') {
-      const outerSize = castTypeSize(expr.type);
-      const innerSize = castTypeSize(operand.type);
-      if (innerSize >= outerSize) {
-        return { kind: 'cast', type: expr.type, operand: operand.operand };
-      }
+      return { kind: 'cast', type: expr.type, operand: operand.operand };
+    }
+    // Cast on constant → fold away
+    if (operand.kind === 'const') {
+      return operand;
+    }
+    // Same-size cast on reg/var → strip
+    const castSize = castTypeSize(expr.type);
+    if ((operand.kind === 'reg' || operand.kind === 'var') && operand.size === castSize) {
+      return operand;
     }
     return { ...expr, operand };
   }

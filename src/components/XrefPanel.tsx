@@ -120,7 +120,7 @@ export function XrefPanel({
     sortKey === key ? (sortAsc ? " ▲" : " ▼") : "";
 
   return (
-    <div className="border-t border-gray-700 bg-gray-900 text-xs flex flex-col" style={{ height: 200 }}>
+    <div className="border-t border-theme panel-bg text-xs flex flex-col" style={{ height: 200 }}>
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1 border-b border-gray-700 shrink-0">
         <span className="text-gray-300 font-semibold text-[11px]">
