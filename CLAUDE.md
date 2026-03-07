@@ -9,7 +9,7 @@ Browser-based PE disassembler/analyzer. Fully client-side (no server). PWA with 
 ```sh
 npm run dev          # dev server
 npm run build        # tsc -b && vite build (use for verification)
-npm test             # vitest run (27 tests, PE parsing)
+npm test             # vitest run (59 tests: PE parsing + decompiler)
 npx tsc --noEmit     # type check only (faster than full build)
 ```
 
@@ -17,7 +17,7 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 - `pe/` — PE format parser (headers, imports, exports, resources, authenticode)
 - `disasm/` — disassembly engine, types, CFG, operand parsing, stack analysis, signatures
-- `disasm/decompile/` — IR lifting → folding → structuring → emission pipeline
+- `disasm/decompile/` — IR lifting → SSA → folding → structuring → cleanup → type inference → promotion → struct synthesis → emission pipeline
 - `components/` — React components (DisassemblyView, CFGView, HexView, Sidebar, etc.)
 - `hooks/` — state management (usePEFile), derived state, disassembly rows, search
 - `workers/` — Web Worker for Capstone WASM + off-thread analysis (disasm.worker.ts + disasmClient.ts)
@@ -53,7 +53,25 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
-**Tests**: `src/pe/__tests__/`. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders (no binary files).
+**Tests**: `src/pe/__tests__/` for PE parsing. `src/disasm/decompile/__tests__/` for decompiler (fold rules, SSA). Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders (no binary files).
+
+## Decompiler Architecture (`src/disasm/decompile/`)
+
+**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → inferTypes → promoteVars → synthesizeStructs → emitFunction`
+
+**IR** (`ir.ts`): `IRExpr` union (13 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (17 kinds including if/while/do_while/for/switch/break/continue/phi). All expression walkers (`walkExpr`, `walkStmts`) must handle every `IRExpr` kind.
+
+**Adding new IRExpr kinds**: Update walkers in `ir.ts` (`walkExpr`), `fold.ts` (`foldExpr`, `countReads`, `substituteReg`, `hasSideEffects`), `ssaopt.ts` (`replaceRegInExpr`, `countExprUses`, `hasSideEffects`), `promote.ts` (`promoteExpr`), `structs.ts` (`walkExprs`, `rewriteExpr`), `emit.ts` (`emitExpr`). Missing any walker causes silent data loss.
+
+**Adding new IRStmt kinds**: Update `foldStmt` in `fold.ts`, `emitStmt` in `emit.ts`, `walkStmts` in `ir.ts`, and control flow handlers in `structure.ts`/`cleanup.ts`.
+
+**Type system** (`typeInfer.ts`): `DecompType` lattice with 11 kinds (unknown, int, float, ptr, bool, void, struct, array, handle, ntstatus, hresult). `meetTypes()` merges types — specific wins over unknown, handle/ntstatus/hresult win over int/ptr.
+
+**API signatures** (`apitypes.ts`): ~130 Win32/NT API type signatures. Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T, etc.) for consistency. Return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
+
+**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns. 2+ distinct offsets on same base → struct candidate. Scale ∈ {1,2,4,8} without struct match → `IRArrayAccess`.
+
+**emit.ts module-level `_typeCtx`**: Set before emission, cleared after. Enables cast suppression and type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
 
 ## Gotchas
 
@@ -62,6 +80,9 @@ npx tsc --noEmit     # type check only (faster than full build)
 - `sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`. Used to distinguish code vs data sections.
 - Worker uses Transferable for large arrays. Don't hold references to transferred buffers.
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`). First load fetches, subsequent loads read from cache.
+- **`fold.ts` has a `castTypeSize` helper** for double-cast removal. Uses regex to extract bit width from type strings like `int32_t`.
+- **`cleanup.ts`** runs after `structureCFG`, before `inferTypes`. Guard clause flattening is single-level only (not recursive inversion).
+- **`StructRegistry`** persists across decompilation calls in the worker — don't clear it between functions in the same session.
 
 ## Verification
 

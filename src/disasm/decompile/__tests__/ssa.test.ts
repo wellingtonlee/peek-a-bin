@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import type { BasicBlock } from '../../cfg';
 import type { IRStmt, IRReg } from '../ir';
-import { irReg, irConst, irBinary, canonReg } from '../ir';
+import type { IRExpr } from '../ir';
+import { irReg, irConst, irBinary, irUnary, irDeref, canonReg } from '../ir';
 import { computeRPO, computeDominators, computeDomFrontier, computeDomTree, buildSSA } from '../ssa';
-import { ssaOptimize } from '../ssaopt';
+import { ssaOptimize, globalValueNumbering } from '../ssaopt';
 import { destroySSA } from '../ssadestroy';
 
 // ── Helpers ──
@@ -235,6 +236,153 @@ describe('ssaOptimize', () => {
         expect(retStmt.value.value).toBe(42);
       }
     }
+  });
+});
+
+describe('globalValueNumbering', () => {
+  it('eliminates redundant expressions (basic CSE)', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    // a_0 already defined (param), r_1 = a + 1, r_2 = a + 1, return r_2
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irConst(1)) },
+      { kind: 'assign', dest: irReg('ecx'), src: irBinary('+', irReg('ebx'), irConst(1)) },
+      { kind: 'return', value: irReg('ecx') },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    // ecx assignment should be eliminated (CSE + DCE), return should use eax's version
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const ecxAssign = stmts.find(s =>
+      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rcx',
+    );
+    expect(ecxAssign).toBeUndefined();
+  });
+
+  it('normalizes commutative ops (a+b == b+a)', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irReg('ecx')) },
+      { kind: 'assign', dest: irReg('edx'), src: irBinary('+', irReg('ecx'), irReg('ebx')) },
+      { kind: 'return', value: irReg('edx') },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const edxAssign = stmts.find(s =>
+      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rdx',
+    );
+    expect(edxAssign).toBeUndefined();
+  });
+
+  it('preserves non-commutative ops (a-b != b-a)', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irBinary('-', irReg('ebx'), irReg('ecx')) },
+      { kind: 'assign', dest: irReg('edx'), src: irBinary('-', irReg('ecx'), irReg('ebx')) },
+      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('edx')) },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    // Both assignments should survive
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const assigns = stmts.filter(s => s.kind === 'assign');
+    expect(assigns.length).toBe(2);
+  });
+
+  it('does not CSE calls (side effects)', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    const call: IRExpr = { kind: 'call', target: 'foo', args: [] };
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: { ...call } },
+      { kind: 'assign', dest: irReg('ecx'), src: { ...call } },
+      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('ecx')) },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const assigns = stmts.filter(s => s.kind === 'assign');
+    expect(assigns.length).toBe(2);
+  });
+
+  it('does not CSE derefs (memory aliasing)', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irDeref(irReg('ebx'), 4) },
+      { kind: 'assign', dest: irReg('ecx'), src: irDeref(irReg('ebx'), 4) },
+      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('ecx')) },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const assigns = stmts.filter(s => s.kind === 'assign');
+    expect(assigns.length).toBe(2);
+  });
+
+  it('eliminates nested redundant expressions', () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    // r1 = (a + b) * c, r2 = (a + b) * c
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irBinary('*', irBinary('+', irReg('ebx'), irReg('ecx')), irReg('edx')) },
+      { kind: 'assign', dest: irReg('esi'), src: irBinary('*', irBinary('+', irReg('ebx'), irReg('ecx')), irReg('edx')) },
+      { kind: 'return', value: irReg('esi') },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    const stmts = ctx.liftedBlocks.get(0)!;
+    const esiAssign = stmts.find(s =>
+      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rsi',
+    );
+    expect(esiAssign).toBeUndefined();
+  });
+
+  it('CSEs across blocks under same dominator', () => {
+    // Block 0 (entry) → Block 1, Block 2
+    // Block 0 defines r1 = a + b
+    // Block 1 defines r2 = a + b (same expr, dominated by block 0)
+    const blocks = [
+      makeBlock(0, [1, 2], []),
+      makeBlock(1, [], [0]),
+      makeBlock(2, [], [0]),
+    ];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irConst(5)) },
+    ]);
+    liftedBlocks.set(1, [
+      { kind: 'assign', dest: irReg('ecx'), src: irBinary('+', irReg('ebx'), irConst(5)) },
+      { kind: 'return', value: irReg('ecx') },
+    ]);
+    liftedBlocks.set(2, [
+      { kind: 'return', value: irReg('eax') },
+    ]);
+
+    const ctx = buildSSA(blocks, liftedBlocks);
+    ssaOptimize(ctx);
+
+    // ecx assignment in block 1 should be eliminated
+    const stmts1 = ctx.liftedBlocks.get(1)!;
+    const ecxAssign = stmts1.find(s =>
+      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rcx',
+    );
+    expect(ecxAssign).toBeUndefined();
   });
 });
 

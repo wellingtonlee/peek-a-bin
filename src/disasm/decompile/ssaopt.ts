@@ -235,6 +235,97 @@ function hasSideEffects(expr: IRExpr): boolean {
   return false;
 }
 
+// ── Global Value Numbering ──
+
+const COMMUTATIVE_OPS = new Set(['+', '*', '&', '|', '^', '==', '!=']);
+
+function canonicalizeExpr(expr: IRExpr, regToVN: Map<string, number>, uid: { n: number }): string {
+  switch (expr.kind) {
+    case 'const':
+      return `c:${expr.value}:${expr.size}`;
+    case 'reg': {
+      const vn = regToVN.get(regKey(expr));
+      return vn !== undefined ? `v:${vn}` : `r:${regKey(expr)}`;
+    }
+    case 'var':
+      return `var:${expr.name}`;
+    case 'binary': {
+      let l = canonicalizeExpr(expr.left, regToVN, uid);
+      let r = canonicalizeExpr(expr.right, regToVN, uid);
+      if (COMMUTATIVE_OPS.has(expr.op) && l > r) { const t = l; l = r; r = t; }
+      return `bin:${expr.op}:${l}:${r}`;
+    }
+    case 'unary':
+      return `un:${expr.op}:${canonicalizeExpr(expr.operand, regToVN, uid)}`;
+    case 'cast':
+      return `cast:${expr.type}:${canonicalizeExpr(expr.operand, regToVN, uid)}`;
+    case 'ternary':
+      return `tern:${canonicalizeExpr(expr.condition, regToVN, uid)}:${canonicalizeExpr(expr.then, regToVN, uid)}:${canonicalizeExpr(expr.else, regToVN, uid)}`;
+    case 'field_access':
+      return `fa:${canonicalizeExpr(expr.base, regToVN, uid)}:${expr.structId}:${expr.fieldOffset}`;
+    case 'array_access':
+      return `aa:${canonicalizeExpr(expr.base, regToVN, uid)}:${canonicalizeExpr(expr.index, regToVN, uid)}:${expr.elementSize}`;
+    case 'deref':
+      return `deref:${uid.n++}`;
+    case 'call':
+      return `call:${uid.n++}`;
+    case 'unknown':
+      return `unk:${uid.n++}`;
+  }
+}
+
+/** Global Value Numbering: eliminate redundant expressions across SSA. */
+export function globalValueNumbering(ctx: SSAContext): boolean {
+  let changed = false;
+  const regToVN = new Map<string, number>();
+  const exprToReg = new Map<string, IRReg>();
+  let nextVN = 0;
+  const uid = { n: 0 };
+
+  // Assign unique VNs to all phi dests
+  for (const [, blockPhis] of ctx.phis) {
+    for (const phi of blockPhis) {
+      regToVN.set(regKey(phi.dest), nextVN++);
+    }
+  }
+
+  // Walk blocks in dominator-tree preorder
+  const entry = ctx.blocks.length > 0 ? ctx.blocks[0].id : undefined;
+  if (entry === undefined) return false;
+
+  const stack: number[] = [entry];
+  while (stack.length > 0) {
+    const blockId = stack.pop()!;
+    const children = ctx.domTree.get(blockId) ?? [];
+    // Push children in reverse so leftmost is processed first
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+
+    const stmts = ctx.liftedBlocks.get(blockId);
+    if (!stmts) continue;
+
+    for (const s of stmts) {
+      if (s.kind !== 'assign' || s.dest.kind !== 'reg' || s.dest.version === undefined) continue;
+
+      const dest = s.dest as IRReg;
+      const key = canonicalizeExpr(s.src, regToVN, uid);
+      const existing = exprToReg.get(key);
+
+      if (existing) {
+        // Replace all uses of dest with the existing register
+        replaceRegInCtx(ctx, dest, existing);
+        regToVN.set(regKey(dest), regToVN.get(regKey(existing))!);
+        changed = true;
+      } else {
+        const vn = nextVN++;
+        regToVN.set(regKey(dest), vn);
+        exprToReg.set(key, dest);
+      }
+    }
+  }
+
+  return changed;
+}
+
 /** Run all SSA optimization passes until stable (max 3 iterations). */
 export function ssaOptimize(ctx: SSAContext): void {
   for (let iter = 0; iter < 3; iter++) {
@@ -242,6 +333,7 @@ export function ssaOptimize(ctx: SSAContext): void {
     changed = simplifyPhis(ctx) || changed;
     changed = copyPropagation(ctx) || changed;
     changed = constantPropagation(ctx) || changed;
+    changed = globalValueNumbering(ctx) || changed;
     changed = deadCodeElimination(ctx) || changed;
     if (!changed) break;
   }
