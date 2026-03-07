@@ -975,6 +975,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           sMap,
           fMap,
           structRegistry,
+          args.runtimeFunctions,
         );
         break;
       }

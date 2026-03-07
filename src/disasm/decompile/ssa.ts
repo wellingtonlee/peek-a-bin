@@ -119,6 +119,60 @@ export function computeDomTree(idom: Map<number, number>): Map<number, number[]>
   return tree;
 }
 
+// ── Natural Loop Detection ──
+
+/** Detect natural loops: for each back-edge (succ → header where header dominates succ),
+ *  collect loop body via reverse walk from succ, stopping at header.
+ *  Returns: header blockId → set of body blockIds (including header). */
+export function detectNaturalLoops(
+  blocks: BasicBlock[],
+  idom: Map<number, number>,
+  _domTree: Map<number, number[]>,
+): Map<number, Set<number>> {
+  const loops = new Map<number, Set<number>>();
+  const blockById = new Map<number, BasicBlock>();
+  for (const b of blocks) blockById.set(b.id, b);
+
+  // Check if a dominates b
+  function dominates(a: number, b: number): boolean {
+    let cur = b;
+    while (cur !== a) {
+      const parent = idom.get(cur);
+      if (parent === undefined || parent === cur) return false;
+      cur = parent;
+    }
+    return true;
+  }
+
+  // Find back edges: edge (src → target) where target dominates src
+  for (const block of blocks) {
+    for (const succ of block.succs) {
+      if (dominates(succ, block.id)) {
+        // Back edge: block → succ (succ is the loop header)
+        const header = succ;
+        if (!loops.has(header)) loops.set(header, new Set([header]));
+        const body = loops.get(header)!;
+
+        // Reverse DFS from block, collecting until header
+        const worklist = [block.id];
+        while (worklist.length > 0) {
+          const n = worklist.pop()!;
+          if (body.has(n)) continue;
+          body.add(n);
+          const b = blockById.get(n);
+          if (b) {
+            for (const pred of b.preds) {
+              if (!body.has(pred)) worklist.push(pred);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return loops;
+}
+
 // ── Liveness & Phi Insertion ──
 
 function collectDefs(stmts: IRStmt[]): Set<string> {

@@ -115,6 +115,8 @@ function cleanupStmt(stmt: IRStmt): IRStmt {
         cases: stmt.cases.map(c => ({ ...c, body: cleanupPass(c.body) })),
         defaultBody: stmt.defaultBody ? cleanupPass(stmt.defaultBody) : undefined,
       };
+    case 'try':
+      return { ...stmt, body: cleanupPass(stmt.body), handler: cleanupPass(stmt.handler) };
     default:
       return stmt;
   }

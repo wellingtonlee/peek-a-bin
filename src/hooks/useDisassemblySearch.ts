@@ -11,6 +11,12 @@ export interface CrossSectionResult {
   text: string;
 }
 
+export interface SearchMatchGroup {
+  funcName: string;
+  funcAddr: number;
+  matches: { rowIdx: number; address: number; text: string }[];
+}
+
 export interface UseDisassemblySearchResult {
   showSearch: boolean;
   setShowSearch: (v: boolean) => void;
@@ -19,6 +25,7 @@ export interface UseDisassemblySearchResult {
   searchRegexError: boolean;
   searchMatches: number[];
   searchMatchIdx: number;
+  searchMatchGroups: SearchMatchGroup[];
   crossResults: CrossSectionResult[] | null;
   crossSearching: boolean;
   handleSearch: (query: string, direction?: 1 | -1) => void;
@@ -43,6 +50,7 @@ export function useDisassemblySearch(
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatches, setSearchMatches] = useState<number[]>([]);
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+  const [searchMatchGroups, setSearchMatchGroups] = useState<SearchMatchGroup[]>([]);
   const [searchRegexError, setSearchRegexError] = useState(false);
   const [crossResults, setCrossResults] = useState<CrossSectionResult[] | null>(null);
   const [crossSearching, setCrossSearching] = useState(false);
@@ -53,6 +61,7 @@ export function useDisassemblySearch(
     setSearchQuery("");
     setSearchMatches([]);
     setSearchMatchIdx(-1);
+    setSearchMatchGroups([]);
     setCrossResults(null);
   }, []);
 
@@ -64,6 +73,7 @@ export function useDisassemblySearch(
       if (!query) {
         setSearchMatches([]);
         setSearchMatchIdx(-1);
+        setSearchMatchGroups([]);
         return;
       }
 
@@ -105,6 +115,48 @@ export function useDisassemblySearch(
         }
       }
       setSearchMatches(matches);
+
+      // Build grouped matches by function
+      if (matches.length > 0 && state.functions.length > 0) {
+        const groups = new Map<number, SearchMatchGroup>();
+        const sortedFuncs = [...state.functions].sort((a, b) => a.address - b.address);
+
+        for (const mi of matches) {
+          const row = rows[mi];
+          const addr = rowAddress(row);
+          if (addr === null) continue;
+
+          // Binary search for containing function
+          let funcName = "(unknown)";
+          let funcAddr = 0;
+          let lo = 0, hi = sortedFuncs.length - 1;
+          while (lo <= hi) {
+            const mid = (lo + hi) >>> 1;
+            if (sortedFuncs[mid].address <= addr) { lo = mid + 1; } else { hi = mid - 1; }
+          }
+          if (hi >= 0) {
+            const fn = sortedFuncs[hi];
+            funcName = getDisplayName(fn, state.renames);
+            funcAddr = fn.address;
+          }
+
+          if (!groups.has(funcAddr)) {
+            groups.set(funcAddr, { funcName, funcAddr, matches: [] });
+          }
+          const text = row.kind === "insn"
+            ? `${row.insn.mnemonic} ${row.insn.opStr}`
+            : row.kind === "label"
+              ? getDisplayName(row.fn, state.renames)
+              : row.kind === "data"
+                ? `${row.item.directive} ${row.item.stringValue ?? ""}`
+                : "";
+          groups.get(funcAddr)!.matches.push({ rowIdx: mi, address: addr, text });
+        }
+        setSearchMatchGroups(Array.from(groups.values()));
+      } else {
+        setSearchMatchGroups([]);
+      }
+
       if (matches.length > 0) {
         let idx = matches.findIndex((m) => m >= currentIndex);
         if (idx === -1) idx = 0;
@@ -121,7 +173,7 @@ export function useDisassemblySearch(
         setSearchMatchIdx(-1);
       }
     },
-    [rows, currentIndex, dispatch, state.renames, state.comments],
+    [rows, currentIndex, dispatch, state.renames, state.comments, state.functions],
   );
 
   const handleSearchNext = useCallback(() => {
@@ -177,6 +229,7 @@ export function useDisassemblySearch(
     searchRegexError,
     searchMatches,
     searchMatchIdx,
+    searchMatchGroups,
     crossResults,
     crossSearching,
     handleSearch,

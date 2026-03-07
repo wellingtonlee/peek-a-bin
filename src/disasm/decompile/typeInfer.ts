@@ -15,7 +15,8 @@ export type DecompType =
   | { kind: 'array'; element: DecompType; count: number }
   | { kind: 'handle' }
   | { kind: 'ntstatus' }
-  | { kind: 'hresult' };
+  | { kind: 'hresult' }
+  | { kind: 'enum'; name: string; members: Map<number, string> };
 
 export interface TypeContext {
   /** Map of variable/register name → inferred type */
@@ -50,6 +51,8 @@ export function typeToString(t: DecompType): string {
       return 'NTSTATUS';
     case 'hresult':
       return 'HRESULT';
+    case 'enum':
+      return t.name;
   }
 }
 
@@ -74,8 +77,14 @@ export function meetTypes(a: DecompType, b: DecompType): DecompType {
     if (a.kind === 'array' && b.kind === 'array') {
       return { kind: 'array', element: meetTypes(a.element, b.element), count: Math.max(a.count, b.count) };
     }
+    if (a.kind === 'enum' && b.kind === 'enum') {
+      return a.name === b.name ? a : { kind: 'unknown' };
+    }
     return a;
   }
+  // enum vs int → enum wins
+  if (a.kind === 'enum' && b.kind === 'int') return a;
+  if (b.kind === 'enum' && a.kind === 'int') return b;
   // handle vs ptr → handle wins
   if (a.kind === 'handle' && b.kind === 'ptr') return a;
   if (b.kind === 'handle' && a.kind === 'ptr') return b;
@@ -210,6 +219,9 @@ export function inferTypes(
   // API call pass: infer types from known API signatures
   inferFromAPICalls(body, types);
 
+  // Enum pass: infer enums from switch statements with 3+ cases
+  inferEnumsFromSwitches(body, types);
+
   return { types };
 }
 
@@ -260,6 +272,61 @@ function inferFromAPICalls(
       if (s.kind === 'switch') {
         s.cases.forEach(c => processStmts(c.body));
         if (s.defaultBody) processStmts(s.defaultBody);
+      }
+      if (s.kind === 'try') {
+        processStmts(s.body);
+        processStmts(s.handler);
+      }
+    }
+  }
+  processStmts(body);
+}
+
+function inferEnumsFromSwitches(body: IRStmt[], types: Map<string, DecompType>): void {
+  let enumCounter = 0;
+
+  function processStmts(stmts: IRStmt[]) {
+    for (const s of stmts) {
+      if (s.kind === 'switch') {
+        // Collect all case values
+        const values = new Set<number>();
+        for (const c of s.cases) {
+          for (const v of c.values) values.add(v);
+        }
+
+        // Need 3+ cases to infer enum
+        if (values.size >= 3) {
+          // Get the switched variable name
+          const varName = s.expr.kind === 'reg' ? canonReg(s.expr.name)
+                        : s.expr.kind === 'var' ? s.expr.name
+                        : null;
+          if (varName) {
+            const existing = types.get(varName);
+            if (!existing || existing.kind === 'unknown' || existing.kind === 'int') {
+              const members = new Map<number, string>();
+              for (const v of values) {
+                members.set(v, `VAL_${v < 0 ? 'NEG_' + Math.abs(v).toString(16).toUpperCase() : '0x' + v.toString(16).toUpperCase()}`);
+              }
+              const enumType: DecompType = { kind: 'enum', name: `enum_${enumCounter++}`, members };
+              types.set(varName, enumType);
+            }
+          }
+        }
+      }
+      // Recurse into nested statements
+      if (s.kind === 'if') {
+        processStmts(s.thenBody);
+        if (s.elseBody) processStmts(s.elseBody);
+      }
+      if (s.kind === 'while' || s.kind === 'do_while') processStmts(s.body);
+      if (s.kind === 'for') processStmts(s.body);
+      if (s.kind === 'switch') {
+        s.cases.forEach(c => processStmts(c.body));
+        if (s.defaultBody) processStmts(s.defaultBody);
+      }
+      if (s.kind === 'try') {
+        processStmts(s.body);
+        processStmts(s.handler);
       }
     }
   }

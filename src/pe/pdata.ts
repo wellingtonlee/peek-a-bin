@@ -30,7 +30,28 @@ export function parsePdata(
     // Validate: begin < end
     if (beginAddress >= endAddress) continue;
 
-    results.push({ beginAddress, endAddress, unwindInfoAddress });
+    const rf: RuntimeFunction = { beginAddress, endAddress, unwindInfoAddress };
+
+    // Parse UNWIND_INFO to check for exception handler
+    const unwindOffset = rvaToFileOffset(unwindInfoAddress, sections);
+    if (unwindOffset >= 0 && unwindOffset + 4 <= view.byteLength) {
+      const versionFlags = view.getUint8(unwindOffset);
+      const flags = (versionFlags >> 3) & 0x1F;
+      rf.handlerFlags = flags;
+
+      // UNW_FLAG_EHANDLER (0x1) or UNW_FLAG_UHANDLER (0x2)
+      if (flags & 0x3) {
+        const countOfCodes = view.getUint8(unwindOffset + 2);
+        // Handler RVA follows after the unwind codes (each 2 bytes), aligned to 4 bytes
+        const codesSize = countOfCodes * 2;
+        const handlerOffset = unwindOffset + 4 + codesSize + (codesSize % 4 ? (4 - codesSize % 4) : 0);
+        if (handlerOffset + 4 <= view.byteLength) {
+          rf.handlerAddress = view.getUint32(handlerOffset, true);
+        }
+      }
+    }
+
+    results.push(rf);
   }
 
   return results;

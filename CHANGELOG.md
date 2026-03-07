@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Regex search UI hint** — `?` help icon next to search bar shows tooltip explaining `/regex/` and `/regex/i` syntax (2026-03-07 00:07)
+- **Search results grouping** — search matches grouped by function with match counts; clickable function names to navigate; shown when matches span 2+ functions (2026-03-07 00:07)
+- **Operand hover tooltips** — hovering clickable operand addresses shows contextual info: import names (`kernel32.dll!CreateFileW`), string previews, function names, section offsets; 200ms delay, auto-dismiss (2026-03-07 00:07)
+- **Export analysis report** — "Report" button in sidebar generates comprehensive Markdown report with file summary, anomalies, driver info, functions, imports, exports, strings, and annotations; downloadable as `.md` file (2026-03-07 00:07)
+- **Enum type inference** — switch statements with 3+ cases auto-infer enum types (`enum_N`); enum member names (`VAL_0x1`) emitted in case labels and constant references; `meetTypes` supports enum lattice merging; 6 new tests (2026-03-07 00:07)
+- **Loop-aware SSA optimizations** — natural loop detection via back-edge analysis; Loop-Invariant Code Motion (LICM) hoists invariant assignments to preheader; induction variable recognition tags phi nodes with step metadata; 3 new tests (2026-03-07 00:07)
+- **Exception handling IR** — `IRTry` statement type for `__try/__except` blocks; UNWIND_INFO parsing from `.pdata` extracts exception handler RVAs; exception regions wrapped during structuring; `__try/__except(filter)` emission; all walkers updated (ir, fold, emit, cleanup, promote, structs, typeInfer); 3 new tests (2026-03-07 00:07)
+
 - **Global Value Numbering** — SSA-based GVN pass in `ssaopt.ts` eliminates redundant common subexpressions; commutative op normalization (`a+b == b+a`); conservative handling of calls, derefs, and unknowns (always unique); runs after const prop, before DCE in the optimize loop; 7 new tests (2026-03-06 23:28)
 - **Decompiler expression quality** — 7 new fold rules (div/mod, comparison folding, ternary simplification, sign-extend `(x<<24)>>24` → `(int8_t)x`, strength reduction `x*2` → `x<<1`, double-cast removal, negation absorption `!(x==y)` → `x!=y`); `IRArrayAccess` node with `base[index]` emit instead of `*(type*)(base + idx * scale)`; increment/decrement `x++`/`x--` instead of `x = x + 1`; redundant cast suppression via TypeContext; array rewrite in struct synthesis pass (2026-03-06 22:30)
 - **Control flow improvements** — `IRContinue` statement; continue detection in loops (goto-to-header → continue); guard clause flattening (`if(cond){return} else{rest}` → `if(cond){return} rest`); redundant goto/empty-block elimination; better loop classification (body-top break → while(!cond)); chained short-circuit `a && b && c` up to 8 blocks; post-structuring `cleanupStructured` pass (2026-03-06 22:30)

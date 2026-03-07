@@ -1,9 +1,10 @@
 import type { Instruction, DisasmFunction, Xref, StackFrame } from '../types';
+import type { RuntimeFunction } from '../../pe/types';
 import type { FunctionSignature } from '../signatures';
 import { buildCFG, detectLoops } from '../cfg';
 import { liftBlock } from './lifter';
 import { foldBlock } from './fold';
-import { buildSSA } from './ssa';
+import { buildSSA, detectNaturalLoops } from './ssa';
 import { ssaOptimize } from './ssaopt';
 import { destroySSA } from './ssadestroy';
 import { structureCFG } from './structure';
@@ -13,6 +14,7 @@ import { inferTypes } from './typeInfer';
 import { RegState } from './regstate';
 import { synthesizeStructs, StructRegistry } from './structs';
 import { cleanupStructured } from './cleanup';
+import type { IRStmt, IRTry, IRExpr } from './ir';
 
 export interface DecompileResult {
   code: string;
@@ -37,6 +39,7 @@ export function decompileFunction(
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
   registry?: StructRegistry,
+  runtimeFunctions?: RuntimeFunction[],
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -57,7 +60,8 @@ export function decompileFunction(
 
     // 3. SSA: build → optimize → destroy
     const ssaCtx = buildSSA(blocks, liftedBlocks);
-    ssaOptimize(ssaCtx);
+    const naturalLoops = detectNaturalLoops(blocks, ssaCtx.idom, ssaCtx.domTree);
+    ssaOptimize(ssaCtx, naturalLoops.size > 0 ? naturalLoops : undefined);
     destroySSA(ssaCtx);
 
     // 4. Fold per block (constant folding + single-use inlining, post-SSA)
@@ -69,7 +73,12 @@ export function decompileFunction(
     const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables);
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
-    const cleaned = cleanupStructured(structured);
+    let cleaned = cleanupStructured(structured);
+
+    // 5c. Exception handling: wrap try/except regions from .pdata
+    if (runtimeFunctions && runtimeFunctions.length > 0) {
+      cleaned = wrapExceptionRegions(cleaned, func, runtimeFunctions);
+    }
 
     // 6. Type inference
     const typeCtx = inferTypes(cleaned, iatMap);
@@ -94,4 +103,38 @@ export function decompileFunction(
       lineMap: [],
     };
   }
+}
+
+/**
+ * Wrap structured statements in __try/__except blocks based on .pdata exception info.
+ * Looks for RuntimeFunctions that overlap the current function and have exception handlers.
+ */
+function wrapExceptionRegions(
+  body: IRStmt[],
+  func: DisasmFunction,
+  runtimeFunctions: RuntimeFunction[],
+): IRStmt[] {
+  // Find RuntimeFunctions with handlers that overlap this function's address range
+  const funcRVA = func.address;
+  const matching = runtimeFunctions.filter(
+    rf => rf.handlerAddress !== undefined &&
+          rf.beginAddress === funcRVA &&
+          (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
+  );
+
+  if (matching.length === 0) return body;
+
+  // For now, wrap the entire function body in a try block for the first matching handler.
+  // The handler body is represented as a comment referencing the handler address.
+  const rf = matching[0];
+  const handlerAddr = rf.handlerAddress!;
+  const tryStmt: IRTry = {
+    kind: 'try',
+    body,
+    handler: [
+      { kind: 'comment', text: `Exception handler at 0x${handlerAddr.toString(16).toUpperCase()}` },
+    ],
+  };
+
+  return [tryStmt];
 }

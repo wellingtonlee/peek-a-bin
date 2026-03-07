@@ -1153,9 +1153,32 @@ export function DisassemblyView() {
             >
               ✕
             </button>
+            <div className="relative group">
+              <button className="px-1 py-0.5 text-gray-500 hover:text-gray-300 text-[10px]">?</button>
+              <div className="hidden group-hover:block absolute right-0 top-full mt-1 w-56 px-2 py-1.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-300 z-50 shadow-lg whitespace-normal">
+                Substring match by default. Use <span className="text-blue-400">/pattern/</span> for regex, <span className="text-blue-400">/pattern/i</span> for case-insensitive.
+              </div>
+            </div>
           </div>
         )}
       </div>
+
+      {/* Grouped search results */}
+      {search.showSearch && search.searchMatchGroups.length > 1 && (
+        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
+          <div className="text-gray-400 mb-1">{search.searchMatches.length} matches in {search.searchMatchGroups.length} functions:</div>
+          {search.searchMatchGroups.map((g) => (
+            <button
+              key={g.funcAddr}
+              onClick={() => dispatch({ type: "SET_ADDRESS", address: g.funcAddr })}
+              className="block w-full text-left hover:bg-gray-700/50 rounded px-1 py-0.5 truncate"
+            >
+              <span className="text-blue-400">{g.funcName}</span>{" "}
+              <span className="text-gray-500">({g.matches.length})</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Cross-section search prompt */}
       {search.showSearch && search.searchQuery && search.searchMatches.length === 0 && !search.crossResults && !search.crossSearching && (
@@ -1473,6 +1496,47 @@ export function DisassemblyView() {
               iatMap,
             ) : [];
 
+            // Build tooltip data for operand addresses
+            let tooltipData: Map<number, string> | undefined;
+            if (operandTargets.length > 0 && pe) {
+              for (const t of operandTargets) {
+                const addr = t.address;
+                // Check IAT (imports)
+                const iat = iatMap.get(addr);
+                if (iat) {
+                  if (!tooltipData) tooltipData = new Map();
+                  tooltipData.set(addr, `Import: ${iat.lib}!${iat.func}`);
+                  continue;
+                }
+                // Check strings
+                const str = pe.strings?.get(addr);
+                if (str) {
+                  if (!tooltipData) tooltipData = new Map();
+                  const preview = str.length > 60 ? str.slice(0, 60) + "..." : str;
+                  tooltipData.set(addr, `"${preview}"`);
+                  continue;
+                }
+                // Check functions
+                const fn = state.functions.find(f => f.address === addr);
+                if (fn) {
+                  if (!tooltipData) tooltipData = new Map();
+                  tooltipData.set(addr, `Function: ${getDisplayName(fn, state.renames)}`);
+                  continue;
+                }
+                // Section lookup
+                if (pe.sections) {
+                  const rva = addr - pe.optionalHeader.imageBase;
+                  for (const sec of pe.sections) {
+                    if (rva >= sec.virtualAddress && rva < sec.virtualAddress + sec.virtualSize) {
+                      if (!tooltipData) tooltipData = new Map();
+                      tooltipData.set(addr, `${sec.name} +0x${(rva - sec.virtualAddress).toString(16)}`);
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+
             // Loop border styling: header takes priority, then body depth
             let borderStyle: string | undefined;
             if (isLoopHeader) {
@@ -1557,6 +1621,7 @@ export function DisassemblyView() {
                     onNavigate={handleAddressClick}
                     highlightRegs={highlightRegs}
                     onRegClick={handleRegClick}
+                    tooltipData={tooltipData}
                   />
                 </span>
                 {insn.comment && (

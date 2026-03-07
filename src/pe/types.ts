@@ -181,6 +181,8 @@ export interface RuntimeFunction {
   beginAddress: number; // RVA
   endAddress: number;   // RVA
   unwindInfoAddress: number; // RVA
+  handlerAddress?: number; // RVA of exception handler (if UNW_FLAG_EHANDLER/UHANDLER)
+  handlerFlags?: number;   // UNWIND_INFO flags byte
 }
 
 export interface ResourceNode {

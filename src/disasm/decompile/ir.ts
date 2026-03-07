@@ -198,10 +198,17 @@ export interface IRPhi {
   addr?: number;
 }
 
+export interface IRTry {
+  kind: 'try';
+  body: IRStmt[];
+  handler: IRStmt[];        // __except or __finally body
+  filterExpr?: IRExpr;       // __except(expr) filter
+}
+
 export type IRStmt =
   | IRAssign | IRStore | IRCallStmt | IRReturn
   | IRIf | IRWhile | IRDoWhile | IRFor | IRSwitch
-  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak | IRContinue | IRPhi;
+  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak | IRContinue | IRPhi | IRTry;
 
 // ── Function Container ──
 
@@ -317,6 +324,7 @@ export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
       case 'switch': walkExpr(s.expr, fn); s.cases.forEach(c => walkStmts(c.body, fn)); if (s.defaultBody) walkStmts(s.defaultBody, fn); break;
       case 'for': walkStmts([s.init], fn); walkExpr(s.condition, fn); walkStmts([s.update], fn); walkStmts(s.body, fn); break;
       case 'phi': for (const op of s.operands) walkExpr(op.value, fn); break;
+      case 'try': walkStmts(s.body, fn); walkStmts(s.handler, fn); if (s.filterExpr) walkExpr(s.filterExpr, fn); break;
     }
   }
 }

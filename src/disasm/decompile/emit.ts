@@ -93,6 +93,15 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
         const ioctlComment = formatIOCTL(expr.value);
         if (ioctlComment) return `${hex} /* ${ioctlComment} */`;
       }
+      // Enum member lookup
+      if (_typeCtx) {
+        for (const [, t] of _typeCtx.types) {
+          if (t.kind === 'enum') {
+            const memberName = t.members.get(expr.value);
+            if (memberName) return memberName;
+          }
+        }
+      }
       return hex;
     }
 
@@ -326,9 +335,20 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
     case 'switch': {
       const expr = emitExpr(stmt.expr, 0);
       push(`${pad}switch (${expr}) {`);
+      // Check if switch expression has enum type
+      let enumType: DecompType | undefined;
+      if (_typeCtx) {
+        if (stmt.expr.kind === 'reg') enumType = _typeCtx.types.get(canonReg(stmt.expr.name));
+        else if (stmt.expr.kind === 'var') enumType = _typeCtx.types.get(stmt.expr.name);
+      }
       for (const c of stmt.cases) {
         for (const v of c.values) {
-          push(`${pad}case ${formatHex(v)}:`);
+          if (enumType?.kind === 'enum') {
+            const memberName = enumType.members.get(v);
+            push(`${pad}case ${memberName ?? formatHex(v)}:`);
+          } else {
+            push(`${pad}case ${formatHex(v)}:`);
+          }
         }
         for (const s of c.body) {
           const r = emitStmt(s, level + 2);
@@ -387,6 +407,24 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
     case 'continue':
       push(`${pad}continue;`);
       break;
+
+    case 'try': {
+      push(`${pad}__try {`);
+      for (const s of stmt.body) {
+        const r = emitStmt(s, level + 1);
+        lines.push(...r.lines);
+        addrs.push(...r.addrs);
+      }
+      const filter = stmt.filterExpr ? emitExpr(stmt.filterExpr, 0) : 'EXCEPTION_EXECUTE_HANDLER';
+      push(`${pad}} __except(${filter}) {`);
+      for (const s of stmt.handler) {
+        const r = emitStmt(s, level + 1);
+        lines.push(...r.lines);
+        addrs.push(...r.addrs);
+      }
+      push(`${pad}}`);
+      break;
+    }
   }
 
   return { lines, addrs };

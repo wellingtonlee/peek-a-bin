@@ -94,6 +94,7 @@ export function useDecompileTabs({
       const result = await disasmWorker.decompileFunction(
         currentFunc, instructions, xrefMap, sf, sig, pe.is64,
         iatMap, pe.strings ?? new Map(), new Map(funcEntries),
+        pe.runtimeFunctions,
       );
       lowCache.current.set(addr, result);
       dispatch({ type: "LOAD_OK", tab: "low", code: result.code, lineMap: result.lineMap });

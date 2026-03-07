@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import { generateMarkdownReport } from "../utils/exportSchema";
 import { useContainingFunc } from "../hooks/useDerivedState";
 import type { DisasmFunction } from "../disasm/types";
 import { SkeletonRows } from "./Skeleton";
@@ -186,6 +187,18 @@ export function Sidebar() {
     a.click();
     URL.revokeObjectURL(url);
   }, [state.functions, state.renames, state.fileName]);
+
+  const handleExportReport = useCallback(() => {
+    if (!state.peFile) return;
+    const report = generateMarkdownReport(state);
+    const blob = new Blob([report], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.fileName ?? "analysis"}_report.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [state]);
 
   const virtualizer = useVirtualizer({
     count: filteredFunctions.length,
@@ -451,6 +464,14 @@ export function Sidebar() {
               title="Export functions as CSV"
             >
               CSV
+            </button>
+            <button
+              onClick={handleExportReport}
+              disabled={!state.peFile}
+              className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
+              title="Export analysis report as Markdown"
+            >
+              Report
             </button>
             <button
               onClick={() => setSort(sort === "address" ? "alpha" : "address")}

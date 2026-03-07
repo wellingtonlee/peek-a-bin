@@ -284,6 +284,11 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
           for (const c of s.cases) walkStmts(c.body);
           if (s.defaultBody) walkStmts(s.defaultBody);
           break;
+        case 'try':
+          walkStmts(s.body);
+          walkStmts(s.handler);
+          if (s.filterExpr) walkExprs(s.filterExpr);
+          break;
       }
     }
   }
@@ -363,6 +368,10 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
       if (s.kind === 'switch') {
         for (const c of s.cases) scan(c.body);
         if (s.defaultBody) scan(s.defaultBody);
+      }
+      if (s.kind === 'try') {
+        scan(s.body);
+        scan(s.handler);
       }
     }
   }
@@ -584,6 +593,10 @@ function inferFieldTypesFromUsage(
         for (const c of s.cases) walkStmts(c.body);
         if (s.defaultBody) walkStmts(s.defaultBody);
       }
+      if (s.kind === 'try') {
+        walkStmts(s.body);
+        walkStmts(s.handler);
+      }
     }
   }
 
@@ -754,6 +767,13 @@ function rewriteStmt(
           body: rewriteStmts(c.body, baseToStruct, canonBase),
         })),
         defaultBody: stmt.defaultBody ? rewriteStmts(stmt.defaultBody, baseToStruct, canonBase) : undefined,
+      };
+    case 'try':
+      return {
+        ...stmt,
+        body: rewriteStmts(stmt.body, baseToStruct, canonBase),
+        handler: rewriteStmts(stmt.handler, baseToStruct, canonBase),
+        filterExpr: stmt.filterExpr ? rewriteExpr(stmt.filterExpr, baseToStruct, canonBase) : undefined,
       };
     default:
       return stmt;

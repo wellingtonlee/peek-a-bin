@@ -326,14 +326,160 @@ export function globalValueNumbering(ctx: SSAContext): boolean {
   return changed;
 }
 
+// ── Loop-Aware Optimizations ──
+
+/** Loop-Invariant Code Motion: move assignments whose operands are all defined
+ *  outside the loop (or are constants) to the loop's preheader. */
+export function loopInvariantCodeMotion(
+  ctx: SSAContext,
+  loops: Map<number, Set<number>>,
+): boolean {
+  let changed = false;
+
+  for (const [header, bodySet] of loops) {
+    // Find preheader: the immediate dominator of the header
+    const preheader = ctx.idom.get(header);
+    if (preheader === undefined || preheader === header) continue;
+    // Only move to preheader if it's NOT in the loop
+    if (bodySet.has(preheader)) continue;
+
+    const preheaderStmts = ctx.liftedBlocks.get(preheader);
+    if (!preheaderStmts) continue;
+
+    // Collect all defs inside the loop
+    const loopDefs = new Set<string>();
+    for (const blockId of bodySet) {
+      const stmts = ctx.liftedBlocks.get(blockId) ?? [];
+      for (const s of stmts) {
+        if (s.kind === 'assign' && s.dest.kind === 'reg' && s.dest.version !== undefined) {
+          loopDefs.add(regKey(s.dest as IRReg));
+        }
+        if (s.kind === 'call_stmt' && s.resultDest?.kind === 'reg' && (s.resultDest as IRReg).version !== undefined) {
+          loopDefs.add(regKey(s.resultDest as IRReg));
+        }
+      }
+      // Phi defs
+      const blockPhis = ctx.phis.get(blockId) ?? [];
+      for (const phi of blockPhis) {
+        loopDefs.add(regKey(phi.dest));
+      }
+    }
+
+    // Check if an expression only uses values defined outside the loop
+    function isInvariant(expr: IRExpr): boolean {
+      switch (expr.kind) {
+        case 'const': return true;
+        case 'var': return true;
+        case 'reg':
+          if (expr.version === undefined) return false;
+          return !loopDefs.has(regKey(expr));
+        case 'binary': return isInvariant(expr.left) && isInvariant(expr.right);
+        case 'unary': return isInvariant(expr.operand);
+        case 'cast': return isInvariant(expr.operand);
+        // Don't move calls, derefs, or unknowns (side effects / memory)
+        case 'call': return false;
+        case 'deref': return false;
+        case 'unknown': return false;
+        case 'ternary': return isInvariant(expr.condition) && isInvariant(expr.then) && isInvariant(expr.else);
+        case 'field_access': return false; // memory access
+        case 'array_access': return false; // memory access
+      }
+    }
+
+    // Move invariant assignments to preheader
+    for (const blockId of bodySet) {
+      const stmts = ctx.liftedBlocks.get(blockId);
+      if (!stmts) continue;
+      const newStmts: IRStmt[] = [];
+      for (const s of stmts) {
+        if (s.kind === 'assign' && s.dest.kind === 'reg' && isInvariant(s.src)) {
+          // Move to preheader
+          preheaderStmts.push(s);
+          changed = true;
+        } else {
+          newStmts.push(s);
+        }
+      }
+      if (newStmts.length !== stmts.length) {
+        ctx.liftedBlocks.set(blockId, newStmts);
+      }
+    }
+  }
+
+  return changed;
+}
+
+/** Recognize induction variables: phi nodes at loop header with pattern
+ *  phi(init, update) where update = phi_result + step (or - step).
+ *  Tags them by setting an `addr` metadata field to the step value. */
+export function canonicalizeInductionVars(
+  ctx: SSAContext,
+  loops: Map<number, Set<number>>,
+): boolean {
+  let changed = false;
+
+  for (const [header, bodySet] of loops) {
+    const headerPhis = ctx.phis.get(header) ?? [];
+
+    for (const phi of headerPhis) {
+      if (phi.operands.length !== 2) continue;
+
+      // One operand should be from outside the loop (init), one from inside (update)
+      let initOp: typeof phi.operands[0] | null = null;
+      let updateOp: typeof phi.operands[0] | null = null;
+
+      for (const op of phi.operands) {
+        if (bodySet.has(op.blockId)) {
+          updateOp = op;
+        } else {
+          initOp = op;
+        }
+      }
+
+      if (!initOp || !updateOp) continue;
+
+      // Check if update is: phi_dest + step or phi_dest - step
+      // Look in the update's block for: updateOp.value = phi.dest OP const
+      const updateBlock = ctx.liftedBlocks.get(updateOp.blockId);
+      if (!updateBlock) continue;
+
+      for (const s of updateBlock) {
+        if (s.kind !== 'assign' || s.dest.kind !== 'reg') continue;
+        if (s.dest.version !== updateOp.value.version) continue;
+        if (canonReg(s.dest.name) !== canonReg(updateOp.value.name)) continue;
+
+        if (s.src.kind === 'binary' && (s.src.op === '+' || s.src.op === '-')) {
+          const left = s.src.left;
+          const right = s.src.right;
+
+          // Check if left is the phi dest
+          if (left.kind === 'reg' && canonReg(left.name) === canonReg(phi.dest.name) &&
+              left.version === phi.dest.version && right.kind === 'const') {
+            // This is an induction variable!
+            // Tag the phi with induction info (addr metadata)
+            phi.addr = right.value; // Reuse addr field as step marker
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+
 /** Run all SSA optimization passes until stable (max 3 iterations). */
-export function ssaOptimize(ctx: SSAContext): void {
+export function ssaOptimize(ctx: SSAContext, loops?: Map<number, Set<number>>): void {
   for (let iter = 0; iter < 3; iter++) {
     let changed = false;
     changed = simplifyPhis(ctx) || changed;
     changed = copyPropagation(ctx) || changed;
     changed = constantPropagation(ctx) || changed;
     changed = globalValueNumbering(ctx) || changed;
+    if (loops) {
+      changed = loopInvariantCodeMotion(ctx, loops) || changed;
+      changed = canonicalizeInductionVars(ctx, loops) || changed;
+    }
     changed = deadCodeElimination(ctx) || changed;
     if (!changed) break;
   }

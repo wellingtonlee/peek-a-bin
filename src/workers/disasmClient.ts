@@ -174,6 +174,7 @@ class DisasmWorkerClient {
     iatMap: Map<number, { lib: string; func: string }>,
     stringMap: Map<number, string>,
     funcMap: Map<number, { name: string; address: number }>,
+    runtimeFunctions?: import('../pe/types').RuntimeFunction[],
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
     const cached = this.decompileCache.get(func.address);
     if (cached) return cached;
@@ -188,6 +189,7 @@ class DisasmWorkerClient {
       iatEntries: Array.from(iatMap.entries()),
       stringEntries: Array.from(stringMap.entries()),
       funcEntries: Array.from(funcMap.entries()),
+      runtimeFunctions,
     });
     const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
     this.decompileCache.set(func.address, parsed);

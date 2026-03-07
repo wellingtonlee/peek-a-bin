@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef, useCallback } from "react";
 
 // --- Register names set ---
 export const REG_NAMES = new Set([
@@ -51,15 +51,29 @@ export interface ClickableTarget {
 }
 
 // --- Colored operand component ---
-export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick }: {
+export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick, tooltipData }: {
   opStr: string;
   targets?: ClickableTarget[];
   onNavigate?: (addr: number) => void;
   highlightRegs?: Set<string> | null;
   onRegClick?: (regName: string) => void;
+  tooltipData?: Map<number, string>;
 }) {
   const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
   const [copiedTarget, setCopiedTarget] = useState<number | null>(null);
+  const [hoveredAddr, setHoveredAddr] = useState<number | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+
+  const showTooltip = useCallback((addr: number) => {
+    clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => setHoveredAddr(addr), 200);
+  }, []);
+
+  const hideTooltip = useCallback(() => {
+    clearTimeout(hoverTimer.current);
+    setHoveredAddr(null);
+  }, []);
 
   const targetMap = useMemo(() => {
     if (!targets || targets.length === 0) return null;
@@ -77,10 +91,12 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
         if (targetMap && onNavigate && t.text.startsWith("0x")) {
           const target = targetMap.get(t.text.toLowerCase());
           if (target) {
+            const tooltip = tooltipData?.get(target.address);
             return (
               <span
                 key={i}
-                className={`${copiedTarget === target.address ? "text-green-400" : "text-blue-400"} underline cursor-pointer hover:text-blue-300`}
+                className={`${copiedTarget === target.address ? "text-green-400" : "text-blue-400"} underline cursor-pointer hover:text-blue-300 relative`}
+                ref={hoveredAddr === target.address ? tooltipRef : undefined}
                 onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
@@ -89,9 +105,16 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
                   setCopiedTarget(target.address);
                   setTimeout(() => setCopiedTarget(null), 1000);
                 }}
-                title={target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`}
+                onMouseEnter={tooltip ? () => showTooltip(target.address) : undefined}
+                onMouseLeave={tooltip ? hideTooltip : undefined}
+                title={!tooltip ? (target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`) : undefined}
               >
                 {t.text}
+                {hoveredAddr === target.address && tooltip && (
+                  <span className="absolute left-0 top-full mt-1 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 z-50 shadow-lg whitespace-nowrap pointer-events-none">
+                    {tooltip}
+                  </span>
+                )}
               </span>
             );
           }

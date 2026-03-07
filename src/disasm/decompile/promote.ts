@@ -171,6 +171,13 @@ function promoteStmt(
         update: promoteStmt(stmt.update, is64, varLookup, paramLookup),
         body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
       };
+    case 'try':
+      return {
+        ...stmt,
+        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        handler: stmt.handler.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        filterExpr: stmt.filterExpr ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup) : undefined,
+      };
     default:
       return stmt;
   }

@@ -228,6 +228,8 @@ function foldStmt(stmt: IRStmt): IRStmt {
       return { ...stmt, expr: foldExpr(stmt.expr), cases: stmt.cases.map(c => ({ ...c, body: c.body.map(foldStmt) })), defaultBody: stmt.defaultBody?.map(foldStmt) };
     case 'for':
       return { ...stmt, init: foldStmt(stmt.init), condition: foldExpr(stmt.condition), update: foldStmt(stmt.update), body: stmt.body.map(foldStmt) };
+    case 'try':
+      return { ...stmt, body: stmt.body.map(foldStmt), handler: stmt.handler.map(foldStmt), filterExpr: stmt.filterExpr ? foldExpr(stmt.filterExpr) : undefined };
     default:
       return stmt;
   }
