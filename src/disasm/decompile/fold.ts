@@ -1,4 +1,4 @@
-import type { IRExpr, IRStmt } from './ir';
+import type { IRExpr, IRStmt, BinaryOp } from './ir';
 import { irConst, canonReg } from './ir';
 
 /** Shallow structural equality for simple expressions (reg, const, var). */
@@ -30,12 +30,24 @@ function foldExpr(expr: IRExpr): IRExpr {
         case '+': result = l + r; break;
         case '-': result = l - r; break;
         case '*': result = l * r; break;
+        case '/': if (r !== 0) result = (l / r) | 0; break;
+        case '%': if (r !== 0) result = l % r; break;
         case '&': result = l & r; break;
         case '|': result = l | r; break;
         case '^': result = l ^ r; break;
         case '<<': result = l << r; break;
         case '>>': result = l >> r; break;
         case '>>>': result = l >>> r; break;
+        case '==': result = l === r ? 1 : 0; break;
+        case '!=': result = l !== r ? 1 : 0; break;
+        case '<': result = l < r ? 1 : 0; break;
+        case '<=': result = l <= r ? 1 : 0; break;
+        case '>': result = l > r ? 1 : 0; break;
+        case '>=': result = l >= r ? 1 : 0; break;
+        case 'u<': result = (l >>> 0) < (r >>> 0) ? 1 : 0; break;
+        case 'u<=': result = (l >>> 0) <= (r >>> 0) ? 1 : 0; break;
+        case 'u>': result = (l >>> 0) > (r >>> 0) ? 1 : 0; break;
+        case 'u>=': result = (l >>> 0) >= (r >>> 0) ? 1 : 0; break;
       }
       if (result !== null) return irConst(result, left.size);
     }
@@ -84,6 +96,33 @@ function foldExpr(expr: IRExpr): IRExpr {
       // x | 0xFFFFFFFF → 0xFFFFFFFF
       if (expr.op === '|' && (right.value === 0xFFFFFFFF || right.value === -1))
         return irConst(right.value, right.size);
+      // Strength reduction: x * 2 → x << 1
+      if (expr.op === '*' && right.value === 2)
+        return { kind: 'binary', op: '<<', left, right: irConst(1, right.size) };
+      // x * 4 → x << 2, x * 8 → x << 3
+      if (expr.op === '*' && right.value > 0 && (right.value & (right.value - 1)) === 0) {
+        const shift = Math.log2(right.value);
+        if (Number.isInteger(shift) && shift <= 31)
+          return { kind: 'binary', op: '<<', left, right: irConst(shift, right.size) };
+      }
+      // unsigned x / 2 → x >> 1 (only for power of 2)
+      if (expr.op === '/' && right.value > 0 && (right.value & (right.value - 1)) === 0) {
+        const shift = Math.log2(right.value);
+        if (Number.isInteger(shift) && shift <= 31)
+          return { kind: 'binary', op: '>>>', left, right: irConst(shift, right.size) };
+      }
+      // unsigned x % 2 → x & 1 (only for power of 2)
+      if (expr.op === '%' && right.value > 0 && (right.value & (right.value - 1)) === 0)
+        return { kind: 'binary', op: '&', left, right: irConst(right.value - 1, right.size) };
+    }
+
+    // Sign-extend patterns: (x << 24) >> 24 → (int8_t)x
+    if (expr.op === '>>' && right.kind === 'const' &&
+        left.kind === 'binary' && left.op === '<<' &&
+        left.right.kind === 'const' && left.right.value === right.value) {
+      const shift = right.value;
+      if (shift === 24) return { kind: 'cast', type: 'int8_t', operand: left.left };
+      if (shift === 16) return { kind: 'cast', type: 'int16_t', operand: left.left };
     }
 
     return { ...expr, left, right };
@@ -103,11 +142,45 @@ function foldExpr(expr: IRExpr): IRExpr {
     if (operand.kind === 'unary' && operand.op === expr.op && (expr.op === '!' || expr.op === '~' || expr.op === '-')) {
       return operand.operand;
     }
+    // Negation absorption: !(x == y) → x != y, !(x < y) → x >= y, etc.
+    if (expr.op === '!' && operand.kind === 'binary') {
+      const negMap: Partial<Record<BinaryOp, BinaryOp>> = {
+        '==': '!=', '!=': '==',
+        '<': '>=', '>=': '<',
+        '>': '<=', '<=': '>',
+        'u<': 'u>=', 'u>=': 'u<',
+        'u>': 'u<=', 'u<=': 'u>',
+      };
+      const neg = negMap[operand.op];
+      if (neg) return { ...operand, op: neg };
+    }
     return { ...expr, operand };
   }
 
   if (expr.kind === 'ternary') {
-    return { ...expr, condition: foldExpr(expr.condition), then: foldExpr(expr.then), else: foldExpr(expr.else) };
+    const cond = foldExpr(expr.condition);
+    const then = foldExpr(expr.then);
+    const els = foldExpr(expr.else);
+    // cond ? X : X → X
+    if (exprEq(then, els)) return then;
+    // 1 ? A : B → A
+    if (cond.kind === 'const' && cond.value !== 0) return then;
+    // 0 ? A : B → B
+    if (cond.kind === 'const' && cond.value === 0) return els;
+    return { ...expr, condition: cond, then, else: els };
+  }
+
+  // Double-cast removal: (T2)(T1)x where T1 size >= T2 size → (T2)x
+  if (expr.kind === 'cast') {
+    const operand = foldExpr(expr.operand);
+    if (operand.kind === 'cast') {
+      const outerSize = castTypeSize(expr.type);
+      const innerSize = castTypeSize(operand.type);
+      if (innerSize >= outerSize) {
+        return { kind: 'cast', type: expr.type, operand: operand.operand };
+      }
+    }
+    return { ...expr, operand };
   }
 
   if (expr.kind === 'deref') {
@@ -118,11 +191,21 @@ function foldExpr(expr: IRExpr): IRExpr {
     return { ...expr, args: expr.args.map(foldExpr) };
   }
 
-  if (expr.kind === 'cast') {
-    return { ...expr, operand: foldExpr(expr.operand) };
+  if (expr.kind === 'field_access') {
+    return { ...expr, base: foldExpr(expr.base) };
+  }
+
+  if (expr.kind === 'array_access') {
+    return { ...expr, base: foldExpr(expr.base), index: foldExpr(expr.index) };
   }
 
   return expr;
+}
+
+function castTypeSize(typeStr: string): number {
+  const m = typeStr.match(/(\d+)/);
+  if (m) return parseInt(m[1], 10) / 8;
+  return 4; // default
 }
 
 function foldStmt(stmt: IRStmt): IRStmt {
@@ -162,6 +245,8 @@ function countReads(expr: IRExpr, canon: string): number {
     case 'call': return expr.args.reduce((n, a) => n + countReads(a, canon), 0);
     case 'ternary': return countReads(expr.condition, canon) + countReads(expr.then, canon) + countReads(expr.else, canon);
     case 'cast': return countReads(expr.operand, canon);
+    case 'field_access': return countReads(expr.base, canon);
+    case 'array_access': return countReads(expr.base, canon) + countReads(expr.index, canon);
     default: return 0;
   }
 }
@@ -192,6 +277,10 @@ function substituteReg(expr: IRExpr, canon: string, replacement: IRExpr): IRExpr
       return { ...expr, condition: substituteReg(expr.condition, canon, replacement), then: substituteReg(expr.then, canon, replacement), else: substituteReg(expr.else, canon, replacement) };
     case 'cast':
       return { ...expr, operand: substituteReg(expr.operand, canon, replacement) };
+    case 'field_access':
+      return { ...expr, base: substituteReg(expr.base, canon, replacement) };
+    case 'array_access':
+      return { ...expr, base: substituteReg(expr.base, canon, replacement), index: substituteReg(expr.index, canon, replacement) };
     default:
       return expr;
   }
@@ -223,6 +312,8 @@ function hasSideEffects(expr: IRExpr): boolean {
   if (expr.kind === 'unary') return hasSideEffects(expr.operand);
   if (expr.kind === 'deref') return hasSideEffects(expr.address);
   if (expr.kind === 'ternary') return hasSideEffects(expr.condition) || hasSideEffects(expr.then) || hasSideEffects(expr.else);
+  if (expr.kind === 'field_access') return hasSideEffects(expr.base);
+  if (expr.kind === 'array_access') return hasSideEffects(expr.base) || hasSideEffects(expr.index);
   return false;
 }
 

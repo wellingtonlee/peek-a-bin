@@ -10,7 +10,12 @@ export type DecompType =
   | { kind: 'float'; size: number }
   | { kind: 'ptr'; pointee: DecompType }
   | { kind: 'bool' }
-  | { kind: 'void' };
+  | { kind: 'void' }
+  | { kind: 'struct'; id: string }
+  | { kind: 'array'; element: DecompType; count: number }
+  | { kind: 'handle' }
+  | { kind: 'ntstatus' }
+  | { kind: 'hresult' };
 
 export interface TypeContext {
   /** Map of variable/register name → inferred type */
@@ -35,6 +40,16 @@ export function typeToString(t: DecompType): string {
       if (t.size === 4) return t.signed ? 'int32_t' : 'uint32_t';
       if (t.size === 8) return t.signed ? 'int64_t' : 'uint64_t';
       return t.signed ? 'int' : 'unsigned int';
+    case 'struct':
+      return `${t.id}*`;
+    case 'array':
+      return `${typeToString(t.element)}[${t.count || ''}]`;
+    case 'handle':
+      return 'HANDLE';
+    case 'ntstatus':
+      return 'NTSTATUS';
+    case 'hresult':
+      return 'HRESULT';
   }
 }
 
@@ -53,8 +68,25 @@ export function meetTypes(a: DecompType, b: DecompType): DecompType {
     if (a.kind === 'float' && b.kind === 'float') {
       return { kind: 'float', size: Math.max(a.size, b.size) };
     }
+    if (a.kind === 'struct' && b.kind === 'struct') {
+      return a.id === b.id ? a : { kind: 'unknown' };
+    }
+    if (a.kind === 'array' && b.kind === 'array') {
+      return { kind: 'array', element: meetTypes(a.element, b.element), count: Math.max(a.count, b.count) };
+    }
     return a;
   }
+  // handle vs ptr → handle wins
+  if (a.kind === 'handle' && b.kind === 'ptr') return a;
+  if (b.kind === 'handle' && a.kind === 'ptr') return b;
+  // ntstatus/hresult vs int → ntstatus/hresult wins
+  if (a.kind === 'ntstatus' && b.kind === 'int') return a;
+  if (b.kind === 'ntstatus' && a.kind === 'int') return b;
+  if (a.kind === 'hresult' && b.kind === 'int') return a;
+  if (b.kind === 'hresult' && a.kind === 'int') return b;
+  // handle vs int → handle wins
+  if (a.kind === 'handle' && b.kind === 'int') return a;
+  if (b.kind === 'handle' && a.kind === 'int') return b;
   // ptr vs int → ptr wins
   if (a.kind === 'ptr') return a;
   if (b.kind === 'ptr') return b;
@@ -123,6 +155,28 @@ export function inferTypes(
       }
       if (expr.address.kind === 'var') {
         setType(expr.address.name, { kind: 'ptr', pointee: { kind: 'unknown' } });
+      }
+    }
+
+    // Field access base → ptr<struct>
+    if (expr.kind === 'field_access') {
+      const base = expr.base;
+      if (base.kind === 'reg') {
+        setType(base.name, { kind: 'ptr', pointee: { kind: 'struct', id: expr.structId } });
+      }
+      if (base.kind === 'var') {
+        setType(base.name, { kind: 'ptr', pointee: { kind: 'struct', id: expr.structId } });
+      }
+    }
+
+    // Array access base → pointer
+    if (expr.kind === 'array_access') {
+      const base = expr.base;
+      if (base.kind === 'reg') {
+        setType(base.name, { kind: 'ptr', pointee: { kind: 'unknown' } });
+      }
+      if (base.kind === 'var') {
+        setType(base.name, { kind: 'ptr', pointee: { kind: 'unknown' } });
       }
     }
 

@@ -197,6 +197,11 @@ class DisasmWorkerClient {
   invalidateDecompileCache(): void {
     this.decompileCache.clear();
   }
+
+  async resetStructRegistry(): Promise<void> {
+    this.decompileCache.clear();
+    await this.send('resetStructRegistry');
+  }
 }
 
 export const disasmWorker = new DisasmWorkerClient();

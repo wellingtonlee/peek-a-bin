@@ -11,6 +11,8 @@ import { promoteVars } from './promote';
 import { emitFunction } from './emit';
 import { inferTypes } from './typeInfer';
 import { RegState } from './regstate';
+import { synthesizeStructs, StructRegistry } from './structs';
+import { cleanupStructured } from './cleanup';
 
 export interface DecompileResult {
   code: string;
@@ -34,6 +36,7 @@ export function decompileFunction(
   iatMap: Map<number, { lib: string; func: string }>,
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
+  registry?: StructRegistry,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -65,14 +68,22 @@ export function decompileFunction(
     // 5. Structure CFG → structured IR statements
     const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables);
 
+    // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
+    const cleaned = cleanupStructured(structured);
+
     // 6. Type inference
-    const typeCtx = inferTypes(structured, iatMap);
+    const typeCtx = inferTypes(cleaned, iatMap);
 
     // 7. Wrap in IRFunction with variable promotion
-    const irFunc = promoteVars(func.name, func.address, structured, stackFrame, signature, is64, typeCtx);
+    let irFunc = promoteVars(func.name, func.address, cleaned, stackFrame, signature, is64, typeCtx);
 
-    // 8. Emit C text + lineMap
-    const result = emitFunction(irFunc);
+    // 8. Struct synthesis (if registry provided)
+    if (registry) {
+      irFunc = synthesizeStructs(irFunc, registry);
+    }
+
+    // 9. Emit C text + lineMap
+    const result = emitFunction(irFunc, typeCtx);
     return {
       code: result.code,
       lineMap: Array.from(result.lineMap.entries()),

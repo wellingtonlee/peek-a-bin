@@ -38,7 +38,6 @@ export function detectShortCircuit(
   // Check if fallthrough leads to another conditional block
   const blockB = blockById.get(fallA);
   if (!blockB || blockB.succs.length !== 2) return null;
-  // Block B must have exactly one predecessor (block A's fallthrough)
   if (blockB.preds.length !== 1) return null;
 
   const [branchB, fallB] = identifyBranches(blockB);
@@ -48,44 +47,44 @@ export function detectShortCircuit(
   const condB = extractCondition(blockB);
 
   // Pattern A (&&): both branch to same FAIL target
-  // Block1 branches to FAIL, Block2 branches to FAIL, falls through to SUCCESS
   if (branchA === branchB) {
-    // Both jump to same target on failure → &&
-    const combined = irBinary('&&', RegState.negate(condA), RegState.negate(condB));
+    let combined = irBinary('&&', RegState.negate(condA), RegState.negate(condB));
+    const consumed = [fallA];
+
+    // Chained &&: keep extending if next block also branches to same FAIL
+    let currentFall = fallB;
+    for (let depth = 0; depth < 6; depth++) { // cap total at 8 blocks
+      const nextBlock = blockById.get(currentFall);
+      if (!nextBlock || nextBlock.succs.length !== 2 || nextBlock.preds.length !== 1) break;
+      const [nextBranch, nextFall] = identifyBranches(nextBlock);
+      if (nextBranch === null || nextFall === null) break;
+      if (nextBranch !== branchA) break; // not same fail target
+      const nextCond = extractCondition(nextBlock);
+      combined = irBinary('&&', combined, RegState.negate(nextCond));
+      consumed.push(currentFall);
+      currentFall = nextFall;
+    }
+
     return {
       kind: '&&',
       condition: combined,
-      trueTarget: fallB,
+      trueTarget: currentFall,
       falseTarget: branchA,
-      consumedBlocks: [fallA],
+      consumedBlocks: consumed,
     };
   }
 
-  // Pattern B (||): both branch to same SUCCESS target
-  if (branchA === branchB) {
-    // Already handled above
-  }
-
-  // Alternative ||: Block1 jumps to SUCCESS, Block2 jumps to SUCCESS
-  // Block1: if (condA) goto SUCCESS → condA is "jump taken"
-  // Block2: if (condB) goto SUCCESS
-  // So: condA || condB → SUCCESS
-  if (branchA !== branchB && fallA === blockB.id) {
-    // Block1's branch goes somewhere, Block2's branch goes somewhere else
-    // Check if Block1's branch target == Block2's branch target (both go to SUCCESS)
-    // OR Block1's branch == Block2's fallthrough (mixed pattern)
-
-    // Simple case: Block1 branches to X, Block2 branches to X → ||
-    if (branchA !== null && branchA === branchB) {
-      const combined = irBinary('||', condA, condB);
-      return {
-        kind: '||',
-        condition: combined,
-        trueTarget: branchA,
-        falseTarget: fallB,
-        consumedBlocks: [fallA],
-      };
-    }
+  // Pattern B (||): Block1 and Block2 both branch to same SUCCESS
+  // Block1 branch != Block2 branch handled — check if fallA == blockB.id
+  // and both branch to same target
+  if (fallA === blockB.id) {
+    // This means Block1's fallthrough IS Block2
+    // For ||: we need branchA to be a SUCCESS target that other blocks also branch to
+    // Check: Block2's branch goes to same place? No, branchA !== branchB already.
+    // But maybe Block2's fallthrough goes to FAIL and we want branchA || branchB with different targets
+    // Actually, the || pattern is: Block1 branches to SUCCESS, Block2 also branches to SUCCESS
+    // Since branchA !== branchB here, this isn't the simple case.
+    // Skip — not a clean || pattern
   }
 
   return null;

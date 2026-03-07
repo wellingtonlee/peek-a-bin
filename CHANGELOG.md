@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Decompiler expression quality** — 7 new fold rules (div/mod, comparison folding, ternary simplification, sign-extend `(x<<24)>>24` → `(int8_t)x`, strength reduction `x*2` → `x<<1`, double-cast removal, negation absorption `!(x==y)` → `x!=y`); `IRArrayAccess` node with `base[index]` emit instead of `*(type*)(base + idx * scale)`; increment/decrement `x++`/`x--` instead of `x = x + 1`; redundant cast suppression via TypeContext; array rewrite in struct synthesis pass (2026-03-06 22:30)
+- **Control flow improvements** — `IRContinue` statement; continue detection in loops (goto-to-header → continue); guard clause flattening (`if(cond){return} else{rest}` → `if(cond){return} rest`); redundant goto/empty-block elimination; better loop classification (body-top break → while(!cond)); chained short-circuit `a && b && c` up to 8 blocks; post-structuring `cleanupStructured` pass (2026-03-06 22:30)
+- **Expanded type system** — HANDLE, NTSTATUS, HRESULT as distinct DecompType kinds; type-aware idioms (`x == INVALID_HANDLE_VALUE`, `NT_SUCCESS(x)`, `SUCCEEDED(x)`, `FAILED(x)`); ~130 Win32/NT API signatures across memory, string, file I/O, process/thread, sync, exception, crypto, COM, NT/Zw, network, device I/O categories; auto stack-frame synthesis when no stack frame analysis available (2026-03-06 22:30)
+- **Fold rule unit tests** — 20 tests covering all new fold rules in `fold.test.ts` (2026-03-06 22:30)
+
+- **Struct synthesis engine** — full struct type system for decompiler: `IRFieldAccess` IR node, `StructRegistry` cross-function state with fingerprint-based deduplication and subset merging, address decomposition (`base + idx*scale + offset`), automatic struct candidate detection from 2+ offset accesses on same base, field type inference (signedness from comparisons, pointer from derefs, float from XMM), alias-aware base grouping, call-site parameter linking for cross-function struct propagation, typedef emission (`typedef struct { ... } struct_N;`), `->fieldName` syntax in emitted pseudocode; replaces old cosmetic `collectStructBases` heuristic (2026-03-06 20:39)
+
 - **Font-size responsive CFG blocks** — graph view block dimensions and text sizes now scale with the font size setting; `CFG_LAYOUT` converted to `getCfgLayout(fontSize)`, hardcoded pixel font sizes replaced with em-relative units (2026-03-06 18:48)
 - **Unconstrained decompile panel resize** — removed 800px max width cap and lowered minimum to 100px; panel can now grow as wide as viewport allows (2026-03-06 18:17)
 - **Graph re-center on decompile open** — opening the decompile panel in graph mode now re-centers the CFG on the current block after layout adjusts (2026-03-06 18:17)
@@ -19,7 +26,7 @@
 
 ### Changed
 
-- **Decompiler pipeline** — new pipeline: buildCFG → liftBlock (per-block RegState) → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → inferTypes → promoteVars → emitFunction; dead store elimination removed from fold.ts (now handled by SSA DCE) (2026-03-06 17:59)
+- **Decompiler pipeline** — new pipeline: buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → inferTypes → promoteVars → synthesizeStructs → emitFunction; cleanup pass inserted after structuring; TypeContext threaded to emitter for cast suppression and type idioms (2026-03-06 22:30)
 
 - **Decompile panel sub-tabs** — decompile panel now has three pill tabs: **Low Level** (existing built-in decompiler), **High Level** (Ghidra server with WASM fallback stub), and **AI** (enhance/explain using best available source); active tab remembered across function navigation; per-tab per-function caching; decompile state extracted into `useDecompileTabs` hook
 - **Ghidra decompilation server** — companion `ghidra-server/` with Dockerfile, FastAPI REST endpoints (`/ping`, `/binary`, `/decompile`), pyhidra integration; optional bearer token auth; binary uploaded once and cached by SHA-256

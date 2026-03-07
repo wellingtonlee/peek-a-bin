@@ -67,6 +67,23 @@ export interface IRTernary {
   else: IRExpr;
 }
 
+export interface IRFieldAccess {
+  kind: 'field_access';
+  base: IRExpr;          // struct pointer
+  structId: string;      // registry key, e.g. "struct_1"
+  fieldOffset: number;
+  fieldName: string;     // "field_0x10", "array_0x20"
+  size: number;          // access size
+}
+
+export interface IRArrayAccess {
+  kind: 'array_access';
+  base: IRExpr;
+  index: IRExpr;
+  elementSize: number;
+  size: number;
+}
+
 export interface IRUnknown {
   kind: 'unknown';
   text: string;
@@ -74,7 +91,7 @@ export interface IRUnknown {
 
 export type IRExpr =
   | IRConst | IRReg | IRVar | IRBinary | IRUnary
-  | IRDeref | IRCall | IRCast | IRTernary | IRUnknown;
+  | IRDeref | IRCall | IRCast | IRTernary | IRFieldAccess | IRArrayAccess | IRUnknown;
 
 // ── IR Statement Types ──
 
@@ -170,6 +187,10 @@ export interface IRBreak {
   kind: 'break';
 }
 
+export interface IRContinue {
+  kind: 'continue';
+}
+
 export interface IRPhi {
   kind: 'phi';
   dest: IRReg;
@@ -180,7 +201,7 @@ export interface IRPhi {
 export type IRStmt =
   | IRAssign | IRStore | IRCallStmt | IRReturn
   | IRIf | IRWhile | IRDoWhile | IRFor | IRSwitch
-  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak | IRPhi;
+  | IRGoto | IRLabel | IRComment | IRRaw | IRBreak | IRContinue | IRPhi;
 
 // ── Function Container ──
 
@@ -201,6 +222,7 @@ export interface IRFunction {
   params: IRParam[];
   locals: IRLocal[];
   body: IRStmt[];
+  typedefs?: import('./structs').StructDef[];
 }
 
 // ── Helpers ──
@@ -230,6 +252,14 @@ export function irUnary(op: UnaryOp, operand: IRExpr): IRUnary {
 
 export function irDeref(address: IRExpr, size: number): IRDeref {
   return { kind: 'deref', address, size };
+}
+
+export function irFieldAccess(base: IRExpr, structId: string, fieldOffset: number, fieldName: string, size: number): IRFieldAccess {
+  return { kind: 'field_access', base, structId, fieldOffset, fieldName, size };
+}
+
+export function irArrayAccess(base: IRExpr, index: IRExpr, elementSize: number, size: number): IRArrayAccess {
+  return { kind: 'array_access', base, index, elementSize, size };
 }
 
 export function irUnknown(text: string): IRUnknown {
@@ -268,6 +298,8 @@ export function walkExpr(expr: IRExpr, fn: (e: IRExpr) => void): void {
     case 'call': expr.args.forEach(a => walkExpr(a, fn)); break;
     case 'cast': walkExpr(expr.operand, fn); break;
     case 'ternary': walkExpr(expr.condition, fn); walkExpr(expr.then, fn); walkExpr(expr.else, fn); break;
+    case 'field_access': walkExpr(expr.base, fn); break;
+    case 'array_access': walkExpr(expr.base, fn); walkExpr(expr.index, fn); break;
   }
 }
 

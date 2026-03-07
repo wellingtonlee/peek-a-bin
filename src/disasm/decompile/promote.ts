@@ -94,6 +94,10 @@ function promoteExpr(
       };
     case 'cast':
       return { ...expr, operand: promoteExpr(expr.operand, is64, varLookup, paramLookup) };
+    case 'field_access':
+      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup) };
+    case 'array_access':
+      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup), index: promoteExpr(expr.index, is64, varLookup, paramLookup) };
     default:
       return expr;
   }
@@ -253,6 +257,51 @@ function inferVarTypes(
   }
 }
 
+/**
+ * Auto-synthesize stack frame locals when stackFrame is null.
+ * Scans body for [rbp - X] and [rsp + X] deref patterns, collects unique
+ * (offset, maxSize) pairs, deduplicates overlapping accesses.
+ */
+function synthesizeStackFrame(
+  body: IRStmt[],
+  is64: boolean,
+  varLookup: Map<number, string>,
+  locals: IRLocal[],
+): void {
+  const accesses = new Map<number, number>(); // offset → max size
+
+  walkStmts(body, (expr) => {
+    const sa = matchStackAccess(expr, is64);
+    if (sa && !sa.isParam && expr.kind === 'deref') {
+      const existing = accesses.get(sa.offset);
+      if (!existing || expr.size > existing) {
+        accesses.set(sa.offset, expr.size);
+      }
+    }
+  });
+
+  // Deduplicate overlapping accesses (largest size wins)
+  const sortedOffsets = [...accesses.entries()].sort((a, b) => a[0] - b[0]);
+  const seen = new Set<number>();
+  for (const [offset, size] of sortedOffsets) {
+    // Skip if this offset overlaps with a previously created variable
+    let overlaps = false;
+    for (const prev of seen) {
+      const prevSize = accesses.get(prev) ?? 0;
+      if (offset >= prev && offset < prev + prevSize) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps) continue;
+
+    const varName = `var_${offset.toString(16).toUpperCase()}`;
+    varLookup.set(offset, varName);
+    locals.push({ name: varName, type: sizeToType(size) });
+    seen.add(offset);
+  }
+}
+
 const FASTCALL_REGS = ['rcx', 'rdx', 'r8', 'r9'];
 
 /**
@@ -285,6 +334,9 @@ export function promoteVars(
         locals.push({ name: v.name, type });
       }
     }
+  } else {
+    // Auto stack-frame: scan body for [rbp - X] and [rsp + X] deref patterns
+    synthesizeStackFrame(body, is64, varLookup, locals);
   }
 
   // For x64 fastcall: add register params

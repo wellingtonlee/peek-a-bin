@@ -2,7 +2,7 @@ import type { BasicBlock, Loop } from '../cfg';
 import type { IRStmt, IRExpr } from './ir';
 import { irBinary } from './ir';
 import { RegState } from './regstate';
-import { detectShortCircuit, detectMultiExitLoop } from './cfgpatterns';
+import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from './cfgpatterns';
 
 /**
  * Structure a CFG into high-level control flow (if/while/do-while/switch).
@@ -484,8 +484,11 @@ export function structureCFG(
 
         const body = structureFrom(bodyStart, loopStopAt, loop.bodyAddrs);
 
+        // Continue detection: scan body for conditional branches targeting header (back-edge)
+        const bodyWithContinue = insertContinueStmts(body, header, loop);
+
         // Include header statements if any (before the condition check)
-        const fullBody = headerStmts.length > 0 ? [...headerStmts, ...body] : body;
+        const fullBody = headerStmts.length > 0 ? [...headerStmts, ...bodyWithContinue] : bodyWithContinue;
 
         // The condition for while: we continue looping when condition takes us to body
         // If branch goes to body (exit is fallthrough): while(condition)
@@ -495,6 +498,25 @@ export function structureCFG(
           whileCondition = RegState.negate(condition);
         } else {
           whileCondition = condition;
+        }
+
+        // Better loop classification: if body starts with if (cond) break; → while(!cond)
+        if (whileCondition.kind === 'const' && whileCondition.value === 1 && fullBody.length > 0) {
+          const first = fullBody[0];
+          if (first.kind === 'if' && first.thenBody.length === 1 && first.thenBody[0].kind === 'break' && !first.elseBody) {
+            return [{ kind: 'while', condition: RegState.negate(first.condition), body: fullBody.slice(1) }];
+          }
+        }
+
+        // Try for-loop detection
+        const bodyBlockIds = collectLoopBodyBlockIds(header, loop);
+        const forLoop = detectForLoop(header, bodyBlockIds, liftedBlocks, blockById);
+        if (forLoop) {
+          // Wire actual header condition
+          const forCond = whileCondition.kind === 'const' && whileCondition.value === 1
+            ? whileCondition
+            : whileCondition;
+          return [{ kind: 'for', init: forLoop.init, condition: forCond, update: forLoop.update, body: forLoop.bodyStmts }];
         }
 
         return [{ kind: 'while', condition: whileCondition, body: fullBody }];
@@ -528,6 +550,40 @@ export function structureCFG(
     }
 
     return [{ kind: 'do_while', condition: loopCondition, body }];
+  }
+
+  /** Collect block IDs that are part of a loop body. */
+  function collectLoopBodyBlockIds(header: BasicBlock, loop: Loop): number[] {
+    const ids: number[] = [];
+    for (const b of blocks) {
+      if (b.id === header.id) continue;
+      if (loop.bodyAddrs.has(b.startAddr) || loop.bodyAddrs.has(b.insns[0]?.address)) {
+        ids.push(b.id);
+      }
+    }
+    return ids;
+  }
+
+  /** Insert continue statements for conditional branches back to loop header. */
+  function insertContinueStmts(body: IRStmt[], header: BasicBlock, loop: Loop): IRStmt[] {
+    const headerLabel = `loc_${header.startAddr.toString(16).toUpperCase()}`;
+    return body.map(stmt => {
+      // Replace goto to header with continue
+      if (stmt.kind === 'goto' && stmt.label === headerLabel) {
+        return { kind: 'continue' as const };
+      }
+      // Check if-goto-header patterns: if (cond) { goto header; } → if (cond) { continue; }
+      if (stmt.kind === 'if') {
+        const newThen = stmt.thenBody.map(s =>
+          s.kind === 'goto' && s.label === headerLabel ? { kind: 'continue' as const } as IRStmt : s
+        );
+        const newElse = stmt.elseBody?.map(s =>
+          s.kind === 'goto' && s.label === headerLabel ? { kind: 'continue' as const } as IRStmt : s
+        );
+        return { ...stmt, thenBody: newThen, elseBody: newElse };
+      }
+      return stmt;
+    });
   }
 
   /** Structure a switch statement. */

@@ -1,6 +1,9 @@
 import type { IRExpr, IRStmt, IRFunction, BinaryOp } from './ir';
-import { walkStmts } from './ir';
+import { canonReg } from './ir';
 import { isPlausibleIOCTL, formatIOCTL } from '../../analysis/driver';
+import type { StructDef } from './structs';
+import type { TypeContext, DecompType } from './typeInfer';
+import { typeToString } from './typeInfer';
 
 // ── Expression Emission ──
 
@@ -45,31 +48,44 @@ function formatHex(value: number): string {
 
 const COMPOUND_OPS = new Set<string>(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>', '>>>']);
 
-/** Collect struct base candidates: names that appear with 2+ distinct offsets in base + const deref patterns. */
-function collectStructBases(body: IRStmt[]): Set<string> {
-  const offsets = new Map<string, Set<number>>();
-  walkStmts(body, (expr) => {
-    if (expr.kind === 'deref' && expr.address.kind === 'binary' && expr.address.op === '+' &&
-        expr.address.right.kind === 'const') {
-      const base = expr.address.left;
-      let baseName: string | null = null;
-      if (base.kind === 'reg') baseName = base.name;
-      else if (base.kind === 'var') baseName = base.name;
-      if (baseName) {
-        const set = offsets.get(baseName) ?? new Set();
-        set.add(expr.address.right.value);
-        offsets.set(baseName, set);
-      }
-    }
-  });
-  const result = new Set<string>();
-  for (const [name, set] of offsets) {
-    if (set.size >= 2) result.add(name);
-  }
-  return result;
+let _typeCtx: TypeContext | undefined;
+
+function getExprType(expr: IRExpr): DecompType | undefined {
+  if (!_typeCtx) return undefined;
+  if (expr.kind === 'reg') return _typeCtx.types.get(canonReg(expr.name));
+  if (expr.kind === 'var') return _typeCtx.types.get(expr.name);
+  return undefined;
 }
 
-function emitExpr(expr: IRExpr, parentPrec = 0, structBases?: Set<string>): string {
+function emitTypeIdiom(expr: IRExpr & { kind: 'binary' }): string | null {
+  const leftType = getExprType(expr.left);
+
+  // HANDLE: x == 0xFFFFFFFF → x == INVALID_HANDLE_VALUE
+  if (leftType?.kind === 'handle' && expr.op === '==' &&
+      expr.right.kind === 'const' && (expr.right.value === 0xFFFFFFFF || expr.right.value === -1)) {
+    return `${emitExpr(expr.left, 0)} == INVALID_HANDLE_VALUE`;
+  }
+  if (leftType?.kind === 'handle' && expr.op === '!=' &&
+      expr.right.kind === 'const' && (expr.right.value === 0xFFFFFFFF || expr.right.value === -1)) {
+    return `${emitExpr(expr.left, 0)} != INVALID_HANDLE_VALUE`;
+  }
+
+  // NTSTATUS: x >= 0 → NT_SUCCESS(x), x < 0 → !NT_SUCCESS(x)
+  if (leftType?.kind === 'ntstatus' && expr.right.kind === 'const' && expr.right.value === 0) {
+    if (expr.op === '>=' || expr.op === 'u>=') return `NT_SUCCESS(${emitExpr(expr.left, 0)})`;
+    if (expr.op === '<') return `!NT_SUCCESS(${emitExpr(expr.left, 0)})`;
+  }
+
+  // HRESULT: x >= 0 → SUCCEEDED(x), x < 0 → FAILED(x)
+  if (leftType?.kind === 'hresult' && expr.right.kind === 'const' && expr.right.value === 0) {
+    if (expr.op === '>=' || expr.op === 'u>=') return `SUCCEEDED(${emitExpr(expr.left, 0)})`;
+    if (expr.op === '<') return `FAILED(${emitExpr(expr.left, 0)})`;
+  }
+
+  return null;
+}
+
+function emitExpr(expr: IRExpr, parentPrec = 0): string {
   switch (expr.kind) {
     case 'const': {
       const hex = formatHex(expr.value);
@@ -87,46 +103,66 @@ function emitExpr(expr: IRExpr, parentPrec = 0, structBases?: Set<string>): stri
       return expr.name;
 
     case 'binary': {
+      // Type-aware idioms
+      if (_typeCtx) {
+        const idiom = emitTypeIdiom(expr);
+        if (idiom) return parentPrec > 0 ? `(${idiom})` : idiom;
+      }
       const prec = PREC[expr.op] ?? 0;
-      const left = emitExpr(expr.left, prec, structBases);
-      const right = emitExpr(expr.right, prec + 1, structBases);
+      const left = emitExpr(expr.left, prec);
+      const right = emitExpr(expr.right, prec + 1);
       const result = `${left} ${opStr(expr.op)} ${right}`;
       return prec < parentPrec ? `(${result})` : result;
     }
 
     case 'unary': {
-      const operand = emitExpr(expr.operand, 99, structBases);
+      const operand = emitExpr(expr.operand, 99);
       return `${expr.op}${operand}`;
     }
 
     case 'deref': {
-      // Struct field access: base->field_0xN
-      if (structBases && expr.address.kind === 'binary' && expr.address.op === '+' &&
-          expr.address.right.kind === 'const') {
-        const base = expr.address.left;
-        const baseName = base.kind === 'reg' ? base.name : base.kind === 'var' ? base.name : null;
-        if (baseName && structBases.has(baseName)) {
-          return `${baseName}->field_0x${expr.address.right.value.toString(16).toUpperCase()}`;
-        }
-      }
       const type = sizeToType(expr.size);
-      const addr = emitExpr(expr.address, 0, structBases);
+      const addr = emitExpr(expr.address, 0);
       return `*(${type}*)(${addr})`;
+    }
+
+    case 'field_access':
+      return `${emitExpr(expr.base)}->${expr.fieldName}`;
+
+    case 'array_access': {
+      const type = sizeToType(expr.elementSize);
+      const base = emitExpr(expr.base, 0);
+      const index = emitExpr(expr.index, 0);
+      // If base is a field_access, use -> syntax: base->field[index]
+      if (expr.base.kind === 'field_access') {
+        return `${emitExpr(expr.base)}[${index}]`;
+      }
+      return `((${type}*)${base})[${index}]`;
     }
 
     case 'call': {
       const name = expr.display?.split('!')?.pop() ?? expr.target;
-      const args = expr.args.map(a => emitExpr(a, 0, structBases)).join(', ');
+      const args = expr.args.map(a => emitExpr(a, 0)).join(', ');
       return `${name}(${args})`;
     }
 
-    case 'cast':
-      return `(${expr.type})${emitExpr(expr.operand, 99, structBases)}`;
+    case 'cast': {
+      // Redundant cast suppression: skip cast when operand's known type matches
+      if (_typeCtx && (expr.operand.kind === 'reg' || expr.operand.kind === 'var')) {
+        const name = expr.operand.kind === 'reg' ? expr.operand.name : expr.operand.name;
+        const known = _typeCtx.types.get(name);
+        if (known && known.kind !== 'unknown') {
+          const knownStr = typeToString(known);
+          if (knownStr === expr.type) return emitExpr(expr.operand, parentPrec);
+        }
+      }
+      return `(${expr.type})${emitExpr(expr.operand, 99)}`;
+    }
 
     case 'ternary': {
-      const cond = emitExpr(expr.condition, 0, structBases);
-      const then = emitExpr(expr.then, 0, structBases);
-      const els = emitExpr(expr.else, 0, structBases);
+      const cond = emitExpr(expr.condition, 0);
+      const then = emitExpr(expr.then, 0);
+      const els = emitExpr(expr.else, 0);
       const result = `${cond} ? ${then} : ${els}`;
       return parentPrec > 0 ? `(${result})` : result;
     }
@@ -159,7 +195,7 @@ interface EmitResult {
   addrs: (number | undefined)[];
 }
 
-function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitResult {
+function emitStmt(stmt: IRStmt, level: number): EmitResult {
   const pad = indent(level);
   const lines: string[] = [];
   const addrs: (number | undefined)[] = [];
@@ -172,13 +208,18 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
 
   switch (stmt.kind) {
     case 'assign': {
-      const dest = emitExpr(stmt.dest, 0, structBases);
-      const src = emitExpr(stmt.src, 0, structBases);
+      const dest = emitExpr(stmt.dest, 0);
+      const src = emitExpr(stmt.src, 0);
       // Compound assignment: dest = dest OP rhs → dest OP= rhs
       if (stmt.src.kind === 'binary' && COMPOUND_OPS.has(stmt.src.op)) {
-        const lhs = emitExpr(stmt.src.left, 0, structBases);
+        const lhs = emitExpr(stmt.src.left, 0);
         if (lhs === dest) {
-          const rhs = emitExpr(stmt.src.right, 0, structBases);
+          const rhs = emitExpr(stmt.src.right, 0);
+          // Increment/decrement: x += 1 → x++, x -= 1 → x--
+          if (stmt.src.right.kind === 'const' && stmt.src.right.value === 1) {
+            if (stmt.src.op === '+') { push(`${pad}${dest}++;`, addr); break; }
+            if (stmt.src.op === '-') { push(`${pad}${dest}--;`, addr); break; }
+          }
           push(`${pad}${dest} ${opStr(stmt.src.op)}= ${rhs};`, addr);
           break;
         }
@@ -188,54 +229,32 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     }
 
     case 'store': {
-      // Struct field store: base->field_0xN = val
-      if (structBases && stmt.address.kind === 'binary' && stmt.address.op === '+' &&
-          stmt.address.right.kind === 'const') {
-        const base = stmt.address.left;
-        const baseName = base.kind === 'reg' ? base.name : base.kind === 'var' ? base.name : null;
-        if (baseName && structBases.has(baseName)) {
-          const field = `${baseName}->field_0x${stmt.address.right.value.toString(16).toUpperCase()}`;
-          // Compound assignment for struct stores
-          if (stmt.value.kind === 'binary' && COMPOUND_OPS.has(stmt.value.op)) {
-            const derefExpr: IRExpr = { kind: 'deref', address: stmt.address, size: stmt.size };
-            const lhs = emitExpr(derefExpr, 0, structBases);
-            if (lhs === field) {
-              const rhs = emitExpr(stmt.value.right, 0, structBases);
-              push(`${pad}${field} ${opStr(stmt.value.op)}= ${rhs};`, addr);
-              break;
-            }
-          }
-          const val = emitExpr(stmt.value, 0, structBases);
-          push(`${pad}${field} = ${val};`, addr);
-          break;
-        }
-      }
       const type = sizeToType(stmt.size);
-      const addrStr = emitExpr(stmt.address, 0, structBases);
+      const addrStr = emitExpr(stmt.address, 0);
       const storeTarget = `*(${type}*)(${addrStr})`;
       // Compound assignment for regular stores
       if (stmt.value.kind === 'binary' && COMPOUND_OPS.has(stmt.value.op)) {
-        const lhs = emitExpr(stmt.value.left, 0, structBases);
+        const lhs = emitExpr(stmt.value.left, 0);
         if (lhs === storeTarget) {
-          const rhs = emitExpr(stmt.value.right, 0, structBases);
+          const rhs = emitExpr(stmt.value.right, 0);
           push(`${pad}${storeTarget} ${opStr(stmt.value.op)}= ${rhs};`, addr);
           break;
         }
       }
-      const val = emitExpr(stmt.value, 0, structBases);
+      const val = emitExpr(stmt.value, 0);
       push(`${pad}${storeTarget} = ${val};`, addr);
       break;
     }
 
     case 'call_stmt': {
-      const call = emitExpr(stmt.call, 0, structBases);
+      const call = emitExpr(stmt.call, 0);
       push(`${pad}${call};`, addr);
       break;
     }
 
     case 'return': {
       if (stmt.value) {
-        const val = emitExpr(stmt.value, 0, structBases);
+        const val = emitExpr(stmt.value, 0);
         push(`${pad}return ${val};`, addr);
       } else {
         push(`${pad}return;`, addr);
@@ -244,10 +263,10 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     }
 
     case 'if': {
-      const cond = emitExpr(stmt.condition, 0, structBases);
+      const cond = emitExpr(stmt.condition, 0);
       push(`${pad}if (${cond}) {`);
       for (const s of stmt.thenBody) {
-        const r = emitStmt(s, level + 1, structBases);
+        const r = emitStmt(s, level + 1);
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
@@ -258,7 +277,7 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
           push(`${pad}} else `);
           // Remove last line's newline context and append if
           const lastIdx = lines.length - 1;
-          const elseIfResult = emitStmt(elseIf, level, structBases);
+          const elseIfResult = emitStmt(elseIf, level);
           if (elseIfResult.lines.length > 0) {
             lines[lastIdx] = lines[lastIdx] + elseIfResult.lines[0].trimStart();
             addrs[lastIdx] = elseIfResult.addrs[0]; // inherit addr from else-if
@@ -268,7 +287,7 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
         } else {
           push(`${pad}} else {`);
           for (const s of stmt.elseBody) {
-            const r = emitStmt(s, level + 1, structBases);
+            const r = emitStmt(s, level + 1);
             lines.push(...r.lines);
             addrs.push(...r.addrs);
           }
@@ -281,10 +300,10 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     }
 
     case 'while': {
-      const cond = emitExpr(stmt.condition, 0, structBases);
+      const cond = emitExpr(stmt.condition, 0);
       push(`${pad}while (${cond}) {`);
       for (const s of stmt.body) {
-        const r = emitStmt(s, level + 1, structBases);
+        const r = emitStmt(s, level + 1);
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
@@ -295,24 +314,24 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     case 'do_while': {
       push(`${pad}do {`);
       for (const s of stmt.body) {
-        const r = emitStmt(s, level + 1, structBases);
+        const r = emitStmt(s, level + 1);
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
-      const cond = emitExpr(stmt.condition, 0, structBases);
+      const cond = emitExpr(stmt.condition, 0);
       push(`${pad}} while (${cond});`);
       break;
     }
 
     case 'switch': {
-      const expr = emitExpr(stmt.expr, 0, structBases);
+      const expr = emitExpr(stmt.expr, 0);
       push(`${pad}switch (${expr}) {`);
       for (const c of stmt.cases) {
         for (const v of c.values) {
           push(`${pad}case ${formatHex(v)}:`);
         }
         for (const s of c.body) {
-          const r = emitStmt(s, level + 2, structBases);
+          const r = emitStmt(s, level + 2);
           lines.push(...r.lines);
           addrs.push(...r.addrs);
         }
@@ -320,7 +339,7 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
       if (stmt.defaultBody) {
         push(`${pad}default:`);
         for (const s of stmt.defaultBody) {
-          const r = emitStmt(s, level + 2, structBases);
+          const r = emitStmt(s, level + 2);
           lines.push(...r.lines);
           addrs.push(...r.addrs);
         }
@@ -346,14 +365,14 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
       break;
 
     case 'for': {
-      const initR = emitStmt(stmt.init, 0, structBases);
+      const initR = emitStmt(stmt.init, 0);
       const initStr = initR.lines[0]?.trim().replace(/;$/, '') ?? '';
-      const updateR = emitStmt(stmt.update, 0, structBases);
+      const updateR = emitStmt(stmt.update, 0);
       const updateStr = updateR.lines[0]?.trim().replace(/;$/, '') ?? '';
-      const cond = emitExpr(stmt.condition, 0, structBases);
+      const cond = emitExpr(stmt.condition, 0);
       push(`${pad}for (${initStr}; ${cond}; ${updateStr}) {`);
       for (const s of stmt.body) {
-        const r = emitStmt(s, level + 1, structBases);
+        const r = emitStmt(s, level + 1);
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
@@ -364,6 +383,10 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
     case 'break':
       push(`${pad}break;`);
       break;
+
+    case 'continue':
+      push(`${pad}continue;`);
+      break;
   }
 
   return { lines, addrs };
@@ -371,17 +394,40 @@ function emitStmt(stmt: IRStmt, level: number, structBases?: Set<string>): EmitR
 
 // ── Function Emission ──
 
+function fieldTypeString(field: import('./structs').StructField): string {
+  return typeToString(field.type);
+}
+
 export interface EmitFunctionResult {
   code: string;
   lineMap: Map<number, number>;  // line number (0-based) → instruction address
 }
 
-export function emitFunction(func: IRFunction): EmitFunctionResult {
+export function emitFunction(func: IRFunction, typeCtx?: TypeContext): EmitFunctionResult {
+  _typeCtx = typeCtx;
   const lines: string[] = [];
   const lineAddrs: (number | undefined)[] = [];
 
-  // Collect struct base candidates before emission
-  const structBases = collectStructBases(func.body);
+  // Emit typedef block for struct definitions
+  if (func.typedefs && func.typedefs.length > 0) {
+    for (const def of func.typedefs) {
+      lines.push(`typedef struct {`);
+      lineAddrs.push(undefined);
+      for (const field of def.fields) {
+        const typeStr = fieldTypeString(field);
+        if (field.isArray) {
+          lines.push(`    ${typeStr} ${field.name}[];`);
+        } else {
+          lines.push(`    ${typeStr} ${field.name};`);
+        }
+        lineAddrs.push(undefined);
+      }
+      lines.push(`} ${def.id};`);
+      lineAddrs.push(undefined);
+      lines.push('');
+      lineAddrs.push(undefined);
+    }
+  }
 
   // Function header
   const params = func.params.map(p => `${p.type} ${p.name}`).join(', ');
@@ -400,7 +446,7 @@ export function emitFunction(func: IRFunction): EmitFunctionResult {
 
   // Body
   for (const stmt of func.body) {
-    const result = emitStmt(stmt, 1, structBases);
+    const result = emitStmt(stmt, 1);
     lines.push(...result.lines);
     lineAddrs.push(...result.addrs);
   }
@@ -416,5 +462,6 @@ export function emitFunction(func: IRFunction): EmitFunctionResult {
     }
   }
 
+  _typeCtx = undefined;
   return { code: lines.join('\n'), lineMap };
 }

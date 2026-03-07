@@ -28,6 +28,10 @@ function replaceRegInExpr(expr: IRExpr, oldReg: IRReg, newVal: IRExpr): IRExpr {
       return { ...expr, condition: replaceRegInExpr(expr.condition, oldReg, newVal), then: replaceRegInExpr(expr.then, oldReg, newVal), else: replaceRegInExpr(expr.else, oldReg, newVal) };
     case 'cast':
       return { ...expr, operand: replaceRegInExpr(expr.operand, oldReg, newVal) };
+    case 'field_access':
+      return { ...expr, base: replaceRegInExpr(expr.base, oldReg, newVal) };
+    case 'array_access':
+      return { ...expr, base: replaceRegInExpr(expr.base, oldReg, newVal), index: replaceRegInExpr(expr.index, oldReg, newVal) };
     default:
       return expr;
   }
@@ -152,6 +156,8 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
     if (expr.kind === 'call') expr.args.forEach(countExprUses);
     if (expr.kind === 'ternary') { countExprUses(expr.condition); countExprUses(expr.then); countExprUses(expr.else); }
     if (expr.kind === 'cast') countExprUses(expr.operand);
+    if (expr.kind === 'field_access') countExprUses(expr.base);
+    if (expr.kind === 'array_access') { countExprUses(expr.base); countExprUses(expr.index); }
   }
 
   function countStmtUses(s: IRStmt) {
@@ -224,6 +230,8 @@ function hasSideEffects(expr: IRExpr): boolean {
   if (expr.kind === 'unary') return hasSideEffects(expr.operand);
   if (expr.kind === 'deref') return hasSideEffects(expr.address);
   if (expr.kind === 'ternary') return hasSideEffects(expr.condition) || hasSideEffects(expr.then) || hasSideEffects(expr.else);
+  if (expr.kind === 'field_access') return hasSideEffects(expr.base);
+  if (expr.kind === 'array_access') return hasSideEffects(expr.base) || hasSideEffects(expr.index);
   return false;
 }
 

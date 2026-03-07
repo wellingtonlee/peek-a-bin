@@ -8,6 +8,7 @@ import type { FunctionSignature } from '../disasm/signatures';
 import { extractStrings } from '../pe/parser';
 import type { SectionHeader } from '../pe/types';
 import { decompileFunction, type DecompileResult } from '../disasm/decompile/pipeline';
+import { StructRegistry } from '../disasm/decompile/structs';
 import { isPlausibleIOCTL, formatIOCTL, detectIRPDispatches, type IRPDispatchEntry } from '../analysis/driver';
 
 let cs32: any;
@@ -16,6 +17,7 @@ let initialized = false;
 let stringMap: Map<number, string> = new Map();
 let iatMap: Map<number, { lib: string; func: string }> = new Map();
 let driverMode = false;
+let structRegistry = new StructRegistry();
 
 // --- IndexedDB WASM module cache ---
 const IDB_NAME = 'peek-a-bin-wasm';
@@ -888,7 +890,7 @@ function buildAllXrefs(
 // Message protocol
 interface WorkerRequest {
   id: number;
-  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction' | 'detectIRPDispatches';
+  method: 'init' | 'configure' | 'disassemble' | 'hybridDisassemble' | 'detectFunctions' | 'buildTypedXrefMap' | 'buildAllXrefs' | 'extractStrings' | 'decompileFunction' | 'detectIRPDispatches' | 'resetStructRegistry';
   args: any;
 }
 
@@ -908,6 +910,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         stringMap = new Map(args.stringEntries);
         iatMap = new Map(args.iatEntries);
         if (args.driverMode !== undefined) driverMode = args.driverMode;
+        structRegistry = new StructRegistry();
         result = true;
         break;
 
@@ -944,6 +947,11 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         result = detectIRPDispatches(args.instructions as Instruction[], args.is64 as boolean);
         break;
 
+      case 'resetStructRegistry':
+        structRegistry = new StructRegistry();
+        result = true;
+        break;
+
       case 'decompileFunction': {
         const xrefEntries: [number, Xref[]][] = args.xrefEntries ?? [];
         const xMap = new Map<number, Xref[]>(xrefEntries);
@@ -966,6 +974,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           iMap,
           sMap,
           fMap,
+          structRegistry,
         );
         break;
       }
