@@ -11,11 +11,20 @@ const PROVIDER_DEFAULTS: Record<string, { model: string; baseUrl: string }> = {
   openai: { model: "gpt-4o", baseUrl: "https://api.openai.com" },
 };
 
+type SettingsTab = "ai" | "ghidra" | "display";
+
+const TABS: { id: SettingsTab; label: string }[] = [
+  { id: "ai", label: "AI" },
+  { id: "ghidra", label: "Ghidra" },
+  { id: "display", label: "Display" },
+];
+
 export function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
   const [showKey, setShowKey] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
   const [decompServer, setDecompServer] = useState<DecompileServerSettings>(loadDecompileServer);
+  const [activeTab, setActiveTab] = useState<SettingsTab>("ai");
 
   useEffect(() => {
     if (open) {
@@ -58,160 +67,200 @@ export function SettingsModal({ open, onClose }: Props) {
           <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
         </div>
 
+        {/* Tab bar */}
+        <div className="flex border-b border-gray-700">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-xs font-medium transition-colors ${
+                activeTab === tab.id
+                  ? "text-blue-400 border-b-2 border-blue-400 -mb-px"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
         <div className="px-4 py-3 space-y-3">
-          {/* Provider */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              Provider
-            </label>
-            <div className="flex gap-3">
-              {(["anthropic", "openai"] as const).map((p) => (
-                <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="provider"
-                    checked={settings.provider === p}
-                    onChange={() => handleProviderChange(p)}
-                    className="accent-blue-500"
-                  />
-                  {p === "anthropic" ? "Anthropic Claude" : "OpenAI-compatible"}
+          {/* AI Tab */}
+          {activeTab === "ai" && (
+            <>
+              {/* Provider */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Provider
                 </label>
-              ))}
-            </div>
-          </div>
+                <div className="flex gap-3">
+                  {(["anthropic", "openai"] as const).map((p) => (
+                    <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="provider"
+                        checked={settings.provider === p}
+                        onChange={() => handleProviderChange(p)}
+                        className="accent-blue-500"
+                      />
+                      {p === "anthropic" ? "Anthropic Claude" : "OpenAI-compatible"}
+                    </label>
+                  ))}
+                </div>
+              </div>
 
-          {/* API Key */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              API Key
-            </label>
-            <div className="flex gap-1">
-              <input
-                type={showKey ? "text" : "password"}
-                value={settings.apiKey}
-                onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
-                placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
-                className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={() => setShowKey((v) => !v)}
-                className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
-              >
-                {showKey ? "Hide" : "Show"}
-              </button>
-            </div>
-          </div>
-
-          {/* Model */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              Model
-            </label>
-            <input
-              type="text"
-              value={settings.model}
-              onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
-              className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-
-          {/* Enhance Source */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              Enhance Source
-            </label>
-            <div className="flex gap-3">
-              {(["pseudocode", "assembly"] as const).map((s) => (
-                <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="enhanceSource"
-                    checked={settings.enhanceSource === s}
-                    onChange={() => setSettings((prev) => ({ ...prev, enhanceSource: s }))}
-                    className="accent-blue-500"
-                  />
-                  {s === "pseudocode" ? "Pseudocode (default)" : "Assembly"}
+              {/* API Key */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  API Key
                 </label>
-              ))}
-            </div>
-            <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
-          </div>
+                <div className="flex gap-1">
+                  <input
+                    type={showKey ? "text" : "password"}
+                    value={settings.apiKey}
+                    onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
+                    placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
+                    className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={() => setShowKey((v) => !v)}
+                    className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
+                  >
+                    {showKey ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
 
-          {/* Font Size */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              Font Size
-            </label>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={10}
-                max={16}
-                step={1}
-                value={fontSize}
-                onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                className="flex-1 accent-blue-500"
-              />
-              <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
-            </div>
-          </div>
-
-          {/* Decompilation Server */}
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-              Decompilation Server
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
-              <input
-                type="checkbox"
-                checked={decompServer.enabled}
-                onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
-                className="accent-blue-500"
-              />
-              Enable Ghidra server
-            </label>
-            {decompServer.enabled && (
-              <div className="space-y-2">
+              {/* Model */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Model
+                </label>
                 <input
                   type="text"
-                  value={decompServer.ghidraUrl}
-                  onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
-                  placeholder="http://localhost:8765"
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                />
-                <input
-                  type="text"
-                  value={decompServer.apiKey}
-                  onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
-                  placeholder="API key (optional)"
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  value={settings.model}
+                  onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
                 />
               </div>
-            )}
-            <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
-          </div>
 
-          {/* Base URL (OpenAI only) */}
-          {settings.provider === "openai" && (
-            <div>
-              <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                Base URL
-              </label>
-              <input
-                type="text"
-                value={settings.baseUrl}
-                onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
-                placeholder="https://api.openai.com"
-                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-              />
-              <p className="text-[10px] text-gray-600 mt-0.5">For Ollama, LM Studio, vLLM, etc.</p>
-            </div>
+              {/* Enhance Source */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Enhance Source
+                </label>
+                <div className="flex gap-3">
+                  {(["pseudocode", "assembly"] as const).map((s) => (
+                    <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="enhanceSource"
+                        checked={settings.enhanceSource === s}
+                        onChange={() => setSettings((prev) => ({ ...prev, enhanceSource: s }))}
+                        className="accent-blue-500"
+                      />
+                      {s === "pseudocode" ? "Pseudocode (default)" : "Assembly"}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
+              </div>
+
+              {/* Base URL (OpenAI only) */}
+              {settings.provider === "openai" && (
+                <div>
+                  <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                    Base URL
+                  </label>
+                  <input
+                    type="text"
+                    value={settings.baseUrl}
+                    onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
+                    placeholder="https://api.openai.com"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  />
+                  <p className="text-[10px] text-gray-600 mt-0.5">For Ollama, LM Studio, vLLM, etc.</p>
+                </div>
+              )}
+
+              {/* Warning */}
+              <p className="text-[10px] text-gray-500 border border-gray-700 rounded px-2 py-1.5 bg-gray-900/50">
+                Key is stored in localStorage and sent only to the configured endpoint.
+              </p>
+            </>
           )}
 
-          {/* Warning */}
-          <p className="text-[10px] text-gray-500 border border-gray-700 rounded px-2 py-1.5 bg-gray-900/50">
-            Key is stored in localStorage and sent only to the configured endpoint.
-          </p>
+          {/* Ghidra Tab */}
+          {activeTab === "ghidra" && (
+            <>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Decompilation Server
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
+                  <input
+                    type="checkbox"
+                    checked={decompServer.enabled}
+                    onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
+                    className="accent-blue-500"
+                  />
+                  Enable Ghidra server
+                </label>
+                {decompServer.enabled && (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                        Ghidra URL
+                      </label>
+                      <input
+                        type="text"
+                        value={decompServer.ghidraUrl}
+                        onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
+                        placeholder="http://localhost:8765"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                        API Key
+                      </label>
+                      <input
+                        type="text"
+                        value={decompServer.apiKey}
+                        onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
+                        placeholder="API key (optional)"
+                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+                )}
+                <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
+              </div>
+            </>
+          )}
+
+          {/* Display Tab */}
+          {activeTab === "display" && (
+            <>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Font Size
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={10}
+                    max={16}
+                    step={1}
+                    value={fontSize}
+                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                    className="flex-1 accent-blue-500"
+                  />
+                  <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">

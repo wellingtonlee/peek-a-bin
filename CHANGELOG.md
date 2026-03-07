@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Font-size responsive CFG blocks** — graph view block dimensions and text sizes now scale with the font size setting; `CFG_LAYOUT` converted to `getCfgLayout(fontSize)`, hardcoded pixel font sizes replaced with em-relative units (2026-03-06 18:48)
+- **Unconstrained decompile panel resize** — removed 800px max width cap and lowered minimum to 100px; panel can now grow as wide as viewport allows (2026-03-06 18:17)
+- **Graph re-center on decompile open** — opening the decompile panel in graph mode now re-centers the CFG on the current block after layout adjusts (2026-03-06 18:17)
+- **Tabbed settings modal** — settings reorganized into three tabs: AI (provider, key, model, enhance source, base URL), Ghidra (server toggle, URL, API key), Display (font size) (2026-03-06 18:17)
+
 - **SSA-based decompiler** — full Static Single Assignment pass with phi nodes inserted between lift and structure phases; Cooper-Harvey-Kennedy dominator algorithm, pruned phi insertion with liveness, per-register versioning and renaming; SSA optimization passes (simplify phis, copy propagation, constant propagation, dead code elimination); SSA destruction with phi-to-copy lowering; cross-block value propagation now produces cleaner pseudocode with fewer redundant assignments (2026-03-06 17:59)
 - **Type inference engine** — forward + backward type propagation over decompiled IR; lattice types (int with signedness, float, ptr, bool, void); signed/unsigned inference from Jcc comparisons, cast annotations, and deref patterns; API-aware typing from ~50 Win32/C function signatures (VirtualAlloc, CreateFile, GetProcAddress, memcpy, etc.) (2026-03-06 17:59)
 - **Wider instruction lifting** — sign extensions (cdq, cqo, cdqe, cwde, cbw, cwd), div/idiv (quotient + remainder), single-operand mul (high-part eliminated by SSA DCE), xchg (SSA-correct swap without temp), rep movsb/stosb → memcpy/memset, basic FPU (fld/fst/fstp/fadd/fsub/fmul/fdiv on st0), SSE scalar ops (movss/addss/subss/mulss/divss/comiss on xmm registers) (2026-03-06 17:59)

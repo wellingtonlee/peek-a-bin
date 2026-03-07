@@ -179,10 +179,11 @@ export function DisassemblyView() {
   const [showXrefPanel, setShowXrefPanel] = useState(false);
   const [highlightedReg, setHighlightedReg] = useState<string | null>(null);
   const [showDecompile, setShowDecompile] = useState(false);
+  const [reCenterTrigger, setReCenterTrigger] = useState(0);
   const [decompileWidth, setDecompileWidth] = useState(() => {
     try {
       const v = localStorage.getItem("peek-a-bin:decompile-width");
-      if (v) { const n = parseInt(v, 10); if (n >= 250 && n <= 800) return n; }
+      if (v) { const n = parseInt(v, 10); if (n >= 100) return n; }
     } catch {}
     return 500;
   });
@@ -804,7 +805,11 @@ export function DisassemblyView() {
     setShowDecompile(true);
     // Trigger the active tab (defaults to "low")
     decompile.triggerTab(decompile.tabsState.activeTab);
-  }, [showDecompile, currentFunc, pe, instructions, decompile]);
+    // Re-center graph after layout adjusts for the decompile panel
+    if (viewMode === "graph") {
+      requestAnimationFrame(() => setReCenterTrigger((c) => c + 1));
+    }
+  }, [showDecompile, currentFunc, pe, instructions, decompile, viewMode]);
 
   // Re-decompile when function changes while panel is open
   const prevDecompFuncRef = useRef<number | null>(null);
@@ -1744,6 +1749,7 @@ export function DisassemblyView() {
         onCommentSubmit={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
         onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
         restorePanZoom={restorePanZoom}
+        reCenterTrigger={reCenterTrigger}
         onNavBack={() => {
           if (state.callStack.length > 0) {
             const last = state.callStack[state.callStack.length - 1];
@@ -1838,7 +1844,7 @@ export function DisassemblyView() {
             onResize={(delta) => {
               // Negative delta = dragging left = panel grows
               setDecompileWidth((prev) => {
-                const newW = Math.max(250, Math.min(800, prev - delta));
+                const newW = Math.max(100, prev - delta);
                 return newW;
               });
             }}

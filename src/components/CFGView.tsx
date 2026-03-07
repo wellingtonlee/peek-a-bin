@@ -1,7 +1,8 @@
 import { useMemo, useRef, useCallback, useEffect } from "react";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { PEFile } from "../pe/types";
-import { buildCFG, layoutCFG, CFG_LAYOUT, type LayoutBlock, type CFGEdge } from "../disasm/cfg";
+import { buildCFG, layoutCFG, getCfgLayout, type LayoutBlock, type CFGEdge } from "../disasm/cfg";
+import { loadFontSize } from "../llm/settings";
 import { parseOperandTargets } from "../disasm/operands";
 import { ColoredOperand, mnemonicClass, type ClickableTarget } from "./shared";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
@@ -35,6 +36,7 @@ export interface CFGViewProps {
   onCommentSubmit: (address: number, text: string) => void;
   onCommentDelete: (address: number) => void;
   restorePanZoom?: { pan: { x: number; y: number }; zoom: number } | null;
+  reCenterTrigger?: number;
   onNavBack?: () => void;
 }
 
@@ -73,6 +75,7 @@ export function CFGView({
   onCommentSubmit,
   onCommentDelete,
   restorePanZoom,
+  reCenterTrigger,
   onNavBack,
 }: CFGViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -80,10 +83,13 @@ export function CFGView({
   const draggingRef = useRef(false);
   const graphInteractionRef = useRef(false);
 
+  const fontSize = loadFontSize();
+  const cfgLayout = useMemo(() => getCfgLayout(fontSize), [fontSize]);
+
   const { blocks, edges } = useMemo(() => {
     const cfg = buildCFG(func, instructions, typedXrefMap, jumpTables);
-    return layoutCFG(cfg);
-  }, [func, instructions, typedXrefMap, jumpTables]);
+    return layoutCFG(cfg, fontSize);
+  }, [func, instructions, typedXrefMap, jumpTables, fontSize]);
 
   const blockMap = useMemo(() => {
     const m = new Map<number, LayoutBlock>();
@@ -133,6 +139,22 @@ export function CFGView({
       onPanChange({ x: containerW / 2 - centerX * zoom, y: 20 - minY * zoom });
     }
   }, [func.address, blocks.length]);
+
+  // Re-center when decompile panel opens (container width changes)
+  useEffect(() => {
+    if (!reCenterTrigger || blocks.length === 0) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const containerW = container.clientWidth;
+    const targetBlockId = addrToBlockId.get(currentAddress);
+    const targetBlock = targetBlockId !== undefined ? blockMap.get(targetBlockId) : undefined;
+    if (targetBlock) {
+      onPanChange({
+        x: containerW / 2 - (targetBlock.x + targetBlock.w / 2) * zoom,
+        y: 40 - targetBlock.y * zoom,
+      });
+    }
+  }, [reCenterTrigger]);
 
   // Zoom-to-fit callback
   const zoomToFit = useCallback(() => {
@@ -215,7 +237,7 @@ export function CFGView({
       const bx = b.x * zoom + pan.x;
       const by = b.y * zoom + pan.y;
       const bw = b.w * zoom;
-      const bh = (collapsedBlocks.has(b.id) ? CFG_LAYOUT.BLOCK_HEADER : b.h) * zoom;
+      const bh = (collapsedBlocks.has(b.id) ? cfgLayout.BLOCK_HEADER : b.h) * zoom;
       if (bx + bw >= -margin && bx <= cW + margin && by + bh >= -margin && by <= cH + margin) {
         ids.add(b.id);
       }
@@ -392,7 +414,7 @@ export function CFGView({
             const ox = -graphBounds.minX;
             const oy = -graphBounds.minY;
 
-            const fromH = fromCollapsed ? CFG_LAYOUT.BLOCK_HEADER : fromBlock.h;
+            const fromH = fromCollapsed ? cfgLayout.BLOCK_HEADER : fromBlock.h;
             const fromX = ox + fromBlock.x + fromBlock.w / 2;
             const fromY = oy + fromBlock.y + fromH;
             const toX = ox + toBlock.x + toBlock.w / 2;
@@ -443,6 +465,7 @@ export function CFGView({
           <CFGBlock
             key={block.id}
             block={block}
+            cfgLayout={cfgLayout}
             isCurrent={block.id === currentBlockId}
             currentAddress={currentAddress}
             collapsed={collapsedBlocks.has(block.id)}
@@ -473,6 +496,7 @@ export function CFGView({
 
 function CFGBlock({
   block,
+  cfgLayout,
   isCurrent,
   currentAddress,
   collapsed,
@@ -494,6 +518,7 @@ function CFGBlock({
   onCommentDelete,
 }: {
   block: LayoutBlock;
+  cfgLayout: ReturnType<typeof getCfgLayout>;
   isCurrent: boolean;
   currentAddress: number;
   collapsed: boolean;
@@ -514,7 +539,7 @@ function CFGBlock({
   onCommentSubmit: (address: number, text: string) => void;
   onCommentDelete: (address: number) => void;
 }) {
-  const height = collapsed ? CFG_LAYOUT.BLOCK_HEADER : block.h;
+  const height = collapsed ? cfgLayout.BLOCK_HEADER : block.h;
 
   return (
     <div
@@ -536,16 +561,16 @@ function CFGBlock({
       <div
         className="flex items-center justify-between px-1.5 cursor-pointer hover:brightness-125"
         style={{
-          height: CFG_LAYOUT.BLOCK_HEADER,
+          height: cfgLayout.BLOCK_HEADER,
           background: isCurrent ? "#1e40af" : "#374151",
           borderRadius: collapsed ? "3px" : "3px 3px 0 0",
         }}
         onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}
       >
-        <span className="text-gray-400 text-[10px]">
+        <span className="text-gray-400 text-[0.85em]">
           {collapsed ? "▶" : "▼"} 0x{block.startAddr.toString(16).toUpperCase()}
         </span>
-        <span className="text-gray-500 text-[9px]">
+        <span className="text-gray-500 text-[0.75em]">
           {block.insns.length} insn
         </span>
       </div>
@@ -568,7 +593,7 @@ function CFGBlock({
           <div
             key={insn.address}
             className={`flex items-center px-1 group ${isCurrentAddr ? "bg-yellow-500/20 border-l-2 border-yellow-400" : "hover:bg-gray-700/30"}`}
-            style={{ height: CFG_LAYOUT.INSN_HEIGHT, lineHeight: `${CFG_LAYOUT.INSN_HEIGHT}px` }}
+            style={{ height: cfgLayout.INSN_HEIGHT, lineHeight: `${cfgLayout.INSN_HEIGHT}px` }}
             onClick={(e) => {
               e.stopPropagation();
               onNavigate(insn.address);
@@ -579,13 +604,13 @@ function CFGBlock({
             }}
           >
             {/* Bookmark indicator */}
-            <span className="w-3 shrink-0 text-center text-[8px]">
+            <span className="w-3 shrink-0 text-center text-[0.67em]">
               {isBookmarked && <span className="text-yellow-300">★</span>}
             </span>
 
             {/* Address */}
             <span
-              className={`w-[60px] shrink-0 text-[10px] cursor-pointer hover:text-blue-400 ${
+              className={`w-[5.5em] shrink-0 text-[0.85em] cursor-pointer hover:text-blue-400 ${
                 copiedAddr === insn.address ? "text-green-400" : "text-gray-500"
               }`}
               onClick={(e) => { e.stopPropagation(); onAddressClick(insn.address); }}
@@ -618,7 +643,7 @@ function CFGBlock({
               <span className="ml-1 shrink-0">
                 <input
                   autoFocus
-                  className="bg-gray-900/80 border border-blue-500 rounded px-1 text-[#6ee7b7] text-[9px] font-mono outline-none w-32"
+                  className="bg-gray-900/80 border border-blue-500 rounded px-1 text-[#6ee7b7] text-[0.75em] font-mono outline-none w-32"
                   value={editingComment.value}
                   onChange={(e) => onEditComment({ ...editingComment, value: e.target.value })}
                   onKeyDown={(e) => {
@@ -637,7 +662,7 @@ function CFGBlock({
                 />
               </span>
             ) : (insn.comment || userComment) ? (
-              <span className="disasm-comment ml-1 truncate max-w-[80px] text-[9px]" title={userComment || insn.comment || ""}>
+              <span className="disasm-comment ml-1 truncate max-w-[8em] text-[0.75em]" title={userComment || insn.comment || ""}>
                 ; {userComment || insn.comment}
               </span>
             ) : null}

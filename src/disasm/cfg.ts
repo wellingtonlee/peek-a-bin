@@ -310,19 +310,24 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
   return loops;
 }
 
-export const CFG_LAYOUT = {
-  BLOCK_WIDTH: 320,
-  BLOCK_MIN_HEIGHT: 50,
-  INSN_HEIGHT: 14,
-  V_SPACING: 40,
-  H_SPACING: 30,
-  BLOCK_HEADER: 22,
-} as const;
+export function getCfgLayout(fontSize = 12) {
+  const scale = fontSize / 12;
+  return {
+    BLOCK_WIDTH: Math.round(320 * scale),
+    BLOCK_MIN_HEIGHT: Math.round(50 * scale),
+    INSN_HEIGHT: Math.round(14 * scale),
+    V_SPACING: 40,
+    H_SPACING: 30,
+    BLOCK_HEADER: Math.round(22 * scale),
+  };
+}
 
-export function layoutCFG(blocks: BasicBlock[]): { blocks: LayoutBlock[]; edges: CFGEdge[] } {
+export const CFG_LAYOUT = getCfgLayout(12);
+
+export function layoutCFG(blocks: BasicBlock[], fontSize = 12): { blocks: LayoutBlock[]; edges: CFGEdge[] } {
   if (blocks.length === 0) return { blocks: [], edges: [] };
 
-  const { BLOCK_WIDTH, BLOCK_MIN_HEIGHT, INSN_HEIGHT, V_SPACING, H_SPACING, BLOCK_HEADER } = CFG_LAYOUT;
+  const { BLOCK_WIDTH, BLOCK_MIN_HEIGHT, INSN_HEIGHT, V_SPACING, H_SPACING, BLOCK_HEADER } = getCfgLayout(fontSize);
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: 'TB', nodesep: H_SPACING, ranksep: V_SPACING, edgesep: 10 });
