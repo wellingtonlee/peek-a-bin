@@ -24,6 +24,7 @@ import { ImportsView } from "./components/ImportsView";
 import { ExportsView } from "./components/ExportsView";
 import { StringsView } from "./components/StringsView";
 import { ResourcesView } from "./components/ResourcesView";
+import { AnomaliesView } from "./components/AnomaliesView";
 import { AddressBar } from "./components/AddressBar";
 import { StatusBar } from "./components/StatusBar";
 import { CommandPalette } from "./components/CommandPalette";
@@ -381,6 +382,7 @@ export default function App() {
     { key: "hex", Component: HexView, isLazy: true },
     { key: "strings", Component: StringsView },
     { key: "resources", Component: ResourcesView },
+    { key: "anomalies", Component: AnomaliesView },
   ];
 
   const renderMainView = () => {

@@ -26,6 +26,7 @@ interface DisassemblyMinimapProps {
   graphViewport?: { width: number; height: number };
   onGraphPanTo?: (pan: { x: number; y: number }) => void;
   currentAddress?: number;
+  commentAddrs?: Set<number>;
 }
 
 export function DisassemblyMinimap({
@@ -44,6 +45,7 @@ export function DisassemblyMinimap({
   graphViewport,
   onGraphPanTo,
   currentAddress,
+  commentAddrs,
 }: DisassemblyMinimapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -109,6 +111,7 @@ export function DisassemblyMinimap({
       let hasLabel = false;
       let hasBookmark = false;
       let hasSearchMatch = false;
+      let hasComment = false;
       let hasInsn = false;
       let maxLoopDepth = 0;
 
@@ -119,7 +122,10 @@ export function DisassemblyMinimap({
         } else if (row.kind === "insn") {
           hasInsn = true;
           if (bookmarkSet.has(row.insn.address)) hasBookmark = true;
+          if (commentAddrs?.has(row.insn.address)) hasComment = true;
           if (searchMatchSet.current.has(r)) hasSearchMatch = true;
+        } else if (row.kind === "data") {
+          if (commentAddrs?.has(row.item.address)) hasComment = true;
         }
         if (loopRowMap) {
           const d = loopRowMap.get(r);
@@ -139,6 +145,9 @@ export function DisassemblyMinimap({
 
       if (hasBookmark) {
         ctx.fillStyle = "rgb(250, 204, 21)";
+        ctx.fillRect(contentX, y, contentW, 1);
+      } else if (hasComment) {
+        ctx.fillStyle = "rgb(110, 231, 183)";
         ctx.fillRect(contentX, y, contentW, 1);
       } else if (hasSearchMatch) {
         ctx.fillStyle = "rgb(251, 146, 60)";
@@ -161,7 +170,7 @@ export function DisassemblyMinimap({
     ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, vpStartY + 0.5, width - 1, vpHeight - 1);
-  }, [rows, bookmarkSet, viewportStartIdx, viewportEndIdx, loopRowMap]);
+  }, [rows, bookmarkSet, commentAddrs, viewportStartIdx, viewportEndIdx, loopRowMap]);
 
   const drawGraph = useCallback(() => {
     const canvas = canvasRef.current;

@@ -58,6 +58,7 @@ export function useDecompileTabs({
   const aiCache = useRef(new Map<number, { code: string; lineMap: Map<number, number> }>());
 
   const abortRef = useRef<AbortController | null>(null);
+  const aiAccumulatedRef = useRef("");
   const ghidraProjectRef = useRef<string | null>(null);
 
   // Clear caches when PE changes
@@ -172,16 +173,26 @@ export function useDecompileTabs({
 
     const systemPrompt = mode === "explain" ? SYSTEM_PROMPT_EXPLAIN : undefined;
 
+    aiAccumulatedRef.current = "";
+
     streamEnhance(input, config, controller.signal, {
       onToken: (accumulated) => {
         if (mode === "explain") {
           const commented = accumulated.split("\n").map((l) => `// ${l}`).join("\n");
-          dispatch({ type: "AI_TOKEN", accumulated: commented + "\n\n" + source });
+          const full = commented + "\n\n" + source;
+          aiAccumulatedRef.current = full;
+          dispatch({ type: "AI_TOKEN", accumulated: full });
         } else {
+          aiAccumulatedRef.current = accumulated;
           dispatch({ type: "AI_TOKEN", accumulated });
         }
       },
-      onDone: () => dispatch({ type: "AI_DONE" }),
+      onDone: () => {
+        if (currentFunc && aiAccumulatedRef.current) {
+          aiCache.current.set(currentFunc.address, { code: aiAccumulatedRef.current, lineMap: new Map() });
+        }
+        dispatch({ type: "AI_DONE" });
+      },
       onError: (error) => {
         dispatch({ type: "LOAD_ERR", tab: "ai", error });
       },
@@ -200,7 +211,13 @@ export function useDecompileTabs({
 
   const setActiveTab = useCallback((tab: DecompileTab) => {
     dispatch({ type: "SET_TAB", tab });
-  }, []);
+    if (tab === "ai" && !tabsState.ai.code && currentFunc) {
+      const cached = aiCache.current.get(currentFunc.address);
+      if (cached) {
+        dispatch({ type: "LOAD_OK", tab: "ai", code: cached.code, lineMap: cached.lineMap });
+      }
+    }
+  }, [tabsState.ai.code, currentFunc]);
 
   const triggerTab = useCallback((tab: DecompileTab) => {
     dispatch({ type: "SET_TAB", tab });

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useCallback, useEffect } from "react";
+import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import type { DecompileTab, HighLevelEngine } from "../decompile/types";
 
 // ── Syntax Highlighting ──
@@ -69,6 +69,15 @@ const TAB_LABELS: { key: DecompileTab; label: string }[] = [
   { key: "ai", label: "AI" },
 ];
 
+// ── Context menu state ──
+
+interface CtxMenuState {
+  x: number;
+  y: number;
+  lineNum: number;
+  address: number;
+}
+
 // ── Component ──
 
 interface DecompileViewProps {
@@ -89,6 +98,13 @@ interface DecompileViewProps {
   syncDisabled?: boolean;
   scrollSyncEnabled?: boolean;
   onScrollSyncToggle?: () => void;
+  // Comment support
+  comments?: Record<number, string>;
+  lineMap?: Map<number, number>;
+  editingComment?: { address: number; value: string } | null;
+  onEditComment?: (ec: { address: number; value: string } | null) => void;
+  onCommitComment?: (address: number, text: string) => void;
+  onDeleteComment?: (address: number) => void;
 }
 
 export function DecompileView({
@@ -96,8 +112,10 @@ export function DecompileView({
   onEnhance, onExplain, onCancelAI, onNavigate, onClose,
   highlightLines, onLineClick, syncDisabled,
   scrollSyncEnabled, onScrollSyncToggle,
+  comments, lineMap, editingComment, onEditComment, onCommitComment, onDeleteComment,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
 
   const lines = useMemo(() => {
     if (!code) return [];
@@ -137,6 +155,53 @@ export function DecompileView({
       lineEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   }, [highlightLines]);
+
+  // Dismiss context menu on click-away or Escape
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const dismiss = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
+    document.addEventListener("click", dismiss);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("click", dismiss); document.removeEventListener("keydown", onKey); };
+  }, [ctxMenu]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, lineNum: number) => {
+    if (syncDisabled || !lineMap) return;
+    const addr = lineMap.get(lineNum);
+    if (addr === undefined) return;
+    e.preventDefault();
+    setCtxMenu({ x: e.clientX, y: e.clientY, lineNum, address: addr });
+  }, [syncDisabled, lineMap]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      setCtxMenu(null);
+      return;
+    }
+    if (e.key === ";" && !syncDisabled && lineMap && onEditComment && comments) {
+      if (highlightLines) {
+        // Find first highlighted line with an address
+        for (const lineNum of highlightLines) {
+          const addr = lineMap.get(lineNum);
+          if (addr !== undefined) {
+            e.preventDefault();
+            e.stopPropagation();
+            onEditComment({ address: addr, value: comments[addr] ?? "" });
+            return;
+          }
+        }
+      }
+      // No match → let event bubble to parent (uses currentAddress)
+    }
+  }, [syncDisabled, lineMap, highlightLines, onEditComment, comments]);
+
+  // Format inline comment display
+  const formatComment = (text: string): string => {
+    const firstLine = text.split("\n")[0];
+    const hasMore = text.includes("\n");
+    return hasMore ? `${firstLine} [...]` : firstLine;
+  };
 
   const isStreaming = activeTab === "ai" && loading && aiMode != null;
 
@@ -268,35 +333,100 @@ export function DecompileView({
       ) : (
         <pre
           ref={preRef}
-          className="flex-1 overflow-auto px-3 py-2 leading-5 font-mono text-gray-200 select-text"
+          className="flex-1 overflow-auto px-3 py-2 leading-5 font-mono text-gray-200 select-text relative"
           style={{ fontSize: 'var(--mono-font-size)' }}
           onClick={handleClick}
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
         >
           {lines.map((line) => {
             const isHighlighted = highlightLines?.has(line.num);
+            const lineAddr = !syncDisabled && lineMap ? lineMap.get(line.num) : undefined;
+            const commentText = lineAddr !== undefined && comments ? comments[lineAddr] : undefined;
+            const isEditing = lineAddr !== undefined && editingComment?.address === lineAddr;
             return (
-              <div
-                key={line.num}
-                data-line={line.num}
-                className={`flex ${isHighlighted ? "bg-blue-900/30" : "hover:bg-gray-800/30"} ${onLineClick && !syncDisabled ? "cursor-pointer" : ""}`}
-                onClick={() => onLineClick?.(line.num)}
-              >
-                <span className="inline-block w-8 text-right mr-3 text-gray-600 select-none shrink-0">
-                  {line.displayNum}
-                </span>
-                <span>
-                  {line.tokens.map((tok, i) =>
-                    tok.cls ? (
-                      <span key={i} className={tok.cls}>{tok.text}</span>
-                    ) : (
-                      <span key={i}>{tok.text}</span>
-                    ),
-                  )}
-                </span>
+              <div key={line.num}>
+                <div
+                  data-line={line.num}
+                  className={`flex ${isHighlighted ? "bg-blue-900/30" : "hover:bg-gray-800/30"} ${onLineClick && !syncDisabled ? "cursor-pointer" : ""}`}
+                  onClick={() => onLineClick?.(line.num)}
+                  onContextMenu={(e) => handleContextMenu(e, line.num)}
+                >
+                  <span className="inline-block w-8 text-right mr-3 text-gray-600 select-none shrink-0">
+                    {line.displayNum}
+                  </span>
+                  <span className="flex-1">
+                    {line.tokens.map((tok, i) =>
+                      tok.cls ? (
+                        <span key={i} className={tok.cls}>{tok.text}</span>
+                      ) : (
+                        <span key={i}>{tok.text}</span>
+                      ),
+                    )}
+                    {commentText && !isEditing && (
+                      <span className="disasm-user-comment ml-4 select-none">{'// '}{formatComment(commentText)}</span>
+                    )}
+                  </span>
+                </div>
+                {isEditing && onEditComment && onCommitComment && onDeleteComment && (
+                  <div className="pl-11 py-1">
+                    <textarea
+                      autoFocus
+                      className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-green-300 font-mono resize-none focus:outline-none focus:border-blue-500"
+                      rows={Math.max(2, (editingComment.value.match(/\n/g)?.length ?? 0) + 1)}
+                      value={editingComment.value}
+                      onChange={(e) => onEditComment({ address: editingComment.address, value: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          const text = editingComment.value.trim();
+                          if (text) onCommitComment(editingComment.address, text);
+                          else onDeleteComment(editingComment.address);
+                          onEditComment(null);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          onEditComment(null);
+                        }
+                      }}
+                      onBlur={() => onEditComment(null)}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
         </pre>
+      )}
+
+      {/* Context menu */}
+      {ctxMenu && onEditComment && comments && (
+        <div
+          className="fixed z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[180px]"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              const existing = comments[ctxMenu.address];
+              onEditComment({ address: ctxMenu.address, value: existing ?? "" });
+              setCtxMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between"
+          >
+            <span>{comments[ctxMenu.address] ? "Edit comment" : "Add comment"}</span>
+            <span className="text-gray-500 text-[9px] ml-4">;</span>
+          </button>
+          <button
+            onClick={() => {
+              const hex = ctxMenu.address.toString(16).toUpperCase();
+              navigator.clipboard.writeText(hex);
+              setCtxMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"
+          >
+            Copy address
+          </button>
+        </div>
       )}
     </div>
   );

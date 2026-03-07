@@ -38,6 +38,8 @@ export interface CFGViewProps {
   restorePanZoom?: { pan: { x: number; y: number }; zoom: number } | null;
   reCenterTrigger?: number;
   onNavBack?: () => void;
+  searchMatches?: Set<number>;
+  currentSearchMatch?: number;
 }
 
 const EDGE_COLORS: Record<CFGEdge['type'], string> = {
@@ -77,6 +79,8 @@ export function CFGView({
   restorePanZoom,
   reCenterTrigger,
   onNavBack,
+  searchMatches,
+  currentSearchMatch,
 }: CFGViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
@@ -494,6 +498,8 @@ export function CFGView({
             bookmarkSet={bookmarkSet}
             onCommentSubmit={onCommentSubmit}
             onCommentDelete={onCommentDelete}
+            searchMatches={searchMatches}
+            currentSearchMatch={currentSearchMatch}
           />
         ))}
       </div>
@@ -525,6 +531,8 @@ function CFGBlock({
   bookmarkSet,
   onCommentSubmit,
   onCommentDelete,
+  searchMatches,
+  currentSearchMatch,
 }: {
   block: LayoutBlock;
   cfgLayout: ReturnType<typeof getCfgLayout>;
@@ -543,6 +551,8 @@ function CFGBlock({
   copiedAddr: number | null;
   editingComment: { address: number; value: string } | null;
   onEditComment: (state: { address: number; value: string } | null) => void;
+  searchMatches?: Set<number>;
+  currentSearchMatch?: number;
   comments: Record<number, string>;
   bookmarkSet: Set<number>;
   onCommentSubmit: (address: number, text: string) => void;
@@ -590,6 +600,8 @@ function CFGBlock({
         const isBookmarked = bookmarkSet.has(insn.address);
         const isEditing = editingComment?.address === insn.address;
         const userComment = comments[insn.address];
+        const isSearchMatch = searchMatches?.has(insn.address) ?? false;
+        const isCurrentSearchMatch = insn.address === currentSearchMatch;
 
         const operandTargets = parseOperandTargets(
           insn,
@@ -601,7 +613,12 @@ function CFGBlock({
         return (
           <div
             key={insn.address}
-            className={`flex items-center px-1 group ${isCurrentAddr ? "bg-yellow-500/20 border-l-2 border-yellow-400" : "hover:bg-gray-700/30"}`}
+            className={`flex items-center px-1 group ${
+              isCurrentSearchMatch ? "bg-orange-500/30 ring-1 ring-orange-400"
+              : isCurrentAddr ? "bg-yellow-500/20 border-l-2 border-yellow-400"
+              : isSearchMatch ? "bg-yellow-500/10"
+              : "hover:bg-gray-700/30"
+            }`}
             style={{ height: cfgLayout.INSN_HEIGHT, lineHeight: `${cfgLayout.INSN_HEIGHT}px` }}
             onClick={(e) => {
               e.stopPropagation();

@@ -103,7 +103,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
   const handleSelect = useCallback((item: ResultItem) => {
     dispatch({ type: "SET_ADDRESS", address: item.address });
-    dispatch({ type: "SET_TAB", tab: "disassembly" });
+    dispatch({ type: "SET_TAB", tab: item.tab ?? "disassembly" });
     onClose();
   }, [dispatch, onClose]);
 

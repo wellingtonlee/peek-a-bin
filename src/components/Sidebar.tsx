@@ -45,6 +45,7 @@ export function Sidebar() {
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
   const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(null);
   const [bmCtxMenu, setBmCtxMenu] = useState<{ x: number; y: number; address: number; label: string } | null>(null);
+  const [fnCtxMenu, setFnCtxMenu] = useState<{ x: number; y: number; fn: DisasmFunction } | null>(null);
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
   const [sectionsOpen, setSectionsOpen] = useState(() => {
     try { return localStorage.getItem("peek-a-bin:sections-open") !== "false"; } catch { return true; }
@@ -69,6 +70,19 @@ export function Sidebar() {
       window.removeEventListener("keydown", onKey);
     };
   }, [bmCtxMenu]);
+
+  // Dismiss function context menu on click/Escape
+  useEffect(() => {
+    if (!fnCtxMenu) return;
+    const dismiss = () => setFnCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [fnCtxMenu]);
 
   // Active function highlight
   const containingFunc = useContainingFunc();
@@ -559,6 +573,11 @@ export function Sidebar() {
                   e.preventDefault();
                   setRenamingFn({ address: fn.address, value: displayName });
                 }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setFnCtxMenu({ x: e.clientX, y: e.clientY, fn });
+                }}
                 className={`absolute left-0 w-full text-left px-2 rounded hover:bg-gray-800 transition-colors truncate ${
                   fn.address === activeFuncAddr
                     ? "bg-blue-900/30 border-l-2 border-blue-400"
@@ -598,6 +617,65 @@ export function Sidebar() {
           {graphOverviewOpen && (
             <GraphOverviewCanvas data={graphOverview} />
           )}
+        </div>
+      )}
+
+      {/* Function context menu */}
+      {fnCtxMenu && (
+        <div
+          className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
+          style={{ left: fnCtxMenu.x, top: fnCtxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
+              dispatch({ type: "SET_TAB", tab: "disassembly" });
+              setFnCtxMenu(null);
+            }}
+          >
+            Jump to
+          </button>
+          <button
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              setRenamingFn({ address: fnCtxMenu.fn.address, value: getDisplayName(fnCtxMenu.fn, state.renames) });
+              setFnCtxMenu(null);
+            }}
+          >
+            Rename
+          </button>
+          <button
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              navigator.clipboard.writeText("0x" + fnCtxMenu.fn.address.toString(16).toUpperCase());
+              setFnCtxMenu(null);
+            }}
+          >
+            Copy address
+          </button>
+          <button
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              dispatch({ type: "TOGGLE_BOOKMARK", address: fnCtxMenu.fn.address });
+              setFnCtxMenu(null);
+            }}
+          >
+            Toggle bookmark
+          </button>
+          <div className="border-t border-gray-700 my-0.5" />
+          <button
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
+              dispatch({ type: "SET_TAB", tab: "disassembly" });
+              window.dispatchEvent(new CustomEvent("peek-a-bin:show-xrefs", { detail: { address: fnCtxMenu.fn.address } }));
+              setFnCtxMenu(null);
+            }}
+          >
+            Show xrefs
+          </button>
         </div>
       )}
 

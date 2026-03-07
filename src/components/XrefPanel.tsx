@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Xref, DisasmFunction } from "../disasm/types";
 import type { PEFile } from "../pe/types";
@@ -6,6 +6,7 @@ import { binarySearchFunc } from "../hooks/useDerivedState";
 
 type XrefType = "call" | "jmp" | "branch" | "data";
 type SortKey = "from" | "to" | "type";
+type ScopeMode = "all" | "address" | "function" | "instruction";
 
 interface FlatXref {
   type: XrefType;
@@ -22,6 +23,10 @@ interface XrefPanelProps {
   pe: PEFile;
   onNavigate: (addr: number) => void;
   onClose: () => void;
+  scopeAddress?: number | null;
+  currentFuncAddr?: number | null;
+  currentFuncEnd?: number | null;
+  currentInsnAddr?: number | null;
 }
 
 export function XrefPanel({
@@ -31,6 +36,10 @@ export function XrefPanel({
   pe,
   onNavigate,
   onClose,
+  scopeAddress,
+  currentFuncAddr,
+  currentFuncEnd,
+  currentInsnAddr,
 }: XrefPanelProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [filterInput, setFilterInput] = useState("");
@@ -45,6 +54,17 @@ export function XrefPanel({
   const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(new Set(["call", "jmp", "branch", "data"]));
   const [sortKey, setSortKey] = useState<SortKey>("from");
   const [sortAsc, setSortAsc] = useState(true);
+  const [scopeMode, setScopeMode] = useState<ScopeMode>(scopeAddress != null ? "address" : "all");
+  const [direction, setDirection] = useState<"to" | "from">("to");
+
+  // Auto-set scope to "address" when scopeAddress changes
+  const prevScopeRef = useRef(scopeAddress);
+  useEffect(() => {
+    if (scopeAddress != null && scopeAddress !== prevScopeRef.current) {
+      setScopeMode("address");
+    }
+    prevScopeRef.current = scopeAddress;
+  }, [scopeAddress]);
 
   const toggleType = (t: XrefType) => {
     setTypeFilter((prev) => {
@@ -82,6 +102,20 @@ export function XrefPanel({
 
   const filtered = useMemo(() => {
     let items = allXrefs.filter((x) => typeFilter.has(x.type));
+
+    // Scope filtering
+    if (scopeMode === "address" && scopeAddress != null) {
+      items = items.filter((x) => x.toAddr === scopeAddress);
+    } else if (scopeMode === "function" && currentFuncAddr != null && currentFuncEnd != null) {
+      items = items.filter((x) => x.fromAddr >= currentFuncAddr && x.fromAddr < currentFuncEnd);
+    } else if (scopeMode === "instruction" && currentInsnAddr != null) {
+      if (direction === "to") {
+        items = items.filter((x) => x.toAddr === currentInsnAddr);
+      } else {
+        items = items.filter((x) => x.fromAddr === currentInsnAddr);
+      }
+    }
+
     if (filter) {
       const q = filter.toLowerCase();
       items = items.filter(
@@ -100,7 +134,7 @@ export function XrefPanel({
       return sortAsc ? cmp : -cmp;
     });
     return items;
-  }, [allXrefs, typeFilter, filter, sortKey, sortAsc]);
+  }, [allXrefs, typeFilter, filter, sortKey, sortAsc, scopeMode, scopeAddress, currentFuncAddr, currentFuncEnd, currentInsnAddr, direction]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -119,10 +153,27 @@ export function XrefPanel({
   const sortIndicator = (key: SortKey) =>
     sortKey === key ? (sortAsc ? " ▲" : " ▼") : "";
 
+  const scopeBtn = (mode: ScopeMode, label: string, show: boolean) => {
+    if (!show) return null;
+    return (
+      <button
+        key={mode}
+        onClick={() => setScopeMode(mode)}
+        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
+          scopeMode === mode
+            ? "bg-blue-600 text-white"
+            : "bg-gray-800 text-gray-500 hover:text-gray-300"
+        }`}
+      >
+        {label}
+      </button>
+    );
+  };
+
   return (
-    <div className="border-t border-theme panel-bg text-xs flex flex-col" style={{ height: 200 }}>
+    <div className="text-xs flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1 border-b border-gray-700 shrink-0">
+      <div className="flex items-center gap-2 px-3 py-1 border-b border-gray-700 shrink-0 flex-wrap">
         <span className="text-gray-300 font-semibold text-[11px]">
           Cross-References ({filtered.length}/{allXrefs.length})
         </span>
@@ -143,6 +194,20 @@ export function XrefPanel({
               {t}
             </button>
           ))}
+        </div>
+        <div className="flex items-center gap-1 ml-2">
+          {scopeBtn("all", "All", true)}
+          {scopeBtn("address", "Addr", scopeAddress != null)}
+          {scopeBtn("function", "Func", currentFuncAddr != null)}
+          {scopeBtn("instruction", "Insn", currentInsnAddr != null)}
+          {scopeMode === "instruction" && (
+            <button
+              onClick={() => setDirection((d) => d === "to" ? "from" : "to")}
+              className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-700 text-gray-300 hover:bg-gray-600"
+            >
+              {direction === "to" ? "To" : "From"}
+            </button>
+          )}
         </div>
         <input
           type="text"

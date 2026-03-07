@@ -13,6 +13,7 @@ const TABS: { id: ViewTab; label: string }[] = [
   { id: "hex", label: "Hex" },
   { id: "strings", label: "Strings" },
   { id: "resources", label: "Resources" },
+  { id: "anomalies", label: "Anomalies" },
 ];
 
 const TAB_KEYS: Record<string, ViewTab> = {
@@ -24,6 +25,7 @@ const TAB_KEYS: Record<string, ViewTab> = {
   "6": "hex",
   "7": "strings",
   "8": "resources",
+  "9": "anomalies",
 };
 
 interface Suggestion {
@@ -42,6 +44,7 @@ export function AddressBar() {
   const [suggestionIdx, setSuggestionIdx] = useState(-1);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -79,14 +82,14 @@ export function AddressBar() {
         }
       }
       result.push({ address: addr, funcName });
-      if (result.length >= 15) break;
+      if (result.length >= 50) break;
     }
     return result;
   }, [state.addressHistory, sortedFuncs, state.renames]);
 
   // Close history dropdown on outside click
   useEffect(() => {
-    if (!showHistory) return;
+    if (!showHistory) { setHistoryFilter(""); return; }
     const handler = (e: MouseEvent) => {
       if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
         setShowHistory(false);
@@ -402,20 +405,38 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      {TABS.map((tab, i) => (
-        <button
-          key={tab.id}
-          onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
-          className={`px-2.5 py-1 rounded transition-colors ${
-            state.activeTab === tab.id
-              ? "bg-blue-600 text-white"
-              : "text-gray-400 hover:text-white hover:bg-gray-700"
-          }`}
-          title={`${tab.label} (${i + 1})`}
-        >
-          {tab.label}
-        </button>
-      ))}
+      {TABS.map((tab, i) => {
+        const isAnomalies = tab.id === "anomalies";
+        const anomalyCount = isAnomalies ? state.anomalies.length : 0;
+        const maxSeverity = isAnomalies && anomalyCount > 0
+          ? state.anomalies.some(a => a.severity === "critical") ? "critical"
+            : state.anomalies.some(a => a.severity === "warning") ? "warning"
+            : "info"
+          : null;
+        const badgeColor = maxSeverity === "critical" ? "bg-red-500"
+          : maxSeverity === "warning" ? "bg-amber-500"
+          : maxSeverity === "info" ? "bg-blue-500"
+          : "";
+        return (
+          <button
+            key={tab.id}
+            onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
+            className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
+              state.activeTab === tab.id
+                ? "bg-blue-600 text-white"
+                : "text-gray-400 hover:text-white hover:bg-gray-700"
+            }`}
+            title={`${tab.label} (${i + 1})`}
+          >
+            {tab.label}
+            {isAnomalies && anomalyCount > 0 && (
+              <span className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}>
+                {anomalyCount}
+              </span>
+            )}
+          </button>
+        );
+      })}
 
       <div className="flex-1" />
 
@@ -444,29 +465,56 @@ export function AddressBar() {
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
           </svg>
         </button>
-        {showHistory && recentAddresses.length > 0 && (
-          <div className="absolute top-full right-0 mt-0.5 w-80 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-80 overflow-auto">
-            <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">Recent Addresses</div>
-            {recentAddresses.map((entry, i) => (
-              <button
-                key={`${entry.address}-${i}`}
-                className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
-                onClick={() => {
-                  dispatch({ type: "SET_ADDRESS", address: entry.address });
-                  dispatch({ type: "SET_TAB", tab: "disassembly" });
-                  setShowHistory(false);
-                }}
-              >
-                <span className="text-blue-400 font-mono text-[10px] shrink-0">
-                  0x{entry.address.toString(16).toUpperCase()}
-                </span>
-                {entry.funcName && (
-                  <span className="text-gray-500 truncate">{entry.funcName}</span>
+        {showHistory && recentAddresses.length > 0 && (() => {
+          const q = historyFilter.toLowerCase().replace(/^0x/i, "");
+          const filtered = q
+            ? recentAddresses.filter((e) =>
+                e.address.toString(16).toLowerCase().includes(q) ||
+                (e.funcName && e.funcName.toLowerCase().includes(q))
+              )
+            : recentAddresses;
+          return (
+            <div className="absolute top-full right-0 mt-0.5 w-80 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-96 flex flex-col">
+              <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">Recent Addresses</div>
+              <div className="px-2 py-1 border-b border-gray-700">
+                <input
+                  autoFocus
+                  type="text"
+                  value={historyFilter}
+                  onChange={(e) => setHistoryFilter(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") { setShowHistory(false); e.stopPropagation(); }
+                  }}
+                  placeholder="Filter addresses..."
+                  className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-[10px] text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div className="overflow-auto flex-1">
+                {filtered.length === 0 && (
+                  <div className="px-3 py-3 text-[10px] text-gray-500 text-center">No matches</div>
                 )}
-              </button>
-            ))}
-          </div>
-        )}
+                {filtered.map((entry, i) => (
+                  <button
+                    key={`${entry.address}-${i}`}
+                    className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
+                    onClick={() => {
+                      dispatch({ type: "SET_ADDRESS", address: entry.address });
+                      dispatch({ type: "SET_TAB", tab: "disassembly" });
+                      setShowHistory(false);
+                    }}
+                  >
+                    <span className="text-blue-400 font-mono text-[10px] shrink-0">
+                      0x{entry.address.toString(16).toUpperCase()}
+                    </span>
+                    {entry.funcName && (
+                      <span className="text-gray-500 truncate">{entry.funcName}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Address input with autocomplete */}

@@ -12,7 +12,8 @@ export type ViewTab =
   | "exports"
   | "hex"
   | "strings"
-  | "resources";
+  | "resources"
+  | "anomalies";
 
 export interface Bookmark {
   address: number;

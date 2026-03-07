@@ -4,12 +4,34 @@
 
 ### Added
 
+- **Pseudocode comments** — annotate decompiled code with user comments; inline green `// comment` display on all lines mapping to the same address; right-click context menu (Add/Edit comment, Copy address); `;` hotkey to add comment on highlighted line; inline textarea editor (Enter=save, Shift+Enter=newline, Escape=cancel, empty=delete); shared editing state with disassembly view; comments auto-persist via existing annotation system (2026-03-07 14:17)
+- **Comment indicators in minimap** — green markers on the minimap for addresses with user comments; priority between bookmarks and search matches (2026-03-07 14:58)
+- **Find all references flow** — xref badge clicks now open the full XrefPanel pre-filtered to the target address instead of a small popup; works for both function label and instruction-level xref badges (2026-03-07 15:39)
+- **Command palette tab routing** — selecting an import/export/string result from Ctrl+P now navigates to the correct tab instead of always switching to disassembly (2026-03-07 15:39)
+- **Breadcrumb overflow indicators** — gradient fade indicators on left/right edges when breadcrumb trail overflows; auto-scrolls to newest entry; hidden scrollbar (2026-03-07 15:39)
+- **Searchable address history** — history dropdown (Alt+H) now includes a filter input; supports filtering by hex address or function name; increased history cap from 15 to 50 entries (2026-03-07 15:39)
+- **Tabbed bottom panels** — Detail, Calls, and Xrefs panels now share a tabbed container with a single resize handle; panels can be popped out as draggable/resizable floating overlays and re-docked; height persists to localStorage (2026-03-07 15:39)
+- **XrefPanel scoped filter** — scope buttons (All/Addr/Func/Insn) filter cross-references by target address, containing function range, or current instruction; direction toggle (To/From) when scoped to instruction (2026-03-07 15:39)
+- **Function list context menu** — right-click functions in the sidebar for Jump to, Rename, Copy address, Toggle bookmark, and Show xrefs actions (2026-03-07 15:39)
+- **Anomalies tab** — new tab (key 9) displaying security anomalies sorted by severity with color-coded badges; kernel driver section with IRP dispatch table; clickable handler addresses navigate to disassembly; count badge on tab button colored by max severity (2026-03-07 15:39)
+- **Graph mode search** — Ctrl+F or `/` in graph mode opens a search overlay; searches instruction mnemonics+operands with regex support; Enter/Shift+Enter cycles matches; matched instructions highlighted in CFG blocks with current match outlined in orange (2026-03-07 15:39)
+- **Persistent AI results** — AI enhance/explain results are cached per function; switching tabs and returning to AI tab restores the cached result without re-running the LLM (2026-03-07 15:39)
+
+### Changed
+
+- **Shortcut legend** — `;` description now clarifies it works in both disassembly and pseudocode views (2026-03-07 14:58)
+
+### Fixed
+
+- **`;` hotkey in DecompileView** — `preventDefault` now only fires when a matching address is found; added `stopPropagation` to prevent duplicate comment editor in wrong view (2026-03-07 14:58)
+- **`?` duplicate shortcut pane** — added `stopPropagation` to prevent event from bubbling and toggling the overlay twice (2026-03-07 14:58)
+- **Graph mode hotkey focus** — `cfgContainerRef` now auto-focuses when entering graph mode and on mousedown clicks, so `;`, `?`, `B`, `N`, `I`, `R` etc. work reliably (2026-03-07 14:58)
+
 - **Theme system** — 4 built-in color themes (Dark, Light, IDA Pro, Terminal) with full CSS variable token system; all ~15 component files migrated from hardcoded Tailwind colors to theme-aware CSS classes; import/export custom themes as JSON; theme picker in Settings → Theme tab; mnemonic, operand, and decompiler syntax colors all themeable (2026-03-07 13:10)
-- **Compact mode** — toggleable density mode reduces row height (20→16px), separator height (12→6px), and padding; persists to localStorage; toolbar toggle button (2026-03-07 13:10)
 - **CSS grid column alignment** — instruction and data rows use CSS grid with `ch`-based column widths that scale with font size; 32-bit (10ch) and 64-bit (18ch) address columns; toggleable bytes column with toolbar button (2026-03-07 13:10)
 - **Context menu enhancements** — "Follow target" item for call/jmp instructions, "Show xrefs (N)" item with xref count; unified menu component for linear and graph modes (removes duplicated code); keyboard shortcut hints on right side; backdrop blur visual polish (2026-03-07 13:10)
 - **Scroll-synced split view** — scrolling disassembly auto-scrolls decompile panel to matching code region; separate `scrollSyncAddr` state avoids feedback loops with `SET_ADDRESS`; throttled (100ms) scroll handler; sync toggle button in decompile panel header; persists to localStorage (2026-03-07 13:10)
-- **Block boundary dividers** — when block tinting is enabled, a subtle top border marks the first instruction of each new basic block (2026-03-07 13:10)
+
 
 - **Decompiler output improvements** — cast elimination (double-cast always collapses, cast-on-const folded, same-size cast stripped); De-Morgan's law for `!(a && b)` / `!(a || b)`; comparison canonicalization (const on right); recursive guard clause flattening for deeply nested if/return/else chains; for-loop detection scans all body blocks for increment; do-while with leading break converted to while; string constant propagation into emitted call args; type-based variable naming (HANDLE→hFile, NTSTATUS→status, HRESULT→hr, PVOID→pBuffer, BOOL→bResult) (2026-03-07 12:33)
 - **Regex search UI hint** — `?` help icon next to search bar shows tooltip explaining `/regex/` and `/regex/i` syntax (2026-03-07 00:07)
@@ -42,6 +64,13 @@
 - **for-loop emission** — `IRFor` statement type with init/condition/update/body emitted as `for (init; cond; update) { body }` (2026-03-06 17:59)
 
 ### Changed
+
+- **Minimap hidden in graph mode** — minimap and Map button only shown in linear view mode (2026-03-07 14:17)
+
+### Removed
+
+- **Blocks button** — removed block tinting toggle and alternating block backgrounds from disassembly toolbar (2026-03-07 14:17)
+- **Compact button** — removed compact density mode toggle; fixed row height at 20px; removed `.density-compact` CSS (2026-03-07 14:17)
 
 - **Decompiler pipeline** — new pipeline: buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → inferTypes → promoteVars → synthesizeStructs → emitFunction; cleanup pass inserted after structuring; TypeContext threaded to emitter for cast suppression and type idioms (2026-03-06 22:30)
 

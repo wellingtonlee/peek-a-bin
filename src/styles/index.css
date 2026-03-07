@@ -11,13 +11,6 @@
   --row-px: 1rem;
 }
 
-.density-compact {
-  --row-height: 16px;
-  --sep-height: 6px;
-  --label-pad-top: 2px;
-  --row-px: 0.5rem;
-}
-
 body {
   font-family: var(--font-mono);
   margin: 0;

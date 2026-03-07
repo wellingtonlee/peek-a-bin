@@ -74,7 +74,7 @@ export function CallPanel({
   }, [func, instructions, funcMap]);
 
   return (
-    <div className="h-48 shrink-0 border-t border-theme panel-bg flex flex-col text-xs">
+    <div className="h-full flex flex-col text-xs">
       <div className="flex items-center px-3 py-1 border-b border-gray-700 text-gray-400">
         <span className="font-semibold text-gray-300">
           Call Graph: {getDisplayName(func, renames)}

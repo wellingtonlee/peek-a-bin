@@ -23,6 +23,7 @@ import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
 import { DecompileView } from "./DecompileView";
 import { ResizeHandle } from "./ResizeHandle";
+import { BottomPanelContainer } from "./BottomPanelContainer";
 import { useDecompileTabs } from "../hooks/useDecompileTabs";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
@@ -96,12 +97,7 @@ function formatRangeCopy(
   return lines.join("\n");
 }
 
-interface XrefPopupState {
-  x: number;
-  y: number;
-  targetAddr: number;
-  sources: Xref[];
-}
+// XrefPopupState removed — replaced by XrefPanel with scoped filter
 
 // --- Context menu ---
 interface ContextMenuState {
@@ -144,6 +140,10 @@ export function DisassemblyView() {
     return binarySearchRows(rows, state.currentAddress);
   }, [rows, state.currentAddress]);
 
+  const commentAddrSet = useMemo(() => new Set(
+    Object.keys(state.comments).filter(k => state.comments[Number(k)]).map(Number)
+  ), [state.comments]);
+
   // Search hook
   const search = useDisassemblySearch(rows, currentIndex);
 
@@ -151,14 +151,13 @@ export function DisassemblyView() {
   const [copiedAddr, setCopiedAddr] = useState<number | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
+  const [xrefScopeAddress, setXrefScopeAddress] = useState<number | null>(null);
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(null);
   const [editingComment, setEditingComment] = useState<{ address: number; value: string } | null>(null);
   const [showCallPanel, setShowCallPanel] = useState(false);
   const [insnFilter, setInsnFilter] = useState<"all" | "calls" | "jumps" | "stringrefs" | "suspicious">("all");
   const [selectionRange, setSelectionRange] = useState<{ start: number; end: number } | null>(null);
   const [lastClickedRow, setLastClickedRow] = useState<number | null>(null);
-  const [showBlocks, setShowBlocks] = useState(false);
   const [showArrows, setShowArrows] = useState(true);
   const [showDetail, setShowDetail] = useState(false);
   const [showMinimap, setShowMinimap] = useState(true);
@@ -177,6 +176,11 @@ export function DisassemblyView() {
   const cfgContainerRef = useRef<HTMLDivElement>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
+  const [showGraphSearch, setShowGraphSearch] = useState(false);
+  const [graphSearchQuery, setGraphSearchQuery] = useState("");
+  const [graphSearchMatches, setGraphSearchMatches] = useState<number[]>([]);
+  const [graphSearchIdx, setGraphSearchIdx] = useState(0);
+  const graphSearchInputRef = useRef<HTMLInputElement>(null);
   const [highlightedReg, setHighlightedReg] = useState<string | null>(null);
   const [showDecompile, setShowDecompile] = useState(false);
   const [reCenterTrigger, setReCenterTrigger] = useState(0);
@@ -185,9 +189,6 @@ export function DisassemblyView() {
   });
   const [scrollSyncAddr, setScrollSyncAddr] = useState<number | null>(null);
   const scrollSyncTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const [compactMode, setCompactMode] = useState(() => {
-    try { return localStorage.getItem("peek-a-bin:density") === "compact"; } catch { return false; }
-  });
   const [showBytes, setShowBytes] = useState(() => {
     try { return localStorage.getItem("peek-a-bin:show-bytes") !== "false"; } catch { return true; }
   });
@@ -256,6 +257,18 @@ export function DisassemblyView() {
     return analyzeStackFrame(currentFunc, instructions, pe?.is64 ?? true);
   }, [showDetail, currentFunc, instructions, pe?.is64]);
 
+  // Current instruction for detail panel
+  const curInsnForDetail = useMemo((): Instruction | null => {
+    if (!showDetail || instructions.length === 0) return null;
+    let lo = 0, hi = instructions.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (instructions[mid].address === state.currentAddress) return instructions[mid];
+      if (instructions[mid].address < state.currentAddress) lo = mid + 1; else hi = mid - 1;
+    }
+    return instructions[Math.min(lo, instructions.length - 1)];
+  }, [showDetail, instructions, state.currentAddress]);
+
   const SUSPICIOUS_MNEMONICS = useMemo(() => new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]), []);
 
   const matchesFilter = useCallback((row: DisplayRow): boolean => {
@@ -287,8 +300,8 @@ export function DisassemblyView() {
     return rowIndex >= lo && rowIndex <= hi;
   }, [selectionRange]);
 
-  const rowHeight = compactMode ? 16 : 20;
-  const sepHeight = compactMode ? 6 : 12;
+  const rowHeight = 20;
+  const sepHeight = 12;
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -408,10 +421,10 @@ export function DisassemblyView() {
     return -1;
   }, [rows, currentFunc]);
 
-  // Dismiss context menu / xref popup / export menu on click outside or Escape
+  // Dismiss context menu / export menu on click outside or Escape
   useEffect(() => {
-    if (!ctxMenu && !xrefPopup && !showExportMenu) return;
-    const dismiss = () => { setCtxMenu(null); setXrefPopup(null); setShowExportMenu(false); };
+    if (!ctxMenu && !showExportMenu) return;
+    const dismiss = () => { setCtxMenu(null); setShowExportMenu(false); };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -419,7 +432,20 @@ export function DisassemblyView() {
       window.removeEventListener("click", dismiss);
       window.removeEventListener("keydown", keyDismiss);
     };
-  }, [ctxMenu, xrefPopup, showExportMenu]);
+  }, [ctxMenu, showExportMenu]);
+
+  // Listen for show-xrefs event from sidebar context menu
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const addr = (e as CustomEvent).detail?.address;
+      if (typeof addr === "number") {
+        setXrefScopeAddress(addr);
+        setShowXrefPanel(true);
+      }
+    };
+    window.addEventListener("peek-a-bin:show-xrefs", handler);
+    return () => window.removeEventListener("peek-a-bin:show-xrefs", handler);
+  }, []);
 
   // Mouse back/forward buttons (works in both linear and graph modes)
   useEffect(() => {
@@ -433,6 +459,20 @@ export function DisassemblyView() {
     return () => el.removeEventListener("mouseup", handler);
   }, [dispatch]);
 
+  // Focus cfgContainerRef when entering graph mode so hotkeys work
+  useEffect(() => {
+    if (viewMode === "graph") cfgContainerRef.current?.focus();
+  }, [viewMode]);
+
+  // Forward clicks inside graph container to focus so hotkeys fire
+  useEffect(() => {
+    const el = cfgContainerRef.current;
+    if (!el || viewMode !== "graph") return;
+    const handler = () => el.focus();
+    el.addEventListener("mousedown", handler);
+    return () => el.removeEventListener("mousedown", handler);
+  }, [viewMode]);
+
   // Build CFG block map for graph keyboard navigation (lazy, only called when needed)
   const buildCFGForNav = useCallback(() => {
     if (!currentFunc) return null;
@@ -445,6 +485,66 @@ export function DisassemblyView() {
     }
     return { navBlocks, addrToBlock };
   }, [currentFunc, instructions, typedXrefMap]);
+
+  // Graph search: compute matches when query changes
+  const handleGraphSearch = useCallback((query: string) => {
+    setGraphSearchQuery(query);
+    if (!query || instructions.length === 0) {
+      setGraphSearchMatches([]);
+      setGraphSearchIdx(0);
+      return;
+    }
+    // Support /regex/ and /regex/i syntax
+    let matcher: (text: string) => boolean;
+    const regexMatch = query.match(/^\/(.+)\/([i]?)$/);
+    if (regexMatch) {
+      try {
+        const rx = new RegExp(regexMatch[1], regexMatch[2]);
+        matcher = (text) => rx.test(text);
+      } catch {
+        matcher = (text) => text.toLowerCase().includes(query.toLowerCase());
+      }
+    } else {
+      const q = query.toLowerCase();
+      matcher = (text) => text.toLowerCase().includes(q);
+    }
+    const matches: number[] = [];
+    for (const insn of instructions) {
+      const text = `${insn.mnemonic} ${insn.opStr}`;
+      if (matcher(text)) matches.push(insn.address);
+    }
+    setGraphSearchMatches(matches);
+    setGraphSearchIdx(0);
+    if (matches.length > 0) {
+      setCollapsedBlocks(new Set());
+      dispatch({ type: "SET_ADDRESS", address: matches[0] });
+    }
+  }, [instructions, dispatch]);
+
+  const graphSearchNextMatch = useCallback(() => {
+    if (graphSearchMatches.length === 0) return;
+    const next = (graphSearchIdx + 1) % graphSearchMatches.length;
+    setGraphSearchIdx(next);
+    dispatch({ type: "SET_ADDRESS", address: graphSearchMatches[next] });
+  }, [graphSearchMatches, graphSearchIdx, dispatch]);
+
+  const graphSearchPrevMatch = useCallback(() => {
+    if (graphSearchMatches.length === 0) return;
+    const prev = (graphSearchIdx - 1 + graphSearchMatches.length) % graphSearchMatches.length;
+    setGraphSearchIdx(prev);
+    dispatch({ type: "SET_ADDRESS", address: graphSearchMatches[prev] });
+  }, [graphSearchMatches, graphSearchIdx, dispatch]);
+
+  const closeGraphSearch = useCallback(() => {
+    setShowGraphSearch(false);
+    setGraphSearchQuery("");
+    setGraphSearchMatches([]);
+    setGraphSearchIdx(0);
+  }, []);
+
+  // Graph search match sets for CFGView highlighting
+  const graphSearchMatchSet = useMemo(() => new Set(graphSearchMatches), [graphSearchMatches]);
+  const graphSearchCurrentMatch = graphSearchMatches[graphSearchIdx] ?? undefined;
 
   // Keyboard navigation
   const handleKeyDown = useCallback(
@@ -516,6 +616,7 @@ export function DisassemblyView() {
 
       if (e.key === "?") {
         e.preventDefault();
+        e.stopPropagation();
         setShowShortcuts((v) => !v);
         return;
       }
@@ -611,15 +712,25 @@ export function DisassemblyView() {
 
       if ((e.ctrlKey || e.metaKey) && e.key === "f") {
         e.preventDefault();
-        search.setShowSearch(true);
-        setTimeout(() => searchInputRef.current?.focus(), 0);
+        if (viewMode === "graph") {
+          setShowGraphSearch(true);
+          setTimeout(() => graphSearchInputRef.current?.focus(), 0);
+        } else {
+          search.setShowSearch(true);
+          setTimeout(() => searchInputRef.current?.focus(), 0);
+        }
         return;
       }
 
       if (e.key === "/") {
         e.preventDefault();
-        search.setShowSearch(true);
-        setTimeout(() => searchInputRef.current?.focus(), 0);
+        if (viewMode === "graph") {
+          setShowGraphSearch(true);
+          setTimeout(() => graphSearchInputRef.current?.focus(), 0);
+        } else {
+          search.setShowSearch(true);
+          setTimeout(() => searchInputRef.current?.focus(), 0);
+        }
         return;
       }
 
@@ -1105,23 +1216,19 @@ export function DisassemblyView() {
         </>)}
         <div className="flex items-center gap-1 ml-2">
           <button
-            onClick={() => setShowBlocks((v) => !v)}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showBlocks ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-          >
-            Blocks
-          </button>
-          <button
             onClick={() => setShowArrows((v) => !v)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showArrows ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
           >
             Arrows
           </button>
+          {viewMode === "linear" && (
           <button
             onClick={() => setShowMinimap((v) => !v)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showMinimap ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
           >
             Map
           </button>
+          )}
           <button
             onClick={() => {
               setShowBytes((v) => {
@@ -1134,19 +1241,6 @@ export function DisassemblyView() {
             title="Toggle bytes column"
           >
             Bytes
-          </button>
-          <button
-            onClick={() => {
-              setCompactMode((v) => {
-                const next = !v;
-                try { localStorage.setItem("peek-a-bin:density", next ? "compact" : "normal"); } catch {}
-                return next;
-              });
-            }}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${compactMode ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-            title="Compact mode"
-          >
-            Compact
           </button>
           <button
             onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
@@ -1350,7 +1444,7 @@ export function DisassemblyView() {
       {viewMode === "linear" ? (
       <div
         ref={parentRef}
-        className={`flex-1 overflow-auto leading-5 focus:outline-none relative ${compactMode ? "density-compact" : ""}`}
+        className="flex-1 overflow-auto leading-5 focus:outline-none relative"
         style={{ fontSize: 'var(--mono-font-size)', '--col-addr': pe.is64 ? '18ch' : '10ch' } as React.CSSProperties}
         tabIndex={0}
       >
@@ -1573,16 +1667,8 @@ export function DisassemblyView() {
                         className="ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
                         onClick={(e) => {
                           e.stopPropagation();
-                          const rect = (e.target as HTMLElement).getBoundingClientRect();
-                          const container = parentRef.current;
-                          if (!container) return;
-                          const cRect = container.getBoundingClientRect();
-                          setXrefPopup({
-                            x: rect.left - cRect.left + container.scrollLeft,
-                            y: rect.bottom - cRect.top + container.scrollTop,
-                            targetAddr: row.fn.address,
-                            sources: xrefs!,
-                          });
+                          setXrefScopeAddress(row.fn.address);
+                          setShowXrefPanel(true);
                         }}
                       >
                         ({label})
@@ -1603,11 +1689,6 @@ export function DisassemblyView() {
             const loopDepth = loopHeaders.get(insn.address);
             const bodyDepth = loopBodyMap.get(insn.address);
             const isCurrentAddr = insn.address === state.currentAddress;
-            // Detect block boundary for top border
-            const isBlockStart = showBlocks && vItem.index > 0 && (() => {
-              const prevRow = rows[vItem.index - 1];
-              return prevRow && prevRow.kind === "insn" && prevRow.blockIdx !== row.blockIdx;
-            })();
             const isSearchMatch =
               search.searchMatches.length > 0 &&
               search.searchMatchIdx >= 0 &&
@@ -1685,9 +1766,7 @@ export function DisassemblyView() {
                       ? "bg-indigo-900/25"
                       : isCurrentAddr
                         ? "bg-blue-900/30"
-                        : showBlocks && row.blockIdx % 2 === 1
-                          ? "bg-gray-800/15"
-                          : ""
+                        : ""
                 } ${isDimmed ? "opacity-30" : isGapFill ? "opacity-50" : ""}`}
                 style={{
                   position: "absolute",
@@ -1697,7 +1776,6 @@ export function DisassemblyView() {
                   height: `${rowHeight}px`,
                   transform: `translateY(${vItem.start}px)`,
                   borderLeft: borderStyle,
-                  borderTop: isBlockStart ? "1px solid rgba(55,65,81,0.15)" : undefined,
                   padding: `0 var(--row-px)`,
                 }}
                 title={isLoopHeader ? `Loop header (depth ${loopDepth})` : bodyDepth !== undefined ? `Loop body (depth ${bodyDepth})` : undefined}
@@ -1725,16 +1803,8 @@ export function DisassemblyView() {
                         className="text-gray-600 hover:text-blue-400 cursor-pointer text-[9px]"
                         onClick={(e) => {
                           e.stopPropagation();
-                          const rect = (e.target as HTMLElement).getBoundingClientRect();
-                          const container = parentRef.current;
-                          if (!container) return;
-                          const cRect = container.getBoundingClientRect();
-                          setXrefPopup({
-                            x: rect.left - cRect.left + container.scrollLeft,
-                            y: rect.bottom - cRect.top + container.scrollTop,
-                            targetAddr: insn.address,
-                            sources: xrefs,
-                          });
+                          setXrefScopeAddress(insn.address);
+                          setShowXrefPanel(true);
                         }}
                       >
                         ×{xrefs.length}
@@ -1894,79 +1964,6 @@ export function DisassemblyView() {
             );
           })()}
 
-          {/* Xref popup */}
-          {xrefPopup && (
-            <div
-              className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[220px] max-h-60 overflow-auto"
-              style={{ left: xrefPopup.x, top: xrefPopup.y }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="px-3 py-1 text-gray-400 border-b border-gray-700">
-                Xrefs to 0x{xrefPopup.targetAddr.toString(16).toUpperCase()}
-              </div>
-              {xrefPopup.sources.map((xref, i) => {
-                const typeColors: Record<string, string> = {
-                  call: "text-green-400",
-                  jmp: "text-red-400",
-                  branch: "text-orange-400",
-                  data: "text-purple-400",
-                };
-                const typeLabels: Record<string, string> = {
-                  call: "C",
-                  jmp: "J",
-                  branch: "B",
-                  data: "D",
-                };
-                // Binary search instructions for source instruction context
-                let srcInsn: Instruction | undefined;
-                if (instructions.length > 0) {
-                  let lo = 0, hi = instructions.length - 1;
-                  while (lo <= hi) {
-                    const mid = (lo + hi) >>> 1;
-                    if (instructions[mid].address === xref.from) { srcInsn = instructions[mid]; break; }
-                    if (instructions[mid].address < xref.from) lo = mid + 1; else hi = mid - 1;
-                  }
-                }
-                // Binary search sortedFuncs for containing function
-                let srcFunc: DisasmFunction | undefined;
-                if (sortedFuncs.length > 0) {
-                  let lo = 0, hi = sortedFuncs.length - 1;
-                  while (lo <= hi) {
-                    const mid = (lo + hi) >>> 1;
-                    if (sortedFuncs[mid].address <= xref.from) { srcFunc = sortedFuncs[mid]; lo = mid + 1; } else hi = mid - 1;
-                  }
-                  if (srcFunc && xref.from >= srcFunc.address + srcFunc.size) srcFunc = undefined;
-                }
-                return (
-                  <button
-                    key={i}
-                    className="w-full text-left px-3 py-1.5 hover:bg-gray-700 font-mono flex items-center gap-2"
-                    onClick={() => {
-                      dispatch({ type: "SET_ADDRESS", address: xref.from });
-                      setXrefPopup(null);
-                    }}
-                  >
-                    <span className={`${typeColors[xref.type] ?? "text-gray-400"} text-[10px] font-semibold w-3`}>
-                      {typeLabels[xref.type] ?? "?"}
-                    </span>
-                    <span className="text-blue-400">
-                      0x{xref.from.toString(16).toUpperCase()}
-                    </span>
-                    {srcFunc && (
-                      <span className="text-gray-500 text-[10px] truncate max-w-[120px]">
-                        {getDisplayName(srcFunc, state.renames)}
-                      </span>
-                    )}
-                    {srcInsn && (
-                      <span className="text-gray-400 text-[10px] truncate max-w-[200px]">
-                        {srcInsn.mnemonic} {srcInsn.opStr}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </div>
       </div>
       ) : currentFunc ? (
@@ -2003,6 +2000,8 @@ export function DisassemblyView() {
         onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
         restorePanZoom={restorePanZoom}
         reCenterTrigger={reCenterTrigger}
+        searchMatches={showGraphSearch ? graphSearchMatchSet : undefined}
+        currentSearchMatch={showGraphSearch ? graphSearchCurrentMatch : undefined}
         onNavBack={() => {
           if (state.callStack.length > 0) {
             const last = state.callStack[state.callStack.length - 1];
@@ -2066,7 +2065,56 @@ export function DisassemblyView() {
           </div>
         );
       })()}
-      {showMinimap && (
+      {/* Graph search overlay */}
+      {showGraphSearch && viewMode === "graph" && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-gray-800 border border-gray-600 rounded-lg shadow-xl px-3 py-2 flex items-center gap-2 text-xs">
+          <input
+            ref={graphSearchInputRef}
+            type="text"
+            value={graphSearchQuery}
+            onChange={(e) => handleGraphSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (e.shiftKey) graphSearchPrevMatch();
+                else graphSearchNextMatch();
+              }
+              if (e.key === "Escape") closeGraphSearch();
+              e.stopPropagation();
+            }}
+            placeholder="Search instructions... (/regex/i)"
+            className="w-56 px-2 py-1 bg-gray-900 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-[11px]"
+          />
+          <span className="text-gray-400 text-[10px] min-w-[60px] text-center">
+            {graphSearchMatches.length > 0
+              ? `${graphSearchIdx + 1}/${graphSearchMatches.length}`
+              : graphSearchQuery ? "0 matches" : ""}
+          </span>
+          <button
+            onClick={graphSearchPrevMatch}
+            disabled={graphSearchMatches.length === 0}
+            className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
+            title="Previous match (Shift+Enter)"
+          >
+            ▲
+          </button>
+          <button
+            onClick={graphSearchNextMatch}
+            disabled={graphSearchMatches.length === 0}
+            className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
+            title="Next match (Enter)"
+          >
+            ▼
+          </button>
+          <button
+            onClick={closeGraphSearch}
+            className="text-gray-500 hover:text-white px-1"
+            title="Close (Escape)"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {showMinimap && viewMode === "linear" && (
         <DisassemblyMinimap
           rows={rows}
           bookmarkSet={bookmarkSet}
@@ -2079,14 +2127,9 @@ export function DisassemblyView() {
             const addr = rowAddress(rows[idx]);
             if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
           }}
-          mode={viewMode}
-          graphBlocks={viewMode === "graph" ? graphBlocksForMinimap : undefined}
-          graphEdges={viewMode === "graph" ? graphEdgesForMinimap : undefined}
-          graphPan={viewMode === "graph" ? graphPan : undefined}
-          graphZoom={viewMode === "graph" ? graphZoom : undefined}
-          graphViewport={viewMode === "graph" && cfgContainerRef.current ? { width: cfgContainerRef.current.clientWidth, height: cfgContainerRef.current.clientHeight } : undefined}
-          onGraphPanTo={viewMode === "graph" ? setGraphPan : undefined}
+          mode="linear"
           currentAddress={state.currentAddress}
+          commentAddrs={commentAddrSet}
         />
       )}
       {showDecompile && (
@@ -2130,68 +2173,80 @@ export function DisassemblyView() {
                   return next;
                 });
               }}
+              comments={state.comments}
+              lineMap={decompile.activeLineMap}
+              editingComment={editingComment}
+              onEditComment={setEditingComment}
+              onCommitComment={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
+              onDeleteComment={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
             />
           </div>
         </>
       )}
       </div>{/* end flex wrapper for content + minimap */}
 
-      {/* Call panel */}
-      {showCallPanel && currentFunc && (
-        <CallPanel
-          func={currentFunc}
-          xrefMap={xrefMap}
-          instructions={instructions}
-          functions={state.functions}
-          renames={state.renames}
-          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-          onClose={() => setShowCallPanel(false)}
-        />
-      )}
-
-      {/* Instruction detail panel */}
-      {showDetail && isExecutable && (() => {
-        // Binary search for current instruction
-        let curInsn: Instruction | null = null;
-        let lo = 0, hi = instructions.length - 1;
-        while (lo <= hi) {
-          const mid = (lo + hi) >>> 1;
-          if (instructions[mid].address === state.currentAddress) { curInsn = instructions[mid]; break; }
-          if (instructions[mid].address < state.currentAddress) lo = mid + 1;
-          else hi = mid - 1;
-        }
-        if (!curInsn && instructions.length > 0) {
-          // Use closest
-          const idx = Math.min(lo, instructions.length - 1);
-          curInsn = instructions[idx];
-        }
-        return curInsn ? (
-          <InstructionDetail
-            insn={curInsn}
-            typedXrefMap={typedXrefMap}
-            funcMap={funcMap}
-            iatMap={iatMap}
-            renames={state.renames}
-            sortedFuncs={sortedFuncs}
-            onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-            onClose={() => setShowDetail(false)}
-            stackFrame={stackFrame}
-            signature={currentFuncSig}
-          />
-        ) : null;
-      })()}
-
-      {/* Xref summary panel */}
-      {showXrefPanel && (
-        <XrefPanel
-          typedXrefMap={typedXrefMap}
-          funcMap={funcMap}
-          sortedFuncs={sortedFuncs}
-          pe={pe}
-          onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-          onClose={() => setShowXrefPanel(false)}
-        />
-      )}
+      {/* Tabbed bottom panels */}
+      <BottomPanelContainer
+        panels={[
+          {
+            id: "calls",
+            label: "Calls",
+            visible: showCallPanel && !!currentFunc,
+            onClose: () => setShowCallPanel(false),
+            content: currentFunc ? (
+              <CallPanel
+                func={currentFunc}
+                xrefMap={xrefMap}
+                instructions={instructions}
+                functions={state.functions}
+                renames={state.renames}
+                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                onClose={() => setShowCallPanel(false)}
+              />
+            ) : null,
+          },
+          {
+            id: "detail",
+            label: "Detail",
+            visible: showDetail && isExecutable,
+            onClose: () => setShowDetail(false),
+            content: curInsnForDetail ? (
+              <InstructionDetail
+                insn={curInsnForDetail}
+                typedXrefMap={typedXrefMap}
+                funcMap={funcMap}
+                iatMap={iatMap}
+                renames={state.renames}
+                sortedFuncs={sortedFuncs}
+                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                onClose={() => setShowDetail(false)}
+                stackFrame={stackFrame}
+                signature={currentFuncSig}
+              />
+            ) : null,
+          },
+          {
+            id: "xrefs",
+            label: "Xrefs",
+            visible: showXrefPanel,
+            onClose: () => { setShowXrefPanel(false); setXrefScopeAddress(null); },
+            content: (
+              <XrefPanel
+                typedXrefMap={typedXrefMap}
+                funcMap={funcMap}
+                sortedFuncs={sortedFuncs}
+                pe={pe}
+                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                onClose={() => { setShowXrefPanel(false); setXrefScopeAddress(null); }}
+                scopeAddress={xrefScopeAddress}
+                currentFuncAddr={currentFunc?.address ?? null}
+                currentFuncEnd={currentFunc ? currentFunc.address + currentFunc.size : null}
+                currentInsnAddr={state.currentAddress}
+              />
+            ),
+          },
+        ]}
+      />
 
       {/* Shortcut legend overlay */}
       {showShortcuts && (
@@ -2211,7 +2266,7 @@ export function DisassemblyView() {
                   ["Shift+Enter", "Previous search result"],
                   ["N", "Rename current function"],
                   ["Esc", "Navigate back"],
-                  [";", "Add/edit comment at current address"],
+                  [";", "Add/edit comment (disassembly + pseudocode)"],
                   ["I", "Toggle instruction detail panel"],
                   ["X", "Toggle callers/callees panel"],
                   ["R", "Toggle cross-reference panel"],
