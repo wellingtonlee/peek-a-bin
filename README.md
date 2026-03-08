@@ -197,13 +197,14 @@ Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
 {
   "mcpServers": {
     "peek-a-bin": {
-      "command": "npx",
-      "args": ["tsx", "src/mcp/index.ts"],
-      "cwd": "/absolute/path/to/web-disassembly"
+      "command": "bash",
+      "args": ["-c", "cd /absolute/path/to/web-disassembly && exec npx tsx src/mcp/index.ts"]
     }
   }
 }
 ```
+
+> **Note:** The `cwd` field in MCP configs is not reliably supported. Use `bash -c "cd ... && exec ..."` to ensure the server starts in the correct directory where `tsx` and project dependencies are installed.
 
 ### Tools
 
