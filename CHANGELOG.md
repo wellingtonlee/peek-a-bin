@@ -4,6 +4,7 @@
 
 ### Added
 
+- **MCP server** — Model Context Protocol server for programmatic PE analysis; stdio transport; multi-file sessions; tools: load_pe, list_files, list_functions, decompile_function, disassemble_function, get_xrefs, detect_anomalies; resources: pe://{fileId}/{headers,sections,imports,exports,strings,functions,anomalies,driver}; shared module extraction from worker (functionDetect.ts); run via `npm run mcp` (2026-03-07 18:06)
 - **Pseudocode comments** — annotate decompiled code with user comments; inline green `// comment` display on all lines mapping to the same address; right-click context menu (Add/Edit comment, Copy address); `;` hotkey to add comment on highlighted line; inline textarea editor (Enter=save, Shift+Enter=newline, Escape=cancel, empty=delete); shared editing state with disassembly view; comments auto-persist via existing annotation system (2026-03-07 14:17)
 - **Comment indicators in minimap** — green markers on the minimap for addresses with user comments; priority between bookmarks and search matches (2026-03-07 14:58)
 - **Find all references flow** — xref badge clicks now open the full XrefPanel pre-filtered to the target address instead of a small popup; works for both function label and instruction-level xref badges (2026-03-07 15:39)

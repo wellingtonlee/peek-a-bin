@@ -177,6 +177,76 @@ Once configured, the **High Level** tab in the decompile panel will send the bin
 | `POST` | `/api/v1/binary` | Upload PE binary (multipart), returns `{ projectId }` |
 | `POST` | `/api/v1/decompile` | Decompile function at address, returns `{ code, lineMap }` |
 
+## MCP Server
+
+Peek-a-Bin includes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that lets AI agents programmatically analyze PE binaries. It uses the same parse, disassemble, and decompile pipeline as the browser UI, running directly in Node.js via stdio transport.
+
+### Starting the Server
+
+```bash
+npm run mcp
+```
+
+The server loads the Capstone WASM engine on startup and accepts MCP requests over stdin/stdout.
+
+### Configuring with Claude Code
+
+Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "peek-a-bin": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp/index.ts"],
+      "cwd": "/absolute/path/to/web-disassembly"
+    }
+  }
+}
+```
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `load_pe` | Load a PE file from disk and run full analysis (parse, disassemble, detect functions, build xrefs, detect anomalies). Returns a summary with header info, function count, anomalies, and driver detection results. Accepts an optional `id` parameter; defaults to the filename. |
+| `list_files` | List all currently loaded PE files with basic metadata (architecture, section count, function count). |
+| `list_functions` | List detected functions in a loaded file. Supports substring filtering (`filter`) and pagination (`offset`/`limit`). |
+| `decompile_function` | Decompile a function at a given address to C-like pseudocode. Runs the full pipeline: stack analysis, signature inference, CFG construction, IR lifting, SSA, optimization, structuring, type inference, struct synthesis, and code emission. |
+| `disassemble_function` | Get a formatted assembly listing for a function (address, raw bytes, mnemonic, operands, and inline comments for strings/imports/IOCTLs). |
+| `get_xrefs` | Get cross-references to a given address — calls, jumps, branches, and data references. |
+| `detect_anomalies` | Get security anomalies for a loaded file with severity, title, and detail for each finding. |
+
+### Resources
+
+PE file data is also exposed as MCP resources using the URI template `pe://{fileId}/<resource>`:
+
+| Resource | Description |
+|----------|-------------|
+| `pe://{fileId}/headers` | PE headers — image base, entry point, subsystem, DLL characteristics, machine type, timestamps. |
+| `pe://{fileId}/sections` | Section table with names, addresses, sizes, and decoded characteristic flags. |
+| `pe://{fileId}/imports` | Import table — libraries and their functions with IAT addresses. |
+| `pe://{fileId}/exports` | Export table — name, ordinal, and address for each export. |
+| `pe://{fileId}/strings` | Extracted strings with addresses and encoding type (ascii/utf16le). |
+| `pe://{fileId}/functions` | Detected function list with names, addresses, sizes, thunk status, and tail call targets. |
+| `pe://{fileId}/anomalies` | Security anomalies with severity, title, and detail. |
+| `pe://{fileId}/driver` | Driver analysis — detection status, kernel modules, WDM flag, import counts. |
+
+### Multi-File Sessions
+
+The MCP server supports loading multiple PE files in a single session. Each file is identified by an `id` (auto-generated from the filename or explicitly provided). All tools and resources reference files by this ID, enabling side-by-side analysis and comparison of multiple binaries.
+
+### Example Prompts
+
+Once configured, you can ask Claude to analyze PE files directly:
+
+- *"Load and analyze /path/to/notepad.exe"*
+- *"Decompile the entry_point function"*
+- *"List all functions containing 'Create'"*
+- *"What security anomalies were detected?"*
+- *"Show me the import table"*
+- *"Get cross-references to 0x140001000"*
+
 ## Project Structure
 
 ```
@@ -184,13 +254,14 @@ src/
 ├── analysis/      # Binary analysis modules (driver detection, IOCTL, IRP, anomaly detection)
 ├── components/    # React UI components
 ├── decompile/     # Decompilation clients (Ghidra REST, WASM stub, types)
-├── pe/            # PE file format parser (headers, imports, authenticode)
 ├── disasm/        # Disassembly engine integration and built-in decompiler
-├── llm/           # LLM integration (settings, streaming client, prompts)
-├── workers/       # Web Worker threads
 ├── hooks/         # Custom React hooks
-├── utils/         # Shared utilities
+├── llm/           # LLM integration (settings, streaming client, prompts)
+├── mcp/           # MCP server (tools, resources, session state, Capstone wrapper)
+├── pe/            # PE file format parser (headers, imports, authenticode)
 ├── styles/        # Tailwind and global styles
+├── utils/         # Shared utilities
+├── workers/       # Web Worker threads
 ├── App.tsx        # Root application component
 └── main.tsx       # Entry point
 ghidra-server/     # Optional Ghidra decompilation server (Docker + FastAPI)
