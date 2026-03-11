@@ -36,10 +36,15 @@ export interface AnalyzedFile {
   /** text section bytes + base for disassembly */
   textBytes: Uint8Array;
   textBase: number;
+  /** Annotations — string address keys for ExportSchemaV1 compat */
+  comments: Record<string, string>;
+  renames: Record<string, string>;
+  bookmarks: { address: number; label: string }[];
 }
 
 export class FileSession {
   files = new Map<string, AnalyzedFile>();
+  onAnnotationChange?: (fileId: string, af: AnalyzedFile) => void;
 
   async loadFile(id: string, fileName: string, buffer: ArrayBuffer): Promise<AnalyzedFile> {
     await initCapstone();
@@ -131,6 +136,9 @@ export class FileSession {
       structRegistry,
       textBytes,
       textBase,
+      comments: {},
+      renames: {},
+      bookmarks: [],
     };
 
     this.files.set(id, analyzed);
@@ -147,5 +155,53 @@ export class FileSession {
 
   removeFile(id: string): boolean {
     return this.files.delete(id);
+  }
+
+  setComment(fileId: string, address: number, text: string): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    af.comments[String(address)] = text;
+    this.onAnnotationChange?.(fileId, af);
+    return true;
+  }
+
+  deleteComment(fileId: string, address: number): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    delete af.comments[String(address)];
+    this.onAnnotationChange?.(fileId, af);
+    return true;
+  }
+
+  setRename(fileId: string, address: number, name: string): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    af.renames[String(address)] = name;
+    this.onAnnotationChange?.(fileId, af);
+    return true;
+  }
+
+  deleteRename(fileId: string, address: number): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    delete af.renames[String(address)];
+    this.onAnnotationChange?.(fileId, af);
+    return true;
+  }
+
+  addBookmark(fileId: string, address: number, label: string): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    af.bookmarks.push({ address, label });
+    this.onAnnotationChange?.(fileId, af);
+    return true;
+  }
+
+  removeBookmark(fileId: string, address: number): boolean {
+    const af = this.files.get(fileId);
+    if (!af) return false;
+    af.bookmarks = af.bookmarks.filter(b => b.address !== address);
+    this.onAnnotationChange?.(fileId, af);
+    return true;
   }
 }

@@ -175,6 +175,19 @@ dist
 !.yarn/sdks
 !.yarn/versions
 
+# Security-sensitive files
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+*.jks
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
 # Vite files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*

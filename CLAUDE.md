@@ -9,7 +9,7 @@ Browser-based PE disassembler/analyzer. Fully client-side (no server). PWA with 
 ```sh
 npm run dev          # dev server
 npm run build        # tsc -b && vite build (use for verification)
-npm test             # vitest run (59 tests: PE parsing + decompiler)
+npm test             # vitest run (78 tests: PE parsing + decompiler)
 npx tsc --noEmit     # type check only (faster than full build)
 ```
 
@@ -22,7 +22,7 @@ npx tsc --noEmit     # type check only (faster than full build)
 - `hooks/` — state management (usePEFile), derived state, disassembly rows, search
 - `workers/` — Web Worker for Capstone WASM + off-thread analysis (disasm.worker.ts + disasmClient.ts)
 - `analysis/` — driver detection, anomalies, IOCTL decoding
-- `llm/` — LLM integration (settings, streaming client, prompts)
+- `llm/` — LLM integration (multi-profile settings, streaming client, prompts)
 - `utils/` — recent files (IndexedDB), export schema, entropy, fuzzy match
 
 ## Architecture
@@ -43,7 +43,7 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 **File naming**: Components = PascalCase.tsx, hooks = useCamelCase.ts, modules = camelCase.ts
 
-**localStorage**: `peek-a-bin:<feature>` namespace (e.g. `peek-a-bin:llm-settings`, `peek-a-bin:font-size`, `peek-a-bin:view-mode`)
+**localStorage**: `peek-a-bin:<feature>` namespace (e.g. `peek-a-bin:llm-profiles`, `peek-a-bin:font-size`, `peek-a-bin:view-mode`). Legacy `peek-a-bin:llm-settings` auto-migrates to `peek-a-bin:llm-profiles` on first load.
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for cross-component communication
 
@@ -92,6 +92,12 @@ Always run after changes:
 npx tsc --noEmit && npx vite build
 npm test
 ```
+
+## Documentation
+
+When making architectural changes, adding major features, or changing conventions, update this file (`CLAUDE.md`) so future AI agents have accurate context. This includes new source directories, new pipeline stages, new conventions, new gotchas, and changes to the build/test commands.
+
+Update `README.md` when changes affect the public-facing project description: new features, new commands, setup instructions, configuration formats, or project structure changes.
 
 ## CHANGELOG Convention
 

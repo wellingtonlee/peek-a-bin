@@ -3,12 +3,13 @@
  */
 
 import { z } from 'zod';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { FileSession } from './session';
 import { analyzeStackFrame } from '../disasm/stack';
 import { inferSignature } from '../disasm/signatures';
 import { decompileFunction } from '../disasm/decompile/pipeline';
+import { validateImport, type ExportSchemaV1 } from '../utils/exportSchema';
 
 export function registerTools(server: McpServer, session: FileSession): void {
   // ── load_pe ──
@@ -139,7 +140,10 @@ export function registerTools(server: McpServer, session: FileSession): void {
       const stackFrame = analyzeStackFrame(func, af.instructions, af.pe.is64);
       const signature = inferSignature(func, af.instructions, af.pe.is64);
 
-      const funcMap = new Map(af.functions.map(f => [f.address, { name: f.name, address: f.address }]));
+      const funcMap = new Map(af.functions.map(f => [
+        f.address,
+        { name: af.renames[String(f.address)] ?? f.name, address: f.address },
+      ]));
 
       const result = decompileFunction(
         func,
@@ -160,9 +164,10 @@ export function registerTools(server: McpServer, session: FileSession): void {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            functionName: func.name,
+            functionName: af.renames[String(func.address)] ?? func.name,
             address: `0x${func.address.toString(16)}`,
             code: result.code,
+            lineMap: result.lineMap.map(([line, addr]) => ({ line, address: `0x${addr.toString(16)}` })),
           }, null, 2),
         }],
       };
@@ -257,6 +262,217 @@ export function registerTools(server: McpServer, session: FileSession): void {
               title: a.title,
               detail: a.detail,
             })),
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── add_comment ──
+  server.tool(
+    'add_comment',
+    'Add or remove a comment at an address',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+      address: z.union([z.number(), z.string()]).describe('Address to comment'),
+      text: z.string().describe('Comment text (empty string to remove)'),
+    },
+    async ({ fileId, address, text }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
+      if (text === '') {
+        session.deleteComment(fileId, addr);
+      } else {
+        session.setComment(fileId, addr, text);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, text }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── rename_function ──
+  server.tool(
+    'rename_function',
+    'Rename a function at an address',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+      address: z.union([z.number(), z.string()]).describe('Function address'),
+      name: z.string().describe('New name (empty string to remove rename)'),
+    },
+    async ({ fileId, address, name }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
+      if (name === '') {
+        session.deleteRename(fileId, addr);
+      } else {
+        session.setRename(fileId, addr, name);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, name }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── add_bookmark ──
+  server.tool(
+    'add_bookmark',
+    'Toggle a bookmark at an address',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+      address: z.union([z.number(), z.string()]).describe('Address to bookmark'),
+      label: z.string().optional().describe('Bookmark label (default "")'),
+    },
+    async ({ fileId, address, label }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
+      const existing = af.bookmarks.find(b => b.address === addr);
+      let action: 'added' | 'removed';
+      if (existing) {
+        session.removeBookmark(fileId, addr);
+        action = 'removed';
+      } else {
+        session.addBookmark(fileId, addr, label ?? '');
+        action = 'added';
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, action }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── list_comments ──
+  server.tool(
+    'list_comments',
+    'List all annotations (comments, renames, bookmarks) for a file',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+    },
+    async ({ fileId }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            comments: Object.entries(af.comments).map(([address, text]) => ({ address: `0x${Number(address).toString(16)}`, text })),
+            renames: Object.entries(af.renames).map(([address, name]) => ({ address: `0x${Number(address).toString(16)}`, name })),
+            bookmarks: af.bookmarks.map(b => ({ address: `0x${b.address.toString(16)}`, label: b.label })),
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── export_analysis ──
+  server.tool(
+    'export_analysis',
+    'Export analysis annotations as ExportSchemaV1 JSON',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+      outputPath: z.string().optional().describe('File path to write JSON to (optional)'),
+    },
+    async ({ fileId, outputPath }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      const exported: ExportSchemaV1 = {
+        version: 1,
+        fileName: af.fileName,
+        exportedAt: new Date().toISOString(),
+        bookmarks: af.bookmarks,
+        renames: af.renames,
+        comments: af.comments,
+        hexPatches: [],
+        functions: af.functions.map(f => ({
+          address: f.address,
+          name: af.renames[String(f.address)] ?? f.name,
+          size: f.size,
+        })),
+      };
+
+      const json = JSON.stringify(exported, null, 2);
+      if (outputPath) {
+        writeFileSync(outputPath, json, 'utf-8');
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: json,
+        }],
+      };
+    },
+  );
+
+  // ── import_analysis ──
+  server.tool(
+    'import_analysis',
+    'Import analysis annotations from an ExportSchemaV1 JSON file',
+    {
+      fileId: z.string().describe('ID of the loaded PE file'),
+      inputPath: z.string().describe('Path to ExportSchemaV1 JSON file'),
+    },
+    async ({ fileId, inputPath }) => {
+      const af = session.getFile(fileId);
+      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readFileSync(inputPath, 'utf-8'));
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error: failed to read/parse "${inputPath}": ${e}` }], isError: true };
+      }
+
+      const data = validateImport(raw);
+      if (!data) {
+        return { content: [{ type: 'text' as const, text: `Error: invalid ExportSchemaV1 format` }], isError: true };
+      }
+
+      // Merge renames and comments (new overrides old)
+      Object.assign(af.renames, data.renames);
+      Object.assign(af.comments, data.comments);
+
+      // Dedup bookmarks by address
+      const existingAddrs = new Set(af.bookmarks.map(b => b.address));
+      for (const b of data.bookmarks) {
+        if (!existingAddrs.has(b.address)) {
+          af.bookmarks.push(b);
+          existingAddrs.add(b.address);
+        }
+      }
+
+      session.onAnnotationChange?.(fileId, af);
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            fileId,
+            imported: {
+              comments: Object.keys(data.comments).length,
+              renames: Object.keys(data.renames).length,
+              bookmarks: data.bookmarks.length,
+            },
           }, null, 2),
         }],
       };

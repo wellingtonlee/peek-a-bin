@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, type LLMSettings, type DecompileServerSettings } from "../llm/settings";
+import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
 
 interface Props {
@@ -21,8 +21,15 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "theme", label: "Theme" },
 ];
 
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
 export function SettingsModal({ open, onClose }: Props) {
+  const [profileStore, setProfileStore] = useState<LLMProfileStore>(loadProfiles);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>("");
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
+  const [profileName, setProfileName] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
   const [decompServer, setDecompServer] = useState<DecompileServerSettings>(loadDecompileServer);
@@ -34,7 +41,13 @@ export function SettingsModal({ open, onClose }: Props) {
 
   useEffect(() => {
     if (open) {
-      setSettings(loadSettings());
+      const store = loadProfiles();
+      setProfileStore(store);
+      const active = getActiveProfile(store);
+      setSelectedProfileId(active.id);
+      const { id: _, name: __, ...s } = active;
+      setSettings(s);
+      setProfileName(active.name);
       setShowKey(false);
       setFontSize(loadFontSize());
       setDecompServer(loadDecompileServer());
@@ -43,6 +56,52 @@ export function SettingsModal({ open, onClose }: Props) {
       setImportError(null);
     }
   }, [open]);
+
+  const handleSelectProfile = (id: string) => {
+    const profile = profileStore.profiles.find(p => p.id === id);
+    if (!profile) return;
+    setSelectedProfileId(id);
+    const { id: _, name: __, ...s } = profile;
+    setSettings(s);
+    setProfileName(profile.name);
+    setShowKey(false);
+  };
+
+  const handleNewProfile = () => {
+    if (!canAddProfile(profileStore)) return;
+    const newProfile: LLMProfile = {
+      id: generateId(),
+      name: `Profile ${profileStore.profiles.length + 1}`,
+      provider: "anthropic",
+      apiKey: "",
+      model: "claude-sonnet-4-20250514",
+      baseUrl: "https://api.openai.com",
+      enhanceSource: "pseudocode",
+    };
+    const newStore = {
+      ...profileStore,
+      profiles: [...profileStore.profiles, newProfile],
+    };
+    setProfileStore(newStore);
+    setSelectedProfileId(newProfile.id);
+    const { id: _, name: __, ...s } = newProfile;
+    setSettings(s);
+    setProfileName(newProfile.name);
+    setShowKey(false);
+  };
+
+  const handleDeleteProfile = () => {
+    if (profileStore.profiles.length <= 1) return;
+    const remaining = profileStore.profiles.filter(p => p.id !== selectedProfileId);
+    const newActiveId = profileStore.activeId === selectedProfileId ? remaining[0].id : profileStore.activeId;
+    const newStore: LLMProfileStore = { profiles: remaining, activeId: newActiveId };
+    setProfileStore(newStore);
+    const fallback = remaining.find(p => p.id === newActiveId) ?? remaining[0];
+    setSelectedProfileId(fallback.id);
+    const { id: _, name: __, ...s } = fallback;
+    setSettings(s);
+    setProfileName(fallback.name);
+  };
 
 
   if (!open) return null;
@@ -58,11 +117,20 @@ export function SettingsModal({ open, onClose }: Props) {
   };
 
   const handleSave = () => {
-    saveSettings(settings);
+    // Update selected profile in store
+    const updatedProfiles = profileStore.profiles.map(p =>
+      p.id === selectedProfileId ? { ...p, ...settings, name: profileName } : p
+    );
+    const store: LLMProfileStore = {
+      profiles: updatedProfiles,
+      activeId: selectedProfileId,
+    };
+    saveProfiles(store);
     saveFontSize(fontSize);
     saveDecompileServer(decompServer);
     saveThemeId(themeId);
     window.dispatchEvent(new CustomEvent("peek-a-bin:theme-changed"));
+    window.dispatchEvent(new CustomEvent("peek-a-bin:profile-changed"));
     onClose();
   };
 
@@ -146,6 +214,57 @@ export function SettingsModal({ open, onClose }: Props) {
           {/* AI Tab */}
           {activeTab === "ai" && (
             <>
+              {/* Profile selector */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Profile
+                </label>
+                <div className="flex gap-1">
+                  <select
+                    value={selectedProfileId}
+                    onChange={(e) => {
+                      if (e.target.value === "__new__") {
+                        handleNewProfile();
+                      } else {
+                        handleSelectProfile(e.target.value);
+                      }
+                    }}
+                    className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                  >
+                    {profileStore.profiles.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                    {canAddProfile(profileStore) && (
+                      <option value="__new__">+ New Profile</option>
+                    )}
+                  </select>
+                  <button
+                    onClick={handleDeleteProfile}
+                    disabled={profileStore.profiles.length <= 1}
+                    className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                    title="Delete profile"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* Profile name */}
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Profile Name
+                </label>
+                <input
+                  type="text"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  placeholder="Profile name"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
               {/* Provider */}
               <div>
                 <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">

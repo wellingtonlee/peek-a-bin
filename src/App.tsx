@@ -33,11 +33,13 @@ import { SettingsModal } from "./components/SettingsModal";
 import { GoToAddressModal } from "./components/GoToAddressModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
+import { useMcpSync } from "./hooks/useMcpSync";
 
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const graphOverviewState = useGraphOverviewState();
+  const mcpStatus = useMcpSync(state.fileName, dispatch);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -453,7 +455,7 @@ export default function App() {
               </main>
             </div>
             </GraphOverviewContext.Provider>
-            <StatusBar />
+            <StatusBar mcpStatus={mcpStatus} />
           </div>
         )}
         <CommandPalette open={paletteOpen} onClose={closePalette} />

@@ -40,6 +40,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Stack frame reconstruction
 - Control flow graph (CFG) — inline graph view togglable with `Space` (IDA-style), with full instruction interaction, collapsible blocks, pan/zoom, and sidebar graph overview minimap
 - Decompiler with sub-tabs — **Low Level** (built-in IR-based decompiler), **High Level** (optional Ghidra server), **AI** (LLM-powered enhance/explain); per-tab per-function caching and bidirectional assembly sync
+- Multiple AI provider profiles — create up to 10 named profiles with different providers, API keys, and models; quick-switch from the status bar
 
 **Kernel Driver Analysis**
 - Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)
@@ -109,6 +110,19 @@ npm run test:watch  # watch mode
 npm run build
 npm run preview  # http://localhost:4173/peek-a-bin/
 ```
+
+## Releasing
+
+1. Bump `version` in `package.json`
+2. Rename `[Unreleased]` to `[x.y.z] - YYYY-MM-DD` in `CHANGELOG.md`, add fresh `[Unreleased]` section
+3. Commit, tag, and push:
+   ```bash
+   git tag v1.0.0
+   git push --tags
+   ```
+4. The `v*.*.*` tag triggers the deploy workflow (type-check + test + build + deploy to GitHub Pages)
+
+CI runs on every push and PR to `main` (type-check + tests).
 
 ## Offline / PWA Usage
 
@@ -217,6 +231,12 @@ Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
 | `disassemble_function` | Get a formatted assembly listing for a function (address, raw bytes, mnemonic, operands, and inline comments for strings/imports/IOCTLs). |
 | `get_xrefs` | Get cross-references to a given address — calls, jumps, branches, and data references. |
 | `detect_anomalies` | Get security anomalies for a loaded file with severity, title, and detail for each finding. |
+| `add_comment` | Add or remove a comment at an address. Empty text removes the comment. |
+| `rename_function` | Rename a function at an address. Empty name removes the rename. |
+| `add_bookmark` | Toggle a bookmark at an address (adds if absent, removes if present). |
+| `list_comments` | List all annotations (comments, renames, bookmarks) for a file. |
+| `export_analysis` | Export annotations as ExportSchemaV1 JSON, optionally writing to a file. |
+| `import_analysis` | Import annotations from an ExportSchemaV1 JSON file, merging into the current session. |
 
 ### Resources
 
@@ -232,6 +252,18 @@ PE file data is also exposed as MCP resources using the URI template `pe://{file
 | `pe://{fileId}/functions` | Detected function list with names, addresses, sizes, thunk status, and tail call targets. |
 | `pe://{fileId}/anomalies` | Security anomalies with severity, title, and detail. |
 | `pe://{fileId}/driver` | Driver analysis — detection status, kernel modules, WDM flag, import counts. |
+
+### Live Browser Sync
+
+When the MCP server is running alongside the browser app, annotations made via MCP tools (comments, renames, bookmarks) are pushed to the browser in real-time over a WebSocket connection. This lets you see AI-generated annotations appear instantly in the disassembly and decompiler views.
+
+The sync is one-way (MCP → browser) and requires the same PE file to be loaded in both. The browser auto-connects and reconnects if the MCP server restarts.
+
+- **Status indicator:** A green "MCP" dot appears in the status bar when connected.
+- **Port:** Default `19283`. Override with the `PEEK_A_BIN_WS_PORT` environment variable:
+  ```bash
+  PEEK_A_BIN_WS_PORT=9999 npm run mcp
+  ```
 
 ### Multi-File Sessions
 

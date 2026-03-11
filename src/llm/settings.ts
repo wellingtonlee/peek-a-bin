@@ -6,7 +6,19 @@ export interface LLMSettings {
   enhanceSource: "pseudocode" | "assembly";
 }
 
+export interface LLMProfile extends LLMSettings {
+  id: string;
+  name: string;
+}
+
+export interface LLMProfileStore {
+  profiles: LLMProfile[];
+  activeId: string;
+}
+
 const STORAGE_KEY = "peek-a-bin:llm-settings";
+const PROFILES_KEY = "peek-a-bin:llm-profiles";
+const MAX_PROFILES = 10;
 
 const DEFAULTS: LLMSettings = {
   provider: "anthropic",
@@ -16,16 +28,77 @@ const DEFAULTS: LLMSettings = {
   enhanceSource: "pseudocode",
 };
 
-export function loadSettings(): LLMSettings {
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+function makeDefaultProfile(): LLMProfile {
+  return { ...DEFAULTS, id: generateId(), name: "Default" };
+}
+
+export function loadProfiles(): LLMProfileStore {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw) {
+      const store: LLMProfileStore = JSON.parse(raw);
+      if (store.profiles?.length) return store;
+    }
   } catch { /* ignore corrupt */ }
-  return { ...DEFAULTS };
+
+  // Auto-migrate from legacy single-settings key
+  try {
+    const legacy = localStorage.getItem(STORAGE_KEY);
+    if (legacy) {
+      const settings: LLMSettings = { ...DEFAULTS, ...JSON.parse(legacy) };
+      const profile: LLMProfile = { ...settings, id: generateId(), name: "Default" };
+      const store: LLMProfileStore = { profiles: [profile], activeId: profile.id };
+      saveProfiles(store);
+      localStorage.removeItem(STORAGE_KEY);
+      return store;
+    }
+  } catch { /* ignore corrupt legacy */ }
+
+  const profile = makeDefaultProfile();
+  return { profiles: [profile], activeId: profile.id };
+}
+
+export function saveProfiles(store: LLMProfileStore): void {
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(store));
+}
+
+export function getActiveProfile(store?: LLMProfileStore): LLMProfile {
+  const s = store ?? loadProfiles();
+  return s.profiles.find(p => p.id === s.activeId) ?? s.profiles[0] ?? makeDefaultProfile();
+}
+
+export function setActiveProfileId(id: string): void {
+  const store = loadProfiles();
+  if (store.profiles.some(p => p.id === id)) {
+    store.activeId = id;
+    saveProfiles(store);
+  }
+}
+
+export function canAddProfile(store: LLMProfileStore): boolean {
+  return store.profiles.length < MAX_PROFILES;
+}
+
+export function loadSettings(): LLMSettings {
+  const profile = getActiveProfile();
+  const { id: _, name: __, ...settings } = profile;
+  return settings;
 }
 
 export function saveSettings(settings: LLMSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  const store = loadProfiles();
+  const idx = store.profiles.findIndex(p => p.id === store.activeId);
+  if (idx >= 0) {
+    store.profiles[idx] = { ...store.profiles[idx], ...settings };
+    saveProfiles(store);
+  } else {
+    // Fallback: write legacy key (shouldn't happen)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  }
 }
 
 export function hasApiKey(): boolean {

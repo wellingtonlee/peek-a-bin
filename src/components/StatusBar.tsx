@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { Skeleton } from "./Skeleton";
+import { loadProfiles, saveProfiles, getActiveProfile, type LLMProfileStore } from "../llm/settings";
 
 const phaseLabels: Record<string, string> = {
   parsing: "Parsing PE...",
@@ -42,13 +43,45 @@ function Spinner() {
   );
 }
 
-export function StatusBar() {
+export function StatusBar({ mcpStatus }: { mcpStatus?: 'connected' | 'disconnected' }) {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const pe = state.peFile;
 
   const containingFunc = useContainingFunc();
   const sectionInfo = useSectionInfo();
+
+  const [profileStore, setProfileStore] = useState<LLMProfileStore>(loadProfiles);
+  const [showProfilePopover, setShowProfilePopover] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const refreshProfiles = useCallback(() => setProfileStore(loadProfiles()), []);
+
+  useEffect(() => {
+    window.addEventListener("peek-a-bin:profile-changed", refreshProfiles);
+    return () => window.removeEventListener("peek-a-bin:profile-changed", refreshProfiles);
+  }, [refreshProfiles]);
+
+  useEffect(() => {
+    if (!showProfilePopover) return;
+    const handleClick = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setShowProfilePopover(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showProfilePopover]);
+
+  const activeProfile = getActiveProfile(profileStore);
+
+  const handleSwitchProfile = (id: string) => {
+    const updated: LLMProfileStore = { ...profileStore, activeId: id };
+    saveProfiles(updated);
+    setProfileStore(updated);
+    setShowProfilePopover(false);
+    window.dispatchEvent(new CustomEvent("peek-a-bin:profile-changed"));
+  };
 
   const fileOffset = useMemo(() => {
     if (!pe || !sectionInfo) return null;
@@ -120,6 +153,46 @@ export function StatusBar() {
         <span className="mr-4 text-gray-500">{blockStr}</span>
       )}
       <div className="flex-1" />
+      {profileStore.profiles.length > 1 && (
+        <span className="mr-3 relative" ref={popoverRef}>
+          <button
+            onClick={() => setShowProfilePopover(v => !v)}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-900/40 text-indigo-300 border border-indigo-700/50 hover:bg-indigo-800/50 hover:text-indigo-200 transition-colors"
+          >
+            <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" />
+            </svg>
+            {activeProfile.name}
+          </button>
+          {showProfilePopover && (
+            <div className="absolute bottom-full mb-1 right-0 w-44 bg-gray-800 border border-gray-600 rounded-lg shadow-xl overflow-hidden z-50">
+              <div className="px-2 py-1.5 border-b border-gray-700 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+                AI Profile
+              </div>
+              {profileStore.profiles.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => handleSwitchProfile(p.id)}
+                  className={`w-full text-left px-2 py-1.5 text-[11px] transition-colors ${
+                    p.id === profileStore.activeId
+                      ? "bg-indigo-600/20 text-indigo-300"
+                      : "text-gray-300 hover:bg-gray-700"
+                  }`}
+                >
+                  <div className="font-medium">{p.name}</div>
+                  <div className="text-[9px] text-gray-500">{p.provider} / {p.model}</div>
+                </button>
+              ))}
+            </div>
+          )}
+        </span>
+      )}
+      {mcpStatus === 'connected' && (
+        <span className="mr-3 flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />
+          <span className="text-green-400">MCP</span>
+        </span>
+      )}
       <span className="mr-4">
         <span className="text-gray-500">{state.functions.length}</span> functions
       </span>
