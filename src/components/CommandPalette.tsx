@@ -9,10 +9,11 @@ interface CommandPaletteProps {
 }
 
 interface ResultItem {
-  category: "Functions" | "Imports" | "Exports" | "Strings";
+  category: "Functions" | "Imports" | "Exports" | "Strings" | "AI Commands";
   label: string;
   address: number;
   tab?: "disassembly" | "imports" | "exports" | "strings";
+  action?: string;
 }
 
 const CAP = 15;
@@ -94,6 +95,19 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       }
     }
 
+    // AI Commands
+    const aiCommands = [
+      { label: "AI: Open Chat", action: "peek-a-bin:open-chat" },
+      { label: "AI: Batch Rename Functions", action: "peek-a-bin:batch-rename" },
+      { label: "AI: Generate Analysis Report", action: "peek-a-bin:generate-report" },
+      { label: "AI: Scan Suspicious Functions", action: "peek-a-bin:ai-scan" },
+    ];
+    for (const cmd of aiCommands) {
+      if (fuzzyMatch(query, cmd.label) || cmd.label.toLowerCase().includes(query.toLowerCase())) {
+        items.push({ category: "AI Commands", label: cmd.label, address: 0, action: cmd.action });
+      }
+    }
+
     return items;
   }, [pe, query, sortedFuncs, state.renames]);
 
@@ -102,6 +116,11 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   }, [results.length]);
 
   const handleSelect = useCallback((item: ResultItem) => {
+    if (item.action) {
+      window.dispatchEvent(new CustomEvent(item.action));
+      onClose();
+      return;
+    }
     dispatch({ type: "SET_ADDRESS", address: item.address });
     dispatch({ type: "SET_TAB", tab: item.tab ?? "disassembly" });
     onClose();

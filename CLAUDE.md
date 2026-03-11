@@ -22,12 +22,12 @@ npx tsc --noEmit     # type check only (faster than full build)
 - `hooks/` — state management (usePEFile), derived state, disassembly rows, search
 - `workers/` — Web Worker for Capstone WASM + off-thread analysis (disasm.worker.ts + disasmClient.ts)
 - `analysis/` — driver detection, anomalies, IOCTL decoding
-- `llm/` — LLM integration (multi-profile settings, streaming client, prompts)
+- `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types)
 - `utils/` — recent files (IndexedDB), export schema, entropy, fuzzy match
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (30+ fields), `AppAction` discriminated union (36 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (33+ fields), `AppAction` discriminated union (48 action types). Access via `useAppState()` / `useAppDispatch()`.
 
 **Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches).
 
@@ -39,11 +39,13 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 **Styling**: Tailwind utility classes. Runtime font size via `--mono-font-size` CSS variable set on app root.
 
+**AI Features**: 4 AI-powered tools: Chat (multi-turn, `useAIChat`), Batch Rename (`useBatchRename`), Report (`useAIReport`), Vulnerability Scanner (`useVulnScanner`). All use `streamChat()` from `src/llm/client.ts`. Chat panel is local state in DisassemblyView. Batch rename/report/scan state in `AppState` (batchRename, aiReport, aiScanResults). Triggered via custom events (`peek-a-bin:open-chat`, `peek-a-bin:batch-rename`, `peek-a-bin:generate-report`, `peek-a-bin:ai-scan`). Markdown rendering via `marked` library in `MarkdownRenderer.tsx`.
+
 ## Conventions
 
 **File naming**: Components = PascalCase.tsx, hooks = useCamelCase.ts, modules = camelCase.ts
 
-**localStorage**: `peek-a-bin:<feature>` namespace (e.g. `peek-a-bin:llm-profiles`, `peek-a-bin:font-size`, `peek-a-bin:view-mode`). Legacy `peek-a-bin:llm-settings` auto-migrates to `peek-a-bin:llm-profiles` on first load.
+**localStorage**: `peek-a-bin:<feature>` namespace (e.g. `peek-a-bin:llm-profiles`, `peek-a-bin:font-size`, `peek-a-bin:view-mode`, `peek-a-bin:chat:${fileName}`, `peek-a-bin:report:${fileName}`, `peek-a-bin:chat-width`). Legacy `peek-a-bin:llm-settings` auto-migrates to `peek-a-bin:llm-profiles` on first load.
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for cross-component communication
 

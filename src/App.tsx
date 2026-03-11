@@ -34,6 +34,11 @@ import { GoToAddressModal } from "./components/GoToAddressModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
 import { useMcpSync } from "./hooks/useMcpSync";
+import { BatchRenameModal } from "./components/BatchRenameModal";
+import { AIReportPanel } from "./components/AIReportPanel";
+import { useAIReport } from "./hooks/useAIReport";
+import { useBatchRename } from "./hooks/useBatchRename";
+import { useVulnScanner } from "./hooks/useVulnScanner";
 
 
 export default function App() {
@@ -46,6 +51,10 @@ export default function App() {
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
+  const [chatOpen, setChatOpen] = useState(false);
+  const aiReport = useAIReport(state, dispatch);
+  const batchRename = useBatchRename(state, dispatch);
+  const vulnScanner = useVulnScanner(state, dispatch);
 
   // Apply theme on mount and when changed
   useEffect(() => {
@@ -73,6 +82,11 @@ export default function App() {
         setGoToOpen((v) => !v);
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        setChatOpen((v) => !v);
+        return;
+      }
       if (e.key === "?") {
         const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
         if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -90,6 +104,24 @@ export default function App() {
     window.addEventListener("peek-a-bin:open-settings", handler);
     return () => window.removeEventListener("peek-a-bin:open-settings", handler);
   }, []);
+
+  // AI feature event listeners
+  useEffect(() => {
+    const handleChat = () => setChatOpen(v => !v);
+    const handleReport = () => aiReport.generateReport();
+    const handleBatchRename = () => batchRename.startBatchRename();
+    const handleAiScan = () => vulnScanner.scanSuspicious();
+    window.addEventListener("peek-a-bin:open-chat", handleChat);
+    window.addEventListener("peek-a-bin:generate-report", handleReport);
+    window.addEventListener("peek-a-bin:batch-rename", handleBatchRename);
+    window.addEventListener("peek-a-bin:ai-scan", handleAiScan);
+    return () => {
+      window.removeEventListener("peek-a-bin:open-chat", handleChat);
+      window.removeEventListener("peek-a-bin:generate-report", handleReport);
+      window.removeEventListener("peek-a-bin:batch-rename", handleBatchRename);
+      window.removeEventListener("peek-a-bin:ai-scan", handleAiScan);
+    };
+  }, [aiReport.generateReport, batchRename.startBatchRename, vulnScanner.scanSuspicious]);
 
   useEffect(() => {
     const handler = () => setFontSize(loadFontSize());
@@ -462,6 +494,13 @@ export default function App() {
         <KeyboardShortcuts open={shortcutsOpen} onClose={closeShortcuts} />
         <SettingsModal open={settingsOpen} onClose={closeSettings} />
         <GoToAddressModal open={goToOpen} onClose={closeGoTo} />
+        <BatchRenameModal />
+        {state.aiReport && (
+          <AIReportPanel
+            onClose={aiReport.dismissReport}
+            onRegenerate={aiReport.regenerateReport}
+          />
+        )}
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );

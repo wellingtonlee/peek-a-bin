@@ -82,6 +82,63 @@ export function AnomaliesView() {
         </table>
       )}
 
+      {/* AI Security Findings */}
+      {state.aiScanResults.length > 0 && (
+        <>
+          <h2 className="text-gray-200 font-semibold text-base mb-3 mt-6">AI Security Findings</h2>
+          <table className="w-full text-xs mb-6">
+            <thead>
+              <tr className="text-gray-500 text-left border-b border-gray-700">
+                <th className="py-1.5 px-2 w-20">Severity</th>
+                <th className="py-1.5 px-2 w-40">Title</th>
+                <th className="py-1.5 px-2 w-36">Function</th>
+                <th className="py-1.5 px-2">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.aiScanResults.map((finding, i) => {
+                const sevColor =
+                  finding.severity === "critical" || finding.severity === "high"
+                    ? { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" }
+                    : finding.severity === "medium"
+                    ? { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" }
+                    : { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" };
+                return (
+                  <tr key={i} className={`${sevColor.bg} border-b border-gray-800/50`}>
+                    <td className="py-1.5 px-2">
+                      <span className={`${sevColor.badge} text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase`}>
+                        {finding.severity}
+                      </span>
+                    </td>
+                    <td className={`py-1.5 px-2 ${sevColor.text} font-medium`}>{finding.title}</td>
+                    <td className="py-1.5 px-2">
+                      <button
+                        className="text-blue-400 hover:underline font-mono text-[10px]"
+                        onClick={() => {
+                          dispatch({ type: "SET_ADDRESS", address: finding.functionAddress });
+                          dispatch({ type: "SET_TAB", tab: "disassembly" });
+                        }}
+                      >
+                        {finding.functionName}
+                      </button>
+                    </td>
+                    <td className="py-1.5 px-2 text-gray-400">
+                      <details>
+                        <summary className="cursor-pointer">{finding.description.substring(0, 100)}{finding.description.length > 100 ? "..." : ""}</summary>
+                        <div className="mt-1 text-gray-400">{finding.description}</div>
+                        {finding.remediation && (
+                          <div className="mt-1 text-green-400/70"><span className="font-medium">Remediation:</span> {finding.remediation}</div>
+                        )}
+                      </details>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
+
       {/* Kernel Driver Section */}
       {driverInfo?.isDriver && (
         <>

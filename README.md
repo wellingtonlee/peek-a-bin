@@ -42,6 +42,12 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - Decompiler with sub-tabs — **Low Level** (built-in IR-based decompiler), **High Level** (optional Ghidra server), **AI** (LLM-powered enhance/explain); per-tab per-function caching and bidirectional assembly sync
 - Multiple AI provider profiles — create up to 10 named profiles with different providers, API keys, and models; quick-switch from the status bar
 
+**AI-Powered Analysis**
+- AI Chat panel — multi-turn conversation with binary context (Ctrl+Shift+A); inline rename action buttons from AI suggestions
+- Batch auto-rename — decompile all unnamed functions, send to LLM in batches, review suggestions in a modal with accept/reject and confidence scores
+- AI analysis report — generates comprehensive Markdown report with executive summary, classification, capabilities, API/string/anomaly analysis, risk assessment, and IOCs; cacheable and downloadable
+- Vulnerability scanner — right-click any function to scan for security issues; bulk scan suspicious functions (those calling dangerous APIs); findings shown in Anomalies tab with severity badges
+
 **Kernel Driver Analysis**
 - Automatic detection of `.sys` drivers (NATIVE subsystem, WDM flag, kernel module imports)
 - Dismissible amber banner and status bar badge for identified drivers
@@ -315,6 +321,7 @@ Press `?` in the app to see all shortcuts. Key bindings include:
 | `B` | Toggle bookmark |
 | `0` | Zoom-to-fit (graph mode) |
 | `Tab` | Cycle successor blocks (graph mode) |
+| `Ctrl+Shift+A` | Toggle AI Chat panel |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
 | `Alt+Left` / `Alt+Right` | Back / Forward |
 

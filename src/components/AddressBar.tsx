@@ -407,10 +407,10 @@ export function AddressBar() {
 
       {TABS.map((tab, i) => {
         const isAnomalies = tab.id === "anomalies";
-        const anomalyCount = isAnomalies ? state.anomalies.length : 0;
+        const anomalyCount = isAnomalies ? state.anomalies.length + state.aiScanResults.length : 0;
         const maxSeverity = isAnomalies && anomalyCount > 0
-          ? state.anomalies.some(a => a.severity === "critical") ? "critical"
-            : state.anomalies.some(a => a.severity === "warning") ? "warning"
+          ? (state.anomalies.some(a => a.severity === "critical") || state.aiScanResults.some(a => a.severity === "critical" || a.severity === "high")) ? "critical"
+            : (state.anomalies.some(a => a.severity === "warning") || state.aiScanResults.some(a => a.severity === "medium")) ? "warning"
             : "info"
           : null;
         const badgeColor = maxSeverity === "critical" ? "bg-red-500"
@@ -582,6 +582,38 @@ export function AddressBar() {
         className="hidden"
         onChange={handleImport}
       />
+
+      <div className="w-px h-5 bg-gray-700 mx-1" />
+
+      {/* AI toolbar buttons */}
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"))}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="AI Chat (Ctrl+Shift+A)"
+      >
+        Chat
+      </button>
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:batch-rename"))}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="AI: Rename All Functions"
+      >
+        Rename
+      </button>
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:generate-report"))}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="AI: Generate Analysis Report"
+      >
+        Report
+      </button>
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:ai-scan"))}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
+        title="AI: Scan Suspicious Functions"
+      >
+        Scan
+      </button>
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 

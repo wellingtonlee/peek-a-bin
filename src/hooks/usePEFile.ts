@@ -3,6 +3,7 @@ import type { PEFile } from "../pe/types";
 import type { DisasmFunction } from "../disasm/types";
 import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
 import type { Anomaly } from "../analysis/anomalies";
+import type { BatchRenameResult, AIScanFinding } from "../llm/types";
 
 export type ViewTab =
   | "disassembly"
@@ -57,6 +58,19 @@ export interface AppState {
   iatMap: Map<number, { lib: string; func: string }>;
   driverInfo: DriverInfo | null;
   irpHandlers: IRPDispatchEntry[];
+  // AI features
+  batchRename: {
+    status: "idle" | "decompiling" | "running" | "review" | "applying";
+    progress: { done: number; total: number };
+    results: BatchRenameResult[];
+    error: string | null;
+  } | null;
+  aiReport: {
+    status: "idle" | "streaming" | "done" | "error";
+    content: string;
+    error: string | null;
+  } | null;
+  aiScanResults: AIScanFinding[];
 }
 
 export type AppAction =
@@ -96,6 +110,22 @@ export type AppAction =
   | { type: "SET_IAT_MAP"; iatMap: Map<number, { lib: string; func: string }> }
   | { type: "SET_DRIVER_INFO"; driverInfo: DriverInfo }
   | { type: "SET_IRP_HANDLERS"; handlers: IRPDispatchEntry[] }
+  // Batch rename
+  | { type: "BATCH_RENAME_START"; total: number }
+  | { type: "BATCH_RENAME_PROGRESS"; done: number }
+  | { type: "BATCH_RENAME_DONE"; results: BatchRenameResult[] }
+  | { type: "BATCH_RENAME_ERROR"; error: string }
+  | { type: "BATCH_RENAME_ACCEPT"; results: BatchRenameResult[] }
+  | { type: "BATCH_RENAME_DISMISS" }
+  // AI report
+  | { type: "AI_REPORT_START" }
+  | { type: "AI_REPORT_TOKEN"; content: string }
+  | { type: "AI_REPORT_DONE" }
+  | { type: "AI_REPORT_ERROR"; error: string }
+  | { type: "AI_REPORT_DISMISS" }
+  // AI scan
+  | { type: "AI_SCAN_ADD"; findings: AIScanFinding[] }
+  | { type: "AI_SCAN_CLEAR" }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -127,6 +157,9 @@ export const initialState: AppState = {
   iatMap: new Map(),
   driverInfo: null,
   irpHandlers: [],
+  batchRename: null,
+  aiReport: null,
+  aiScanResults: [],
 };
 
 const MAX_HISTORY = 50;
@@ -344,6 +377,40 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, driverInfo: action.driverInfo };
     case "SET_IRP_HANDLERS":
       return { ...state, irpHandlers: action.handlers };
+    // ── Batch Rename ──
+    case "BATCH_RENAME_START":
+      return { ...state, batchRename: { status: "decompiling", progress: { done: 0, total: action.total }, results: [], error: null } };
+    case "BATCH_RENAME_PROGRESS":
+      return state.batchRename ? { ...state, batchRename: { ...state.batchRename, status: state.batchRename.status === "decompiling" ? "decompiling" : "running", progress: { ...state.batchRename.progress, done: action.done } } } : state;
+    case "BATCH_RENAME_DONE":
+      return state.batchRename ? { ...state, batchRename: { ...state.batchRename, status: "review", results: action.results, error: null } } : state;
+    case "BATCH_RENAME_ERROR":
+      return state.batchRename ? { ...state, batchRename: { ...state.batchRename, status: "idle", error: action.error } } : state;
+    case "BATCH_RENAME_ACCEPT": {
+      const undo = pushUndo(state);
+      const accepted = action.results.filter(r => r.accepted);
+      const newRenames = { ...state.renames };
+      for (const r of accepted) newRenames[r.address] = r.suggestedName;
+      return { ...state, ...undo, renames: newRenames, batchRename: null };
+    }
+    case "BATCH_RENAME_DISMISS":
+      return { ...state, batchRename: null };
+    // ── AI Report ──
+    case "AI_REPORT_START":
+      return { ...state, aiReport: { status: "streaming", content: "", error: null } };
+    case "AI_REPORT_TOKEN":
+      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, content: action.content } } : state;
+    case "AI_REPORT_DONE":
+      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, status: "done" } } : state;
+    case "AI_REPORT_ERROR":
+      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, status: "error", error: action.error } } : state;
+    case "AI_REPORT_DISMISS":
+      return { ...state, aiReport: null };
+    // ── AI Scan ──
+    case "AI_SCAN_ADD":
+      return { ...state, aiScanResults: [...state.aiScanResults, ...action.findings] };
+    case "AI_SCAN_CLEAR":
+      return { ...state, aiScanResults: [] };
     case "RESET":
       return { ...initialState, disasmReady: state.disasmReady, callGraph: null, dataXrefs: null, anomalies: [] };
     default:

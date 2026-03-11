@@ -19,6 +19,7 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@tanstack/react-virtual": "^3.11.0",
     "capstone-wasm": "^1.0.3",
+    "marked": "^17.0.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tsx": "^4.21.0",

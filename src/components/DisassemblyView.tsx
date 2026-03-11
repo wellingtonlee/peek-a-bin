@@ -30,6 +30,9 @@ import { canonReg } from "../disasm/decompile/ir";
 import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { useSetGraphOverview } from "../hooks/useGraphOverview";
+import { AIChatPanel } from "./AIChatPanel";
+import { useAIChat } from "../hooks/useAIChat";
+import { useVulnScanner } from "../hooks/useVulnScanner";
 
 const _SUSPICIOUS_MNEMONICS = new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]);
 
@@ -201,6 +204,23 @@ export function DisassemblyView() {
     } catch {}
     return 500;
   });
+
+  // AI Chat panel
+  const [showChat, setShowChat] = useState(false);
+  const [chatWidth, setChatWidth] = useState(() => {
+    try {
+      const v = localStorage.getItem("peek-a-bin:chat-width");
+      if (v) { const n = parseInt(v, 10); if (n >= 200) return n; }
+    } catch {}
+    return 380;
+  });
+
+  // Listen for chat toggle events from toolbar
+  useEffect(() => {
+    const handler = () => setShowChat(v => !v);
+    window.addEventListener("peek-a-bin:open-chat", handler);
+    return () => window.removeEventListener("peek-a-bin:open-chat", handler);
+  }, []);
 
   // Register highlight family set
   const highlightRegs = useMemo(() => {
@@ -986,6 +1006,12 @@ export function DisassemblyView() {
     renames: state.renames,
     buildFunctionAsm,
   });
+
+  // AI Chat — use decompile code as context
+  const aiChat = useAIChat(pe ?? null, state.fileName, decompile.activeCode || null);
+
+  // Vuln scanner (for context menu "scan" action)
+  const vulnScanner = useVulnScanner(state, dispatch);
 
   const handleDecompileToggle = useCallback(() => {
     if (showDecompile) {
@@ -1943,6 +1969,12 @@ export function DisassemblyView() {
                 {menuItem("Add/Edit comment", ctxAddComment, ";")}
                 {hasComment && menuItem("Copy comment", ctxCopyComment)}
                 {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
+                {isFuncHead && sep}
+                {isFuncHead && menuItem("Scan for vulnerabilities", () => {
+                  const fn = funcMap.get(ctxMenu.insn.address);
+                  if (fn) vulnScanner.scanFunction(fn);
+                  setCtxMenu(null);
+                })}
                 {selectionRange && (() => {
                   const lo = Math.min(selectionRange.start, selectionRange.end);
                   const hi = Math.max(selectionRange.start, selectionRange.end);
@@ -2059,6 +2091,12 @@ export function DisassemblyView() {
             {menuItem("Add/Edit comment", ctxAddComment, ";")}
             {hasComment && menuItem("Copy comment", ctxCopyComment)}
             {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
+            {isFuncHead && sep}
+            {isFuncHead && menuItem("Scan for vulnerabilities", () => {
+              const fn = funcMap.get(ctxMenu.insn.address);
+              if (fn) vulnScanner.scanFunction(fn);
+              setCtxMenu(null);
+            })}
           </div>
         );
       })()}
@@ -2176,6 +2214,26 @@ export function DisassemblyView() {
               onEditComment={setEditingComment}
               onCommitComment={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
               onDeleteComment={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
+            />
+          </div>
+        </>
+      )}
+      {showChat && (
+        <>
+          <ResizeHandle
+            orientation="horizontal"
+            onResize={(delta) => {
+              setChatWidth((prev) => Math.max(200, prev - delta));
+            }}
+            onResizeEnd={() => {
+              try { localStorage.setItem("peek-a-bin:chat-width", String(chatWidth)); } catch {}
+            }}
+          />
+          <div className="shrink-0" style={{ width: chatWidth }}>
+            <AIChatPanel
+              chat={aiChat}
+              onClose={() => setShowChat(false)}
+              onRename={(address, name) => dispatch({ type: "RENAME_FUNCTION", address, name })}
             />
           </div>
         </>
