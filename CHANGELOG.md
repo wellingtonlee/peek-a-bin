@@ -4,11 +4,13 @@
 
 ### Added
 
+- **Ghidra connection test** — "Test Connection" button in Settings → Ghidra tab verifies server reachability and displays server version and Ghidra version (2026-03-27 14:00)
 - **MCP auto-discovery** — `.mcp.json` at project root enables Claude Code to automatically discover and use the MCP server without manual configuration (2026-03-27 12:00)
 - **MCP setup CLI** — `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue.dev) with `--dry-run` and `--list` flags; extensible registry pattern in `src/mcp/clients.ts` (2026-03-27 12:00)
 
 ### Changed
 
+- **Ghidra 12.0.4** — Docker image updated from Ghidra 11.3.2 to 12.0.4; ping endpoint now returns `ghidraVersion` (2026-03-27 14:00)
 - **Browser deps moved to devDependencies** — react, react-dom, marked, @dagrejs/dagre, @tanstack/react-virtual moved to devDependencies; only MCP runtime deps (SDK, capstone-wasm, ws, tsx, zod) remain in dependencies (2026-03-27 12:00)
 
 - **AI Chat panel** — multi-turn streaming conversation with binary context; right sidebar panel toggled via Ctrl+Shift+A or toolbar button; PE metadata + active function pseudocode auto-attached as system context; `[RENAME:0xADDR:name]` markers in AI responses render as inline "Apply" rename buttons; per-file message persistence in localStorage (capped at 50 messages); local useReducer state to avoid app-wide re-renders during streaming (2026-03-11 19:33)
@@ -53,6 +55,7 @@
 
 ### Fixed
 
+- **Ghidra NotFoundException on binary import** — Ghidra 12 throws `NotFoundException` (not `IOException`) when `openProject()` fails, breaking pyhidra's fallback to `createProject()`; server now catches `NotFoundException` and falls back to direct Java API calls (`GhidraProject.createProject` + `importProgram` + `analyze`), bypassing pyhidra's broken exception handling; stale project directories also pre-cleaned unconditionally; `WindowsResourceReferenceAnalyzer` disabled in fallback path to prevent NPE from uninitialized OSGi BundleHost, and `analyze()` wrapped in try/except so any analyzer crash is non-fatal (2026-03-27 15:30)
 - **`;` hotkey in DecompileView** — `preventDefault` now only fires when a matching address is found; added `stopPropagation` to prevent duplicate comment editor in wrong view (2026-03-07 14:58)
 - **`?` duplicate shortcut pane** — added `stopPropagation` to prevent event from bubbling and toggling the overlay twice (2026-03-07 14:58)
 - **Graph mode hotkey focus** — `cfgContainerRef` now auto-focuses when entering graph mode and on mousedown clicks, so `;`, `?`, `B`, `N`, `I`, `R` etc. work reliably (2026-03-07 14:58)

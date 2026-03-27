@@ -27,7 +27,7 @@ export class GhidraClient {
     throw new Error(detail);
   }
 
-  async ping(): Promise<{ version: string }> {
+  async ping(): Promise<{ version: string; ghidraVersion?: string | null }> {
     const res = await fetch(`${this.baseUrl}/api/v1/ping`, { headers: this.headers() });
     if (!res.ok) await this.throwWithDetail(res, `Ghidra server error (${res.status})`);
     return res.json();

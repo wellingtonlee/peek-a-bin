@@ -158,7 +158,7 @@ The **High Level** tab in the decompile panel can use a companion Ghidra server 
 ```bash
 cd ghidra-server
 docker build -t peek-a-bin-ghidra .
-docker run -p 8765:8765 peek-a-bin-ghidra
+docker run --rm --name peek-a-bin-ghidra -p 8765:8765 peek-a-bin-ghidra
 ```
 
 To require an API key for authentication:
@@ -185,7 +185,8 @@ On first run, pyhidra will download and install Ghidra automatically.
 2. Check **Enable Ghidra server**
 3. Enter the server URL (default: `http://localhost:8765`)
 4. Enter the API key if the server was started with `--api-key`
-5. Click **Save**
+5. Click **Test Connection** to verify the server is reachable (shows server and Ghidra version on success)
+6. Click **Save**
 
 Once configured, the **High Level** tab in the decompile panel will send the binary to the Ghidra server and display Ghidra's decompiled output. Binaries are uploaded once and cached server-side by SHA-256 hash.
 
@@ -193,7 +194,7 @@ Once configured, the **High Level** tab in the decompile panel will send the bin
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/v1/ping` | Health check, returns `{ version }` |
+| `GET` | `/api/v1/ping` | Health check, returns `{ version, ghidraVersion }` |
 | `POST` | `/api/v1/binary` | Upload PE binary (multipart), returns `{ projectId }` |
 | `POST` | `/api/v1/decompile` | Decompile function at address, returns `{ code, lineMap }` |
 

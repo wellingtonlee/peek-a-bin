@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import logging
 import os
+import shutil
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -63,7 +64,15 @@ def check_auth(authorization: Optional[str] = Header(None)):
 @app.get("/api/v1/ping")
 async def ping(authorization: Optional[str] = Header(None)):
     check_auth(authorization)
-    return {"version": "0.1.0"}
+    ghidra_version = None
+    install_dir = os.environ.get("GHIDRA_INSTALL_DIR", "")
+    if install_dir:
+        # Extract version from path like /opt/ghidra_12.0.4_PUBLIC
+        import re
+        m = re.search(r"ghidra[_-](\d+\.\d+(?:\.\d+)?)", install_dir, re.IGNORECASE)
+        if m:
+            ghidra_version = m.group(1)
+    return {"version": "0.1.0", "ghidraVersion": ghidra_version}
 
 
 @app.post("/api/v1/binary")
@@ -84,6 +93,12 @@ async def upload_binary(
     bin_path = project_path / "binary.exe"
     bin_path.write_bytes(data)
 
+    # Remove stale Ghidra project dir if present (best-effort pre-cleanup)
+    ghidra_project_dir = project_path / "binary.exe_ghidra"
+    if ghidra_project_dir.exists():
+        shutil.rmtree(ghidra_project_dir)
+        log.info("Removed existing Ghidra project dir for %s", sha[:12])
+
     try:
         ctx = pyhidra.open_program(str(bin_path))
         flat_api = ctx.__enter__()
@@ -96,8 +111,51 @@ async def upload_binary(
         }
         log.info("Imported binary %s (%d bytes)", sha[:12], len(data))
     except Exception as e:
-        log.exception("Import failed for %s", sha[:12])
-        raise HTTPException(status_code=500, detail=f"Import failed: {e}")
+        if "NotFoundException" not in type(e).__name__:
+            log.exception("Import failed for %s", sha[:12])
+            raise HTTPException(status_code=500, detail=f"Import failed: {e}")
+
+        # Ghidra 12 throws NotFoundException instead of IOException;
+        # pyhidra only catches IOException, so we fall back to direct Java API.
+        log.warning("NotFoundException for %s — using direct Ghidra API", sha[:12])
+        if ghidra_project_dir.exists():
+            shutil.rmtree(ghidra_project_dir)
+
+        try:
+            from ghidra.base.project import GhidraProject
+            from ghidra.program.flatapi import FlatProgramAPI
+            from java.io import File as JavaFile
+
+            project = GhidraProject.createProject(
+                str(project_path), "binary.exe_ghidra", False
+            )
+            program = project.importProgram(JavaFile(str(bin_path)))
+
+            # Ghidra 12's WindowsResourceReferenceAnalyzer crashes without
+            # OSGi BundleHost (NPE in GhidraScriptUtil). Disable it if possible,
+            # and wrap analyze() so one bad analyzer doesn't abort the import.
+            try:
+                analyzer_opts = program.getOptions("Analyzers")
+                analyzer_opts.setBoolean("Windows x86 PE Resource Reference Analyzer", False)
+            except Exception:
+                pass  # option name may vary by Ghidra version
+
+            try:
+                project.analyze(program)
+            except Exception as ae:
+                log.warning("Analysis completed with errors for %s: %s (non-fatal)", sha[:12], ae)
+
+            flat_api = FlatProgramAPI(program)
+
+            _programs[sha] = {
+                "project": project,
+                "flat_api": flat_api,
+                "program": program,
+            }
+            log.info("Imported binary %s via direct API (%d bytes)", sha[:12], len(data))
+        except Exception as e2:
+            log.exception("Direct API import also failed for %s", sha[:12])
+            raise HTTPException(status_code=500, detail=f"Import failed: {e2}")
 
     return {"projectId": sha}
 

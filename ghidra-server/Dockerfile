@@ -6,14 +6,14 @@ RUN apt-get update && apt-get install -y \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
-# Download Ghidra 11.3.2 (compatible with pyhidra >=1.2)
-RUN wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.3.2_build/ghidra_11.3.2_PUBLIC_20250415.zip \
-    && unzip -q ghidra_11.3.2_PUBLIC_20250415.zip -d /opt \
-    && rm ghidra_11.3.2_PUBLIC_20250415.zip \
-    && chmod -R +x /opt/ghidra_11.3.2_PUBLIC/Ghidra/Features/*/os/linux_x86_64/ \
-    && chmod -R +x /opt/ghidra_11.3.2_PUBLIC/support/
+# Download Ghidra 12.0.4 (compatible with pyhidra >=1.2)
+RUN wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.0.4_build/ghidra_12.0.4_PUBLIC_20260303.zip \
+    && unzip -q ghidra_12.0.4_PUBLIC_20260303.zip -d /opt \
+    && rm ghidra_12.0.4_PUBLIC_20260303.zip \
+    && chmod -R +x /opt/ghidra_12.0.4_PUBLIC/Ghidra/Features/*/os/linux_x86_64/ \
+    && chmod -R +x /opt/ghidra_12.0.4_PUBLIC/support/
 
-ENV GHIDRA_INSTALL_DIR=/opt/ghidra_11.3.2_PUBLIC
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra_12.0.4_PUBLIC
 
 WORKDIR /app
 COPY requirements.txt .

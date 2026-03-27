@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
+import { GhidraClient } from "../decompile/ghidraClient";
 
 interface Props {
   open: boolean;
@@ -37,6 +38,8 @@ export function SettingsModal({ open, onClose }: Props) {
   const [themeId, setThemeId] = useState(loadThemeId);
   const [themes, setThemes] = useState(getAllThemes);
   const [importError, setImportError] = useState<string | null>(null);
+  const [connStatus, setConnStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
+  const [connMessage, setConnMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -51,6 +54,8 @@ export function SettingsModal({ open, onClose }: Props) {
       setShowKey(false);
       setFontSize(loadFontSize());
       setDecompServer(loadDecompileServer());
+      setConnStatus("idle");
+      setConnMessage("");
       setThemeId(loadThemeId());
       setThemes(getAllThemes());
       setImportError(null);
@@ -408,6 +413,34 @@ export function SettingsModal({ open, onClose }: Props) {
                         placeholder="API key (optional)"
                         className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
                       />
+                    </div>
+                    <div>
+                      <button
+                        onClick={async () => {
+                          setConnStatus("testing");
+                          setConnMessage("");
+                          try {
+                            const client = new GhidraClient(decompServer.ghidraUrl, decompServer.apiKey);
+                            const res = await client.ping();
+                            const ver = res.ghidraVersion ? ` (Ghidra ${res.ghidraVersion})` : "";
+                            setConnStatus("success");
+                            setConnMessage(`Connected — server v${res.version}${ver}`);
+                          } catch (err) {
+                            setConnStatus("error");
+                            setConnMessage(err instanceof Error ? err.message : "Connection failed");
+                          }
+                        }}
+                        disabled={connStatus === "testing"}
+                        className="px-3 py-1.5 text-xs text-gray-300 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {connStatus === "testing" ? "Testing..." : "Test Connection"}
+                      </button>
+                      {connStatus === "success" && (
+                        <p className="text-[10px] text-green-400 mt-1">{connMessage}</p>
+                      )}
+                      {connStatus === "error" && (
+                        <p className="text-[10px] text-red-400 mt-1">{connMessage}</p>
+                      )}
                     </div>
                   </div>
                 )}
