@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Documentation restructuring** — split monolithic README into `docs/` folder with 8 topic-specific guides (keyboard, theming, ghidra-server, mcp-server, ai-features, architecture, decompiler, deployment); added CONTRIBUTING.md, SECURITY.md, and docs/README.md hub; README slimmed to project overview with doc links (2026-03-27 16:00)
 - **Ghidra connection test** — "Test Connection" button in Settings → Ghidra tab verifies server reachability and displays server version and Ghidra version (2026-03-27 14:00)
 - **MCP auto-discovery** — `.mcp.json` at project root enables Claude Code to automatically discover and use the MCP server without manual configuration (2026-03-27 12:00)
 - **MCP setup CLI** — `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue.dev) with `--dry-run` and `--list` flags; extensible registry pattern in `src/mcp/clients.ts` (2026-03-27 12:00)

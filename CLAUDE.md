@@ -100,9 +100,21 @@ npm test
 
 ## Documentation
 
+Documentation lives in `docs/` with topic-specific files. See `docs/README.md` for the full index.
+
 When making architectural changes, adding major features, or changing conventions, update this file (`CLAUDE.md`) so future AI agents have accurate context. This includes new source directories, new pipeline stages, new conventions, new gotchas, and changes to the build/test commands.
 
-Update `README.md` when changes affect the public-facing project description: new features, new commands, setup instructions, configuration formats, or project structure changes.
+When changes affect public-facing behavior, update the relevant `docs/` file(s) — not just `README.md`. Key mappings:
+- Keyboard shortcuts → `docs/keyboard.md`
+- Theme system → `docs/theming.md`
+- AI features → `docs/ai-features.md`
+- MCP server → `docs/mcp-server.md`
+- Ghidra server → `docs/ghidra-server.md`
+- Architecture → `docs/architecture.md`
+- Decompiler → `docs/decompiler.md`
+- Build/deploy → `docs/deployment.md`
+
+Update `README.md` only when changes affect the top-level project description (new major features, setup changes).
 
 ## CHANGELOG Convention
 
