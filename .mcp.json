@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "peek-a-bin": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp/index.ts"]
+    }
+  }
+}

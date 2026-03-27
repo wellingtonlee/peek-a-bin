@@ -4,6 +4,13 @@
  * Exposes PE analysis tools via Model Context Protocol (stdio transport).
  */
 
+// CLI routing guard — handle `setup` subcommand before any heavy imports
+if (process.argv[2] === 'setup') {
+  const { runSetup } = await import('./cli.js');
+  await runSetup(process.argv.slice(3));
+  process.exit(0);
+}
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebSocketServer } from 'ws';

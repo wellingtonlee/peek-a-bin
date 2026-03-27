@@ -201,30 +201,41 @@ Once configured, the **High Level** tab in the decompile panel will send the bin
 
 Peek-a-Bin includes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that lets AI agents programmatically analyze PE binaries. It uses the same parse, disassemble, and decompile pipeline as the browser UI, running directly in Node.js via stdio transport.
 
-### Starting the Server
+### Quick Setup
+
+The setup CLI automatically configures supported AI clients:
+
+```bash
+npx tsx src/mcp/index.ts setup <client>
+```
+
+| Client | Command | What it does |
+|--------|---------|-------------|
+| `claude-code` | `npx tsx src/mcp/index.ts setup claude-code` | Merges into `~/.claude.json` |
+| `opencode` | `npx tsx src/mcp/index.ts setup opencode` | Merges into `~/.config/opencode/config.json` |
+| `continue` | `npx tsx src/mcp/index.ts setup continue` | Prints YAML snippet for `~/.continue/config.yaml` |
+
+List all available clients:
+
+```bash
+npx tsx src/mcp/index.ts setup --list
+```
+
+Preview config without writing (dry run):
+
+```bash
+npx tsx src/mcp/index.ts setup claude-code --dry-run
+```
+
+**Claude Code auto-discovery:** When working inside the project directory, Claude Code automatically discovers the MCP server via the `.mcp.json` file at the project root — no manual setup needed.
+
+### Starting the Server Manually
 
 ```bash
 npm run mcp
 ```
 
 The server loads the Capstone WASM engine on startup and accepts MCP requests over stdin/stdout.
-
-### Configuring with Claude Code
-
-Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "peek-a-bin": {
-      "command": "bash",
-      "args": ["-c", "cd /absolute/path/to/web-disassembly && exec npx tsx src/mcp/index.ts"]
-    }
-  }
-}
-```
-
-> **Note:** The `cwd` field in MCP configs is not reliably supported. Use `bash -c "cd ... && exec ..."` to ensure the server starts in the correct directory where `tsx` and project dependencies are installed.
 
 ### Tools
 

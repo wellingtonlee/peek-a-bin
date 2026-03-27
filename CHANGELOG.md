@@ -4,6 +4,13 @@
 
 ### Added
 
+- **MCP auto-discovery** — `.mcp.json` at project root enables Claude Code to automatically discover and use the MCP server without manual configuration (2026-03-27 12:00)
+- **MCP setup CLI** — `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue.dev) with `--dry-run` and `--list` flags; extensible registry pattern in `src/mcp/clients.ts` (2026-03-27 12:00)
+
+### Changed
+
+- **Browser deps moved to devDependencies** — react, react-dom, marked, @dagrejs/dagre, @tanstack/react-virtual moved to devDependencies; only MCP runtime deps (SDK, capstone-wasm, ws, tsx, zod) remain in dependencies (2026-03-27 12:00)
+
 - **AI Chat panel** — multi-turn streaming conversation with binary context; right sidebar panel toggled via Ctrl+Shift+A or toolbar button; PE metadata + active function pseudocode auto-attached as system context; `[RENAME:0xADDR:name]` markers in AI responses render as inline "Apply" rename buttons; per-file message persistence in localStorage (capped at 50 messages); local useReducer state to avoid app-wide re-renders during streaming (2026-03-11 19:33)
 - **AI batch auto-rename** — "Rename" toolbar button or command palette "AI: Batch Rename Functions" decompiles all unnamed functions (no user rename, not thunk, size > 16 bytes) via worker, batches pseudocode to LLM in groups of 6, parses JSON rename suggestions; review modal with current/suggested name, confidence score (color-coded), reasoning, and accept/reject toggles; bulk actions (Accept All, Accept High Confidence, Reject All); accepted renames dispatched as RENAME_FUNCTION with undo support (2026-03-11 19:33)
 - **AI analysis report** — "Report" toolbar button or command palette generates comprehensive Markdown report; builds ~12K token context (PE headers, notable imports, exports, anomalies, driver info, decompiled key functions, interesting strings); streams to full-page modal with live MarkdownRenderer; cached per file in localStorage with "Regenerate" button; downloadable as .md file (2026-03-11 19:33)

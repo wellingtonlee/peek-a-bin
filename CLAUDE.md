@@ -23,6 +23,7 @@ npx tsc --noEmit     # type check only (faster than full build)
 - `workers/` — Web Worker for Capstone WASM + off-thread analysis (disasm.worker.ts + disasmClient.ts)
 - `analysis/` — driver detection, anomalies, IOCTL decoding
 - `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types)
+- `mcp/` — MCP server (tools, resources, session, Capstone wrapper) + `cli.ts` (setup command) + `clients.ts` (client config registry)
 - `utils/` — recent files (IndexedDB), export schema, entropy, fuzzy match
 
 ## Architecture
@@ -56,6 +57,8 @@ npx tsc --noEmit     # type check only (faster than full build)
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
 **Tests**: `src/pe/__tests__/` for PE parsing. `src/disasm/decompile/__tests__/` for decompiler (fold rules, SSA). Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders (no binary files).
+
+**MCP setup CLI**: `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue). Registry in `src/mcp/clients.ts` — add new clients by inserting a map entry. `.mcp.json` at project root enables Claude Code auto-discovery.
 
 ## Decompiler Architecture (`src/disasm/decompile/`)
 
