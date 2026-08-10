@@ -309,6 +309,25 @@ function AnomalyBanners() {
 export function HeaderView() {
   const { peFile: pe } = useAppState();
   const dispatch = useAppDispatch();
+
+  // --- Metadata computations ---
+  // Every hook must run before the `!pe` early return below, otherwise the hook
+  // count changes between renders and React throws on the transition.
+  const richHeader = useMemo(() => (pe ? parseRichHeader(pe.buffer) : null), [pe]);
+  const debugInfo = useMemo(() => (pe ? parseDebugDirectory(pe.buffer, pe) : []), [pe]);
+  const checksum = useMemo(() => (pe ? validateChecksum(pe.buffer, pe) : null), [pe]);
+  const imphash = useMemo(() => (pe ? computeImphash(pe.imports) : null), [pe]);
+  const overlay = useMemo(() => (pe ? detectOverlay(pe.buffer, pe) : null), [pe]);
+
+  const [copiedImphash, setCopiedImphash] = useState(false);
+  const copyImphash = useCallback(() => {
+    if (!imphash) return;
+    navigator.clipboard.writeText(imphash).then(() => {
+      setCopiedImphash(true);
+      setTimeout(() => setCopiedImphash(false), 800);
+    });
+  }, [imphash]);
+
   if (!pe) return null;
 
   const { coffHeader: coff, optionalHeader: opt } = pe;
@@ -320,22 +339,6 @@ export function HeaderView() {
     dispatch({ type: "SET_ADDRESS", address: entryVA });
     dispatch({ type: "SET_TAB", tab: "disassembly" });
   };
-
-  // --- Metadata computations ---
-  const richHeader = useMemo(() => parseRichHeader(pe.buffer), [pe.buffer]);
-  const debugInfo = useMemo(() => parseDebugDirectory(pe.buffer, pe), [pe]);
-  const checksum = useMemo(() => validateChecksum(pe.buffer, pe), [pe]);
-  const imphash = useMemo(() => computeImphash(pe.imports), [pe.imports]);
-  const overlay = useMemo(() => detectOverlay(pe.buffer, pe), [pe]);
-
-  const [copiedImphash, setCopiedImphash] = useState(false);
-  const copyImphash = useCallback(() => {
-    if (!imphash) return;
-    navigator.clipboard.writeText(imphash).then(() => {
-      setCopiedImphash(true);
-      setTimeout(() => setCopiedImphash(false), 800);
-    });
-  }, [imphash]);
 
   return (
     <div className="p-4 space-y-6 text-xs overflow-auto h-full">
@@ -469,7 +472,9 @@ export function HeaderView() {
         <table>
           <tbody>
             <Row label="Checksum Validation">
-              {checksum.expected === 0 ? (
+              {!checksum ? (
+                <span className="text-gray-500">Unavailable</span>
+              ) : checksum.expected === 0 ? (
                 <span className="text-gray-500">Not set (0x00000000)</span>
               ) : checksum.valid ? (
                 <span className="text-green-400">Valid</span>

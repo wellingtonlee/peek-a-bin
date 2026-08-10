@@ -20,11 +20,12 @@ export function ExportsView() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const parentRef = useRef<HTMLDivElement>(null);
 
-  if (!pe) return null;
-
-  const imageBase = pe.optionalHeader.imageBase;
+  // Every hook must run before the `!pe` early return below, otherwise the hook
+  // count changes between renders and React throws on the transition.
+  const imageBase = pe?.optionalHeader.imageBase ?? 0;
 
   const filtered = useMemo(() => {
+    if (!pe) return [];
     let exps = pe.exports.filter(
       (exp) =>
         exp.name.toLowerCase().includes(filter.toLowerCase()) ||
@@ -39,7 +40,16 @@ export function ExportsView() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return exps;
-  }, [pe.exports, filter, sortKey, sortDir, imageBase]);
+  }, [pe, filter, sortKey, sortDir, imageBase]);
+
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 28,
+    overscan: 20,
+  });
+
+  if (!pe) return null;
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -57,13 +67,6 @@ export function ExportsView() {
     dispatch({ type: "SET_ADDRESS", address: imageBase + rva });
     dispatch({ type: "SET_TAB", tab: "disassembly" });
   };
-
-  const virtualizer = useVirtualizer({
-    count: filtered.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 28,
-    overscan: 20,
-  });
 
   return (
     <div className="p-4 text-xs h-full flex flex-col">

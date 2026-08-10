@@ -4,7 +4,7 @@
  */
 
 import { Const, Capstone, loadCapstone } from 'capstone-wasm';
-import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
+import type { Instruction, Xref } from '../disasm/types';
 import {
   type DisasmContext,
   disassemble,

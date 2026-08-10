@@ -96,7 +96,7 @@ export function buildCFG(
   // Also add xref targets as leaders
   for (const insn of funcInsns) {
     const xrefs = xrefMap.get(insn.address);
-    if (xrefs && xrefs.some(x => x.type === 'branch' || x.type === 'jmp')) {
+    if (xrefs?.some(x => x.type === 'branch' || x.type === 'jmp')) {
       leaders.add(insn.address);
     }
   }

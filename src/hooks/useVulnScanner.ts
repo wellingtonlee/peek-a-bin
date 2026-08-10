@@ -2,7 +2,7 @@ import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
 import type { AppAction, AppState } from "./usePEFile";
 import type { AIScanFinding } from "../llm/types";
-import type { DisasmFunction, Instruction } from "../disasm/types";
+import type { DisasmFunction, } from "../disasm/types";
 import { disasmWorker } from "../workers/disasmClient";
 import { streamChat } from "../llm/client";
 import { hasApiKey, loadSettings } from "../llm/settings";

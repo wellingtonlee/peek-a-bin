@@ -3,7 +3,7 @@ import { useAppState } from "../hooks/usePEFile";
 import { ResourceTypeNames, RT_VERSION, RT_ICON, RT_GROUP_ICON, RT_MANIFEST } from "../pe/constants";
 import { parseVersionInfo, reconstructIcon } from "../pe/resources";
 import { rvaToFileOffset } from "../pe/parser";
-import type { ResourceNode, ResourceTree } from "../pe/types";
+import type { ResourceTree } from "../pe/types";
 
 function getTypeName(id: number | string): string {
   if (typeof id === "string") return id;
@@ -132,7 +132,18 @@ export function ResourcesView() {
     return types.size;
   }, [pe?.resources]);
 
-  if (!pe || !pe.resources || pe.resources.entries.length === 0) {
+  // Grouped before the early return below so hook order stays stable.
+  const grouped = useMemo(() => {
+    const map = new Map<string, ResourceTree['entries']>();
+    for (const entry of pe?.resources?.entries ?? []) {
+      const key = String(entry.type);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(entry);
+    }
+    return Array.from(map.entries());
+  }, [pe?.resources]);
+
+  if (!pe?.resources || pe.resources.entries.length === 0) {
     return (
       <div className="p-4 text-xs text-gray-500">
         No resources found in this PE file.
@@ -141,17 +152,6 @@ export function ResourcesView() {
   }
 
   const { resources } = pe;
-
-  // Group entries by type for display
-  const grouped = useMemo(() => {
-    const map = new Map<string, ResourceTree['entries']>();
-    for (const entry of resources.entries) {
-      const key = String(entry.type);
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(entry);
-    }
-    return Array.from(map.entries());
-  }, [resources.entries]);
 
   return (
     <div className="p-4 text-xs overflow-auto h-full">

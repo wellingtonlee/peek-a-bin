@@ -3,7 +3,7 @@
  */
 
 import { z } from 'zod';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { FileSession } from './session';
 import { analyzeStackFrame } from '../disasm/stack';

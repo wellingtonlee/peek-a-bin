@@ -30,14 +30,14 @@ export function detectShortCircuit(
   consumedBlocks: number[];
 } | null {
   const block = blockById.get(blockId);
-  if (!block || block.succs.length !== 2) return null;
+  if (block?.succs.length !== 2) return null;
 
   const [branchA, fallA] = identifyBranches(block);
   if (branchA === null || fallA === null) return null;
 
   // Check if fallthrough leads to another conditional block
   const blockB = blockById.get(fallA);
-  if (!blockB || blockB.succs.length !== 2) return null;
+  if (blockB?.succs.length !== 2) return null;
   if (blockB.preds.length !== 1) return null;
 
   const [branchB, fallB] = identifyBranches(blockB);
@@ -55,7 +55,7 @@ export function detectShortCircuit(
     let currentFall = fallB;
     for (let depth = 0; depth < 6; depth++) { // cap total at 8 blocks
       const nextBlock = blockById.get(currentFall);
-      if (!nextBlock || nextBlock.succs.length !== 2 || nextBlock.preds.length !== 1) break;
+      if (nextBlock?.succs.length !== 2 || nextBlock.preds.length !== 1) break;
       const [nextBranch, nextFall] = identifyBranches(nextBlock);
       if (nextBranch === null || nextFall === null) break;
       if (nextBranch !== branchA) break; // not same fail target
@@ -103,7 +103,7 @@ export function detectForLoop(
   header: BasicBlock,
   bodyBlocks: number[],
   liftedBlocks: Map<number, IRStmt[]>,
-  blockById: Map<number, BasicBlock>,
+  _blockById: Map<number, BasicBlock>,
 ): {
   init: IRStmt;
   condition: IRExpr;
@@ -233,7 +233,7 @@ export function detectIfElseIfChain(
   blockById: Map<number, BasicBlock>,
 ): boolean {
   const block = blockById.get(blockId);
-  if (!block || block.succs.length !== 2) return false;
+  if (block?.succs.length !== 2) return false;
 
   // Check if the fallthrough successor is also a conditional
   // This is detected naturally by the recursive structuring
@@ -242,7 +242,7 @@ export function detectIfElseIfChain(
   let current = blockId;
   while (count < 5) {
     const b = blockById.get(current);
-    if (!b || b.succs.length !== 2) break;
+    if (b?.succs.length !== 2) break;
     count++;
     // Follow the fallthrough
     const insns = b.insns;

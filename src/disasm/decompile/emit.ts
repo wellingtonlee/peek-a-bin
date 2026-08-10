@@ -1,7 +1,6 @@
 import type { IRExpr, IRStmt, IRFunction, BinaryOp } from './ir';
 import { canonReg } from './ir';
 import { isPlausibleIOCTL, formatIOCTL } from '../../analysis/driver';
-import type { StructDef } from './structs';
 import type { TypeContext, DecompType } from './typeInfer';
 import { typeToString } from './typeInfer';
 

@@ -1,6 +1,5 @@
 import type { BasicBlock, Loop } from '../cfg';
 import type { IRStmt, IRExpr } from './ir';
-import { irBinary } from './ir';
 import { RegState } from './regstate';
 import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from './cfgpatterns';
 
@@ -163,30 +162,6 @@ export function structureCFG(
   }
 
   /** Collect block IDs in a region between start and end (exclusive). */
-  function collectRegionBlocks(startId: number, endId: number, loopBody?: Set<number>): number[] {
-    const region: number[] = [];
-    const regionVisited = new Set<number>();
-    const queue = [startId];
-    while (queue.length > 0) {
-      const id = queue.shift()!;
-      if (regionVisited.has(id) || id === endId) continue;
-      regionVisited.add(id);
-      region.push(id);
-      const block = blockById.get(id);
-      if (!block) continue;
-      for (const succ of block.succs) {
-        if (!regionVisited.has(succ) && succ !== endId) {
-          if (loopBody) {
-            const succBlock = blockById.get(succ);
-            if (succBlock && !loopBody.has(succBlock.startAddr) && !loopBody.has(succBlock.insns[0]?.address)) continue;
-          }
-          queue.push(succ);
-        }
-      }
-    }
-    return region;
-  }
-
   /**
    * Structure a sequence of blocks starting from blockId.
    * stopAt: set of block IDs to stop before (e.g., convergence point, loop exit).
@@ -532,7 +507,6 @@ export function structureCFG(
       }
     }
 
-    const loopStopAt = new Set<number>([header.id]);
     const body: IRStmt[] = [...headerStmts];
     for (const bid of bodyBlockIds) {
       if (!visited.has(bid)) {
@@ -571,7 +545,7 @@ export function structureCFG(
   }
 
   /** Insert continue statements for conditional branches back to loop header. */
-  function insertContinueStmts(body: IRStmt[], header: BasicBlock, loop: Loop): IRStmt[] {
+  function insertContinueStmts(body: IRStmt[], header: BasicBlock, _loop: Loop): IRStmt[] {
     const headerLabel = `loc_${header.startAddr.toString(16).toUpperCase()}`;
     return body.map(stmt => {
       // Replace goto to header with continue

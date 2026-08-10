@@ -12,9 +12,9 @@ import { promoteVars } from './promote';
 import { emitFunction } from './emit';
 import { inferTypes } from './typeInfer';
 import { RegState } from './regstate';
-import { synthesizeStructs, StructRegistry } from './structs';
+import { synthesizeStructs, type StructRegistry } from './structs';
 import { cleanupStructured } from './cleanup';
-import type { IRStmt, IRTry, IRExpr } from './ir';
+import type { IRStmt, IRTry, } from './ir';
 
 export interface DecompileResult {
   code: string;

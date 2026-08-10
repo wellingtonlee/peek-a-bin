@@ -39,7 +39,6 @@ export function DisassemblyMinimap({
   onScrollTo,
   mode = "linear",
   graphBlocks,
-  graphEdges,
   graphPan,
   graphZoom,
   graphViewport,

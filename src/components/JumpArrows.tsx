@@ -137,9 +137,6 @@ export function JumpArrows({
   if (arrows.length === 0) return null;
 
   // Calculate SVG dimensions
-  const allYs = arrows.flatMap((a) => [a.fromY, a.toY]);
-  const svgMinY = Math.min(...allYs) - 10;
-  const svgMaxY = Math.max(...allYs) + 10;
   const maxLane = Math.max(...arrows.map((a) => a.lane));
   const svgWidth = Math.min((maxLane + 1) * 8 + 8, 40);
 

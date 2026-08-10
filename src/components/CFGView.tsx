@@ -4,7 +4,7 @@ import type { PEFile } from "../pe/types";
 import { buildCFG, layoutCFG, getCfgLayout, type LayoutBlock, type CFGEdge } from "../disasm/cfg";
 import { loadFontSize } from "../llm/settings";
 import { parseOperandTargets } from "../disasm/operands";
-import { ColoredOperand, mnemonicClass, type ClickableTarget } from "./shared";
+import { ColoredOperand, mnemonicClass, } from "./shared";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
 
 export interface CFGViewProps {
@@ -37,7 +37,6 @@ export interface CFGViewProps {
   onCommentDelete: (address: number) => void;
   restorePanZoom?: { pan: { x: number; y: number }; zoom: number } | null;
   reCenterTrigger?: number;
-  onNavBack?: () => void;
   searchMatches?: Set<number>;
   currentSearchMatch?: number;
 }
@@ -65,7 +64,6 @@ export function CFGView({
   editingComment,
   onEditComment,
   comments,
-  renames,
   bookmarkSet,
   iatMap,
   pan,
@@ -78,7 +76,6 @@ export function CFGView({
   onCommentDelete,
   restorePanZoom,
   reCenterTrigger,
-  onNavBack,
   searchMatches,
   currentSearchMatch,
 }: CFGViewProps) {
@@ -421,7 +418,6 @@ export function CFGView({
             if (!fromBlock || !toBlock) return null;
 
             const fromCollapsed = collapsedBlocks.has(fromBlock.id);
-            const toCollapsed = collapsedBlocks.has(toBlock.id);
 
             // Offset within SVG coordinate space
             const ox = -graphBounds.minX;

@@ -43,7 +43,7 @@ function writeString(view: DataView, offset: number, str: string, maxLen: number
   }
 }
 
-function defaultTextSection(fileOffset: number): SectionDef {
+function defaultTextSection(_fileOffset: number): SectionDef {
   const code = new Uint8Array([0xCC, 0xCC, 0xCC, 0xCC]); // int3 x4
   return {
     name: '.text',
@@ -117,7 +117,7 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   view.setUint16(coffOffset + 18, peCharacteristics, true);
 
   // --- Optional Header (PE32) ---
-  let o = optionalHeaderOffset;
+  const o = optionalHeaderOffset;
   view.setUint16(o, IMAGE_NT_OPTIONAL_HDR32_MAGIC, true); // magic
   view.setUint8(o + 2, 14);   // majorLinkerVersion
   view.setUint8(o + 3, 0);    // minorLinkerVersion
@@ -225,7 +225,7 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
   view.setUint16(coffOffset + 18, peCharacteristics, true);
 
   // --- Optional Header (PE64) ---
-  let o = optionalHeaderOffset;
+  const o = optionalHeaderOffset;
   view.setUint16(o, IMAGE_NT_OPTIONAL_HDR64_MAGIC, true);
   view.setUint8(o + 2, 14);
   view.setUint8(o + 3, 0);

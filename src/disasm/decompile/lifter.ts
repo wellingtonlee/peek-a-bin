@@ -4,9 +4,9 @@ import type {
   IRExpr, IRStmt, IRCall, BinaryOp,
 } from './ir';
 import {
-  irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, canonReg,
+  irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, 
 } from './ir';
-import { RegState } from './regstate';
+import type { RegState } from './regstate';
 
 // ── Operand Parsing ──
 
@@ -225,7 +225,7 @@ export function liftBlock(
   regState: RegState,
   is64: boolean,
   iatMap: Map<number, { lib: string; func: string }>,
-  stringMap: Map<number, string>,
+  _stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
@@ -557,7 +557,6 @@ export function liftBlock(
 
     // ── String ops: rep movsb → memcpy, rep stosb → memset ──
     if (mn === 'rep' || insn.opStr.toLowerCase().startsWith('rep ')) {
-      const fullMn = mn === 'rep' ? insn.opStr.toLowerCase().split(/\s+/)[0] : mn;
       const innerMn = mn === 'rep' ? insn.opStr.toLowerCase().replace(/^rep\s+/, '') : insn.opStr.toLowerCase();
 
       if (innerMn.startsWith('movs')) {
@@ -642,7 +641,7 @@ export function liftBlock(
 
 function resolveCallTarget(
   insn: Instruction,
-  is64: boolean,
+  _is64: boolean,
   iatMap: Map<number, { lib: string; func: string }>,
   funcMap: Map<number, { name: string; address: number }>,
 ): { name: string; display?: string } {

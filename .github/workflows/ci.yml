@@ -16,5 +16,24 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run typecheck
       - run: npm test
+      # The build was previously only exercised on release tags, so a Vite/PWA
+      # break could ship silently. Gate it on every PR instead.
+      - run: npm run build
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Threshold is `high`: one moderate advisory (@hono/node-server path
+      # traversal) is pinned transitively by @modelcontextprotocol/sdk with no
+      # upstream fix, and is unreachable here — the server uses stdio + ws,
+      # not Hono serve-static.
+      - run: npm audit --audit-level=high

@@ -380,7 +380,6 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
         // Count total reads in remaining statements until next write to same register
         let totalReads = 0;
         let firstReadIdx = -1;
-        let hitWrite = false;
         for (let j = i + 1; j < result.length; j++) {
           const s = result[j];
           const reads = countReadsInStmt(s, canon);
@@ -388,7 +387,6 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
           totalReads += reads;
           // Check if this statement writes to the same register
           if (s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === canon) {
-            hitWrite = true;
             break;
           }
           if (s.kind === 'call_stmt') break; // calls clobber regs

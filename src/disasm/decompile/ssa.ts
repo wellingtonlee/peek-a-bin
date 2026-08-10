@@ -1,5 +1,5 @@
 import type { BasicBlock } from '../cfg';
-import type { IRStmt, IRReg, IRPhi, IRExpr } from './ir';
+import type { IRStmt, IRPhi, IRExpr } from './ir';
 import { irReg, canonReg } from './ir';
 
 export interface SSAContext {

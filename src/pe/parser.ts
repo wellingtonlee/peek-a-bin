@@ -70,6 +70,12 @@ export function rvaToFileOffset(rva: number, sections: SectionHeader[]): number 
  * Read DOS Header
  */
 function parseDOSHeader(view: DataView): DOSHeader {
+  // The DOS header is 64 bytes; without this, a short file throws a bare
+  // RangeError from getUint16/getUint32 instead of a usable parse error.
+  if (view.byteLength < 64) {
+    throw new Error(`File too small to be a PE (${view.byteLength} bytes, need at least 64)`);
+  }
+
   const e_magic = view.getUint16(0, true);
 
   if (e_magic !== IMAGE_DOS_SIGNATURE) {
@@ -181,7 +187,12 @@ function parseDataDirectories(
 ): DataDirectory[] {
   const directories: DataDirectory[] = [];
 
-  for (let i = 0; i < count; i++) {
+  // numberOfRvaAndSizes is attacker-controlled. The PE spec caps it at 16, and
+  // entries must fit in the buffer; without this a crafted value allocates
+  // millions of objects before the first out-of-range read throws.
+  const safeCount = Math.min(count, 16, Math.max(0, Math.floor((view.byteLength - offset) / 8)));
+
+  for (let i = 0; i < safeCount; i++) {
     const dirOffset = offset + i * 8;
     directories.push({
       virtualAddress: view.getUint32(dirOffset, true),
@@ -202,7 +213,12 @@ function parseSectionHeaders(
 ): SectionHeader[] {
   const sections: SectionHeader[] = [];
 
-  for (let i = 0; i < count; i++) {
+  // numberOfSections is a uint16 (up to 65535) read straight off the file. Each
+  // header is 40 bytes, so anything that cannot fit in the buffer is bogus —
+  // clamp rather than let getUint8 throw partway through.
+  const safeCount = Math.min(count, Math.max(0, Math.floor((view.byteLength - offset) / 40)));
+
+  for (let i = 0; i < safeCount; i++) {
     const sectionOffset = offset + i * 40;
 
     // Read section name (8 bytes, null-padded)
@@ -257,8 +273,6 @@ function parseImports(
   // Walk import descriptors until null entry
   while (descriptorOffset + descriptorSize <= view.byteLength) {
     const originalFirstThunk = view.getUint32(descriptorOffset, true);
-    const timeDateStamp = view.getUint32(descriptorOffset + 4, true);
-    const forwarderChain = view.getUint32(descriptorOffset + 8, true);
     const nameRVA = view.getUint32(descriptorOffset + 12, true);
     const firstThunk = view.getUint32(descriptorOffset + 16, true);
 
@@ -281,8 +295,11 @@ function parseImports(
     // Read import names from INT (Import Name Table)
     const thunkRVA = originalFirstThunk || firstThunk;
     const thunkSize = is64 ? 8 : 4;
-    if (thunkRVA) {
-      let thunkOffset = rvaToFileOffset(thunkRVA, sections);
+    // A thunk RVA outside every section yields -1; without this guard the loop
+    // below is entered with a negative offset and getBigUint64 throws, failing
+    // the whole file load. Every other rvaToFileOffset call site checks this.
+    let thunkOffset = thunkRVA ? rvaToFileOffset(thunkRVA, sections) : -1;
+    if (thunkRVA && thunkOffset >= 0) {
       let funcIndex = 0;
 
       while (thunkOffset + thunkSize <= view.byteLength) {
@@ -358,13 +375,24 @@ function parseExports(
     return exports;
   }
 
+  // numberOfNames comes straight off the file as a uint32. A hostile 0xFFFFFFFF
+  // would otherwise spin ~4.3 billion times here, freezing the main thread — the
+  // name/ordinal tables cannot exceed the buffer, so clamp to what could fit.
+  const maxNames = Math.min(
+    numberOfNames,
+    Math.max(0, Math.floor((view.byteLength - namePointerOffset) / 4)),
+    Math.max(0, Math.floor((view.byteLength - ordinalTableOffset) / 2)),
+  );
+
   // Walk name pointer table
-  for (let i = 0; i < numberOfNames; i++) {
+  for (let i = 0; i < maxNames; i++) {
     const namePointerPos = namePointerOffset + i * 4;
     const ordinalPos = ordinalTableOffset + i * 2;
 
+    // Past the end of the buffer — every later index is too, so stop rather than
+    // spin to numberOfNames.
     if (namePointerPos + 4 > view.byteLength || ordinalPos + 2 > view.byteLength) {
-      continue;
+      break;
     }
 
     const nameRVA = view.getUint32(namePointerPos, true);
@@ -642,8 +670,11 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     );
   }
 
-  // 3. Parse COFF Header
+  // 3. Parse COFF Header (20 bytes) followed by the optional header magic (2).
   const coffOffset = peOffset + 4;
+  if (coffOffset + 22 > view.byteLength) {
+    throw new Error('Truncated PE: COFF header runs past end of file');
+  }
   const coffHeader = parseCOFFHeader(view, coffOffset);
 
   // 4. Parse Optional Header

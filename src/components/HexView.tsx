@@ -13,7 +13,7 @@ function parseBytePattern(input: string): (number | null)[] | null {
   for (const p of parts) {
     if (p === "??" || p === "?") { bytes.push(null); continue; }
     const v = parseInt(p, 16);
-    if (isNaN(v) || v < 0 || v > 255) return null;
+    if (Number.isNaN(v) || v < 0 || v > 255) return null;
     bytes.push(v);
   }
   return bytes.length > 0 ? bytes : null;
@@ -187,7 +187,7 @@ export function HexView() {
     if (!pe || !sectionInfo) return;
     const cleaned = goToInput.replace(/^0[xX]/, "");
     const val = parseInt(cleaned, 16);
-    if (isNaN(val)) return;
+    if (Number.isNaN(val)) return;
     const addr = val >= baseAddress ? val : baseAddress + val;
     dispatch({ type: "SET_ADDRESS", address: addr });
     setGoToInput("");
@@ -651,7 +651,7 @@ export function HexView() {
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 const val = parseInt(editValue, 16);
-                                if (!isNaN(val) && val >= 0 && val <= 255) {
+                                if (!Number.isNaN(val) && val >= 0 && val <= 255) {
                                   dispatch({ type: "PATCH_BYTE", offset: fileOffset, value: val });
                                 }
                                 setEditingByte(null);

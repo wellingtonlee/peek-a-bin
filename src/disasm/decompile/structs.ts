@@ -225,14 +225,6 @@ function exprKey(expr: IRExpr): string {
   }
 }
 
-function exprEq(a: IRExpr, b: IRExpr): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'reg' && b.kind === 'reg') return canonReg(a.name) === canonReg(b.name);
-  if (a.kind === 'var' && b.kind === 'var') return a.name === b.name;
-  if (a.kind === 'const' && b.kind === 'const') return a.value === b.value;
-  return false;
-}
-
 // ── Access Pattern Collection ──
 
 interface AccessPattern {
@@ -329,7 +321,7 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
   function walkDeref(deref: { kind: 'deref'; address: IRExpr; size: number }): void {
     walkExprs(deref.address);
     const decomp = decomposeAddress(deref.address);
-    if (!decomp || !decomp.base) return;
+    if (!decomp?.base) return;
     patterns.push({
       base: decomp.base,
       offset: decomp.offset,
@@ -851,7 +843,7 @@ function propagateCallSites(
         // Parse call target address
         const target = s.call.target;
         const targetAddr = parseInt(target, 16) || parseInt(target.replace('sub_', ''), 16);
-        if (!isNaN(targetAddr) && targetAddr > 0) {
+        if (!Number.isNaN(targetAddr) && targetAddr > 0) {
           for (let i = 0; i < s.call.args.length; i++) {
             const arg = s.call.args[i];
             if (arg.kind === 'reg' || arg.kind === 'var') {

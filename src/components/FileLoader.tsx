@@ -98,7 +98,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       const lsOnlyFiles: RecentFileEntry[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (!key || !key.startsWith("peek-a-bin:")) continue;
+        if (!key?.startsWith("peek-a-bin:")) continue;
         const name = key.slice("peek-a-bin:".length);
         if (KNOWN_LS_KEYS.has(name) || idbNames.has(name)) continue;
         const ann = getLocalStorageAnnotations(name);

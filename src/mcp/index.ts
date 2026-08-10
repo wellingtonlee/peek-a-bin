@@ -1,7 +1,10 @@
-#!/usr/bin/env npx tsx
 /**
  * Peek-a-Bin MCP Server
  * Exposes PE analysis tools via Model Context Protocol (stdio transport).
+ *
+ * Run via `npm run mcp` or `npx tsx src/mcp/index.ts` — this file is not directly
+ * executable (a `#!/usr/bin/env npx tsx` shebang cannot work: env receives the
+ * single argument "npx tsx"). All client configs in clients.ts invoke it via npx.
  */
 
 // CLI routing guard — handle `setup` subcommand before any heavy imports

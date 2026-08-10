@@ -21,7 +21,7 @@ export function cleanupStructured(body: IRStmt[]): IRStmt[] {
 }
 
 function cleanupPass(stmts: IRStmt[]): IRStmt[] {
-  let result: IRStmt[] = [];
+  const result: IRStmt[] = [];
 
   for (let i = 0; i < stmts.length; i++) {
     const stmt = stmts[i];
@@ -53,7 +53,7 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
 
 function cleanupIf(
   stmt: IRStmt & { kind: 'if' },
-  trailing: IRStmt[],
+  _trailing: IRStmt[],
 ): { stmts: IRStmt[]; consumed: number } | null {
   const thenBody = cleanupPass(stmt.thenBody);
   const elseBody = stmt.elseBody ? cleanupPass(stmt.elseBody) : undefined;

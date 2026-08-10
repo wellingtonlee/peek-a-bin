@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { inferTypes, typeToString, meetTypes, type DecompType } from '../typeInfer';
 import type { IRStmt, IRSwitch } from '../ir';
-import { irReg, irConst } from '../ir';
+import { irReg, } from '../ir';
 
 describe('Enum Type Inference', () => {
   it('should infer enum from switch with 3+ cases', () => {

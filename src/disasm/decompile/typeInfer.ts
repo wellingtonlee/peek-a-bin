@@ -1,4 +1,4 @@
-import type { IRStmt, IRExpr, BinaryOp } from './ir';
+import type { IRStmt, BinaryOp } from './ir';
 import { walkStmts, canonReg } from './ir';
 import { API_TYPES } from './apitypes';
 
@@ -121,7 +121,7 @@ function isFloatReg(name: string): boolean {
  */
 export function inferTypes(
   body: IRStmt[],
-  iatMap: Map<number, { lib: string; func: string }>,
+  _iatMap: Map<number, { lib: string; func: string }>,
 ): TypeContext {
   const types = new Map<string, DecompType>();
 
@@ -133,10 +133,6 @@ export function inferTypes(
     } else {
       types.set(canon, meetTypes(existing, t));
     }
-  }
-
-  function getType(name: string): DecompType {
-    return types.get(canonReg(name)) ?? { kind: 'unknown' };
   }
 
   // Forward pass: walk all statements and infer types from operations

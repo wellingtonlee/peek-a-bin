@@ -172,12 +172,12 @@ export function parseVersionInfo(
         // Extract FileVersion from dwFileVersionMS / dwFileVersionLS
         const fileVerMS = view.getUint32(pos + 8, true);
         const fileVerLS = view.getUint32(pos + 12, true);
-        result['FileVersion'] = `${(fileVerMS >>> 16) & 0xFFFF}.${fileVerMS & 0xFFFF}.${(fileVerLS >>> 16) & 0xFFFF}.${fileVerLS & 0xFFFF}`;
+        result.FileVersion = `${(fileVerMS >>> 16) & 0xFFFF}.${fileVerMS & 0xFFFF}.${(fileVerLS >>> 16) & 0xFFFF}.${fileVerLS & 0xFFFF}`;
 
         // Extract ProductVersion from dwProductVersionMS / dwProductVersionLS
         const prodVerMS = view.getUint32(pos + 16, true);
         const prodVerLS = view.getUint32(pos + 20, true);
-        result['ProductVersion'] = `${(prodVerMS >>> 16) & 0xFFFF}.${prodVerMS & 0xFFFF}.${(prodVerLS >>> 16) & 0xFFFF}.${prodVerLS & 0xFFFF}`;
+        result.ProductVersion = `${(prodVerMS >>> 16) & 0xFFFF}.${prodVerMS & 0xFFFF}.${(prodVerLS >>> 16) & 0xFFFF}.${prodVerLS & 0xFFFF}`;
       }
       pos += viValueLength;
     }
@@ -211,7 +211,7 @@ export function parseVersionInfo(
             const sValueLength = view.getUint16(strPos + 2, true);
             // wType at strPos+4
             const sKey = readWString(strPos + 6);
-            let valPos = align4(sKey.end);
+            const valPos = align4(sKey.end);
 
             if (sValueLength > 0 && valPos + 2 <= sEnd) {
               const val = readWString(valPos);

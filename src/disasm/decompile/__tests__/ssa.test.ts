@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import type { BasicBlock } from '../../cfg';
-import type { IRStmt, IRReg } from '../ir';
+import type { IRStmt, } from '../ir';
 import type { IRExpr } from '../ir';
-import { irReg, irConst, irBinary, irUnary, irDeref, canonReg } from '../ir';
-import { computeRPO, computeDominators, computeDomFrontier, computeDomTree, buildSSA } from '../ssa';
-import { ssaOptimize, globalValueNumbering } from '../ssaopt';
+import { irReg, irConst, irBinary, irDeref, canonReg } from '../ir';
+import { computeRPO, computeDominators, computeDomFrontier, buildSSA } from '../ssa';
+import { ssaOptimize, } from '../ssaopt';
 import { destroySSA } from '../ssadestroy';
 
 // ── Helpers ──
@@ -18,12 +18,6 @@ function makeBlock(id: number, succs: number[], preds: number[]): BasicBlock {
     succs,
     preds,
   };
-}
-
-function findAssign(stmts: IRStmt[], regName: string): IRStmt | undefined {
-  return stmts.find(s =>
-    s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === canonReg(regName),
-  );
 }
 
 // ── Tests ──

@@ -6,7 +6,6 @@ export interface FunctionSignature {
 }
 
 const FASTCALL_REGS_64 = ['rcx', 'rdx', 'r8', 'r9'];
-const CDECL_PARAM_REGS_32 = ['ecx']; // for thiscall detection
 
 function isSourceOperand(mnemonic: string, opStr: string, reg: string): boolean {
   const lower = opStr.toLowerCase();
@@ -103,7 +102,7 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
     if (!m) {
       // Also check simple decimal
       const d = parseInt(last.opStr, 10);
-      if (!isNaN(d) && d > 0) {
+      if (!Number.isNaN(d) && d > 0) {
         convention = 'stdcall';
         paramCount = Math.floor(d / 4);
       }

@@ -20,9 +20,6 @@ export interface CertificateInfo {
 // DER tag constants
 const TAG_SEQUENCE = 0x30;
 const TAG_SET = 0x31;
-const TAG_INTEGER = 0x02;
-const TAG_BIT_STRING = 0x03;
-const TAG_OCTET_STRING = 0x04;
 const TAG_OID = 0x06;
 const TAG_UTF8_STRING = 0x0C;
 const TAG_PRINTABLE_STRING = 0x13;
@@ -60,17 +57,25 @@ function readDERElement(data: Uint8Array, offset: number): DERElement | null {
     const numBytes = lenByte & 0x7F;
     if (numBytes > 4 || pos + numBytes > data.length) return null;
     for (let i = 0; i < numBytes; i++) {
-      contentLen = (contentLen << 8) | data[pos + i];
+      // `*` rather than `<<`: JS bitwise shifts are signed-32, so a 4-byte length
+      // with a leading byte >= 0x80 would produce a NEGATIVE contentLen. That makes
+      // totalLen negative, and readDERChildren then walks backwards through the
+      // buffer and never terminates — a hang no try/catch can recover from.
+      contentLen = contentLen * 256 + data[pos + i];
     }
     headerLen = 2 + numBytes;
     pos += numBytes;
   }
 
+  const contentOffset = offset + headerLen;
+  // Reject lengths that run past the buffer as well as impossible negatives.
+  if (contentLen < 0 || contentOffset + contentLen > data.length) return null;
+
   return {
     tag,
     headerLen,
     contentLen,
-    contentOffset: offset + headerLen,
+    contentOffset,
     totalLen: headerLen + contentLen,
   };
 }
@@ -81,7 +86,8 @@ function readDERChildren(data: Uint8Array, start: number, length: number): DEREl
   const end = start + length;
   while (pos < end) {
     const el = readDERElement(data, pos);
-    if (!el || el.totalLen === 0) break;
+    // <= 0 rather than === 0: a non-advancing element would loop forever.
+    if (!el || el.totalLen <= 0) break;
     children.push(el);
     pos += el.totalLen;
   }

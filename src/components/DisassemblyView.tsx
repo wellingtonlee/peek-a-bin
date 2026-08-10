@@ -7,8 +7,7 @@ import { useDisassemblySearch } from "../hooks/useDisassemblySearch";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
 import type { CrossSectionResult } from "../hooks/useDisassemblySearch";
 import { disasmWorker } from "../workers/disasmClient";
-import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
-import type { SectionHeader } from "../pe/types";
+import type { Instruction, DisasmFunction, } from "../disasm/types";
 import { CallPanel } from "./CallPanel";
 import { parseOperandTargets } from "../disasm/operands";
 import { JumpArrows } from "./JumpArrows";
@@ -122,7 +121,7 @@ export function DisassemblyView() {
   // Sorted functions for binary search
   const sortedFuncs = useSortedFuncs();
   // Find current function for call panel
-  const currentFunc = useContainingFunc(undefined, sortedFuncs);
+  const currentFunc = useContainingFunc();
   const sectionInfo = useSectionInfo();
 
   // Core row computation hook
@@ -414,12 +413,12 @@ export function DisassemblyView() {
       let startAddr = row.insn.address, endAddr = row.insn.address;
       for (let i = currentIndex; i >= 0; i--) {
         const r = rows[i];
-        if (!r || r.kind !== "insn" || r.blockIdx !== blockIdx) break;
+        if (r?.kind !== "insn" || r.blockIdx !== blockIdx) break;
         startAddr = r.insn.address;
       }
       for (let i = currentIndex; i < rows.length; i++) {
         const r = rows[i];
-        if (!r || r.kind !== "insn" || r.blockIdx !== blockIdx) break;
+        if (r?.kind !== "insn" || r.blockIdx !== blockIdx) break;
         endAddr = r.insn.address + r.insn.size;
       }
       dispatch({ type: "SET_CURRENT_BLOCK", block: { startAddr, endAddr } });
@@ -683,7 +682,6 @@ export function DisassemblyView() {
         if (curRow && curRow.kind === "insn") {
           const target = parseBranchTarget(curRow.insn.mnemonic, curRow.insn.opStr);
           if (target !== null) {
-            const targetFn = funcMap.get(target);
             const vs = { viewMode, graphPan, graphZoom };
             if (currentFunc) {
               dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(currentFunc, state.renames), viewSnapshot: vs });
@@ -2031,27 +2029,6 @@ export function DisassemblyView() {
         reCenterTrigger={reCenterTrigger}
         searchMatches={showGraphSearch ? graphSearchMatchSet : undefined}
         currentSearchMatch={showGraphSearch ? graphSearchCurrentMatch : undefined}
-        onNavBack={() => {
-          if (state.callStack.length > 0) {
-            const last = state.callStack[state.callStack.length - 1];
-            if (last.viewSnapshot) {
-              setViewMode(last.viewSnapshot.viewMode);
-              setRestorePanZoom({ pan: last.viewSnapshot.graphPan, zoom: last.viewSnapshot.graphZoom });
-            }
-            dispatch({ type: "SET_ADDRESS", address: last.address });
-            dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
-          } else {
-            const destAddr = state.historyIndex > 0 ? state.addressHistory[state.historyIndex - 1] : undefined;
-            if (destAddr !== undefined) {
-              const saved = navViewStateMapRef.current.get(destAddr);
-              if (saved) {
-                setViewMode(saved.viewMode);
-                setRestorePanZoom({ pan: saved.graphPan, zoom: saved.graphZoom });
-              }
-            }
-            dispatch({ type: "NAV_BACK" });
-          }
-        }}
       />
       ) : (
         <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">

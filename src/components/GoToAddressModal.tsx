@@ -27,7 +27,7 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
     const cleaned = input.trim().replace(/^0[xX]/, "");
     if (!cleaned) return null;
     const val = parseInt(cleaned, 16);
-    return isNaN(val) ? null : val;
+    return Number.isNaN(val) ? null : val;
   }, [input]);
 
   const resolvedVA = useMemo(() => {

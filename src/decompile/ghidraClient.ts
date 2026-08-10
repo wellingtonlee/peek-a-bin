@@ -14,7 +14,7 @@ export class GhidraClient {
 
   private headers(): Record<string, string> {
     const h: Record<string, string> = { "Content-Type": "application/json" };
-    if (this.apiKey) h["Authorization"] = `Bearer ${this.apiKey}`;
+    if (this.apiKey) h.Authorization = `Bearer ${this.apiKey}`;
     return h;
   }
 
@@ -37,7 +37,7 @@ export class GhidraClient {
     const form = new FormData();
     form.append("file", new Blob([bytes]), "binary.exe");
     const headers: Record<string, string> = {};
-    if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     const res = await fetch(`${this.baseUrl}/api/v1/binary`, {
       method: "POST",
       headers,

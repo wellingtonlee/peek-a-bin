@@ -15,7 +15,7 @@ function buildHeaders(config: LLMSettings, isAnthropic: boolean): Record<string,
     headers["anthropic-version"] = "2023-06-01";
     headers["anthropic-dangerous-direct-browser-access"] = "true";
   } else {
-    headers["Authorization"] = `Bearer ${config.apiKey}`;
+    headers.Authorization = `Bearer ${config.apiKey}`;
   }
   return headers;
 }

@@ -1,4 +1,4 @@
-import { useReducer, useRef, useCallback, useMemo, useEffect } from "react";
+import { useReducer, useRef, useCallback, useEffect } from "react";
 import type { DecompileTab, DecompileTabsState, HighLevelEngine } from "../decompile/types";
 import { tabsReducer, initialTabsState } from "../decompile/types";
 import { disasmWorker } from "../workers/disasmClient";
@@ -29,8 +29,6 @@ export interface UseDecompileTabsResult {
   triggerTab: (tab: DecompileTab) => void;
   triggerAI: (mode: "enhance" | "explain") => void;
   cancelAI: () => void;
-  highlightLines: Set<number>;
-  handleLineClick: (lineNum: number) => void;
   resetForNewFunc: () => void;
   activeCode: string;
   activeLoading: boolean;
@@ -239,37 +237,12 @@ export function useDecompileTabs({
   // Sync is disabled for AI tab
   const syncDisabled = tabsState.activeTab === "ai";
 
-  // Highlight lines from active tab's lineMap
-  const addrToLines = useMemo(() => {
-    const m = new Map<number, number[]>();
-    for (const [line, addr] of activeLineMap) {
-      const arr = m.get(addr);
-      if (arr) arr.push(line);
-      else m.set(addr, [line]);
-    }
-    return m;
-  }, [activeLineMap]);
-
-  const highlightLines = useMemo(() => {
-    if (syncDisabled || activeLineMap.size === 0) return new Set<number>();
-    return new Set<number>();
-  }, [syncDisabled, activeLineMap]);
-
-  const handleLineClick = useCallback((lineNum: number) => {
-    if (syncDisabled) return;
-    // Caller provides dispatch to SET_ADDRESS — we return the addr
-    // This is handled in DisassemblyView which wraps this
-    void lineNum;
-  }, [syncDisabled]);
-
   return {
     tabsState,
     setActiveTab,
     triggerTab,
     triggerAI,
     cancelAI,
-    highlightLines,
-    handleLineClick,
     resetForNewFunc,
     activeCode,
     activeLoading,

@@ -7,12 +7,11 @@ import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/ty
 import type { FunctionSignature } from '../disasm/signatures';
 import { extractStrings } from '../pe/parser';
 import type { SectionHeader } from '../pe/types';
-import { decompileFunction, type DecompileResult } from '../disasm/decompile/pipeline';
+import { decompileFunction } from '../disasm/decompile/pipeline';
 import { StructRegistry } from '../disasm/decompile/structs';
-import { detectIRPDispatches, type IRPDispatchEntry } from '../analysis/driver';
+import { detectIRPDispatches } from '../analysis/driver';
 import {
   type DisasmContext,
-  mapInsn as _mapInsn,
   disassemble as _disassemble,
   detectFunctions as _detectFunctions,
   hybridDisassemble as _hybridDisassemble,
@@ -22,7 +21,6 @@ import {
 
 let cs32: any;
 let cs64: any;
-let initialized = false;
 let stringMap: Map<number, string> = new Map();
 let iatMap: Map<number, { lib: string; func: string }> = new Map();
 let driverMode = false;
@@ -154,7 +152,6 @@ const initPromise = (async () => {
   }
   cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
   cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
-  initialized = true;
 })();
 
 // Message protocol

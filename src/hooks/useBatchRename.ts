@@ -57,7 +57,6 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
     );
     if (!textSection) return;
 
-    const bufferEl = document.querySelector("[data-pe-buffer]");
     // We don't have direct buffer access; work through worker
 
     // Collect unnamed functions
@@ -150,7 +149,7 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
               const addr = typeof item.address === "string"
                 ? parseInt(item.address.replace(/^0x/i, ""), 16)
                 : item.address;
-              if (isNaN(addr) || !item.suggestedName) continue;
+              if (Number.isNaN(addr) || !item.suggestedName) continue;
               const batchFn = batch.find(b => b.fn.address === addr);
               allResults.push({
                 address: addr,

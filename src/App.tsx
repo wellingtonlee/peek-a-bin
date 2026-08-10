@@ -51,7 +51,7 @@ export default function App() {
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
-  const [chatOpen, setChatOpen] = useState(false);
+  const [_chatOpen, setChatOpen] = useState(false);
   const aiReport = useAIReport(state, dispatch);
   const batchRename = useBatchRename(state, dispatch);
   const vulnScanner = useVulnScanner(state, dispatch);
@@ -334,7 +334,7 @@ export default function App() {
     const tabStr = params.get("tab") as ViewTab | null;
     if (addrStr) {
       const addr = parseInt(addrStr.replace(/^0x/i, ""), 16);
-      if (!isNaN(addr)) dispatch({ type: "SET_ADDRESS", address: addr });
+      if (!Number.isNaN(addr)) dispatch({ type: "SET_ADDRESS", address: addr });
     }
     if (tabStr) dispatch({ type: "SET_TAB", tab: tabStr });
   }, [state.peFile, dispatch]);
@@ -364,7 +364,7 @@ export default function App() {
       const tabStr = params.get("tab") as ViewTab | null;
       if (addrStr) {
         const addr = parseInt(addrStr.replace(/^0x/i, ""), 16);
-        if (!isNaN(addr) && addr !== state.currentAddress) {
+        if (!Number.isNaN(addr) && addr !== state.currentAddress) {
           dispatch({ type: "SET_ADDRESS", address: addr });
         }
       }

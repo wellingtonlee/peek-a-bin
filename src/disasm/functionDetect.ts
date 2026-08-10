@@ -209,9 +209,8 @@ export function detectFunctions(
       else if (i + 4 < len && bytes[i] === 0x57 && bytes[i + 1] === 0x56 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
         isFunctionStart = true;
       }
-      else if (i > 0 && i + 3 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x83 && bytes[i + 2] === 0xEC && (bytes[i - 1] === 0xCC || bytes[i - 1] === 0x90)) {
-        isFunctionStart = true;
-      }
+      // NOTE: a `48 83 EC` (sub rsp, imm8) preceded by CC/90 padding is already
+      // matched by the unqualified `48 83 EC` branch above — no separate case needed.
       else if (i + 4 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x53 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
         isFunctionStart = true;
       }
@@ -721,7 +720,7 @@ export function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]]
 export function buildAllXrefs(
   bytes: Uint8Array,
   baseAddress: number,
-  is64: boolean,
+  _is64: boolean,
   stringAddrs: number[],
   iatAddrs: number[],
   cs: any,

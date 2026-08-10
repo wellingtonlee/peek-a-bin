@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { IRTry, IRStmt } from '../ir';
+import type { IRTry, } from '../ir';
 import { walkStmts, irConst, irReg } from '../ir';
 import { emitFunction } from '../emit';
 import type { IRFunction } from '../ir';

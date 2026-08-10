@@ -33,7 +33,6 @@ export function XrefPanel({
   typedXrefMap,
   funcMap,
   sortedFuncs,
-  pe,
   onNavigate,
   onClose,
   scopeAddress,

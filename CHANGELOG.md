@@ -4,6 +4,34 @@
 
 ### Added
 
+- **Biome lint + format** — `npm run lint` / `npm run format` / `npm run check`; `biome.json` configured with the a11y group and other large-backlog rules at warn so the baseline is visible without blocking CI (2026-08-10 05:19)
+- **CI build, lint and audit gates** — CI now runs `lint`, `typecheck`, `test` and `build` on every PR (`build` previously ran only on release tags, so Vite/PWA breaks shipped silently); separate `audit` job at `--audit-level=high`; dependabot config for npm and GitHub Actions (2026-08-10 05:19)
+- **Malformed-PE regression suite** — `src/pe/__tests__/malformed.test.ts`, 8 tests covering truncated headers, unbounded section/data-directory counts, unmapped import thunks, a 0xFFFFFFFF export-name count, and a poisoned DER length; each carries an explicit timeout so a regression fails rather than hangs (2026-08-10 05:19)
+- **Test coverage reporting** — `npm run test:coverage`; v8 provider configured in `vitest.config.ts` (2026-08-10 05:19)
+- **`typecheck`, `test:coverage`, `mcp:setup` scripts** — replacing the hand-typed `npx tsc --noEmit` documented in three places (2026-08-10 05:19)
+
+### Fixed
+
+- **PE parser crashed on unmapped import thunks** — an `OriginalFirstThunk` RVA outside every section resolved to `-1` and was used unguarded, throwing an uncaught `RangeError` that failed the entire file load (2026-08-10 05:19)
+- **PE parser froze on a hostile export table** — the name-pointer walk was bounded only by `numberOfNames`, read straight off the file as a uint32; `0xFFFFFFFF` spun ~4.3 billion times, measured at ~20 seconds of blocked main thread. Now clamped to what the buffer can hold, and out-of-range indices `break` instead of `continue` (2026-08-10 05:19)
+- **Authenticode DER parser killed the worker on a crafted certificate** — `contentLen = (contentLen << 8) | byte` is signed-32 in JS, so a 4-byte length of `0x80000000` became `-2147483648`, driving `readDERChildren` backwards through the buffer. Length accumulation no longer uses signed shifts, and out-of-range lengths are rejected (2026-08-10 05:19)
+- **Unbounded header counts** — `numberOfSections` (uint16) and `numberOfRvaAndSizes` (uint32) are now clamped to what the buffer can hold, and to the 16-entry spec maximum for data directories (2026-08-10 05:19)
+- **Truncated files threw bare `RangeError`s** — short buffers and PEs whose COFF header runs past EOF now report a usable parse error (2026-08-10 05:19)
+- **Unsanitized markdown rendering** — `MarkdownRenderer` passed `marked` output straight to `dangerouslySetInnerHTML`. That content is LLM output which routinely echoes strings extracted from the analysed binary, so attacker-controlled text from an untrusted PE reached raw HTML injection on an origin holding plaintext LLM API keys. Now sanitized with DOMPurify (2026-08-10 05:19)
+- **Conditional hook call** — `useContainingFunc` called `useSortedFuncs()` behind a `??`, a Rules-of-Hooks violation that breaks under React Compiler. The redundant `sortedFuncs` parameter was removed (2026-08-10 05:19)
+- **11 hooks called after an early return** — `HeaderView` (7), `ExportsView` (2), `ResourcesView` (1) and `SectionTable` (1) ran `useMemo`/`useState`/`useCallback`/`useVirtualizer` below an `if (!pe) return null` guard, so the hook count changed between renders. Hooks are now hoisted above the guard with null-tolerant bodies, and `useHookAtTopLevel` is enforced at error level (2026-08-10 13:00)
+
+### Removed
+
+- **Dead code** — ~60 unused imports, variables, parameters and functions, including `useDecompileTabs`'s `highlightLines` (always returned an empty Set) and `handleLineClick` (a no-op), plus `CFGView`'s `onNavBack` prop, which was declared and destructured but never invoked — making the 20-line handler `DisassemblyView` passed to it unreachable (2026-08-10 05:19)
+- **Broken `bin` entry** — `package.json` declared `peek-a-bin-mcp` pointing at a raw `.ts` file whose `#!/usr/bin/env npx tsx` shebang cannot work on Linux, in a `private: true` package that can never be published. All client configs invoke the server via `npx tsx` explicitly (2026-08-10 05:19)
+
+### Changed
+
+- **Package identity** — renamed from the scaffolding name `web-disassembly` to `peek-a-bin`; added `description`, `license`, `repository`, `homepage` and `engines: node >=20` (2026-08-10 05:19)
+- **`noUnusedLocals` / `noUnusedParameters` enabled** in `tsconfig.json` (2026-08-10 05:19)
+- **Dependency vulnerabilities: 23 → 1** — including the critical Vitest advisory and the direct `ws` uninitialized-memory-disclosure. The remaining moderate (`@hono/node-server` path traversal) is pinned transitively by the latest MCP SDK with no upstream fix and is unreachable here — the server uses stdio + ws, not Hono serve-static (2026-08-10 05:19)
+
 - **Documentation restructuring** — split monolithic README into `docs/` folder with 8 topic-specific guides (keyboard, theming, ghidra-server, mcp-server, ai-features, architecture, decompiler, deployment); added CONTRIBUTING.md, SECURITY.md, and docs/README.md hub; README slimmed to project overview with doc links (2026-03-27 16:00)
 - **Ghidra connection test** — "Test Connection" button in Settings → Ghidra tab verifies server reachability and displays server version and Ghidra version (2026-03-27 14:00)
 - **MCP auto-discovery** — `.mcp.json` at project root enables Claude Code to automatically discover and use the MCP server without manual configuration (2026-03-27 12:00)

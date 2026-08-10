@@ -12,11 +12,9 @@ import { detectDriver, type DriverInfo } from '../analysis/driver';
 import { StructRegistry } from '../disasm/decompile/structs';
 import {
   initCapstone,
-  disassembleBytes,
   detectFunctionsFromBytes,
   hybridDisassembleBytes,
   buildXrefMap,
-  buildXrefs,
 } from './disasm';
 
 export interface AnalyzedFile {

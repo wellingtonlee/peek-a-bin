@@ -1,35 +1,51 @@
 {
-  "name": "web-disassembly",
+  "name": "peek-a-bin",
   "private": true,
   "version": "0.1.0",
+  "description": "Browser-based PE disassembler and decompiler. All analysis client-side via WebAssembly.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wellingtonlee/peek-a-bin.git"
+  },
+  "homepage": "https://wellingtonlee.github.io/peek-a-bin/",
   "type": "module",
-  "bin": {
-    "peek-a-bin-mcp": "./src/mcp/index.ts"
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint src",
+    "format": "biome format --write",
+    "check": "biome check",
     "test": "vitest run",
     "test:watch": "vitest",
-    "mcp": "tsx src/mcp/index.ts"
+    "test:coverage": "vitest run --coverage",
+    "mcp": "tsx src/mcp/index.ts",
+    "mcp:setup": "tsx src/mcp/index.ts setup"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "capstone-wasm": "^1.0.3",
-    "tsx": "^4.21.0",
-    "ws": "^8.19.0",
+    "tsx": "^4.23.12",
+    "ws": "^8.21.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.7",
     "@dagrejs/dagre": "^2.0.4",
     "@tailwindcss/vite": "^4.0.0",
     "@tanstack/react-virtual": "^3.11.0",
+    "@types/dompurify": "^3.2.0",
     "@types/node": "^25.3.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.0",
+    "dompurify": "^3.4.13",
     "marked": "^17.0.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

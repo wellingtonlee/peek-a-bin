@@ -1,7 +1,7 @@
 import type { StackFrame } from '../types';
 import type { FunctionSignature } from '../signatures';
 import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from './ir';
-import { irVar, canonReg, walkStmts } from './ir';
+import { irVar, walkStmts } from './ir';
 import type { TypeContext } from './typeInfer';
 import { typeToString } from './typeInfer';
 
@@ -374,7 +374,6 @@ function synthesizeStackFrame(
   }
 }
 
-const FASTCALL_REGS = ['rcx', 'rdx', 'r8', 'r9'];
 
 /**
  * Promote stack variable references to named variables and

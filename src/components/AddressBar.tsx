@@ -174,7 +174,7 @@ export function AddressBar() {
 
     const cleaned = input.replace(/^0[xX]/, "");
     const addr = parseInt(cleaned, 16);
-    if (!isNaN(addr) && cleaned.length > 0) {
+    if (!Number.isNaN(addr) && cleaned.length > 0) {
       dispatch({ type: "SET_ADDRESS", address: addr });
       dispatch({ type: "SET_TAB", tab: "disassembly" });
       setInput("");
@@ -470,7 +470,7 @@ export function AddressBar() {
           const filtered = q
             ? recentAddresses.filter((e) =>
                 e.address.toString(16).toLowerCase().includes(q) ||
-                (e.funcName && e.funcName.toLowerCase().includes(q))
+                (e.funcName?.toLowerCase().includes(q))
               )
             : recentAddresses;
           return (

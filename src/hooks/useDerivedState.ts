@@ -31,12 +31,11 @@ function binarySearchFunc(
   return best;
 }
 
-export function useContainingFunc(
-  address?: number,
-  sortedFuncs?: DisasmFunction[],
-): DisasmFunction | null {
+export function useContainingFunc(address?: number): DisasmFunction | null {
   const state = useAppState();
-  const funcs = sortedFuncs ?? useSortedFuncs();
+  // Must be called unconditionally — a `sortedFuncs ?? useSortedFuncs()` form
+  // is a conditional hook call and breaks hook ordering.
+  const funcs = useSortedFuncs();
   const addr = address ?? state.currentAddress;
   return useMemo(() => binarySearchFunc(funcs, addr), [funcs, addr]);
 }

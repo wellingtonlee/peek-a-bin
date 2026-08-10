@@ -7,7 +7,7 @@ import { SYSTEM_PROMPT_REPORT } from "../llm/prompt";
 import { getDisplayName } from "./usePEFile";
 import type { PEFile } from "../pe/types";
 import type { Anomaly } from "../analysis/anomalies";
-import type { DisasmFunction, Instruction } from "../disasm/types";
+import type { DisasmFunction, } from "../disasm/types";
 import { disasmWorker } from "../workers/disasmClient";
 import { analyzeStackFrame } from "../disasm/stack";
 import { inferSignature } from "../disasm/signatures";
@@ -16,7 +16,7 @@ function buildReportContext(
   pe: PEFile,
   fileName: string,
   functions: DisasmFunction[],
-  renames: Record<number, string>,
+  _renames: Record<number, string>,
   anomalies: Anomaly[],
   driverInfo: AppState["driverInfo"],
   decompiled: { name: string; code: string }[],

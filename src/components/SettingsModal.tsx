@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { loadSettings, saveSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
+import { loadSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
 import { GhidraClient } from "../decompile/ghidraClient";
 
@@ -374,8 +374,7 @@ export function SettingsModal({ open, onClose }: Props) {
 
           {/* Ghidra Tab */}
           {activeTab === "ghidra" && (
-            <>
-              <div>
+            <div>
                 <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Decompilation Server
                 </label>
@@ -446,13 +445,11 @@ export function SettingsModal({ open, onClose }: Props) {
                 )}
                 <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
               </div>
-            </>
           )}
 
           {/* Display Tab */}
           {activeTab === "display" && (
-            <>
-              <div>
+            <div>
                 <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Font Size
                 </label>
@@ -469,7 +466,6 @@ export function SettingsModal({ open, onClose }: Props) {
                   <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
                 </div>
               </div>
-            </>
           )}
 
           {/* Theme Tab */}

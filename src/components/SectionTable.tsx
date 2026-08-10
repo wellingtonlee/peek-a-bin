@@ -6,6 +6,22 @@ import { computeSectionEntropy, classifyEntropy } from "../utils/entropy";
 export function SectionTable() {
   const { peFile: pe, currentAddress } = useAppState();
   const dispatch = useAppDispatch();
+
+  // Every hook must run before the `!pe` early return below, otherwise the hook
+  // count changes between renders and React throws on the transition.
+  const sectionEntropies = useMemo(() => {
+    if (!pe) return [];
+    return pe.sections.map((sec) => {
+      if (sec.sizeOfRawData === 0) return 0;
+      try {
+        const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
+        return computeSectionEntropy(bytes);
+      } catch {
+        return 0;
+      }
+    });
+  }, [pe]);
+
   if (!pe) return null;
 
   const imageBase = pe.optionalHeader.imageBase;
@@ -18,19 +34,6 @@ export function SectionTable() {
     dispatch({ type: "SET_ADDRESS", address: imageBase + sec.virtualAddress });
     dispatch({ type: "SET_TAB", tab: "disassembly" });
   };
-
-  // Compute per-section entropy
-  const sectionEntropies = useMemo(() => {
-    return pe.sections.map((sec) => {
-      if (sec.sizeOfRawData === 0) return 0;
-      try {
-        const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
-        return computeSectionEntropy(bytes);
-      } catch {
-        return 0;
-      }
-    });
-  }, [pe]);
 
   return (
     <div className="p-4 text-xs overflow-auto h-full">

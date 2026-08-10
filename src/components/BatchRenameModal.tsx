@@ -20,7 +20,7 @@ export function BatchRenameModal() {
     setLocalResults(prev => {
       const next = [...prev];
       const cur = next[idx].accepted;
-      next[idx] = { ...next[idx], accepted: cur === true ? false : true };
+      next[idx] = { ...next[idx], accepted: cur !== true };
       return next;
     });
   }, []);
