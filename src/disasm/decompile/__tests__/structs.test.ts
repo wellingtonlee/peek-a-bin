@@ -1089,4 +1089,271 @@ describe('synthesizeStructs — call-site propagation', () => {
     synthesizeStructs(fn([...twoFieldBody(), callStmt('DECADE', [RCX])]), reg);
     expect(reg.getParamStruct(0xdecade, 0)).toBeUndefined();
   });
+
+  // The call-site walk used to skip try statements, so every argument passed
+  // inside a __try body was invisible — and SEH wrapping covers whole function
+  // bodies, not small fragments.
+  it('links an argument passed inside a try body or handler', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(fn([
+      ...twoFieldBody(),
+      { kind: 'try', body: [callStmt('sub_402000', [RCX])], handler: [callStmt('sub_403000', [RCX])] },
+    ]), reg);
+    expect(reg.getParamStruct(0x402000, 0)).toBeDefined();
+    expect(reg.getParamStruct(0x403000, 0)).toBeDefined();
+  });
+});
+
+// Shape agreement is a coincidence; a value flowing through a parameter slot is
+// evidence. Where the evidence exists these merges are made on it instead, and
+// the shape guards — which cost a two-field partial view its ability to be
+// completed — do not apply.
+describe('synthesizeStructs — provenance-based merging', () => {
+  /** An x64 function whose parameters were named by the register path. */
+  const callee = (body: IRStmt[], address: number, paramCount = 1): IRFunction =>
+    fn(body, {
+      address,
+      name: `sub_${address.toString(16)}`,
+      params: Array.from({ length: paramCount }, (_, i) => ({ name: `arg${i}`, type: 'int64_t' })),
+    });
+
+  const caller = (body: IRStmt[], address = 0x401000): IRFunction =>
+    fn(body, { address, name: `sub_${address.toString(16)}` });
+
+  /** Reads `base` at each offset — the caller's fuller view of the object. */
+  const reads = (base: IRExpr, offsets: number[]): IRStmt[] =>
+    offsets.map((o, i) => assign(irReg(`r${i + 8}`, 8), at(base, o)));
+
+  it('completes a two-field parameter view from a struct the caller passed in', () => {
+    const reg = new StructRegistry();
+    // A sees three fields and hands the object to sub_402000 as argument 0.
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), reg);
+    // B only ever touches two of them — too weak a shape to merge on, but its
+    // base *is* the object A passed.
+    const b = synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), reg);
+
+    expect(reg.getAll()).toHaveLength(1);
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16]);
+  });
+
+  // Provenance is published from both ends — the callee records its own reading
+  // of the parameter, the caller records what it passed — so the merge does not
+  // depend on which of the two is decompiled first.
+  it('merges a caller and callee pair the same way in either order', () => {
+    const callerFirst = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), callerFirst);
+    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), callerFirst);
+
+    const calleeFirst = new StructRegistry();
+    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), calleeFirst);
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), calleeFirst);
+
+    for (const reg of [callerFirst, calleeFirst]) {
+      expect(reg.getAll()).toHaveLength(1);
+      expect(reg.getAll()[0].fields.map(f => f.offset)).toEqual([0, 8, 16]);
+    }
+  });
+
+  // Provenance overrides the shape *guards*, not the shape *contradiction*. If
+  // the two layouts cannot both be right, something upstream is wrong and a
+  // merged declaration would only bake the error in.
+  it('refuses a provenance merge when the two layouts contradict', () => {
+    // 4:4 sits inside the 8-byte field at 0.
+    const conflicting = new StructRegistry();
+    synthesizeStructs(caller([
+      assign(irReg('rax', 8), at(RCX, 0, 8)),
+      assign(irReg('ebx', 4), at(RCX, 16)),
+      callStmt('sub_402000', [RCX]),
+    ]), conflicting);
+    synthesizeStructs(callee(reads(RCX, [4, 16]), 0x402000), conflicting);
+    expect(conflicting.getAll()).toHaveLength(2);
+
+    // Control: the same pair with the callee reading offset 8 instead of 4 has
+    // no contradiction, and merges on the same evidence.
+    const compatible = new StructRegistry();
+    synthesizeStructs(caller([
+      assign(irReg('rax', 8), at(RCX, 0, 8)),
+      assign(irReg('ebx', 4), at(RCX, 16)),
+      callStmt('sub_402000', [RCX]),
+    ]), compatible);
+    synthesizeStructs(callee(reads(RCX, [8, 16]), 0x402000), compatible);
+    expect(compatible.getAll()).toHaveLength(1);
+  });
+
+  // `arg0`…`arg3` are only produced for an x64 function with a detected
+  // signature, and the argument registers only mean argument 0..3 there. In an
+  // x86 function RCX is a scratch register.
+  it('only reads RCX as a parameter for a function that has register parameters', () => {
+    const withParams = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), withParams);
+    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), withParams);
+    expect(withParams.getAll()).toHaveLength(1);
+
+    const noParams = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), noParams);
+    synthesizeStructs(fn(reads(RCX, [0, 8]), { address: 0x402000, name: 'sub_402000' }), noParams);
+    expect(noParams.getAll()).toHaveLength(2);
+  });
+
+  it('matches the argument index, not merely the presence of an argument', () => {
+    // The object is passed in position 1, so RDX — the second argument
+    // register — is the base that carries it.
+    const rightSlot = new StructRegistry();
+    synthesizeStructs(
+      caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [irConst(0), RCX])]), rightSlot);
+    synthesizeStructs(callee(reads(RDX, [0, 8]), 0x402000, 2), rightSlot);
+    expect(rightSlot.getAll()).toHaveLength(1);
+
+    const wrongSlot = new StructRegistry();
+    synthesizeStructs(
+      caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [irConst(0), RCX])]), wrongSlot);
+    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000, 2), wrongSlot);
+    expect(wrongSlot.getAll()).toHaveLength(2);
+  });
+
+  // Stack parameters are deliberately NOT used as provenance. `arg_N` is named
+  // by a running counter over the stack slots the function was *observed* to
+  // touch (stack.ts), not by argument position — a function that never reads
+  // its first argument names its second one `arg_0`. Pairing that against the
+  // caller's true index would link mismatched slots and merge unrelated
+  // structs, which is the failure this whole path exists to avoid. Fewer
+  // merges, none of them wrong.
+  it('does not treat a stack parameter name as an argument index', () => {
+    const reg = new StructRegistry();
+    const p = irVar('p', 8);
+    synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [p])]), reg);
+
+    const stackParamFn = fn(reads(irVar('arg_0', 8), [0, 8]), {
+      address: 0x402000,
+      name: 'sub_402000',
+      params: [{ name: 'arg_0', type: 'int64_t' }],
+    });
+    const b = synthesizeStructs(stackParamFn, reg);
+
+    // No provenance, and the two-field shape is below MIN_SUBSET_MERGE_FIELDS,
+    // so the callee gets its own struct rather than a possibly-wrong merge.
+    expect(reg.getAll()).toHaveLength(2);
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8]);
+  });
+
+  // Two callers of the same function are only merged with each other through
+  // the callee's own reading of that parameter. A helper that never
+  // dereferences the argument as a struct — a passthrough taking a void* —
+  // therefore does not conflate the objects its callers hand it.
+  it('unifies two callers only once the callee corroborates the parameter', () => {
+    const passthrough = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8]), callStmt('sub_403000', [RCX])], 0x401000), passthrough);
+    synthesizeStructs(caller([...reads(RCX, [0, 16]), callStmt('sub_403000', [RCX])], 0x402000), passthrough);
+    expect(passthrough.getAll()).toHaveLength(2);
+
+    const corroborated = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8]), callStmt('sub_403000', [RCX])], 0x401000), corroborated);
+    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), corroborated);
+    synthesizeStructs(caller([...reads(RCX, [0, 16]), callStmt('sub_403000', [RCX])], 0x402000), corroborated);
+    expect(corroborated.getAll()).toHaveLength(1);
+    expect(corroborated.getAll()[0].fields.map(f => f.offset)).toEqual([0, 8, 16, 24]);
+  });
+
+  // The residual order-dependence, pinned deliberately. A base's struct is
+  // decided once, when its function is synthesized, and two structs that
+  // already exist are never folded together — so a caller processed before the
+  // callee published its reading keeps the struct it made on shape alone.
+  // Missing a merge is the benign direction; no ordering produces a *different*
+  // merge, only fewer of them.
+  it('leaves a caller processed before the callee out of the unification', () => {
+    const inOrder = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8]), callStmt('sub_403000', [RCX])], 0x401000), inOrder);
+    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), inOrder);
+    synthesizeStructs(caller([...reads(RCX, [0, 16]), callStmt('sub_403000', [RCX])], 0x402000), inOrder);
+    expect(inOrder.getAll()).toHaveLength(1);
+
+    const callersFirst = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8]), callStmt('sub_403000', [RCX])], 0x401000), callersFirst);
+    synthesizeStructs(caller([...reads(RCX, [0, 16]), callStmt('sub_403000', [RCX])], 0x402000), callersFirst);
+    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), callersFirst);
+    expect(callersFirst.getAll()).toHaveLength(2);
+  });
+
+  it('follows an alias from the parameter register to the base actually used', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), reg);
+    // `rbx = rcx` then everything through RBX — the normal shape once a
+    // parameter is kept across a call.
+    const b = synthesizeStructs(callee([
+      assign(irReg('rbx', 8), RCX),
+      ...reads(irReg('rbx', 8), [0, 8]),
+    ], 0x402000), reg);
+
+    expect(reg.getAll()).toHaveLength(1);
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16]);
+  });
+
+  it('propagates a struct along a chain of calls', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt('sub_402000', [RCX])]), reg);
+    synthesizeStructs(callee([...reads(RCX, [0, 8]), callStmt('sub_403000', [RCX])], 0x402000), reg);
+    const c = synthesizeStructs(callee(reads(RCX, [0, 32]), 0x403000), reg);
+
+    expect(reg.getAll()).toHaveLength(1);
+    expect(c.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16, 32]);
+  });
+});
+
+describe('StructRegistry.findOrCreateLinked', () => {
+  it('merges into a linked struct whatever the shapes look like', () => {
+    const reg = new StructRegistry();
+    const big = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    // A two-field shape the subset path refuses on its own.
+    const small = reg.findOrCreateLinked([big.id], '0:4,8:4', [field(0, 4), field(8, 4)]);
+    expect(small.id).toBe(big.id);
+    expect(reg.getAll()).toHaveLength(1);
+  });
+
+  it('merges a shape that does not nest at all', () => {
+    const reg = new StructRegistry();
+    const a = reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
+    const b = reg.findOrCreateLinked([a.id], '0:4,16:4', [field(0, 4), field(16, 4)]);
+    expect(b.id).toBe(a.id);
+    expect(b.fields.map(f => f.offset)).toEqual([0, 8, 16]);
+  });
+
+  it('re-indexes the merged struct so its new shape is found by fingerprint', () => {
+    const reg = new StructRegistry();
+    const a = reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
+    reg.findOrCreateLinked([a.id], '0:4,16:4', [field(0, 4), field(16, 4)]);
+    const again = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    expect(again.id).toBe(a.id);
+    expect(reg.getAll()).toHaveLength(1);
+  });
+
+  it('falls back to the shape path for a contradictory layout', () => {
+    const reg = new StructRegistry();
+    const a = reg.findOrCreate('0:8,16:4', [field(0, 8), field(16, 4)]);
+    const b = reg.findOrCreateLinked([a.id], '4:4,16:4', [field(4, 4), field(16, 4)]);
+    expect(b.id).not.toBe(a.id);
+    expect(reg.getAll()).toHaveLength(2);
+  });
+
+  it('skips a stale link and takes the next one', () => {
+    const reg = new StructRegistry();
+    const a = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    const b = reg.findOrCreateLinked(['struct_99', a.id], '0:4,8:4', [field(0, 4), field(8, 4)]);
+    expect(b.id).toBe(a.id);
+  });
+
+  it('creates a struct when no link resolves', () => {
+    const reg = new StructRegistry();
+    const def = reg.findOrCreateLinked(['struct_99'], '0:4,8:4', [field(0, 4), field(8, 4)]);
+    expect(def.id).toBe('struct_0');
+    expect(reg.getAll()).toHaveLength(1);
+  });
+
+  it('round-trips a callee parameter view and clears it', () => {
+    const reg = new StructRegistry();
+    reg.linkParamView(0x401000, 1, 'struct_0');
+    expect(reg.getParamView(0x401000, 1)).toBe('struct_0');
+    expect(reg.getParamView(0x401000, 0)).toBeUndefined();
+    reg.clear();
+    expect(reg.getParamView(0x401000, 1)).toBeUndefined();
+  });
 });

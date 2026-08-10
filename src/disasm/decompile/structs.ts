@@ -2,6 +2,20 @@ import type { IRExpr, IRStmt, IRFunction } from './ir';
 import { irFieldAccess, irArrayAccess, irConst, canonReg } from './ir';
 import type { DecompType } from './typeInfer';
 
+/**
+ * A parameter position — one function's argument slot, identified by the
+ * function's address and the argument index.
+ *
+ * Two bases that occupy the same slot are the same object by construction: one
+ * was passed to the other. That is *evidence*, unlike the shape agreement the
+ * subset path relies on, and it is what lets a partial view merge into a fuller
+ * one however small it is.
+ */
+interface ParamSlot {
+  funcAddr: number;
+  paramIdx: number;
+}
+
 // ── Struct Definition Types ──
 
 export interface StructField {
@@ -25,7 +39,9 @@ export class StructRegistry {
   private structs = new Map<string, StructDef>();
   private nextId = 0;
   private fingerprintIndex = new Map<string, string>(); // fingerprint → struct id
-  private paramLinks = new Map<string, string>(); // "funcAddr:paramIdx" → structId
+  // Two provenance maps, deliberately kept apart — see findOrCreateLinked.
+  private paramLinks = new Map<string, string>(); // "funcAddr:paramIdx" → structId a *caller* passed there
+  private paramViews = new Map<string, string>(); // "funcAddr:paramIdx" → structId the *callee* built from it
 
   findOrCreate(fingerprint: string, fields: StructField[]): StructDef {
     // Exact match
@@ -67,6 +83,47 @@ export class StructRegistry {
     return def;
   }
 
+  /**
+   * Merge `fields` into the first of `linkedIds` that can accept them, falling
+   * back to the shape-based path when none can.
+   *
+   * A linked id is evidence that this base and that struct are the same object:
+   * a value flowed through a parameter slot shared by the two. Evidence beats
+   * shape, so this path deliberately ignores MIN_SUBSET_MERGE_FIELDS — a
+   * two-field view of a parameter completes from a caller's fuller view, which
+   * is the capability the subset guard had to give up.
+   *
+   * The one thing provenance cannot override is a boundary conflict. If the
+   * layouts contradict each other (overlapping, non-identical extents) then one
+   * of the two readings is wrong, and merging would bake the error into a
+   * declaration rather than resolve it. Such a base falls through to the shape
+   * path, which will refuse it too and give it a struct of its own.
+   */
+  findOrCreateLinked(linkedIds: string[], fingerprint: string, fields: StructField[]): StructDef {
+    const incoming = parseFingerprint(fingerprint);
+    for (const id of linkedIds) {
+      const def = this.structs.get(id);
+      if (!def) continue; // stale link, e.g. across a clear()
+      if (hasBoundaryConflict(incoming, parseFingerprint(buildFingerprint(def.fields)))) continue;
+      this.mergeFields(def.id, fields);
+      this.reindex(def);
+      return def;
+    }
+    return this.findOrCreate(fingerprint, fields);
+  }
+
+  /** Keep fingerprintIndex pointing at a struct's current shape after a merge. */
+  private reindex(def: StructDef): void {
+    const merged = buildFingerprint(def.fields);
+    for (const [fp, id] of this.fingerprintIndex) {
+      if (id !== def.id) continue;
+      if (fp === merged) return;
+      this.fingerprintIndex.delete(fp);
+      break;
+    }
+    this.fingerprintIndex.set(merged, def.id);
+  }
+
   mergeFields(id: string, newFields: StructField[]): void {
     const def = this.structs.get(id);
     if (!def) return;
@@ -101,12 +158,31 @@ export class StructRegistry {
     return Array.from(this.structs.values());
   }
 
+  /** Record the struct a *caller* passed as argument `paramIdx` of `funcAddr`. */
   linkParam(funcAddr: number, paramIdx: number, structId: string): void {
-    this.paramLinks.set(`${funcAddr}:${paramIdx}`, structId);
+    this.paramLinks.set(slotKey(funcAddr, paramIdx), structId);
   }
 
   getParamStruct(funcAddr: number, paramIdx: number): string | undefined {
-    return this.paramLinks.get(`${funcAddr}:${paramIdx}`);
+    return this.paramLinks.get(slotKey(funcAddr, paramIdx));
+  }
+
+  /**
+   * Record the struct `funcAddr` itself builds out of its own parameter
+   * `paramIdx` — that is, the callee's own reading of the argument.
+   *
+   * Kept separate from linkParam so that a merge always has the callee's
+   * corroboration behind it. Two callers passing objects to the same slot are
+   * only merged with each other through this map, so the callee has to
+   * dereference that parameter as a struct before anything unifies; a
+   * passthrough helper taking a void* never links its callers together.
+   */
+  linkParamView(funcAddr: number, paramIdx: number, structId: string): void {
+    this.paramViews.set(slotKey(funcAddr, paramIdx), structId);
+  }
+
+  getParamView(funcAddr: number, paramIdx: number): string | undefined {
+    return this.paramViews.get(slotKey(funcAddr, paramIdx));
   }
 
   clear(): void {
@@ -114,10 +190,15 @@ export class StructRegistry {
     this.nextId = 0;
     this.fingerprintIndex.clear();
     this.paramLinks.clear();
+    this.paramViews.clear();
   }
 }
 
 // ── Fingerprinting helpers ──
+
+function slotKey(funcAddr: number, paramIdx: number): string {
+  return `${funcAddr}:${paramIdx}`;
+}
 
 function parseFingerprint(fp: string): Set<string> {
   return new Set(fp.split(',').filter(Boolean));
@@ -516,6 +597,113 @@ function offsetLabel(offset: number): string {
     : `0x${offset.toString(16).toUpperCase()}`;
 }
 
+// ── Parameter Provenance ──
+
+/** Integer argument registers of the x64 calling convention, in argument order. */
+const X64_ARG_REGS = ['rcx', 'rdx', 'r8', 'r9'];
+
+/**
+ * Canonical base key → argument index, for bases that *are* a parameter.
+ *
+ * Two naming schemes, and which one applies is decided by the parameter names
+ * promoteVars produced:
+ *
+ * - `arg0`…`arg3` are only emitted for an x64 function with a detected
+ *   signature, and they are never substituted into the body — the body still
+ *   reads RCX. Their presence is therefore the signal that the argument
+ *   registers mean what they say. Without it the register mapping must not be
+ *   applied: in an x86 function ECX is a scratch register, not parameter 0.
+ * Stack parameters (`arg_N`) are deliberately NOT mapped. The N in that name is
+ * a running counter over the stack slots the function was *observed* to touch
+ * (stack.ts, `arg_${paramIdx}` with `paramIdx++` per entry), not the argument's
+ * position: a function that never reads its first argument names its second one
+ * `arg_0`. The caller side records the true index, so pairing the two would link
+ * mismatched slots and merge unrelated structs — precisely the false merge this
+ * provenance path exists to avoid. `IRParam` carries no offset, so the real
+ * index cannot be recovered here; correcting it belongs in stack.ts, where the
+ * offset is still in hand. Tracked separately.
+ *
+ * The consequence is that provenance currently reaches x64 register arguments
+ * only. That is the conservative direction: fewer merges, none of them wrong.
+ */
+function paramIndexByBase(func: IRFunction): Map<string, number> {
+  const names = new Set(func.params.map(p => p.name));
+  const byBase = new Map<string, number>();
+
+  for (let i = 0; i < X64_ARG_REGS.length; i++) {
+    if (names.has(`arg${i}`)) byBase.set(`reg:${canonReg(X64_ARG_REGS[i])}`, i);
+  }
+  return byBase;
+}
+
+/**
+ * An address for a call target, or null when the target is not one.
+ *
+ * `sub_<hex>` is the only form resolveCallTarget emits that *is* an address —
+ * the others are import names, user function names and register names. Running
+ * parseInt over those parses a prefix of the name as hex, so `CloseHandle`
+ * became 0xC and `ExitProcess` 0xE, both silently linked as call targets.
+ */
+function parseCallTargetAddr(target: string): number | null {
+  const m = /^sub_([0-9a-fA-F]+)$/.exec(target);
+  if (!m) return null;
+  const addr = parseInt(m[1], 16);
+  return Number.isFinite(addr) && addr > 0 ? addr : null;
+}
+
+/**
+ * Canonical base key → the argument slots that base is passed in, at direct
+ * calls to known functions.
+ *
+ * Runs before the IR rewrite, but a bare register or variable argument is
+ * returned unchanged by rewriteExpr, so the arguments seen here are the ones a
+ * post-rewrite walk would see.
+ */
+function collectCallArgSlots(
+  body: IRStmt[],
+  canonBase: (e: IRExpr) => string,
+): Map<string, ParamSlot[]> {
+  const slots = new Map<string, ParamSlot[]>();
+
+  function record(key: string, slot: ParamSlot): void {
+    const existing = slots.get(key);
+    if (existing) existing.push(slot);
+    else slots.set(key, [slot]);
+  }
+
+  function walk(stmts: IRStmt[]): void {
+    for (const s of stmts) {
+      if (s.kind === 'call_stmt') {
+        const funcAddr = parseCallTargetAddr(s.call.target);
+        if (funcAddr !== null) {
+          for (let i = 0; i < s.call.args.length; i++) {
+            const arg = s.call.args[i];
+            if (arg.kind === 'reg' || arg.kind === 'var') {
+              record(canonBase(arg), { funcAddr, paramIdx: i });
+            }
+          }
+        }
+      }
+      if (s.kind === 'if') {
+        walk(s.thenBody);
+        if (s.elseBody) walk(s.elseBody);
+      }
+      if (s.kind === 'while' || s.kind === 'do_while') walk(s.body);
+      if (s.kind === 'for') walk(s.body);
+      if (s.kind === 'switch') {
+        for (const c of s.cases) walk(c.body);
+        if (s.defaultBody) walk(s.defaultBody);
+      }
+      if (s.kind === 'try') {
+        walk(s.body);
+        walk(s.handler);
+      }
+    }
+  }
+  walk(body);
+  return slots;
+}
+
 // ── Struct Synthesis Pass ──
 
 export function synthesizeStructs(
@@ -566,6 +754,8 @@ export function synthesizeStructs(
   }
 
   // 4c. Build StructDefs
+  const ownParamIdx = paramIndexByBase(func);
+  const callArgSlots = collectCallArgSlots(func.body, canonBase);
   const baseToStruct = new Map<string, StructDef>();
   for (const [key, group] of candidates) {
     // Deduplicate fields by offset (use largest size)
@@ -601,8 +791,32 @@ export function synthesizeStructs(
     }
 
     const fingerprint = buildFingerprint(fields);
-    const def = registry.findOrCreate(fingerprint, fields);
+
+    // Provenance, strongest first: a struct a caller already passed into this
+    // parameter, then the callee's own reading of each slot this base is passed
+    // in. Either is direct evidence of identity; shape agreement is the
+    // fallback, not the first resort.
+    const paramIdx = ownParamIdx.get(key);
+    const outgoing = callArgSlots.get(key) ?? [];
+    const linked: string[] = [];
+    if (paramIdx !== undefined) {
+      const fromCaller = registry.getParamStruct(func.address, paramIdx);
+      if (fromCaller) linked.push(fromCaller);
+    }
+    for (const slot of outgoing) {
+      const view = registry.getParamView(slot.funcAddr, slot.paramIdx);
+      if (view) linked.push(view);
+    }
+
+    const def = linked.length > 0
+      ? registry.findOrCreateLinked(linked, fingerprint, fields)
+      : registry.findOrCreate(fingerprint, fields);
     baseToStruct.set(key, def);
+
+    // Publish this base's identity so the functions on the other side of those
+    // slots can find it, whichever order they are decompiled in.
+    if (paramIdx !== undefined) registry.linkParamView(func.address, paramIdx, def.id);
+    for (const slot of outgoing) registry.linkParam(slot.funcAddr, slot.paramIdx, def.id);
   }
 
   // 4d. Enhanced field type inference from usage context
@@ -610,9 +824,6 @@ export function synthesizeStructs(
 
   // 4e. IR Rewrite (struct fields + array access)
   const rewrittenBody = rewriteStmts(func.body, baseToStruct, canonBase);
-
-  // 4f. Call-site propagation
-  propagateCallSites(rewrittenBody, baseToStruct, canonBase, registry);
 
   // Collect typedefs for this function
   const usedStructIds = new Set<string>();
@@ -932,57 +1143,3 @@ function rewriteExpr(
   }
 }
 
-// ── Call-Site Propagation ──
-
-/**
- * An address for a call target, or null when the target is not one.
- *
- * `sub_<hex>` is the only form resolveCallTarget emits that *is* an address —
- * the others are import names, user function names and register names. Running
- * parseInt over those parses a prefix of the name as hex, so `CloseHandle`
- * became 0xC and `ExitProcess` 0xE, both silently linked as call targets.
- */
-function parseCallTargetAddr(target: string): number | null {
-  const m = /^sub_([0-9a-fA-F]+)$/.exec(target);
-  if (!m) return null;
-  const addr = parseInt(m[1], 16);
-  return Number.isFinite(addr) && addr > 0 ? addr : null;
-}
-
-function propagateCallSites(
-  body: IRStmt[],
-  baseToStruct: Map<string, StructDef>,
-  canonBase: (e: IRExpr) => string,
-  registry: StructRegistry,
-): void {
-  function walk(stmts: IRStmt[]): void {
-    for (const s of stmts) {
-      if (s.kind === 'call_stmt') {
-        const targetAddr = parseCallTargetAddr(s.call.target);
-        if (targetAddr !== null) {
-          for (let i = 0; i < s.call.args.length; i++) {
-            const arg = s.call.args[i];
-            if (arg.kind === 'reg' || arg.kind === 'var') {
-              const key = canonBase(arg);
-              const def = baseToStruct.get(key);
-              if (def) {
-                registry.linkParam(targetAddr, i, def.id);
-              }
-            }
-          }
-        }
-      }
-      if (s.kind === 'if') {
-        walk(s.thenBody);
-        if (s.elseBody) walk(s.elseBody);
-      }
-      if (s.kind === 'while' || s.kind === 'do_while') walk(s.body);
-      if (s.kind === 'for') walk(s.body);
-      if (s.kind === 'switch') {
-        for (const c of s.cases) walk(c.body);
-        if (s.defaultBody) walk(s.defaultBody);
-      }
-    }
-  }
-  walk(body);
-}
