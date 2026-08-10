@@ -1,0 +1,14 @@
+# Revisions to skip when running `git blame`.
+#
+# Only bulk, purely-mechanical reformatting belongs here — never a commit that
+# changed behaviour, because blame would then hide the change that caused a bug.
+#
+# Enable locally with:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub applies it automatically.
+
+# Run biome format across the repo (178 files, quote style unified to double,
+# wrapped at 100 columns). Deferred through the hardening effort so bug-fix
+# diffs stayed reviewable.
+3458c406a0ab3dd25d930d1425fef37d68042485
