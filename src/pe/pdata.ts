@@ -1,18 +1,25 @@
 import type { DataDirectory, SectionHeader, RuntimeFunction } from './types';
-import { rvaToFileOffset } from './parser';
+import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from './parser';
 
 /**
  * Parse .pdata (Exception Directory) for x64 PE files.
  * Each RUNTIME_FUNCTION entry is 12 bytes: beginAddress (u32), endAddress (u32), unwindInfoAddress (u32).
+ *
+ * `index` is the caller's prebuilt section lookup — ntoskrnl-sized images have
+ * ~100k entries and each one resolves an unwind RVA, so building it per call
+ * (let alone scanning the section table per lookup) is the whole cost here.
+ * Omitted, one is built from `sections`.
  */
 export function parsePdata(
   buffer: ArrayBuffer,
   exceptionDir: DataDirectory,
   sections: SectionHeader[],
+  index?: SectionIndex,
 ): RuntimeFunction[] {
   if (!exceptionDir.virtualAddress || !exceptionDir.size) return [];
 
-  const offset = rvaToFileOffset(exceptionDir.virtualAddress, sections);
+  const sectionIndex = index ?? buildSectionIndex(sections);
+  const offset = rvaToFileOffsetIndexed(exceptionDir.virtualAddress, sectionIndex);
   if (offset < 0) return [];
 
   const view = new DataView(buffer);
@@ -33,7 +40,7 @@ export function parsePdata(
     const rf: RuntimeFunction = { beginAddress, endAddress, unwindInfoAddress };
 
     // Parse UNWIND_INFO to check for exception handler
-    const unwindOffset = rvaToFileOffset(unwindInfoAddress, sections);
+    const unwindOffset = rvaToFileOffsetIndexed(unwindInfoAddress, sectionIndex);
     if (unwindOffset >= 0 && unwindOffset + 4 <= view.byteLength) {
       const versionFlags = view.getUint8(unwindOffset);
       const flags = (versionFlags >> 3) & 0x1F;

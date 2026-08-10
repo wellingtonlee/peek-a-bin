@@ -143,10 +143,18 @@ export interface ChecksumResult {
   valid: boolean;
 }
 
+/**
+ * A `Uint16Array` reads native-endian, so it only stands in for a run of
+ * little-endian `getUint16` calls on a little-endian host. Every browser and
+ * Node target is one, but a wrong checksum is silent, so this is checked rather
+ * than assumed.
+ */
+const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
 export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResult {
   const expected = pe.optionalHeader.checksum;
-  const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
+  const limit = bytes.length;
 
   // Find checksum field offset in the file
   // PE signature at dosHeader.e_lfanew, COFF header = 4 + 20 bytes, then optional header
@@ -154,18 +162,52 @@ export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResul
   const peOffset = pe.dosHeader.e_lfanew;
   const checksumOffset = peOffset + 4 + 20 + 64;
 
+  // One 16-bit word of the walk: a little-endian read, except at a trailing odd
+  // byte where the absent high half reads as zero.
+  const wordAt = (i: number): number => (i + 1 < limit ? bytes[i] | (bytes[i + 1] << 8) : bytes[i]);
+
+  // Sum every word in the file, unfolded. This is the whole cost of the
+  // function — a 50 MB image is 25M iterations on the main thread — so it stays
+  // a bare accumulate over a typed array with no per-word branch or fold, in
+  // four independent lanes so the adds do not serialise on one accumulator.
+  // The accumulators cannot lose precision: 0xFFFF per word stays exact in a
+  // double until ~1.4e11 words, i.e. a 274 GB file.
   let sum = 0;
-  const limit = bytes.length;
-  for (let i = 0; i < limit; i += 2) {
-    // Skip the 4-byte checksum field
-    if (i === checksumOffset || i === checksumOffset + 2) continue;
-    const word = i + 1 < limit ? view.getUint16(i, true) : bytes[i];
-    sum += word;
-    // Fold carries
-    sum = (sum & 0xFFFF) + (sum >>> 16);
+  const wordCount = limit >>> 1;
+  if (IS_LITTLE_ENDIAN) {
+    const words = new Uint16Array(buffer, 0, wordCount);
+    const quads = wordCount - (wordCount % 4);
+    let s0 = 0;
+    let s1 = 0;
+    let s2 = 0;
+    let s3 = 0;
+    for (let i = 0; i < quads; i += 4) {
+      s0 += words[i];
+      s1 += words[i + 1];
+      s2 += words[i + 2];
+      s3 += words[i + 3];
+    }
+    sum = s0 + s1 + s2 + s3;
+    for (let i = quads; i < wordCount; i++) sum += words[i];
+  } else {
+    for (let i = 0; i < wordCount; i++) sum += bytes[i * 2] | (bytes[i * 2 + 1] << 8);
   }
-  // Final fold
-  sum = (sum & 0xFFFF) + (sum >>> 16);
+  if (limit & 1) sum += bytes[limit - 1];
+
+  // A file does not checksum its own checksum field, so take those two words
+  // back out. The walk only ever visited even offsets, so an image with an odd
+  // e_lfanew never skipped anything and summed its own field — preserved here,
+  // because the value this function writes back has to verify against itself.
+  if ((checksumOffset & 1) === 0) {
+    if (checksumOffset < limit) sum -= wordAt(checksumOffset);
+    if (checksumOffset + 2 < limit) sum -= wordAt(checksumOffset + 2);
+  }
+
+  // Fold the carries. Folding after every word and folding once at the end give
+  // the same answer: the fold is a reduction modulo 0xFFFF either way, and it
+  // lands on 0 only when every word was 0, which is the one case where 0 and
+  // 0xFFFF are not interchangeable.
+  while (sum > 0xFFFF) sum = (sum & 0xFFFF) + Math.floor(sum / 0x10000);
   const actual = (sum + limit) >>> 0;
 
   return { expected, actual, valid: expected === 0 || expected === actual };
