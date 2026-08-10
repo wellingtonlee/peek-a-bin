@@ -603,6 +603,14 @@ function offsetLabel(offset: number): string {
 const X64_ARG_REGS = ['rcx', 'rdx', 'r8', 'r9'];
 
 /**
+ * A stack parameter whose name carries a known argument index. stack.ts names a
+ * slot `arg_<decimal index>` only when it verified the frame-pointer prologue
+ * and the offset divided evenly into a slot; otherwise the name is the offset
+ * (`arg_0x10`), which this deliberately does not match.
+ */
+const STACK_PARAM_RE = /^arg_(\d+)$/;
+
+/**
  * Canonical base key → argument index, for bases that *are* a parameter.
  *
  * Two naming schemes, and which one applies is decided by the parameter names
@@ -613,25 +621,63 @@ const X64_ARG_REGS = ['rcx', 'rdx', 'r8', 'r9'];
  *   reads RCX. Their presence is therefore the signal that the argument
  *   registers mean what they say. Without it the register mapping must not be
  *   applied: in an x86 function ECX is a scratch register, not parameter 0.
- * Stack parameters (`arg_N`) are deliberately NOT mapped. The N in that name is
- * a running counter over the stack slots the function was *observed* to touch
- * (stack.ts, `arg_${paramIdx}` with `paramIdx++` per entry), not the argument's
- * position: a function that never reads its first argument names its second one
- * `arg_0`. The caller side records the true index, so pairing the two would link
- * mismatched slots and merge unrelated structs — precisely the false merge this
- * provenance path exists to avoid. `IRParam` carries no offset, so the real
- * index cannot be recovered here; correcting it belongs in stack.ts, where the
- * offset is still in hand. Tracked separately.
+ * - `arg_N` is a promoted stack slot, and N is its argument index, derived in
+ *   stack.ts from the slot's offset above the frame pointer. A slot stack.ts
+ *   could not derive an index for is named after its offset instead, so it does
+ *   not match here and contributes no provenance. That is the whole gate: an
+ *   `arg_N` reaching this point means the frame pointer was verified to be one,
+ *   which matters most on x64, where RBP is more often a callee-saved object
+ *   pointer whose `[rbp+0x10]` is a struct field rather than an argument.
  *
- * The consequence is that provenance currently reaches x64 register arguments
- * only. That is the conservative direction: fewer merges, none of them wrong.
+ * Both schemes count the same thing the call-site side counts — a slot, not a
+ * source-level argument — so an argument occupying two slots shifts caller and
+ * callee indices identically and they still pair correctly. On x64 the two
+ * schemes agree by construction rather than merely coexisting: `[rbp+0x10]` is
+ * the home slot of the argument that arrives in RCX, so a homed parameter maps
+ * to the same index from either direction.
+ *
+ * (N ≥ 4 on x64 is a real stack argument. Nothing links to it today, since
+ * `collectArgs64` stops at the four argument registers, so it is published and
+ * looked up harmlessly. The 32-bit side is where this earns its keep: every
+ * argument is a stack slot there, and provenance did not reach it at all.)
+ *
+ * The two schemes can both claim one index, in an x64 function that spills RCX
+ * to its home slot: RCX and `arg_0` are then the same argument. Where they
+ * really are the same value the body reloads it, `buildAliasMap` folds the two
+ * keys into one, and no collision reaches here. A collision that survives that
+ * therefore means RCX no longer holds the argument — it was reused for
+ * something else after the spill, which is routine for a volatile register —
+ * and only one of the two bases can be argument N.
+ *
+ * The home slot wins. `[rbp+0x10]` in a function whose frame-pointer prologue
+ * stack.ts verified can only be argument 0's storage; that is the ABI. RCX's
+ * claim rests on two heuristics instead — that the signature detector got the
+ * parameter count right, and that the register still holds the incoming value
+ * at the point of use — and the surviving collision is evidence the second one
+ * has already failed. Keeping both would link the reused register's object to
+ * the caller's argument and then publish it over the correct view, since the
+ * last write to a slot wins. One base per index, so neither can happen.
  */
 function paramIndexByBase(func: IRFunction): Map<string, number> {
   const names = new Set(func.params.map(p => p.name));
   const byBase = new Map<string, number>();
+  const claimedBy = new Map<number, string>();
 
   for (let i = 0; i < X64_ARG_REGS.length; i++) {
-    if (names.has(`arg${i}`)) byBase.set(`reg:${canonReg(X64_ARG_REGS[i])}`, i);
+    if (names.has(`arg${i}`)) {
+      const key = `reg:${canonReg(X64_ARG_REGS[i])}`;
+      byBase.set(key, i);
+      claimedBy.set(i, key);
+    }
+  }
+  for (const name of names) {
+    const m = STACK_PARAM_RE.exec(name);
+    if (!m) continue;
+    const index = Number(m[1]);
+    const heldByRegister = claimedBy.get(index);
+    if (heldByRegister !== undefined) byBase.delete(heldByRegister);
+    byBase.set(`var:${name}`, index);
+    claimedBy.set(index, `var:${name}`);
   }
   return byBase;
 }

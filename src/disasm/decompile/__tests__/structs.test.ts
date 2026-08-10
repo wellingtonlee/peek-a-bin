@@ -1211,29 +1211,106 @@ describe('synthesizeStructs — provenance-based merging', () => {
     expect(wrongSlot.getAll()).toHaveLength(2);
   });
 
-  // Stack parameters are deliberately NOT used as provenance. `arg_N` is named
-  // by a running counter over the stack slots the function was *observed* to
-  // touch (stack.ts), not by argument position — a function that never reads
-  // its first argument names its second one `arg_0`. Pairing that against the
-  // caller's true index would link mismatched slots and merge unrelated
-  // structs, which is the failure this whole path exists to avoid. Fewer
-  // merges, none of them wrong.
-  it('does not treat a stack parameter name as an argument index', () => {
+  /** A function whose parameter came from a promoted stack slot. */
+  const stackCallee = (base: IRExpr, offsets: number[], name: string, address = 0x402000) =>
+    fn(reads(base, offsets), {
+      address,
+      name: `sub_${address.toString(16)}`,
+      params: [{ name, type: 'int64_t' }],
+    });
+
+  // The N in a stack parameter's `arg_N` is now its argument index, derived in
+  // stack.ts from the slot's offset, so it pairs with the caller's index. This
+  // is what extends provenance to 32-bit binaries, where every argument is a
+  // stack slot and none of this path applied before.
+  it('reads a stack parameter name as an argument index', () => {
     const reg = new StructRegistry();
     const p = irVar('p', 8);
     synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [p])]), reg);
 
-    const stackParamFn = fn(reads(irVar('arg_0', 8), [0, 8]), {
-      address: 0x402000,
-      name: 'sub_402000',
-      params: [{ name: 'arg_0', type: 'int64_t' }],
-    });
-    const b = synthesizeStructs(stackParamFn, reg);
+    const b = synthesizeStructs(stackCallee(irVar('arg_0', 8), [0, 8], 'arg_0'), reg);
 
-    // No provenance, and the two-field shape is below MIN_SUBSET_MERGE_FIELDS,
-    // so the callee gets its own struct rather than a possibly-wrong merge.
+    // Merged on the evidence, so the callee's two-field view is completed by
+    // the caller's third field even though the shape alone was too weak.
+    expect(reg.getAll()).toHaveLength(1);
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16]);
+  });
+
+  it('matches the argument index for a stack parameter, not merely its presence', () => {
+    // Passed in position 1, so only the parameter named arg_1 is that object.
+    const rightSlot = new StructRegistry();
+    const p = irVar('p', 8);
+    const passesSecond = caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [irConst(0), p])]);
+    synthesizeStructs(passesSecond, rightSlot);
+    synthesizeStructs(stackCallee(irVar('arg_1', 8), [0, 8], 'arg_1'), rightSlot);
+    expect(rightSlot.getAll()).toHaveLength(1);
+
+    // The same callee reading argument 0 instead is a different object. Under
+    // the old observation-order numbering this slot was also called arg_0 —
+    // that is the mismatch that kept the path disabled.
+    const wrongSlot = new StructRegistry();
+    synthesizeStructs(passesSecond, wrongSlot);
+    synthesizeStructs(stackCallee(irVar('arg_0', 8), [0, 8], 'arg_0'), wrongSlot);
+    expect(wrongSlot.getAll()).toHaveLength(2);
+  });
+
+  // stack.ts falls back to naming a slot after its offset whenever it could not
+  // establish that the frame pointer was a frame pointer — the common x64 case
+  // of RBP holding a callee-saved object pointer, where `[rbp+0x10]` is a field
+  // and not an argument at all. Those names carry no index and must not be
+  // guessed at.
+  it('ignores an offset-named stack parameter', () => {
+    const reg = new StructRegistry();
+    const p = irVar('p', 8);
+    synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [p])]), reg);
+
+    const b = synthesizeStructs(stackCallee(irVar('arg_0x10', 8), [0, 8], 'arg_0x10'), reg);
+
+    // No provenance, and two fields are below MIN_SUBSET_MERGE_FIELDS, so the
+    // callee keeps its own struct rather than taking a possibly-wrong merge.
     expect(reg.getAll()).toHaveLength(2);
     expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8]);
+  });
+
+  // An x64 function that spills RCX to its home slot has both an `arg0`
+  // register parameter and an `arg_0` stack parameter for the same argument.
+  // Where they really are the same value the body reloads it and buildAliasMap
+  // folds the two bases into one, so a collision that gets this far means RCX
+  // was reused for something else after the spill. The home slot is argument
+  // 0's storage by ABI; the register's claim is a heuristic that this collision
+  // is itself evidence against.
+  it('gives a contested argument index to the stack slot, not the register', () => {
+    const reg = new StructRegistry();
+    const p = irVar('p', 8);
+    // The caller passes a three-field object as argument 0.
+    synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [p])]), reg);
+
+    // The callee reads argument 0 through its home slot, and separately uses
+    // RCX — no longer the argument — as the base of an unrelated object.
+    const homed = fn([...reads(irVar('arg_0', 8), [0, 8]), ...reads(RCX, [0, 24])], {
+      address: 0x402000,
+      name: 'sub_402000',
+      params: [{ name: 'arg_0', type: 'int64_t' }, { name: 'arg0', type: 'int64_t' }],
+    });
+    synthesizeStructs(homed, reg);
+
+    // arg_0 completes from the caller's view; the reused RCX keeps its own
+    // struct instead of being absorbed into the caller's argument.
+    const shapes = reg.getAll().map(d => d.fields.map(f => f.offset));
+    expect(shapes).toContainEqual([0, 8, 16]);
+    expect(shapes).toContainEqual([0, 24]);
+    expect(reg.getAll()).toHaveLength(2);
+  });
+
+  // Publication is the other half: the callee's own view of a stack parameter
+  // has to reach a caller decompiled after it, or the merge would depend on
+  // decompilation order.
+  it('publishes a stack parameter view for a caller processed later', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(stackCallee(irVar('arg_0', 8), [0, 8], 'arg_0'), reg);
+    const p = irVar('p', 8);
+    synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt('sub_402000', [p])]), reg);
+    expect(reg.getAll()).toHaveLength(1);
   });
 
   // Two callers of the same function are only merged with each other through
