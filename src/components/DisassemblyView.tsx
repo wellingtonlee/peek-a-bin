@@ -1,25 +1,20 @@
 import { useEffect, useRef, useMemo, useCallback, useState } from "react";
-import { focusOnMount } from "./focusOnMount";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { useDisassemblyRows, binarySearchRows, rowAddress } from "../hooks/useDisassemblyRows";
 import { useDisassemblySearch } from "../hooks/useDisassemblySearch";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
-import type { CrossSectionResult } from "../hooks/useDisassemblySearch";
 import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction, DisasmFunction, } from "../disasm/types";
 import { CallPanel } from "./CallPanel";
-import { parseOperandTargets } from "../disasm/operands";
 import { JumpArrows } from "./JumpArrows";
 import { InstructionDetail } from "./InstructionDetail";
 import { DisassemblyMinimap } from "./DisassemblyMinimap";
 import { analyzeStackFrame } from "../disasm/stack";
-import { MNEMONIC_HINTS } from "../disasm/mnemonics";
 import { CFGView } from "./CFGView";
 import { inferSignature, type FunctionSignature } from "../disasm/signatures";
 import { Breadcrumbs } from "./Breadcrumbs";
-import { rvaToFileOffset } from "../pe/parser";
 import { XrefPanel } from "./XrefPanel";
 import { DecompileView } from "./DecompileView";
 import { ResizeHandle } from "./ResizeHandle";
@@ -27,12 +22,16 @@ import { BottomPanelContainer } from "./BottomPanelContainer";
 import { useDecompileTabs } from "../hooks/useDecompileTabs";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
-import { ColoredOperand, mnemonicClass, parseBranchTarget } from "./shared";
+import { parseBranchTarget } from "./shared";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { useSetGraphOverview } from "../hooks/useGraphOverview";
 import { AIChatPanel } from "./AIChatPanel";
 import { useAIChat } from "../hooks/useAIChat";
 import { useVulnScanner } from "../hooks/useVulnScanner";
+import { SeparatorRow, DataRow, LabelRow, InsnRow } from "./DisassemblyRows";
+import { InsnContextMenu } from "./InsnContextMenu";
+import { DisassemblyToolbar } from "./DisassemblyToolbar";
+import { useInsnContextMenu, type ContextMenuState } from "../hooks/useInsnContextMenu";
 
 const _SUSPICIOUS_MNEMONICS = new Set(["int", "sysenter", "syscall", "in", "out", "rdtsc", "cpuid"]);
 
@@ -103,13 +102,6 @@ function formatRangeCopy(
 }
 
 // XrefPopupState removed — replaced by XrefPanel with scoped filter
-
-// --- Context menu ---
-interface ContextMenuState {
-  x: number;
-  y: number;
-  insn: Instruction;
-}
 
 export function DisassemblyView() {
   const state = useAppState();
@@ -856,123 +848,23 @@ export function DisassemblyView() {
   );
 
   // Context menu actions
-  const ctxCopyAddr = useCallback(() => {
-    if (!ctxMenu) return;
-    navigator.clipboard.writeText("0x" + ctxMenu.insn.address.toString(16).toUpperCase());
-    setCtxMenu(null);
-  }, [ctxMenu]);
-
-  const ctxCopyInsn = useCallback(() => {
-    if (!ctxMenu) return;
-    navigator.clipboard.writeText(`${ctxMenu.insn.mnemonic} ${ctxMenu.insn.opStr}`);
-    setCtxMenu(null);
-  }, [ctxMenu]);
-
-  const ctxCopyBytes = useCallback(() => {
-    if (!ctxMenu) return;
-    const hex = Array.from(ctxMenu.insn.bytes).map((b) => b.toString(16).padStart(2, "0")).join(" ");
-    navigator.clipboard.writeText(hex);
-    setCtxMenu(null);
-  }, [ctxMenu]);
-
-  const ctxGoTo = useCallback(() => {
-    if (!ctxMenu) return;
-    const target = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
-    const addrInput = document.querySelector<HTMLInputElement>(
-      'input[placeholder*="address"]'
-    );
-    if (addrInput) {
-      addrInput.focus();
-      const prefill = target !== null ? "0x" + target.toString(16) : ctxMenu.insn.opStr;
-      addrInput.value = prefill;
-      addrInput.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    setCtxMenu(null);
-  }, [ctxMenu]);
-
-  const ctxShowInHex = useCallback(() => {
-    if (!ctxMenu || !pe) return;
-    const rva = ctxMenu.insn.address - pe.optionalHeader.imageBase;
-    const fileOffset = rvaToFileOffset(rva, pe.sections);
-    if (fileOffset >= 0) {
-      dispatch({ type: "SET_ADDRESS", address: ctxMenu.insn.address });
-      dispatch({ type: "SET_TAB", tab: "hex" });
-    }
-    setCtxMenu(null);
-  }, [ctxMenu, pe, dispatch]);
-
-  const ctxToggleBookmark = useCallback(() => {
-    if (!ctxMenu) return;
-    dispatch({ type: "TOGGLE_BOOKMARK", address: ctxMenu.insn.address });
-    setCtxMenu(null);
-  }, [ctxMenu, dispatch]);
-
-  const ctxAddComment = useCallback(() => {
-    if (!ctxMenu) return;
-    const existing = state.comments[ctxMenu.insn.address] ?? "";
-    setEditingComment({ address: ctxMenu.insn.address, value: existing });
-    setCtxMenu(null);
-  }, [ctxMenu, state.comments]);
-
-  const ctxCopyComment = useCallback(() => {
-    if (!ctxMenu) return;
-    const comment = state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment;
-    if (comment) navigator.clipboard.writeText(comment);
-    setCtxMenu(null);
-  }, [ctxMenu, state.comments]);
-
-  const ctxRenameFunction = useCallback(() => {
-    if (!ctxMenu) return;
-    // Find the function that owns this instruction
-    const addr = ctxMenu.insn.address;
-    const fn = funcMap.get(addr);
-    if (fn) {
-      setRenamingLabel({ address: fn.address, value: getDisplayName(fn, state.renames) });
-    }
-    setCtxMenu(null);
-  }, [ctxMenu, funcMap, state.renames]);
-
-  const ctxFollowTarget = useCallback(() => {
-    if (!ctxMenu) return;
-    const target = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
-    if (target !== null) handleAddressClick(target);
-    setCtxMenu(null);
-  }, [ctxMenu, handleAddressClick]);
-
-  const ctxShowXrefs = useCallback(() => {
-    if (!ctxMenu) return;
-    setShowXrefPanel(true);
-    setCtxMenu(null);
-  }, [ctxMenu]);
-
-  // Xref count map for context menu
-  const xrefCountMap = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const [addr, xrefs] of typedXrefMap) {
-      m.set(addr, xrefs.length);
-    }
-    return m;
-  }, [typedXrefMap]);
-
-  const handleContextMenu = useCallback(
-    (e: React.MouseEvent, insn: Instruction) => {
-      e.preventDefault();
-      const container = viewMode === "graph" ? cfgContainerRef.current : parentRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      const rawX = e.clientX - rect.left;
-      const rawY = e.clientY - rect.top;
-      const popW = 180, popH = 300;
-      const maxX = rect.width - popW - 8;
-      const maxY = rect.height - popH - 8;
-      setCtxMenu({
-        x: Math.max(0, Math.min(rawX + (viewMode === "linear" ? container.scrollLeft : 0), viewMode === "linear" ? maxX + container.scrollLeft : maxX)),
-        y: Math.max(0, Math.min(rawY + (viewMode === "linear" ? container.scrollTop : 0), viewMode === "linear" ? maxY + container.scrollTop : maxY)),
-        insn,
-      });
-    },
-    [viewMode],
-  );
+  const { actions: ctxActions, xrefCountMap, handleContextMenu } = useInsnContextMenu({
+    ctxMenu,
+    setCtxMenu,
+    pe,
+    dispatch,
+    comments: state.comments,
+    renames: state.renames,
+    funcMap,
+    typedXrefMap,
+    setEditingComment,
+    setRenamingLabel,
+    setShowXrefPanel,
+    handleAddressClick,
+    viewMode,
+    cfgContainerRef,
+    parentRef,
+  });
 
   // Build assembly text for current function (used by AI enhancement)
   const buildFunctionAsm = useCallback((): string => {
@@ -1206,256 +1098,54 @@ export function DisassemblyView() {
   }
 
   const addrWidth = pe.is64 ? 16 : 8;
+
+  // Plain functions, not hooks — these are recreated on every render exactly as
+  // the inline arrow functions they replace were. Do not wrap in useCallback:
+  // that would insert a hook after the early returns above.
+  const handleRowSelect = (address: number) => {
+    suppressScrollRef.current = true;
+    dispatch({ type: "SET_ADDRESS", address });
+  };
+  const handleShowXrefs = (address: number) => {
+    setXrefScopeAddress(address);
+    setShowXrefPanel(true);
+  };
+
   const sectionBaseVA = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
   const sectionEndVA = sectionBaseVA + sectionInfo.virtualSize;
 
   return (
     <div className="flex flex-col h-full">
-      {/* Section header bar */}
-      <div className="flex items-center gap-3 px-4 py-1 bg-gray-800/50 border-b border-gray-700 text-xs text-gray-400 shrink-0">
-        <span className="font-semibold text-gray-300">{sectionInfo.name}</span>
-        <span>
-          VA: 0x{sectionBaseVA.toString(16).toUpperCase()} – 0x{sectionEndVA.toString(16).toUpperCase()}
-        </span>
-        <span>Size: 0x{sectionInfo.virtualSize.toString(16).toUpperCase()}</span>
-        <span>{isExecutable ? `${instructions.length.toLocaleString()} instructions` : "data section"}</span>
-        {isExecutable && (<>
-        <select
-          value={insnFilter}
-          onChange={(e) => setInsnFilter(e.target.value as typeof insnFilter)}
-          className="px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 text-[10px]"
-        >
-          <option value="all">All</option>
-          <option value="calls">Calls</option>
-          <option value="jumps">Jumps</option>
-          <option value="stringrefs">String refs</option>
-          <option value="suspicious">Suspicious</option>
-        </select>
-        {insnFilter !== "all" && (
-          <span className="text-gray-500 text-[10px]">({filterMatchCount} matches)</span>
-        )}
-        </>)}
-        <div className="flex items-center gap-1 ml-2">
-          <button type="button"
-            onClick={() => setShowArrows((v) => !v)}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showArrows ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-          >
-            Arrows
-          </button>
-          {viewMode === "linear" && (
-          <button type="button"
-            onClick={() => setShowMinimap((v) => !v)}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showMinimap ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-          >
-            Map
-          </button>
-          )}
-          <button type="button"
-            onClick={() => {
-              setShowBytes((v) => {
-                const next = !v;
-                try { localStorage.setItem("peek-a-bin:show-bytes", String(next)); } catch {}
-                return next;
-              });
-            }}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showBytes ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-            title="Toggle bytes column"
-          >
-            Bytes
-          </button>
-          <button type="button"
-            onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
-            disabled={!currentFunc || !isExecutable}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${viewMode === "graph" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
-            title="Toggle graph view (Space)"
-          >
-            Graph
-          </button>
-          <button type="button"
-            onClick={handleDecompileToggle}
-            disabled={!currentFunc || !isExecutable}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showDecompile ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
-            title="Decompile current function (D)"
-          >
-            Decompile
-          </button>
-          <button type="button"
-            onClick={() => setShowXrefPanel((v) => !v)}
-            className={`px-1.5 py-0.5 rounded text-[10px] ${showXrefPanel ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
-            title="Toggle cross-reference panel (R)"
-          >
-            Xrefs
-          </button>
-          <div className="relative">
-            <button type="button"
-              onClick={() => setShowExportMenu((v) => !v)}
-              className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600"
-              title="Export disassembly as .asm file"
-            >
-              Export
-            </button>
-            {showExportMenu && (
-              <div className="absolute top-full left-0 mt-0.5 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 text-[10px] min-w-[140px]">
-                <button type="button"
-                  onClick={() => handleExportAsm("function")}
-                  disabled={!currentFunc}
-                  className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200 disabled:opacity-30 disabled:cursor-default"
-                >
-                  Current function
-                </button>
-                <button type="button"
-                  onClick={() => handleExportAsm("section")}
-                  className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
-                >
-                  Entire section
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex-1" />
-        {search.showSearch && (
-          <div className="flex items-center gap-1">
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={search.searchQuery}
-              onChange={(e) => {
-                const value = e.target.value;
-                search.setSearchQuery(value);
-                clearTimeout(search.searchDebounceRef.current);
-                search.searchDebounceRef.current = setTimeout(() => search.handleSearch(value), 150);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  clearTimeout(search.searchDebounceRef.current);
-                  if (e.shiftKey) search.handleSearchPrev();
-                  else if (search.searchMatches.length > 0) search.handleSearchNext();
-                  else search.handleSearch(search.searchQuery);
-                }
-                if (e.key === "Escape") {
-                  clearTimeout(search.searchDebounceRef.current);
-                  search.resetSearch();
-                  parentRef.current?.focus();
-                }
-                e.stopPropagation();
-              }}
-              placeholder="Search... (/regex/)"
-              title={search.searchRegexError ? "Invalid regex" : "Substring search, or /regex/ for regex"}
-              className={`w-48 px-2 py-0.5 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 focus:outline-none ${
-                search.searchRegexError ? "border-red-500" : "border-gray-600 focus:border-blue-500"
-              }`}
-            />
-            {search.searchMatches.length > 0 && (
-              <span className="text-gray-500 text-[10px]">
-                {search.searchMatchIdx + 1}/{search.searchMatches.length}
-              </span>
-            )}
-            {search.searchRegexError && (
-              <span className="text-red-400 text-[10px]">Invalid regex</span>
-            )}
-            {search.searchQuery && !search.searchRegexError && search.searchMatches.length === 0 && !search.crossResults && (
-              <span className="text-red-400 text-[10px]">No matches</span>
-            )}
-            <button type="button"
-              onClick={search.handleSearchPrev}
-              className="px-1 py-0.5 text-gray-400 hover:text-white"
-              title="Previous (Shift+Enter)"
-            >
-              ▲
-            </button>
-            <button type="button"
-              onClick={search.handleSearchNext}
-              className="px-1 py-0.5 text-gray-400 hover:text-white"
-              title="Next (Enter)"
-            >
-              ▼
-            </button>
-            <button type="button"
-              onClick={() => {
-                search.resetSearch();
-                parentRef.current?.focus();
-              }}
-              className="px-1 py-0.5 text-gray-400 hover:text-white"
-            >
-              ✕
-            </button>
-            <div className="relative group">
-              <button type="button" className="px-1 py-0.5 text-gray-500 hover:text-gray-300 text-[10px]">?</button>
-              <div className="hidden group-hover:block absolute right-0 top-full mt-1 w-56 px-2 py-1.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-300 z-50 shadow-lg whitespace-normal">
-                Substring match by default. Use <span className="text-blue-400">/pattern/</span> for regex, <span className="text-blue-400">/pattern/i</span> for case-insensitive.
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Grouped search results */}
-      {search.showSearch && search.searchMatchGroups.length > 1 && (
-        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
-          <div className="text-gray-400 mb-1">{search.searchMatches.length} matches in {search.searchMatchGroups.length} functions:</div>
-          {search.searchMatchGroups.map((g) => (
-            <button type="button"
-              key={g.funcAddr}
-              onClick={() => dispatch({ type: "SET_ADDRESS", address: g.funcAddr })}
-              className="block w-full text-left hover:bg-gray-700/50 rounded px-1 py-0.5 truncate"
-            >
-              <span className="text-blue-400">{g.funcName}</span>{" "}
-              <span className="text-gray-500">({g.matches.length})</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Cross-section search prompt */}
-      {search.showSearch && search.searchQuery && search.searchMatches.length === 0 && !search.crossResults && !search.crossSearching && (
-        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs flex items-center gap-2">
-          <span className="text-gray-400">No matches in {sectionInfo.name}.</span>
-          <button type="button"
-            onClick={search.handleCrossSearch}
-            className="text-blue-400 hover:text-blue-300 hover:underline"
-          >
-            Search all sections?
-          </button>
-        </div>
-      )}
-
-      {/* Cross-section search loading */}
-      {search.crossSearching && (
-        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs text-gray-400 flex items-center gap-2">
-          <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          Searching all sections...
-        </div>
-      )}
-
-      {/* Cross-section search results */}
-      {search.crossResults && search.crossResults.length > 0 && (
-        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
-          <div className="text-gray-400 mb-1">{search.crossResults.length} result{search.crossResults.length !== 1 ? "s" : ""} in other sections:</div>
-          {search.crossResults.map((r: CrossSectionResult, i: number) => (
-            <button type="button"
-              key={i}
-              onClick={() => {
-                dispatch({ type: "SET_ADDRESS", address: r.address });
-                search.resetSearch();
-              }}
-              className="block w-full text-left hover:bg-gray-700/50 rounded px-1 py-0.5 truncate"
-            >
-              <span className="text-gray-500">[{r.section.name}]</span>{" "}
-              <span className="text-blue-400">0x{r.address.toString(16).toUpperCase()}</span>{" "}
-              <span className="text-gray-300">{r.text}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      {search.crossResults && search.crossResults.length === 0 && (
-        <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs text-gray-500">
-          No matches found in any section.
-        </div>
-      )}
+      <DisassemblyToolbar
+        sectionInfo={sectionInfo}
+        sectionBaseVA={sectionBaseVA}
+        sectionEndVA={sectionEndVA}
+        isExecutable={isExecutable}
+        instructions={instructions}
+        insnFilter={insnFilter}
+        setInsnFilter={setInsnFilter}
+        filterMatchCount={filterMatchCount}
+        showArrows={showArrows}
+        setShowArrows={setShowArrows}
+        showMinimap={showMinimap}
+        setShowMinimap={setShowMinimap}
+        showBytes={showBytes}
+        setShowBytes={setShowBytes}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        currentFunc={currentFunc}
+        showDecompile={showDecompile}
+        handleDecompileToggle={handleDecompileToggle}
+        showXrefPanel={showXrefPanel}
+        setShowXrefPanel={setShowXrefPanel}
+        showExportMenu={showExportMenu}
+        setShowExportMenu={setShowExportMenu}
+        handleExportAsm={handleExportAsm}
+        search={search}
+        searchInputRef={searchInputRef}
+        parentRef={parentRef}
+        dispatch={dispatch}
+      />
 
       {/* Breadcrumb trail */}
       <Breadcrumbs />
@@ -1525,512 +1215,118 @@ export function DisassemblyView() {
 
             if (row.kind === "separator") {
               return (
-                <div
+                <SeparatorRow
                   key={`sep-${vItem.index}`}
-                  data-index={vItem.index}
-                  className="flex items-center"
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: `${sepHeight}px`,
-                    transform: `translateY(${vItem.start}px)`,
-                    padding: "0 var(--row-px)",
-                  }}
-                >
-                  <div className="w-full border-t border-gray-700/20" style={{ margin: "0 1rem" }} />
-                </div>
+                  index={vItem.index}
+                  start={vItem.start}
+                  height={sepHeight}
+                />
               );
             }
 
             if (row.kind === "data") {
-              const item = row.item;
-              const addrHex = item.address.toString(16).toUpperCase().padStart(addrWidth, "0");
-              const bytesHex = Array.from(item.bytes.slice(0, 8)).map(b => b.toString(16).padStart(2, "0")).join(" ");
-              const isCurrentAddr = item.address === state.currentAddress;
-              const isBookmarked = bookmarkSet.has(item.address);
-
-              let directiveStr: React.ReactNode;
-              let commentStr: React.ReactNode = null;
-
-              if (item.directive === "dup") {
-                directiveStr = <span className="text-gray-500">{item.dupCount} dup({item.dupByte === 0 ? "0" : `0x${item.dupByte!.toString(16)}`})</span>;
-              } else if (item.directive === "db" && item.stringValue != null) {
-                const escaped = item.stringValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
-                directiveStr = <span className="text-green-400">"{escaped}", 0</span>;
-                if (item.stringType) commentStr = <span className="text-gray-500 ml-4">; {item.stringType}</span>;
-              } else if ((item.directive === "dd" || item.directive === "dq") && item.pointerTarget != null) {
-                directiveStr = (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    className="inline text-blue-400 cursor-pointer hover:underline"
-                    onClick={(e) => { e.stopPropagation(); handleAddressClick(item.pointerTarget!); }}
-                  >
-                    0x{item.pointerTarget.toString(16).toUpperCase()}
-                  </button>
-                );
-                if (item.pointerLabel) commentStr = <span className="text-gray-500 ml-4">; {item.pointerLabel}</span>;
-              } else {
-                const hexStr = Array.from(item.bytes).map(b => b.toString(16).toUpperCase().padStart(2, "0") + "h").join(", ");
-                directiveStr = <span>{hexStr}</span>;
-                const ascii = Array.from(item.bytes).map(b => b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".").join("");
-                commentStr = <span className="text-gray-500 ml-4">; {ascii}</span>;
-              }
-
-              const userComment = state.comments[item.address];
-
               return (
-                // Data row wraps its own pointer-target button — same constraint as
-                // the instruction row below.
-                // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
-                // biome-ignore lint/a11y/useKeyWithClickEvents: container of controls, not a control
-                <div
+                <DataRow
                   key={vItem.index}
-                  data-index={vItem.index}
-                  className={`disasm-row group disasm-grid-data${!showBytes ? " hide-bytes" : ""} ${isCurrentAddr ? "bg-blue-900/30" : ""}`}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: `${rowHeight}px`,
-                    transform: `translateY(${vItem.start}px)`,
-                    padding: `0 var(--row-px)`,
-                  }}
-                  onClick={() => {
-                    suppressScrollRef.current = true;
-                    dispatch({ type: "SET_ADDRESS", address: item.address });
-                  }}
-                >
-                  <span className="text-center">
-                    {isBookmarked && <span className="text-yellow-300">★</span>}
-                  </span>
-                  <span className="disasm-address">{addrHex}</span>
-                  {showBytes && <span className="disasm-bytes truncate">{bytesHex}</span>}
-                  <span className="text-cyan-400">{item.directive}</span>
-                  <span>{directiveStr}</span>
-                  <span className="truncate flex items-center gap-1">
-                    {commentStr}
-                    {userComment && <span className="disasm-user-comment truncate max-w-xs">; {userComment}</span>}
-                  </span>
-                </div>
+                  item={row.item}
+                  index={vItem.index}
+                  start={vItem.start}
+                  rowHeight={rowHeight}
+                  addrWidth={addrWidth}
+                  currentAddress={state.currentAddress}
+                  bookmarkSet={bookmarkSet}
+                  showBytes={showBytes}
+                  comments={state.comments}
+                  onAddressClick={handleAddressClick}
+                  onRowClick={handleRowSelect}
+                />
               );
             }
 
             if (row.kind === "label") {
-              const displayName = getDisplayName(row.fn, state.renames);
-              const xrefs = typedXrefMap.get(row.fn.address);
-              const xrefCount = xrefs?.length ?? 0;
-              const isBookmarked = bookmarkSet.has(row.fn.address);
-
-              if (renamingLabel && renamingLabel.address === row.fn.address) {
-                return (
-                  <div
-                    key={`label-${vItem.index}`}
-                    data-index={vItem.index}
-                    className="flex items-center func-label text-[11px] font-mono border-t border-gray-700/50"
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      width: "100%",
-                      height: `${rowHeight}px`,
-                      transform: `translateY(${vItem.start}px)`,
-                      paddingTop: "var(--label-pad-top)",
-                      paddingLeft: "var(--row-px)",
-                      paddingRight: "var(--row-px)",
-                    }}
-                  >
-                    <span className="mr-1">; ────</span>
-                    <input
-                      ref={focusOnMount}
-                      className="bg-gray-800 border border-blue-500 rounded px-1 text-yellow-300 text-[11px] font-mono outline-none w-48"
-                      value={renamingLabel.value}
-                      onChange={(e) => setRenamingLabel({ ...renamingLabel, value: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          const val = renamingLabel.value.trim();
-                          if (val && val !== row.fn.name) {
-                            dispatch({ type: "RENAME_FUNCTION", address: renamingLabel.address, name: val });
-                          } else if (!val || val === row.fn.name) {
-                            dispatch({ type: "CLEAR_RENAME", address: renamingLabel.address });
-                          }
-                          setRenamingLabel(null);
-                        }
-                        if (e.key === "Escape") setRenamingLabel(null);
-                        e.stopPropagation();
-                      }}
-                      onBlur={() => setRenamingLabel(null)}
-                    />
-                    <span className="ml-1">────</span>
-                  </div>
-                );
-              }
-
               return (
-                // Double-click-to-rename on a row that contains its own xref button.
-                // Rename is also on the context menu, which is keyboard-operable.
-                // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
-                <div
+                <LabelRow
                   key={`label-${vItem.index}`}
-                  data-index={vItem.index}
-                  className="flex items-center func-label text-[11px] font-mono border-t border-gray-700/50"
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: `${rowHeight}px`,
-                    transform: `translateY(${vItem.start}px)`,
-                    paddingTop: "var(--label-pad-top)",
-                    paddingLeft: "var(--row-px)",
-                    paddingRight: "var(--row-px)",
-                  }}
-                  onDoubleClick={() => setRenamingLabel({ address: row.fn.address, value: displayName })}
-                >
-                  {isBookmarked && <span className="text-yellow-300 mr-1">★</span>}
-                  <span>; ──── {displayName}{(() => {
-                    const sig = getSigForFunc(row.fn);
-                    return sig ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})` : "";
-                  })()} ────</span>
-                  {xrefCount > 0 && (() => {
-                    const counts: Record<string, number> = {};
-                    for (const x of xrefs!) {
-                      counts[x.type] = (counts[x.type] ?? 0) + 1;
-                    }
-                    const parts: string[] = [];
-                    if (counts.call) parts.push(`${counts.call} call${counts.call > 1 ? "s" : ""}`);
-                    if (counts.jmp) parts.push(`${counts.jmp} jmp`);
-                    if (counts.branch) parts.push(`${counts.branch} branch`);
-                    if (counts.data) parts.push(`${counts.data} data`);
-                    const label = parts.length > 0 ? parts.join(", ") : `${xrefCount} xref${xrefCount !== 1 ? "s" : ""}`;
-                    return (
-                      <button
-                        type="button"
-                        tabIndex={-1}
-                        className="inline ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setXrefScopeAddress(row.fn.address);
-                          setShowXrefPanel(true);
-                        }}
-                      >
-                        ({label})
-                      </button>
-                    );
-                  })()}
-                </div>
+                  fn={row.fn}
+                  index={vItem.index}
+                  start={vItem.start}
+                  rowHeight={rowHeight}
+                  renames={state.renames}
+                  typedXrefMap={typedXrefMap}
+                  bookmarkSet={bookmarkSet}
+                  renamingLabel={renamingLabel}
+                  setRenamingLabel={setRenamingLabel}
+                  dispatch={dispatch}
+                  getSigForFunc={getSigForFunc}
+                  onShowXrefs={handleShowXrefs}
+                />
               );
             }
 
-            const insn = row.insn;
-            const bytesHex = Array.from(insn.bytes)
-              .map((b) => b.toString(16).padStart(2, "0"))
-              .join(" ");
-
-            const isBookmarked = bookmarkSet.has(insn.address);
-            const isLoopHeader = loopHeaders.has(insn.address);
-            const loopDepth = loopHeaders.get(insn.address);
-            const bodyDepth = loopBodyMap.get(insn.address);
-            const isCurrentAddr = insn.address === state.currentAddress;
-            const isSearchMatch =
-              search.searchMatches.length > 0 &&
-              search.searchMatchIdx >= 0 &&
-              search.searchMatches[search.searchMatchIdx] === vItem.index;
-            const rowSelected = isSelected(vItem.index);
-            const isDimmed = insnFilter !== "all" && !matchesFilter(row);
-            const isGapFill = insn.source === 'gap-fill';
-
-            const operandTargets = pe ? parseOperandTargets(
-              insn,
-              pe.optionalHeader.imageBase,
-              pe.optionalHeader.imageBase + pe.optionalHeader.sizeOfImage,
-              iatMap,
-            ) : [];
-
-            // Build tooltip data for operand addresses
-            let tooltipData: Map<number, string> | undefined;
-            if (operandTargets.length > 0 && pe) {
-              for (const t of operandTargets) {
-                const addr = t.address;
-                // Check IAT (imports)
-                const iat = iatMap.get(addr);
-                if (iat) {
-                  if (!tooltipData) tooltipData = new Map();
-                  tooltipData.set(addr, `Import: ${iat.lib}!${iat.func}`);
-                  continue;
-                }
-                // Check strings
-                const str = pe.strings?.get(addr);
-                if (str) {
-                  if (!tooltipData) tooltipData = new Map();
-                  const preview = str.length > 60 ? str.slice(0, 60) + "..." : str;
-                  tooltipData.set(addr, `"${preview}"`);
-                  continue;
-                }
-                // Check functions
-                const fn = state.functions.find(f => f.address === addr);
-                if (fn) {
-                  if (!tooltipData) tooltipData = new Map();
-                  tooltipData.set(addr, `Function: ${getDisplayName(fn, state.renames)}`);
-                  continue;
-                }
-                // Section lookup
-                if (pe.sections) {
-                  const rva = addr - pe.optionalHeader.imageBase;
-                  for (const sec of pe.sections) {
-                    if (rva >= sec.virtualAddress && rva < sec.virtualAddress + sec.virtualSize) {
-                      if (!tooltipData) tooltipData = new Map();
-                      tooltipData.set(addr, `${sec.name} +0x${(rva - sec.virtualAddress).toString(16)}`);
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-
-            // Loop border styling: header takes priority, then body depth
-            let borderStyle: string | undefined;
-            if (isLoopHeader) {
-              borderStyle = "2px solid #eab308"; // gold
-            } else if (bodyDepth !== undefined) {
-              if (bodyDepth >= 3) borderStyle = "2px solid rgba(239, 68, 68, 0.3)"; // red-500/30
-              else if (bodyDepth === 2) borderStyle = "2px solid rgba(249, 115, 22, 0.3)"; // orange-500/30
-              else borderStyle = "2px solid rgba(234, 179, 8, 0.3)"; // yellow-500/30
-            }
-
             return (
-              // The row already contains its own buttons (address, mnemonic, operand
-              // targets), so it cannot become a <button> (no nesting) and role="button"
-              // would be invalid ARIA for the same reason. Selecting a row from the
-              // keyboard needs a roving-tabindex grid model, tracked separately.
-              // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
-              // biome-ignore lint/a11y/useKeyWithClickEvents: container of controls, not a control
-              <div
+              <InsnRow
                 key={vItem.index}
-                data-index={vItem.index}
-                className={`disasm-row group disasm-grid${!showBytes ? " hide-bytes" : ""} ${
-                  isSearchMatch
-                    ? "bg-yellow-900/30"
-                    : rowSelected
-                      ? "bg-indigo-900/25"
-                      : isCurrentAddr
-                        ? "bg-blue-900/30"
-                        : ""
-                } ${isDimmed ? "opacity-30" : isGapFill ? "opacity-50" : ""}`}
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  height: `${rowHeight}px`,
-                  transform: `translateY(${vItem.start}px)`,
-                  borderLeft: borderStyle,
-                  padding: `0 var(--row-px)`,
-                }}
-                title={isLoopHeader ? `Loop header (depth ${loopDepth})` : bodyDepth !== undefined ? `Loop body (depth ${bodyDepth})` : undefined}
-                onContextMenu={(e) => handleContextMenu(e, insn)}
-                onClick={(e) => {
-                  if (e.shiftKey) {
-                    e.preventDefault();
-                    const anchor = lastClickedRow ?? currentIndex;
-                    setSelectionRange({ start: anchor, end: vItem.index });
-                  } else {
-                    setSelectionRange(null);
-                    setLastClickedRow(vItem.index);
-                    suppressScrollRef.current = true;
-                    dispatch({ type: "SET_ADDRESS", address: insn.address });
-                  }
-                }}
-              >
-                <span className="text-right pr-1 flex items-center justify-end gap-0.5">
-                  {isBookmarked && <span className="text-yellow-300">★</span>}
-                  {(() => {
-                    const xrefs = typedXrefMap.get(insn.address);
-                    if (!xrefs || xrefs.length === 0 || funcMap.has(insn.address)) return null;
-                    return (
-                      <button
-                        type="button"
-                        tabIndex={-1}
-                        className="inline text-gray-600 hover:text-blue-400 cursor-pointer text-[9px]"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setXrefScopeAddress(insn.address);
-                          setShowXrefPanel(true);
-                        }}
-                      >
-                        ×{xrefs.length}
-                      </button>
-                    );
-                  })()}
-                </span>
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  className={`disasm-address cursor-pointer hover:text-blue-400 text-left ${
-                    copiedAddr === insn.address ? "text-green-400" : ""
-                  }`}
-                  onClick={() => handleAddressClick(insn.address)}
-                  onDoubleClick={() => handleDoubleClickAddr(insn.address)}
-                >
-                  {insn.address
-                    .toString(16)
-                    .toUpperCase()
-                    .padStart(addrWidth, "0")}
-                </button>
-                {showBytes && (
-                  <span className="disasm-bytes truncate">
-                    {bytesHex}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  className={`disasm-mnemonic text-left ${mnemonicClass(insn.mnemonic)}`}
-                  title={MNEMONIC_HINTS[insn.mnemonic]}
-                  onDoubleClick={() => handleDoubleClickInsn(insn)}
-                >
-                  {insn.mnemonic}
-                </button>
-                {/* biome-ignore lint/a11y/noStaticElementInteractions: wraps the
-                    operand target buttons, so it cannot itself be a button. The
-                    double-click opens instruction detail, which is also on the
-                    context menu. */}
-                <span
-                  className="disasm-operands overflow-hidden"
-                  onDoubleClick={() => handleDoubleClickInsn(insn)}
-                >
-                  <ColoredOperand
-                    opStr={insn.opStr}
-                    targets={operandTargets}
-                    onNavigate={handleAddressClick}
-                    highlightRegs={highlightRegs}
-                    onRegClick={handleRegClick}
-                    tooltipData={tooltipData}
-                  />
-                </span>
-                <span className="truncate flex items-center gap-1">
-                  {insn.comment ? (
-                    <span
-                      className="disasm-comment truncate max-w-xs"
-                      title={insn.comment.length > 60 ? insn.comment : undefined}
-                    >
-                      ; {insn.comment}
-                    </span>
-                  ) : insn.mnemonic === 'jmp' && (() => {
-                    for (const t of operandTargets) {
-                      const targetFn = funcMap.get(t.address);
-                      if (targetFn && targetFn.address !== currentFunc?.address) {
-                        return (
-                          <span className="disasm-comment truncate max-w-xs">
-                            ; tail call → {getDisplayName(targetFn, state.renames)}
-                          </span>
-                        );
-                      }
-                    }
-                    return null;
-                  })()}
-                  {editingComment && editingComment.address === insn.address ? (
-                    <span className="shrink-0">
-                      <textarea
-                        ref={focusOnMount}
-                        rows={1}
-                        className="bg-gray-900/80 border border-blue-500 ring-1 ring-blue-500/50 rounded px-1.5 py-0.5 text-[#6ee7b7] text-xs font-mono outline-none w-64 resize-none align-middle"
-                        placeholder="Add comment..."
-                        value={editingComment.value}
-                        onChange={(e) => setEditingComment({ ...editingComment, value: e.target.value })}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            const val = editingComment.value.trim();
-                            if (val) {
-                              dispatch({ type: "SET_COMMENT", address: editingComment.address, text: val });
-                            } else {
-                              dispatch({ type: "DELETE_COMMENT", address: editingComment.address });
-                            }
-                            setEditingComment(null);
-                          }
-                          if (e.key === "Escape") setEditingComment(null);
-                          e.stopPropagation();
-                        }}
-                        onBlur={() => setEditingComment(null)}
-                      />
-                    </span>
-                  ) : state.comments[insn.address] ? (
-                    <span
-                      className="disasm-user-comment truncate max-w-xs"
-                      title={state.comments[insn.address]}
-                    >
-                      ; {state.comments[insn.address].includes("\n") ? state.comments[insn.address].split("\n")[0] + " [...]" : state.comments[insn.address]}
-                    </span>
-                  ) : isCurrentAddr && !insn.comment ? (
-                    <span className="text-gray-600 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity select-none">
-                      press ; to comment
-                    </span>
-                  ) : null}
-                </span>
-              </div>
+                row={row}
+                index={vItem.index}
+                start={vItem.start}
+                rowHeight={rowHeight}
+                addrWidth={addrWidth}
+                pe={pe}
+                iatMap={iatMap}
+                functions={state.functions}
+                renames={state.renames}
+                comments={state.comments}
+                currentAddress={state.currentAddress}
+                currentFunc={currentFunc}
+                currentIndex={currentIndex}
+                funcMap={funcMap}
+                typedXrefMap={typedXrefMap}
+                bookmarkSet={bookmarkSet}
+                loopHeaders={loopHeaders}
+                loopBodyMap={loopBodyMap}
+                searchMatches={search.searchMatches}
+                searchMatchIdx={search.searchMatchIdx}
+                isSelected={isSelected}
+                insnFilter={insnFilter}
+                matchesFilter={matchesFilter}
+                showBytes={showBytes}
+                copiedAddr={copiedAddr}
+                highlightRegs={highlightRegs}
+                lastClickedRow={lastClickedRow}
+                editingComment={editingComment}
+                setEditingComment={setEditingComment}
+                setSelectionRange={setSelectionRange}
+                setLastClickedRow={setLastClickedRow}
+                onShowXrefs={handleShowXrefs}
+                onAddressClick={handleAddressClick}
+                onDoubleClickAddr={handleDoubleClickAddr}
+                onDoubleClickInsn={handleDoubleClickInsn}
+                onRegClick={handleRegClick}
+                onContextMenu={handleContextMenu}
+                onRowClick={handleRowSelect}
+                dispatch={dispatch}
+              />
             );
           })}
 
           {/* Context menu */}
-          {ctxMenu && (() => {
-            const branchTarget = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
-            const xrefCount = xrefCountMap.get(ctxMenu.insn.address) ?? 0;
-            const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
-            const isFuncHead = funcMap.has(ctxMenu.insn.address);
-            const menuItem = (label: string, onClick: () => void, hint?: string) => (
-              <button type="button" onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
-                <span>{label}</span>
-                {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
-              </button>
-            );
-            const sep = <div className="border-t border-gray-800 my-0.5" />;
-            return (
-              <div
-                ref={ctxMenuRef}
-                className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
-                style={{ left: ctxMenu.x, top: ctxMenu.y }}
-              >
-                {menuItem("Copy address", ctxCopyAddr)}
-                {menuItem("Copy instruction", ctxCopyInsn)}
-                {menuItem("Copy bytes", ctxCopyBytes)}
-                {sep}
-                {branchTarget !== null && menuItem("Follow target", ctxFollowTarget, "Enter")}
-                {xrefCount > 0 && menuItem(`Show xrefs (${xrefCount})`, ctxShowXrefs, "R")}
-                {(branchTarget !== null || xrefCount > 0) && sep}
-                {menuItem("Go to address...", ctxGoTo, "G")}
-                {menuItem("Show in Hex", ctxShowInHex)}
-                {sep}
-                {menuItem("Toggle bookmark", ctxToggleBookmark, "B")}
-                {menuItem("Add/Edit comment", ctxAddComment, ";")}
-                {hasComment && menuItem("Copy comment", ctxCopyComment)}
-                {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
-                {isFuncHead && sep}
-                {isFuncHead && menuItem("Scan for vulnerabilities", () => {
-                  const fn = funcMap.get(ctxMenu.insn.address);
-                  if (fn) vulnScanner.scanFunction(fn);
-                  setCtxMenu(null);
-                })}
-                {selectionRange && (() => {
-                  const lo = Math.min(selectionRange.start, selectionRange.end);
-                  const hi = Math.max(selectionRange.start, selectionRange.end);
-                  const count = hi - lo + 1;
-                  return (
-                    <>
-                      {sep}
-                      {menuItem(`Copy selected (${count} rows)`, () => {
-                        navigator.clipboard.writeText(formatRangeCopy(selectionRange, rows, pe, state.renames, state.comments));
-                        setCtxMenu(null);
-                      })}
-                    </>
-                  );
-                })()}
-              </div>
-            );
-          })()}
+          {ctxMenu && (
+            <InsnContextMenu
+              ctxMenu={ctxMenu}
+              menuRef={ctxMenuRef}
+              actions={ctxActions}
+              xrefCountMap={xrefCountMap}
+              comments={state.comments}
+              funcMap={funcMap}
+              setCtxMenu={setCtxMenu}
+              scanFunction={vulnScanner.scanFunction}
+              selectionRange={selectionRange}
+              rows={rows}
+              pe={pe}
+              renames={state.renames}
+              formatRangeCopy={formatRangeCopy}
+            />
+          )}
 
         </div>
       </div>
@@ -2077,47 +1373,23 @@ export function DisassemblyView() {
         </div>
       )}
       {/* Context menu (graph mode) */}
-      {viewMode === "graph" && ctxMenu && (() => {
-        const branchTarget = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
-        const xrefCount = xrefCountMap.get(ctxMenu.insn.address) ?? 0;
-        const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
-        const isFuncHead = funcMap.has(ctxMenu.insn.address);
-        const menuItem = (label: string, onClick: () => void, hint?: string) => (
-          <button type="button" onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
-            <span>{label}</span>
-            {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
-          </button>
-        );
-        const sep = <div className="border-t border-gray-800 my-0.5" />;
-        return (
-          <div
-            ref={ctxMenuRef}
-            className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
-            style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          >
-            {menuItem("Copy address", ctxCopyAddr)}
-            {menuItem("Copy instruction", ctxCopyInsn)}
-            {menuItem("Copy bytes", ctxCopyBytes)}
-            {sep}
-            {branchTarget !== null && menuItem("Follow target", ctxFollowTarget, "Enter")}
-            {xrefCount > 0 && menuItem(`Show xrefs (${xrefCount})`, ctxShowXrefs, "R")}
-            {(branchTarget !== null || xrefCount > 0) && sep}
-            {menuItem("Go to address...", ctxGoTo, "G")}
-            {menuItem("Show in Hex", ctxShowInHex)}
-            {sep}
-            {menuItem("Toggle bookmark", ctxToggleBookmark, "B")}
-            {menuItem("Add/Edit comment", ctxAddComment, ";")}
-            {hasComment && menuItem("Copy comment", ctxCopyComment)}
-            {isFuncHead && menuItem("Rename function", ctxRenameFunction, "N")}
-            {isFuncHead && sep}
-            {isFuncHead && menuItem("Scan for vulnerabilities", () => {
-              const fn = funcMap.get(ctxMenu.insn.address);
-              if (fn) vulnScanner.scanFunction(fn);
-              setCtxMenu(null);
-            })}
-          </div>
-        );
-      })()}
+      {viewMode === "graph" && ctxMenu && (
+        <InsnContextMenu
+          ctxMenu={ctxMenu}
+          menuRef={ctxMenuRef}
+          actions={ctxActions}
+          xrefCountMap={xrefCountMap}
+          comments={state.comments}
+          funcMap={funcMap}
+          setCtxMenu={setCtxMenu}
+          scanFunction={vulnScanner.scanFunction}
+          selectionRange={null}
+          rows={rows}
+          pe={pe}
+          renames={state.renames}
+          formatRangeCopy={formatRangeCopy}
+        />
+      )}
       {/* Graph search overlay */}
       {showGraphSearch && viewMode === "graph" && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-gray-800 border border-gray-600 rounded-lg shadow-xl px-3 py-2 flex items-center gap-2 text-xs">
