@@ -1,3 +1,6 @@
+// Leaf module: this file must not import anything that pulls in disasmClient or
+// Capstone WASM, so tests can exercise the decisions below directly.
+
 export type DecompileTab = "low" | "high" | "ai";
 export type HighLevelEngine = "ghidra" | "retdec" | "none";
 
@@ -40,6 +43,65 @@ export function initialTabsState(): DecompileTabsState {
     ai: emptyTabState(),
     aiMode: null,
   };
+}
+
+// ── High Level result cache ──
+
+/**
+ * The parts of `DecompileServerSettings` that decide *which* backend produced a
+ * high-level result. Declared structurally rather than imported so this module
+ * stays a leaf.
+ */
+export interface DecompileServerConfig {
+  enabled: boolean;
+  ghidraUrl: string;
+  apiKey: string;
+}
+
+export interface HighCacheEntry {
+  code: string;
+  lineMap: Map<number, number>;
+  engine: HighLevelEngine;
+  /** Backend identity that produced this entry — see `decompileServerKey()`. */
+  serverKey: string;
+}
+
+/**
+ * Identity of the configured high-level backend. Derived from settings at read
+ * time, so a cached result is only reused while the backend that produced it is
+ * still the one selected — no invalidation call at the Settings save path, and
+ * nothing to remember to wire up when another settings path is added.
+ */
+export function decompileServerKey(cfg: DecompileServerConfig): string {
+  if (!cfg.enabled) return "none";
+  // Trailing slashes are stripped by GhidraClient, so they are not a distinct server.
+  return `ghidra\x00${cfg.ghidraUrl.replace(/\/+$/, "")}\x00${cfg.apiKey}`;
+}
+
+/** Cache hit only if the entry came from the currently configured backend. */
+export function readHighCache(
+  cache: Map<number, HighCacheEntry>,
+  addr: number,
+  serverKey: string,
+): HighCacheEntry | null {
+  const hit = cache.get(addr);
+  if (!hit || hit.serverKey !== serverKey) return null;
+  return hit;
+}
+
+/**
+ * Store a high-level result, unless there was no engine to produce one.
+ * `engine: "none"` is the "configure a server" placeholder — the absence of a
+ * result, not a result — and caching it is what used to leave the tab showing
+ * the placeholder forever after the user enabled Ghidra.
+ */
+export function writeHighCache(
+  cache: Map<number, HighCacheEntry>,
+  addr: number,
+  entry: HighCacheEntry,
+): void {
+  if (entry.engine === "none") return;
+  cache.set(addr, entry);
 }
 
 export function tabsReducer(state: DecompileTabsState, action: TabAction): DecompileTabsState {

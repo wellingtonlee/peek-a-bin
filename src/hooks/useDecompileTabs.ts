@@ -1,6 +1,12 @@
 import { useReducer, useRef, useCallback, useEffect } from "react";
-import type { DecompileTab, DecompileTabsState, HighLevelEngine } from "./decompileTabsState";
-import { tabsReducer, initialTabsState } from "./decompileTabsState";
+import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
+import {
+  tabsReducer,
+  initialTabsState,
+  decompileServerKey,
+  readHighCache,
+  writeHighCache,
+} from "./decompileTabsState";
 import { disasmWorker } from "../workers/disasmClient";
 import { GhidraClient } from "../ghidra/client";
 import { hasApiKey, loadSettings, loadDecompileServer } from "../llm/settings";
@@ -53,12 +59,13 @@ export function useDecompileTabs({
 
   // Per-tab, per-function caches: Map<funcAddr, {code, lineMap}>
   const lowCache = useRef(new Map<number, { code: string; lineMap: Map<number, number> }>());
-  const highCache = useRef(new Map<number, { code: string; lineMap: Map<number, number>; engine?: HighLevelEngine }>());
+  const highCache = useRef(new Map<number, HighCacheEntry>());
   const aiCache = useRef(new Map<number, { code: string; lineMap: Map<number, number> }>());
 
   const abortRef = useRef<AbortController | null>(null);
   const aiAccumulatedRef = useRef("");
   const ghidraProjectRef = useRef<string | null>(null);
+  const ghidraServerKeyRef = useRef<string>("");
 
   // Clear caches when PE changes
   const prevPeRef = useRef<PEFile | null>(null);
@@ -107,18 +114,30 @@ export function useDecompileTabs({
     if (!currentFunc || !pe) return;
     const addr = currentFunc.address;
 
-    const cached = highCache.current.get(addr);
+    // Settings are read before the cache lookup: which backend is configured is
+    // part of the cache key, so a result is only reused while that backend is
+    // still the selected one.
+    const serverSettings = loadDecompileServer();
+    const serverKey = decompileServerKey(serverSettings);
+
+    const cached = readHighCache(highCache.current, addr, serverKey);
     if (cached) {
       dispatch({ type: "LOAD_OK", tab: "high", code: cached.code, lineMap: cached.lineMap, engine: cached.engine });
       return;
     }
 
-    const serverSettings = loadDecompileServer();
     dispatch({ type: "BEGIN_LOAD", tab: "high" });
 
     if (serverSettings.enabled) {
       try {
         const client = new GhidraClient(serverSettings.ghidraUrl, serverSettings.apiKey || undefined);
+
+        // The project lives on one specific server, so a URL/key change makes
+        // the old project id meaningless — re-upload against the new one.
+        if (ghidraServerKeyRef.current !== serverKey) {
+          ghidraServerKeyRef.current = serverKey;
+          ghidraProjectRef.current = null;
+        }
 
         // Upload binary if not already uploaded
         if (!ghidraProjectRef.current) {
@@ -128,7 +147,7 @@ export function useDecompileTabs({
 
         const result = await client.decompileFunction(ghidraProjectRef.current, addr, pe.is64);
         const lineMap = new Map(result.lineMap);
-        highCache.current.set(addr, { code: result.code, lineMap, engine: "ghidra" });
+        writeHighCache(highCache.current, addr, { code: result.code, lineMap, engine: "ghidra", serverKey });
         dispatch({ type: "LOAD_OK", tab: "high", code: result.code, lineMap, engine: "ghidra" });
       } catch (err: any) {
         dispatch({ type: "LOAD_ERR", tab: "high", error: `Ghidra: ${err?.message ?? String(err)}` });
@@ -136,9 +155,11 @@ export function useDecompileTabs({
     } else {
       // No high-level engine configured. There is no client-side one, so show the
       // placeholder as the tab body; DecompileView renders `engine: "none"` as
-      // "(not available)" beside the tab.
+      // "(not available)" beside the tab. writeHighCache drops it — the
+      // placeholder is the absence of a result, and caching it is what used to
+      // make the tab stay "(not available)" after Ghidra was enabled.
       const lineMap = new Map<number, number>();
-      highCache.current.set(addr, { code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none" });
+      writeHighCache(highCache.current, addr, { code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none", serverKey });
       dispatch({ type: "LOAD_OK", tab: "high", code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none" });
     }
   }, [currentFunc, pe]);
