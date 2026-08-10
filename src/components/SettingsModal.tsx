@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { loadSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
-import { GhidraClient } from "../decompile/ghidraClient";
+import { GhidraClient } from "../ghidra/client";
 import { PROVIDER_DEFAULTS, ANTHROPIC_DEFAULT_MODEL, ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MODELS, OPENAI_MODELS, isDefaultModel } from "../llm/models";
 
 interface Props {

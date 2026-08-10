@@ -4,6 +4,7 @@ import type { AppAction, AppState } from "./usePEFile";
 import { streamChat } from "../llm/client";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_REPORT } from "../llm/prompt";
+import { NOTABLE_APIS, matchesApi } from "../llm/apiLists";
 import { getDisplayName } from "./usePEFile";
 import type { PEFile } from "../pe/types";
 import type { Anomaly } from "../analysis/anomalies";
@@ -46,22 +47,11 @@ Sections: ${pe.sections.length}
 
   // Notable imports (top 50)
   ctx += "\n## Notable Imports\n";
-  const notableAPIs = new Set([
-    "VirtualAlloc", "VirtualProtect", "WriteProcessMemory", "CreateRemoteThread",
-    "NtCreateThread", "NtWriteVirtualMemory", "LoadLibrary", "GetProcAddress",
-    "CreateFile", "ReadFile", "WriteFile", "DeleteFile", "CreateProcess",
-    "ShellExecute", "WinExec", "OpenProcess", "TerminateProcess",
-    "RegOpenKey", "RegSetValue", "RegCreateKey", "RegDeleteKey",
-    "InternetOpen", "HttpOpenRequest", "URLDownloadToFile", "socket", "connect", "send", "recv",
-    "CryptEncrypt", "CryptDecrypt", "CryptCreateHash", "BCryptEncrypt",
-    "CreateService", "StartService", "IsDebuggerPresent", "CheckRemoteDebuggerPresent",
-    "NtQueryInformationProcess", "SetWindowsHookEx", "VirtualAllocEx",
-  ]);
   let importCount = 0;
   for (const imp of pe.imports) {
     for (const funcName of imp.functions) {
       if (importCount >= 50) break;
-      if (notableAPIs.has(funcName) || notableAPIs.has(funcName.replace(/[AW]$/, ""))) {
+      if (matchesApi(NOTABLE_APIS, funcName)) {
         ctx += `- ${imp.libraryName}!${funcName}\n`;
         importCount++;
       }

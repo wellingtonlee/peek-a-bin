@@ -1,4 +1,5 @@
 import type { Instruction, DisasmFunction } from './types';
+import { getFuncInsns } from './funcInsns';
 
 export interface FunctionSignature {
   convention: string;
@@ -242,16 +243,10 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
 export function inferSignature(
   func: DisasmFunction,
   instructions: Instruction[],
-  is64: boolean
+  is64: boolean,
+  funcInsnMap?: Map<number, Instruction[]>,
 ): FunctionSignature {
-  const endAddr = func.address + func.size;
-  const funcInsns: Instruction[] = [];
-  for (const insn of instructions) {
-    if (insn.address >= func.address && insn.address < endAddr) {
-      funcInsns.push(insn);
-    }
-    if (insn.address >= endAddr) break;
-  }
+  const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
   if (funcInsns.length === 0) {
     return { convention: is64 ? 'fastcall' : 'cdecl', paramCount: 0 };

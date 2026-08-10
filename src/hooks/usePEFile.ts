@@ -140,7 +140,9 @@ export type AppAction =
   | { type: "SET_COMMENT"; address: number; text: string }
   | { type: "DELETE_COMMENT"; address: number }
   | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
-  | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
+  // `source` splits the two very different callers of this action. Omitting it
+  // means "user": that direction can only over-record history, never lose it.
+  | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string>; source?: "user" | "mcp" }
   | { type: "IMPORT_FULL_ANALYSIS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string>; hexPatches: Map<number, number> }
   | { type: "PATCH_BYTE"; offset: number; value: number }
   | { type: "UNDO_PATCH"; offset: number }
@@ -331,6 +333,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, bookmarks: action.bookmarks, renames: action.renames, comments: action.comments };
     }
     case "IMPORT_ANNOTATIONS": {
+      // A user-initiated import is a user edit, so it is undoable — symmetric
+      // with IMPORT_FULL_ANALYSIS below.
+      //
+      // MCP sync frames are not: useMcpSync dispatches one per frame from the
+      // bridge, and pushing each into a stack capped at MAX_UNDO would evict the
+      // user's own edits. They still clear redo, though — a redo entry from
+      // before the sync would otherwise restore a pre-sync snapshot and silently
+      // revert the annotations the sync just brought in.
+      const history: Pick<AppState, "annotationUndoStack" | "annotationRedoStack"> =
+        action.source === "mcp"
+          ? { annotationUndoStack: state.annotationUndoStack, annotationRedoStack: [] }
+          : pushUndo(state);
       const mergedBookmarks = [...state.bookmarks];
       const existingAddrs = new Set(mergedBookmarks.map(b => b.address));
       for (const b of action.bookmarks) {
@@ -338,6 +352,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       }
       return {
         ...state,
+        ...history,
         bookmarks: mergedBookmarks,
         renames: { ...state.renames, ...action.renames },
         comments: { ...state.comments, ...action.comments },

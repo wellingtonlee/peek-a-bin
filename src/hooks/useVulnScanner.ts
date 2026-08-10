@@ -7,6 +7,7 @@ import { streamChat } from "../llm/client";
 import { parseScanResponse, toScanFinding } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_VULN_SCAN } from "../llm/prompt";
+import { DANGEROUS_APIS, matchesApi } from "../llm/apiLists";
 import { getDisplayName } from "./usePEFile";
 import type { PEFile } from "../pe/types";
 import { analyzeStackFrame } from "../disasm/stack";
@@ -47,18 +48,6 @@ async function decompileFunc(
     return null;
   }
 }
-
-const DANGEROUS_APIS = new Set([
-  "VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualProtectEx",
-  "WriteProcessMemory", "ReadProcessMemory", "CreateRemoteThread",
-  "NtCreateThread", "NtWriteVirtualMemory", "NtAllocateVirtualMemory",
-  "CreateProcess", "CreateProcessA", "CreateProcessW",
-  "ShellExecute", "ShellExecuteA", "ShellExecuteW", "WinExec",
-  "OpenProcess", "NtOpenProcess", "SetWindowsHookEx", "SetWindowsHookExA", "SetWindowsHookExW",
-  "LoadLibrary", "LoadLibraryA", "LoadLibraryW",
-  "GetProcAddress", "NtMapViewOfSection", "MapViewOfFile",
-  "CryptEncrypt", "CryptDecrypt", "BCryptEncrypt", "BCryptDecrypt",
-]);
 
 export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
   const abortRef = useRef<AbortController | null>(null);
@@ -177,8 +166,7 @@ export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
     if (state.importXrefs) {
       for (const imp of pe.imports) {
         for (let i = 0; i < imp.functions.length; i++) {
-          const funcName = imp.functions[i].replace(/[AW]$/, "");
-          if (DANGEROUS_APIS.has(funcName) || DANGEROUS_APIS.has(imp.functions[i])) {
+          if (matchesApi(DANGEROUS_APIS, imp.functions[i])) {
             const iatAddr = imp.iatAddresses[i];
             const refs = state.importXrefs.get(iatAddr);
             if (refs) {

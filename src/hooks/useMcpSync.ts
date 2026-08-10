@@ -70,6 +70,9 @@ export function useMcpSync(
           bookmarks: data.bookmarks,
           renames: data.renames,
           comments: data.comments,
+          // Background sync: clears the redo branch (so a stale redo cannot
+          // revert what just arrived) without consuming an undo slot.
+          source: 'mcp',
         });
       };
 

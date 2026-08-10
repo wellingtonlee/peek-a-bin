@@ -1,19 +1,32 @@
 import type { Instruction, DisasmFunction, StackFrame, StackVar } from './types';
+import { getFuncInsns } from './funcInsns';
+
+/**
+ * Stack-operand patterns, one pair per width. They depend only on `is64`, so
+ * they are built once here rather than recompiled for every instruction.
+ * None carry the `g` flag, so there is no shared `lastIndex` to reset.
+ */
+const BP_LOCAL_RE = {
+  64: /\[rbp\s*-\s*0x([0-9a-fA-F]+)\]/i,
+  32: /\[ebp\s*-\s*0x([0-9a-fA-F]+)\]/i,
+};
+const SP_RE = {
+  64: /\[rsp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+  32: /\[esp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+};
+const BP_PARAM_RE = {
+  64: /\[rbp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+  32: /\[ebp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+};
 
 export function analyzeStackFrame(
   func: DisasmFunction,
   instructions: Instruction[],
   is64: boolean,
+  funcInsnMap?: Map<number, Instruction[]>,
 ): StackFrame | null {
   // Find instructions within this function
-  const funcInsns: Instruction[] = [];
-  const endAddr = func.address + func.size;
-  for (const insn of instructions) {
-    if (insn.address >= func.address && insn.address < endAddr) {
-      funcInsns.push(insn);
-    }
-    if (insn.address >= endAddr) break;
-  }
+  const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
   if (funcInsns.length === 0) return null;
 
@@ -65,8 +78,10 @@ export function analyzeStackFrame(
     }
   }
 
-  const bpReg = is64 ? 'rbp' : 'ebp';
-  const spReg = is64 ? 'rsp' : 'esp';
+  const width = is64 ? 64 : 32;
+  const bpLocalRe = BP_LOCAL_RE[width];
+  const spRe = SP_RE[width];
+  const bpParamRe = BP_PARAM_RE[width];
 
   // Size heuristic from operand prefix
   function inferSize(opStr: string): number {
@@ -82,21 +97,21 @@ export function analyzeStackFrame(
     const op = insn.opStr;
 
     // [rbp - 0xN] → local variable
-    const bpLocalMatch = op.match(new RegExp(`\\[${bpReg}\\s*-\\s*0x([0-9a-fA-F]+)\\]`, 'i'));
+    const bpLocalMatch = op.match(bpLocalRe);
     if (bpLocalMatch) {
       const offset = parseInt(bpLocalMatch[1], 16);
       record('bp', offset, -offset, inferSize(op), false);
     }
 
     // [rsp + 0xN] → could be local or param depending on offset vs frameSize
-    const spMatch = op.match(new RegExp(`\\[${spReg}\\s*\\+\\s*0x([0-9a-fA-F]+)\\]`, 'i'));
+    const spMatch = op.match(spRe);
     if (spMatch) {
       const offset = parseInt(spMatch[1], 16);
       record('sp', offset, offset, inferSize(op), false);
     }
 
     // [rbp + 0xN] → parameter (above saved rbp + return addr)
-    const bpParamMatch = op.match(new RegExp(`\\[${bpReg}\\s*\\+\\s*0x([0-9a-fA-F]+)\\]`, 'i'));
+    const bpParamMatch = op.match(bpParamRe);
     if (bpParamMatch) {
       const offset = parseInt(bpParamMatch[1], 16);
       // In 64-bit: [rbp+0x10] = first stack param, [rbp+0x18] = second, etc.

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import { focusOnMount } from "./focusOnMount";
-import type { DecompileTab, HighLevelEngine } from "../decompile/types";
+import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
 
 // ── Syntax Highlighting ──
 

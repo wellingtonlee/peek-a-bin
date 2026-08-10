@@ -1,9 +1,8 @@
 import { useReducer, useRef, useCallback, useEffect } from "react";
-import type { DecompileTab, DecompileTabsState, HighLevelEngine } from "../decompile/types";
-import { tabsReducer, initialTabsState } from "../decompile/types";
+import type { DecompileTab, DecompileTabsState, HighLevelEngine } from "./decompileTabsState";
+import { tabsReducer, initialTabsState } from "./decompileTabsState";
 import { disasmWorker } from "../workers/disasmClient";
-import { GhidraClient } from "../decompile/ghidraClient";
-import { decompileWithWasm } from "../decompile/wasmDecompiler";
+import { GhidraClient } from "../ghidra/client";
 import { hasApiKey, loadSettings, loadDecompileServer } from "../llm/settings";
 import { streamEnhance } from "../llm/client";
 import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
@@ -12,6 +11,10 @@ import { inferSignature } from "../disasm/signatures";
 import { getDisplayName } from "./usePEFile";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import type { PEFile } from "../pe/types";
+
+/** Body of the High Level tab when no decompile server is configured. */
+const HIGH_LEVEL_UNAVAILABLE =
+  "// Client-side decompiler not yet available.\n// Configure a Ghidra server in Settings for high-level decompilation.";
 
 interface UseDecompileTabsArgs {
   currentFunc: DisasmFunction | null;
@@ -131,16 +134,12 @@ export function useDecompileTabs({
         dispatch({ type: "LOAD_ERR", tab: "high", error: `Ghidra: ${err?.message ?? String(err)}` });
       }
     } else {
-      // Fallback to WASM decompiler (stub)
-      try {
-        const result = await decompileWithWasm(new Uint8Array(pe.buffer), addr, pe.is64);
-        const lineMap = new Map(result.lineMap);
-        const engine = result.engine as HighLevelEngine;
-        highCache.current.set(addr, { code: result.code, lineMap, engine });
-        dispatch({ type: "LOAD_OK", tab: "high", code: result.code, lineMap, engine });
-      } catch (err: any) {
-        dispatch({ type: "LOAD_ERR", tab: "high", error: err?.message ?? String(err) });
-      }
+      // No high-level engine configured. There is no client-side one, so show the
+      // placeholder as the tab body; DecompileView renders `engine: "none"` as
+      // "(not available)" beside the tab.
+      const lineMap = new Map<number, number>();
+      highCache.current.set(addr, { code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none" });
+      dispatch({ type: "LOAD_OK", tab: "high", code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none" });
     }
   }, [currentFunc, pe]);
 

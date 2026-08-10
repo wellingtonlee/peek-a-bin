@@ -247,53 +247,91 @@ describe("undo/redo — actions that bypass the stack", () => {
     expect(appReducer(imported, { type: "UNDO_ANNOTATION" }).renames).toEqual({});
   });
 
-  // KNOWN BUG (usePEFile.ts:330-342, IMPORT_ANNOTATIONS).
+  // IMPORT_ANNOTATIONS has two callers that want opposite history treatment, told
+  // apart by `action.source` (peek-a-bin-p87):
   //
-  // IMPORT_ANNOTATIONS neither pushes an undo snapshot nor clears the redo stack,
-  // unlike IMPORT_FULL_ANALYSIS directly below it which does both. Two consequences:
+  //   - "user" (the default, used by the import button) is a user edit: undoable,
+  //     symmetric with IMPORT_FULL_ANALYSIS above.
+  //   - "mcp" is a background sync frame from useMcpSync, one per bridge message.
+  //     It must not consume an undo slot in a stack capped at MAX_UNDO.
   //
-  //   1. An import cannot be undone.
-  //   2. Worse — a redo entry left over from before the import survives it, and
-  //      redoing silently reverts the imported annotations.
-  //
-  // This is reachable in normal use: useMcpSync dispatches IMPORT_ANNOTATIONS for
-  // every annotation message from the MCP bridge, so a remote sync arriving while
-  // the user has an open redo branch can be wiped by a single Ctrl-Shift-Z.
-  //
-  // These assertions pin the CURRENT behaviour so the fix is visible when made.
-  // Whether an import should be undoable is a product call — see the report.
-  it("KNOWN BUG: IMPORT_ANNOTATIONS is not undoable", () => {
+  // Both clear redo. That is the part that matters for correctness: without it a
+  // redo entry left over from before the import restores a pre-import snapshot,
+  // and a single Ctrl-Shift-Z silently reverts everything the import brought in.
+  it("a user-initiated IMPORT_ANNOTATIONS is undoable", () => {
     const imported = appReducer(initialState, {
       type: "IMPORT_ANNOTATIONS",
       bookmarks: [{ address: 1, label: "" }],
       renames: { 1: "imported" },
       comments: {},
+      source: "user",
     });
-    expect(imported.annotationUndoStack).toEqual([]);
-    // Undo cannot reach back past it.
-    expect(appReducer(imported, { type: "UNDO_ANNOTATION" })).toBe(imported);
+    expect(imported.annotationUndoStack).toHaveLength(1);
+    expect(imported.renames).toEqual({ 1: "imported" });
+
+    const undone = appReducer(imported, { type: "UNDO_ANNOTATION" });
+    expect(undone.renames).toEqual({});
+    expect(undone.bookmarks).toEqual([]);
   });
 
-  it("KNOWN BUG: a stale redo entry survives IMPORT_ANNOTATIONS and reverts it", () => {
-    const undone = run([
-      { type: "RENAME_FUNCTION", address: 0x1000, name: "local" },
-      { type: "UNDO_ANNOTATION" },
-    ]);
-    expect(undone.annotationRedoStack).toHaveLength(1);
-
-    const imported = appReducer(undone, {
+  it("treats an IMPORT_ANNOTATIONS with no source as user-initiated", () => {
+    const imported = appReducer(initialState, {
       type: "IMPORT_ANNOTATIONS",
       bookmarks: [],
-      renames: { 0x2000: "from-mcp" },
+      renames: { 1: "imported" },
       comments: {},
     });
-    expect(imported.renames).toEqual({ 0x2000: "from-mcp" });
-    // The redo branch was never invalidated by the import.
-    expect(imported.annotationRedoStack).toHaveLength(1);
-
-    const redone = appReducer(imported, { type: "REDO_ANNOTATION" });
-    // The imported rename is gone, replaced by the pre-import snapshot.
-    expect(redone.renames).toEqual({ 0x1000: "local" });
-    expect(redone.renames[0x2000]).toBeUndefined();
+    // Defaulting this way can only over-record history, never lose it.
+    expect(imported.annotationUndoStack).toHaveLength(1);
+    expect(appReducer(imported, { type: "UNDO_ANNOTATION" }).renames).toEqual({});
   });
+
+  it("an MCP sync frame does not consume an undo slot", () => {
+    const edited = run([{ type: "RENAME_FUNCTION", address: 0x1000, name: "local" }]);
+    expect(edited.annotationUndoStack).toHaveLength(1);
+
+    const synced = run(
+      Array.from({ length: 5 }, (_, i): AppAction => ({
+        type: "IMPORT_ANNOTATIONS",
+        bookmarks: [],
+        renames: { [0x2000 + i]: `remote${i}` },
+        comments: {},
+        source: "mcp",
+      })),
+      edited,
+    );
+
+    expect(synced.renames[0x2004]).toBe("remote4");
+    // Still just the user's own rename — the frames did not evict it.
+    expect(synced.annotationUndoStack).toHaveLength(1);
+    // And undo reaches back past the sync to that edit, not into it.
+    const undone = appReducer(synced, { type: "UNDO_ANNOTATION" });
+    expect(undone.renames).toEqual({});
+  });
+
+  it.each(["user", "mcp"] as const)(
+    "a stale redo entry does not survive a %s import",
+    (source) => {
+      const undone = run([
+        { type: "RENAME_FUNCTION", address: 0x1000, name: "local" },
+        { type: "UNDO_ANNOTATION" },
+      ]);
+      expect(undone.annotationRedoStack).toHaveLength(1);
+
+      const imported = appReducer(undone, {
+        type: "IMPORT_ANNOTATIONS",
+        bookmarks: [],
+        renames: { 0x2000: "from-import" },
+        comments: {},
+        source,
+      });
+      expect(imported.renames).toEqual({ 0x2000: "from-import" });
+      expect(imported.annotationRedoStack).toEqual([]);
+
+      // Redo is now a no-op, so the imported rename survives it.
+      const redone = appReducer(imported, { type: "REDO_ANNOTATION" });
+      expect(redone).toBe(imported);
+      expect(redone.renames).toEqual({ 0x2000: "from-import" });
+    },
+  );
 });

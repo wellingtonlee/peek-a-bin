@@ -198,9 +198,10 @@ Per-file annotation keys are derived from the filename and stored automatically.
 src/
 ├── analysis/      # Binary analysis (driver detection, IOCTL, IRP, anomalies)
 ├── components/    # React UI components
-├── decompile/     # Decompilation clients (Ghidra REST, WASM stub, types)
 ├── disasm/        # Disassembly engine + built-in decompiler
-├── hooks/         # Custom React hooks (state, derived data, search)
+├── ghidra/        # REST client for the optional Ghidra server (see ghidra-server/)
+├── hooks/         # Custom React hooks (state, derived data, search) +
+│                 #   decompileTabsState.ts (decompile panel tab reducer)
 ├── llm/           # LLM integration (model registry, settings, streaming client,
 │                 #   prompts, retry/backoff/limiter, zod response validation)
 ├── mcp/           # MCP server (tools, resources, paths, session, Capstone wrapper)

@@ -34,7 +34,8 @@ on every PR, plus a separate `npm audit --audit-level=high` job.
 - `disasm/` — disassembly engine, types, CFG, operand parsing, stack analysis, signatures
 - `disasm/decompile/` — IR lifting → SSA → folding → structuring → cleanup → type inference → promotion → struct synthesis → emission pipeline
 - `components/` — React components (DisassemblyView, CFGView, HexView, Sidebar, etc.)
-- `hooks/` — state management (usePEFile), derived state, disassembly rows, search
+- `hooks/` — state management (usePEFile), derived state, disassembly rows, search. Also `decompileTabsState.ts`, the pure reducer behind `useDecompileTabs` (kept as its own leaf module so tests can import it without dragging in `disasmClient` → Capstone WASM)
+- `ghidra/` — `client.ts`, the REST client for the optional Ghidra decompile server in `ghidra-server/`. Powers the decompile panel's **High Level** tab; used by `useDecompileTabs` and by SettingsModal's "Test Connection". Not a decompiler — see `disasm/decompile/` for that
 - `workers/` — Web Worker for Capstone WASM + off-thread analysis. `disasm.worker.ts` owns the `self`/`indexedDB`/WASM setup; `dispatch.ts` holds the RPC method switch (extracted so it is importable under vitest — the worker module is not); `disasmClient.ts` is the caller-side RPC client
 - `analysis/` — driver detection, anomalies, IOCTL decoding
 - `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types). `models.ts` is the single source of model IDs, provider defaults and per-task token budgets — never write a model ID anywhere else. `retry.ts` holds the backoff/limiter policy; `responseSchema.ts` the zod validation

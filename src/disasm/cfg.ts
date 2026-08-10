@@ -1,4 +1,5 @@
 import type { Instruction, DisasmFunction, Xref } from './types';
+import { getFuncInsns } from './funcInsns';
 import dagre from '@dagrejs/dagre';
 
 export interface BasicBlock {
@@ -28,17 +29,12 @@ export function buildCFG(
   instructions: Instruction[],
   xrefMap: Map<number, Xref[]>,
   jumpTables?: Map<number, number[]>,
+  funcInsnMap?: Map<number, Instruction[]>,
 ): BasicBlock[] {
   const endAddr = func.address + func.size;
 
   // Collect function instructions
-  const funcInsns: Instruction[] = [];
-  for (const insn of instructions) {
-    if (insn.address >= func.address && insn.address < endAddr) {
-      funcInsns.push(insn);
-    }
-    if (insn.address >= endAddr) break;
-  }
+  const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
   if (funcInsns.length === 0) return [];
 
@@ -46,8 +42,12 @@ export function buildCFG(
   const leaders = new Set<number>();
   leaders.add(func.address); // entry point
 
-  // Xref targets within this function are leaders
-  for (const insn of funcInsns) {
+  // Xref targets within this function are leaders.
+  // Indexed loop: the "instruction after this one" lookups below used
+  // `funcInsns.indexOf(insn)` on the array being iterated, which is O(n) per
+  // branch instruction.
+  for (let i = 0; i < funcInsns.length; i++) {
+    const insn = funcInsns[i];
     const mn = insn.mnemonic;
     if (mn === 'call') continue; // calls don't split blocks
 
@@ -60,23 +60,22 @@ export function buildCFG(
         }
       }
       // Instruction after an unconditional branch/conditional branch is a leader
-      const idx = funcInsns.indexOf(insn);
-      if (idx >= 0 && idx + 1 < funcInsns.length) {
-        leaders.add(funcInsns[idx + 1].address);
+      if (i + 1 < funcInsns.length) {
+        leaders.add(funcInsns[i + 1].address);
       }
     }
 
     if (mn === 'ret' || mn === 'retn') {
-      const idx = funcInsns.indexOf(insn);
-      if (idx >= 0 && idx + 1 < funcInsns.length) {
-        leaders.add(funcInsns[idx + 1].address);
+      if (i + 1 < funcInsns.length) {
+        leaders.add(funcInsns[i + 1].address);
       }
     }
   }
 
   // Add jump table targets as leaders
   if (jumpTables) {
-    for (const insn of funcInsns) {
+    for (let i = 0; i < funcInsns.length; i++) {
+      const insn = funcInsns[i];
       const targets = jumpTables.get(insn.address);
       if (targets) {
         for (const target of targets) {
@@ -85,9 +84,8 @@ export function buildCFG(
           }
         }
         // Instruction after indirect jmp is a leader
-        const idx = funcInsns.indexOf(insn);
-        if (idx >= 0 && idx + 1 < funcInsns.length) {
-          leaders.add(funcInsns[idx + 1].address);
+        if (i + 1 < funcInsns.length) {
+          leaders.add(funcInsns[i + 1].address);
         }
       }
     }
@@ -108,17 +106,32 @@ export function buildCFG(
   const blocks: BasicBlock[] = [];
   const addrToBlock = new Map<number, number>(); // leader addr → block id
 
+  // Bucket each instruction into its leader's range with a binary search over
+  // the leaders, instead of rescanning every instruction once per leader.
+  // Leaders tile [func.address, endAddr) and every instruction in `funcInsns`
+  // lies in that window, so each lands in exactly one bucket — the same one the
+  // per-leader rescan picked, and in the same order.
+  const buckets: Instruction[][] = sortedLeaders.map(() => []);
+  for (const insn of funcInsns) {
+    let lo = 0;
+    let hi = sortedLeaders.length - 1;
+    let owner = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (sortedLeaders[mid] <= insn.address) {
+        owner = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (owner >= 0) buckets[owner].push(insn);
+  }
+
   let blockId = 0;
   for (let li = 0; li < sortedLeaders.length; li++) {
     const leaderAddr = sortedLeaders[li];
-    const nextLeaderAddr = li + 1 < sortedLeaders.length ? sortedLeaders[li + 1] : endAddr;
-
-    const blockInsns: Instruction[] = [];
-    for (const insn of funcInsns) {
-      if (insn.address >= leaderAddr && insn.address < nextLeaderAddr) {
-        blockInsns.push(insn);
-      }
-    }
+    const blockInsns = buckets[li];
 
     if (blockInsns.length === 0) continue;
 
@@ -216,11 +229,12 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
   // BFS layer assignment from entry block (id 0)
   const layers = new Map<number, number>();
   const queue: number[] = [0];
+  let queueHead = 0; // cursor instead of shift(), which is O(queue length)
   layers.set(0, 0);
   const visited = new Set<number>();
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  while (queueHead < queue.length) {
+    const id = queue[queueHead++];
     if (visited.has(id)) continue;
     visited.add(id);
     const layer = layers.get(id)!;
@@ -258,8 +272,9 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
           const bodyAddrs = new Set<number>();
           const bodyVisited = new Set<number>();
           const bodyQueue = [header.id];
-          while (bodyQueue.length > 0) {
-            const bid = bodyQueue.shift()!;
+          let bodyHead = 0;
+          while (bodyHead < bodyQueue.length) {
+            const bid = bodyQueue[bodyHead++];
             if (bodyVisited.has(bid)) continue;
             bodyVisited.add(bid);
             const b = blockById.get(bid);
@@ -295,16 +310,29 @@ export function detectLoops(blocks: BasicBlock[]): Loop[] {
 
   // Compute nesting depth: a loop header inside another loop's range gets depth++
   // Approximate loop range as [headerAddr, backEdgeFromAddr]
-  for (let i = 0; i < loops.length; i++) {
-    let depth = 0;
-    for (let j = 0; j < loops.length; j++) {
-      if (i === j) continue;
-      if (loops[i].headerAddr >= loops[j].headerAddr &&
-          loops[i].headerAddr < loops[j].backEdgeFromAddr) {
-        depth++;
-      }
+  //
+  // Counting, for each header, how many ranges cover it — a sweep over sorted
+  // range starts and ends rather than the full loops-x-loops comparison.
+  // Ranges with backEdgeFromAddr <= headerAddr are empty and cover nothing, so
+  // dropping them leaves starts <= ends and makes the two sweeps independent.
+  const starts: number[] = []; // already ascending: `loops` is sorted by headerAddr
+  const ends: number[] = [];
+  for (const l of loops) {
+    if (l.backEdgeFromAddr > l.headerAddr) {
+      starts.push(l.headerAddr);
+      ends.push(l.backEdgeFromAddr);
     }
-    loops[i].depth = depth;
+  }
+  ends.sort((a, b) => a - b);
+
+  let startIdx = 0;
+  let endIdx = 0;
+  for (const loop of loops) {
+    while (startIdx < starts.length && starts[startIdx] <= loop.headerAddr) startIdx++;
+    while (endIdx < ends.length && ends[endIdx] <= loop.headerAddr) endIdx++;
+    // Covering ranges, minus this loop's own range when it is one of them.
+    const self = loop.backEdgeFromAddr > loop.headerAddr ? 1 : 0;
+    loop.depth = startIdx - endIdx - self;
   }
 
   return loops;
