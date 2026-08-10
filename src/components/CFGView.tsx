@@ -7,14 +7,32 @@ import { loadFontSize } from "../llm/settings";
 import { parseOperandTargets } from "../disasm/operands";
 import { ColoredOperand, mnemonicClass, } from "./shared";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
+import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
+/**
+ * Props here are deliberately limited to things DisassemblyView genuinely owns.
+ * Anything that is just an `AppState` field (currentAddress, peFile, comments,
+ * iatMap, bookmarks) or a bare `dispatch` wrapper (comment submit/delete) is read
+ * from context inside this component instead of being threaded through the parent.
+ *
+ * What stays a prop, and why:
+ *  - `func` / `instructions` / `typedXrefMap` / `jumpTables` — produced by
+ *    `useDisassemblyRows` in the parent; re-running that hook here would duplicate
+ *    disassembly work, not just relocate it.
+ *  - `pan` / `zoom` / `collapsedBlocks` and their setters — the parent reads graph
+ *    pan/zoom back out (call-stack view snapshots, back-navigation restore, the
+ *    sidebar minimap) and clears collapsed blocks on function change and on graph
+ *    search, so this state has to stay lifted.
+ *  - `copiedAddr` / `editingComment` / `highlightRegs` and their callbacks — shared
+ *    with the linear view and with the parent's keyboard handler.
+ *  - `restorePanZoom` / `reCenterTrigger` / `searchMatches` / `currentSearchMatch` —
+ *    driven by parent-owned navigation, the decompile panel and graph search.
+ */
 export interface CFGViewProps {
   func: DisasmFunction;
   instructions: Instruction[];
   typedXrefMap: Map<number, Xref[]>;
   jumpTables?: Map<number, number[]>;
-  currentAddress: number;
-  pe: PEFile;
   onNavigate: (addr: number) => void;
   onAddressClick: (addr: number) => void;
   onDoubleClickAddr: (addr: number) => void;
@@ -24,18 +42,12 @@ export interface CFGViewProps {
   copiedAddr: number | null;
   editingComment: { address: number; value: string } | null;
   onEditComment: (state: { address: number; value: string } | null) => void;
-  comments: Record<number, string>;
-  renames: Record<number, string>;
-  bookmarkSet: Set<number>;
-  iatMap: Map<number, { lib: string; func: string }>;
   pan: { x: number; y: number };
   zoom: number;
   onPanChange: (pan: { x: number; y: number }) => void;
   onZoomChange: (zoom: number) => void;
   collapsedBlocks: Set<number>;
   onToggleCollapse: (blockId: number) => void;
-  onCommentSubmit: (address: number, text: string) => void;
-  onCommentDelete: (address: number) => void;
   restorePanZoom?: { pan: { x: number; y: number }; zoom: number } | null;
   reCenterTrigger?: number;
   searchMatches?: Set<number>;
@@ -53,8 +65,6 @@ export function CFGView({
   instructions,
   typedXrefMap,
   jumpTables,
-  currentAddress,
-  pe,
   onNavigate,
   onAddressClick,
   onDoubleClickAddr,
@@ -64,26 +74,43 @@ export function CFGView({
   copiedAddr,
   editingComment,
   onEditComment,
-  comments,
-  bookmarkSet,
-  iatMap,
   pan,
   zoom,
   onPanChange,
   onZoomChange,
   collapsedBlocks,
   onToggleCollapse,
-  onCommentSubmit,
-  onCommentDelete,
   restorePanZoom,
   reCenterTrigger,
   searchMatches,
   currentSearchMatch,
 }: CFGViewProps) {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const { currentAddress, comments, iatMap } = state;
+  const pe = state.peFile;
+
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const draggingRef = useRef(false);
   const graphInteractionRef = useRef(false);
+
+  // Same derivation useDisassemblyRows performs for the linear view; recomputed
+  // here rather than threaded down, so it costs one extra Set per bookmark edit.
+  const bookmarkSet = useMemo(() => {
+    const s = new Set<number>();
+    for (const b of state.bookmarks) s.add(b.address);
+    return s;
+  }, [state.bookmarks]);
+
+  // Previously inline arrows in DisassemblyView that did nothing but dispatch.
+  const handleCommentSubmit = useCallback((address: number, text: string) => {
+    dispatch({ type: "SET_COMMENT", address, text });
+  }, [dispatch]);
+
+  const handleCommentDelete = useCallback((address: number) => {
+    dispatch({ type: "DELETE_COMMENT", address });
+  }, [dispatch]);
 
   const fontSize = loadFontSize();
   const cfgLayout = useMemo(() => getCfgLayout(fontSize), [fontSize]);
@@ -338,6 +365,12 @@ export function CFGView({
     return { minX, minY, maxX, maxY };
   }, [blocks]);
 
+  // Placed after every hook, never before: an early return above them would make
+  // the hook count conditional. In practice this branch is dead — DisassemblyView
+  // returns null when `peFile` is null, so CFGView is unmounted first — but the
+  // parser types `peFile` as nullable and this keeps that honest.
+  if (!pe) return null;
+
   return (
     <div
       ref={containerRef}
@@ -495,8 +528,8 @@ export function CFGView({
             onEditComment={onEditComment}
             comments={comments}
             bookmarkSet={bookmarkSet}
-            onCommentSubmit={onCommentSubmit}
-            onCommentDelete={onCommentDelete}
+            onCommentSubmit={handleCommentSubmit}
+            onCommentDelete={handleCommentDelete}
             searchMatches={searchMatches}
             currentSearchMatch={currentSearchMatch}
           />

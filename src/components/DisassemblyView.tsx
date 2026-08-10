@@ -1358,8 +1358,6 @@ export function DisassemblyView() {
         instructions={instructions}
         typedXrefMap={typedXrefMap}
         jumpTables={disasmWorker.jumpTables}
-        currentAddress={state.currentAddress}
-        pe={pe}
         onNavigate={(addr) => {
           suppressScrollRef.current = true;
           dispatch({ type: "SET_ADDRESS", address: addr });
@@ -1372,18 +1370,12 @@ export function DisassemblyView() {
         copiedAddr={copiedAddr}
         editingComment={editingComment}
         onEditComment={setEditingComment}
-        comments={state.comments}
-        renames={state.renames}
-        bookmarkSet={bookmarkSet}
-        iatMap={iatMap}
         pan={graphPan}
         zoom={graphZoom}
         onPanChange={setGraphPan}
         onZoomChange={setGraphZoom}
         collapsedBlocks={collapsedBlocks}
         onToggleCollapse={handleToggleCollapse}
-        onCommentSubmit={(addr, text) => dispatch({ type: "SET_COMMENT", address: addr, text })}
-        onCommentDelete={(addr) => dispatch({ type: "DELETE_COMMENT", address: addr })}
         restorePanZoom={restorePanZoom}
         reCenterTrigger={reCenterTrigger}
         searchMatches={showGraphSearch ? graphSearchMatchSet : undefined}
