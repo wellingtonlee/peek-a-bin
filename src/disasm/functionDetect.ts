@@ -6,6 +6,7 @@
 
 import type { Instruction, DisasmFunction, Xref } from './types';
 import { isPlausibleIOCTL, formatIOCTL } from '../analysis/driver';
+import { resolveRipTarget } from './ripRelative';
 
 /** Context maps passed in instead of module-level state */
 export interface DisasmContext {
@@ -33,15 +34,10 @@ export function mapInsn(
   };
 
   if (stringMap.size > 0) {
-    const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-    if (ripMatch) {
-      const sign = ripMatch[1] === '+' ? 1 : -1;
-      const disp = parseInt(ripMatch[2], 16);
-      const target = insn.address + insn.size + sign * disp;
-      if (stringMap.has(target)) {
-        const str = stringMap.get(target)!;
-        instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
-      }
+    const ripTarget = resolveRipTarget(insn);
+    if (ripTarget !== null && stringMap.has(ripTarget)) {
+      const str = stringMap.get(ripTarget)!;
+      instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
     }
     if (!instruction.comment) {
       const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
@@ -59,12 +55,9 @@ export function mapInsn(
   }
 
   if (iatMap.size > 0 && !instruction.comment) {
-    const ripMatch2 = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-    if (ripMatch2) {
-      const sign = ripMatch2[1] === '+' ? 1 : -1;
-      const disp = parseInt(ripMatch2[2], 16);
-      const target = insn.address + insn.size + sign * disp;
-      const iat = iatMap.get(target);
+    const ripTarget = resolveRipTarget(insn);
+    if (ripTarget !== null) {
+      const iat = iatMap.get(ripTarget);
       if (iat) instruction.comment = `${iat.lib}!${iat.func}`;
     }
     if (!instruction.comment) {
@@ -331,12 +324,8 @@ export function detectFunctions(
               }
 
               if (!tableBase && is64) {
-                const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-                if (ripMatch) {
-                  const sign = ripMatch[1] === '+' ? 1 : -1;
-                  const disp = parseInt(ripMatch[2], 16);
-                  tableBase = insn.address + insn.size + sign * disp;
-                }
+                const ripTarget = resolveRipTarget(insn);
+                if (ripTarget !== null) tableBase = ripTarget;
               }
 
               if (tableBase) {
@@ -431,12 +420,7 @@ export function detectFunctions(
         if (jmpInsn && meaningfulCount === 1) {
           let resolvedAddr: number | null = null;
           if (is64) {
-            const ripMatch = jmpInsn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-            if (ripMatch) {
-              const sign = ripMatch[1] === '+' ? 1 : -1;
-              const disp = parseInt(ripMatch[2], 16);
-              resolvedAddr = jmpInsn.address + jmpInsn.size + sign * disp;
-            }
+            resolvedAddr = resolveRipTarget(jmpInsn);
           } else {
             const addrMatch = jmpInsn.opStr.match(/\[0x([0-9a-fA-F]+)\]/);
             if (addrMatch) resolvedAddr = parseInt(addrMatch[1], 16);
@@ -683,11 +667,8 @@ export function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]]
       continue;
     }
 
-    const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-    if (ripMatch) {
-      const sign = ripMatch[1] === '+' ? 1 : -1;
-      const disp = parseInt(ripMatch[2], 16);
-      const target = insn.address + insn.size + sign * disp;
+    const target = resolveRipTarget(insn);
+    if (target !== null) {
       let type: Xref['type'];
       if (mn === 'call') type = 'call';
       else if (mn === 'jmp') type = 'jmp';
@@ -779,11 +760,8 @@ export function buildAllXrefs(
       for (const insn of insns) {
         const resolvedTargets: number[] = [];
 
-        const ripMatch = insn.opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
-        if (ripMatch) {
-          const sign = ripMatch[1] === '+' ? 1 : -1;
-          const disp = parseInt(ripMatch[2], 16);
-          const target = insn.address + insn.size + sign * disp;
+        const target = resolveRipTarget(insn);
+        if (target !== null) {
           resolvedTargets.push(target);
           if (stringSet.has(target)) {
             let arr = strXrefs.get(target);

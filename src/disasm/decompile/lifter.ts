@@ -7,6 +7,7 @@ import {
   irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, isKnownRegister,
 } from './ir';
 import type { RegState } from './regstate';
+import { resolveRipMemExpr, resolveRipTarget } from '../ripRelative';
 
 // ── Operand Parsing ──
 
@@ -51,12 +52,8 @@ function parseImm(s: string): number | null {
  */
 function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr {
   // Handle RIP-relative addressing
-  const ripMatch = inside.match(/^rip\s*([+-])\s*0x([0-9a-fA-F]+)$/i);
-  if (ripMatch) {
-    const sign = ripMatch[1] === '+' ? 1 : -1;
-    const disp = parseInt(ripMatch[2], 16);
-    return irConst(insn.address + insn.size + sign * disp, is64 ? 8 : 4);
-  }
+  const ripTarget = resolveRipMemExpr(inside, insn);
+  if (ripTarget !== null) return irConst(ripTarget, is64 ? 8 : 4);
 
   // Tokenize: split on + and - while preserving sign
   const tokens: { sign: number; text: string }[] = [];
@@ -659,11 +656,8 @@ function resolveCallTarget(
   }
 
   // RIP-relative: `call qword ptr [rip + 0xNNNN]`
-  const ripM = opStr.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/i);
-  if (ripM) {
-    const sign = ripM[1] === '+' ? 1 : -1;
-    const disp = parseInt(ripM[2], 16);
-    const target = insn.address + insn.size + sign * disp;
+  const target = resolveRipTarget(insn);
+  if (target !== null) {
     const iat = iatMap.get(target);
     if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}` };
     const fn = funcMap.get(target);

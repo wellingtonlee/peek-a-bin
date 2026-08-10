@@ -1,5 +1,6 @@
 import type { Instruction } from './types';
 import type { ImportEntry } from '../pe/types';
+import { matchRipOperand } from './ripRelative';
 
 export interface OperandTarget {
   address: number;
@@ -48,14 +49,11 @@ export function parseOperandTargets(
   // it is never an address in its own right; with a low image base it can still
   // fall in range and produce a bogus xref alongside the real one.
   let ripSpan: [number, number] | null = null;
-  const ripMatch = op.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
+  const ripMatch = matchRipOperand(op);
   if (ripMatch) {
-    const sign = ripMatch[1] === '+' ? 1 : -1;
-    const disp = parseInt(ripMatch[2], 16);
-    const target = insn.address + insn.size + sign * disp;
+    const target = insn.address + insn.size + ripMatch.disp;
     if (target >= imageBase && target < imageEnd) addTarget(target);
-    const start = ripMatch.index ?? 0;
-    ripSpan = [start, start + ripMatch[0].length];
+    ripSpan = [ripMatch.index, ripMatch.index + ripMatch.length];
   }
 
   // Case 3: all hex addresses in operand (absolute [0xNNNN] or bare 0xNNNN).
