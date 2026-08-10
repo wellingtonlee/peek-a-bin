@@ -5,205 +5,156 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { FileSession } from './session';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import type { AnalyzedFile, FileSession } from './session';
+
+type ResourceResult = {
+  contents: { uri: string; mimeType: string; text: string }[];
+};
+
+/** Format an address the way every tool/resource response does. */
+function hex(n: number): string {
+  return `0x${n.toString(16)}`;
+}
+
+/**
+ * Resolve a loaded file or fail the read.
+ *
+ * `resources/read` has no `isError` field (unlike `tools/call`), so an unknown fileId
+ * is reported as a JSON-RPC error rather than a successful read whose body happens to
+ * contain `{"error": ...}` — which clients would otherwise treat as valid PE data.
+ */
+function withFile(
+  session: FileSession,
+  fileId: unknown,
+  uri: URL,
+  fn: (af: AnalyzedFile) => unknown,
+): ResourceResult {
+  const id = String(fileId);
+  const af = session.getFile(id);
+  if (!af) {
+    throw new McpError(ErrorCode.InvalidParams, `file "${id}" not loaded`);
+  }
+  return {
+    contents: [{
+      uri: uri.href,
+      mimeType: 'application/json',
+      text: JSON.stringify(fn(af), null, 2),
+    }],
+  };
+}
 
 export function registerResources(server: McpServer, session: FileSession): void {
   // ── pe://{fileId}/headers ──
   server.resource(
     'pe-headers',
     new ResourceTemplate('pe://{fileId}/headers', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) => {
       const pe = af.pe;
       const opt = pe.optionalHeader;
       return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify({
-            is64: pe.is64,
-            machine: pe.coffHeader.machine,
-            numberOfSections: pe.coffHeader.numberOfSections,
-            timeDateStamp: pe.coffHeader.timeDateStamp,
-            characteristics: pe.coffHeader.characteristics,
-            imageBase: `0x${opt.imageBase.toString(16)}`,
-            addressOfEntryPoint: `0x${opt.addressOfEntryPoint.toString(16)}`,
-            sectionAlignment: opt.sectionAlignment,
-            fileAlignment: opt.fileAlignment,
-            subsystem: opt.subsystem,
-            dllCharacteristics: `0x${opt.dllCharacteristics.toString(16)}`,
-            sizeOfImage: opt.sizeOfImage,
-            checksum: `0x${opt.checksum.toString(16)}`,
-          }, null, 2),
-        }],
+        is64: pe.is64,
+        machine: pe.coffHeader.machine,
+        numberOfSections: pe.coffHeader.numberOfSections,
+        timeDateStamp: pe.coffHeader.timeDateStamp,
+        characteristics: pe.coffHeader.characteristics,
+        imageBase: hex(opt.imageBase),
+        addressOfEntryPoint: hex(opt.addressOfEntryPoint),
+        sectionAlignment: opt.sectionAlignment,
+        fileAlignment: opt.fileAlignment,
+        subsystem: opt.subsystem,
+        dllCharacteristics: hex(opt.dllCharacteristics),
+        sizeOfImage: opt.sizeOfImage,
+        checksum: hex(opt.checksum),
       };
-    },
+    }),
   );
 
   // ── pe://{fileId}/sections ──
   server.resource(
     'pe-sections',
     new ResourceTemplate('pe://{fileId}/sections', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      const sections = af.pe.sections.map(s => ({
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) =>
+      af.pe.sections.map(s => ({
         name: s.name,
-        virtualAddress: `0x${s.virtualAddress.toString(16)}`,
+        virtualAddress: hex(s.virtualAddress),
         virtualSize: s.virtualSize,
         rawSize: s.sizeOfRawData,
-        rawOffset: `0x${s.pointerToRawData.toString(16)}`,
-        characteristics: `0x${s.characteristics.toString(16)}`,
+        rawOffset: hex(s.pointerToRawData),
+        characteristics: hex(s.characteristics),
         flags: decodeCharacteristics(s.characteristics),
-      }));
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(sections, null, 2),
-        }],
-      };
-    },
+      })),
+    ),
   );
 
   // ── pe://{fileId}/imports ──
   server.resource(
     'pe-imports',
     new ResourceTemplate('pe://{fileId}/imports', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      const imports = af.pe.imports.map(imp => ({
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) =>
+      af.pe.imports.map(imp => ({
         library: imp.libraryName,
         functions: imp.functions.map((fn, i) => ({
           name: fn,
-          iatAddress: i < imp.iatAddresses.length ? `0x${imp.iatAddresses[i].toString(16)}` : undefined,
+          iatAddress: i < imp.iatAddresses.length ? hex(imp.iatAddresses[i]) : undefined,
         })),
-      }));
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(imports, null, 2),
-        }],
-      };
-    },
+      })),
+    ),
   );
 
   // ── pe://{fileId}/exports ──
   server.resource(
     'pe-exports',
     new ResourceTemplate('pe://{fileId}/exports', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      const exports = af.pe.exports.map(e => ({
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) =>
+      af.pe.exports.map(e => ({
         name: e.name,
         ordinal: e.ordinal,
-        address: `0x${e.address.toString(16)}`,
-      }));
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(exports, null, 2),
-        }],
-      };
-    },
+        address: hex(e.address),
+      })),
+    ),
   );
 
   // ── pe://{fileId}/strings ──
   server.resource(
     'pe-strings',
     new ResourceTemplate('pe://{fileId}/strings', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      const strings = Array.from(af.stringMap.entries()).map(([addr, value]) => ({
-        address: `0x${addr.toString(16)}`,
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) =>
+      Array.from(af.stringMap.entries()).map(([addr, value]) => ({
+        address: hex(addr),
         value,
         type: af.stringTypes.get(addr) ?? 'ascii',
-      }));
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(strings, null, 2),
-        }],
-      };
-    },
+      })),
+    ),
   );
 
   // ── pe://{fileId}/functions ──
   server.resource(
     'pe-functions',
     new ResourceTemplate('pe://{fileId}/functions', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      const functions = af.functions.map(f => ({
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) =>
+      af.functions.map(f => ({
         name: f.name,
-        address: `0x${f.address.toString(16)}`,
+        address: hex(f.address),
         size: f.size,
         isThunk: f.isThunk ?? false,
-        tailCallTarget: f.tailCallTarget ? `0x${f.tailCallTarget.toString(16)}` : undefined,
-      }));
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(functions, null, 2),
-        }],
-      };
-    },
+        tailCallTarget: f.tailCallTarget !== undefined ? hex(f.tailCallTarget) : undefined,
+      })),
+    ),
   );
 
   // ── pe://{fileId}/anomalies ──
   server.resource(
     'pe-anomalies',
     new ResourceTemplate('pe://{fileId}/anomalies', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(af.anomalies, null, 2),
-        }],
-      };
-    },
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) => af.anomalies),
   );
 
   // ── pe://{fileId}/driver ──
   server.resource(
     'pe-driver',
     new ResourceTemplate('pe://{fileId}/driver', { list: undefined }),
-    async (uri, { fileId }) => {
-      const af = session.getFile(fileId as string);
-      if (!af) return { contents: [{ uri: uri.href, mimeType: 'application/json', text: '{"error":"file not loaded"}' }] };
-
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(af.driverInfo, null, 2),
-        }],
-      };
-    },
+    async (uri, { fileId }) => withFile(session, fileId, uri, (af) => af.driverInfo),
   );
 }
 

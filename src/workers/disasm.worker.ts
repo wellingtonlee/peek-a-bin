@@ -252,6 +252,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         );
         break;
       }
+
+      default: {
+        // Without this an unrecognized method posts `{ id, result: undefined }`
+        // and the caller's promise resolves with undefined instead of failing.
+        // The `never` binding makes a newly added method a compile error here.
+        const _exhaustive: never = method;
+        throw new Error(`Unknown worker method: ${String(_exhaustive)}`);
+      }
     }
 
     self.postMessage({ id, result });

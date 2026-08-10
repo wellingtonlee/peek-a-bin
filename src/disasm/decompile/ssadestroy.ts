@@ -53,8 +53,19 @@ function stripVersionsExpr(expr: IRExpr): IRExpr {
       return { ...expr, condition: stripVersionsExpr(expr.condition), then: stripVersionsExpr(expr.then), else: stripVersionsExpr(expr.else) };
     case 'cast':
       return { ...expr, operand: stripVersionsExpr(expr.operand) };
-    default:
-      return expr;
+    case 'field_access':
+      return { ...expr, base: stripVersionsExpr(expr.base) };
+    case 'array_access':
+      return { ...expr, base: stripVersionsExpr(expr.base), index: stripVersionsExpr(expr.index) };
+    case 'const':
+    case 'var':
+    case 'unknown':
+      return expr; // leaf kinds — no nested registers
+    default: {
+      // Compile error if a new IRExpr kind is added without handling it here.
+      const _exhaustive: never = expr;
+      return _exhaustive;
+    }
   }
 }
 
@@ -71,7 +82,25 @@ function stripVersionsStmt(stmt: IRStmt): IRStmt {
     }
     case 'return':
       return stmt.value ? { ...stmt, value: stripVersionsExpr(stmt.value) } : stmt;
-    default:
+    // destroySSA runs before structuring, so no nested-body statements exist
+    // yet; phis have already been converted to copies and cleared above.
+    case 'if':
+    case 'while':
+    case 'do_while':
+    case 'for':
+    case 'switch':
+    case 'goto':
+    case 'label':
+    case 'comment':
+    case 'raw':
+    case 'break':
+    case 'continue':
+    case 'phi':
+    case 'try':
       return stmt;
+    default: {
+      const _exhaustive: never = stmt;
+      return _exhaustive;
+    }
   }
 }

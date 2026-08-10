@@ -44,18 +44,47 @@ export function computeDominators(blocks: BasicBlock[], rpo: number[]): Map<numb
   const entry = rpo[0];
   idom.set(entry, entry);
 
+  // Walking up the idom chain assumes every node reached has both an idom entry
+  // and an RPO index. That holds for a well-formed CFG, but these blocks come
+  // from disassembling untrusted bytes and callers may pass a stale `rpo`, so a
+  // broken chain (missing entry, self-loop, or cycle) must degrade to a
+  // conservative answer instead of spinning this worker thread forever.
+  // Every walk is bounded and every lookup that comes back empty bails out.
+  const maxSteps = rpo.length * 2 + 8;
+
   function intersect(b1: number, b2: number): number {
     let f1 = b1, f2 = b2;
+    let steps = 0;
     while (f1 !== f2) {
-      while ((rpoIndex.get(f1) ?? 0) > (rpoIndex.get(f2) ?? 0)) f1 = idom.get(f1)!;
-      while ((rpoIndex.get(f2) ?? 0) > (rpoIndex.get(f1) ?? 0)) f2 = idom.get(f2)!;
+      let moved = false;
+      while ((rpoIndex.get(f1) ?? 0) > (rpoIndex.get(f2) ?? 0)) {
+        const next = idom.get(f1);
+        if (next === undefined || next === f1) return f2; // chain ends early
+        f1 = next;
+        moved = true;
+        if (++steps > maxSteps) return entry; // cyclic idom — entry dominates all
+      }
+      while ((rpoIndex.get(f2) ?? 0) > (rpoIndex.get(f1) ?? 0)) {
+        const next = idom.get(f2);
+        if (next === undefined || next === f2) return f1;
+        f2 = next;
+        moved = true;
+        if (++steps > maxSteps) return entry;
+      }
+      // Distinct nodes with equal RPO rank (only reachable when a node is
+      // missing from the RPO): neither pointer can advance, so stop.
+      if (!moved) return entry;
     }
     return f1;
   }
 
   let changed = true;
+  // The fixpoint converges in a handful of passes for real CFGs; the cap only
+  // matters if an imprecise intersect() result above makes an entry oscillate.
+  let passes = 0;
   while (changed) {
     changed = false;
+    if (++passes > rpo.length + 2) break;
     for (let i = 1; i < rpo.length; i++) {
       const b = rpo[i];
       const block = blockById.get(b);
@@ -93,11 +122,18 @@ export function computeDomFrontier(
 
   for (const b of blocks) {
     if (b.preds.length < 2) continue;
+    const stop = idom.get(b.id);
     for (const p of b.preds) {
-      let runner = p;
-      while (runner !== idom.get(b.id) && runner !== undefined) {
-        df.get(runner)!.add(b.id);
-        runner = idom.get(runner)!;
+      let runner: number | undefined = p;
+      // Bounded: a malformed idom map can be cyclic, which would otherwise walk
+      // forever here. A chain longer than the block count must contain a cycle.
+      let steps = 0;
+      while (runner !== undefined && runner !== stop) {
+        const frontier = df.get(runner);
+        if (!frontier) break; // runner isn't a block in this CFG
+        frontier.add(b.id);
+        runner = idom.get(runner);
+        if (++steps > blocks.length) break;
       }
     }
   }
@@ -136,10 +172,14 @@ export function detectNaturalLoops(
   // Check if a dominates b
   function dominates(a: number, b: number): boolean {
     let cur = b;
+    // Bounded for the same reason as computeDomFrontier: a cyclic idom map
+    // would otherwise loop forever.
+    let steps = 0;
     while (cur !== a) {
       const parent = idom.get(cur);
       if (parent === undefined || parent === cur) return false;
       cur = parent;
+      if (++steps > blocks.length) return false;
     }
     return true;
   }
@@ -198,6 +238,8 @@ function stmtUses(s: IRStmt): Set<string> {
     if (e.kind === 'call') { e.args.forEach(walk); return; }
     if (e.kind === 'ternary') { walk(e.condition); walk(e.then); walk(e.else); return; }
     if (e.kind === 'cast') { walk(e.operand); return; }
+    if (e.kind === 'field_access') { walk(e.base); return; }
+    if (e.kind === 'array_access') { walk(e.base); walk(e.index); return; }
   }
   switch (s.kind) {
     case 'assign':
@@ -356,8 +398,19 @@ export function renameVariables(
         return { ...expr, condition: renameExpr(expr.condition), then: renameExpr(expr.then), else: renameExpr(expr.else) };
       case 'cast':
         return { ...expr, operand: renameExpr(expr.operand) };
-      default:
-        return expr;
+      case 'field_access':
+        return { ...expr, base: renameExpr(expr.base) };
+      case 'array_access':
+        return { ...expr, base: renameExpr(expr.base), index: renameExpr(expr.index) };
+      case 'const':
+      case 'var':
+      case 'unknown':
+        return expr; // leaf kinds — nothing to rename
+      default: {
+        // Compile error if a new IRExpr kind is added without handling it here.
+        const _exhaustive: never = expr;
+        return _exhaustive;
+      }
     }
   }
 
@@ -418,8 +471,26 @@ export function renameVariables(
         }
         case 'return':
           return stmt.value ? { ...stmt, value: renameExpr(stmt.value) } : stmt;
-        default:
+        // Renaming runs before structuring, so these kinds carry no registers to
+        // rename here (phi destinations/operands are handled separately above).
+        case 'if':
+        case 'while':
+        case 'do_while':
+        case 'for':
+        case 'switch':
+        case 'goto':
+        case 'label':
+        case 'comment':
+        case 'raw':
+        case 'break':
+        case 'continue':
+        case 'phi':
+        case 'try':
           return stmt;
+        default: {
+          const _exhaustive: never = stmt;
+          return _exhaustive;
+        }
       }
     }
 

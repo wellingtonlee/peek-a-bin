@@ -6,7 +6,25 @@ import type { IRPDispatchEntry } from '../analysis/driver';
 interface PendingRequest {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
+  method: string;
+  timer: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * Watchdog for every worker request.
+ *
+ * One timeout for all methods rather than per-method budgets: the worker
+ * services messages serially on a single thread, so a cheap call (`configure`,
+ * `resetStructRegistry`) can sit queued behind a whole-image
+ * `hybridDisassemble` for minutes. A short per-method timeout would reject
+ * those queued requests even though nothing is wrong.
+ *
+ * 5 minutes is far above any legitimate run — whole-image disassembly and
+ * decompilation of a large PE are seconds to low minutes of CPU — but bounded,
+ * so a wedged worker (infinite loop, unresolved WASM load) surfaces as a real
+ * error instead of leaving this and every later request pending forever.
+ */
+const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 class DisasmWorkerClient {
   private worker: Worker;
@@ -21,27 +39,58 @@ class DisasmWorkerClient {
     this.worker = new Worker(new URL('./disasm.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e) => {
       const { id, result, error } = e.data;
-      const p = this.pending.get(id);
+      const p = this.take(id);
       if (!p) return;
-      this.pending.delete(id);
       if (error) p.reject(new Error(error));
       else p.resolve(result);
     };
     this.worker.onerror = (e) => {
       console.error('[disasm worker] load error:', e.message ?? e);
       // Reject all pending requests so callers don't hang
-      for (const [id, p] of this.pending) {
-        p.reject(new Error(`Worker error: ${e.message ?? 'unknown'}`));
-        this.pending.delete(id);
-      }
+      this.rejectAll(`Worker error: ${e.message ?? 'unknown'}`);
     };
+    this.worker.onmessageerror = () => {
+      // A reply that failed structured clone (the large Instruction[] payloads
+      // are the risk) never reaches onmessage, and the event carries no usable
+      // data identifying which request it belonged to — so fail everything
+      // outstanding instead of letting them hang until the watchdog fires.
+      console.error('[disasm worker] message deserialization failed');
+      this.rejectAll('Worker reply could not be deserialized (structured clone failed)');
+    };
+  }
+
+  /** Remove a pending request and cancel its watchdog. */
+  private take(id: number): PendingRequest | undefined {
+    const p = this.pending.get(id);
+    if (!p) return undefined;
+    this.pending.delete(id);
+    clearTimeout(p.timer);
+    return p;
+  }
+
+  private rejectAll(message: string): void {
+    for (const id of [...this.pending.keys()]) {
+      const p = this.take(id);
+      p?.reject(new Error(`${message} (request '${p.method}')`));
+    }
   }
 
   private send(method: string, args: any = {}): Promise<any> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args });
+      const timer = setTimeout(() => {
+        this.take(id)?.reject(new Error(
+          `Worker request '${method}' timed out after ${REQUEST_TIMEOUT_MS / 1000}s`,
+        ));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, method, timer });
+      try {
+        this.worker.postMessage({ id, method, args });
+      } catch (err) {
+        // e.g. DataCloneError on a non-transferable argument — fail now instead
+        // of leaving the entry and its watchdog around for the full timeout.
+        this.take(id)?.reject(err);
+      }
     });
   }
 

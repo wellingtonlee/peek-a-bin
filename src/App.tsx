@@ -4,7 +4,7 @@ import {
   initialState,
   AppStateContext,
   AppDispatchContext,
-  type ViewTab,
+  parseViewTab,
 } from "./hooks/usePEFile";
 import { parsePE } from "./pe/parser";
 import { disasmWorker } from "./workers/disasmClient";
@@ -14,6 +14,7 @@ import { detectAnomalies } from "./analysis/anomalies";
 import { loadFontSize } from "./llm/settings";
 import { loadTheme, applyTheme } from "./styles/themes";
 import { saveRecentFile } from "./utils/recentFiles";
+import { validateAnnotations } from "./utils/exportSchema";
 import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
@@ -51,7 +52,6 @@ export default function App() {
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
-  const [_chatOpen, setChatOpen] = useState(false);
   const aiReport = useAIReport(state, dispatch);
   const batchRename = useBatchRename(state, dispatch);
   const vulnScanner = useVulnScanner(state, dispatch);
@@ -84,7 +84,10 @@ export default function App() {
       }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
-        setChatOpen((v) => !v);
+        // Chat visibility lives in DisassemblyView (`showChat`), which listens for
+        // this event. This shortcut previously toggled a local state that nothing
+        // read, so it never opened the panel.
+        window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"));
         return;
       }
       if (e.key === "?") {
@@ -107,16 +110,13 @@ export default function App() {
 
   // AI feature event listeners
   useEffect(() => {
-    const handleChat = () => setChatOpen(v => !v);
     const handleReport = () => aiReport.generateReport();
     const handleBatchRename = () => batchRename.startBatchRename();
     const handleAiScan = () => vulnScanner.scanSuspicious();
-    window.addEventListener("peek-a-bin:open-chat", handleChat);
     window.addEventListener("peek-a-bin:generate-report", handleReport);
     window.addEventListener("peek-a-bin:batch-rename", handleBatchRename);
     window.addEventListener("peek-a-bin:ai-scan", handleAiScan);
     return () => {
-      window.removeEventListener("peek-a-bin:open-chat", handleChat);
       window.removeEventListener("peek-a-bin:generate-report", handleReport);
       window.removeEventListener("peek-a-bin:batch-rename", handleBatchRename);
       window.removeEventListener("peek-a-bin:ai-scan", handleAiScan);
@@ -150,13 +150,19 @@ export default function App() {
     try {
       const raw = localStorage.getItem(`peek-a-bin:${state.fileName}`);
       if (raw) {
-        const data = JSON.parse(raw);
-        dispatch({
-          type: "LOAD_PERSISTED",
-          bookmarks: data.bookmarks ?? [],
-          renames: data.renames ?? {},
-          comments: data.comments ?? {},
-        });
+        // localStorage is editable by the user and by any script on this origin,
+        // so the parsed blob is untrusted — validate before it reaches the reducer.
+        const data = validateAnnotations(JSON.parse(raw));
+        if (data) {
+          dispatch({
+            type: "LOAD_PERSISTED",
+            bookmarks: data.bookmarks,
+            renames: data.renames,
+            comments: data.comments,
+          });
+        } else {
+          console.warn("[peek-a-bin] ignoring malformed persisted annotations");
+        }
       }
     } catch { /* ignore corrupt data */ }
   }, [state.fileName]);
@@ -268,12 +274,19 @@ export default function App() {
           .map(s => ({ va: pe.optionalHeader.imageBase + s.virtualAddress, size: s.virtualSize }));
 
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
-        disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries, dataSections)
+        return disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries, dataSections)
           .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
             dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
             dispatch({ type: "SET_CALL_GRAPH", callGraph });
             dispatch({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
           });
+      })
+      // Without this, any worker failure in the chain above left analysisPhase
+      // pinned on its last value forever, with a spinner and no feedback.
+      .catch((err) => {
+        console.error("[peek-a-bin] analysis failed", err);
+        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "failed" });
+        dispatch({ type: "SET_ERROR", error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}` });
       });
   }, [state.peFile, state.disasmReady]);
 
@@ -315,7 +328,10 @@ export default function App() {
             .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
               dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
               dispatch({ type: "SET_CALL_GRAPH", callGraph });
-            });
+            })
+            // Non-fatal: the first xref pass already ran, this only enriches it
+            // with late-arriving strings. Log rather than fail the whole view.
+            .catch((err) => console.error("[peek-a-bin] xref rebuild failed", err));
         }
       }
     }
@@ -331,7 +347,7 @@ export default function App() {
     if (!hash) return;
     const params = new URLSearchParams(hash);
     const addrStr = params.get("addr");
-    const tabStr = params.get("tab") as ViewTab | null;
+    const tabStr = parseViewTab(params.get("tab"));
     if (addrStr) {
       const addr = parseInt(addrStr.replace(/^0x/i, ""), 16);
       if (!Number.isNaN(addr)) dispatch({ type: "SET_ADDRESS", address: addr });
@@ -361,7 +377,7 @@ export default function App() {
       if (!hash) return;
       const params = new URLSearchParams(hash);
       const addrStr = params.get("addr");
-      const tabStr = params.get("tab") as ViewTab | null;
+      const tabStr = parseViewTab(params.get("tab"));
       if (addrStr) {
         const addr = parseInt(addrStr.replace(/^0x/i, ""), 16);
         if (!Number.isNaN(addr) && addr !== state.currentAddress) {
@@ -391,13 +407,16 @@ export default function App() {
         const anomalies = detectAnomalies(pe);
         if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
         // Save to IndexedDB for recent files
-        saveRecentFile(fileName, buffer);
+        void saveRecentFile(fileName, buffer)
+          .catch((err) => console.error("[peek-a-bin] failed to save recent file", err));
         // Extract strings off the main thread via worker
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
         disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)
           .then(({ strings, stringTypes }) => {
             dispatch({ type: "SET_STRINGS", strings, stringTypes });
-          });
+          })
+          // Non-fatal: the PE is loaded and browsable without extracted strings.
+          .catch((err) => console.error("[peek-a-bin] string extraction failed", err));
       } catch (e) {
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "idle" });
         dispatch({

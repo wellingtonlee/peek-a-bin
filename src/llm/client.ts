@@ -20,15 +20,29 @@ function buildHeaders(config: LLMSettings, isAnthropic: boolean): Record<string,
   return headers;
 }
 
+const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
+
 function buildUrl(config: LLMSettings, isAnthropic: boolean): string {
-  return isAnthropic
-    ? "https://api.anthropic.com/v1/messages"
-    : `${config.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
+  if (!isAnthropic) {
+    return `${config.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
+  }
+  // The Anthropic URL used to be hardcoded, so `baseUrl` was never read for this
+  // provider and its default was left as the (nonsensical) OpenAI host. Existing
+  // saved profiles still carry that value, so treat it — and an empty string — as
+  // "use the default" rather than posting Anthropic requests at api.openai.com.
+  // Anything else is a deliberate custom gateway and is honoured.
+  const configured = config.baseUrl?.replace(/\/+$/, "") ?? "";
+  const base =
+    !configured || /(^|\/\/)api\.openai\.com$/.test(configured)
+      ? ANTHROPIC_DEFAULT_BASE_URL
+      : configured;
+  return `${base}/v1/messages`;
 }
 
 function streamSSE(
   res: Response,
   isAnthropic: boolean,
+  signal: AbortSignal,
   callbacks: StreamCallbacks,
 ): void {
   const { onToken, onDone, onError } = callbacks;
@@ -40,6 +54,7 @@ function streamSSE(
   let accumulated = "";
   let buffer = "";
   let pendingFlush = false;
+  let rafHandle = 0;
 
   function flush() {
     pendingFlush = false;
@@ -49,7 +64,9 @@ function streamSSE(
   function scheduleFlush() {
     if (!pendingFlush) {
       pendingFlush = true;
-      requestAnimationFrame(flush);
+      // Handle is retained so the final flush can cancel a pending frame; the
+      // previous code called cancelAnimationFrame(0), which is never a valid id.
+      rafHandle = requestAnimationFrame(flush);
     }
   }
 
@@ -89,7 +106,7 @@ function streamSSE(
       if (done) {
         if (buffer.trim()) processSSE("\n");
         if (pendingFlush) {
-          cancelAnimationFrame(0);
+          cancelAnimationFrame(rafHandle);
           flush();
         }
         onDone();
@@ -101,6 +118,10 @@ function streamSSE(
   }
 
   pump().catch((err) => {
+    // A user cancel aborts the reader, which rejects here. Reporting that as an
+    // error surfaced a spurious "Network error" after every cancellation, since
+    // the caller has already dispatched its done/cancelled state.
+    if (signal.aborted) return;
     onError(err instanceof Error ? err.message : "Network error");
   });
 }
@@ -123,7 +144,7 @@ function doFetch(
         };
         throw new Error(map[res.status] ?? `API error (${res.status})`);
       }
-      streamSSE(res, isAnthropic, callbacks);
+      streamSSE(res, isAnthropic, signal, callbacks);
     })
     .catch((err) => {
       if (signal.aborted) return;

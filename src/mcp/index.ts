@@ -7,7 +7,9 @@
  * single argument "npx tsx"). All client configs in clients.ts invoke it via npx.
  */
 
-// CLI routing guard — handle `setup` subcommand before any heavy imports
+// CLI routing guard — handle the `setup` subcommand and exit before the server starts.
+// Note: this does NOT avoid loading the imports below — ESM static imports are hoisted
+// and fully evaluated before any top-level statement runs. It only skips main().
 if (process.argv[2] === 'setup') {
   const { runSetup } = await import('./cli.js');
   await runSetup(process.argv.slice(3));
@@ -16,7 +18,7 @@ if (process.argv[2] === 'setup') {
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { initCapstone } from './disasm.js';
 import { FileSession } from './session.js';
 import { registerTools } from './tools.js';
@@ -36,13 +38,29 @@ async function main() {
   // Initialize Capstone WASM engine
   await initCapstone();
 
-  // Start WebSocket server for browser live sync
+  // Start WebSocket server for browser live sync.
+  // The bridge is unauthenticated and unencrypted, so it binds to loopback only.
+  // PEEK_A_BIN_WS_HOST can opt into a wider bind (e.g. 0.0.0.0) for users who
+  // deliberately want remote access and provide their own network controls.
   const WS_PORT = Number(process.env.PEEK_A_BIN_WS_PORT) || 19283;
-  const wss = new WebSocketServer({ port: WS_PORT });
-  const clients = new Set<import('ws').WebSocket>();
+  const WS_HOST = process.env.PEEK_A_BIN_WS_HOST || '127.0.0.1';
+  const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
+  const clients = new Set<WebSocket>();
   wss.on('connection', (ws) => {
     clients.add(ws);
     ws.on('close', () => clients.delete(ws));
+    // Without an 'error' listener, ws re-emits socket errors as uncaught exceptions.
+    ws.on('error', () => clients.delete(ws));
+  });
+
+  wss.on('listening', () => {
+    process.stderr.write(`[peek-a-bin] WS sync on ${WS_HOST}:${WS_PORT}\n`);
+  });
+
+  // EADDRINUSE (and friends) arrive as an 'error' event; unhandled, it kills the process.
+  // Live sync is optional, so degrade instead of taking the MCP server down.
+  wss.on('error', (err) => {
+    process.stderr.write(`[peek-a-bin] WS sync disabled: ${err instanceof Error ? err.message : String(err)}\n`);
   });
 
   session.onAnnotationChange = (_fileId, af) => {
@@ -53,10 +71,16 @@ async function main() {
       renames: af.renames,
       bookmarks: af.bookmarks,
     });
-    for (const c of clients) c.send(msg);
+    for (const c of clients) {
+      if (c.readyState !== WebSocket.OPEN) continue;
+      try {
+        c.send(msg);
+      } catch {
+        // Socket raced into closing between the check and the send — drop it.
+        clients.delete(c);
+      }
+    }
   };
-
-  process.stderr.write(`[peek-a-bin] WS sync on port ${WS_PORT}\n`);
 
   // Connect via stdio
   const transport = new StdioServerTransport();

@@ -54,6 +54,8 @@ Load a PE file from disk and run full analysis (parse, disassemble, detect funct
 
 Returns summary with header info, function count, anomalies, and driver detection.
 
+Files larger than 256 MB are rejected. Unreadable paths, directories and parse failures return a normal MCP error result rather than crashing the server.
+
 #### `list_files`
 List all currently loaded PE files with basic metadata (architecture, section count, function count). No parameters.
 
@@ -64,8 +66,8 @@ List detected functions in a loaded file.
 |-----------|------|----------|-------------|
 | `fileId` | string | Yes | ID of the loaded PE file |
 | `filter` | string | No | Substring filter for function names |
-| `offset` | number | No | Pagination offset (default 0) |
-| `limit` | number | No | Max results (default 100) |
+| `offset` | number | No | Pagination offset, non-negative integer (default 0) |
+| `limit` | number | No | Max results, positive integer (default 100) |
 
 #### `decompile_function`
 Decompile a function to C-like pseudocode. Runs the full pipeline: stack analysis, signature inference, CFG, IR lifting, SSA, optimization, structuring, type inference, struct synthesis, and emission.
@@ -144,7 +146,17 @@ Export annotations as ExportSchemaV1 JSON, optionally writing to a file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `fileId` | string | Yes | ID of the loaded PE file |
-| `outputPath` | string | No | File path to write JSON to |
+| `outputPath` | string | No | `.json` file path to write to, confined to the export directory |
+
+The JSON is always returned in the response body. `outputPath` additionally writes it to
+disk and is **confined**: it must end in `.json` and resolve inside the export root —
+`PEEK_A_BIN_EXPORT_DIR` if set, otherwise the server's working directory. Relative paths
+resolve against that root. Traversal outside it (including via symlinked directories)
+returns an error and writes nothing.
+
+```bash
+PEEK_A_BIN_EXPORT_DIR=/home/me/analysis npm run mcp
+```
 
 #### `import_analysis`
 Import annotations from an ExportSchemaV1 JSON file, merging into the current session.
@@ -169,6 +181,10 @@ PE file data is exposed as MCP resources using the URI template `pe://{fileId}/<
 | Anomalies | `pe://{fileId}/anomalies` | Security anomalies with severity, title, and detail |
 | Driver | `pe://{fileId}/driver` | Driver analysis — detection status, kernel modules, WDM flag |
 
+Reading a resource for an unknown `fileId` returns a JSON-RPC error (`InvalidParams`),
+not a success payload — `resources/read` has no `isError` flag, so a valid-looking body
+containing `{"error": ...}` would be indistinguishable from real PE data.
+
 ## Live Browser Sync
 
 When the MCP server runs alongside the browser app, annotations made via MCP tools are pushed to the browser in real-time over WebSocket.
@@ -177,11 +193,17 @@ When the MCP server runs alongside the browser app, annotations made via MCP too
 - **Requirement:** Same PE file must be loaded in both
 - **Auto-reconnect:** Browser reconnects with 3-second backoff if the MCP server restarts
 - **Status indicator:** Green "MCP" dot in the status bar when connected
-- **Default port:** 19283
-- **Override:** Set `PEEK_A_BIN_WS_PORT` environment variable:
+- **Default bind:** `127.0.0.1:19283` — loopback only, since the bridge is unauthenticated
+- **Override:** Set `PEEK_A_BIN_WS_PORT` / `PEEK_A_BIN_WS_HOST`:
   ```bash
   PEEK_A_BIN_WS_PORT=9999 npm run mcp
   ```
+
+> **Warning:** `PEEK_A_BIN_WS_HOST=0.0.0.0` exposes an unauthenticated annotation-injection
+> channel to the entire network. Only set it if you have your own network controls in place.
+
+If the WebSocket port is already in use, the server logs `WS sync disabled: ...` to stderr
+and continues serving MCP over stdio — live sync is optional and never takes the server down.
 
 ## Multi-File Sessions
 

@@ -24,7 +24,10 @@ const DEFAULTS: LLMSettings = {
   provider: "anthropic",
   apiKey: "",
   model: "claude-sonnet-4-20250514",
-  baseUrl: "https://api.openai.com",
+  // Was https://api.openai.com — a leftover from when buildUrl hardcoded the
+  // Anthropic endpoint and never read this field. client.ts still treats the old
+  // value as "use the default" so saved profiles keep working.
+  baseUrl: "https://api.anthropic.com",
   enhanceSource: "pseudocode",
 };
 

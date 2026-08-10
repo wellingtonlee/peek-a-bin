@@ -229,3 +229,55 @@ export function generateMarkdownReport(state: AppState): string {
 
   return lines.join("\n");
 }
+
+/** Bookmarks/renames/comments as accepted from an untrusted source. */
+export interface AnnotationPayload {
+  bookmarks: { address: number; label: string }[];
+  renames: Record<number, string>;
+  comments: Record<number, string>;
+}
+
+function validateAddressMap(value: unknown): Record<number, string> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out: Record<number, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    const addr = Number(k);
+    if (!Number.isFinite(addr)) return null;
+    if (typeof v !== "string") return null;
+    out[addr] = v;
+  }
+  return out;
+}
+
+/**
+ * Validate an annotation blob from an untrusted source before it reaches the
+ * reducer. Two callers feed this: localStorage (which the user or any script on
+ * the origin can edit) and the MCP WebSocket bridge (remote input). Both used to
+ * spread the parsed JSON straight into a dispatch.
+ *
+ * Returns null if the shape is wrong — callers should ignore the payload rather
+ * than partially apply it.
+ */
+export function validateAnnotations(data: unknown): AnnotationPayload | null {
+  if (typeof data !== "object" || data === null) return null;
+  const obj = data as Record<string, unknown>;
+
+  const bookmarks: { address: number; label: string }[] = [];
+  if (obj.bookmarks !== undefined) {
+    if (!Array.isArray(obj.bookmarks)) return null;
+    for (const b of obj.bookmarks) {
+      if (typeof b !== "object" || b === null) return null;
+      const rec = b as Record<string, unknown>;
+      if (typeof rec.address !== "number" || !Number.isFinite(rec.address)) return null;
+      if (typeof rec.label !== "string") return null;
+      bookmarks.push({ address: rec.address, label: rec.label });
+    }
+  }
+
+  const renames = obj.renames === undefined ? {} : validateAddressMap(obj.renames);
+  if (renames === null) return null;
+  const comments = obj.comments === undefined ? {} : validateAddressMap(obj.comments);
+  if (comments === null) return null;
+
+  return { bookmarks, renames, comments };
+}

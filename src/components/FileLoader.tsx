@@ -40,6 +40,8 @@ function getStepStatus(stepIndex: number, analysisPhase: AnalysisPhase): "done" 
 
   const activeStepIndex = ANALYSIS_STEPS.findIndex(s => (s.phases as readonly string[]).includes(analysisPhase));
   if (analysisPhase === "ready") return "done";
+  // Analysis aborted — stop every remaining step showing as pending-forever.
+  if (analysisPhase === "failed") return "pending";
   if (activeStepIndex === -1) return "pending";
   return stepIndex < activeStepIndex ? "done" : "pending";
 }

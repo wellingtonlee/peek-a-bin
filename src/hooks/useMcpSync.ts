@@ -1,5 +1,6 @@
 import { useEffect, useState, type Dispatch } from 'react';
 import type { AppAction } from './usePEFile';
+import { validateAnnotations } from '../utils/exportSchema';
 
 const WS_URL = `ws://localhost:${19283}`;
 const RECONNECT_DELAY = 3000;
@@ -31,19 +32,19 @@ export function useMcpSync(
           const msg = JSON.parse(String(ev.data));
           if (msg.type !== 'annotations' || msg.fileName !== fileName) return;
 
-          // Convert string-keyed objects to number-keyed
-          const renames: Record<number, string> = Object.fromEntries(
-            Object.entries(msg.renames ?? {} as Record<string, string>).map(([k, v]) => [Number(k), v as string]),
-          );
-          const comments: Record<number, string> = Object.fromEntries(
-            Object.entries(msg.comments ?? {} as Record<string, string>).map(([k, v]) => [Number(k), v as string]),
-          );
+          // Remote input over a WebSocket — validate the shape (and coerce the
+          // string keys to numbers) before dispatching into app state.
+          const data = validateAnnotations(msg);
+          if (!data) {
+            console.warn('[peek-a-bin] ignoring malformed annotation message from MCP bridge');
+            return;
+          }
 
           dispatch({
             type: 'IMPORT_ANNOTATIONS',
-            bookmarks: msg.bookmarks ?? [],
-            renames,
-            comments,
+            bookmarks: data.bookmarks,
+            renames: data.renames,
+            comments: data.comments,
           });
         } catch { /* ignore malformed messages */ }
       };

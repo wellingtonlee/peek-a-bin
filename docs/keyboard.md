@@ -7,11 +7,11 @@ Press `?` in the app to see an interactive shortcuts panel.
 | Key | Action |
 |-----|--------|
 | `Space` | Toggle linear / graph view |
-| `G` | Go to address dialog |
+| `G` | Focus the address input |
+| `Ctrl+G` / `Cmd+G` | Go to address dialog |
 | `Ctrl+P` / `Cmd+P` | Command palette |
 | `?` | Toggle keyboard shortcuts panel |
-| `1`–`8` | Switch tabs (Headers, Disasm, Hex, Imports, Exports, Strings, Resources, Anomalies) |
-| `9` | Anomalies tab |
+| `1`–`9` | Switch tabs (Disasm, Headers, Sections, Imports, Exports, Hex, Strings, Resources, Anomalies) |
 | `Alt+Left` | Navigate back in history |
 | `Alt+Right` | Navigate forward in history |
 | `Alt+H` | Recent addresses dropdown (searchable) |
@@ -38,10 +38,10 @@ Press `?` in the app to see an interactive shortcuts panel.
 
 | Key | Action |
 |-----|--------|
-| `X` | Toggle Xrefs panel |
-| `R` | Toggle Resources panel |
-| `I` | Toggle Imports panel |
-| `D` | Toggle Detail panel |
+| `X` | Toggle callers/callees panel |
+| `R` | Toggle cross-reference panel |
+| `I` | Toggle instruction detail panel |
+| `D` | Toggle decompiler panel |
 
 ## AI
 
@@ -65,7 +65,9 @@ All annotation shortcuts (`B`, `N`, `;`) and interaction features (context menus
 
 ## Tips
 
-- Pressing `?` in the app always shows the latest shortcuts
+- Pressing `?` in the app always shows the latest shortcuts. The panel is rendered
+  from `SHORTCUT_GROUPS` in `src/components/KeyboardShortcuts.tsx`, which is the
+  single source of truth — update it and this file together
 - Graph mode keyboard navigation requires focus on the graph container — click the graph area or press `Space` to enter graph mode
 - `Escape` in graph view restores the full view state (linear/graph mode, pan position, zoom level)
 - Back navigation (`Alt+Left`, `Escape`) preserves view mode, graph pan position, and zoom level

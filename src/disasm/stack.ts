@@ -39,8 +39,31 @@ export function analyzeStackFrame(
     }
   }
 
-  // Scan for stack variable accesses
-  const varMap = new Map<number, { size: number; accessCount: number; isParam: boolean }>();
+  // Scan for stack variable accesses.
+  // Keyed by "<base>:<signedOffset>" — `[rbp-0x10]` and `[rsp+0x10]` are
+  // different memory locations, so keying on the bare numeric offset merged
+  // them into one entry with a combined size, a combined access count, and
+  // whichever isParam flag happened to be written first.
+  interface VarEntry {
+    base: 'bp' | 'sp';
+    offset: number;        // as written in the operand (always positive)
+    signedOffset: number;  // negative for [rbp - N]
+    size: number;
+    accessCount: number;
+    isParam: boolean;
+  }
+  const varMap = new Map<string, VarEntry>();
+
+  function record(base: 'bp' | 'sp', offset: number, signedOffset: number, size: number, isParam: boolean) {
+    const key = stackVarKey(base, signedOffset);
+    const existing = varMap.get(key);
+    if (existing) {
+      existing.accessCount++;
+      if (size > existing.size) existing.size = size;
+    } else {
+      varMap.set(key, { base, offset, signedOffset, size, accessCount: 1, isParam });
+    }
+  }
 
   const bpReg = is64 ? 'rbp' : 'ebp';
   const spReg = is64 ? 'rsp' : 'esp';
@@ -62,28 +85,14 @@ export function analyzeStackFrame(
     const bpLocalMatch = op.match(new RegExp(`\\[${bpReg}\\s*-\\s*0x([0-9a-fA-F]+)\\]`, 'i'));
     if (bpLocalMatch) {
       const offset = parseInt(bpLocalMatch[1], 16);
-      const existing = varMap.get(offset);
-      const size = inferSize(op);
-      if (existing) {
-        existing.accessCount++;
-        if (size > existing.size) existing.size = size;
-      } else {
-        varMap.set(offset, { size, accessCount: 1, isParam: false });
-      }
+      record('bp', offset, -offset, inferSize(op), false);
     }
 
     // [rsp + 0xN] → could be local or param depending on offset vs frameSize
     const spMatch = op.match(new RegExp(`\\[${spReg}\\s*\\+\\s*0x([0-9a-fA-F]+)\\]`, 'i'));
     if (spMatch) {
       const offset = parseInt(spMatch[1], 16);
-      const existing = varMap.get(offset);
-      const size = inferSize(op);
-      if (existing) {
-        existing.accessCount++;
-        if (size > existing.size) existing.size = size;
-      } else {
-        varMap.set(offset, { size, accessCount: 1, isParam: false });
-      }
+      record('sp', offset, offset, inferSize(op), false);
     }
 
     // [rbp + 0xN] → parameter (above saved rbp + return addr)
@@ -94,40 +103,47 @@ export function analyzeStackFrame(
       // In 32-bit: [ebp+0x8] = first param, [ebp+0xC] = second, etc.
       const minParamOffset = is64 ? 0x10 : 0x8;
       if (offset >= minParamOffset) {
-        const existing = varMap.get(offset);
-        const size = inferSize(op);
-        if (existing) {
-          existing.accessCount++;
-        } else {
-          varMap.set(offset, { size, accessCount: 1, isParam: true });
-        }
+        record('bp', offset, offset, inferSize(op), true);
       }
     }
   }
 
   if (varMap.size === 0 && frameSize === 0) return null;
 
-  // Build sorted variable list
+  // Build sorted variable list. Sorted by the operand offset as before; entries
+  // that now stay distinct (same offset, different base) are ordered bp first.
   const vars: StackVar[] = [];
-  const sortedOffsets = Array.from(varMap.keys()).sort((a, b) => a - b);
+  const entries = Array.from(varMap.values())
+    .sort((a, b) => a.offset - b.offset || a.base.localeCompare(b.base));
 
   let paramIdx = 0;
-  for (const offset of sortedOffsets) {
-    const v = varMap.get(offset)!;
+  const usedNames = new Set<string>();
+  for (const v of entries) {
     let name: string;
     if (v.isParam) {
       name = `arg_${paramIdx}`;
       paramIdx++;
     } else {
-      name = `var_${offset.toString(16).toUpperCase()}`;
+      // Two locals can now share an operand offset (e.g. [rbp-0x10] and
+      // [rsp+0x10]); suffix the base so their names stay distinct. Names are
+      // unchanged whenever there is no collision.
+      name = `var_${v.offset.toString(16).toUpperCase()}`;
+      if (usedNames.has(name)) name = `${name}_${v.base}`;
     }
+    usedNames.add(name);
     vars.push({
-      offset,
+      offset: v.offset,
       size: v.size,
       accessCount: v.accessCount,
       name,
+      key: stackVarKey(v.base, v.signedOffset),
     });
   }
 
   return { frameSize, vars };
+}
+
+/** Stable identity for a stack slot: base register + signed operand offset. */
+export function stackVarKey(base: 'bp' | 'sp', signedOffset: number): string {
+  return `${base}:${signedOffset}`;
 }

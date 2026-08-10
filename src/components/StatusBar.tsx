@@ -11,6 +11,7 @@ const phaseLabels: Record<string, string> = {
   "recursive-descent": "Recursive descent...",
   "gap-filling": "Gap filling...",
   "building-xrefs": "Building xrefs...",
+  failed: "Analysis failed",
 };
 
 const SECTION_CHAR_FLAGS: [number, string][] = [
@@ -95,7 +96,7 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: 'connected' | 'disconnect
   const funcName = containingFunc ? getDisplayName(containingFunc, state.renames) : "---";
 
   const phase = state.analysisPhase;
-  const isAnalyzing = phase !== "idle" && phase !== "ready";
+  const isAnalyzing = phase !== "idle" && phase !== "ready" && phase !== "failed";
   const phaseLabel = phaseLabels[phase];
 
   const insnBytesStr = state.currentInstruction

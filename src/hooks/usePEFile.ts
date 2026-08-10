@@ -16,6 +16,18 @@ export type ViewTab =
   | "resources"
   | "anomalies";
 
+const VIEW_TABS: readonly ViewTab[] = [
+  "disassembly", "headers", "sections", "imports",
+  "exports", "hex", "strings", "resources", "anomalies",
+];
+
+/** Narrow an untrusted string (e.g. the `#tab=` URL param) to a ViewTab. */
+export function parseViewTab(value: string | null | undefined): ViewTab | null {
+  return value != null && (VIEW_TABS as readonly string[]).includes(value)
+    ? (value as ViewTab)
+    : null;
+}
+
 export interface Bookmark {
   address: number;
   label: string;
@@ -27,7 +39,7 @@ export interface AnnotationSnapshot {
   comments: Record<number, string>;
 }
 
-export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "recursive-descent" | "gap-filling" | "building-xrefs" | "extracting-strings" | "ready";
+export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "recursive-descent" | "gap-filling" | "building-xrefs" | "extracting-strings" | "ready" | "failed";
 
 export interface AppState {
   peFile: PEFile | null;

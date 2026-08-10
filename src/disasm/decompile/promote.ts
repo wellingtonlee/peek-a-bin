@@ -1,4 +1,5 @@
 import type { StackFrame } from '../types';
+import { stackVarKey } from '../stack';
 import type { FunctionSignature } from '../signatures';
 import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from './ir';
 import { irVar, walkStmts } from './ir';
@@ -84,8 +85,17 @@ function sizeToType(size: number): string {
 
 // ── Stack access pattern matching ──
 
-/** Check if expr is [rbp - const] or [rsp + const] and return the offset. */
-function matchStackAccess(expr: IRExpr, is64: boolean): { offset: number; isParam: boolean } | null {
+interface StackAccess {
+  /** Slot identity — see `stackVarKey`. `[rbp-0x10]` and `[rsp+0x10]` differ. */
+  key: string;
+  base: 'bp' | 'sp';
+  /** Offset as written in the operand (always positive). */
+  offset: number;
+  isParam: boolean;
+}
+
+/** Check if expr is [rbp - const] or [rsp + const] and return the slot. */
+function matchStackAccess(expr: IRExpr, is64: boolean): StackAccess | null {
   if (expr.kind !== 'deref') return null;
   const addr = expr.address;
 
@@ -96,7 +106,8 @@ function matchStackAccess(expr: IRExpr, is64: boolean): { offset: number; isPara
   if (addr.kind === 'binary' && addr.op === '-' &&
       addr.left.kind === 'reg' && addr.left.name.toLowerCase() === bp &&
       addr.right.kind === 'const') {
-    return { offset: addr.right.value, isParam: false };
+    const offset = addr.right.value;
+    return { key: stackVarKey('bp', -offset), base: 'bp', offset, isParam: false };
   }
 
   // [rbp + offset] → param (if offset >= threshold)
@@ -104,20 +115,23 @@ function matchStackAccess(expr: IRExpr, is64: boolean): { offset: number; isPara
       addr.left.kind === 'reg' && addr.left.name.toLowerCase() === bp &&
       addr.right.kind === 'const') {
     const minParam = is64 ? 0x10 : 0x8;
-    if (addr.right.value >= minParam) return { offset: addr.right.value, isParam: true };
+    const offset = addr.right.value;
+    if (offset >= minParam) return { key: stackVarKey('bp', offset), base: 'bp', offset, isParam: true };
   }
 
   // [rsp + offset] → local
   if (addr.kind === 'binary' && addr.op === '+' &&
       addr.left.kind === 'reg' && addr.left.name.toLowerCase() === sp &&
       addr.right.kind === 'const') {
-    return { offset: addr.right.value, isParam: false };
+    const offset = addr.right.value;
+    return { key: stackVarKey('sp', offset), base: 'sp', offset, isParam: false };
   }
 
   // Direct register (rbp/rsp alone) with const
   if (addr.kind === 'reg') {
     const name = addr.name.toLowerCase();
-    if (name === bp || name === sp) return { offset: 0, isParam: false };
+    if (name === bp) return { key: stackVarKey('bp', 0), base: 'bp', offset: 0, isParam: false };
+    if (name === sp) return { key: stackVarKey('sp', 0), base: 'sp', offset: 0, isParam: false };
   }
 
   return null;
@@ -128,14 +142,14 @@ function matchStackAccess(expr: IRExpr, is64: boolean): { offset: number; isPara
 function promoteExpr(
   expr: IRExpr,
   is64: boolean,
-  varLookup: Map<number, string>,
-  paramLookup: Map<number, string>,
+  varLookup: Map<string, string>,
+  paramLookup: Map<string, string>,
 ): IRExpr {
   // Check if this is a stack variable deref
   const stackAccess = matchStackAccess(expr, is64);
   if (stackAccess) {
     const lookup = stackAccess.isParam ? paramLookup : varLookup;
-    const name = lookup.get(stackAccess.offset);
+    const name = lookup.get(stackAccess.key);
     if (name) {
       return irVar(name, expr.kind === 'deref' ? expr.size : 4);
     }
@@ -171,8 +185,8 @@ function promoteExpr(
 function promoteStmt(
   stmt: IRStmt,
   is64: boolean,
-  varLookup: Map<number, string>,
-  paramLookup: Map<number, string>,
+  varLookup: Map<string, string>,
+  paramLookup: Map<string, string>,
 ): IRStmt {
   switch (stmt.kind) {
     case 'assign': {
@@ -185,7 +199,7 @@ function promoteStmt(
       const stackAccess = matchStackAccess({ kind: 'deref', address: stmt.address, size: stmt.size }, is64);
       if (stackAccess) {
         const lookup = stackAccess.isParam ? paramLookup : varLookup;
-        const name = lookup.get(stackAccess.offset);
+        const name = lookup.get(stackAccess.key);
         if (name) {
           // Convert store to assign to variable
           return {
@@ -278,8 +292,8 @@ function inferVarTypes(
   body: IRStmt[],
   locals: IRLocal[],
   is64: boolean,
-  varLookup: Map<number, string>,
-  paramLookup: Map<number, string>,
+  varLookup: Map<string, string>,
+  paramLookup: Map<string, string>,
 ): void {
   const localsByName = new Map<string, IRLocal>();
   for (const l of locals) localsByName.set(l.name, l);
@@ -293,7 +307,7 @@ function inferVarTypes(
       const inner = expr.operand;
       const sa = matchStackAccess(inner, is64);
       if (sa) {
-        const name = (sa.isParam ? paramLookup : varLookup).get(sa.offset);
+        const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
           const entry = info.get(name) ?? { minSize: 8, signed: null };
           const castSigned = expr.type.startsWith('int');
@@ -309,7 +323,7 @@ function inferVarTypes(
     if (expr.kind === 'deref') {
       const sa = matchStackAccess(expr, is64);
       if (sa) {
-        const name = (sa.isParam ? paramLookup : varLookup).get(sa.offset);
+        const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
           const entry = info.get(name) ?? { minSize: 8, signed: null };
           entry.minSize = Math.min(entry.minSize, expr.size);
@@ -337,40 +351,49 @@ function inferVarTypes(
 function synthesizeStackFrame(
   body: IRStmt[],
   is64: boolean,
-  varLookup: Map<number, string>,
+  varLookup: Map<string, string>,
   locals: IRLocal[],
 ): void {
-  const accesses = new Map<number, number>(); // offset → max size
+  // Keyed by slot, not by bare offset: [rbp-0x10] and [rsp+0x10] are different
+  // slots and must not be collapsed into one local.
+  interface Access { key: string; base: 'bp' | 'sp'; offset: number; size: number }
+  const accesses = new Map<string, Access>();
 
   walkStmts(body, (expr) => {
     const sa = matchStackAccess(expr, is64);
     if (sa && !sa.isParam && expr.kind === 'deref') {
-      const existing = accesses.get(sa.offset);
-      if (!existing || expr.size > existing) {
-        accesses.set(sa.offset, expr.size);
+      const existing = accesses.get(sa.key);
+      if (!existing) {
+        accesses.set(sa.key, { key: sa.key, base: sa.base, offset: sa.offset, size: expr.size });
+      } else if (expr.size > existing.size) {
+        existing.size = expr.size;
       }
     }
   });
 
-  // Deduplicate overlapping accesses (largest size wins)
-  const sortedOffsets = [...accesses.entries()].sort((a, b) => a[0] - b[0]);
-  const seen = new Set<number>();
-  for (const [offset, size] of sortedOffsets) {
+  // Deduplicate overlapping accesses (largest size wins). Overlap is only
+  // meaningful between slots off the same base register.
+  const sorted = [...accesses.values()].sort((a, b) => a.offset - b.offset || a.base.localeCompare(b.base));
+  const seen: Access[] = [];
+  const usedNames = new Set<string>();
+  for (const acc of sorted) {
     // Skip if this offset overlaps with a previously created variable
     let overlaps = false;
     for (const prev of seen) {
-      const prevSize = accesses.get(prev) ?? 0;
-      if (offset >= prev && offset < prev + prevSize) {
+      if (prev.base !== acc.base) continue;
+      if (acc.offset >= prev.offset && acc.offset < prev.offset + prev.size) {
         overlaps = true;
         break;
       }
     }
     if (overlaps) continue;
 
-    const varName = `var_${offset.toString(16).toUpperCase()}`;
-    varLookup.set(offset, varName);
-    locals.push({ name: varName, type: sizeToType(size) });
-    seen.add(offset);
+    let varName = `var_${acc.offset.toString(16).toUpperCase()}`;
+    if (usedNames.has(varName)) varName = `${varName}_${acc.base}`;
+    usedNames.add(varName);
+    varLookup.set(acc.key, varName);
+    locals.push({ name: varName, type: sizeToType(acc.size) });
+    seen.push(acc);
   }
 }
 
@@ -389,19 +412,24 @@ export function promoteVars(
   typeCtx?: TypeContext,
 ): IRFunction {
   // Build lookup maps from stack frame vars
-  const varLookup = new Map<number, string>();  // offset → var name (locals)
-  const paramLookup = new Map<number, string>(); // offset → param name
+  const varLookup = new Map<string, string>();  // slot key → var name (locals)
+  const paramLookup = new Map<string, string>(); // slot key → param name
   const locals: IRLocal[] = [];
   const params: IRParam[] = [];
 
   if (stackFrame) {
     for (const v of stackFrame.vars) {
       const type = sizeToType(v.size);
-      if (v.name.startsWith('arg_')) {
-        paramLookup.set(v.offset, v.name);
+      const isParam = v.name.startsWith('arg_');
+      // `key` identifies the slot (base + signed offset). Fall back to the old
+      // offset-only interpretation for StackFrames produced before it existed:
+      // params are [rbp + N], locals [rbp - N].
+      const key = v.key ?? stackVarKey('bp', isParam ? v.offset : -v.offset);
+      if (isParam) {
+        paramLookup.set(key, v.name);
         params.push({ name: v.name, type });
       } else {
-        varLookup.set(v.offset, v.name);
+        varLookup.set(key, v.name);
         locals.push({ name: v.name, type });
       }
     }

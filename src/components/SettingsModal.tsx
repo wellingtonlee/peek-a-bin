@@ -9,7 +9,7 @@ interface Props {
 }
 
 const PROVIDER_DEFAULTS: Record<string, { model: string; baseUrl: string }> = {
-  anthropic: { model: "claude-sonnet-4-20250514", baseUrl: "https://api.openai.com" },
+  anthropic: { model: "claude-sonnet-4-20250514", baseUrl: "https://api.anthropic.com" },
   openai: { model: "gpt-4o", baseUrl: "https://api.openai.com" },
 };
 
@@ -80,7 +80,7 @@ export function SettingsModal({ open, onClose }: Props) {
       provider: "anthropic",
       apiKey: "",
       model: "claude-sonnet-4-20250514",
-      baseUrl: "https://api.openai.com",
+      baseUrl: "https://api.anthropic.com",
       enhanceSource: "pseudocode",
     };
     const newStore = {

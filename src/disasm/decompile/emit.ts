@@ -186,6 +186,12 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
 
     case 'unknown':
       return `/* ${expr.text} */`;
+
+    default: {
+      // Compile error if a new IRExpr kind is added without an emitter.
+      const _exhaustive: never = expr;
+      return _exhaustive;
+    }
   }
 }
 
@@ -203,6 +209,7 @@ function stmtAddr(stmt: IRStmt): number | undefined {
     case 'call_stmt': return stmt.addr;
     case 'return': return stmt.addr;
     case 'raw': return stmt.addr;
+    case 'phi': return stmt.addr;
     default: return undefined;
   }
 }
@@ -433,6 +440,25 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       push(`${pad}}`);
       break;
     }
+
+    case 'phi': {
+      // destroySSA converts every phi to copies, so one reaching the emitter
+      // means SSA destruction was incomplete. Emit it as a comment rather than
+      // silently dropping the statement (which used to produce no line at all).
+      const ops = stmt.operands
+        .map(o => `${o.value.name}${o.value.version !== undefined ? `_${o.value.version}` : ''}@B${o.blockId}`)
+        .join(', ');
+      const dest = `${stmt.dest.name}${stmt.dest.version !== undefined ? `_${stmt.dest.version}` : ''}`;
+      push(`${pad}/* unresolved phi: ${dest} = phi(${ops}) */`, addr);
+      break;
+    }
+
+    default: {
+      // Compile error if a new IRStmt kind is added without an emitter.
+      const _exhaustive: never = stmt;
+      void _exhaustive;
+      break;
+    }
   }
 
   return { lines, addrs };
@@ -450,8 +476,26 @@ export interface EmitFunctionResult {
 }
 
 export function emitFunction(func: IRFunction, typeCtx?: TypeContext, stringMap?: Map<number, string>): EmitFunctionResult {
+  // emitStmt/emitExpr are mutually recursive and unbounded, so deeply nested IR
+  // can throw (e.g. RangeError) part-way through, and pipeline.ts swallows the
+  // exception. The unwind used to skip the reset at the bottom of this function
+  // and leave both globals pointing at the failed function's state; nothing
+  // observed it only because the next call reassigns them on entry. try/finally
+  // makes that independent of the assignments above, and save/restore (rather
+  // than clear) keeps the state correct should emission ever nest.
+  const prevTypeCtx = _typeCtx;
+  const prevStringMap = _stringMap;
   _typeCtx = typeCtx;
   _stringMap = stringMap;
+  try {
+    return emitFunctionBody(func);
+  } finally {
+    _typeCtx = prevTypeCtx;
+    _stringMap = prevStringMap;
+  }
+}
+
+function emitFunctionBody(func: IRFunction): EmitFunctionResult {
   const lines: string[] = [];
   const lineAddrs: (number | undefined)[] = [];
 
@@ -509,7 +553,5 @@ export function emitFunction(func: IRFunction, typeCtx?: TypeContext, stringMap?
     }
   }
 
-  _typeCtx = undefined;
-  _stringMap = undefined;
   return { code: lines.join('\n'), lineMap };
 }

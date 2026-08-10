@@ -22,10 +22,17 @@ export interface Xref {
 }
 
 export interface StackVar {
+  /** Offset exactly as written in the operand (always positive). */
   offset: number;
   size: number;
   accessCount: number;
   name: string;
+  /**
+   * Stable slot identity, `"<base>:<signedOffset>"` (see `stackVarKey` in
+   * disasm/stack.ts) — e.g. `bp:-16` for `[rbp-0x10]` vs `sp:16` for
+   * `[rsp+0x10]`. `offset` alone does not distinguish those two slots.
+   */
+  key?: string;
 }
 
 export interface StackFrame {

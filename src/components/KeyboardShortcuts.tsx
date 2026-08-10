@@ -15,15 +15,25 @@ interface ShortcutGroup {
   shortcuts: Shortcut[];
 }
 
-const SHORTCUT_GROUPS: ShortcutGroup[] = [
+/**
+ * The single source of truth for keyboard shortcuts.
+ *
+ * DisassemblyView used to render a second, independently hardcoded `?` overlay.
+ * Both were window-level keydown listeners, and stopPropagation() does not stop
+ * other listeners on the same target, so `?` opened both at once \u2014 with
+ * contradicting content. Keep new shortcuts here only, and mirror them in
+ * docs/keyboard.md.
+ */
+export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     category: "Navigation",
     shortcuts: [
-      { key: "1-8", action: "Switch tabs" },
+      { key: "1-9", action: "Switch tabs" },
       { key: "G", action: "Focus address input" },
+      { key: "Ctrl+G", action: "Go to address dialog" },
       { key: "Alt+\u2190/\u2192", action: "Back / Forward" },
       { key: "Enter", action: "Follow branch target" },
-      { key: "Escape", action: "Close panel" },
+      { key: "Escape", action: "Navigate back / close panel" },
       { key: "X", action: "Toggle call panel" },
       { key: "R", action: "Toggle xref panel" },
       { key: "I", action: "Toggle instruction detail" },
@@ -43,6 +53,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { key: "Ctrl+P", action: "Command palette" },
       { key: "Ctrl+F", action: "Search disassembly" },
+      { key: "/", action: "Search in graph mode" },
     ],
   },
   {
@@ -56,6 +67,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     category: "Disassembly",
     shortcuts: [
       { key: "\u2191 / \u2193", action: "Navigate instructions" },
+      { key: "PgUp / PgDn", action: "Scroll 40 instructions" },
       { key: "Space", action: "Toggle graph / linear view" },
       { key: "; (semicolon)", action: "Add / edit comment" },
       { key: "N", action: "Rename function" },
@@ -68,6 +80,19 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { key: "Tab", action: "Cycle successor blocks" },
       { key: "Enter", action: "Follow branch target" },
       { key: "0", action: "Zoom to fit" },
+    ],
+  },
+  {
+    category: "AI",
+    shortcuts: [{ key: "Ctrl+Shift+A", action: "Toggle AI chat panel" }],
+  },
+  {
+    category: "Mouse",
+    shortcuts: [
+      { key: "Double-click addr", action: "Copy address" },
+      { key: "Double-click label", action: "Rename function" },
+      { key: "Shift+Click", action: "Select instruction range" },
+      { key: "Right-click", action: "Context menu" },
     ],
   },
 ];

@@ -150,30 +150,32 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
 
   // Build typed xref map (off main thread via worker)
   const [typedXrefMap, setTypedXrefMap] = useState<Map<number, Xref[]>>(new Map());
-  const typedXrefMapSizeRef = useRef(0);
   useEffect(() => {
     if (instructions.length === 0) {
       setTypedXrefMap(new Map());
-      typedXrefMapSizeRef.current = 0;
       return;
     }
     let cancelled = false;
-    disasmWorker.buildTypedXrefMap(instructions).then((map) => {
-      if (!cancelled) {
-        // Stabilize: skip update if size hasn't changed (common after initial load)
-        if (map.size !== typedXrefMapSizeRef.current) {
-          typedXrefMapSizeRef.current = map.size;
-          setTypedXrefMap(map);
-        } else {
-          // Check if any keys differ
-          let changed = false;
+    disasmWorker
+      .buildTypedXrefMap(instructions)
+      .then((map) => {
+        if (cancelled) return;
+        // Compared against `prev` rather than the captured `typedXrefMap`: the
+        // effect only depends on `instructions`, so reading the state variable
+        // here compared against a stale snapshot.
+        setTypedXrefMap((prev) => {
+          // Stabilize: keep the old reference unless the contents actually differ,
+          // so rows are not rebuilt after every load.
+          if (map.size !== prev.size) return map;
           for (const k of map.keys()) {
-            if (!typedXrefMap.has(k)) { changed = true; break; }
+            if (!prev.has(k)) return map;
           }
-          if (changed) setTypedXrefMap(map);
-        }
-      }
-    });
+          return prev;
+        });
+      })
+      .catch((err) => {
+        console.error("[peek-a-bin] failed to build typed xref map", err);
+      });
     return () => { cancelled = true; };
   }, [instructions]);
 

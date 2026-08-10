@@ -154,7 +154,6 @@ export function DisassemblyView() {
   // Local UI states
   const [copiedAddr, setCopiedAddr] = useState<number | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
-  const [showShortcuts, setShowShortcuts] = useState(false);
   const [xrefScopeAddress, setXrefScopeAddress] = useState<number | null>(null);
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(null);
   const [editingComment, setEditingComment] = useState<{ address: number; value: string } | null>(null);
@@ -574,7 +573,6 @@ export function DisassemblyView() {
 
       if (e.key === "Escape") {
         if (highlightedReg) { setHighlightedReg(null); return; }
-        if (showShortcuts) { setShowShortcuts(false); return; }
         if (ctxMenu) { setCtxMenu(null); return; }
         if (selectionRange) { setSelectionRange(null); return; }
         // Pop breadcrumb if available, else navigate back
@@ -628,13 +626,6 @@ export function DisassemblyView() {
           const cfgEl = el.querySelector('.cfg-container') as any;
           if (cfgEl?.__zoomToFit) cfgEl.__zoomToFit();
         }
-        return;
-      }
-
-      if (e.key === "?") {
-        e.preventDefault();
-        e.stopPropagation();
-        setShowShortcuts((v) => !v);
         return;
       }
 
@@ -809,7 +800,7 @@ export function DisassemblyView() {
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },
-    [currentIndex, rows, dispatch, search, showShortcuts, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack, viewMode, graphPan, graphZoom, state.addressHistory, state.historyIndex],
+    [currentIndex, rows, dispatch, search, ctxMenu, state.currentAddress, state.comments, selectionRange, state.renames, pe, currentFunc, virtualizer, funcMap, state.callStack, viewMode, graphPan, graphZoom, state.addressHistory, state.historyIndex],
   );
 
   const handleAddressClick = useCallback(
@@ -2280,57 +2271,6 @@ export function DisassemblyView() {
         ]}
       />
 
-      {/* Shortcut legend overlay */}
-      {showShortcuts && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowShortcuts(false)}>
-          <div
-            className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl p-4 text-xs max-w-sm"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-semibold text-gray-200 mb-3">Keyboard Shortcuts</h3>
-            <table className="w-full">
-              <tbody>
-                {([
-                  ["Space", "Toggle linear / graph view"],
-                  ["G", "Go to address (focus address bar)"],
-                  ["/ or Ctrl+F", "Search in disassembly"],
-                  ["Enter", "Follow branch / next search result"],
-                  ["Shift+Enter", "Previous search result"],
-                  ["N", "Rename current function"],
-                  ["Esc", "Navigate back"],
-                  [";", "Add/edit comment (disassembly + pseudocode)"],
-                  ["I", "Toggle instruction detail panel"],
-                  ["X", "Toggle callers/callees panel"],
-                  ["R", "Toggle cross-reference panel"],
-                  ["D", "Toggle decompile panel"],
-                  ["B", "Toggle bookmark at current address"],
-                  ["0", "Zoom-to-fit (graph mode)"],
-                  ["Tab", "Cycle successor blocks (graph mode)"],
-                  ["Ctrl+P", "Command palette"],
-                  ["Ctrl+Z", "Undo annotation"],
-                  ["Ctrl+Shift+Z", "Redo annotation"],
-                  ["↑ / ↓", "Navigate instructions"],
-                  ["PgUp / PgDn", "Scroll 40 instructions"],
-                  ["1–7", "Switch tabs"],
-                  ["Alt+← / Alt+→", "Navigate back / forward"],
-                  ["?", "Toggle this help"],
-                  ["Double-click addr", "Copy address"],
-                  ["Double-click label", "Rename function"],
-                  ["Shift+Click", "Select range of instructions"],
-                  ["Ctrl/Cmd+C", "Copy selected instructions"],
-                  ["Right-click", "Context menu"],
-                ] as [string, string][]).map(([key, desc]) => (
-                  <tr key={key} className="border-b border-gray-700/50">
-                    <td className="py-1 pr-4 text-blue-400 font-mono whitespace-nowrap">{key}</td>
-                    <td className="py-1 text-gray-300">{desc}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="mt-3 text-gray-500 text-center">Press ? or Esc to close</div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

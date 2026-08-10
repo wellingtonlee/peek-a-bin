@@ -3,13 +3,104 @@
  */
 
 import { z } from 'zod';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, resolve, sep } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { FileSession } from './session';
+import type { AnalyzedFile, FileSession } from './session';
 import { analyzeStackFrame } from '../disasm/stack';
 import { inferSignature } from '../disasm/signatures';
 import { decompileFunction } from '../disasm/decompile/pipeline';
 import { validateImport, type ExportSchemaV1 } from '../utils/exportSchema';
+
+/** Upper bound on files accepted by `load_pe`, guarding against accidental huge reads. */
+const MAX_PE_FILE_BYTES = 256 * 1024 * 1024;
+
+type ToolResult = {
+  content: { type: 'text'; text: string }[];
+  isError?: boolean;
+};
+
+/** Standard success payload. */
+function ok(text: string): ToolResult {
+  return { content: [{ type: 'text' as const, text }] };
+}
+
+/** Standard success payload for structured data. */
+function json(value: unknown): ToolResult {
+  return ok(JSON.stringify(value, null, 2));
+}
+
+/** Standard error payload — every failure path in this file uses this shape. */
+function err(message: string): ToolResult {
+  return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+}
+
+/** Format an address the way every tool response does. */
+function hex(n: number): string {
+  return `0x${n.toString(16)}`;
+}
+
+/** Resolve a loaded file, or return the standard "not loaded" error. */
+async function withFile(
+  session: FileSession,
+  fileId: string,
+  fn: (af: AnalyzedFile) => ToolResult | Promise<ToolResult>,
+): Promise<ToolResult> {
+  const af = session.getFile(fileId);
+  if (!af) return err(`file "${fileId}" not loaded`);
+  return fn(af);
+}
+
+/**
+ * Parse a tool `address` argument. Hex strings may carry an optional `0x` prefix.
+ * Returns null for anything that would otherwise become NaN and surface as `0xNaN`.
+ */
+function parseAddr(address: number | string): number | null {
+  if (typeof address === 'number') {
+    return Number.isFinite(address) ? address : null;
+  }
+  const n = parseInt(address.trim(), 16);
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * Confine `export_analysis` writes to a single root: `PEEK_A_BIN_EXPORT_DIR` if set,
+ * otherwise the process working directory. Requires a `.json` extension and rejects
+ * traversal (including via symlinked parent directories) outside that root.
+ */
+function resolveExportPath(outputPath: string): { path: string } | { error: string } {
+  const configured = process.env.PEEK_A_BIN_EXPORT_DIR;
+  const rootRaw = resolve(configured || process.cwd());
+  let root: string;
+  try {
+    root = realpathSync(rootRaw);
+  } catch {
+    return { error: `export root does not exist: ${rootRaw}` };
+  }
+
+  const target = resolve(root, outputPath);
+  if (extname(target).toLowerCase() !== '.json') {
+    return { error: `outputPath must end in .json (got "${outputPath}")` };
+  }
+
+  // The parent directory must already exist; resolving it defeats symlink escapes.
+  let realDir: string;
+  try {
+    realDir = realpathSync(dirname(target));
+  } catch {
+    return { error: `output directory does not exist: ${dirname(target)}` };
+  }
+
+  const contained = realDir === root || realDir.startsWith(root + sep);
+  if (!contained) {
+    return {
+      error: `outputPath escapes the allowed export directory "${root}". `
+        + `Set PEEK_A_BIN_EXPORT_DIR to write elsewhere.`,
+    };
+  }
+
+  return { path: resolve(realDir, basename(target)) };
+}
 
 export function registerTools(server: McpServer, session: FileSession): void {
   // ── load_pe ──
@@ -21,34 +112,50 @@ export function registerTools(server: McpServer, session: FileSession): void {
       id: z.string().optional().describe('Identifier for the loaded file (auto-generated from filename if omitted)'),
     },
     async ({ filePath, id }) => {
-      const buffer = readFileSync(filePath);
-      const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      const fileName = filePath.split('/').pop() ?? filePath;
+      const resolved = resolve(filePath);
+
+      let ab: ArrayBuffer;
+      try {
+        const stat = statSync(resolved);
+        if (!stat.isFile()) return err(`not a regular file: ${resolved}`);
+        if (stat.size > MAX_PE_FILE_BYTES) {
+          return err(`file too large: ${stat.size} bytes (limit ${MAX_PE_FILE_BYTES})`);
+        }
+        const buffer = readFileSync(resolved);
+        // Only copy when the Buffer is a view into a shared pool (small files).
+        ab = buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength
+          ? (buffer.buffer as ArrayBuffer)
+          : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      } catch (e) {
+        return err(`failed to read "${resolved}": ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      const fileName = basename(resolved) || resolved;
       const fileId = id ?? fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-      const analyzed = await session.loadFile(fileId, fileName, ab);
+      let analyzed: AnalyzedFile;
+      try {
+        analyzed = await session.loadFile(fileId, fileName, ab);
+      } catch (e) {
+        return err(`failed to analyze "${resolved}": ${e instanceof Error ? e.message : String(e)}`);
+      }
       const pe = analyzed.pe;
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            id: fileId,
-            fileName,
-            is64: pe.is64,
-            imageBase: `0x${pe.optionalHeader.imageBase.toString(16)}`,
-            entryPoint: `0x${pe.optionalHeader.addressOfEntryPoint.toString(16)}`,
-            subsystem: pe.optionalHeader.subsystem,
-            sectionCount: pe.sections.length,
-            importCount: pe.imports.length,
-            exportCount: pe.exports.length,
-            functionCount: analyzed.functions.length,
-            anomalyCount: analyzed.anomalies.length,
-            isDriver: analyzed.driverInfo.isDriver,
-            driverInfo: analyzed.driverInfo.isDriver ? analyzed.driverInfo : undefined,
-          }, null, 2),
-        }],
-      };
+      return json({
+        id: fileId,
+        fileName,
+        is64: pe.is64,
+        imageBase: hex(pe.optionalHeader.imageBase),
+        entryPoint: hex(pe.optionalHeader.addressOfEntryPoint),
+        subsystem: pe.optionalHeader.subsystem,
+        sectionCount: pe.sections.length,
+        importCount: pe.imports.length,
+        exportCount: pe.exports.length,
+        functionCount: analyzed.functions.length,
+        anomalyCount: analyzed.anomalies.length,
+        isDriver: analyzed.driverInfo.isDriver,
+        driverInfo: analyzed.driverInfo.isDriver ? analyzed.driverInfo : undefined,
+      });
     },
   );
 
@@ -68,9 +175,7 @@ export function registerTools(server: McpServer, session: FileSession): void {
           functionCount: af.functions.length,
         };
       });
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(files, null, 2) }],
-      };
+      return json(files);
     },
   );
 
@@ -81,13 +186,10 @@ export function registerTools(server: McpServer, session: FileSession): void {
     {
       fileId: z.string().describe('ID of the loaded PE file'),
       filter: z.string().optional().describe('Filter function names (substring match)'),
-      offset: z.number().optional().describe('Pagination offset (default 0)'),
-      limit: z.number().optional().describe('Max results to return (default 100)'),
+      offset: z.number().int().nonnegative().optional().describe('Pagination offset (default 0)'),
+      limit: z.number().int().positive().optional().describe('Max results to return (default 100)'),
     },
-    async ({ fileId, filter, offset: off, limit: lim }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
-
+    async ({ fileId, filter, offset: off, limit: lim }) => withFile(session, fileId, (af) => {
       let fns = af.functions;
       if (filter) {
         const lower = filter.toLowerCase();
@@ -97,24 +199,19 @@ export function registerTools(server: McpServer, session: FileSession): void {
       const count = lim ?? 100;
       const page = fns.slice(start, start + count);
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            total: fns.length,
-            offset: start,
-            count: page.length,
-            functions: page.map(f => ({
-              name: f.name,
-              address: `0x${f.address.toString(16)}`,
-              size: f.size,
-              isThunk: f.isThunk ?? false,
-              tailCallTarget: f.tailCallTarget ? `0x${f.tailCallTarget.toString(16)}` : undefined,
-            })),
-          }, null, 2),
-        }],
-      };
-    },
+      return json({
+        total: fns.length,
+        offset: start,
+        count: page.length,
+        functions: page.map(f => ({
+          name: f.name,
+          address: hex(f.address),
+          size: f.size,
+          isThunk: f.isThunk ?? false,
+          tailCallTarget: f.tailCallTarget !== undefined ? hex(f.tailCallTarget) : undefined,
+        })),
+      });
+    }),
   );
 
   // ── decompile_function ──
@@ -125,13 +222,12 @@ export function registerTools(server: McpServer, session: FileSession): void {
       fileId: z.string().describe('ID of the loaded PE file'),
       address: z.union([z.number(), z.string()]).describe('Function address (hex string like "0x1234" or number)'),
     },
-    async ({ fileId, address }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address }) => withFile(session, fileId, (af) => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       const func = af.functions.find(f => f.address === addr);
-      if (!func) return { content: [{ type: 'text' as const, text: `Error: no function at address 0x${addr.toString(16)}` }], isError: true };
+      if (!func) return err(`no function at address ${hex(addr)}`);
 
       // Get function instructions
       const endAddr = func.address + func.size;
@@ -160,18 +256,13 @@ export function registerTools(server: McpServer, session: FileSession): void {
         af.pe.runtimeFunctions,
       );
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            functionName: af.renames[String(func.address)] ?? func.name,
-            address: `0x${func.address.toString(16)}`,
-            code: result.code,
-            lineMap: result.lineMap.map(([line, addr]) => ({ line, address: `0x${addr.toString(16)}` })),
-          }, null, 2),
-        }],
-      };
-    },
+      return json({
+        functionName: af.renames[String(func.address)] ?? func.name,
+        address: hex(func.address),
+        code: result.code,
+        lineMap: result.lineMap.map(([line, addr2]) => ({ line, address: hex(addr2) })),
+      });
+    }),
   );
 
   // ── disassemble_function ──
@@ -182,13 +273,12 @@ export function registerTools(server: McpServer, session: FileSession): void {
       fileId: z.string().describe('ID of the loaded PE file'),
       address: z.union([z.number(), z.string()]).describe('Function address (hex string like "0x1234" or number)'),
     },
-    async ({ fileId, address }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address }) => withFile(session, fileId, (af) => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       const func = af.functions.find(f => f.address === addr);
-      if (!func) return { content: [{ type: 'text' as const, text: `Error: no function at address 0x${addr.toString(16)}` }], isError: true };
+      if (!func) return err(`no function at address ${hex(addr)}`);
 
       const endAddr = func.address + func.size;
       const funcInsns = af.instructions.filter(i => i.address >= func.address && i.address < endAddr);
@@ -200,13 +290,8 @@ export function registerTools(server: McpServer, session: FileSession): void {
         return insn.comment ? `${line}  ; ${insn.comment}` : line;
       });
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `; ${func.name} (0x${func.address.toString(16)}, ${func.size} bytes)\n${lines.join('\n')}`,
-        }],
-      };
-    },
+      return ok(`; ${func.name} (${hex(func.address)}, ${func.size} bytes)\n${lines.join('\n')}`);
+    }),
   );
 
   // ── get_xrefs ──
@@ -217,27 +302,21 @@ export function registerTools(server: McpServer, session: FileSession): void {
       fileId: z.string().describe('ID of the loaded PE file'),
       address: z.union([z.number(), z.string()]).describe('Target address'),
     },
-    async ({ fileId, address }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address }) => withFile(session, fileId, (af) => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       const xrefs = af.xrefMap.get(addr) ?? [];
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            address: `0x${addr.toString(16)}`,
-            xrefCount: xrefs.length,
-            xrefs: xrefs.map(x => ({
-              from: `0x${x.from.toString(16)}`,
-              type: x.type,
-            })),
-          }, null, 2),
-        }],
-      };
-    },
+      return json({
+        address: hex(addr),
+        xrefCount: xrefs.length,
+        xrefs: xrefs.map(x => ({
+          from: hex(x.from),
+          type: x.type,
+        })),
+      });
+    }),
   );
 
   // ── detect_anomalies ──
@@ -247,25 +326,15 @@ export function registerTools(server: McpServer, session: FileSession): void {
     {
       fileId: z.string().describe('ID of the loaded PE file'),
     },
-    async ({ fileId }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
-
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            fileId,
-            anomalyCount: af.anomalies.length,
-            anomalies: af.anomalies.map(a => ({
-              severity: a.severity,
-              title: a.title,
-              detail: a.detail,
-            })),
-          }, null, 2),
-        }],
-      };
-    },
+    async ({ fileId }) => withFile(session, fileId, (af) => json({
+      fileId,
+      anomalyCount: af.anomalies.length,
+      anomalies: af.anomalies.map(a => ({
+        severity: a.severity,
+        title: a.title,
+        detail: a.detail,
+      })),
+    })),
   );
 
   // ── add_comment ──
@@ -277,24 +346,18 @@ export function registerTools(server: McpServer, session: FileSession): void {
       address: z.union([z.number(), z.string()]).describe('Address to comment'),
       text: z.string().describe('Comment text (empty string to remove)'),
     },
-    async ({ fileId, address, text }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address, text }) => withFile(session, fileId, () => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       if (text === '') {
         session.deleteComment(fileId, addr);
       } else {
         session.setComment(fileId, addr, text);
       }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, text }, null, 2),
-        }],
-      };
-    },
+      return json({ fileId, address: hex(addr), text });
+    }),
   );
 
   // ── rename_function ──
@@ -306,24 +369,18 @@ export function registerTools(server: McpServer, session: FileSession): void {
       address: z.union([z.number(), z.string()]).describe('Function address'),
       name: z.string().describe('New name (empty string to remove rename)'),
     },
-    async ({ fileId, address, name }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address, name }) => withFile(session, fileId, () => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       if (name === '') {
         session.deleteRename(fileId, addr);
       } else {
         session.setRename(fileId, addr, name);
       }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, name }, null, 2),
-        }],
-      };
-    },
+      return json({ fileId, address: hex(addr), name });
+    }),
   );
 
   // ── add_bookmark ──
@@ -335,11 +392,10 @@ export function registerTools(server: McpServer, session: FileSession): void {
       address: z.union([z.number(), z.string()]).describe('Address to bookmark'),
       label: z.string().optional().describe('Bookmark label (default "")'),
     },
-    async ({ fileId, address, label }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
+    async ({ fileId, address, label }) => withFile(session, fileId, (af) => {
+      const addr = parseAddr(address);
+      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
 
-      const addr = typeof address === 'string' ? parseInt(address, 16) : address;
       const existing = af.bookmarks.find(b => b.address === addr);
       let action: 'added' | 'removed';
       if (existing) {
@@ -350,13 +406,8 @@ export function registerTools(server: McpServer, session: FileSession): void {
         action = 'added';
       }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ fileId, address: `0x${addr.toString(16)}`, action }, null, 2),
-        }],
-      };
-    },
+      return json({ fileId, address: hex(addr), action });
+    }),
   );
 
   // ── list_comments ──
@@ -366,35 +417,26 @@ export function registerTools(server: McpServer, session: FileSession): void {
     {
       fileId: z.string().describe('ID of the loaded PE file'),
     },
-    async ({ fileId }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
-
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            comments: Object.entries(af.comments).map(([address, text]) => ({ address: `0x${Number(address).toString(16)}`, text })),
-            renames: Object.entries(af.renames).map(([address, name]) => ({ address: `0x${Number(address).toString(16)}`, name })),
-            bookmarks: af.bookmarks.map(b => ({ address: `0x${b.address.toString(16)}`, label: b.label })),
-          }, null, 2),
-        }],
-      };
-    },
+    async ({ fileId }) => withFile(session, fileId, (af) => json({
+      comments: Object.entries(af.comments).map(([address, text]) => ({ address: hex(Number(address)), text })),
+      renames: Object.entries(af.renames).map(([address, name]) => ({ address: hex(Number(address)), name })),
+      bookmarks: af.bookmarks.map(b => ({ address: hex(b.address), label: b.label })),
+    })),
   );
 
   // ── export_analysis ──
   server.tool(
     'export_analysis',
-    'Export analysis annotations as ExportSchemaV1 JSON',
+    'Export analysis annotations as ExportSchemaV1 JSON. When outputPath is given it must '
+      + 'be a .json path inside the export directory (PEEK_A_BIN_EXPORT_DIR, default: cwd).',
     {
       fileId: z.string().describe('ID of the loaded PE file'),
-      outputPath: z.string().optional().describe('File path to write JSON to (optional)'),
+      outputPath: z.string().optional().describe(
+        'Optional .json file path to write to. Relative paths resolve against the export directory '
+        + '(PEEK_A_BIN_EXPORT_DIR, default: the server working directory); paths outside it are rejected.',
+      ),
     },
-    async ({ fileId, outputPath }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
-
+    async ({ fileId, outputPath }) => withFile(session, fileId, (af) => {
       const exported: ExportSchemaV1 = {
         version: 1,
         fileName: af.fileName,
@@ -410,18 +452,19 @@ export function registerTools(server: McpServer, session: FileSession): void {
         })),
       };
 
-      const json = JSON.stringify(exported, null, 2);
+      const data = JSON.stringify(exported, null, 2);
       if (outputPath) {
-        writeFileSync(outputPath, json, 'utf-8');
+        const target = resolveExportPath(outputPath);
+        if ('error' in target) return err(target.error);
+        try {
+          writeFileSync(target.path, data, 'utf-8');
+        } catch (e) {
+          return err(`failed to write "${target.path}": ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: json,
-        }],
-      };
-    },
+      return ok(data);
+    }),
   );
 
   // ── import_analysis ──
@@ -432,21 +475,16 @@ export function registerTools(server: McpServer, session: FileSession): void {
       fileId: z.string().describe('ID of the loaded PE file'),
       inputPath: z.string().describe('Path to ExportSchemaV1 JSON file'),
     },
-    async ({ fileId, inputPath }) => {
-      const af = session.getFile(fileId);
-      if (!af) return { content: [{ type: 'text' as const, text: `Error: file "${fileId}" not loaded` }], isError: true };
-
+    async ({ fileId, inputPath }) => withFile(session, fileId, (af) => {
       let raw: unknown;
       try {
         raw = JSON.parse(readFileSync(inputPath, 'utf-8'));
       } catch (e) {
-        return { content: [{ type: 'text' as const, text: `Error: failed to read/parse "${inputPath}": ${e}` }], isError: true };
+        return err(`failed to read/parse "${inputPath}": ${e instanceof Error ? e.message : String(e)}`);
       }
 
       const data = validateImport(raw);
-      if (!data) {
-        return { content: [{ type: 'text' as const, text: `Error: invalid ExportSchemaV1 format` }], isError: true };
-      }
+      if (!data) return err('invalid ExportSchemaV1 format');
 
       // Merge renames and comments (new overrides old)
       Object.assign(af.renames, data.renames);
@@ -463,19 +501,14 @@ export function registerTools(server: McpServer, session: FileSession): void {
 
       session.onAnnotationChange?.(fileId, af);
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            fileId,
-            imported: {
-              comments: Object.keys(data.comments).length,
-              renames: Object.keys(data.renames).length,
-              bookmarks: data.bookmarks.length,
-            },
-          }, null, 2),
-        }],
-      };
-    },
+      return json({
+        fileId,
+        imported: {
+          comments: Object.keys(data.comments).length,
+          renames: Object.keys(data.renames).length,
+          bookmarks: data.bookmarks.length,
+        },
+      });
+    }),
   );
 }
