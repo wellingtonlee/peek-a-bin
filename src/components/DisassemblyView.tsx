@@ -4,6 +4,7 @@ import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile"
 import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { useDisassemblyRows, binarySearchRows, rowAddress } from "../hooks/useDisassemblyRows";
 import { useDisassemblySearch } from "../hooks/useDisassemblySearch";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
 import { disasmWorker } from "../workers/disasmClient";
 import type { Instruction, DisasmFunction, } from "../disasm/types";
@@ -432,24 +433,22 @@ export function DisassemblyView() {
     return -1;
   }, [rows, currentFunc]);
 
-  // Dismiss context menu / export menu on click outside or Escape
-  useEffect(() => {
-    if (!ctxMenu && !showExportMenu) return;
-    // Clicks inside the menu are ignored here rather than being stopped from
-    // propagating by a handler on the menu div.
-    const dismiss = (e?: MouseEvent) => {
-      if (e && ctxMenuRef.current?.contains(e.target as Node)) return;
+  // Dismiss context menu / export menu on click outside or Escape.
+  // Clicks inside the menu are ignored via ctxMenuRef rather than being stopped
+  // from propagating by a handler on the menu div. The export menu has no ref of
+  // its own, so a click on one of its items both runs the item and closes it.
+  useDismissOnOutsideClick({
+    active: ctxMenu !== null || showExportMenu,
+    ref: ctxMenuRef,
+    onDismiss: () => {
       setCtxMenu(null);
       setShowExportMenu(false);
-    };
-    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", keyDismiss);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", keyDismiss);
-    };
-  }, [ctxMenu, showExportMenu]);
+    },
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   // Listen for show-xrefs event from sidebar context menu
   useEffect(() => {

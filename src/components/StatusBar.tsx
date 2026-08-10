@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { Skeleton } from "./Skeleton";
 import { loadProfiles, saveProfiles, getActiveProfile, type LLMProfileStore } from "../llm/settings";
 
@@ -63,16 +64,11 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: 'connected' | 'disconnect
     return () => window.removeEventListener("peek-a-bin:profile-changed", refreshProfiles);
   }, [refreshProfiles]);
 
-  useEffect(() => {
-    if (!showProfilePopover) return;
-    const handleClick = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-        setShowProfilePopover(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [showProfilePopover]);
+  useDismissOnOutsideClick({
+    active: showProfilePopover,
+    ref: popoverRef,
+    onDismiss: () => setShowProfilePopover(false),
+  });
 
   const activeProfile = getActiveProfile(profileStore);
 

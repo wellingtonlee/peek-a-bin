@@ -3,6 +3,7 @@ import { focusOnMount } from "./focusOnMount";
 import { useAppState, useAppDispatch, getDisplayName, type ViewTab, type Bookmark } from "../hooks/usePEFile";
 import { serializeState, validateImport } from "../utils/exportSchema";
 import { useSortedFuncs } from "../hooks/useDerivedState";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 
 const TABS: { id: ViewTab; label: string }[] = [
@@ -88,17 +89,16 @@ export function AddressBar() {
     return result;
   }, [state.addressHistory, sortedFuncs, state.renames]);
 
-  // Close history dropdown on outside click
+  // Reset the filter box whenever the dropdown closes
   useEffect(() => {
-    if (!showHistory) { setHistoryFilter(""); return; }
-    const handler = (e: MouseEvent) => {
-      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
-        setShowHistory(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    if (!showHistory) setHistoryFilter("");
   }, [showHistory]);
+
+  useDismissOnOutsideClick({
+    active: showHistory,
+    ref: historyRef,
+    onDismiss: () => setShowHistory(false),
+  });
 
   const computeSuggestions = useCallback((query: string) => {
     if (!query || query.length < 1) {
@@ -224,16 +224,11 @@ export function AddressBar() {
   );
 
   // Close suggestions when clicking outside
-  useEffect(() => {
-    if (!showSuggestions) return;
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showSuggestions]);
+  useDismissOnOutsideClick({
+    active: showSuggestions,
+    ref: containerRef,
+    onDismiss: () => setShowSuggestions(false),
+  });
 
   const handleReset = useCallback(() => {
     dispatch({ type: "RESET" });
