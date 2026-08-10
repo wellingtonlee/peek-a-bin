@@ -236,6 +236,7 @@ export function analyzeStackFrame(
     usedNames.add(name);
     vars.push({
       offset: v.offset,
+      signedOffset: v.signedOffset,
       size: v.size,
       accessCount: v.accessCount,
       name,

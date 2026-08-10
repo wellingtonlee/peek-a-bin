@@ -24,6 +24,14 @@ export interface Xref {
 export interface StackVar {
   /** Offset exactly as written in the operand (always positive). */
   offset: number;
+  /**
+   * Offset with its real sign: negative for `[rbp-0x10]`, positive for
+   * `[rbp+0x10]` and `[rsp+0x10]`.
+   *
+   * `offset` alone cannot be rendered — a frame holds locals below the frame
+   * pointer AND parameters above it, so assuming one sign mislabels the other.
+   */
+  signedOffset: number;
   size: number;
   accessCount: number;
   name: string;

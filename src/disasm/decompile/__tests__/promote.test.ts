@@ -31,7 +31,10 @@ function promote(
 }
 
 function stackVar(over: Partial<StackVar> & { name: string }): StackVar {
-  return { offset: 0x8, size: 4, accessCount: 1, ...over };
+  const base: StackVar = { offset: 0x8, signedOffset: -0x8, size: 4, accessCount: 1, ...over };
+  // Default the sign to a local ([rbp - offset]) unless the caller states
+  // otherwise, matching what these fixtures meant before signedOffset existed.
+  return over.signedOffset === undefined ? { ...base, signedOffset: -base.offset } : base;
 }
 
 function frameOf(...vars: StackVar[]): StackFrame {

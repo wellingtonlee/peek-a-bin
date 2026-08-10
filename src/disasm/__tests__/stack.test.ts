@@ -260,3 +260,30 @@ describe('analyzeStackFrame — frame-pointer verification', () => {
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(['arg_0x8']);
   });
 });
+
+describe('signed offsets', () => {
+  // The Stack Frame panel renders the sign from signedOffset. `offset` is the
+  // operand value as written and is always positive, so a frame holding locals
+  // below the frame pointer AND parameters above it cannot be rendered from it:
+  // a hard-coded minus labelled every parameter negative.
+  it('gives locals a negative signed offset and parameters a positive one', () => {
+    const frame = analyzeStackFrame(func(0x40), body(
+      ...PROLOGUE_32,
+      ['mov', 'eax, dword ptr [ebp - 0x10]'],
+      ['mov', 'ecx, dword ptr [ebp + 0x8]'],
+      ['ret', ''],
+    ), false);
+
+    expect(frame!.vars.find(v => v.offset === 0x10)?.signedOffset).toBe(-0x10);
+    expect(frame!.vars.find(v => v.offset === 0x8)?.signedOffset).toBe(0x8);
+  });
+
+  it('keeps an rsp-relative slot positive', () => {
+    const frame = analyzeStackFrame(func(0x40), body(
+      ...PROLOGUE_32,
+      ['mov', 'eax, dword ptr [esp + 0x10]'],
+      ['ret', ''],
+    ), false);
+    expect(frame!.vars.find(v => v.offset === 0x10)?.signedOffset).toBe(0x10);
+  });
+});

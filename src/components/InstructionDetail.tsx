@@ -321,7 +321,12 @@ export function InstructionDetail({
                       currentStackOffset === v.offset ? "bg-blue-900/30 text-blue-300" : "text-gray-400"
                     }`}
                   >
-                    <span className="w-12 text-gray-500 text-[10px]">-0x{v.offset.toString(16)}</span>
+                    {/* Sign comes from signedOffset: this list holds locals
+                        below the frame pointer AND parameters above it, so a
+                        hard-coded minus labelled every parameter negative. */}
+                    <span className="w-12 text-gray-500 text-[10px]">
+                      {v.signedOffset < 0 ? "-" : "+"}0x{Math.abs(v.signedOffset).toString(16)}
+                    </span>
                     <span className="w-8 text-gray-600 text-[10px]">{v.size}B</span>
                     <span className="text-gray-300">{v.name}</span>
                     <span className="text-gray-600 text-[10px]">({v.accessCount}x)</span>
