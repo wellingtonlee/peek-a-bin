@@ -1,6 +1,7 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 
 type SortKey = "address" | "length";
 type EncodingFilter = "all" | "ascii" | "utf16le";
@@ -74,24 +75,19 @@ export function StringsView() {
     overscan: 30,
   });
 
-  // Dismiss xref popup on click outside or Escape
-  useEffect(() => {
-    if (!xrefPopup) return;
-    // Clicks inside the popup are ignored here rather than being stopped from
-    // propagating by a handler on the popup div — stopPropagation also hid those
-    // clicks from every other listener on the page.
-    const dismiss = (e?: MouseEvent) => {
-      if (e && popupRef.current?.contains(e.target as Node)) return;
-      setXrefPopup(null);
-    };
-    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", keyDismiss);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", keyDismiss);
-    };
-  }, [xrefPopup]);
+  // Dismiss xref popup on click outside or Escape. Clicks inside the popup are
+  // ignored by the hook's ref check rather than being stopped from propagating
+  // by a handler on the popup div — stopPropagation also hid those clicks from
+  // every other listener on the page.
+  useDismissOnOutsideClick({
+    active: xrefPopup !== null,
+    ref: popupRef,
+    onDismiss: () => setXrefPopup(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   if (!pe) return null;
 

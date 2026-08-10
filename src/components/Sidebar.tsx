@@ -8,6 +8,7 @@ import { useContainingFunc } from "../hooks/useDerivedState";
 import type { DisasmFunction } from "../disasm/types";
 import { SkeletonRows } from "./Skeleton";
 import { useGraphOverview } from "../hooks/useGraphOverview";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 
 type SortMode = "address" | "alpha";
 
@@ -63,39 +64,29 @@ export function Sidebar() {
   const bmCtxMenuRef = useRef<HTMLDivElement>(null);
   const fnCtxMenuRef = useRef<HTMLDivElement>(null);
 
-  // Dismiss bookmark context menu on click/Escape
-  useEffect(() => {
-    if (!bmCtxMenu) return;
-    // Clicks inside the menu are ignored here instead of being stopped from
-    // propagating by a handler on the menu div.
-    const dismiss = (e?: MouseEvent) => {
-      if (e && bmCtxMenuRef.current?.contains(e.target as Node)) return;
-      setBmCtxMenu(null);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [bmCtxMenu]);
+  // Dismiss bookmark context menu on click/Escape. Clicks inside the menu are
+  // ignored by the hook's ref check instead of being stopped from propagating
+  // by a handler on the menu div.
+  useDismissOnOutsideClick({
+    active: bmCtxMenu !== null,
+    ref: bmCtxMenuRef,
+    onDismiss: () => setBmCtxMenu(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   // Dismiss function context menu on click/Escape
-  useEffect(() => {
-    if (!fnCtxMenu) return;
-    const dismiss = (e?: MouseEvent) => {
-      if (e && fnCtxMenuRef.current?.contains(e.target as Node)) return;
-      setFnCtxMenu(null);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [fnCtxMenu]);
+  useDismissOnOutsideClick({
+    active: fnCtxMenu !== null,
+    ref: fnCtxMenuRef,
+    onDismiss: () => setFnCtxMenu(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   // Active function highlight
   const containingFunc = useContainingFunc();

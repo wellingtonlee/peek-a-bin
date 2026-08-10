@@ -4,6 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import { DataInspector } from "./DataInspector";
 import { computeEntropyBlocks } from "../utils/entropy";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 
 const BYTES_PER_ROW = 16;
 
@@ -269,20 +270,15 @@ export function HexView() {
   }, [sectionBytes]);
 
   // Dismiss hex context menu on click outside or Escape
-  useEffect(() => {
-    if (!hexCtxMenu) return;
-    const dismiss = (e?: MouseEvent) => {
-      if (e && hexCtxMenuRef.current?.contains(e.target as Node)) return;
-      setHexCtxMenu(null);
-    };
-    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", keyDismiss);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", keyDismiss);
-    };
-  }, [hexCtxMenu]);
+  useDismissOnOutsideClick({
+    active: hexCtxMenu !== null,
+    ref: hexCtxMenuRef,
+    onDismiss: () => setHexCtxMenu(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   const handleHexContextMenu = useCallback((e: React.MouseEvent) => {
     if (!selectionRange || !sectionBytes) return;
@@ -379,20 +375,15 @@ export function HexView() {
   }, [state.dataXrefs, sectionInfo, pe]);
 
   // Dismiss xref popup
-  useEffect(() => {
-    if (!xrefPopup) return;
-    const dismiss = (e?: MouseEvent) => {
-      if (e && xrefPopupRef.current?.contains(e.target as Node)) return;
-      setXrefPopup(null);
-    };
-    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", keyDismiss);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", keyDismiss);
-    };
-  }, [xrefPopup]);
+  useDismissOnOutsideClick({
+    active: xrefPopup !== null,
+    ref: xrefPopupRef,
+    onDismiss: () => setXrefPopup(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   const addrWidth = pe?.is64 ? 16 : 8;
 

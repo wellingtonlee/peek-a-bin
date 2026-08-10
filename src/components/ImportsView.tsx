@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { clampPopup } from "../utils/clampPopup";
 import { getApiRiskTag } from "../analysis/driver";
 
@@ -27,23 +28,17 @@ export function ImportsView() {
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
-  // Dismiss popup
-  useEffect(() => {
-    if (!xrefPopup) return;
-    // Clicks inside the popup are ignored here rather than being stopped from
-    // propagating by a handler on the popup div.
-    const dismiss = (e?: MouseEvent) => {
-      if (e && popupRef.current?.contains(e.target as Node)) return;
-      setXrefPopup(null);
-    };
-    const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
-    window.addEventListener("click", dismiss);
-    window.addEventListener("keydown", keyDismiss);
-    return () => {
-      window.removeEventListener("click", dismiss);
-      window.removeEventListener("keydown", keyDismiss);
-    };
-  }, [xrefPopup]);
+  // Dismiss popup. Clicks inside the popup are ignored by the hook's ref check
+  // rather than being stopped from propagating by a handler on the popup div.
+  useDismissOnOutsideClick({
+    active: xrefPopup !== null,
+    ref: popupRef,
+    onDismiss: () => setXrefPopup(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   const filtered = useMemo(() => {
     if (!pe) return [];

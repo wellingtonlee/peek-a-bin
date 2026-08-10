@@ -51,7 +51,8 @@ export function isOutsideDismiss(
 /**
  * Close a popup when a pointer event lands outside `ref` (and optionally on
  * Escape). Replaces the hand-rolled effect that was copy-pasted across the
- * address bar, status bar and disassembly view.
+ * address bar, status bar, disassembly view, hex view, sidebar, imports view,
+ * strings view and decompile view.
  *
  * `onDismiss` is read through a ref, so passing an inline arrow does not cause
  * the listeners to be torn down and re-attached on every render.

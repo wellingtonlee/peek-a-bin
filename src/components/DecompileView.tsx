@@ -1,6 +1,7 @@
 import { useMemo, useRef, useCallback, useEffect, useState } from "react";
 import { focusOnMount } from "./focusOnMount";
 import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 
 // ── Syntax Highlighting ──
 
@@ -158,18 +159,17 @@ export function DecompileView({
     }
   }, [highlightLines]);
 
-  // Dismiss context menu on click-away or Escape
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const dismiss = (e?: MouseEvent) => {
-      if (e && ctxMenuRef.current?.contains(e.target as Node)) return;
-      setCtxMenu(null);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
-    document.addEventListener("click", dismiss);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("click", dismiss); document.removeEventListener("keydown", onKey); };
-  }, [ctxMenu]);
+  // Dismiss context menu on click-away or Escape. Unlike the other popups this
+  // one listens on `document`, not `window`.
+  useDismissOnOutsideClick({
+    active: ctxMenu !== null,
+    ref: ctxMenuRef,
+    onDismiss: () => setCtxMenu(null),
+    event: "click",
+    target: "document",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
 
   const handleContextMenu = useCallback((e: React.MouseEvent, lineNum: number) => {
     if (syncDisabled || !lineMap) return;

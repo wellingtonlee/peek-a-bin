@@ -4,7 +4,7 @@ import { isOutsideDismiss } from "../useDismissOnOutsideClick";
 /**
  * There is no React renderer in this repo, so the effect that attaches the
  * listeners cannot be exercised. These cover the decision the handler makes
- * once an event has arrived, which is the part that differed between the four
+ * once an event has arrived, which is the part that differed between the
  * hand-rolled copies this hook replaced.
  */
 
