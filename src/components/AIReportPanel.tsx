@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { Modal } from "./Modal";
+import { accidentalDismissAllowed } from "./modalScaffold";
 import { useAppState } from "../hooks/usePEFile";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
@@ -25,22 +26,33 @@ export function AIReportPanel({ onClose, onRegenerate }: AIReportPanelProps) {
 
   if (!report) return null;
 
+  // Escape and backdrop click are offered once the report has finished, and
+  // withheld while it is streaming. A finished report is written to
+  // localStorage, so closing it costs nothing — reopening reads it back. A
+  // streaming one is not: `onClose` dispatches the dismiss without aborting, so
+  // a stray Escape throws away a partial report that was paid for and cannot be
+  // recovered without regenerating it. The Close button is still there in both
+  // states for anyone who means it.
+  const dismissible = accidentalDismissAllowed({
+    inFlight: report.status === "streaming",
+    unsavedWork: false,
+  });
+
   return (
-    // Not dismissible by Escape or backdrop click — as before this became shared
-    // scaffolding. The Close button is the way out, and it is the last stop in
-    // the focus trap's cycle.
     <Modal
-      label="AI analysis report"
+      labelledBy="ai-report-title"
       onClose={onClose}
-      closeOnEscape={false}
-      closeOnBackdropClick={false}
+      closeOnEscape={dismissible}
+      closeOnBackdropClick={dismissible}
       backdropClassName="bg-black/60"
       className="shadow-xl flex flex-col"
       style={{ width: "min(90vw, 800px)", height: "min(90vh, 700px)" }}
     >
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-3 shrink-0">
-        <h3 className="text-sm font-semibold text-gray-200">AI Analysis Report</h3>
+        <h3 id="ai-report-title" className="text-sm font-semibold text-gray-200">
+          AI Analysis Report
+        </h3>
         {report.status === "streaming" && (
           <span className="flex items-center gap-1.5 text-blue-400 text-[10px]">
             <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">

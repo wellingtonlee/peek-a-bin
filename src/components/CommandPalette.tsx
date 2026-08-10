@@ -157,6 +157,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
   return (
     <Modal
+      // Named by a string rather than by a heading: the palette opens straight
+      // onto its search field and has no visible title to point `labelledBy` at.
+      // Adding one purely to be referenced would change the dialog for everyone
+      // to satisfy an attribute.
       label="Command palette"
       onClose={onClose}
       placement="top"

@@ -192,7 +192,7 @@ export function SettingsModal({ open, onClose }: Props) {
     // closing this by accident and losing unsaved settings, so Save and Cancel
     // are the only ways out. Do not "unify" this with the other dialogs.
     <Modal
-      label="Settings"
+      labelledBy="settings-title"
       onClose={onClose}
       placement="top"
       closeOnEscape={false}
@@ -200,7 +200,9 @@ export function SettingsModal({ open, onClose }: Props) {
       className="w-[440px] shadow-2xl overflow-hidden"
     >
       <div className="px-4 py-3 border-b border-gray-700">
-        <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
+        <h2 id="settings-title" className="text-sm font-semibold text-gray-200">
+          Settings
+        </h2>
       </div>
 
       {/* Tab bar */}

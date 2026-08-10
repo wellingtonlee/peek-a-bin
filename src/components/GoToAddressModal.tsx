@@ -66,12 +66,14 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
 
   return (
     <Modal
-      label="Go to address"
+      labelledBy="goto-address-title"
       onClose={onClose}
       initialFocusRef={inputRef}
       className="shadow-xl p-4 w-80"
     >
-      <h3 className="text-sm font-semibold text-gray-200 mb-3">Go to Address</h3>
+      <h3 id="goto-address-title" className="text-sm font-semibold text-gray-200 mb-3">
+        Go to Address
+      </h3>
 
       {/* Format toggle */}
       <div className="flex gap-1 mb-3">

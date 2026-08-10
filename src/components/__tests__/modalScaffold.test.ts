@@ -12,11 +12,17 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  accidentalDismissAllowed,
   FOCUSABLE_SELECTOR,
   FOCUS_CONTAINER,
+  lockBodyScroll,
   modalDialogClass,
+  modalNameAttrs,
   modalWrapperClass,
   nextTrapIndex,
+  unlockBodyScroll,
+  UNLOCKED,
+  type ScrollLockState,
 } from "../modalScaffold";
 
 describe("nextTrapIndex", () => {
@@ -117,5 +123,131 @@ describe("modalDialogClass", () => {
     expect(modalDialogClass("")).toBe(
       "relative focus:outline-none bg-gray-800 border border-gray-600 rounded-lg",
     );
+  });
+});
+
+describe("modalNameAttrs", () => {
+  it("names the dialog by its heading when there is one", () => {
+    expect(modalNameAttrs(undefined, "settings-title")).toEqual({
+      ariaLabelledBy: "settings-title",
+    });
+  });
+
+  it("falls back to a string for dialogs with no heading", () => {
+    // The command palette opens onto a search field and has no title to point at.
+    expect(modalNameAttrs("Command palette", undefined)).toEqual({
+      ariaLabel: "Command palette",
+    });
+  });
+
+  it("never emits both, so there is no second name to fall out of date", () => {
+    const attrs = modalNameAttrs("Settings", "settings-title");
+    expect(attrs.ariaLabel).toBeUndefined();
+    expect(attrs.ariaLabelledBy).toBe("settings-title");
+  });
+});
+
+describe("body scroll lock", () => {
+  const inline = { overflow: "", paddingRight: "" };
+
+  it("hides overflow on the first lock and remembers what was there", () => {
+    const taken = lockBodyScroll(UNLOCKED, { overflow: "auto", paddingRight: "4px" }, 0, 0);
+    expect(taken.patch?.overflow).toBe("hidden");
+    expect(taken.state).toEqual({
+      depth: 1,
+      saved: { overflow: "auto", paddingRight: "4px" },
+    });
+  });
+
+  it("restores the previous value rather than clearing it", () => {
+    // Blindly setting overflow back to "" would drop a value the page had set
+    // for its own reasons before any dialog opened.
+    const taken = lockBodyScroll(UNLOCKED, { overflow: "auto", paddingRight: "4px" }, 0, 0);
+    const released = unlockBodyScroll(taken.state);
+    expect(released.restore).toEqual({ overflow: "auto", paddingRight: "4px" });
+    expect(released.state).toEqual(UNLOCKED);
+  });
+
+  it("counts nested dialogs instead of flagging them", () => {
+    // Two dialogs can be open at once. With a boolean, closing the first would
+    // unlock the page while the second is still covering it.
+    const first = lockBodyScroll(UNLOCKED, inline, 0, 0);
+    const second = lockBodyScroll(first.state, inline, 0, 0);
+    expect(second.state.depth).toBe(2);
+    expect(second.patch).toBeNull();
+
+    const inner = unlockBodyScroll(second.state);
+    expect(inner.restore).toBeNull();
+    expect(inner.state.depth).toBe(1);
+
+    const outer = unlockBodyScroll(inner.state);
+    expect(outer.restore).toEqual(inline);
+    expect(outer.state).toEqual(UNLOCKED);
+  });
+
+  it("saves the styles from before the first lock, not from between locks", () => {
+    // By the time a second dialog opens, <body> is already overflow:hidden. A
+    // nested lock that re-read the inline styles would save that and restore it
+    // for ever, leaving the page permanently unscrollable.
+    const first = lockBodyScroll(UNLOCKED, { overflow: "auto", paddingRight: "" }, 0, 0);
+    const second = lockBodyScroll(first.state, { overflow: "hidden", paddingRight: "" }, 0, 0);
+    expect(second.state.saved).toEqual({ overflow: "auto", paddingRight: "" });
+  });
+
+  it("pads out the scrollbar it is about to hide", () => {
+    // Without this the viewport widens by the scrollbar's width the instant a
+    // dialog opens and the whole page jumps sideways behind it.
+    const taken = lockBodyScroll(UNLOCKED, inline, 15, 8);
+    expect(taken.patch?.paddingRight).toBe("23px");
+  });
+
+  it("leaves padding alone when there is no scrollbar to hide", () => {
+    // null, not "": this app's <body> is overflow:hidden from CSS and never has
+    // a scrollbar, and clearing an inline padding that was not ours to clear is
+    // a layout change in its own right.
+    expect(lockBodyScroll(UNLOCKED, inline, 0, 8).patch?.paddingRight).toBeNull();
+  });
+
+  it("survives an unbalanced release without wedging the lock on", () => {
+    const released = unlockBodyScroll(UNLOCKED);
+    expect(released.state).toEqual(UNLOCKED);
+    expect(released.restore).toBeNull();
+    // A negative depth would make the next lock believe one is already held and
+    // never apply the patch.
+    expect(released.state.depth).toBe(0);
+  });
+
+  it("comes back cleanly from React's development double-mount", () => {
+    // StrictMode runs mount → unmount → mount. The second mount must re-apply
+    // the patch, which it only does if the first cycle left the depth at zero.
+    let state: ScrollLockState = UNLOCKED;
+    const mount = lockBodyScroll(state, { overflow: "auto", paddingRight: "" }, 0, 0);
+    state = unlockBodyScroll(mount.state).state;
+    const remount = lockBodyScroll(state, { overflow: "auto", paddingRight: "" }, 0, 0);
+    expect(remount.patch?.overflow).toBe("hidden");
+    expect(remount.state.saved).toEqual({ overflow: "auto", paddingRight: "" });
+  });
+});
+
+describe("accidentalDismissAllowed", () => {
+  it("offers Escape and backdrop click to an idle dialog", () => {
+    // The go-to-address, palette, shortcuts and batch-rename-error dialogs.
+    expect(accidentalDismissAllowed({ inFlight: false, unsavedWork: false })).toBe(true);
+  });
+
+  it("withholds it while a request is in flight", () => {
+    // Batch rename mid-run, or a report still streaming: dismissing abandons
+    // work that has already been paid for and is not written down anywhere.
+    expect(accidentalDismissAllowed({ inFlight: true, unsavedWork: false })).toBe(false);
+  });
+
+  it("withholds it from a dialog holding uncommitted decisions", () => {
+    // The batch-rename review table: dismissing drops both the suggestions and
+    // every accept/reject the user has clicked.
+    expect(accidentalDismissAllowed({ inFlight: false, unsavedWork: true })).toBe(false);
+  });
+
+  it("needs both to be clear, not either", () => {
+    expect(accidentalDismissAllowed({ inFlight: true, unsavedWork: true })).toBe(false);
   });
 });

@@ -4,10 +4,12 @@
  *
  * There is no React renderer in this repo (no jsdom, no @testing-library/react),
  * so a component cannot be mounted and nothing here can be verified through the
- * DOM. What *can* be pinned is the arithmetic — where Tab sends focus, and which
- * layout classes each placement produces — so that lives here as pure functions
- * over plain values. `focusableWithin` is the one exception: it needs a real
- * element, touches the DOM only when called, and is therefore untested.
+ * DOM. What *can* be pinned is the arithmetic — where Tab sends focus, which
+ * layout classes each placement produces, which naming attribute the dialog
+ * gets, how the scroll lock nests, and which dialogs may be dismissed by
+ * accident — so all of that lives here as pure functions over plain values.
+ * `focusableWithin` is the one exception: it needs a real element, touches the
+ * DOM only when called, and is therefore untested.
  */
 
 /** Vertical placement of the dialog box within the viewport. */
@@ -102,4 +104,139 @@ export function modalWrapperClass(placement: ModalPlacement, tint: string | null
  */
 export function modalDialogClass(className: string): string {
   return `relative focus:outline-none bg-gray-800 border border-gray-600 rounded-lg ${className}`.trimEnd();
+}
+
+/** The two ways a dialog can carry its accessible name. */
+export interface ModalNameAttrs {
+  ariaLabel?: string;
+  ariaLabelledBy?: string;
+}
+
+/**
+ * Which naming attribute the dialog element gets.
+ *
+ * A dialog with a visible heading is named by pointing at that heading, so the
+ * name a screen reader announces is literally the text a sighted user reads and
+ * the two cannot drift apart. `aria-label` remains for the dialogs that have no
+ * heading — the command palette opens straight onto a search field.
+ *
+ * Exactly one of the two is ever emitted. Setting both is legal (labelledby
+ * wins) but leaves a second, unused string in the source that nothing keeps
+ * honest, which is the drift this is meant to remove.
+ */
+export function modalNameAttrs(
+  label: string | undefined,
+  labelledBy: string | undefined,
+): ModalNameAttrs {
+  return labelledBy ? { ariaLabelledBy: labelledBy } : { ariaLabel: label };
+}
+
+/** Inline `<body>` styles the scroll lock overwrites, as they were found. */
+export interface BodyStyles {
+  overflow: string;
+  paddingRight: string;
+}
+
+/**
+ * Book-keeping for the body scroll lock.
+ *
+ * `depth` is a count, not a flag: two dialogs can be open at once (the command
+ * palette can launch batch rename), and a boolean would let the first one to
+ * close unlock the page while the second is still up.
+ *
+ * `saved` is captured from the *first* lock only. Re-reading the inline styles
+ * on a nested lock would save the locked values and restore them for ever.
+ */
+export interface ScrollLockState {
+  depth: number;
+  saved: BodyStyles | null;
+}
+
+export const UNLOCKED: ScrollLockState = { depth: 0, saved: null };
+
+/**
+ * Styles to write onto `<body>`. `paddingRight: null` means "leave the existing
+ * padding alone" — distinct from `""`, which would clear an inline padding the
+ * page had set for its own reasons.
+ */
+export interface ScrollLockPatch {
+  overflow: string;
+  paddingRight: string | null;
+}
+
+/**
+ * Take a lock, returning the next state and the styles to apply (or `null` when
+ * a lock is already held and the DOM needs no further change).
+ *
+ * @param inline            the inline styles currently on `<body>`
+ * @param gutter            width of the scrollbar about to disappear, i.e.
+ *                          `innerWidth - documentElement.clientWidth`
+ * @param basePaddingRight  computed `padding-right` of `<body>` in px
+ *
+ * The gutter is added back as padding so that hiding the scrollbar does not
+ * widen the viewport and shift the whole page sideways. When there is no
+ * scrollbar to hide — overlay scrollbars, or a page that never scrolled — the
+ * padding is left untouched rather than being set to the same value it already
+ * had, which keeps the restore a no-op too.
+ */
+export function lockBodyScroll(
+  state: ScrollLockState,
+  inline: BodyStyles,
+  gutter: number,
+  basePaddingRight: number,
+): { state: ScrollLockState; patch: ScrollLockPatch | null } {
+  if (state.depth > 0) {
+    return { state: { ...state, depth: state.depth + 1 }, patch: null };
+  }
+  return {
+    state: { depth: 1, saved: inline },
+    patch: {
+      overflow: "hidden",
+      paddingRight: gutter > 0 ? `${basePaddingRight + gutter}px` : null,
+    },
+  };
+}
+
+/**
+ * Release a lock, returning the next state and the styles to put back (or
+ * `null` while other dialogs still hold the lock).
+ *
+ * The restore is the saved values, not `""`. Blindly clearing would drop an
+ * inline `overflow` the page had before any dialog opened — this app sets
+ * `overflow: hidden` on `<body>` from CSS rather than inline, but a stylesheet
+ * change should not turn into a scroll bug here.
+ *
+ * A release with nothing held returns `UNLOCKED` and no restore, so an
+ * unbalanced cleanup cannot drive the depth negative and wedge the lock on.
+ */
+export function unlockBodyScroll(state: ScrollLockState): {
+  state: ScrollLockState;
+  restore: BodyStyles | null;
+} {
+  if (state.depth > 1) {
+    return { state: { ...state, depth: state.depth - 1 }, restore: null };
+  }
+  return { state: UNLOCKED, restore: state.saved };
+}
+
+/**
+ * Whether closing a dialog by Escape or a stray backdrop click is acceptable.
+ *
+ * Escape is the expected key for a dialog, and most of them should have it.
+ * The exceptions are not "important" dialogs — they are dialogs where the
+ * keystroke destroys something the user cannot get back by reopening: a request
+ * that is still in flight, or a set of choices they have made in the dialog and
+ * not yet applied. Both are one keystroke away from the Escape a user presses
+ * out of habit when a dialog is in the way.
+ *
+ * The visible Cancel/Close button stays either way, so WCAG 2.1.2 is satisfied
+ * regardless; this only decides whether the *accidental* dismissal is offered.
+ */
+export function accidentalDismissAllowed(risk: {
+  /** A request is running that closing would abandon or waste. */
+  inFlight: boolean;
+  /** The dialog holds user decisions or results that closing would discard. */
+  unsavedWork: boolean;
+}): boolean {
+  return !risk.inFlight && !risk.unsavedWork;
 }

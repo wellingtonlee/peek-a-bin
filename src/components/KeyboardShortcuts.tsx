@@ -105,13 +105,15 @@ export function KeyboardShortcuts({ open, onClose }: Props) {
   // dialog on open and keeps it there.
   return (
     <Modal
-      label="Keyboard shortcuts"
+      labelledBy="keyboard-shortcuts-title"
       onClose={onClose}
       placement="top"
       className="w-[512px] max-w-lg shadow-2xl overflow-hidden"
     >
       <div className="px-4 py-3 border-b border-gray-700">
-        <h2 className="text-sm font-semibold text-gray-200">Keyboard Shortcuts</h2>
+        <h2 id="keyboard-shortcuts-title" className="text-sm font-semibold text-gray-200">
+          Keyboard Shortcuts
+        </h2>
       </div>
       <div className="max-h-[400px] overflow-auto px-4 py-2">
         {SHORTCUT_GROUPS.map((group) => (

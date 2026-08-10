@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import { Modal } from "./Modal";
+import { accidentalDismissAllowed } from "./modalScaffold";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import type { BatchRenameResult } from "../llm/types";
 
@@ -54,24 +55,30 @@ export function BatchRenameModal() {
   // button is unmounted underneath the focus trap, and focus falls out to
   // <body>. A distinct key remounts the Modal, which re-runs the trap.
   //
-  // None of the three is dismissible by Escape or backdrop click; that matches
-  // how they behaved before this was shared scaffolding, and every state has a
+  // Only the error state takes Escape and backdrop click. The other two are
+  // where an idle keystroke costs something: `dismiss` is not a "hide", it is
+  // BATCH_RENAME_DISMISS, which drops the run entirely. Escaping the progress
+  // dialog kills a decompile-plus-LLM pass over every function in the binary,
+  // and escaping the review table throws away both the suggestions and whatever
+  // accept/reject decisions the user has clicked through — neither is
+  // recoverable except by paying for the whole run again. All three keep a
   // visible Cancel/Close.
 
   // Progress overlay during decompiling/running
   if (br.status === "decompiling" || br.status === "running") {
     const pct = br.progress.total > 0 ? Math.round((br.progress.done / br.progress.total) * 100) : 0;
+    const dismissible = accidentalDismissAllowed({ inFlight: true, unsavedWork: false });
     return (
       <Modal
         key="progress"
-        label="Batch rename progress"
+        labelledBy="batch-rename-progress-title"
         onClose={dismiss}
-        closeOnEscape={false}
-        closeOnBackdropClick={false}
+        closeOnEscape={dismissible}
+        closeOnBackdropClick={dismissible}
         backdropClassName="bg-black/60"
         className="shadow-xl p-6 w-96"
       >
-        <h3 className="text-sm font-semibold text-gray-200 mb-3">
+        <h3 id="batch-rename-progress-title" className="text-sm font-semibold text-gray-200 mb-3">
           {br.status === "decompiling" ? "Decompiling functions..." : "Generating names..."}
         </h3>
         <div className="w-full bg-gray-700 rounded-full h-2 mb-2">
@@ -96,17 +103,22 @@ export function BatchRenameModal() {
 
   // Error state
   if (br.error) {
+    // Nothing left to lose: the run has already failed and the message is the
+    // only content, so the usual dismissal applies.
+    const dismissible = accidentalDismissAllowed({ inFlight: false, unsavedWork: false });
     return (
       <Modal
         key="error"
-        label="Batch rename error"
+        labelledBy="batch-rename-error-title"
         onClose={dismiss}
-        closeOnEscape={false}
-        closeOnBackdropClick={false}
+        closeOnEscape={dismissible}
+        closeOnBackdropClick={dismissible}
         backdropClassName="bg-black/60"
         className="shadow-xl p-6 w-96"
       >
-        <h3 className="text-sm font-semibold text-red-400 mb-2">Batch Rename Error</h3>
+        <h3 id="batch-rename-error-title" className="text-sm font-semibold text-red-400 mb-2">
+          Batch Rename Error
+        </h3>
         <p className="text-xs text-gray-400 mb-4">{br.error}</p>
         <button type="button"
           onClick={dismiss}
@@ -122,21 +134,22 @@ export function BatchRenameModal() {
   if (br.status !== "review") return null;
 
   const acceptedCount = localResults.filter(r => r.accepted === true).length;
+  const reviewDismissible = accidentalDismissAllowed({ inFlight: false, unsavedWork: true });
 
   return (
     <Modal
       key="review"
-      label="AI rename suggestions"
+      labelledBy="batch-rename-review-title"
       onClose={dismiss}
-      closeOnEscape={false}
-      closeOnBackdropClick={false}
+      closeOnEscape={reviewDismissible}
+      closeOnBackdropClick={reviewDismissible}
       backdropClassName="bg-black/60"
       className="shadow-xl flex flex-col"
       style={{ width: "min(90vw, 900px)", maxHeight: "80vh" }}
     >
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-3 shrink-0">
-        <h3 className="text-sm font-semibold text-gray-200">
+        <h3 id="batch-rename-review-title" className="text-sm font-semibold text-gray-200">
           AI Rename Suggestions ({localResults.length})
         </h3>
         <div className="flex-1" />
