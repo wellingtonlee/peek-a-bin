@@ -25,11 +25,17 @@ export function ImportsView() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const importXrefs = state.importXrefs;
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
 
   // Dismiss popup
   useEffect(() => {
     if (!xrefPopup) return;
-    const dismiss = () => setXrefPopup(null);
+    // Clicks inside the popup are ignored here rather than being stopped from
+    // propagating by a handler on the popup div.
+    const dismiss = (e?: MouseEvent) => {
+      if (e && popupRef.current?.contains(e.target as Node)) return;
+      setXrefPopup(null);
+    };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -103,7 +109,7 @@ export function ImportsView() {
         <div className="flex-1" />
         {!importXrefs ? (
           <span className="text-[10px] text-gray-500 flex items-center gap-1">
-            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
@@ -119,7 +125,7 @@ export function ImportsView() {
           const isCollapsed = collapsed.has(imp.libraryName);
           return (
             <div key={i}>
-              <button
+              <button type="button"
                 onClick={() => toggleCollapse(imp.libraryName)}
                 className="flex items-center gap-1.5 text-yellow-400 font-semibold hover:text-yellow-300 py-0.5"
               >
@@ -148,8 +154,9 @@ export function ImportsView() {
                           );
                         })()}
                         {importXrefs && xrefCount > 0 && (
-                          <span
-                            className="text-gray-500 cursor-pointer hover:text-blue-400 text-[10px]"
+                          <button
+                            type="button"
+                            className="inline text-gray-500 cursor-pointer hover:text-blue-400 text-[10px]"
                             onClick={(e) => {
                               e.stopPropagation();
                               const rect = (e.target as HTMLElement).getBoundingClientRect();
@@ -163,7 +170,7 @@ export function ImportsView() {
                             }}
                           >
                             ({xrefCount} xref{xrefCount !== 1 ? "s" : ""})
-                          </span>
+                          </button>
                         )}
                         {importXrefs && xrefCount === 0 && (
                           <span className="text-gray-700 text-[10px]">(0 xrefs)</span>
@@ -181,15 +188,15 @@ export function ImportsView() {
       {/* Xref popup */}
       {xrefPopup && (
         <div
+          ref={popupRef}
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[220px] max-h-60 overflow-auto"
           style={{ left: xrefPopup.x, top: xrefPopup.y }}
-          onClick={(e) => e.stopPropagation()}
         >
           <div className="px-3 py-1 text-gray-400 border-b border-gray-700">
             Xrefs to {xrefPopup.funcName}
           </div>
           {xrefPopup.sources.map((src, i) => (
-            <button
+            <button type="button"
               key={i}
               className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
               onClick={() => {

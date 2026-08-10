@@ -1,10 +1,14 @@
 /**
  * Test harness for the MCP tool layer.
  *
- * `registerTools` is the only export of `src/mcp/tools.ts`; the interesting
- * logic (`parseAddr`, `resolveExportPath`) is module-private. Rather than
- * widening the module's public surface for tests, this captures the handlers
- * `registerTools` hands to the server and calls them directly.
+ * `registerTools` is the only export of `src/mcp/tools.ts`, so reaching a tool's
+ * behaviour means registering it: this captures the handlers `registerTools`
+ * hands to the server and calls them directly.
+ *
+ * Prefer NOT to route a test through here when the logic under test is a plain
+ * helper — `parseAddr` and `resolveExportPath` now live in `src/mcp/paths.ts`
+ * and are imported directly by their suites, which keeps them off the whole tool
+ * import graph. `importGraph.test.ts` holds that line.
  *
  * Caveat: the captured handlers are invoked WITHOUT the zod schema that the real
  * McpServer applies, so these tests exercise handler logic, not argument

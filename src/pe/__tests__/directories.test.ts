@@ -191,10 +191,9 @@ describe('parseExports', () => {
     expect(byName.get('PointsAtSecond')).toBe(0xbbb0);
   });
 
-  it('reports the ordinal-table value verbatim (the Base field is not applied)', () => {
-    // NOTE: current parser behaviour. The spec ordinal is Base + index, so with
-    // the conventional Base of 1 these are each one lower than what dumpbin
-    // reports. See the ordinal-base finding in the review notes.
+  it('biases ordinals by the directory Base field', () => {
+    // The ordinal table holds unbiased address-table indices; the ordinal the
+    // loader (and dumpbin) reports is Base + index.
     const buf = buildMinimalPE32({
       directories: {
         exports: {
@@ -210,13 +209,132 @@ describe('parseExports', () => {
     });
 
     const pe = parsePE(buf);
-    expect(pe.exports.map(e => e.ordinal)).toEqual([0, 1]);
+    expect(pe.exports.map(e => e.ordinal)).toEqual([1, 2]);
   });
 
-  it('returns an empty list when the export directory is present but has no names', () => {
+  it('honours a non-conventional ordinal base', () => {
+    const buf = buildMinimalPE64({
+      directories: {
+        exports: {
+          dllName: 'based.dll',
+          ordinalBase: 0x20,
+          addresses: [0x1000, 0x1100],
+          names: [
+            { name: 'First', addressIndex: 0 },
+            { name: 'Second', addressIndex: 1 },
+          ],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    expect(pe.exports.map(e => [e.name, e.ordinal])).toEqual([
+      ['First', 0x20],
+      ['Second', 0x21],
+    ]);
+  });
+
+  it('reports ordinal-only exports with a synthesized name', () => {
+    // ws2_32.dll-style: address table slots with no entry in the name table.
     const buf = buildMinimalPE32({
       directories: {
-        exports: { dllName: 'sample.dll', addresses: [0x1000], names: [] },
+        exports: {
+          dllName: 'sample.dll',
+          ordinalBase: 1,
+          addresses: [0x1000, 0x1100, 0x1200],
+          names: [{ name: 'OnlyNamed', addressIndex: 1 }],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    expect(pe.exports.map(e => [e.name, e.ordinal, e.address, e.byOrdinal ?? false])).toEqual([
+      ['Ordinal#1', 1, 0x1000, true],
+      ['OnlyNamed', 2, 0x1100, false],
+      ['Ordinal#3', 3, 0x1200, true],
+    ]);
+  });
+
+  it('skips empty address-table slots', () => {
+    const buf = buildMinimalPE32({
+      directories: {
+        exports: {
+          dllName: 'sample.dll',
+          ordinalBase: 1,
+          addresses: [0x1000, 0, 0x1200],
+          names: [],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    // Ordinal 2 is an unused slot; 1 and 3 keep their spec ordinals.
+    expect(pe.exports.map(e => e.ordinal)).toEqual([1, 3]);
+  });
+
+  it('emits an entry per alias when several names share one address slot', () => {
+    const buf = buildMinimalPE32({
+      directories: {
+        exports: {
+          dllName: 'sample.dll',
+          addresses: [0x1000],
+          names: [
+            { name: 'RealName', addressIndex: 0 },
+            { name: 'AliasName', addressIndex: 0 },
+          ],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    expect(pe.exports.map(e => e.name)).toEqual(['RealName', 'AliasName']);
+    expect(pe.exports.every(e => e.ordinal === 1 && e.address === 0x1000)).toBe(true);
+  });
+
+  it('detects forwarder exports and exposes their target string', () => {
+    const buf = buildMinimalPE64({
+      directories: {
+        exports: {
+          dllName: 'fwd.dll',
+          addresses: [0x1000, { forwarder: 'NTDLL.RtlAllocateHeap' }],
+          names: [
+            { name: 'LocalFunc', addressIndex: 0 },
+            { name: 'HeapAlloc', addressIndex: 1 },
+          ],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    const local = pe.exports.find(e => e.name === 'LocalFunc');
+    const fwd = pe.exports.find(e => e.name === 'HeapAlloc');
+    expect(local?.forwarder).toBeUndefined();
+    expect(fwd?.forwarder).toBe('NTDLL.RtlAllocateHeap');
+  });
+
+  it('detects forwarders on ordinal-only exports too', () => {
+    const buf = buildMinimalPE32({
+      directories: {
+        exports: {
+          dllName: 'fwd.dll',
+          ordinalBase: 5,
+          addresses: [{ forwarder: 'OTHER.Thing' }],
+          names: [],
+        },
+      },
+    });
+
+    const pe = parsePE(buf);
+    expect(pe.exports).toHaveLength(1);
+    expect(pe.exports[0].name).toBe('Ordinal#5');
+    expect(pe.exports[0].byOrdinal).toBe(true);
+    expect(pe.exports[0].forwarder).toBe('OTHER.Thing');
+  });
+
+  it('returns an empty list when the address table is empty', () => {
+    const buf = buildMinimalPE32({
+      directories: {
+        exports: { dllName: 'sample.dll', addresses: [], names: [] },
       },
     });
 

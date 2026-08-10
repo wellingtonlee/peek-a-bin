@@ -4,7 +4,7 @@ import type {
   IRExpr, IRStmt, IRCall, BinaryOp,
 } from './ir';
 import {
-  irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, 
+  irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, isKnownRegister,
 } from './ir';
 import type { RegState } from './regstate';
 
@@ -29,7 +29,9 @@ function memPrefixSize(s: string): number {
 }
 
 function isRegister(s: string): boolean {
-  return regSize(s) > 0 || /^(rip|eip)$/i.test(s);
+  // NB: not `regSize(s) > 0` — regSize() falls back to 4 for unknown names, so
+  // that test matched every operand and immediates were lifted as registers.
+  return isKnownRegister(s) || /^(rip|eip)$/i.test(s.trim());
 }
 
 function parseImm(s: string): number | null {
@@ -719,12 +721,12 @@ function collectArgs32(
   }
   if (callIdx < 0) return args;
 
+  // Walking backwards from the call already yields argument order: cdecl
+  // pushes the last argument first, so the push nearest the call is argument 1.
   for (let i = callIdx - 1; i >= 0 && args.length < 8; i--) {
     if (insns[i].mnemonic !== 'push') break;
     const op = insns[i].opStr.trim();
     args.push(parseOperand(op, insns[i], is64, regState));
   }
-  // push order is reverse of arg order
-  args.reverse();
   return args;
 }

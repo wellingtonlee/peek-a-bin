@@ -131,9 +131,18 @@ function extractCN(data: Uint8Array, nameElement: DERElement): string | null {
   return null;
 }
 
+/** DER times are ASCII digits; anything else would render as "NaN-ab-cd". */
+function isDigits(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x30 || c > 0x39) return false;
+  }
+  return true;
+}
+
 function parseUTCTime(data: Uint8Array, el: DERElement): string | null {
   const str = readDERString(data, el);
-  if (str.length < 12) return null;
+  if (str.length < 12 || !isDigits(str.substring(0, 12))) return null;
   const year = parseInt(str.substring(0, 2), 10);
   const fullYear = year >= 50 ? 1900 + year : 2000 + year;
   const month = str.substring(2, 4);
@@ -146,7 +155,7 @@ function parseUTCTime(data: Uint8Array, el: DERElement): string | null {
 
 function parseGeneralizedTime(data: Uint8Array, el: DERElement): string | null {
   const str = readDERString(data, el);
-  if (str.length < 14) return null;
+  if (str.length < 14 || !isDigits(str.substring(0, 14))) return null;
   const year = str.substring(0, 4);
   const month = str.substring(4, 6);
   const day = str.substring(6, 8);

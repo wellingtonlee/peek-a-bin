@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
+import { ModalBackdrop } from "./ModalBackdrop";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type AddrMode = "va" | "rva" | "file";
@@ -65,20 +66,20 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <ModalBackdrop onClose={onClose} />
       <div
-        className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl p-4 w-80"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Go to address"
+        className="relative bg-gray-800 border border-gray-600 rounded-lg shadow-xl p-4 w-80"
       >
         <h3 className="text-sm font-semibold text-gray-200 mb-3">Go to Address</h3>
 
         {/* Format toggle */}
         <div className="flex gap-1 mb-3">
           {(["va", "rva", "file"] as AddrMode[]).map((m) => (
-            <button
+            <button type="button"
               key={m}
               onClick={() => setMode(m)}
               className={`px-3 py-1 rounded text-xs font-semibold ${
@@ -125,13 +126,13 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
 
         {/* Actions */}
         <div className="flex justify-end gap-2">
-          <button
+          <button type="button"
             onClick={onClose}
             className="px-3 py-1.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600"
           >
             Cancel
           </button>
-          <button
+          <button type="button"
             onClick={handleGo}
             disabled={resolvedVA === null}
             className="px-3 py-1.5 rounded text-xs bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default"

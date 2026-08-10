@@ -151,8 +151,9 @@ Export annotations as ExportSchemaV1 JSON, optionally writing to a file.
 The JSON is always returned in the response body. `outputPath` additionally writes it to
 disk and is **confined**: it must end in `.json` and resolve inside the export root —
 `PEEK_A_BIN_EXPORT_DIR` if set, otherwise the server's working directory. Relative paths
-resolve against that root. Traversal outside it (including via symlinked directories)
-returns an error and writes nothing.
+resolve against that root. Traversal outside it returns an error and writes nothing; that
+includes escaping via a symlinked parent directory, and via a symlinked *file* planted at the
+target name, which is refused outright rather than followed.
 
 ```bash
 PEEK_A_BIN_EXPORT_DIR=/home/me/analysis npm run mcp
@@ -175,7 +176,7 @@ PE file data is exposed as MCP resources using the URI template `pe://{fileId}/<
 | Headers | `pe://{fileId}/headers` | Image base, entry point, subsystem, DLL characteristics, machine type, timestamps |
 | Sections | `pe://{fileId}/sections` | Section table with names, addresses, sizes, and characteristic flags |
 | Imports | `pe://{fileId}/imports` | Import table — libraries and functions with IAT addresses |
-| Exports | `pe://{fileId}/exports` | Export table — name, ordinal, and address for each export |
+| Exports | `pe://{fileId}/exports` | Export table — name, ordinal (Ordinal Base applied) and address per export, plus `byOrdinal: true` for nameless exports and `forwarder: "OTHERDLL.Func"` for forwarded ones. Both keys are omitted when they do not apply |
 | Strings | `pe://{fileId}/strings` | Extracted strings with addresses and encoding (ascii/utf16le) |
 | Functions | `pe://{fileId}/functions` | Detected function list with names, addresses, sizes, thunk status |
 | Anomalies | `pe://{fileId}/anomalies` | Security anomalies with severity, title, and detail |
@@ -208,6 +209,35 @@ and continues serving MCP over stdio — live sync is optional and never takes t
 ## Multi-File Sessions
 
 The MCP server supports loading multiple PE files. Each file is identified by an `id` (auto-generated from filename or explicitly provided via `load_pe`). All tools and resources reference files by this ID, enabling side-by-side analysis.
+
+## Module Layout
+
+| File | Role |
+|------|------|
+| `src/mcp/index.ts` | Entry point. Routes the `setup` subcommand, then starts the server over stdio |
+| `src/mcp/cli.ts` | The `setup` subcommand |
+| `src/mcp/clients.ts` | Registry of supported AI clients (see below) |
+| `src/mcp/tools.ts` | `registerTools()` — the 13 tools |
+| `src/mcp/resources.ts` | `registerResources()` — the `pe://` resources |
+| `src/mcp/paths.ts` | `parseAddr()` and `resolveExportPath()` — argument parsing and export-path confinement |
+| `src/mcp/session.ts` | Multi-file session state and the analysis pipeline |
+| `src/mcp/disasm.ts` | Capstone wrapper for Node (no Web Worker, no IndexedDB cache) |
+
+### The `./session` type-import invariant
+
+`src/mcp/disasm.ts` loads Capstone WASM at module scope, and `session.ts` imports it for value.
+**`tools.ts` and `resources.ts` therefore import `./session` for types only** — `import type
+{ AnalyzedFile, FileSession } from './session'`, which TypeScript erases entirely. That is what
+lets the test suite register every tool handler against a stub server without any WASM being
+fetched.
+
+Switching either file to a value import of `./session` is a one-character change that still
+compiles, still passes every other test, and quietly makes both MCP suites load Capstone —
+slow, and fragile in CI. `src/mcp/__tests__/importGraph.test.ts` walks the value-import closure
+of `tools.ts` and `resources.ts` and fails if it ever reaches `session.ts`, `disasm.ts` or
+`capstone-wasm`. The same suite asserts `paths.ts` imports nothing but `node:` builtins, which
+is why the path and address helpers live there rather than inside `tools.ts`: their tests call
+them directly instead of driving a full tool invocation.
 
 ## Adding New Clients
 

@@ -232,7 +232,7 @@ export function InstructionDetail({
           0x{insn.address.toString(16).toUpperCase()}
         </span>
         <div className="flex-1" />
-        <button
+        <button type="button"
           onClick={onClose}
           className="text-gray-500 hover:text-white px-1"
         >
@@ -265,7 +265,7 @@ export function InstructionDetail({
             <div className="text-gray-600 italic">None</div>
           ) : (
             xrefsTo.slice(0, 50).map((xref, i) => (
-              <button
+              <button type="button"
                 key={`${xref.from}-${i}`}
                 onClick={() => onNavigate(xref.from)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate font-mono flex items-center gap-1"
@@ -285,7 +285,7 @@ export function InstructionDetail({
         <div className={`flex-1 overflow-auto p-2 ${stackFrame ? "border-r border-gray-700" : ""}`}>
           <div className="text-gray-500 mb-1 font-semibold">Xrefs From</div>
           {xrefFrom ? (
-            <button
+            <button type="button"
               onClick={() => onNavigate(xrefFrom.address)}
               className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"
             >

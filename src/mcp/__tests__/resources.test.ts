@@ -150,9 +150,10 @@ describe('pe://{fileId}/exports', () => {
     const { session } = stubSession({ pe: samplePE() } as never);
     const exports = await body(captureResources(session).get('pe-exports')!, 'exports');
 
+    // Ordinals are Base-biased (Base 1), matching dumpbin.
     expect(exports).toEqual([
-      { name: 'Start', ordinal: 0, address: '0x1000' },
-      { name: 'Stop', ordinal: 1, address: '0x1100' },
+      { name: 'Start', ordinal: 1, address: '0x1000' },
+      { name: 'Stop', ordinal: 2, address: '0x1100' },
     ]);
   });
 });

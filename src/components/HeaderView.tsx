@@ -76,15 +76,16 @@ function CopyableHex({ value, width = 8 }: { value: number; width?: number }) {
   }, [hex]);
 
   return (
-    <span
+    <button
+      type="button"
       onClick={handleClick}
-      className={`cursor-pointer hover:underline transition-colors ${
+      className={`inline cursor-pointer hover:underline transition-colors ${
         copied ? "text-green-400" : "text-blue-400"
       }`}
       title="Click to copy"
     >
       {hex}
-    </span>
+    </button>
   );
 }
 
@@ -106,7 +107,7 @@ function SignatureSection() {
 
   return (
     <section>
-      <button
+      <button type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
@@ -164,7 +165,7 @@ function TLSSection() {
 
   return (
     <section>
-      <button
+      <button type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
@@ -198,7 +199,7 @@ function TLSSection() {
                 <div className="space-y-0.5">
                   {tls.callbacks.map((cb, i) => (
                     <div key={i}>
-                      <button
+                      <button type="button"
                         onClick={() => navigateTo(cb)}
                         className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer font-mono"
                       >
@@ -226,7 +227,7 @@ function RelocationsSection() {
 
   return (
     <section>
-      <button
+      <button type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
@@ -292,7 +293,7 @@ function AnomalyBanners() {
               <span className={`${cfg.label} font-semibold`}>{a.title}</span>
               <span className={`${cfg.text} ml-2`}>{a.detail}</span>
             </div>
-            <button
+            <button type="button"
               onClick={() => setDismissed((prev) => new Set([...prev, a.idx]))}
               className={`${cfg.label} hover:opacity-80 text-sm leading-none shrink-0`}
               title="Dismiss"
@@ -390,7 +391,7 @@ export function HeaderView() {
               </span>
             </Row>
             <Row label="Entry Point">
-              <button
+              <button type="button"
                 onClick={navigateToEntry}
                 className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
               >
@@ -486,13 +487,14 @@ export function HeaderView() {
             </Row>
             <Row label="Imphash">
               {imphash ? (
-                <span
+                <button
+                  type="button"
                   onClick={copyImphash}
-                  className={`font-mono cursor-pointer hover:underline transition-colors ${copiedImphash ? "text-green-400" : "text-blue-400"}`}
+                  className={`inline font-mono cursor-pointer hover:underline transition-colors ${copiedImphash ? "text-green-400" : "text-blue-400"}`}
                   title="Click to copy"
                 >
                   {imphash}
-                </span>
+                </button>
               ) : (
                 <span className="text-gray-500">No imports</span>
               )}

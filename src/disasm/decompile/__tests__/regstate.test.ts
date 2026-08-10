@@ -233,20 +233,54 @@ describe('RegState.invalidateCallerSaved', () => {
     expect(st.getCondition('je')).toEqual({ kind: 'unknown', text: 'je' });
   });
 
-  // KNOWN BUG (reported, not fixed here): the lifter stores defs under the literal
-  // operand name ('eax', 'ecx', 'r8d'), but invalidateCallerSaved only deletes the
-  // 64-bit names. A stale sub-register value therefore survives a call and can be
-  // folded into code after it. This is total in 32-bit mode, where every def is
-  // stored as eax/ecx/edx/…
-  it('fails to drop 32-bit sub-registers of the volatile registers', () => {
+  // The lifter stores defs under the literal operand name ('eax', 'ecx', 'r8d'),
+  // so the clobber check has to run through the canonical parent register.
+  it('drops 32-bit sub-registers of the volatile registers', () => {
     const st = new RegState();
     st.set('ecx', irConst(0x1234));
     st.set('eax', irConst(1));
     st.set('r8d', irConst(2));
     st.invalidateCallerSaved();
-    expect(st.get('ecx')).toEqual(irConst(0x1234)); // should be undefined
-    expect(st.get('eax')).toEqual(irConst(1)); // should be undefined
-    expect(st.get('r8d')).toEqual(irConst(2)); // should be undefined
+    expect(st.get('ecx')).toBeUndefined();
+    expect(st.get('eax')).toBeUndefined();
+    expect(st.get('r8d')).toBeUndefined();
+  });
+
+  it('drops 16-bit and 8-bit sub-registers of the volatile registers', () => {
+    const st = new RegState();
+    for (const r of ['ax', 'al', 'ah', 'cx', 'cl', 'dx', 'dl', 'r9w', 'r11b']) {
+      st.set(r, irConst(1));
+    }
+    st.invalidateCallerSaved();
+    for (const r of ['ax', 'al', 'ah', 'cx', 'cl', 'dx', 'dl', 'r9w', 'r11b']) {
+      expect(st.get(r), r).toBeUndefined();
+    }
+  });
+
+  it('keeps sub-registers of the non-volatile registers', () => {
+    const st = new RegState();
+    for (const r of ['ebx', 'esi', 'edi', 'bp', 'r12d', 'r15w']) st.set(r, irConst(1));
+    st.invalidateCallerSaved();
+    for (const r of ['ebx', 'esi', 'edi', 'bp', 'r12d', 'r15w']) {
+      expect(st.get(r), r).toEqual(irConst(1));
+    }
+  });
+
+  it('invalidates a 32-bit-mode constant so it cannot fold past the call', () => {
+    // mov ecx, 0x1234 / call f / mov edx, ecx — ECX must not still be 0x1234.
+    const st = new RegState();
+    st.set('ecx', irConst(0x1234));
+    st.invalidateCallerSaved();
+    expect(st.getOrReg('ecx', 4)).toEqual(irReg('ecx', 4));
+  });
+
+  it('leaves the return-value def written after the call in place', () => {
+    // The lifter invalidates first, then stores the call result in eax/rax.
+    const st = new RegState();
+    st.set('eax', irConst(0));
+    st.invalidateCallerSaved();
+    st.set('eax', irConst(42));
+    expect(st.get('eax')).toEqual(irConst(42));
   });
 });
 

@@ -143,18 +143,114 @@ describe('inferSignature — x64 (Windows fastcall)', () => {
     expect(inferSignature(ours, insns, true).paramCount).toBe(0);
   });
 
-  // KNOWN BUG (reported, not fixed here): `xor rcx, rcx` is a zeroing idiom, not a
-  // parameter read, but isSourceOperand() falls through to a substring match for
-  // non-mov mnemonics and reports a read before the write is recorded.
-  it('miscounts the `xor rcx, rcx` zeroing idiom as a parameter', () => {
-    expect(sig64([['xor', 'rcx, rcx'], ['ret', '']]).paramCount).toBe(1);
+  describe('zeroing idioms', () => {
+    it('does not count `xor rcx, rcx` as a parameter read', () => {
+      expect(sig64([['xor', 'rcx, rcx'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('does not count `xor ecx, ecx` as a parameter read', () => {
+      expect(sig64([['xor', 'ecx, ecx'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('does not count `sub r8, r8` as a parameter read', () => {
+      expect(sig64([['sub', 'r8, r8'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('lets a zeroing idiom suppress a later read of the same register', () => {
+      const s = sig64([
+        ['xor', 'ecx, ecx'],
+        ['mov', 'rax, rcx'],
+        ['ret', ''],
+      ]);
+      expect(s.paramCount).toBe(0);
+    });
+
+    it('still counts a genuine xor against a parameter register', () => {
+      // `xor rcx, rdx` reads both operands — this is arithmetic, not zeroing.
+      expect(sig64([['xor', 'rcx, rdx'], ['ret', '']]).paramCount).toBe(2);
+    });
   });
 
-  // KNOWN BUG (reported): only the 64-bit register names are matched, so 32-bit
-  // sub-registers of RCX/RDX are invisible while r8d/r9d match by substring.
-  it('does not see edx as a parameter but does see r8d', () => {
-    expect(sig64([['mov', 'eax, edx'], ['ret', '']]).paramCount).toBe(0);
-    expect(sig64([['mov', 'eax, r8d'], ['ret', '']]).paramCount).toBe(3);
+  describe('sub-register operands', () => {
+    it('counts a read of edx as two parameters', () => {
+      expect(sig64([['mov', 'eax, edx'], ['ret', '']]).paramCount).toBe(2);
+    });
+
+    it('counts a read of r8d as three parameters', () => {
+      expect(sig64([['mov', 'eax, r8d'], ['ret', '']]).paramCount).toBe(3);
+    });
+
+    it('counts 16-bit and 8-bit reads of the argument registers', () => {
+      expect(sig64([['movzx', 'eax, cx'], ['ret', '']]).paramCount).toBe(1);
+      expect(sig64([['movzx', 'eax, dl'], ['ret', '']]).paramCount).toBe(2);
+      expect(sig64([['movzx', 'eax, r9b'], ['ret', '']]).paramCount).toBe(4);
+    });
+
+    it('treats a 32-bit write as killing the whole register', () => {
+      const s = sig64([
+        ['mov', 'ecx, 0x10'],
+        ['mov', 'rax, rcx'],
+        ['ret', ''],
+      ]);
+      expect(s.paramCount).toBe(0);
+    });
+
+    it('does not read `rdx` out of the `dx` inside another mnemonic operand', () => {
+      // Substring matching used to see `rdx` in text like `dx`/`edx` and vice versa.
+      expect(sig64([['mov', 'rax, qword ptr [rbx]'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('does not count a write to a 32-bit argument register as a read', () => {
+      expect(sig64([['mov', 'ecx, eax'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('keeps counting the parent after a partial 8-bit write', () => {
+      // `mov cl, al` leaves the upper bits of RCX intact, so the later read is
+      // still (partly) a read of the incoming argument.
+      const s = sig64([
+        ['mov', 'cl, al'],
+        ['mov', 'rax, rcx'],
+        ['ret', ''],
+      ]);
+      expect(s.paramCount).toBe(1);
+    });
+  });
+
+  describe('read/write ordering within one instruction', () => {
+    it('counts a register that is read and written by the same instruction', () => {
+      // `add rdx, 1` reads the incoming RDX before overwriting it.
+      expect(sig64([['add', 'rdx, 0x1'], ['ret', '']]).paramCount).toBe(2);
+    });
+
+    it('suppresses reads only after the defining instruction', () => {
+      const s = sig64([
+        ['add', 'rcx, 0x1'],
+        ['mov', 'rax, rcx'],
+        ['ret', ''],
+      ]);
+      expect(s.paramCount).toBe(1);
+    });
+
+    it('counts registers read through a memory destination', () => {
+      expect(sig64([['mov', 'qword ptr [rdx], rax'], ['ret', '']]).paramCount).toBe(2);
+    });
+
+    it('does not treat the destination of a 3-operand imul as a read', () => {
+      expect(sig64([['imul', 'rcx, rax, 0x4'], ['ret', '']]).paramCount).toBe(0);
+    });
+
+    it('counts the destination of a 2-operand imul as a read', () => {
+      expect(sig64([['imul', 'rcx, rax'], ['ret', '']]).paramCount).toBe(1);
+    });
+
+    it('treats pop as a write, not a read', () => {
+      const s = sig64([
+        ['pop', 'rcx'],
+        ['mov', 'rax, rcx'],
+        ['ret', ''],
+      ]);
+      expect(s.paramCount).toBe(0);
+    });
   });
 });
 
@@ -230,6 +326,19 @@ describe('inferSignature — x86', () => {
     it('reports thiscall when ecx is read before being written', () => {
       const s = sig32([['mov', 'eax, dword ptr [ecx + 0x4]'], ['ret', '']]);
       expect(s.convention).toBe('thiscall');
+    });
+
+    it('reports thiscall for a read of a sub-register of ecx', () => {
+      expect(sig32([['movzx', 'eax, cl'], ['ret', '']]).convention).toBe('thiscall');
+    });
+
+    it('does not report thiscall for the `xor ecx, ecx` zeroing idiom', () => {
+      const s = sig32([
+        ['xor', 'ecx, ecx'],
+        ['mov', 'eax, dword ptr [ecx]'],
+        ['ret', ''],
+      ]);
+      expect(s.convention).toBe('cdecl');
     });
 
     it('does not report thiscall when ecx is written first', () => {

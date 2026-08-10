@@ -1,30 +1,35 @@
 /**
- * Export-path confinement for the `export_analysis` tool.
+ * Export-path confinement, tested directly against `resolveExportPath`.
  *
  * The MCP server writes files on behalf of a model, so `outputPath` is
- * attacker-influenced input. Every case here asserts the OUTCOME — that no file
- * appears outside the export root — not merely that an error string came back.
+ * attacker-influenced input. This suite asserts the DECISION (which absolute
+ * path, if any, the tool is allowed to write); the end-to-end counterpart in
+ * `exportAnalysis.test.ts` asserts the OUTCOME on disk — that no file appears
+ * outside the export root.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { captureTools, stubSession, textOf, type ToolHandler } from './harness';
+import { resolveExportPath } from '../paths';
 
 let root: string;
 let outside: string;
 let sibling: string;
-let exportAnalysis: ToolHandler;
 const savedExportDir = process.env.PEEK_A_BIN_EXPORT_DIR;
+
+/** The resolved path of an accepted result; fails loudly on a rejection. */
+function acceptedPath(result: ReturnType<typeof resolveExportPath>): string {
+  if ('error' in result) throw new Error(`expected acceptance, got: ${result.error}`);
+  return result.path;
+}
+
+/** The message of a rejected result; fails loudly on an acceptance. */
+function rejection(result: ReturnType<typeof resolveExportPath>): string {
+  if ('path' in result) throw new Error(`expected rejection, got path: ${result.path}`);
+  return result.error;
+}
 
 beforeEach(() => {
   // realpathSync: /tmp is a symlink on some platforms, and the confinement check
@@ -36,14 +41,6 @@ beforeEach(() => {
   mkdirSync(sibling, { recursive: true });
 
   process.env.PEEK_A_BIN_EXPORT_DIR = root;
-
-  const { session } = stubSession({
-    fileName: 'sample.exe',
-    renames: { '4198400': 'main' },
-    comments: { '4198400': 'entry' },
-    bookmarks: [{ address: 0x401000, label: 'start' }],
-  });
-  exportAnalysis = captureTools(session).get('export_analysis')!;
 });
 
 afterEach(() => {
@@ -52,201 +49,139 @@ afterEach(() => {
   for (const dir of [root, outside, sibling]) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('export_analysis path confinement — accepted', () => {
-  it('writes a .json file inside the export root', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'analysis.json' });
-
-    expect(result.isError).toBeUndefined();
-    const target = join(root, 'analysis.json');
-    expect(existsSync(target)).toBe(true);
-    const written = JSON.parse(readFileSync(target, 'utf-8'));
-    expect(written.version).toBe(1);
-    expect(written.renames).toEqual({ '4198400': 'main' });
+describe('resolveExportPath — accepted', () => {
+  it('resolves a relative .json name against the export root', () => {
+    expect(acceptedPath(resolveExportPath('analysis.json'))).toBe(join(root, 'analysis.json'));
   });
 
-  it('writes into an existing subdirectory of the export root', async () => {
+  it('resolves into an existing subdirectory of the export root', () => {
     mkdirSync(join(root, 'reports'));
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'reports/out.json' });
-
-    expect(result.isError).toBeUndefined();
-    expect(existsSync(join(root, 'reports', 'out.json'))).toBe(true);
+    expect(acceptedPath(resolveExportPath('reports/out.json'))).toBe(join(root, 'reports', 'out.json'));
   });
 
-  it('accepts an absolute path that lands inside the export root', async () => {
+  it('accepts an absolute path that lands inside the export root', () => {
     const target = join(root, 'absolute.json');
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: target });
-
-    expect(result.isError).toBeUndefined();
-    expect(existsSync(target)).toBe(true);
+    expect(acceptedPath(resolveExportPath(target))).toBe(target);
   });
 
-  it('returns the payload without touching disk when outputPath is omitted', async () => {
-    const result = await exportAnalysis({ fileId: 'sample' });
+  it('accepts .JSON case-insensitively', () => {
+    expect(acceptedPath(resolveExportPath('Analysis.JSON'))).toBe(join(root, 'Analysis.JSON'));
+  });
 
-    expect(result.isError).toBeUndefined();
-    expect(JSON.parse(textOf(result)).version).toBe(1);
-    expect(existsSync(join(root, 'sample.exe.json'))).toBe(false);
+  it('normalizes ../ that stays inside the root', () => {
+    mkdirSync(join(root, 'reports'));
+    expect(acceptedPath(resolveExportPath('reports/../back.json'))).toBe(join(root, 'back.json'));
+  });
+
+  it('accepts overwriting an existing regular file', () => {
+    const target = join(root, 'existing.json');
+    writeFileSync(target, '{}');
+    expect(acceptedPath(resolveExportPath('existing.json'))).toBe(target);
+  });
+
+  it('resolves through a symlinked directory that stays inside the root', () => {
+    mkdirSync(join(root, 'real'));
+    symlinkSync(join(root, 'real'), join(root, 'alias'), 'dir');
+    // The returned path is the REAL location, not the aliased one.
+    expect(acceptedPath(resolveExportPath('alias/out.json'))).toBe(join(root, 'real', 'out.json'));
   });
 });
 
-describe('export_analysis path confinement — rejected', () => {
-  it('rejects ../ traversal and creates nothing outside the root', async () => {
-    const escaped = resolve(dirname(root), 'escaped.json');
-    expect(existsSync(escaped)).toBe(false);
-
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: '../escaped.json' });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/escapes the allowed export directory/);
-    expect(existsSync(escaped)).toBe(false);
+describe('resolveExportPath — rejected', () => {
+  it('rejects ../ traversal', () => {
+    expect(rejection(resolveExportPath('../escaped.json'))).toMatch(/escapes the allowed export directory/);
   });
 
-  it('rejects deep ../../ traversal', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: '../../../../etc/peek.json' });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync('/etc/peek.json')).toBe(false);
+  it('rejects deep ../../ traversal', () => {
+    expect(rejection(resolveExportPath('../../../../etc/peek.json'))).toMatch(/escapes|does not exist/);
   });
 
-  it('rejects an absolute path outside the root', async () => {
-    const target = join(outside, 'stolen.json');
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: target });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/escapes the allowed export directory/);
-    expect(existsSync(target)).toBe(false);
+  it('rejects an absolute path outside the root', () => {
+    expect(rejection(resolveExportPath(join(outside, 'stolen.json'))))
+      .toMatch(/escapes the allowed export directory/);
   });
 
-  it('rejects a sibling directory that merely shares the root name prefix', async () => {
+  it('rejects a sibling directory that merely shares the root name prefix', () => {
     // `${root}-sibling` startsWith(root); only a separator-aware check rejects it.
-    const target = join(sibling, 'prefix.json');
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: target });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync(target)).toBe(false);
+    expect(rejection(resolveExportPath(join(sibling, 'prefix.json'))))
+      .toMatch(/escapes the allowed export directory/);
   });
 
-  it('rejects a symlinked directory inside the root that points outside it', async () => {
+  it('rejects a symlinked directory inside the root that points outside it', () => {
     symlinkSync(outside, join(root, 'link'), 'dir');
-    const realTarget = join(outside, 'via-symlink.json');
-
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'link/via-symlink.json' });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/escapes the allowed export directory/);
-    expect(existsSync(realTarget)).toBe(false);
+    expect(rejection(resolveExportPath('link/via-symlink.json')))
+      .toMatch(/escapes the allowed export directory/);
   });
 
   // Regression: resolveExportPath used to realpath only the PARENT directory, so a
   // symlinked FILE pre-planted inside the export root redirected writeFileSync out
   // of the root while the tool reported success. Confirmed end-to-end against the
   // real MCP server before the lstat check was added.
-  it('rejects a symlinked FILE inside the root that points outside it', async () => {
-    const realTarget = join(outside, 'target.json');
-    symlinkSync(realTarget, join(root, 'out.json'));
-
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'out.json' });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync(realTarget)).toBe(false);
+  it('rejects a symlinked FILE inside the root that points outside it', () => {
+    symlinkSync(join(outside, 'target.json'), join(root, 'out.json'));
+    expect(rejection(resolveExportPath('out.json'))).toMatch(/symlink/);
   });
 
-  it('rejects a non-.json extension without writing', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'analysis.txt' });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/must end in \.json/);
-    expect(existsSync(join(root, 'analysis.txt'))).toBe(false);
+  it('rejects a symlinked FILE inside the root even when it points back inside', () => {
+    // The check refuses to follow the final component at all, rather than trying
+    // to reason about where a dangling or re-pointed link lands.
+    symlinkSync(join(root, 'real.json'), join(root, 'inner-link.json'));
+    expect(rejection(resolveExportPath('inner-link.json'))).toMatch(/symlink/);
   });
 
-  it('rejects an extensionless path', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'analysis' });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync(join(root, 'analysis'))).toBe(false);
+  it('rejects a non-.json extension', () => {
+    expect(rejection(resolveExportPath('analysis.txt'))).toMatch(/must end in \.json/);
   });
 
-  it('rejects a .json suffix that is only part of the filename', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'analysis.json.sh' });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync(join(root, 'analysis.json.sh'))).toBe(false);
+  it('rejects an extensionless path', () => {
+    expect(rejection(resolveExportPath('analysis'))).toMatch(/must end in \.json/);
   });
 
-  it('accepts .JSON case-insensitively', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'Analysis.JSON' });
-
-    expect(result.isError).toBeUndefined();
-    expect(existsSync(join(root, 'Analysis.JSON'))).toBe(true);
+  it('rejects a .json suffix that is only part of the filename', () => {
+    expect(rejection(resolveExportPath('analysis.json.sh'))).toMatch(/must end in \.json/);
   });
 
-  it('rejects a directory that does not exist rather than creating it', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'missing/out.json' });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/output directory does not exist/);
-    expect(existsSync(join(root, 'missing'))).toBe(false);
+  it('rejects a directory that does not exist rather than creating it', () => {
+    expect(rejection(resolveExportPath('missing/out.json'))).toMatch(/output directory does not exist/);
   });
 
-  it('does not leak the analysis payload on a rejected path', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: '../escaped.json' });
-    expect(textOf(result)).not.toMatch(/"version"/);
-  });
-
-  it('errors when the configured export root does not exist', async () => {
+  it('errors when the configured export root does not exist', () => {
     process.env.PEEK_A_BIN_EXPORT_DIR = join(outside, 'no-such-dir');
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: 'out.json' });
+    expect(rejection(resolveExportPath('out.json'))).toMatch(/export root does not exist/);
+  });
 
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/export root does not exist/);
+  it('names the resolved root in the escape error so the caller can fix it', () => {
+    const message = rejection(resolveExportPath(join(outside, 'x.json')));
+    expect(message).toContain(root);
+    expect(message).toContain('PEEK_A_BIN_EXPORT_DIR');
   });
 });
 
-describe('export_analysis default export root', () => {
-  it('falls back to cwd and still rejects paths outside it', async () => {
+describe('resolveExportPath — default export root', () => {
+  it('falls back to cwd when PEEK_A_BIN_EXPORT_DIR is unset', () => {
     delete process.env.PEEK_A_BIN_EXPORT_DIR;
-    const target = join(outside, 'cwd-escape.json');
-
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: target });
-
-    expect(result.isError).toBe(true);
-    expect(existsSync(target)).toBe(false);
+    expect(acceptedPath(resolveExportPath('cwd-relative.json')))
+      .toBe(resolve(realpathSync(process.cwd()), 'cwd-relative.json'));
   });
 
-  it('names the resolved root in the error so the caller can fix it', async () => {
-    const result = await exportAnalysis({ fileId: 'sample', outputPath: join(outside, 'x.json') });
-    expect(textOf(result)).toContain(root);
+  it('still rejects paths outside cwd', () => {
+    delete process.env.PEEK_A_BIN_EXPORT_DIR;
+    expect(rejection(resolveExportPath(join(outside, 'cwd-escape.json'))))
+      .toMatch(/escapes the allowed export directory/);
   });
-});
 
-describe('export_analysis unknown file', () => {
-  it('reports a not-loaded file before touching the path logic', async () => {
-    const result = await exportAnalysis({ fileId: 'nope', outputPath: '../escaped.json' });
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/not loaded/);
-    expect(existsSync(resolve(dirname(root), 'escaped.json'))).toBe(false);
+  it('treats an empty PEEK_A_BIN_EXPORT_DIR as unset', () => {
+    process.env.PEEK_A_BIN_EXPORT_DIR = '';
+    expect(acceptedPath(resolveExportPath('empty-env.json')))
+      .toBe(resolve(realpathSync(process.cwd()), 'empty-env.json'));
   });
-});
 
-describe('export_analysis payload', () => {
-  it('serializes bookmarks, renames, comments and functions', async () => {
-    const { session } = stubSession({
-      fileName: 'payload.exe',
-      renames: { '4096': 'renamed' },
-      comments: { '4096': 'note' },
-      bookmarks: [{ address: 0x1000, label: 'bm' }],
-      functions: [{ address: 0x1000, name: 'sub_1000', size: 32 }] as never,
-    });
-    const handler = captureTools(session).get('export_analysis')!;
-
-    const payload = JSON.parse(textOf(await handler({ fileId: 'sample' })));
-
-    expect(payload.fileName).toBe('payload.exe');
-    expect(payload.bookmarks).toEqual([{ address: 0x1000, label: 'bm' }]);
-    expect(payload.comments).toEqual({ '4096': 'note' });
-    // The rename wins over the detected name in the functions table.
-    expect(payload.functions).toEqual([{ address: 0x1000, name: 'renamed', size: 32 }]);
-    expect(payload.hexPatches).toEqual([]);
+  it('resolves a relative PEEK_A_BIN_EXPORT_DIR against cwd', () => {
+    // dirname(root) is absolute; use a relative spelling of an existing dir.
+    process.env.PEEK_A_BIN_EXPORT_DIR = '.';
+    expect(acceptedPath(resolveExportPath('relative-root.json')))
+      .toBe(resolve(realpathSync(process.cwd()), 'relative-root.json'));
+    expect(rejection(resolveExportPath(join(dirname(root), 'nope.json'))))
+      .toMatch(/escapes the allowed export directory/);
   });
 });

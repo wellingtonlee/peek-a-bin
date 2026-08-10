@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from "react";
+import { focusOnMount } from "./focusOnMount";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import { DataInspector } from "./DataInspector";
@@ -58,6 +59,8 @@ export function HexView() {
   const dispatch = useAppDispatch();
   const pe = state.peFile;
   const parentRef = useRef<HTMLDivElement>(null);
+  const hexCtxMenuRef = useRef<HTMLDivElement>(null);
+  const xrefPopupRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [goToInput, setGoToInput] = useState("");
   const [byteSearch, setByteSearch] = useState("");
@@ -268,7 +271,10 @@ export function HexView() {
   // Dismiss hex context menu on click outside or Escape
   useEffect(() => {
     if (!hexCtxMenu) return;
-    const dismiss = () => setHexCtxMenu(null);
+    const dismiss = (e?: MouseEvent) => {
+      if (e && hexCtxMenuRef.current?.contains(e.target as Node)) return;
+      setHexCtxMenu(null);
+    };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -375,7 +381,10 @@ export function HexView() {
   // Dismiss xref popup
   useEffect(() => {
     if (!xrefPopup) return;
-    const dismiss = () => setXrefPopup(null);
+    const dismiss = (e?: MouseEvent) => {
+      if (e && xrefPopupRef.current?.contains(e.target as Node)) return;
+      setXrefPopup(null);
+    };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -459,14 +468,14 @@ export function HexView() {
 
         <div className="w-px h-4 bg-gray-700 mx-1" />
 
-        <button
+        <button type="button"
           onClick={() => setShowEntropy((v) => !v)}
           className={`px-2 py-1 rounded text-[10px] ${showEntropy ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}
         >
           Entropy
         </button>
 
-        <button
+        <button type="button"
           onClick={() => {
             dispatch({ type: "SET_ADDRESS", address: state.currentAddress });
             dispatch({ type: "SET_TAB", tab: "disassembly" });
@@ -481,19 +490,19 @@ export function HexView() {
           <>
             <div className="w-px h-4 bg-gray-700 mx-1" />
             <span className="text-orange-400 text-[10px]">Patches: {state.hexPatches.size}</span>
-            <button
+            <button type="button"
               onClick={() => setShowDiff((v) => !v)}
               className={`px-2 py-1 rounded text-[10px] ${showDiff ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}
             >
               Diff
             </button>
-            <button
+            <button type="button"
               onClick={() => dispatch({ type: "CLEAR_PATCHES" })}
               className="px-2 py-1 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600"
             >
               Clear
             </button>
-            <button
+            <button type="button"
               onClick={handleDownload}
               className="px-2 py-1 rounded text-[10px] bg-green-700 text-white hover:bg-green-600"
             >
@@ -572,6 +581,11 @@ export function HexView() {
       </div>
 
       {/* Hex rows */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: onContextMenu is a
+          right-click affordance on a scroll region, not a control. Making this a
+          button is invalid (it contains the byte-cell buttons) and there is no
+          keyboard gesture to attach — the browser's own context-menu key already
+          fires this event on whatever is focused inside. */}
       <div ref={parentRef} className="flex-1 overflow-auto relative" onContextMenu={handleHexContextMenu}>
         <div
           style={{
@@ -622,13 +636,15 @@ export function HexView() {
                   transform: `translateY(${vItem.start}px)`,
                 }}
               >
-                <span
-                  className="disasm-address cursor-pointer hover:text-blue-400"
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="disasm-address text-left cursor-pointer hover:text-blue-400"
                   style={{ width: `${addrWidth + 2}ch` }}
                   onClick={() => handleAddressClick(addr)}
                 >
                   {addr.toString(16).toUpperCase().padStart(addrWidth, "0")}
-                </span>
+                </button>
                 <span className="hex-byte ml-2 flex-1">
                   {hexParts.map((h, i) => {
                     const byteOffset = offset + i;
@@ -643,7 +659,7 @@ export function HexView() {
                         <span key={i}>
                           {i > 0 ? " " : ""}
                           <input
-                            autoFocus
+                            ref={focusOnMount}
                             className="w-5 bg-gray-700 border border-blue-500 rounded-sm text-center text-red-400 font-bold outline-none text-xs"
                             value={editValue}
                             maxLength={2}
@@ -685,8 +701,12 @@ export function HexView() {
                         {showOrig && (
                           <span className="text-gray-600 text-[8px] line-through">{origHex}</span>
                         )}
-                        <span
-                          className={`cursor-pointer ${cls}`}
+                        {/* tabIndex={-1}: a hex page renders hundreds of byte
+                            cells; each one as a tab stop would be unusable. */}
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          className={`inline cursor-pointer ${cls}`}
                           onClick={(e) => {
                             if (i >= rowLen) return;
                             if (e.shiftKey && selectedOffset !== null) {
@@ -705,7 +725,7 @@ export function HexView() {
                           }}
                         >
                           {h}
-                        </span>
+                        </button>
                       </span>
                     );
                   })}
@@ -734,7 +754,8 @@ export function HexView() {
                 </span>
                 {/* Data xref badges */}
                 {rowXrefs?.get(vItem.index)?.map((xref) => (
-                  <span
+                  <button
+                    type="button"
                     key={xref.addr}
                     className="ml-1 px-1 py-0 rounded bg-purple-900/50 text-purple-300 text-[9px] cursor-pointer hover:bg-purple-800/60 shrink-0"
                     title={`${xref.count} xref(s) to 0x${xref.addr.toString(16).toUpperCase()}`}
@@ -745,7 +766,7 @@ export function HexView() {
                     }}
                   >
                     x{xref.count}
-                  </span>
+                  </button>
                 ))}
               </div>
             );
@@ -756,17 +777,17 @@ export function HexView() {
       {/* Hex context menu */}
       {hexCtxMenu && selectionRange && (
         <div
+          ref={hexCtxMenuRef}
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
           style={{ left: hexCtxMenu.x, top: hexCtxMenu.y }}
-          onClick={(e) => e.stopPropagation()}
         >
-          <button onClick={copyAsCArray} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button type="button" onClick={copyAsCArray} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
             Copy as C byte array
           </button>
-          <button onClick={copyAsHexString} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button type="button" onClick={copyAsHexString} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
             Copy as hex string
           </button>
-          <button onClick={copySelectionAddress} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button type="button" onClick={copySelectionAddress} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
             Copy address
           </button>
         </div>
@@ -775,15 +796,15 @@ export function HexView() {
       {/* Data xref popup */}
       {xrefPopup && (
         <div
+          ref={xrefPopupRef}
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[200px] max-h-48 overflow-auto"
           style={{ left: xrefPopup.x, top: xrefPopup.y }}
-          onClick={(e) => e.stopPropagation()}
         >
           <div className="px-3 py-1 text-gray-400 border-b border-gray-700 font-semibold">
             Xrefs to 0x{xrefPopup.addr.toString(16).toUpperCase()} ({xrefPopup.refs.length})
           </div>
           {xrefPopup.refs.map((ref, i) => (
-            <button
+            <button type="button"
               key={i}
               className="w-full text-left px-3 py-1 hover:bg-gray-700 text-blue-400 font-mono"
               onClick={() => {

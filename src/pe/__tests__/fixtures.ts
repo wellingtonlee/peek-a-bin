@@ -46,11 +46,16 @@ export interface ExportDirDef {
   dllName: string;
   /** Written to the directory's Base field. */
   ordinalBase?: number;
-  /** Function RVAs, in export-address-table order. */
-  addresses: number[];
+  /**
+   * Export address table, in slot order. A number is written verbatim as a
+   * function RVA; `{ forwarder: 'OTHER.Func' }` emits the string inside the
+   * export directory's range and writes its RVA, i.e. a forwarder export.
+   */
+  addresses: (number | { forwarder: string })[];
   /**
    * Named exports. `addressIndex` is the value written to the ordinal table —
-   * the slot in `addresses` that this name resolves to.
+   * the slot in `addresses` that this name resolves to. Slots with no name here
+   * become ordinal-only exports.
    */
   names: { name: string; addressIndex: number }[];
 }
@@ -204,7 +209,13 @@ function buildDirectorySection(
     const dllNameOff = putString(e.dllName);
 
     const addrTable = alloc(e.addresses.length * 4);
-    e.addresses.forEach((a, i) => dv.setUint32(addrTable + i * 4, a, true));
+    e.addresses.forEach((a, i) => {
+      // A forwarder's "value" is the RVA of a string that must land inside the
+      // directory's declared range — that containment is what marks it as a
+      // forwarder, so the string is allocated here, before the size is computed.
+      const value = typeof a === 'number' ? a : rvaOf(putString(a.forwarder));
+      dv.setUint32(addrTable + i * 4, value, true);
+    });
 
     const nameStringOffsets = e.names.map((n) => putString(n.name));
     const namePtrTable = alloc(e.names.length * 4);
@@ -221,7 +232,13 @@ function buildDirectorySection(
     dv.setUint32(dirOff + 32, rvaOf(namePtrTable), true);
     dv.setUint32(dirOff + 36, rvaOf(ordinalTable), true);
 
-    dirs.set(IMAGE_DIRECTORY_ENTRY_EXPORT, { virtualAddress: rvaOf(dirOff), size: 40 });
+    // Real linkers size the export directory to span everything it owns — the
+    // header, both tables and every string. Forwarder detection depends on that
+    // extent, so cover the whole block rather than just the 40-byte header.
+    dirs.set(IMAGE_DIRECTORY_ENTRY_EXPORT, {
+      virtualAddress: rvaOf(dirOff),
+      size: pos - dirOff,
+    });
   }
 
   // --- TLS ---

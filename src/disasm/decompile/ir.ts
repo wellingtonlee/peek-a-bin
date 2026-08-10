@@ -293,6 +293,16 @@ export function regSize(name: string): number {
   return REG_SIZES[name.toLowerCase()] ?? 4;
 }
 
+/**
+ * Is `name` an x86 register this IR knows about?
+ *
+ * `regSize()` defaults to 4 for anything it does not recognise, so it can never
+ * be used as a membership test — `regSize(x) > 0` is true for every string.
+ */
+export function isKnownRegister(name: string): boolean {
+  return REG_SIZES[name.toLowerCase()] !== undefined;
+}
+
 // ── Expression / Statement Walkers ──
 
 /** Recursively visit all sub-expressions in an expression tree. */

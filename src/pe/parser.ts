@@ -270,8 +270,16 @@ function parseImports(
   let descriptorOffset = importTableOffset;
   const descriptorSize = 20;
 
+  // The walk stops at the null descriptor, but a file that simply omits one
+  // would otherwise run the rest of the buffer as descriptors. The directory
+  // declares its own extent, so never read past it either.
+  const descriptorLimit = Math.min(
+    view.byteLength,
+    importTableOffset + Math.max(0, importDir.size),
+  );
+
   // Walk import descriptors until null entry
-  while (descriptorOffset + descriptorSize <= view.byteLength) {
+  while (descriptorOffset + descriptorSize <= descriptorLimit) {
     const originalFirstThunk = view.getUint32(descriptorOffset, true);
     const nameRVA = view.getUint32(descriptorOffset + 12, true);
     const firstThunk = view.getUint32(descriptorOffset + 16, true);
@@ -362,6 +370,8 @@ function parseExports(
   }
 
   // Read Export Directory Table
+  const ordinalBase = view.getUint32(exportTableOffset + 16, true);
+  const numberOfFunctions = view.getUint32(exportTableOffset + 20, true);
   const numberOfNames = view.getUint32(exportTableOffset + 24, true);
   const addressTableRVA = view.getUint32(exportTableOffset + 28, true);
   const namePointerRVA = view.getUint32(exportTableOffset + 32, true);
@@ -371,45 +381,102 @@ function parseExports(
   const namePointerOffset = rvaToFileOffset(namePointerRVA, sections);
   const ordinalTableOffset = rvaToFileOffset(ordinalTableRVA, sections);
 
-  if (addressTableOffset < 0 || namePointerOffset < 0 || ordinalTableOffset < 0) {
+  // Every export ultimately comes out of the address table; without it there is
+  // nothing to report. The name tables are optional — a DLL may export purely
+  // by ordinal — so an unmapped name table only costs the names.
+  if (addressTableOffset < 0) {
     return exports;
   }
 
-  // numberOfNames comes straight off the file as a uint32. A hostile 0xFFFFFFFF
-  // would otherwise spin ~4.3 billion times here, freezing the main thread — the
-  // name/ordinal tables cannot exceed the buffer, so clamp to what could fit.
-  const maxNames = Math.min(
-    numberOfNames,
-    Math.max(0, Math.floor((view.byteLength - namePointerOffset) / 4)),
-    Math.max(0, Math.floor((view.byteLength - ordinalTableOffset) / 2)),
+  // Address-table index -> the names bound to it. Multiple names may resolve to
+  // the same slot (aliases), and dumpbin lists each, so keep them all.
+  const namesByIndex = new Map<number, string[]>();
+
+  if (namePointerOffset >= 0 && ordinalTableOffset >= 0) {
+    // numberOfNames comes straight off the file as a uint32. A hostile 0xFFFFFFFF
+    // would otherwise spin ~4.3 billion times here, freezing the main thread — the
+    // name/ordinal tables cannot exceed the buffer, so clamp to what could fit.
+    const maxNames = Math.min(
+      numberOfNames,
+      Math.max(0, Math.floor((view.byteLength - namePointerOffset) / 4)),
+      Math.max(0, Math.floor((view.byteLength - ordinalTableOffset) / 2)),
+    );
+
+    // Walk name pointer table
+    for (let i = 0; i < maxNames; i++) {
+      const namePointerPos = namePointerOffset + i * 4;
+      const ordinalPos = ordinalTableOffset + i * 2;
+
+      // Past the end of the buffer — every later index is too, so stop rather than
+      // spin to numberOfNames.
+      if (namePointerPos + 4 > view.byteLength || ordinalPos + 2 > view.byteLength) {
+        break;
+      }
+
+      const nameRVA = view.getUint32(namePointerPos, true);
+      // The ordinal table holds the *unbiased* index into the address table,
+      // not the ordinal the loader reports.
+      const addressIndex = view.getUint16(ordinalPos, true);
+
+      const nameOffset = rvaToFileOffset(nameRVA, sections);
+      if (nameOffset < 0 || nameOffset >= view.byteLength) continue;
+
+      const name = readCString(view, nameOffset);
+
+      const existing = namesByIndex.get(addressIndex);
+      if (existing) existing.push(name);
+      else namesByIndex.set(addressIndex, [name]);
+    }
+  }
+
+  // An address inside the export directory's own range is not code: it is the
+  // RVA of a "OTHERDLL.Func" forwarder string.
+  const forwarderStart = exportDir.virtualAddress;
+  const forwarderEnd = exportDir.virtualAddress + exportDir.size;
+
+  // Same clamp as the name walk: numberOfFunctions is attacker-controlled and
+  // the address table is 4 bytes per entry.
+  const maxFunctions = Math.min(
+    numberOfFunctions,
+    Math.max(0, Math.floor((view.byteLength - addressTableOffset) / 4)),
   );
 
-  // Walk name pointer table
-  for (let i = 0; i < maxNames; i++) {
-    const namePointerPos = namePointerOffset + i * 4;
-    const ordinalPos = ordinalTableOffset + i * 2;
-
-    // Past the end of the buffer — every later index is too, so stop rather than
-    // spin to numberOfNames.
-    if (namePointerPos + 4 > view.byteLength || ordinalPos + 2 > view.byteLength) {
-      break;
-    }
-
-    const nameRVA = view.getUint32(namePointerPos, true);
-    const ordinal = view.getUint16(ordinalPos, true);
-
-    const nameOffset = rvaToFileOffset(nameRVA, sections);
-    if (nameOffset < 0 || nameOffset >= view.byteLength) continue;
-
-    const name = readCString(view, nameOffset);
-
-    // Get address from address table
-    const addressPos = addressTableOffset + ordinal * 4;
-    if (addressPos + 4 > view.byteLength) continue;
+  // Walk the address table, which is the only table that covers ordinal-only
+  // exports. Index i is ordinal `ordinalBase + i` per the PE spec.
+  for (let i = 0; i < maxFunctions; i++) {
+    const addressPos = addressTableOffset + i * 4;
+    if (addressPos + 4 > view.byteLength) break;
 
     const address = view.getUint32(addressPos, true);
+    const names = namesByIndex.get(i);
 
-    exports.push({ name, ordinal, address });
+    // A zero address marks an unused ordinal slot. Keep it only if a name
+    // somehow points at it, so a malformed file still shows its named exports.
+    if (address === 0 && !names) continue;
+
+    const ordinal = ordinalBase + i;
+
+    let forwarder: string | undefined;
+    if (address >= forwarderStart && address < forwarderEnd) {
+      const forwarderOffset = rvaToFileOffset(address, sections);
+      if (forwarderOffset >= 0 && forwarderOffset < view.byteLength) {
+        forwarder = readCString(view, forwarderOffset) || undefined;
+      }
+    }
+
+    if (names) {
+      for (const name of names) {
+        exports.push({ name, ordinal, address, ...(forwarder ? { forwarder } : {}) });
+      }
+    } else {
+      exports.push({
+        name: `Ordinal#${ordinal}`,
+        ordinal,
+        address,
+        byOrdinal: true,
+        ...(forwarder ? { forwarder } : {}),
+      });
+    }
   }
 
   return exports;

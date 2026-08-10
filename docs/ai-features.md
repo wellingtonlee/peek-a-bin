@@ -44,9 +44,79 @@ The **OpenAI** provider option works with any OpenAI-compatible API:
 |-------|-------------|
 | `provider` | `"anthropic"` or `"openai"` |
 | `apiKey` | API key for the selected provider |
-| `model` | Model identifier (e.g., `claude-sonnet-4-20250514`, `gpt-4o`) |
+| `model` | Model identifier (e.g., `claude-opus-5`, `gpt-4o`). Anthropic IDs carry no date suffix — appending one 404s. The canonical list lives in `src/llm/models.ts`; update it there, not here. |
 | `baseUrl` | Base URL for OpenAI-compatible endpoints |
 | `enhanceSource` | Source for enhance/explain: `"pseudocode"` or `"assembly"` |
+
+## Request Handling
+
+Everything below applies to every AI feature on this page, since they all go through
+`streamChat()` in `src/llm/client.ts`.
+
+### Token budgets
+
+`src/llm/models.ts` holds a per-task output ceiling, applied via `maxTokensFor(task)` and sent
+as `max_tokens` on **both** providers — an 8K ceiling was previously hardcoded twice for
+Anthropic and omitted entirely for OpenAI, so a long report could be truncated on one provider
+and unbounded on the other. `TASK_MAX_TOKENS` in that file is the source of truth; the tasks
+are `chat`, `report`, `enhance`, `batch-rename` and `vuln-scan`, and `report` gets the largest
+budget.
+
+These are caps, not reservations. They are sized generously because every call streams, so the
+timeout pressure that motivates small ceilings on non-streaming requests does not apply. For
+reasoning-capable models, `max_tokens` bounds thinking *and* visible text together — the app
+deliberately sends no `thinking` parameter, because an explicit `{"type":"disabled"}` is
+rejected by some models and gated on effort level by others, and omitting it is the only
+setting valid across the whole range a user can type into the settings box. The visible
+tradeoff is that a thinking model may pause before its first token.
+
+### Model IDs
+
+Model IDs, provider default base URLs and the settings dropdown contents all come from
+`src/llm/models.ts`. They used to be duplicated across `settings.ts`, `SettingsModal.tsx` and
+these docs, which is exactly how they drifted. **Read the current IDs from that file** — the
+two named in the profile-field table above are illustrations of the shape, not a list to keep
+in sync. Anthropic IDs carry no date suffix; appending one produces a 404.
+
+### Retries and backoff
+
+`src/llm/retry.ts` wraps every request in `runWithRetry`.
+
+| Behaviour | Detail |
+|-----------|--------|
+| Retried | Network/transport failures, HTTP 408, 429, and any 5xx |
+| Not retried | Aborts (the user's own cancel), and every other 4xx |
+| Never retried | **Anything that fails after the first token has been shown.** Retrying would replay the response from scratch and duplicate text on screen, so the caller wraps such failures in `LLMCommittedError`, which `shouldRetry` always refuses. Partial output stays on screen |
+| Backoff | Exponential with equal jitter — half the window fixed so delays grow monotonically, half random so concurrent clients do not resynchronise |
+| `Retry-After` | Honoured when present, in both RFC 9110 forms (delta-seconds and HTTP-date), capped by the policy's max delay. A malformed value falls back to normal backoff rather than retrying immediately |
+| Caps | `DEFAULT_RETRY_POLICY` bounds both total attempts and total wall-clock elapsed time. A backoff sleep that would cross the elapsed cap is not started — the real error is reported immediately instead of burning the budget first |
+| Aborts | Interrupt a backoff sleep immediately rather than running the timer down |
+
+A failure that survived retries is reported as `<message> (after N attempts)`, so it does not
+read as a one-off blip. The `onRetry` callback lets a view show a "retrying…" state.
+
+### Concurrency limiting
+
+A shared `RequestLimiter` (`llmLimiter`) caps how many LLM requests are in flight at once and
+enforces a minimum gap between request starts. The bulk features — the vulnerability scanner
+and batch rename — otherwise fire bursts that reliably trip a 429 that then has to be retried.
+A slot is held for the whole streamed response, not just the fetch, and is released before a
+backoff sleep so a backing-off request does not hold it. The current setting is small on
+purpose: enough for an interactive chat to proceed alongside a running scan, not enough for a
+bulk loop to saturate the provider. Values live in `src/llm/retry.ts`.
+
+### Response validation
+
+Features that expect JSON back (batch rename, vulnerability scan) parse it through
+`src/llm/responseSchema.ts` rather than a bare `JSON.parse` in a `catch {}`:
+
+- `unwrapJSON()` strips Markdown code fences — one implementation, replacing per-caller regexes
+  that both mishandled a fence whose info string was not exactly `json`.
+- `parseBatchRenameResponse()` / `parseScanResponse()` validate against zod schemas and return
+  a discriminated `ParseResult` (`{ ok: true, value }` or `{ ok: false, error }`). They never
+  throw.
+- Callers surface the failure. Previously a truncated or malformed response was
+  indistinguishable from a legitimate "nothing to report".
 
 ## AI Chat
 
@@ -104,9 +174,9 @@ assembles:
 - Decompiled key functions
 - Interesting strings
 
-> The context is bounded by those per-section item caps, not by a token budget — nothing counts
-> or enforces tokens. The only token limit in the codebase is `max_tokens: 8192` on the LLM
-> *response* (`src/llm/client.ts`).
+> The *request* context is bounded by those per-section item caps, not by a token budget —
+> nothing counts or enforces input tokens. The *response* is capped by the per-task budget for
+> `"report"` (see [Token budgets](#token-budgets)), which is the most generous of the five.
 
 The report includes:
 - Executive summary and binary classification
@@ -160,6 +230,13 @@ Findings appear in the **Anomalies** tab under "AI Security Findings":
 - Severity badges (Critical, High, Medium, Low)
 - Clickable function names navigate to disassembly
 - Collapsible descriptions and remediation text
+
+An empty result is **not** the same as a clean binary. Scan progress and outcome are tracked
+separately from the finding list, in `AIScanState` (`state.aiScan`), precisely so the two stay
+distinguishable — a run that produced nothing usable reports `failed`, and a run that scanned
+some functions but not others reports `complete` with a non-zero failure count, meaning the
+findings are real but incomplete. See
+[Architecture → `AIScanState`](architecture.md#aiscanstate) for the phase table.
 
 ## Enhance / Explain
 

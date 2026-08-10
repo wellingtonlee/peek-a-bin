@@ -82,10 +82,70 @@ export function AnomaliesView() {
         </table>
       )}
 
-      {/* AI Security Findings */}
-      {state.aiScanResults.length > 0 && (
+      {/* AI Security Findings — gated on the scan phase, not on the finding
+          count. An empty result list is only a clean bill of health when the
+          scan actually completed; a failed scan produces the same empty list. */}
+      {state.aiScan.phase !== "idle" && (
         <>
           <h2 className="text-gray-200 font-semibold text-base mb-3 mt-6">AI Security Findings</h2>
+
+          {state.aiScan.phase === "scanning" && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mb-3 px-3 py-2 rounded border border-blue-800 bg-blue-900/20 text-xs text-blue-200"
+            >
+              Scanning… {state.aiScan.scanned + state.aiScan.failed} of {state.aiScan.total} functions
+            </div>
+          )}
+
+          {state.aiScan.phase === "failed" && (
+            <div
+              role="alert"
+              className="mb-3 px-3 py-2 rounded border border-red-700 bg-red-900/30 text-xs text-red-200"
+            >
+              <p className="font-semibold text-red-300">Scan failed — this is not a clean result.</p>
+              <p className="mt-1">
+                No functions could be analysed
+                {state.aiScan.total > 0 ? ` (0 of ${state.aiScan.total})` : ""}. An empty findings list here means the
+                scan produced nothing, not that the binary is free of issues.
+              </p>
+              {state.aiScan.error && (
+                <p className="mt-1 font-mono text-[10px] text-red-300/80 break-words">{state.aiScan.error}</p>
+              )}
+            </div>
+          )}
+
+          {state.aiScan.phase === "complete" && state.aiScan.failed > 0 && (
+            <div
+              role="status"
+              className="mb-3 px-3 py-2 rounded border border-amber-700 bg-amber-900/25 text-xs text-amber-200"
+            >
+              <p className="font-semibold text-amber-300">
+                Partial results — the scan did not cover the whole binary.
+              </p>
+              <p className="mt-1">
+                {state.aiScan.scanned} of {state.aiScan.total} functions analysed, {state.aiScan.failed} failed. Nothing
+                in the functions that failed is represented below.
+              </p>
+              {state.aiScan.error && (
+                <p className="mt-1 font-mono text-[10px] text-amber-300/80 break-words">{state.aiScan.error}</p>
+              )}
+            </div>
+          )}
+
+          {state.aiScan.phase === "complete" &&
+            state.aiScan.failed === 0 &&
+            state.aiScanResults.length === 0 && (
+              <div
+                role="status"
+                className="mb-3 px-3 py-2 rounded border border-gray-700 bg-gray-800/40 text-xs text-gray-300"
+              >
+                No issues found across {state.aiScan.scanned} functions.
+              </div>
+            )}
+
+          {state.aiScanResults.length > 0 && (
           <table className="w-full text-xs mb-6">
             <thead>
               <tr className="text-gray-500 text-left border-b border-gray-700">
@@ -112,7 +172,7 @@ export function AnomaliesView() {
                     </td>
                     <td className={`py-1.5 px-2 ${sevColor.text} font-medium`}>{finding.title}</td>
                     <td className="py-1.5 px-2">
-                      <button
+                      <button type="button"
                         className="text-blue-400 hover:underline font-mono text-[10px]"
                         onClick={() => {
                           dispatch({ type: "SET_ADDRESS", address: finding.functionAddress });
@@ -136,6 +196,7 @@ export function AnomaliesView() {
               })}
             </tbody>
           </table>
+          )}
         </>
       )}
 
@@ -174,7 +235,7 @@ export function AnomaliesView() {
                       </td>
                       <td className="py-1.5 px-2">
                         {handler.handlerAddress > 0 ? (
-                          <button
+                          <button type="button"
                             className="text-blue-400 hover:underline font-mono"
                             onClick={() => {
                               dispatch({ type: "SET_ADDRESS", address: handler.handlerAddress });
@@ -188,7 +249,7 @@ export function AnomaliesView() {
                         )}
                       </td>
                       <td className="py-1.5 px-2">
-                        <button
+                        <button type="button"
                           className="text-blue-400 hover:underline font-mono"
                           onClick={() => {
                             dispatch({ type: "SET_ADDRESS", address: handler.instructionAddress });

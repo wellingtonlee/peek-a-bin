@@ -1,4 +1,5 @@
 import { useMemo, useRef, useCallback, useEffect, useState } from "react";
+import { focusOnMount } from "./focusOnMount";
 import type { DecompileTab, HighLevelEngine } from "../decompile/types";
 
 // ── Syntax Highlighting ──
@@ -115,6 +116,7 @@ export function DecompileView({
   comments, lineMap, editingComment, onEditComment, onCommitComment, onDeleteComment,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
 
   const lines = useMemo(() => {
@@ -159,7 +161,10 @@ export function DecompileView({
   // Dismiss context menu on click-away or Escape
   useEffect(() => {
     if (!ctxMenu) return;
-    const dismiss = () => setCtxMenu(null);
+    const dismiss = (e?: MouseEvent) => {
+      if (e && ctxMenuRef.current?.contains(e.target as Node)) return;
+      setCtxMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
     document.addEventListener("click", dismiss);
     document.addEventListener("keydown", onKey);
@@ -217,7 +222,7 @@ export function DecompileView({
         {/* Pill tab group */}
         <div className="flex bg-gray-900 rounded-md p-0.5">
           {TAB_LABELS.map(({ key, label }) => (
-            <button
+            <button type="button"
               key={key}
               onClick={() => onTabChange(key)}
               className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
@@ -245,7 +250,7 @@ export function DecompileView({
         {activeTab === "ai" && !loading && (
           <>
             {onExplain && (
-              <button
+              <button type="button"
                 onClick={onExplain}
                 className="px-1.5 py-0.5 rounded text-[10px] bg-blue-800/60 text-blue-300 hover:bg-blue-700/60"
                 title="Explain with AI"
@@ -254,7 +259,7 @@ export function DecompileView({
               </button>
             )}
             {onEnhance && (
-              <button
+              <button type="button"
                 onClick={onEnhance}
                 className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60"
                 title="Enhance with AI"
@@ -267,12 +272,12 @@ export function DecompileView({
 
         {/* Cancel button during AI streaming */}
         {isStreaming && onCancelAI && (
-          <button
+          <button type="button"
             onClick={onCancelAI}
             className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
             title="Cancel AI"
           >
-            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
@@ -281,7 +286,7 @@ export function DecompileView({
         )}
 
         {onScrollSyncToggle && (
-          <button
+          <button type="button"
             onClick={onScrollSyncToggle}
             className={`px-1.5 py-0.5 rounded text-[10px] ${
               scrollSyncEnabled
@@ -293,14 +298,14 @@ export function DecompileView({
             Sync
           </button>
         )}
-        <button
+        <button type="button"
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Copy to clipboard"
         >
           Copy
         </button>
-        <button
+        <button type="button"
           onClick={onClose}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Close (D)"
@@ -319,7 +324,7 @@ export function DecompileView({
       {/* Content */}
       {loading && !code ? (
         <div className="flex items-center justify-center flex-1 text-gray-500 text-sm gap-2">
-          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="animate-spin h-4 w-4" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
@@ -336,7 +341,9 @@ export function DecompileView({
           className="flex-1 overflow-auto px-3 py-2 leading-5 font-mono text-gray-200 select-text relative"
           style={{ fontSize: 'var(--mono-font-size)' }}
           onClick={handleClick}
-          tabIndex={0}
+          // tabIndex={-1}: still focusable by click (which is how the ";" comment
+          // shortcut is reached) but kept out of the tab order.
+          tabIndex={-1}
           onKeyDown={handleKeyDown}
         >
           {lines.map((line) => {
@@ -346,9 +353,11 @@ export function DecompileView({
             const isEditing = lineAddr !== undefined && editingComment?.address === lineAddr;
             return (
               <div key={line.num}>
-                <div
+                <button
+                  type="button"
+                  tabIndex={-1}
                   data-line={line.num}
-                  className={`flex ${isHighlighted ? "bg-blue-900/30" : "hover:bg-gray-800/30"} ${onLineClick && !syncDisabled ? "cursor-pointer" : ""}`}
+                  className={`flex w-full text-left ${isHighlighted ? "bg-blue-900/30" : "hover:bg-gray-800/30"} ${onLineClick && !syncDisabled ? "cursor-pointer" : ""}`}
                   onClick={() => onLineClick?.(line.num)}
                   onContextMenu={(e) => handleContextMenu(e, line.num)}
                 >
@@ -367,11 +376,11 @@ export function DecompileView({
                       <span className="disasm-user-comment ml-4 select-none">{'// '}{formatComment(commentText)}</span>
                     )}
                   </span>
-                </div>
+                </button>
                 {isEditing && onEditComment && onCommitComment && onDeleteComment && (
                   <div className="pl-11 py-1">
                     <textarea
-                      autoFocus
+                      ref={focusOnMount}
                       className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-green-300 font-mono resize-none focus:outline-none focus:border-blue-500"
                       rows={Math.max(2, (editingComment.value.match(/\n/g)?.length ?? 0) + 1)}
                       value={editingComment.value}
@@ -401,11 +410,11 @@ export function DecompileView({
       {/* Context menu */}
       {ctxMenu && onEditComment && comments && (
         <div
+          ref={ctxMenuRef}
           className="fixed z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[180px]"
           style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          onClick={(e) => e.stopPropagation()}
         >
-          <button
+          <button type="button"
             onClick={() => {
               const existing = comments[ctxMenu.address];
               onEditComment({ address: ctxMenu.address, value: existing ?? "" });
@@ -416,7 +425,7 @@ export function DecompileView({
             <span>{comments[ctxMenu.address] ? "Edit comment" : "Add comment"}</span>
             <span className="text-gray-500 text-[9px] ml-4">;</span>
           </button>
-          <button
+          <button type="button"
             onClick={() => {
               const hex = ctxMenu.address.toString(16).toUpperCase();
               navigator.clipboard.writeText(hex);

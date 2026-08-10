@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { focusOnMount } from "./focusOnMount";
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
@@ -12,6 +13,8 @@ type SortMode = "address" | "alpha";
 
 const MIN_WIDTH = 180;
 const MAX_WIDTH = 400;
+/** Pixels per arrow-key press when the resize handle has keyboard focus. */
+const RESIZE_STEP_PX = 16;
 const DEFAULT_WIDTH = 224;
 
 function loadWidth(): number {
@@ -57,11 +60,18 @@ export function Sidebar() {
     try { return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false"; } catch { return true; }
   });
   const graphOverview = useGraphOverview();
+  const bmCtxMenuRef = useRef<HTMLDivElement>(null);
+  const fnCtxMenuRef = useRef<HTMLDivElement>(null);
 
   // Dismiss bookmark context menu on click/Escape
   useEffect(() => {
     if (!bmCtxMenu) return;
-    const dismiss = () => setBmCtxMenu(null);
+    // Clicks inside the menu are ignored here instead of being stopped from
+    // propagating by a handler on the menu div.
+    const dismiss = (e?: MouseEvent) => {
+      if (e && bmCtxMenuRef.current?.contains(e.target as Node)) return;
+      setBmCtxMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", onKey);
@@ -74,7 +84,10 @@ export function Sidebar() {
   // Dismiss function context menu on click/Escape
   useEffect(() => {
     if (!fnCtxMenu) return;
-    const dismiss = () => setFnCtxMenu(null);
+    const dismiss = (e?: MouseEvent) => {
+      if (e && fnCtxMenuRef.current?.contains(e.target as Node)) return;
+      setFnCtxMenu(null);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", onKey);
@@ -130,6 +143,15 @@ export function Sidebar() {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
   }, [width]);
+
+  // Keyboard equivalent for the drag handle — left/right arrows nudge the width
+  // within the same bounds the drag path enforces.
+  const handleResizeKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const delta = e.key === "ArrowLeft" ? -RESIZE_STEP_PX : RESIZE_STEP_PX;
+    setWidth((w) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, w + delta)));
+  }, []);
 
   const exportNames = useMemo(() => {
     if (!pe) return new Set<string>();
@@ -238,7 +260,7 @@ export function Sidebar() {
   if (collapsed) {
     return (
       <aside className="w-10 panel-bg border-r border-theme flex flex-col items-center py-2 shrink-0">
-        <button
+        <button type="button"
           onClick={() => setCollapsed(false)}
           className="text-gray-400 hover:text-white text-sm"
           title="Expand sidebar"
@@ -255,14 +277,17 @@ export function Sidebar() {
       style={{ width }}
     >
       {/* Resize handle */}
-      <div
+      <button
+        type="button"
+        aria-label="Resize sidebar"
         className={`sidebar-handle${dragging ? " active" : ""}`}
         onMouseDown={handleMouseDown}
+        onKeyDown={handleResizeKeyDown}
       />
 
       {/* Sections */}
       <div className="p-2 border-b border-gray-700">
-        <button
+        <button type="button"
           onClick={() => setSectionsOpen(!sectionsOpen)}
           className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
         >
@@ -273,7 +298,7 @@ export function Sidebar() {
           <ul className="mt-1.5 space-y-0.5">
             {pe.sections.map((sec, i) => (
               <li key={i}>
-                <button
+                <button type="button"
                   onClick={() => {
                     dispatch({
                       type: "SET_ADDRESS",
@@ -297,7 +322,7 @@ export function Sidebar() {
       {/* Bookmarks panel (only show if bookmarks exist) */}
       {state.bookmarks.length > 0 && (
         <div className="relative p-2 border-b border-gray-700">
-          <button
+          <button type="button"
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
@@ -317,17 +342,23 @@ export function Sidebar() {
                     setBmCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, address: bm.address, label: bm.label });
                   }}
                 >
-                  <button
+                  <button type="button"
                     onClick={() => {
                       dispatch({ type: "SET_ADDRESS", address: bm.address });
                       dispatch({ type: "SET_TAB", tab: "disassembly" });
+                    }}
+                    // Double-click-to-rename moved up from the label span, which as
+                    // a bare <span> had no keyboard equivalent and could not get one.
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      setEditingBookmark({ address: bm.address, value: bm.label });
                     }}
                     className="flex-1 text-left px-1.5 py-0.5 rounded hover:bg-gray-800 truncate"
                   >
                     <span className="text-yellow-300 mr-1">★</span>
                     {editingBookmark && editingBookmark.address === bm.address ? (
                       <input
-                        autoFocus
+                        ref={focusOnMount}
                         className="bg-gray-800 border border-blue-500 rounded px-1 text-gray-200 text-[11px] outline-none w-24"
                         value={editingBookmark.value}
                         onClick={(e) => e.stopPropagation()}
@@ -346,18 +377,12 @@ export function Sidebar() {
                         }}
                       />
                     ) : (
-                      <span
-                        className="text-blue-400"
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          setEditingBookmark({ address: bm.address, value: bm.label });
-                        }}
-                      >
+                      <span className="text-blue-400">
                         {bm.label || `0x${bm.address.toString(16).toUpperCase()}`}
                       </span>
                     )}
                   </button>
-                  <button
+                  <button type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       dispatch({ type: "TOGGLE_BOOKMARK", address: bm.address });
@@ -373,11 +398,11 @@ export function Sidebar() {
           )}
           {bmCtxMenu && (
             <div
+              ref={bmCtxMenuRef}
               className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
               style={{ left: bmCtxMenu.x, top: bmCtxMenu.y }}
-              onClick={(e) => e.stopPropagation()}
             >
-              <button
+              <button type="button"
                 className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
                 onClick={() => {
                   setEditingBookmark({ address: bmCtxMenu.address, value: bmCtxMenu.label });
@@ -386,7 +411,7 @@ export function Sidebar() {
               >
                 Rename
               </button>
-              <button
+              <button type="button"
                 className="w-full text-left px-3 py-1 hover:bg-gray-700 text-red-400"
                 onClick={() => {
                   dispatch({ type: "TOGGLE_BOOKMARK", address: bmCtxMenu.address });
@@ -403,7 +428,7 @@ export function Sidebar() {
       {/* Callers/Callees panel */}
       {state.callGraph && activeFuncAddr !== null && (callers.length > 0 || callees.length > 0) && (
         <div className="p-2 border-b border-gray-700">
-          <button
+          <button type="button"
             onClick={() => setCallersOpen(!callersOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
@@ -418,7 +443,7 @@ export function Sidebar() {
                   <ul className="space-y-0.5">
                     {callers.map((fn) => (
                       <li key={fn.address}>
-                        <button
+                        <button type="button"
                           onClick={() => {
                             dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
                             dispatch({ type: "SET_ADDRESS", address: fn.address });
@@ -440,7 +465,7 @@ export function Sidebar() {
                   <ul className="space-y-0.5">
                     {callees.map((fn) => (
                       <li key={fn.address}>
-                        <button
+                        <button type="button"
                           onClick={() => {
                             dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
                             dispatch({ type: "SET_ADDRESS", address: fn.address });
@@ -471,7 +496,7 @@ export function Sidebar() {
               : ""})
           </h3>
           <div className="flex items-center gap-1">
-            <button
+            <button type="button"
               onClick={handleExportCSV}
               disabled={state.functions.length === 0}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
@@ -479,7 +504,7 @@ export function Sidebar() {
             >
               CSV
             </button>
-            <button
+            <button type="button"
               onClick={handleExportReport}
               disabled={!state.peFile}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
@@ -487,7 +512,7 @@ export function Sidebar() {
             >
               Report
             </button>
-            <button
+            <button type="button"
               onClick={() => setSort(sort === "address" ? "alpha" : "address")}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1"
               title={sort === "address" ? "Sort: by address" : "Sort: alphabetical"}
@@ -539,7 +564,7 @@ export function Sidebar() {
                   }}
                 >
                   <input
-                    autoFocus
+                    ref={focusOnMount}
                     className="w-full bg-gray-800 border border-blue-500 rounded px-1 text-gray-200 text-[11px] font-mono outline-none"
                     value={renamingFn.value}
                     onChange={(e) => setRenamingFn({ ...renamingFn, value: e.target.value })}
@@ -563,7 +588,7 @@ export function Sidebar() {
             }
 
             return (
-              <button
+              <button type="button"
                 key={vItem.index}
                 onClick={() => {
                   dispatch({ type: "SET_ADDRESS", address: fn.address });
@@ -607,7 +632,7 @@ export function Sidebar() {
       {/* Graph Overview */}
       {graphOverview && (
         <div className="p-2 border-t border-gray-700">
-          <button
+          <button type="button"
             onClick={() => setGraphOverviewOpen(!graphOverviewOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
@@ -623,11 +648,11 @@ export function Sidebar() {
       {/* Function context menu */}
       {fnCtxMenu && (
         <div
+          ref={fnCtxMenuRef}
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
           style={{ left: fnCtxMenu.x, top: fnCtxMenu.y }}
-          onClick={(e) => e.stopPropagation()}
         >
-          <button
+          <button type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
@@ -637,7 +662,7 @@ export function Sidebar() {
           >
             Jump to
           </button>
-          <button
+          <button type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               setRenamingFn({ address: fnCtxMenu.fn.address, value: getDisplayName(fnCtxMenu.fn, state.renames) });
@@ -646,7 +671,7 @@ export function Sidebar() {
           >
             Rename
           </button>
-          <button
+          <button type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               navigator.clipboard.writeText("0x" + fnCtxMenu.fn.address.toString(16).toUpperCase());
@@ -655,7 +680,7 @@ export function Sidebar() {
           >
             Copy address
           </button>
-          <button
+          <button type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "TOGGLE_BOOKMARK", address: fnCtxMenu.fn.address });
@@ -665,7 +690,7 @@ export function Sidebar() {
             Toggle bookmark
           </button>
           <div className="border-t border-gray-700 my-0.5" />
-          <button
+          <button type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
@@ -686,7 +711,7 @@ export function Sidebar() {
           <div>{pe.sections.length} sections</div>
           <div>{pe.imports.length} imports</div>
         </div>
-        <button
+        <button type="button"
           onClick={() => setCollapsed(true)}
           className="text-gray-500 hover:text-white text-sm px-1"
           title="Collapse sidebar"

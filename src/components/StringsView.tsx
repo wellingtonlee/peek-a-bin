@@ -35,6 +35,7 @@ export function StringsView() {
   const [encodingFilter, setEncodingFilter] = useState<EncodingFilter>("all");
   const stringXrefs = state.stringXrefs;
   const [xrefPopup, setXrefPopup] = useState<XrefPopupState | null>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
 
   const allStrings = useMemo((): StringEntry[] => {
     if (!pe) return [];
@@ -76,7 +77,13 @@ export function StringsView() {
   // Dismiss xref popup on click outside or Escape
   useEffect(() => {
     if (!xrefPopup) return;
-    const dismiss = () => setXrefPopup(null);
+    // Clicks inside the popup are ignored here rather than being stopped from
+    // propagating by a handler on the popup div — stopPropagation also hid those
+    // clicks from every other listener on the page.
+    const dismiss = (e?: MouseEvent) => {
+      if (e && popupRef.current?.contains(e.target as Node)) return;
+      setXrefPopup(null);
+    };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -98,7 +105,7 @@ export function StringsView() {
         <div className="flex-1" />
         {!stringXrefs ? (
           <span className="text-[10px] text-gray-500 flex items-center gap-1">
-            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
@@ -108,7 +115,7 @@ export function StringsView() {
           <span className="text-[10px] text-green-400">Xrefs loaded</span>
         )}
         {(["all", "ascii", "utf16le"] as EncodingFilter[]).map((enc) => (
-          <button
+          <button type="button"
             key={enc}
             onClick={() => setEncodingFilter(enc)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${
@@ -120,7 +127,7 @@ export function StringsView() {
             {enc === "all" ? "All" : enc === "ascii" ? "ASCII" : "UTF-16"}
           </button>
         ))}
-        <button
+        <button type="button"
           onClick={() => setSortKey(sortKey === "address" ? "length" : "address")}
           className="text-gray-500 hover:text-gray-300 px-1"
           title={sortKey === "address" ? "Sort: by address" : "Sort: by length"}
@@ -170,23 +177,25 @@ export function StringsView() {
                   transform: `translateY(${vItem.start}px)`,
                 }}
               >
-                <span
-                  className="w-36 shrink-0 text-blue-400 cursor-pointer hover:text-blue-300 hover:underline font-mono"
+                <button
+                  type="button"
+                  className="w-36 shrink-0 text-left text-blue-400 cursor-pointer hover:text-blue-300 hover:underline font-mono"
                   onClick={() => {
                     dispatch({ type: "SET_ADDRESS", address: entry.address });
                     dispatch({ type: "SET_TAB", tab: "disassembly" });
                   }}
                 >
                   {entry.address.toString(16).toUpperCase().padStart(addrWidth, "0")}
-                </span>
+                </button>
                 <span className="w-16 shrink-0 text-right pr-4 text-gray-500">
                   {entry.value.length}
                 </span>
                 <span className="w-12 shrink-0 text-right pr-4">
                   {stringXrefs ? (
                     xrefCount > 0 ? (
-                      <span
-                        className="text-gray-400 cursor-pointer hover:text-blue-400"
+                      <button
+                        type="button"
+                        className="inline text-gray-400 cursor-pointer hover:text-blue-400"
                         onClick={(e) => {
                           e.stopPropagation();
                           const rect = (e.target as HTMLElement).getBoundingClientRect();
@@ -207,7 +216,7 @@ export function StringsView() {
                         }}
                       >
                         {xrefCount}
-                      </span>
+                      </button>
                     ) : (
                       <span className="text-gray-600">&mdash;</span>
                     )
@@ -229,15 +238,15 @@ export function StringsView() {
         {/* Xref popup */}
         {xrefPopup && (
           <div
+            ref={popupRef}
             className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[220px] max-h-60 overflow-auto"
             style={{ left: xrefPopup.x, top: xrefPopup.y }}
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="px-3 py-1 text-gray-400 border-b border-gray-700">
               Xrefs to 0x{xrefPopup.address.toString(16).toUpperCase()}
             </div>
             {xrefPopup.sources.map((src, i) => (
-              <button
+              <button type="button"
                 key={i}
                 className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
                 onClick={() => {

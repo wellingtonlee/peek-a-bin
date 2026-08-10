@@ -489,7 +489,7 @@ export default function App() {
                   </span>
                 )}
                 <div className="flex-1" />
-                <button
+                <button type="button"
                   onClick={() => setDriverBannerDismissed(true)}
                   className="text-amber-500 hover:text-amber-300 text-sm leading-none"
                   title="Dismiss"

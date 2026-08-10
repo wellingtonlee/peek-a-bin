@@ -209,7 +209,12 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       </div>
 
       {/* Drop zone */}
-      <div
+      {/* A real <button> so the "click to browse" affordance is keyboard-operable;
+          the drag handlers ride along unchanged. */}
+      <button
+        type="button"
+        aria-label="Drop a PE file here, or activate to browse"
+        disabled={isAnalyzing}
         className={`flex flex-col items-center justify-center w-[600px] h-[350px] border-2 border-dashed rounded-xl transition-colors ${
           isAnalyzing ? "" : "cursor-pointer"
         } ${
@@ -259,7 +264,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
         ) : (
           /* Normal drop zone content */
           <>
-            <svg
+            <svg aria-hidden="true"
               className="w-16 h-16 mb-4 text-gray-500"
               fill="none"
               stroke="currentColor"
@@ -288,7 +293,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               <span className="text-xs text-gray-600">or</span>
               <hr className="flex-1 border-gray-700" />
             </div>
-            <button
+            <button type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 loadExample();
@@ -300,14 +305,18 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
             </button>
           </>
         )}
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".exe,.dll,.sys,.ocx"
-          onChange={onChange}
-          className="hidden"
-        />
-      </div>
+      </button>
+
+      {/* Sibling of the drop zone, not a child: a form control nested inside a
+          <button> is invalid, and the programmatic .click() would bubble back into
+          the button's own onClick. */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".exe,.dll,.sys,.ocx"
+        onChange={onChange}
+        className="hidden"
+      />
 
       {/* Recent files */}
       {recentFiles.length > 0 && !isAnalyzing && !loading && (
@@ -321,42 +330,48 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               if (f.comments > 0) parts.push(`${f.comments} comment${f.comments !== 1 ? "s" : ""}`);
               const isLoading = loadingRecent === f.name;
               return (
+                // The row is a button and the "remove" × is its sibling — buttons
+                // cannot nest. The button still spans everything but the ×, so the
+                // whole row stays clickable.
                 <div
                   key={f.name}
-                  className={`flex items-center justify-between text-sm px-2 py-1.5 rounded group ${
+                  className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded group ${
                     f.hasBuffer
                       ? "cursor-pointer hover:bg-gray-800/60 transition-colors"
                       : ""
                   }`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (f.hasBuffer && !isLoading) handleRecentClick(f.name);
-                  }}
                 >
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
-                    <span className={`font-mono text-xs truncate ${f.hasBuffer ? "text-blue-400" : "text-gray-400"}`}>
-                      {f.name}
-                    </span>
-                    {isLoading && <span className="text-yellow-400 text-[10px] animate-pulse">loading...</span>}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {f.size > 0 && (
-                      <span className="text-gray-600 text-[10px]">{formatFileSize(f.size)}</span>
-                    )}
-                    {f.lastOpened > 0 && (
-                      <span className="text-gray-600 text-[10px]">{formatRelativeTime(f.lastOpened)}</span>
-                    )}
-                    {parts.length > 0 && (
-                      <span className="text-gray-600 text-[10px]">{parts.join(", ")}</span>
-                    )}
-                    <button
-                      onClick={(e) => handleRemoveRecent(e, f.name)}
-                      className="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1"
-                      title="Remove from recent"
-                    >
-                      ×
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    disabled={!f.hasBuffer || isLoading}
+                    className="flex items-center justify-between gap-2 flex-1 min-w-0 text-left"
+                    onClick={() => handleRecentClick(f.name)}
+                  >
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <span className={`font-mono text-xs truncate ${f.hasBuffer ? "text-blue-400" : "text-gray-400"}`}>
+                        {f.name}
+                      </span>
+                      {isLoading && <span className="text-yellow-400 text-[10px] animate-pulse">loading...</span>}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {f.size > 0 && (
+                        <span className="text-gray-600 text-[10px]">{formatFileSize(f.size)}</span>
+                      )}
+                      {f.lastOpened > 0 && (
+                        <span className="text-gray-600 text-[10px]">{formatRelativeTime(f.lastOpened)}</span>
+                      )}
+                      {parts.length > 0 && (
+                        <span className="text-gray-600 text-[10px]">{parts.join(", ")}</span>
+                      )}
+                    </div>
+                  </button>
+                  <button type="button"
+                    onClick={(e) => handleRemoveRecent(e, f.name)}
+                    className="shrink-0 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1"
+                    title="Remove from recent"
+                  >
+                    ×
+                  </button>
                 </div>
               );
             })}

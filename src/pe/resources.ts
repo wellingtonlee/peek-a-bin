@@ -4,18 +4,35 @@ import { rvaToFileOffset } from './parser';
 const MAX_DEPTH = 4;
 
 /**
+ * Total directory entries the whole walk may process.
+ *
+ * The depth limit alone does not bound the work: a directory declares its own
+ * entry count in two uint16s, so each one can claim 131070 children, and each
+ * child can point at a *distinct* subdirectory offset that the `visited` set
+ * cannot collapse. A 256 KB crafted .rsrc built that way exhausted a 4 GB heap
+ * in under a minute — in the browser that is a dead tab. Real images use a few
+ * thousand entries at most.
+ */
+const MAX_TOTAL_ENTRIES = 65536;
+
+/** Resource name strings are short in practice; anything longer is junk. */
+const MAX_RESOURCE_STRING = 4096;
+
+/**
  * Read a UTF-16LE length-prefixed string from the resource section.
  * Format: uint16 length (in chars), then length * uint16 chars.
  */
 function readResourceString(view: DataView, offset: number): string {
   if (offset + 2 > view.byteLength) return '';
-  const len = view.getUint16(offset, true);
+  const len = Math.min(view.getUint16(offset, true), MAX_RESOURCE_STRING);
   const chars: number[] = [];
   for (let i = 0; i < len; i++) {
     const pos = offset + 2 + i * 2;
     if (pos + 2 > view.byteLength) break;
     chars.push(view.getUint16(pos, true));
   }
+  // Spreading a 65535-element array into fromCharCode is at or over the
+  // argument limit of some engines; the clamp above keeps this well under it.
   return String.fromCharCode(...chars);
 }
 
@@ -30,6 +47,7 @@ function walkDirectory(
   visited: Set<number>,
   entries: ResourceTree['entries'],
   parentPath: (number | string)[],
+  budget: { remaining: number },
 ): ResourceNode[] {
   if (depth >= MAX_DEPTH) return [];
   if (visited.has(dirOffset)) return [];
@@ -47,6 +65,9 @@ function walkDirectory(
   const entriesStart = absOffset + 16;
 
   for (let i = 0; i < totalEntries; i++) {
+    if (budget.remaining <= 0) break;
+    budget.remaining--;
+
     const entryOffset = entriesStart + i * 8;
     if (entryOffset + 8 > view.byteLength) break;
 
@@ -70,7 +91,7 @@ function walkDirectory(
       // Subdirectory: lower 31 bits = offset from section base
       const subDirOffset = offsetToData & 0x7FFFFFFF;
       node.children = walkDirectory(
-        view, sectionBase, subDirOffset, depth + 1, visited, entries, currentPath,
+        view, sectionBase, subDirOffset, depth + 1, visited, entries, currentPath, budget,
       );
     } else {
       // Leaf: IMAGE_RESOURCE_DATA_ENTRY (16 bytes)
@@ -112,9 +133,10 @@ export function parseResourceDirectory(
   const view = new DataView(buffer);
   const entries: ResourceTree['entries'] = [];
   const visited = new Set<number>();
+  const budget = { remaining: MAX_TOTAL_ENTRIES };
 
-  const root = walkDirectory(view, fileOffset, 0, 0, visited, entries, []);
-  return { root, entries };
+  const root = walkDirectory(view, fileOffset, 0, 0, visited, entries, [], budget);
+  return budget.remaining > 0 ? { root, entries } : { root, entries, truncated: true };
 }
 
 /**
@@ -141,7 +163,11 @@ export function parseVersionInfo(
       const ch = view.getUint16(p, true);
       p += 2;
       if (ch === 0) break;
-      chars.push(ch);
+      // Keep scanning for the terminator so `end` stays right, but stop
+      // collecting: an unterminated string spanning a large version resource
+      // would otherwise spread hundreds of thousands of arguments into
+      // fromCharCode and blow the call stack.
+      if (chars.length < MAX_RESOURCE_STRING) chars.push(ch);
     }
     return { str: String.fromCharCode(...chars), end: p };
   }

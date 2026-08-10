@@ -26,13 +26,13 @@
     "rules": {
       "recommended": true,
       "a11y": {
-        "useButtonType": "warn",
-        "noStaticElementInteractions": "warn",
-        "useKeyWithClickEvents": "warn",
-        "noSvgWithoutTitle": "warn",
-        "noLabelWithoutControl": "warn",
-        "noAutofocus": "warn",
-        "noNoninteractiveTabindex": "warn"
+        "useButtonType": "error",
+        "noStaticElementInteractions": "error",
+        "useKeyWithClickEvents": "error",
+        "noSvgWithoutTitle": "error",
+        "noLabelWithoutControl": "error",
+        "noAutofocus": "error",
+        "noNoninteractiveTabindex": "error"
       },
       "complexity": {
         "useSimpleNumberKeys": "off"

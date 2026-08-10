@@ -38,6 +38,7 @@ repeating it.
 | State, worker, rendering, or the analysis pipeline | [architecture.md](architecture.md) |
 | Decompiler IR, passes, or type system | [decompiler.md](decompiler.md) |
 | Builds, Docker, CI, PWA, self-hosting | [deployment.md](deployment.md) |
+| Content Security Policy | edit `build/csp.ts` (the single source of truth for both the meta tag and the nginx header) — then [../SECURITY.md](../SECURITY.md) for directive rationale and [deployment.md](deployment.md) for delivery |
 | Security model, filesystem/network surface | [../SECURITY.md](../SECURITY.md) |
 | Conventions, gotchas, or anything an AI agent needs | [../CLAUDE.md](../CLAUDE.md) |
 | Top-level project description or setup | [../README.md](../README.md) |

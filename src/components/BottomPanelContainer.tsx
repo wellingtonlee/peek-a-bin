@@ -93,32 +93,37 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
           <ResizeHandle orientation="vertical" onResize={handleResize} onResizeEnd={handleResizeEnd} />
           {/* Tab header */}
           <div className="flex items-center gap-0.5 px-2 py-0.5 border-b border-gray-700 shrink-0">
+            {/* Pop-out and close are siblings of the tab button, not children:
+                buttons cannot nest, and as spans they were mouse-only. */}
             {tabbedPanels.map((p) => (
-              <button
+              <div
                 key={p.id}
-                onClick={() => setActiveTab(p.id)}
                 className={`px-2 py-0.5 rounded text-[10px] flex items-center gap-1 ${
                   activeTab === p.id
                     ? "bg-blue-600 text-white"
                     : "text-gray-400 hover:text-white hover:bg-gray-700"
                 }`}
               >
-                {p.label}
-                <span
+                <button type="button" onClick={() => setActiveTab(p.id)}>
+                  {p.label}
+                </button>
+                <button
+                  type="button"
                   className="text-gray-500 hover:text-gray-200 text-[8px] ml-0.5"
-                  onClick={(e) => { e.stopPropagation(); handlePopOut(p.id); }}
+                  onClick={() => handlePopOut(p.id)}
                   title="Pop out"
                 >
                   ↗
-                </span>
-                <span
+                </button>
+                <button
+                  type="button"
                   className="text-gray-500 hover:text-red-400 text-[9px]"
-                  onClick={(e) => { e.stopPropagation(); p.onClose(); }}
+                  onClick={() => p.onClose()}
                   title="Close"
                 >
                   ✕
-                </span>
-              </button>
+                </button>
+              </div>
             ))}
           </div>
           {/* Active panel content */}
@@ -247,14 +252,14 @@ function FloatingPanel({ panel, state, onDock, onClose, onMove, onResizeFloat }:
       >
         <span className="text-gray-300 text-[10px] font-semibold">{panel.label}</span>
         <div className="flex-1" />
-        <button
+        <button type="button"
           onClick={onDock}
           className="text-gray-500 hover:text-white text-[10px] px-1"
           title="Re-dock"
         >
           ↙
         </button>
-        <button
+        <button type="button"
           onClick={onClose}
           className="text-gray-500 hover:text-red-400 text-[10px] px-1"
           title="Close"

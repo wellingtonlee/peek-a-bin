@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { ModalBackdrop } from "./ModalBackdrop";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
@@ -156,13 +157,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   let currentCategory = "";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
+      <ModalBackdrop onClose={onClose} />
       <div
-        className="w-[600px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        className="relative w-[600px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
       >
         <div className="p-3 border-b border-gray-700">
           <input
@@ -194,7 +195,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                     {item.category}
                   </div>
                 )}
-                <button
+                <button type="button"
                   data-idx={i}
                   className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs ${
                     i === selectedIdx

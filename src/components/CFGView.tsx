@@ -1,4 +1,5 @@
 import { useMemo, useRef, useCallback, useEffect } from "react";
+import { focusOnMount } from "./focusOnMount";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { PEFile } from "../pe/types";
 import { buildCFG, layoutCFG, getCfgLayout, type LayoutBlock, type CFGEdge } from "../disasm/cfg";
@@ -340,6 +341,8 @@ export function CFGView({
   return (
     <div
       ref={containerRef}
+      role="application"
+      aria-label="Control flow graph viewport"
       className="cfg-container flex-1 overflow-hidden cursor-grab active:cursor-grabbing relative"
       style={{ overscrollBehavior: "none", touchAction: "none" }}
       onMouseDown={handleMouseDown}
@@ -350,7 +353,7 @@ export function CFGView({
     >
       {/* Zoom control bar */}
       <div className="absolute top-2 right-2 z-10 flex items-center gap-1 bg-gray-900/80 px-1.5 py-0.5 rounded text-[10px] text-gray-400">
-        <button
+        <button type="button"
           className="hover:text-white px-0.5"
           onClick={(e) => { e.stopPropagation(); zoomToCenter(Math.max(0.2, zoom - 0.1)); }}
           title="Zoom out"
@@ -366,13 +369,13 @@ export function CFGView({
           onMouseDown={(e) => e.stopPropagation()}
           className="w-16 h-1 accent-gray-500 cursor-pointer"
         />
-        <button
+        <button type="button"
           className="hover:text-white px-0.5"
           onClick={(e) => { e.stopPropagation(); zoomToCenter(Math.min(3, zoom + 0.1)); }}
           title="Zoom in"
         >+</button>
         <span className="w-7 text-center text-gray-500">{Math.round(zoom * 100)}%</span>
-        <button
+        <button type="button"
           className="hover:text-white px-0.5"
           onClick={(e) => { e.stopPropagation(); zoomToFit(); }}
           title="Fit to view"
@@ -389,7 +392,7 @@ export function CFGView({
         }}
       >
         {/* SVG edge layer */}
-        <svg
+        <svg aria-hidden="true"
           style={{
             position: "absolute",
             top: graphBounds.minY,
@@ -573,8 +576,10 @@ function CFGBlock({
       }}
     >
       {/* Header bar */}
-      <div
-        className="flex items-center justify-between px-1.5 cursor-pointer hover:brightness-125"
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        className="w-full flex items-center justify-between px-1.5 cursor-pointer hover:brightness-125"
         style={{
           height: cfgLayout.BLOCK_HEADER,
           background: isCurrent ? "#1e40af" : "#374151",
@@ -588,7 +593,7 @@ function CFGBlock({
         <span className="text-gray-500 text-[0.75em]">
           {block.insns.length} insn
         </span>
-      </div>
+      </button>
 
       {/* Instruction rows */}
       {!collapsed && block.insns.map(insn => {
@@ -607,6 +612,11 @@ function CFGBlock({
         );
 
         return (
+          // Row contains its own address and operand buttons, so it can be neither a
+          // <button> (no nesting) nor role="button" (invalid with interactive
+          // descendants). Keyboard support here needs a roving-tabindex grid model.
+          // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
+          // biome-ignore lint/a11y/useKeyWithClickEvents: container of controls, not a control
           <div
             key={insn.address}
             className={`flex items-center px-1 group ${
@@ -631,15 +641,17 @@ function CFGBlock({
             </span>
 
             {/* Address */}
-            <span
-              className={`w-[5.5em] shrink-0 text-[0.85em] cursor-pointer hover:text-blue-400 ${
+            <button
+              type="button"
+              tabIndex={-1}
+              className={`w-[5.5em] shrink-0 text-left text-[0.85em] cursor-pointer hover:text-blue-400 ${
                 copiedAddr === insn.address ? "text-green-400" : "text-gray-500"
               }`}
               onClick={(e) => { e.stopPropagation(); onAddressClick(insn.address); }}
               onDoubleClick={(e) => { e.stopPropagation(); onDoubleClickAddr(insn.address); }}
             >
               {insn.address.toString(16).toUpperCase().slice(-8)}
-            </span>
+            </button>
 
             {/* Mnemonic */}
             <span
@@ -664,7 +676,7 @@ function CFGBlock({
             {isEditing ? (
               <span className="ml-1 shrink-0">
                 <input
-                  autoFocus
+                  ref={focusOnMount}
                   className="bg-gray-900/80 border border-blue-500 rounded px-1 text-[#6ee7b7] text-[0.75em] font-mono outline-none w-32"
                   value={editingComment.value}
                   onChange={(e) => onEditComment({ ...editingComment, value: e.target.value })}

@@ -32,7 +32,7 @@ export function AIReportPanel({ onClose, onRegenerate }: AIReportPanelProps) {
           <h3 className="text-sm font-semibold text-gray-200">AI Analysis Report</h3>
           {report.status === "streaming" && (
             <span className="flex items-center gap-1.5 text-blue-400 text-[10px]">
-              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+              <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
@@ -42,13 +42,13 @@ export function AIReportPanel({ onClose, onRegenerate }: AIReportPanelProps) {
           <div className="flex-1" />
           {report.status === "done" && (
             <>
-              <button
+              <button type="button"
                 onClick={onRegenerate}
                 className="px-2 py-1 text-[10px] bg-purple-800/50 text-purple-300 rounded hover:bg-purple-700/50"
               >
                 Regenerate
               </button>
-              <button
+              <button type="button"
                 onClick={handleDownload}
                 className="px-2 py-1 text-[10px] bg-blue-800/50 text-blue-300 rounded hover:bg-blue-700/50"
               >
@@ -56,7 +56,7 @@ export function AIReportPanel({ onClose, onRegenerate }: AIReportPanelProps) {
               </button>
             </>
           )}
-          <button
+          <button type="button"
             onClick={onClose}
             className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 rounded hover:bg-gray-600 hover:text-gray-200"
           >
@@ -77,7 +77,7 @@ export function AIReportPanel({ onClose, onRegenerate }: AIReportPanelProps) {
             <MarkdownRenderer content={report.content} />
           ) : report.status === "streaming" ? (
             <div className="flex items-center justify-center h-full text-gray-500 text-sm gap-2">
-              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <svg aria-hidden="true" className="animate-spin h-4 w-4" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>

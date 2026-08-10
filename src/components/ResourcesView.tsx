@@ -169,7 +169,7 @@ export function ResourcesView() {
 
           return (
             <div key={typeKey}>
-              <button
+              <button type="button"
                 onClick={() => toggleCollapse(typeKey)}
                 className="flex items-center gap-1.5 text-yellow-400 font-semibold hover:text-yellow-300 py-0.5"
               >
@@ -203,7 +203,7 @@ export function ResourcesView() {
                           <>
                             <tr key={leafKey} className="text-gray-300 hover:bg-gray-800/50">
                               <td className="py-0.5 pr-4">
-                                <button
+                                <button type="button"
                                   onClick={() => toggleExpand(leafKey)}
                                   className="hover:text-blue-400"
                                 >
@@ -219,7 +219,7 @@ export function ResourcesView() {
                                 0x{entry.rva.toString(16).toUpperCase()}
                               </td>
                               <td className="py-0.5">
-                                <button
+                                <button type="button"
                                   onClick={() => downloadResource(
                                     pe.buffer, entry.rva, entry.size, pe.sections,
                                     `resource_${typeName}_${nameDisplay}_${entry.lang}.bin`,

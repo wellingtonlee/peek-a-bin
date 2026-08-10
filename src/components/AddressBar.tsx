@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { focusOnMount } from "./focusOnMount";
 import { useAppState, useAppDispatch, getDisplayName, type ViewTab, type Bookmark } from "../hooks/usePEFile";
 import { serializeState, validateImport } from "../utils/exportSchema";
 import { useSortedFuncs } from "../hooks/useDerivedState";
@@ -355,7 +356,7 @@ export function AddressBar() {
 
   return (
     <div className="flex items-center gap-1 px-3 py-1.5 toolbar-bg border-b border-theme text-sm">
-      <button
+      <button type="button"
         onClick={handleReset}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
         title="Load new file"
@@ -366,7 +367,7 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* Back / Forward */}
-      <button
+      <button type="button"
         onClick={() => dispatch({ type: "NAV_BACK" })}
         disabled={!canGoBack}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
@@ -374,7 +375,7 @@ export function AddressBar() {
       >
         ◀
       </button>
-      <button
+      <button type="button"
         onClick={() => dispatch({ type: "NAV_FORWARD" })}
         disabled={!canGoForward}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
@@ -386,7 +387,7 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* Undo / Redo */}
-      <button
+      <button type="button"
         onClick={() => dispatch({ type: "UNDO_ANNOTATION" })}
         disabled={state.annotationUndoStack.length === 0}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
@@ -394,7 +395,7 @@ export function AddressBar() {
       >
         Undo
       </button>
-      <button
+      <button type="button"
         onClick={() => dispatch({ type: "REDO_ANNOTATION" })}
         disabled={state.annotationRedoStack.length === 0}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
@@ -408,6 +409,16 @@ export function AddressBar() {
       {TABS.map((tab, i) => {
         const isAnomalies = tab.id === "anomalies";
         const anomalyCount = isAnomalies ? state.anomalies.length + state.aiScanResults.length : 0;
+        // A scan that failed or only partly ran produces few or no findings, so
+        // the count alone reads as a clean result. Flag it separately.
+        const scanNote = !isAnomalies
+          ? null
+          : state.aiScan.phase === "failed"
+          ? "AI scan failed — findings are not a clean result"
+          : state.aiScan.phase === "complete" && state.aiScan.failed > 0
+          ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
+          : null;
+        const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
         const maxSeverity = isAnomalies && anomalyCount > 0
           ? (state.anomalies.some(a => a.severity === "critical") || state.aiScanResults.some(a => a.severity === "critical" || a.severity === "high")) ? "critical"
             : (state.anomalies.some(a => a.severity === "warning") || state.aiScanResults.some(a => a.severity === "medium")) ? "warning"
@@ -418,7 +429,7 @@ export function AddressBar() {
           : maxSeverity === "info" ? "bg-blue-500"
           : "";
         return (
-          <button
+          <button type="button"
             key={tab.id}
             onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
             className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
@@ -426,12 +437,21 @@ export function AddressBar() {
                 ? "bg-blue-600 text-white"
                 : "text-gray-400 hover:text-white hover:bg-gray-700"
             }`}
-            title={`${tab.label} (${i + 1})`}
+            title={scanNote ? `${tab.label} (${i + 1}) — ${scanNote}` : `${tab.label} (${i + 1})`}
+            aria-label={scanNote ? `${tab.label} — ${scanNote}` : undefined}
           >
             {tab.label}
             {isAnomalies && anomalyCount > 0 && (
               <span className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}>
                 {anomalyCount}
+              </span>
+            )}
+            {scanNote && (
+              <span
+                aria-hidden="true"
+                className={`${scanNoteColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
+              >
+                !
               </span>
             )}
           </button>
@@ -442,7 +462,7 @@ export function AddressBar() {
 
       {!state.disasmReady && (
         <span className="text-yellow-500 text-xs mr-2 flex items-center gap-1">
-          <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
@@ -456,12 +476,12 @@ export function AddressBar() {
 
       {/* Recent addresses dropdown */}
       <div ref={historyRef} className="relative">
-        <button
+        <button type="button"
           onClick={() => setShowHistory((v) => !v)}
           className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
           title="Recent addresses (Alt+H)"
         >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
           </svg>
         </button>
@@ -478,7 +498,7 @@ export function AddressBar() {
               <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">Recent Addresses</div>
               <div className="px-2 py-1 border-b border-gray-700">
                 <input
-                  autoFocus
+                  ref={focusOnMount}
                   type="text"
                   value={historyFilter}
                   onChange={(e) => setHistoryFilter(e.target.value)}
@@ -494,7 +514,7 @@ export function AddressBar() {
                   <div className="px-3 py-3 text-[10px] text-gray-500 text-center">No matches</div>
                 )}
                 {filtered.map((entry, i) => (
-                  <button
+                  <button type="button"
                     key={`${entry.address}-${i}`}
                     className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
                     onClick={() => {
@@ -534,7 +554,7 @@ export function AddressBar() {
         {showSuggestions && suggestions.length > 0 && (
           <div className="absolute top-full left-0 mt-0.5 w-72 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-52 overflow-auto">
             {suggestions.map((s, i) => (
-              <button
+              <button type="button"
                 key={`${s.address}-${i}`}
                 className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 ${
                   i === suggestionIdx ? "bg-blue-600/30 text-white" : "text-gray-300 hover:bg-gray-700/50"
@@ -552,7 +572,7 @@ export function AddressBar() {
           </div>
         )}
       </div>
-      <button
+      <button type="button"
         onClick={handleGo}
         className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs"
       >
@@ -561,14 +581,14 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      <button
+      <button type="button"
         onClick={handleExport}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="Export annotations (bookmarks, renames, comments)"
       >
         Export
       </button>
-      <button
+      <button type="button"
         onClick={() => importInputRef.current?.click()}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="Import annotations from JSON file"
@@ -586,28 +606,28 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* AI toolbar buttons */}
-      <button
+      <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI Chat (Ctrl+Shift+A)"
       >
         Chat
       </button>
-      <button
+      <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:batch-rename"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Rename All Functions"
       >
         Rename
       </button>
-      <button
+      <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:generate-report"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Generate Analysis Report"
       >
         Report
       </button>
-      <button
+      <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:ai-scan"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Scan Suspicious Functions"
@@ -617,12 +637,12 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      <button
+      <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"))}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
         title="Settings"
       >
-        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+        <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>

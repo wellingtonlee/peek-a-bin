@@ -89,6 +89,41 @@ describe('parseOperandTargets', () => {
       expect(targets).toEqual([{ address: 0x140009ff8, display: 'kernel32.dll!CreateFileW' }]);
     });
 
+    // Regression: the displacement was being re-scanned by the absolute-hex
+    // pass and reported as an address of its own. Realistic x64 bases hide it
+    // (the displacement sorts below imageBase), a low base does not.
+    it('reports one target for [rip + disp] even when disp falls inside a low image', () => {
+      const LOW = 0x1000;
+      const LOW_END = 0x40000;
+      // 0x2000 + 7 + 0x2000 = 0x4007; the raw disp 0x2000 is also in range.
+      const targets = parseOperandTargets(
+        insn(0x2000, 'mov', 'rax, qword ptr [rip + 0x2000]', 7),
+        LOW,
+        LOW_END,
+      );
+      expect(targets.map(t => t.address)).toEqual([0x4007]);
+    });
+
+    it('does not report a negative displacement that falls inside a low image', () => {
+      const targets = parseOperandTargets(
+        insn(0x8000, 'lea', 'rcx, [rip - 0x2000]', 7),
+        0x1000,
+        0x40000,
+      );
+      expect(targets.map(t => t.address)).toEqual([0x6007]);
+    });
+
+    it('still reports an immediate stored through a RIP-relative address', () => {
+      // mov dword ptr [rip + 0x100], 0x3000 — the immediate sits outside the
+      // RIP span, so it remains a genuine second target.
+      const targets = parseOperandTargets(
+        insn(0x2000, 'mov', 'dword ptr [rip + 0x100], 0x3000', 10),
+        0x1000,
+        0x40000,
+      );
+      expect(targets.map(t => t.address)).toEqual([0x210a, 0x3000]);
+    });
+
     it('leaves display undefined when the target is not an IAT slot', () => {
       const targets = parseOperandTargets(
         insn(0x140001000, 'call', 'qword ptr [rip + 0x8ff2]', 6),

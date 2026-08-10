@@ -1,5 +1,7 @@
+import { ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_DEFAULT_MODEL, type LLMProvider } from "./models";
+
 export interface LLMSettings {
-  provider: "anthropic" | "openai";
+  provider: LLMProvider;
   apiKey: string;
   model: string;
   baseUrl: string;
@@ -23,11 +25,13 @@ const MAX_PROFILES = 10;
 const DEFAULTS: LLMSettings = {
   provider: "anthropic",
   apiKey: "",
-  model: "claude-sonnet-4-20250514",
+  // Model IDs live in models.ts — they were duplicated here and in SettingsModal,
+  // which is how they drifted a full generation behind.
+  model: ANTHROPIC_DEFAULT_MODEL,
   // Was https://api.openai.com — a leftover from when buildUrl hardcoded the
   // Anthropic endpoint and never read this field. client.ts still treats the old
   // value as "use the default" so saved profiles keep working.
-  baseUrl: "https://api.anthropic.com",
+  baseUrl: ANTHROPIC_DEFAULT_BASE_URL,
   enhanceSource: "pseudocode",
 };
 

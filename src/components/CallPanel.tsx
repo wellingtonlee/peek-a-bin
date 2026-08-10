@@ -80,7 +80,7 @@ export function CallPanel({
           Call Graph: {getDisplayName(func, renames)}
         </span>
         <div className="flex-1" />
-        <button
+        <button type="button"
           onClick={onClose}
           className="text-gray-500 hover:text-white px-1"
         >
@@ -97,7 +97,7 @@ export function CallPanel({
             <div className="text-gray-600 italic">No callers found</div>
           ) : (
             callers.map((c) => (
-              <button
+              <button type="button"
                 key={c.fn.address}
                 onClick={() => onNavigate(c.sourceAddr)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"
@@ -121,7 +121,7 @@ export function CallPanel({
             <div className="text-gray-600 italic">No calls found</div>
           ) : (
             callees.map((c) => (
-              <button
+              <button type="button"
                 key={c.targetAddr}
                 onClick={() => onNavigate(c.targetAddr)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"

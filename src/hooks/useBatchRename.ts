@@ -5,6 +5,7 @@ import type { BatchRenameResult } from "../llm/types";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { disasmWorker } from "../workers/disasmClient";
 import { streamChat } from "../llm/client";
+import { parseBatchRenameResponse, toBatchRenameResult } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_BATCH_RENAME } from "../llm/prompt";
 import { getDisplayName } from "./usePEFile";
@@ -71,6 +72,9 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
 
     dispatch({ type: "BATCH_RENAME_START", total: unnamed.length });
 
+    // Abort any previous run before taking over the ref — overwriting it left the
+    // earlier request streaming with nobody listening and nobody able to cancel it.
+    abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -111,10 +115,12 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
 
       // Phase 2: Send in batches to LLM
       const allResults: BatchRenameResult[] = [];
+      const parseFailures: string[] = [];
       const config = loadSettings();
 
-      // Update status to running
-      dispatch({ type: "BATCH_RENAME_PROGRESS", done: 0 });
+      // Leave the decompile phase — this is what makes the modal switch from
+      // "Decompiling functions…" to "Generating names…".
+      dispatch({ type: "BATCH_RENAME_PROGRESS", done: 0, phase: "running" });
 
       for (let b = 0; b < decompiled.length; b += BATCH_SIZE) {
         if (controller.signal.aborted) return;
@@ -137,39 +143,35 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
               onDone: () => resolve(acc),
               onError: (err) => reject(new Error(err)),
             },
+            "batch-rename",
           );
         });
 
-        // Parse JSON from response
-        try {
-          const jsonStr = result.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
-          const parsed = JSON.parse(jsonStr);
-          if (Array.isArray(parsed)) {
-            for (const item of parsed) {
-              const addr = typeof item.address === "string"
-                ? parseInt(item.address.replace(/^0x/i, ""), 16)
-                : item.address;
-              if (Number.isNaN(addr) || !item.suggestedName) continue;
-              const batchFn = batch.find(b => b.fn.address === addr);
-              allResults.push({
-                address: addr,
-                currentName: batchFn
-                  ? getDisplayName(batchFn.fn, state.renames)
-                  : `sub_${addr.toString(16)}`,
-                suggestedName: item.suggestedName,
-                confidence: typeof item.confidence === "number" ? item.confidence : 0.5,
-                reasoning: item.reasoning ?? "",
-                accepted: null,
-              });
-            }
+        const parsed = parseBatchRenameResponse(result);
+        if (parsed.ok) {
+          for (const item of parsed.value) {
+            const batchFn = batch.find(entry => entry.fn.address === item.address);
+            const currentName = batchFn
+              ? getDisplayName(batchFn.fn, state.renames)
+              : `sub_${item.address.toString(16)}`;
+            allResults.push(toBatchRenameResult(item, currentName));
           }
-        } catch { /* skip parse errors */ }
+        } else {
+          // A malformed batch used to vanish into an empty catch, so a run that
+          // parsed nothing reported the same "no suggestions" as a clean run.
+          parseFailures.push(parsed.error);
+        }
 
         dispatch({ type: "BATCH_RENAME_PROGRESS", done: b + batch.length });
       }
 
       if (allResults.length === 0) {
-        dispatch({ type: "BATCH_RENAME_ERROR", error: "No rename suggestions could be parsed" });
+        dispatch({
+          type: "BATCH_RENAME_ERROR",
+          error: parseFailures.length > 0
+            ? `No rename suggestions could be parsed — ${parseFailures[0]}`
+            : "No rename suggestions could be parsed",
+        });
       } else {
         dispatch({ type: "BATCH_RENAME_DONE", results: allResults });
       }

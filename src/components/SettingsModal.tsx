@@ -2,16 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import { loadSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
 import { GhidraClient } from "../decompile/ghidraClient";
+import { PROVIDER_DEFAULTS, ANTHROPIC_DEFAULT_MODEL, ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MODELS, OPENAI_MODELS, isDefaultModel } from "../llm/models";
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
-
-const PROVIDER_DEFAULTS: Record<string, { model: string; baseUrl: string }> = {
-  anthropic: { model: "claude-sonnet-4-20250514", baseUrl: "https://api.anthropic.com" },
-  openai: { model: "gpt-4o", baseUrl: "https://api.openai.com" },
-};
 
 type SettingsTab = "ai" | "ghidra" | "display" | "theme";
 
@@ -79,8 +75,8 @@ export function SettingsModal({ open, onClose }: Props) {
       name: `Profile ${profileStore.profiles.length + 1}`,
       provider: "anthropic",
       apiKey: "",
-      model: "claude-sonnet-4-20250514",
-      baseUrl: "https://api.anthropic.com",
+      model: ANTHROPIC_DEFAULT_MODEL,
+      baseUrl: ANTHROPIC_DEFAULT_BASE_URL,
       enhanceSource: "pseudocode",
     };
     const newStore = {
@@ -116,7 +112,11 @@ export function SettingsModal({ open, onClose }: Props) {
     setSettings((s) => ({
       ...s,
       provider,
-      model: s.model === PROVIDER_DEFAULTS[s.provider].model ? defaults.model : s.model,
+      // isDefaultModel, not an equality check against the current default: a
+      // profile stored before the default changed still holds the superseded ID,
+      // and treating that as a deliberate user choice would carry a Claude model
+      // over to the OpenAI provider instead of cleaning it up.
+      model: isDefaultModel(s.provider, s.model) ? defaults.model : s.model,
       baseUrl: provider === "openai" ? s.baseUrl : defaults.baseUrl,
     }));
   };
@@ -187,12 +187,14 @@ export function SettingsModal({ open, onClose }: Props) {
   );
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50"
-    >
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50">
+      {/* The stopPropagation handler that used to be here was dead: this modal's
+          backdrop has no click handler to stop propagation to. */}
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
         className="w-[440px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-gray-700">
           <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
@@ -201,7 +203,7 @@ export function SettingsModal({ open, onClose }: Props) {
         {/* Tab bar */}
         <div className="flex border-b border-gray-700">
           {TABS.map((tab) => (
-            <button
+            <button type="button"
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`px-4 py-2 text-xs font-medium transition-colors ${
@@ -221,11 +223,12 @@ export function SettingsModal({ open, onClose }: Props) {
             <>
               {/* Profile selector */}
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="settings-profile" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Profile
                 </label>
                 <div className="flex gap-1">
                   <select
+                    id="settings-profile"
                     value={selectedProfileId}
                     onChange={(e) => {
                       if (e.target.value === "__new__") {
@@ -243,13 +246,13 @@ export function SettingsModal({ open, onClose }: Props) {
                       <option value="__new__">+ New Profile</option>
                     )}
                   </select>
-                  <button
+                  <button type="button"
                     onClick={handleDeleteProfile}
                     disabled={profileStore.profiles.length <= 1}
                     className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Delete profile"
                   >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                     </svg>
                   </button>
@@ -258,10 +261,11 @@ export function SettingsModal({ open, onClose }: Props) {
 
               {/* Profile name */}
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="settings-profile-name" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Profile Name
                 </label>
                 <input
+                  id="settings-profile-name"
                   type="text"
                   value={profileName}
                   onChange={(e) => setProfileName(e.target.value)}
@@ -271,10 +275,13 @@ export function SettingsModal({ open, onClose }: Props) {
               </div>
 
               {/* Provider */}
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              {/* fieldset/legend so the radio group is announced with its caption.
+                  Tailwind preflight zeroes fieldset/legend padding and margin, so
+                  this renders identically to the previous div/label. */}
+              <fieldset>
+                <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Provider
-                </label>
+                </legend>
                 <div className="flex gap-3">
                   {(["anthropic", "openai"] as const).map((p) => (
                     <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
@@ -289,22 +296,23 @@ export function SettingsModal({ open, onClose }: Props) {
                     </label>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
               {/* API Key */}
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="settings-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   API Key
                 </label>
                 <div className="flex gap-1">
                   <input
+                    id="settings-api-key"
                     type={showKey ? "text" : "password"}
                     value={settings.apiKey}
                     onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
                     placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
                     className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
                   />
-                  <button
+                  <button type="button"
                     onClick={() => setShowKey((v) => !v)}
                     className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
                   >
@@ -315,22 +323,33 @@ export function SettingsModal({ open, onClose }: Props) {
 
               {/* Model */}
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="settings-model" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Model
                 </label>
                 <input
+                  id="settings-model"
                   type="text"
+                  list="settings-model-options"
                   value={settings.model}
                   onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
                   className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
                 />
+                {/* Suggestions only — the field stays free text on purpose, so a
+                    model newer than this build can still be entered by hand. */}
+                <datalist id="settings-model-options">
+                  {(settings.provider === "anthropic" ? ANTHROPIC_MODELS : OPENAI_MODELS).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.note ? `${m.label} — ${m.note}` : m.label}
+                    </option>
+                  ))}
+                </datalist>
               </div>
 
               {/* Enhance Source */}
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              <fieldset>
+                <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Enhance Source
-                </label>
+                </legend>
                 <div className="flex gap-3">
                   {(["pseudocode", "assembly"] as const).map((s) => (
                     <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
@@ -346,15 +365,16 @@ export function SettingsModal({ open, onClose }: Props) {
                   ))}
                 </div>
                 <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
-              </div>
+              </fieldset>
 
               {/* Base URL (OpenAI only) */}
               {settings.provider === "openai" && (
                 <div>
-                  <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  <label htmlFor="settings-base-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                     Base URL
                   </label>
                   <input
+                    id="settings-base-url"
                     type="text"
                     value={settings.baseUrl}
                     onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
@@ -375,9 +395,12 @@ export function SettingsModal({ open, onClose }: Props) {
           {/* Ghidra Tab */}
           {activeTab === "ghidra" && (
             <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                {/* Section caption, not a control label — the checkbox below carries
+                    its own <label>. A <label> with no control is invisible to
+                    assistive tech anyway, so a plain div is more honest. */}
+                <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Decompilation Server
-                </label>
+                </div>
                 <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
                   <input
                     type="checkbox"
@@ -390,10 +413,11 @@ export function SettingsModal({ open, onClose }: Props) {
                 {decompServer.enabled && (
                   <div className="space-y-2">
                     <div>
-                      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                      <label htmlFor="ghidra-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                         Ghidra URL
                       </label>
                       <input
+                        id="ghidra-url"
                         type="text"
                         value={decompServer.ghidraUrl}
                         onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
@@ -402,10 +426,11 @@ export function SettingsModal({ open, onClose }: Props) {
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                      <label htmlFor="ghidra-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                         API Key
                       </label>
                       <input
+                        id="ghidra-api-key"
                         type="text"
                         value={decompServer.apiKey}
                         onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
@@ -414,7 +439,7 @@ export function SettingsModal({ open, onClose }: Props) {
                       />
                     </div>
                     <div>
-                      <button
+                      <button type="button"
                         onClick={async () => {
                           setConnStatus("testing");
                           setConnMessage("");
@@ -450,11 +475,12 @@ export function SettingsModal({ open, onClose }: Props) {
           {/* Display Tab */}
           {activeTab === "display" && (
             <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="display-font-size" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Font Size
                 </label>
                 <div className="flex items-center gap-3">
                   <input
+                    id="display-font-size"
                     type="range"
                     min={10}
                     max={16}
@@ -472,27 +498,33 @@ export function SettingsModal({ open, onClose }: Props) {
           {activeTab === "theme" && (
             <>
               <div>
-                <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                {/* Section caption for the theme card grid — not a control label. */}
+                <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
                   Color Theme
-                </label>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {themes.map((theme) => {
                     const isBuiltin = BUILTIN_THEMES.some(b => b.id === theme.id);
                     return (
-                      <div
-                        key={theme.id}
-                        onClick={() => setThemeId(theme.id)}
-                        className={`relative p-2 rounded-lg border cursor-pointer transition-colors ${
-                          themeId === theme.id
-                            ? "border-blue-500 bg-blue-500/10"
-                            : "border-gray-600 hover:border-gray-500 bg-gray-900/50"
-                        }`}
-                      >
-                        <div className="text-xs text-gray-200 font-medium">{theme.name}</div>
-                        <ThemeSwatches theme={theme} />
+                      // The delete "×" is a sibling rather than a child so the card
+                      // itself can be a real <button> (buttons cannot nest).
+                      <div key={theme.id} className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setThemeId(theme.id)}
+                          aria-pressed={themeId === theme.id}
+                          className={`w-full text-left p-2 rounded-lg border cursor-pointer transition-colors ${
+                            themeId === theme.id
+                              ? "border-blue-500 bg-blue-500/10"
+                              : "border-gray-600 hover:border-gray-500 bg-gray-900/50"
+                          }`}
+                        >
+                          <div className="text-xs text-gray-200 font-medium">{theme.name}</div>
+                          <ThemeSwatches theme={theme} />
+                        </button>
                         {!isBuiltin && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleDeleteTheme(theme.id); }}
+                          <button type="button"
+                            onClick={() => handleDeleteTheme(theme.id)}
                             className="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-[10px]"
                             title="Delete theme"
                           >
@@ -506,7 +538,7 @@ export function SettingsModal({ open, onClose }: Props) {
               </div>
 
               <div className="flex gap-2">
-                <button
+                <button type="button"
                   onClick={() => fileInputRef.current?.click()}
                   className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
                 >
@@ -519,7 +551,7 @@ export function SettingsModal({ open, onClose }: Props) {
                   onChange={handleImportTheme}
                   className="hidden"
                 />
-                <button
+                <button type="button"
                   onClick={handleExportTheme}
                   className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
                 >
@@ -535,13 +567,13 @@ export function SettingsModal({ open, onClose }: Props) {
         </div>
 
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button
+          <button type="button"
             onClick={onClose}
             className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
           >
             Cancel
           </button>
-          <button
+          <button type="button"
             onClick={handleSave}
             className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded"
           >

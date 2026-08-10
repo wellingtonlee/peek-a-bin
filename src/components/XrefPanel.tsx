@@ -155,7 +155,7 @@ export function XrefPanel({
   const scopeBtn = (mode: ScopeMode, label: string, show: boolean) => {
     if (!show) return null;
     return (
-      <button
+      <button type="button"
         key={mode}
         onClick={() => setScopeMode(mode)}
         className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
@@ -178,7 +178,7 @@ export function XrefPanel({
         </span>
         <div className="flex items-center gap-1 ml-2">
           {(["call", "jmp", "branch", "data"] as XrefType[]).map((t) => (
-            <button
+            <button type="button"
               key={t}
               onClick={() => toggleType(t)}
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
@@ -200,7 +200,7 @@ export function XrefPanel({
           {scopeBtn("function", "Func", currentFuncAddr != null)}
           {scopeBtn("instruction", "Insn", currentInsnAddr != null)}
           {scopeMode === "instruction" && (
-            <button
+            <button type="button"
               onClick={() => setDirection((d) => d === "to" ? "from" : "to")}
               className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-700 text-gray-300 hover:bg-gray-600"
             >
@@ -216,7 +216,7 @@ export function XrefPanel({
           className="ml-2 px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-[10px] w-40"
         />
         <div className="flex-1" />
-        <button
+        <button type="button"
           onClick={onClose}
           className="text-gray-500 hover:text-white px-1"
         >
@@ -226,25 +226,28 @@ export function XrefPanel({
 
       {/* Column headers */}
       <div className="flex items-center px-3 py-0.5 border-b border-gray-800 text-gray-500 text-[10px] select-none shrink-0">
-        <div
-          className="w-12 shrink-0 cursor-pointer hover:text-gray-300"
+        <button
+          type="button"
+          className="w-12 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("type")}
         >
           Type{sortIndicator("type")}
-        </div>
-        <div
-          className="w-32 shrink-0 cursor-pointer hover:text-gray-300"
+        </button>
+        <button
+          type="button"
+          className="w-32 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("from")}
         >
           From{sortIndicator("from")}
-        </div>
+        </button>
         <div className="w-36 shrink-0">Function</div>
-        <div
-          className="w-32 shrink-0 cursor-pointer hover:text-gray-300"
+        <button
+          type="button"
+          className="w-32 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("to")}
         >
           To{sortIndicator("to")}
-        </div>
+        </button>
         <div className="flex-1">Target</div>
       </div>
 
@@ -266,9 +269,10 @@ export function XrefPanel({
               const x = filtered[vItem.index];
               if (!x) return null;
               return (
-                <div
+                <button
+                  type="button"
                   key={vItem.index}
-                  className="absolute left-0 w-full flex items-center px-3 hover:bg-gray-800/50 cursor-pointer"
+                  className="absolute left-0 w-full flex items-center px-3 text-left hover:bg-gray-800/50 cursor-pointer"
                   style={{
                     top: 0,
                     height: "22px",
@@ -291,7 +295,7 @@ export function XrefPanel({
                   <div className="flex-1 text-gray-400 truncate" title={x.toFuncName}>
                     {x.toFuncName || "---"}
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>

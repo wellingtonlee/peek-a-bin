@@ -1,5 +1,8 @@
 import type { IRExpr, BinaryOp } from './ir';
-import { irBinary, irConst, irUnary, irReg } from './ir';
+import { irBinary, irConst, irUnary, irReg, canonReg } from './ir';
+
+/** Volatile registers under the Windows x64 ABI (a superset of the x86 ones). */
+const CALLER_SAVED = new Set(['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11']);
 
 /**
  * Tracks last-written expression per register and flag state within a basic block.
@@ -108,8 +111,13 @@ export class RegState {
 
   /** Invalidate caller-saved registers after a call (x64 Windows ABI). */
   invalidateCallerSaved(): void {
-    const clobbered = ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11'];
-    for (const r of clobbered) this.defs.delete(r);
+    // Defs are keyed by the literal operand text ('eax', 'r8d', 'cl', …), so
+    // match on the canonical parent rather than deleting the 64-bit names.
+    // In 32-bit mode every def is a sub-register, so deleting only rax/rcx/…
+    // would invalidate nothing at all.
+    for (const key of [...this.defs.keys()]) {
+      if (CALLER_SAVED.has(canonReg(key))) this.defs.delete(key);
+    }
     this.flagLeft = null;
     this.flagRight = null;
     this.flagOp = null;

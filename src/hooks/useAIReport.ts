@@ -158,6 +158,9 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
 
     dispatch({ type: "AI_REPORT_START" });
 
+    // Abort the previous report before replacing the ref, so a re-generate does
+    // not leave the earlier stream running and un-cancellable.
+    abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -252,6 +255,7 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
           dispatch({ type: "AI_REPORT_ERROR", error });
         },
       },
+      "report",
     );
   }, [state.peFile, state.fileName, state.functions, state.renames, state.anomalies, state.driverInfo, dispatch]);
 

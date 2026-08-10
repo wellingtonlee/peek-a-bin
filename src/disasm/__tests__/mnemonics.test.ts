@@ -30,6 +30,33 @@ describe('MNEMONIC_HINTS', () => {
     expect(declared.length).toBe(keys.length);
   });
 
+  // Every conditional branch needs a hint: buildCFG treats any `j*` as a
+  // branch and RegState.getCondition understands the negated aliases, so a
+  // missing entry means a blank tooltip on a real, reachable instruction.
+  const CONDITIONAL_JUMPS = [
+    'je', 'jz', 'jne', 'jnz',
+    'jg', 'jnle', 'jge', 'jnl', 'jl', 'jnge', 'jle', 'jng',
+    'ja', 'jnbe', 'jae', 'jnb', 'jnc', 'jb', 'jnae', 'jc', 'jbe', 'jna',
+    'js', 'jns', 'jo', 'jno',
+    'jp', 'jpe', 'jnp', 'jpo',
+    'jcxz', 'jecxz', 'jrcxz',
+  ];
+
+  it('describes every x86 conditional jump, including the negated aliases', () => {
+    expect(CONDITIONAL_JUMPS.filter(m => !(m in MNEMONIC_HINTS))).toEqual([]);
+  });
+
+  // Catches a jcc added to RegState.getCondition's condMap without a hint.
+  it('describes every jcc RegState.getCondition knows about', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../decompile/regstate.ts', import.meta.url)),
+      'utf8',
+    );
+    const jccs = [...new Set([...src.matchAll(/'(jn?[a-z]{1,4})'/g)].map(m => m[1]))];
+    expect(jccs.length).toBeGreaterThan(0);
+    expect(jccs.filter(m => !(m in MNEMONIC_HINTS))).toEqual([]);
+  });
+
   it('covers the mnemonics that dominate real disassembly', () => {
     const common = [
       'mov', 'lea', 'push', 'pop', 'call', 'ret', 'jmp', 'je', 'jne', 'jz', 'jnz',

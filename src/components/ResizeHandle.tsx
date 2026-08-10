@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 
+/** Pixels moved per arrow-key press when the handle has keyboard focus. */
+const KEYBOARD_STEP_PX = 16;
+
 interface ResizeHandleProps {
   orientation?: "horizontal" | "vertical";
   onResize: (delta: number) => void;
@@ -45,10 +48,26 @@ export function ResizeHandle({ orientation = "horizontal", onResize, onResizeEnd
     document.body.style.userSelect = "none";
   }, [orientation]);
 
+  // Keyboard resizing. The onResize API is already delta-based, so arrow keys map
+  // onto it directly — this gives keyboard users a resize path they previously had
+  // no equivalent for, rather than just satisfying the linter.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const isHorizontal = orientation === "horizontal";
+    const decrease = isHorizontal ? "ArrowLeft" : "ArrowUp";
+    const increase = isHorizontal ? "ArrowRight" : "ArrowDown";
+    if (e.key !== decrease && e.key !== increase) return;
+    e.preventDefault();
+    onResizeRef.current(e.key === decrease ? -KEYBOARD_STEP_PX : KEYBOARD_STEP_PX);
+    onResizeEndRef.current?.();
+  }, [orientation]);
+
   return (
-    <div
+    <button
+      type="button"
+      aria-label={orientation === "horizontal" ? "Resize panel width" : "Resize panel height"}
       className={orientation === "horizontal" ? "panel-handle-h" : "panel-handle-v"}
       onMouseDown={handleMouseDown}
+      onKeyDown={handleKeyDown}
     />
   );
 }

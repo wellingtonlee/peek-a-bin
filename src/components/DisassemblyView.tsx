@@ -1,4 +1,5 @@
 import { useEffect, useRef, useMemo, useCallback, useState } from "react";
+import { focusOnMount } from "./focusOnMount";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
@@ -177,6 +178,8 @@ export function DisassemblyView() {
   const [restorePanZoom, setRestorePanZoom] = useState<{ pan: { x: number; y: number }; zoom: number } | null>(null);
   const navViewStateMapRef = useRef<Map<number, { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number }>>(new Map());
   const cfgContainerRef = useRef<HTMLDivElement>(null);
+  // Only one of the two context-menu render sites is mounted at a time.
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showXrefPanel, setShowXrefPanel] = useState(false);
   const [showGraphSearch, setShowGraphSearch] = useState(false);
@@ -440,7 +443,13 @@ export function DisassemblyView() {
   // Dismiss context menu / export menu on click outside or Escape
   useEffect(() => {
     if (!ctxMenu && !showExportMenu) return;
-    const dismiss = () => { setCtxMenu(null); setShowExportMenu(false); };
+    // Clicks inside the menu are ignored here rather than being stopped from
+    // propagating by a handler on the menu div.
+    const dismiss = (e?: MouseEvent) => {
+      if (e && ctxMenuRef.current?.contains(e.target as Node)) return;
+      setCtxMenu(null);
+      setShowExportMenu(false);
+    };
     const keyDismiss = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
     window.addEventListener("click", dismiss);
     window.addEventListener("keydown", keyDismiss);
@@ -1159,7 +1168,7 @@ export function DisassemblyView() {
   if (disassembling) {
     return (
       <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-        <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
+        <svg aria-hidden="true" className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
         </svg>
@@ -1179,7 +1188,7 @@ export function DisassemblyView() {
   if (!state.disasmReady) {
     return (
       <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-        <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
+        <svg aria-hidden="true" className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
         </svg>
@@ -1227,21 +1236,21 @@ export function DisassemblyView() {
         )}
         </>)}
         <div className="flex items-center gap-1 ml-2">
-          <button
+          <button type="button"
             onClick={() => setShowArrows((v) => !v)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showArrows ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
           >
             Arrows
           </button>
           {viewMode === "linear" && (
-          <button
+          <button type="button"
             onClick={() => setShowMinimap((v) => !v)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showMinimap ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
           >
             Map
           </button>
           )}
-          <button
+          <button type="button"
             onClick={() => {
               setShowBytes((v) => {
                 const next = !v;
@@ -1254,7 +1263,7 @@ export function DisassemblyView() {
           >
             Bytes
           </button>
-          <button
+          <button type="button"
             onClick={() => setViewMode(v => v === "graph" ? "linear" : "graph")}
             disabled={!currentFunc || !isExecutable}
             className={`px-1.5 py-0.5 rounded text-[10px] ${viewMode === "graph" ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
@@ -1262,7 +1271,7 @@ export function DisassemblyView() {
           >
             Graph
           </button>
-          <button
+          <button type="button"
             onClick={handleDecompileToggle}
             disabled={!currentFunc || !isExecutable}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showDecompile ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"} disabled:opacity-30`}
@@ -1270,7 +1279,7 @@ export function DisassemblyView() {
           >
             Decompile
           </button>
-          <button
+          <button type="button"
             onClick={() => setShowXrefPanel((v) => !v)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${showXrefPanel ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"}`}
             title="Toggle cross-reference panel (R)"
@@ -1278,7 +1287,7 @@ export function DisassemblyView() {
             Xrefs
           </button>
           <div className="relative">
-            <button
+            <button type="button"
               onClick={() => setShowExportMenu((v) => !v)}
               className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600"
               title="Export disassembly as .asm file"
@@ -1287,14 +1296,14 @@ export function DisassemblyView() {
             </button>
             {showExportMenu && (
               <div className="absolute top-full left-0 mt-0.5 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 text-[10px] min-w-[140px]">
-                <button
+                <button type="button"
                   onClick={() => handleExportAsm("function")}
                   disabled={!currentFunc}
                   className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200 disabled:opacity-30 disabled:cursor-default"
                 >
                   Current function
                 </button>
-                <button
+                <button type="button"
                   onClick={() => handleExportAsm("section")}
                   className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
                 >
@@ -1348,21 +1357,21 @@ export function DisassemblyView() {
             {search.searchQuery && !search.searchRegexError && search.searchMatches.length === 0 && !search.crossResults && (
               <span className="text-red-400 text-[10px]">No matches</span>
             )}
-            <button
+            <button type="button"
               onClick={search.handleSearchPrev}
               className="px-1 py-0.5 text-gray-400 hover:text-white"
               title="Previous (Shift+Enter)"
             >
               ▲
             </button>
-            <button
+            <button type="button"
               onClick={search.handleSearchNext}
               className="px-1 py-0.5 text-gray-400 hover:text-white"
               title="Next (Enter)"
             >
               ▼
             </button>
-            <button
+            <button type="button"
               onClick={() => {
                 search.resetSearch();
                 parentRef.current?.focus();
@@ -1372,7 +1381,7 @@ export function DisassemblyView() {
               ✕
             </button>
             <div className="relative group">
-              <button className="px-1 py-0.5 text-gray-500 hover:text-gray-300 text-[10px]">?</button>
+              <button type="button" className="px-1 py-0.5 text-gray-500 hover:text-gray-300 text-[10px]">?</button>
               <div className="hidden group-hover:block absolute right-0 top-full mt-1 w-56 px-2 py-1.5 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-300 z-50 shadow-lg whitespace-normal">
                 Substring match by default. Use <span className="text-blue-400">/pattern/</span> for regex, <span className="text-blue-400">/pattern/i</span> for case-insensitive.
               </div>
@@ -1386,7 +1395,7 @@ export function DisassemblyView() {
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
           <div className="text-gray-400 mb-1">{search.searchMatches.length} matches in {search.searchMatchGroups.length} functions:</div>
           {search.searchMatchGroups.map((g) => (
-            <button
+            <button type="button"
               key={g.funcAddr}
               onClick={() => dispatch({ type: "SET_ADDRESS", address: g.funcAddr })}
               className="block w-full text-left hover:bg-gray-700/50 rounded px-1 py-0.5 truncate"
@@ -1402,7 +1411,7 @@ export function DisassemblyView() {
       {search.showSearch && search.searchQuery && search.searchMatches.length === 0 && !search.crossResults && !search.crossSearching && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs flex items-center gap-2">
           <span className="text-gray-400">No matches in {sectionInfo.name}.</span>
-          <button
+          <button type="button"
             onClick={search.handleCrossSearch}
             className="text-blue-400 hover:text-blue-300 hover:underline"
           >
@@ -1414,7 +1423,7 @@ export function DisassemblyView() {
       {/* Cross-section search loading */}
       {search.crossSearching && (
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs text-gray-400 flex items-center gap-2">
-          <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
@@ -1427,7 +1436,7 @@ export function DisassemblyView() {
         <div className="px-4 py-1.5 bg-gray-800/80 border-b border-gray-700 text-xs max-h-40 overflow-auto">
           <div className="text-gray-400 mb-1">{search.crossResults.length} result{search.crossResults.length !== 1 ? "s" : ""} in other sections:</div>
           {search.crossResults.map((r: CrossSectionResult, i: number) => (
-            <button
+            <button type="button"
               key={i}
               onClick={() => {
                 dispatch({ type: "SET_ADDRESS", address: r.address });
@@ -1452,13 +1461,26 @@ export function DisassemblyView() {
       <Breadcrumbs />
 
       {/* Disassembly content */}
-      <div className="flex flex-1 overflow-hidden" ref={cfgContainerRef} tabIndex={0} onKeyDown={handleKeyDown}>
+      {/* tabIndex={-1}: focus is moved here programmatically (on entering graph mode, on
+          row click, on navigation) rather than by tabbing — see the focus() calls above.
+          Global hotkeys are bound on window, so keyboard users lose nothing. */}
+      {/* role="application": this pane defines its own single-key shortcuts
+          (G, R, Space, Enter, ";" ...), so screen readers should forward keys
+          rather than intercept them for browse mode. */}
+      <div
+        role="application"
+        aria-label="Disassembly viewer"
+        className="flex flex-1 overflow-hidden"
+        ref={cfgContainerRef}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+      >
       {viewMode === "linear" ? (
       <div
         ref={parentRef}
         className="flex-1 overflow-auto leading-5 focus:outline-none relative"
         style={{ fontSize: 'var(--mono-font-size)', '--col-addr': pe.is64 ? '18ch' : '10ch' } as React.CSSProperties}
-        tabIndex={0}
+        tabIndex={-1}
       >
         {/* Sticky function header */}
         {currentFunc && currentFuncLabelIndex >= 0 && (() => {
@@ -1467,13 +1489,14 @@ export function DisassemblyView() {
           if (currentFuncLabelIndex < firstVisible) {
             const name = getDisplayName(currentFunc, state.renames);
             return (
-              <div
-                className="sticky top-0 left-0 right-0 z-10 bg-gray-900/95 border-b border-gray-700/50 px-4 py-0.5 text-xs text-gray-300 cursor-pointer hover:text-white font-mono"
+              <button
+                type="button"
+                className="sticky top-0 left-0 right-0 z-10 w-full text-left bg-gray-900/95 border-b border-gray-700/50 px-4 py-0.5 text-xs text-gray-300 cursor-pointer hover:text-white font-mono"
                 onClick={() => virtualizer.scrollToIndex(currentFuncLabelIndex, { align: "start" })}
                 title="Click to scroll to function header"
               >
                 ▸ {name}
-              </div>
+              </button>
             );
           }
           return null;
@@ -1539,12 +1562,14 @@ export function DisassemblyView() {
                 if (item.stringType) commentStr = <span className="text-gray-500 ml-4">; {item.stringType}</span>;
               } else if ((item.directive === "dd" || item.directive === "dq") && item.pointerTarget != null) {
                 directiveStr = (
-                  <span
-                    className="text-blue-400 cursor-pointer hover:underline"
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    className="inline text-blue-400 cursor-pointer hover:underline"
                     onClick={(e) => { e.stopPropagation(); handleAddressClick(item.pointerTarget!); }}
                   >
                     0x{item.pointerTarget.toString(16).toUpperCase()}
-                  </span>
+                  </button>
                 );
                 if (item.pointerLabel) commentStr = <span className="text-gray-500 ml-4">; {item.pointerLabel}</span>;
               } else {
@@ -1557,6 +1582,10 @@ export function DisassemblyView() {
               const userComment = state.comments[item.address];
 
               return (
+                // Data row wraps its own pointer-target button — same constraint as
+                // the instruction row below.
+                // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
+                // biome-ignore lint/a11y/useKeyWithClickEvents: container of controls, not a control
                 <div
                   key={vItem.index}
                   data-index={vItem.index}
@@ -1616,7 +1645,7 @@ export function DisassemblyView() {
                   >
                     <span className="mr-1">; ────</span>
                     <input
-                      autoFocus
+                      ref={focusOnMount}
                       className="bg-gray-800 border border-blue-500 rounded px-1 text-yellow-300 text-[11px] font-mono outline-none w-48"
                       value={renamingLabel.value}
                       onChange={(e) => setRenamingLabel({ ...renamingLabel, value: e.target.value })}
@@ -1641,6 +1670,9 @@ export function DisassemblyView() {
               }
 
               return (
+                // Double-click-to-rename on a row that contains its own xref button.
+                // Rename is also on the context menu, which is keyboard-operable.
+                // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
                 <div
                   key={`label-${vItem.index}`}
                   data-index={vItem.index}
@@ -1675,8 +1707,10 @@ export function DisassemblyView() {
                     if (counts.data) parts.push(`${counts.data} data`);
                     const label = parts.length > 0 ? parts.join(", ") : `${xrefCount} xref${xrefCount !== 1 ? "s" : ""}`;
                     return (
-                      <span
-                        className="ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        className="inline ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
                         onClick={(e) => {
                           e.stopPropagation();
                           setXrefScopeAddress(row.fn.address);
@@ -1684,7 +1718,7 @@ export function DisassemblyView() {
                         }}
                       >
                         ({label})
-                      </span>
+                      </button>
                     );
                   })()}
                 </div>
@@ -1768,6 +1802,12 @@ export function DisassemblyView() {
             }
 
             return (
+              // The row already contains its own buttons (address, mnemonic, operand
+              // targets), so it cannot become a <button> (no nesting) and role="button"
+              // would be invalid ARIA for the same reason. Selecting a row from the
+              // keyboard needs a roving-tabindex grid model, tracked separately.
+              // biome-ignore lint/a11y/noStaticElementInteractions: container of controls, not a control
+              // biome-ignore lint/a11y/useKeyWithClickEvents: container of controls, not a control
               <div
                 key={vItem.index}
                 data-index={vItem.index}
@@ -1811,8 +1851,10 @@ export function DisassemblyView() {
                     const xrefs = typedXrefMap.get(insn.address);
                     if (!xrefs || xrefs.length === 0 || funcMap.has(insn.address)) return null;
                     return (
-                      <span
-                        className="text-gray-600 hover:text-blue-400 cursor-pointer text-[9px]"
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        className="inline text-gray-600 hover:text-blue-400 cursor-pointer text-[9px]"
                         onClick={(e) => {
                           e.stopPropagation();
                           setXrefScopeAddress(insn.address);
@@ -1820,12 +1862,14 @@ export function DisassemblyView() {
                         }}
                       >
                         ×{xrefs.length}
-                      </span>
+                      </button>
                     );
                   })()}
                 </span>
-                <span
-                  className={`disasm-address cursor-pointer hover:text-blue-400 ${
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className={`disasm-address cursor-pointer hover:text-blue-400 text-left ${
                     copiedAddr === insn.address ? "text-green-400" : ""
                   }`}
                   onClick={() => handleAddressClick(insn.address)}
@@ -1835,19 +1879,25 @@ export function DisassemblyView() {
                     .toString(16)
                     .toUpperCase()
                     .padStart(addrWidth, "0")}
-                </span>
+                </button>
                 {showBytes && (
                   <span className="disasm-bytes truncate">
                     {bytesHex}
                   </span>
                 )}
-                <span
-                  className={`disasm-mnemonic ${mnemonicClass(insn.mnemonic)}`}
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className={`disasm-mnemonic text-left ${mnemonicClass(insn.mnemonic)}`}
                   title={MNEMONIC_HINTS[insn.mnemonic]}
                   onDoubleClick={() => handleDoubleClickInsn(insn)}
                 >
                   {insn.mnemonic}
-                </span>
+                </button>
+                {/* biome-ignore lint/a11y/noStaticElementInteractions: wraps the
+                    operand target buttons, so it cannot itself be a button. The
+                    double-click opens instruction detail, which is also on the
+                    context menu. */}
                 <span
                   className="disasm-operands overflow-hidden"
                   onDoubleClick={() => handleDoubleClickInsn(insn)}
@@ -1885,7 +1935,7 @@ export function DisassemblyView() {
                   {editingComment && editingComment.address === insn.address ? (
                     <span className="shrink-0">
                       <textarea
-                        autoFocus
+                        ref={focusOnMount}
                         rows={1}
                         className="bg-gray-900/80 border border-blue-500 ring-1 ring-blue-500/50 rounded px-1.5 py-0.5 text-[#6ee7b7] text-xs font-mono outline-none w-64 resize-none align-middle"
                         placeholder="Add comment..."
@@ -1932,7 +1982,7 @@ export function DisassemblyView() {
             const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
             const isFuncHead = funcMap.has(ctxMenu.insn.address);
             const menuItem = (label: string, onClick: () => void, hint?: string) => (
-              <button onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
+              <button type="button" onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
                 <span>{label}</span>
                 {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
               </button>
@@ -1940,9 +1990,9 @@ export function DisassemblyView() {
             const sep = <div className="border-t border-gray-800 my-0.5" />;
             return (
               <div
+                ref={ctxMenuRef}
                 className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
                 style={{ left: ctxMenu.x, top: ctxMenu.y }}
-                onClick={(e) => e.stopPropagation()}
               >
                 {menuItem("Copy address", ctxCopyAddr)}
                 {menuItem("Copy instruction", ctxCopyInsn)}
@@ -2033,7 +2083,7 @@ export function DisassemblyView() {
         const hasComment = !!(state.comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
         const isFuncHead = funcMap.has(ctxMenu.insn.address);
         const menuItem = (label: string, onClick: () => void, hint?: string) => (
-          <button onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
+          <button type="button" onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
             <span>{label}</span>
             {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
           </button>
@@ -2041,9 +2091,9 @@ export function DisassemblyView() {
         const sep = <div className="border-t border-gray-800 my-0.5" />;
         return (
           <div
+            ref={ctxMenuRef}
             className="absolute z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[200px]"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
-            onClick={(e) => e.stopPropagation()}
           >
             {menuItem("Copy address", ctxCopyAddr)}
             {menuItem("Copy instruction", ctxCopyInsn)}
@@ -2092,7 +2142,7 @@ export function DisassemblyView() {
               ? `${graphSearchIdx + 1}/${graphSearchMatches.length}`
               : graphSearchQuery ? "0 matches" : ""}
           </span>
-          <button
+          <button type="button"
             onClick={graphSearchPrevMatch}
             disabled={graphSearchMatches.length === 0}
             className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
@@ -2100,7 +2150,7 @@ export function DisassemblyView() {
           >
             ▲
           </button>
-          <button
+          <button type="button"
             onClick={graphSearchNextMatch}
             disabled={graphSearchMatches.length === 0}
             className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
@@ -2108,7 +2158,7 @@ export function DisassemblyView() {
           >
             ▼
           </button>
-          <button
+          <button type="button"
             onClick={closeGraphSearch}
             className="text-gray-500 hover:text-white px-1"
             title="Close (Escape)"

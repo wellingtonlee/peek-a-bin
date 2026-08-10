@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { ModalBackdrop } from "./ModalBackdrop";
 
 interface Props {
   open: boolean;
@@ -113,13 +114,13 @@ export function KeyboardShortcuts({ open, onClose }: Props) {
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
+      <ModalBackdrop onClose={onClose} />
       <div
-        className="w-[512px] max-w-lg bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard shortcuts"
+        className="relative w-[512px] max-w-lg bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
       >
         <div className="px-4 py-3 border-b border-gray-700">
           <h2 className="text-sm font-semibold text-gray-200">Keyboard Shortcuts</h2>

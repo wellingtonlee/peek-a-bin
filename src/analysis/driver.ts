@@ -202,6 +202,10 @@ export function decodeIOCTL(value: number): IOCTLDecode | null {
 }
 
 export function isPlausibleIOCTL(value: number): boolean {
+  // An IOCTL code is a 32-bit value. Without this, a wider immediate (x64 movabs
+  // constants reach here) is silently truncated by the shifts below and can
+  // decode as a plausible code — a false IOCTL annotation on an unrelated value.
+  if (!Number.isInteger(value) || value < 0 || value > 0xFFFFFFFF) return false;
   if (value === 0 || value < 0x10000) return false;
   const deviceType = (value >>> 16) & 0xFFFF;
   const func = (value >>> 2) & 0xFFF;

@@ -1,3 +1,4 @@
+import { ORDINAL_TABLES } from "./ordinalTables";
 import type { PEFile } from "./types";
 
 // --- Rich Header ---
@@ -18,7 +19,10 @@ export function parseRichHeader(buffer: ArrayBuffer): RichEntry[] | null {
       break;
     }
   }
-  if (richOffset < 0) return null;
+  // The marker only counts if the 4-byte XOR key behind it is actually present:
+  // a file ending in "Rich" otherwise threw a RangeError out of the read below,
+  // and HeaderView calls this during render, so the whole tab went blank.
+  if (richOffset < 0 || richOffset + 8 > bytes.length) return null;
 
   // XOR key follows "Rich"
   const view = new DataView(buffer);
@@ -37,7 +41,7 @@ export function parseRichHeader(buffer: ArrayBuffer): RichEntry[] | null {
 
   // Decode entries (skip DanS + 3 padding dwords = 16 bytes)
   const entries: RichEntry[] = [];
-  for (let i = dansOffset + 16; i < richOffset; i += 8) {
+  for (let i = dansOffset + 16; i + 8 <= richOffset; i += 8) {
     const compId = view.getUint32(i, true) ^ xorKey;
     const useCount = view.getUint32(i + 4, true) ^ xorKey;
     entries.push({
@@ -169,8 +173,14 @@ export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResul
 
 // --- Imphash (MD5-based) ---
 
-// Minimal MD5 implementation (RFC 1321)
-function md5(input: Uint8Array): string {
+/**
+ * Minimal MD5 implementation (RFC 1321).
+ *
+ * Exported for testing: imphash is a hash nobody cross-checks at runtime, so a
+ * wrong digest would look exactly like a right one. `metadata.test.ts` pins it
+ * against the RFC 1321 vectors directly.
+ */
+export function md5(input: Uint8Array): string {
   const K = new Uint32Array([
     0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
     0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
@@ -232,25 +242,37 @@ function md5(input: Uint8Array): string {
   return Array.from(new Uint8Array(result.buffer)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Ordinal resolution table for common DLLs (subset for imphash compatibility)
-const ORDINAL_DLL_MAP: Record<string, Record<number, string>> = {
-  "oleaut32.dll": { 2: "SysAllocString", 6: "SysFreeString", 8: "VariantInit", 9: "VariantClear" },
-  "ws2_32.dll": { 1: "accept", 2: "bind", 3: "closesocket", 4: "connect", 9: "getpeername", 23: "socket", 115: "WSAStartup" },
-};
+/**
+ * pefile strips the extension only when it is one of these — `foo.exe` keeps
+ * its extension, `foo.sys` does not. Matching that exactly is the whole point:
+ * an imphash that disagrees with pefile cannot be looked up anywhere.
+ */
+const IMPHASH_STRIPPED_EXTENSIONS = new Set(["dll", "ocx", "sys"]);
 
 export function computeImphash(imports: PEFile["imports"]): string {
   const parts: string[] = [];
   for (const imp of imports) {
     const lib = imp.libraryName.toLowerCase();
-    // Strip extension for the lib name per imphash spec
-    const libBase = lib.replace(/\.dll$/i, "");
+    const dot = lib.lastIndexOf(".");
+    const libBase =
+      dot > 0 && IMPHASH_STRIPPED_EXTENSIONS.has(lib.slice(dot + 1)) ? lib.slice(0, dot) : lib;
     for (const func of imp.functions) {
       // Check if it's an ordinal (starts with "Ordinal_" or is numeric)
       if (func.startsWith("Ordinal_")) {
         const ord = parseInt(func.replace("Ordinal_", ""), 10);
-        const resolved = ORDINAL_DLL_MAP[lib]?.[ord];
-        parts.push(`${libBase}.${resolved ? resolved.toLowerCase() : func.toLowerCase()}`);
-      } else {
+        // Keyed by the library name *with* its extension, exactly as pefile
+        // keys ordlookup — ws2_32 and wsock32 disagree on several ordinals.
+        const resolved = ORDINAL_TABLES[lib]?.[ord];
+        // pefile renders an unresolved ordinal as "ord<N>"
+        // (ordlookup.formatOrdString), never as this parser's "Ordinal_N".
+        const funcName = resolved
+          ? resolved.toLowerCase()
+          : Number.isNaN(ord)
+            ? func.toLowerCase()
+            : `ord${ord}`;
+        parts.push(`${libBase}.${funcName}`);
+      } else if (func) {
+        // pefile skips imports it could not name at all.
         parts.push(`${libBase}.${func.toLowerCase()}`);
       }
     }

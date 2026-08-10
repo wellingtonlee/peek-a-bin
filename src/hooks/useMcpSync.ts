@@ -1,9 +1,41 @@
 import { useEffect, useState, type Dispatch } from 'react';
 import type { AppAction } from './usePEFile';
-import { validateAnnotations } from '../utils/exportSchema';
+import { validateAnnotations, type AnnotationPayload } from '../utils/exportSchema';
 
 const WS_URL = `ws://localhost:${19283}`;
 const RECONNECT_DELAY = 3000;
+
+/**
+ * Decide what to do with one raw frame from the MCP bridge.
+ *
+ * Extracted from the socket handler so the decision is testable without a React
+ * renderer or a live socket. Returns the validated payload to import, or null
+ * for anything that should be ignored — an unparseable frame, a frame for a
+ * different binary, or one whose annotations fail validation.
+ *
+ * Never throws: this is remote input, and a bad frame must not take down the
+ * socket handler.
+ */
+export function parseAnnotationMessage(
+  raw: unknown,
+  fileName: string,
+): AnnotationPayload | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+  if (typeof msg !== 'object' || msg === null) return null;
+
+  const envelope = msg as { type?: unknown; fileName?: unknown };
+  if (envelope.type !== 'annotations') return null;
+  if (envelope.fileName !== fileName) return null;
+
+  // Remote input over a WebSocket — validate the shape (and coerce the string
+  // keys to numbers) before it reaches app state.
+  return validateAnnotations(msg);
+}
 
 export function useMcpSync(
   fileName: string | null,
@@ -13,6 +45,8 @@ export function useMcpSync(
 
   useEffect(() => {
     if (!fileName) return;
+    // Captured so the narrowing survives into the nested socket callbacks.
+    const activeFile = fileName;
 
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -28,25 +62,15 @@ export function useMcpSync(
 
       ws.onmessage = (ev) => {
         if (disposed) return;
-        try {
-          const msg = JSON.parse(String(ev.data));
-          if (msg.type !== 'annotations' || msg.fileName !== fileName) return;
+        const data = parseAnnotationMessage(ev.data, activeFile);
+        if (!data) return;
 
-          // Remote input over a WebSocket — validate the shape (and coerce the
-          // string keys to numbers) before dispatching into app state.
-          const data = validateAnnotations(msg);
-          if (!data) {
-            console.warn('[peek-a-bin] ignoring malformed annotation message from MCP bridge');
-            return;
-          }
-
-          dispatch({
-            type: 'IMPORT_ANNOTATIONS',
-            bookmarks: data.bookmarks,
-            renames: data.renames,
-            comments: data.comments,
-          });
-        } catch { /* ignore malformed messages */ }
+        dispatch({
+          type: 'IMPORT_ANNOTATIONS',
+          bookmarks: data.bookmarks,
+          renames: data.renames,
+          comments: data.comments,
+        });
       };
 
       ws.onclose = () => {

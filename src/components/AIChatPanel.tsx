@@ -43,7 +43,7 @@ function MessageBubble({ msg, onRename }: { msg: ChatMessage; onRename?: (addres
         {renames.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {renames.map((r, i) => (
-              <button
+              <button type="button"
                 key={i}
                 onClick={() => onRename?.(r.address, r.name)}
                 className="px-2 py-1 text-[10px] bg-green-800/40 border border-green-600/40 rounded text-green-300 hover:bg-green-700/50 transition-colors"
@@ -97,14 +97,14 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
       <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
         <span className="text-gray-300 font-medium">AI Chat</span>
         <div className="flex-1" />
-        <button
+        <button type="button"
           onClick={chat.clearChat}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Clear conversation"
         >
           Clear
         </button>
-        <button
+        <button type="button"
           onClick={onClose}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Close chat"
@@ -127,7 +127,7 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
         {chat.streaming && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].content === "" && (
           <div className="flex justify-start mb-3">
             <div className="flex items-center gap-1.5 text-gray-500 text-xs">
-              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+              <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
@@ -160,14 +160,14 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
             disabled={chat.streaming}
           />
           {chat.streaming ? (
-            <button
+            <button type="button"
               onClick={chat.cancelStream}
               className="px-2.5 py-1.5 bg-yellow-700 text-yellow-200 rounded text-xs hover:bg-yellow-600 shrink-0"
             >
               Stop
             </button>
           ) : (
-            <button
+            <button type="button"
               onClick={handleSend}
               disabled={!input.trim()}
               className="px-2.5 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default shrink-0"

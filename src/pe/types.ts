@@ -152,9 +152,27 @@ export interface ImportEntry {
 }
 
 export interface ExportEntry {
+  /**
+   * Exported name. Exports that appear only in the address table (no entry in
+   * the name table) get a synthesized `Ordinal#<n>` display name and carry
+   * `byOrdinal: true`.
+   */
   name: string;
+  /** Spec ordinal: the export directory's Base plus the address-table index. */
   ordinal: number;
+  /**
+   * Export Address Table value. A code/data RVA normally, or — when
+   * `forwarder` is set — the RVA of the forwarder string itself.
+   */
   address: number;
+  /** True when this export has no name of its own. */
+  byOrdinal?: boolean;
+  /**
+   * `"OTHERDLL.Func"` for a forwarder export: the address falls inside the
+   * export directory's own range, so it points at a redirect string rather
+   * than at code in this image.
+   */
+  forwarder?: string;
 }
 
 export interface TLSDirectory {
@@ -194,6 +212,11 @@ export interface ResourceNode {
 export interface ResourceTree {
   root: ResourceNode[];
   entries: { type: number | string; name: number | string; lang: number; rva: number; size: number }[];
+  /**
+   * Set when the walk hit its entry budget and stopped early. Only a crafted
+   * (or absurdly large) resource directory can reach it.
+   */
+  truncated?: boolean;
 }
 
 export interface PEFile {

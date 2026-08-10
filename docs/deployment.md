@@ -81,25 +81,66 @@ Peek-a-Bin is a Progressive Web App that works fully offline after the first vis
 
 ### Precache contents
 
-`vite.config.ts` configures `VitePWA` with `globPatterns: ["**/*.{js,css,html,wasm,png,svg}"]`
-and `registerType: "autoUpdate"`. A production build reports **11 precache entries, ~4.85 MiB**,
-and `dist/sw.js` lists the WASM engine explicitly:
+`vite.config.ts` configures `VitePWA` with `registerType: "autoUpdate"` and:
 
-```
-{url:"assets/capstone.wasm",revision:null}
-{url:"assets/capstone-DLaga0AD.wasm",revision:null}
-```
+- `globPatterns: ["**/*.{js,css,html,wasm,png,svg,json}"]` — `json` is there for
+  `manifest.json`, the only JSON in `dist`, so the PWA manifest is available offline.
+- `globIgnores: ["icons/icon-512.png"]` — that icon is 435 KB and is only read by the OS at
+  install and splash time, which happens online. `icon-192.png` still ships.
+
+A production build currently reports **10 precache entries, ~2.7 MiB**. The exact size tracks
+the app bundle and moves with ordinary code changes; the entry count and the single WASM copy
+are the parts worth watching.
 
 Two points worth knowing:
 
-- `capstone.wasm` is **1.70 MiB** (1,778,509 bytes), which is under Workbox's default
-  `maximumFileSizeToCacheInBytes` of 2 MiB. The config sets no override, so the engine is
-  precached only because it happens to fit. If capstone-wasm grows past 2 MiB, Workbox will
-  silently drop it from the precache and offline disassembly will break with no build error.
-- The engine ships **twice** — once hashed by Vite and once copied under its original name by
-  the `copy-capstone-wasm` plugin (the pre-bundled `.mjs` references `capstone.wasm` by that
-  literal name). Both copies are precached, so ~3.4 MiB of the 4.85 MiB total is one duplicated
-  file.
+- The engine is **1.70 MiB** (1,778,509 bytes), under Workbox's default
+  `maximumFileSizeToCacheInBytes` of 2 MiB. The config sets no override, so it is precached only
+  because it happens to fit. If capstone-wasm grows past 2 MiB, Workbox will silently drop it
+  from the precache and offline disassembly will break with no build error.
+- The engine ships **once**, as a hashed asset (`assets/capstone-<hash>.wasm`). It used to ship
+  twice, and the fix is counterintuitive enough to be worth stating plainly: Rollup already
+  recognises capstone-wasm's `new URL("capstone.wasm", import.meta.url)` and rewrites it to the
+  hashed asset it emits, so the `copy-capstone-wasm` plugin that also copied the file under its
+  literal name was itself the *sole* cause of the duplicate. Deleting the plugin removed
+  1.7 MiB from every install. **Re-adding it will re-add that 1.7 MiB.**
+
+In its place, `vite.config.ts` runs a `capstone-wasm-guard` plugin that fails the build if
+`dist/assets` ever contains anything other than exactly one `.wasm` file, or if the emitted
+`.wasm` is referenced by no chunk — the failure mode if Rollup ever stops rewriting that
+`new URL(...)` pattern, which would otherwise ship an app that 404s on the disassembly engine.
+
+## Content Security Policy
+
+The policy itself is defined once, in **`build/csp.ts`**, and both deployment paths consume it
+from there. The rationale for every directive lives in
+[SECURITY.md](../SECURITY.md#content-security-policy); what follows is only how it is delivered.
+
+| Path | Mechanism |
+|------|-----------|
+| GitHub Pages | Pages cannot set response headers, so the `inject-csp-meta` Vite plugin (`vite.config.ts`) injects `<meta http-equiv="Content-Security-Policy">` into `dist/index.html` |
+| Docker / nginx | `nginx.conf` carries the generated `add_header` line verbatim, in both the server block and the static-asset location block |
+
+The plugin is **build-only** (`apply: "build"`, `transformIndexHtml` with `order: "pre"`).
+`index.html` doubles as the dev entry point, and Vite injects an inline React Refresh preamble
+in dev that a source-level meta CSP would block — so committing the tag into `index.html` would
+break `npm run dev`. Running at `"pre"` puts the policy in the document before the built
+`<script>`/`<link>` tags it governs, and the plugin throws rather than shipping a build if it
+cannot find the `<meta charset>` it anchors to.
+
+The header policy carries one directive the meta tag does not: `frame-ancestors`, which browsers
+ignore when it arrives via `<meta http-equiv>`. Clickjacking protection therefore exists only on
+the nginx deployment.
+
+**To change the policy:** edit `build/csp.ts`, then regenerate the nginx line and paste it into
+both places in `nginx.conf`:
+
+```bash
+npx tsx -e 'import("./build/csp.ts").then(m => console.log(m.nginxCspHeaderLine()))'
+```
+
+`build/csp.test.ts` fails the test suite if `nginx.conf` stops matching what `build/csp.ts`
+generates, so the two delivery paths cannot drift apart silently.
 
 ## Self-Hosting Notes
 

@@ -26,15 +26,21 @@ export function binarySearchRows(rows: DisplayRow[], address: number): number {
   let best = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    const row = rows[mid];
-    const rowAddr = rowAddress(row);
-    if (rowAddr === null) {
+    // Separator rows carry no address. Treating one as "too high" and discarding
+    // the whole right half is wrong — separators sit between functions, anywhere
+    // in the list, so a single one on the search path used to strand the result
+    // at a much earlier row. Probe forward to the next addressed row instead;
+    // everything skipped is addressless, so nothing searchable is lost.
+    let probe = mid;
+    while (probe <= hi && rowAddress(rows[probe]) === null) probe++;
+    if (probe > hi) {
       hi = mid - 1;
       continue;
     }
+    const rowAddr = rowAddress(rows[probe]) as number;
     if (rowAddr <= address) {
-      best = mid;
-      lo = mid + 1;
+      best = probe;
+      lo = probe + 1;
     } else {
       hi = mid - 1;
     }

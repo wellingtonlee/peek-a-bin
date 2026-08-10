@@ -43,17 +43,28 @@ export function parseOperandTargets(
   }
 
   // Case 2: RIP-relative [rip +/- 0xNNNN]
+  // The matched span is remembered so case 3 cannot report the displacement a
+  // second time. A RIP displacement is an offset from the next instruction, so
+  // it is never an address in its own right; with a low image base it can still
+  // fall in range and produce a bogus xref alongside the real one.
+  let ripSpan: [number, number] | null = null;
   const ripMatch = op.match(/\[rip\s*([+-])\s*0x([0-9a-fA-F]+)\]/);
   if (ripMatch) {
     const sign = ripMatch[1] === '+' ? 1 : -1;
     const disp = parseInt(ripMatch[2], 16);
     const target = insn.address + insn.size + sign * disp;
     if (target >= imageBase && target < imageEnd) addTarget(target);
+    const start = ripMatch.index ?? 0;
+    ripSpan = [start, start + ripMatch[0].length];
   }
 
-  // Case 3: all hex addresses in operand (absolute [0xNNNN] or bare 0xNNNN)
+  // Case 3: all hex addresses in operand (absolute [0xNNNN] or bare 0xNNNN).
+  // Only the RIP span is skipped, not the whole operand string — a store like
+  // `mov dword ptr [rip + 0x10], 0x407120` still carries a real second target.
   const hexMatches = op.matchAll(/0x([0-9a-fA-F]+)/g);
   for (const m of hexMatches) {
+    const idx = m.index ?? 0;
+    if (ripSpan && idx >= ripSpan[0] && idx < ripSpan[1]) continue;
     const addr = parseInt(m[1], 16);
     if (addr >= imageBase && addr < imageEnd) addTarget(addr);
   }

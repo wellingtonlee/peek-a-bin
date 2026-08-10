@@ -138,6 +138,9 @@ export function useAIChat(
     dispatch({ type: "BEGIN_STREAM" });
 
     const config = loadSettings();
+    // `state.streaming` normally prevents overlap, but abort the previous
+    // controller anyway so the ref can never be overwritten while live.
+    abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     accRef.current = "";

@@ -111,6 +111,8 @@ export function registerResources(server: McpServer, session: FileSession): void
         name: e.name,
         ordinal: e.ordinal,
         address: hex(e.address),
+        ...(e.byOrdinal ? { byOrdinal: true } : {}),
+        ...(e.forwarder ? { forwarder: e.forwarder } : {}),
       })),
     ),
   );

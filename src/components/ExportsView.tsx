@@ -29,6 +29,7 @@ export function ExportsView() {
     let exps = pe.exports.filter(
       (exp) =>
         exp.name.toLowerCase().includes(filter.toLowerCase()) ||
+        (exp.forwarder?.toLowerCase().includes(filter.toLowerCase()) ?? false) ||
         exp.ordinal.toString().includes(filter) ||
         (imageBase + exp.address).toString(16).toLowerCase().includes(filter.toLowerCase()),
     );
@@ -98,24 +99,27 @@ export function ExportsView() {
         <>
           {/* Sticky header */}
           <div className="flex text-gray-400 border-b border-gray-700 pb-1 mb-1 select-none shrink-0">
-            <div
-              className="w-16 shrink-0 cursor-pointer hover:text-gray-200"
+            <button
+              type="button"
+              className="w-16 shrink-0 text-left cursor-pointer hover:text-gray-200"
               onClick={() => toggleSort("ordinal")}
             >
               Ordinal{sortIndicator("ordinal")}
-            </div>
-            <div
-              className="flex-1 cursor-pointer hover:text-gray-200"
+            </button>
+            <button
+              type="button"
+              className="flex-1 text-left cursor-pointer hover:text-gray-200"
               onClick={() => toggleSort("name")}
             >
               Name{sortIndicator("name")}
-            </div>
-            <div
-              className="w-32 shrink-0 cursor-pointer hover:text-gray-200"
+            </button>
+            <button
+              type="button"
+              className="w-32 shrink-0 text-left cursor-pointer hover:text-gray-200"
               onClick={() => toggleSort("address")}
             >
               VA{sortIndicator("address")}
-            </div>
+            </button>
           </div>
 
           {/* Virtualized rows */}
@@ -141,14 +145,27 @@ export function ExportsView() {
                     }}
                   >
                     <div className="w-16 shrink-0 text-gray-400">{exp.ordinal}</div>
-                    <div className="flex-1 text-gray-200 truncate">{exp.name}</div>
+                    <div
+                      className={`flex-1 truncate ${exp.byOrdinal ? "text-gray-400 italic" : "text-gray-200"}`}
+                    >
+                      {exp.name}
+                      {exp.forwarder && (
+                        <span className="text-purple-400"> → {exp.forwarder}</span>
+                      )}
+                    </div>
                     <div className="w-32 shrink-0">
-                      <button
-                        onClick={() => handleNavigate(exp.address)}
-                        className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
-                      >
-                        0x{(imageBase + exp.address).toString(16).toUpperCase()}
-                      </button>
+                      {exp.forwarder ? (
+                        // A forwarder's address is an RVA into the export
+                        // directory's string blob, not code — nothing to jump to.
+                        <span className="text-gray-500">forwarded</span>
+                      ) : (
+                        <button type="button"
+                          onClick={() => handleNavigate(exp.address)}
+                          className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
+                        >
+                          0x{(imageBase + exp.address).toString(16).toUpperCase()}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

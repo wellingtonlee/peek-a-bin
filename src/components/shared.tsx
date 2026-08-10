@@ -63,7 +63,7 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
   const [copiedTarget, setCopiedTarget] = useState<number | null>(null);
   const [hoveredAddr, setHoveredAddr] = useState<number | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const tooltipRef = useRef<HTMLSpanElement>(null);
+  const tooltipRef = useRef<HTMLButtonElement>(null);
 
   const showTooltip = useCallback((addr: number) => {
     clearTimeout(hoverTimer.current);
@@ -93,9 +93,15 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
           if (target) {
             const tooltip = tooltipData?.get(target.address);
             return (
-              <span
+              // Real <button> rather than a clickable <span>, but tabIndex={-1}:
+              // a disassembly screen holds hundreds of operand targets, and putting
+              // every one in the tab order would bury every other control. `inline`
+              // keeps it laying out exactly like the span it replaced.
+              <button
+                type="button"
+                tabIndex={-1}
                 key={i}
-                className={`${copiedTarget === target.address ? "text-green-400" : "op-target"} underline cursor-pointer hover:opacity-80 relative`}
+                className={`inline ${copiedTarget === target.address ? "text-green-400" : "op-target"} underline cursor-pointer hover:opacity-80 relative`}
                 ref={hoveredAddr === target.address ? tooltipRef : undefined}
                 onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
                 onDoubleClick={(e) => {
@@ -115,7 +121,7 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
                     {tooltip}
                   </span>
                 )}
-              </span>
+              </button>
             );
           }
         }
@@ -124,13 +130,15 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
         const cls = isHighlighted ? `${t.cls} reg-highlight cursor-pointer` : isReg && onRegClick ? `${t.cls} cursor-pointer` : t.cls;
         if (isReg && onRegClick) {
           return (
-            <span
+            <button
+              type="button"
+              tabIndex={-1}
               key={i}
-              className={cls}
+              className={`inline ${cls}`}
               onClick={(e) => { e.stopPropagation(); onRegClick(t.text); }}
             >
               {t.text}
-            </span>
+            </button>
           );
         }
         return t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>;

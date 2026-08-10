@@ -66,7 +66,7 @@ export function BatchRenameModal() {
             <span>{br.progress.done} / {br.progress.total}</span>
             <span>{pct}%</span>
           </div>
-          <button
+          <button type="button"
             onClick={dismiss}
             className="mt-4 px-3 py-1.5 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
           >
@@ -84,7 +84,7 @@ export function BatchRenameModal() {
         <div className="bg-gray-800 border border-gray-600 rounded-lg shadow-xl p-6 w-96">
           <h3 className="text-sm font-semibold text-red-400 mb-2">Batch Rename Error</h3>
           <p className="text-xs text-gray-400 mb-4">{br.error}</p>
-          <button
+          <button type="button"
             onClick={dismiss}
             className="px-3 py-1.5 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600"
           >
@@ -109,9 +109,9 @@ export function BatchRenameModal() {
             AI Rename Suggestions ({localResults.length})
           </h3>
           <div className="flex-1" />
-          <button onClick={acceptAll} className="px-2 py-1 text-[10px] bg-green-800/50 text-green-300 rounded hover:bg-green-700/50">Accept All</button>
-          <button onClick={acceptHighConf} className="px-2 py-1 text-[10px] bg-blue-800/50 text-blue-300 rounded hover:bg-blue-700/50">Accept High Conf</button>
-          <button onClick={rejectAll} className="px-2 py-1 text-[10px] bg-red-800/50 text-red-300 rounded hover:bg-red-700/50">Reject All</button>
+          <button type="button" onClick={acceptAll} className="px-2 py-1 text-[10px] bg-green-800/50 text-green-300 rounded hover:bg-green-700/50">Accept All</button>
+          <button type="button" onClick={acceptHighConf} className="px-2 py-1 text-[10px] bg-blue-800/50 text-blue-300 rounded hover:bg-blue-700/50">Accept High Conf</button>
+          <button type="button" onClick={rejectAll} className="px-2 py-1 text-[10px] bg-red-800/50 text-red-300 rounded hover:bg-red-700/50">Reject All</button>
         </div>
 
         {/* Table */}
@@ -134,7 +134,7 @@ export function BatchRenameModal() {
                 return (
                   <tr key={i} className={`border-b border-gray-800/50 ${rowBg} hover:bg-gray-700/30`}>
                     <td className="py-1.5 px-3">
-                      <button
+                      <button type="button"
                         onClick={() => toggleAccept(i)}
                         className={`w-5 h-5 rounded border text-[10px] flex items-center justify-center ${
                           accepted === true
@@ -162,10 +162,10 @@ export function BatchRenameModal() {
         <div className="px-4 py-3 border-t border-gray-700 flex items-center gap-3 shrink-0">
           <span className="text-xs text-gray-400">{acceptedCount} selected for rename</span>
           <div className="flex-1" />
-          <button onClick={dismiss} className="px-3 py-1.5 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600">
+          <button type="button" onClick={dismiss} className="px-3 py-1.5 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600">
             Cancel
           </button>
-          <button
+          <button type="button"
             onClick={apply}
             disabled={acceptedCount === 0}
             className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-30"

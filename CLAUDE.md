@@ -30,20 +30,22 @@ on every PR, plus a separate `npm audit --audit-level=high` job.
 
 ## Source Layout (`src/`)
 
-- `pe/` — PE format parser (headers, imports, exports, resources, authenticode)
+- `pe/` — PE format parser (headers, imports, exports, resources, authenticode). `ordinalTables.ts` is generated data transcribed from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it matches nothing in any corpus
 - `disasm/` — disassembly engine, types, CFG, operand parsing, stack analysis, signatures
 - `disasm/decompile/` — IR lifting → SSA → folding → structuring → cleanup → type inference → promotion → struct synthesis → emission pipeline
 - `components/` — React components (DisassemblyView, CFGView, HexView, Sidebar, etc.)
 - `hooks/` — state management (usePEFile), derived state, disassembly rows, search
-- `workers/` — Web Worker for Capstone WASM + off-thread analysis (disasm.worker.ts + disasmClient.ts)
+- `workers/` — Web Worker for Capstone WASM + off-thread analysis. `disasm.worker.ts` owns the `self`/`indexedDB`/WASM setup; `dispatch.ts` holds the RPC method switch (extracted so it is importable under vitest — the worker module is not); `disasmClient.ts` is the caller-side RPC client
 - `analysis/` — driver detection, anomalies, IOCTL decoding
-- `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types)
-- `mcp/` — MCP server (tools, resources, session, Capstone wrapper) + `cli.ts` (setup command) + `clients.ts` (client config registry)
+- `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types). `models.ts` is the single source of model IDs, provider defaults and per-task token budgets — never write a model ID anywhere else. `retry.ts` holds the backoff/limiter policy; `responseSchema.ts` the zod validation
+- `mcp/` — MCP server (tools, resources, session, Capstone wrapper) + `cli.ts` (setup command) + `clients.ts` (client config registry) + `paths.ts` (`parseAddr`, `resolveExportPath`)
 - `utils/` — recent files (IndexedDB), export schema, entropy, fuzzy match
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (31 fields), `AppAction` discriminated union (50 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (32 fields), `AppAction` discriminated union (53 action types). Access via `useAppState()` / `useAppDispatch()`.
+
+`appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. Two invariants that suite pins and you should preserve: no-op branches return the **same object reference** (returning a new equal object causes pointless re-renders), and every mutating action **replaces** rather than mutates — the annotation undo/redo snapshots hold direct references to annotation objects, so a branch that mutates in place would corrupt history retroactively.
 
 `AnalysisPhase` includes a `"failed"` value — the analysis chain rejects into it, and the status
 bar surfaces it. Without it a failed parse left the UI spinning forever. `usePEFile.ts` also
@@ -76,7 +78,9 @@ exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast t
 
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
-**Tests**: `src/pe/__tests__/` for PE parsing (including `malformed.test.ts` for adversarial input), `src/disasm/__tests__/` for CFG/operands/signatures/mnemonics, `src/disasm/decompile/__tests__/` for the decompiler (fold rules, SSA, dominators, emit, enum, loops, exceptions), `src/mcp/__tests__/` for the MCP server, `src/utils/__tests__/` for the export schema and annotation validation. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders from `src/pe/__tests__/fixtures.ts` (no binary files).
+**Tests**: `src/pe/__tests__/` for PE parsing (including `malformed.test.ts` for adversarial input, and `metadata.test.ts`, which pins the hand-rolled MD5 against the RFC 1321 vectors *and* differentially against Node's `crypto` — a wrong digest is invisible at runtime because nothing cross-checks a hash), `src/disasm/__tests__/` and `src/disasm/decompile/__tests__/` for the engine and decompiler, `src/hooks/__tests__/` for `appReducer` and the annotation undo/redo stack, `src/mcp/__tests__/` for the MCP server, `src/utils/__tests__/` and `src/workers/__tests__/` for utilities and RPC dispatch, `src/components/__tests__/` for the keyboard drift guard. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders from `src/pe/__tests__/fixtures.ts` (no binary files).
+
+There is **no React renderer configured** — no jsdom, no `@testing-library/react`. Hooks cannot be mounted, so hook logic is tested by extracting the decision into an exported pure function (see `parseAnnotationMessage` in `useMcpSync.ts`). Adding a renderer means adding deps to `package.json` and merging the React plugins into `vitest.config.ts`. `@vitest/coverage-v8` is also not installed, so `npm run test:coverage` currently fails.
 
 Don't hard-code a test count in docs — it goes stale within a session. Run `npm test` for the current number.
 
@@ -106,7 +110,7 @@ so adding a union member breaks the build until they are handled. Just run `npm 
 | `ssa.ts` | `renameExpr` / `renameStmt` (inside `renameVariables`) |
 | `ssadestroy.ts` | `stripVersionsExpr` / `stripVersionsStmt` |
 | `emit.ts` | `emitExpr` / `emitStmt` |
-| `workers/disasm.worker.ts` | the RPC method dispatch (guards `WorkerMethod`, not IR) |
+| `workers/dispatch.ts` | the RPC method dispatch (guards `WorkerMethod`, not IR) |
 
 **You must find these by hand.** The typechecker stays silent on all of them.
 
@@ -140,12 +144,24 @@ kind gets a cast spelling.
 
 **API signatures** (`apitypes.ts`): ~130 Win32/NT API type signatures. Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T, etc.) for consistency. Return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
 
-**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns. 2+ distinct offsets on same base → struct candidate. Scale ∈ {1,2,4,8} without struct match → `IRArrayAccess`.
+**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns. 2+ distinct offsets on same base → struct candidate.
+
+Scale ∈ {1,2,4,8} without struct match → `IRArrayAccess` — **but only if the function has at least one struct candidate somewhere.** `synthesizeStructs` returns early on `candidates.size === 0` before any rewriting, so a function whose only indexed access has a single offset is left untouched. Do not rely on array-access rewriting happening in isolation.
+
+Two known properties of the cross-function sharing, both verified. **Struct defs are shared by reference in both directions** — `mergeFields` stores the caller's `StructField` objects, and the inference passes mutate `field.type` in place — so struct output is **order-dependent**: decompiling A-then-B versus B-then-A gives A different struct declarations, and a decompile-cache clear can change A's output with no change to the binary. (Emitted text is not live-mutated: the worker caches `code: string`, and `irFieldAccess` copies offset/name/size as scalars, so a rewritten body is immune.) **Merging is decided on shape alone** — offset:size subset, no type or provenance check — so unrelated structs sharing an opening shape (`{0:8, 8:8}` is extremely common) get conflated.
+
+Do **not** "fix" the first by cloning in `findOrCreate`: the in-place mutation *is* the mechanism by which a later function inherits a better field type, and cloning silently disables cross-function type refinement without failing any test. `resetStructRegistry` mitigates both. See the open bugs before relying on struct output.
 
 **emit.ts module-level `_typeCtx`**: Set before emission, cleared after. Enables cast suppression and type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
 
 ## Gotchas
 
+- **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`). This exact mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
+- **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or `index.html` directly — `build/csp.test.ts` fails on drift. A meta CSP cannot be committed into `index.html` because it is also the dev entry point and Vite injects an inline React Refresh preamble there. Note the shipped `connect-src` omits non-localhost plain `http:`, so a LAN Ghidra server is blocked on the HTTP nginx deployment.
+- **Do not re-add a plugin that copies `capstone.wasm`.** Rollup already rewrites `new URL("capstone.wasm", import.meta.url)` to its hashed asset; a manual copy is pure duplication and was 1.7 MiB of the PWA precache. `capstone-wasm-guard` in `vite.config.ts` fails the build if more than one WASM asset is emitted.
+- **`tools.ts` and `resources.ts` must only *type*-import `./session`.** A value import pulls in `./disasm`, which loads Capstone WASM at module scope, and both MCP suites become slow and fragile. `src/mcp/__tests__/importGraph.test.ts` enforces this.
+- **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and Biome falls back to defaults — which looks like your rule settings randomly stopped applying. The a11y group is now mostly at `error` (301 findings were cleared); keep it there.
+- **A multi-line `biome-ignore` needs `//` on every line.** Biome only honours the directive on the line immediately preceding the offence, so put prose in a normal comment block above a single-line directive. Getting this wrong leaves bare text inside JSX and breaks the parse.
 - **DisassemblyView.tsx** is ~2000 lines. Read in chunks.
 - **JumpArrows.tsx** and **DisassemblyMinimap.tsx** have their own local `DisplayRow` types — must update when extending the canonical union.
 - `sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`. Used to distinguish code vs data sections.

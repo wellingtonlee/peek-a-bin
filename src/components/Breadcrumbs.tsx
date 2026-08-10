@@ -69,7 +69,7 @@ export function Breadcrumbs() {
         {/* Section node */}
         {sectionInfo && (
           <span className="flex items-center gap-0.5 shrink-0">
-            <button
+            <button type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 if (sectionVA !== null) {
@@ -88,7 +88,7 @@ export function Breadcrumbs() {
         {funcName && containingFunc && (
           <span className="flex items-center gap-0.5 shrink-0">
             <span className="text-gray-600 mx-0.5">&rsaquo;</span>
-            <button
+            <button type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 dispatch({ type: "CLEAR_CALL_STACK" });
@@ -105,7 +105,7 @@ export function Breadcrumbs() {
         {state.callStack.map((entry, i) => (
           <span key={`${entry.address}-${i}`} className="flex items-center gap-0.5 shrink-0">
             <span className="text-gray-600 mx-0.5">&rsaquo;</span>
-            <button
+            <button type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 dispatch({ type: "SET_ADDRESS", address: entry.address });
