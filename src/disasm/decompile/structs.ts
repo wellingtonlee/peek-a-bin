@@ -871,13 +871,35 @@ export function synthesizeStructs(
   // 4d. Enhanced field type inference from usage context
   inferFieldTypesFromUsage(func.body, baseToStruct, canonBase, registry);
 
-  // 4e. IR Rewrite (struct fields + array access)
+  // 4e. Fields that point at another struct. After 4d, whose PVOID guess this
+  // refines; before the rewrite, which turns the loads it reads into field
+  // accesses.
+  linkNestedStructFields(func.body, baseToStruct, canonBase);
+
+  // 4f. IR Rewrite (struct fields + array access)
   const rewrittenBody = rewriteStmts(func.body, baseToStruct, canonBase);
 
   // Collect typedefs for this function
   const usedStructIds = new Set<string>();
   for (const [, def] of baseToStruct) {
     usedStructIds.add(def.id);
+  }
+  // A nested field names a struct this function may never have dereferenced
+  // itself — including one an *earlier* function resolved, since field types
+  // live in the shared registry. Its declaration has to travel with the one
+  // that references it or the emitted typedef block names a type it never
+  // defines. Self-reference terminates on the visited set.
+  const pending = [...usedStructIds];
+  while (pending.length > 0) {
+    const def = registry.get(pending.pop()!);
+    if (!def) continue;
+    for (const f of def.fields) {
+      const nested = referencedStructId(f.type);
+      if (nested && !usedStructIds.has(nested)) {
+        usedStructIds.add(nested);
+        pending.push(nested);
+      }
+    }
   }
   // Snapshot, do not hand out the registry's live objects: a later function's
   // inference pass mutates field types in place, which would otherwise rewrite
@@ -911,6 +933,16 @@ const GUESSED_POINTER: DecompType = { kind: 'ptr', pointee: { kind: 'unknown' } 
  * function established.
  */
 function refineFieldType(field: StructField, evidence: DecompType): void {
+  // One case meetTypes gets backwards for a *field*: it ranks ptr above
+  // everything it does not order explicitly, so `meetTypes(struct_1*, PVOID)`
+  // answers PVOID. Pointer-to-nothing is the weakest thing this pass can say
+  // and a resolved nesting is among the strongest, so the guess must not win.
+  // The lattice itself is right for its other callers — a ptr genuinely does
+  // beat a bare int — so the correction belongs here, on the field, and not in
+  // meetTypes.
+  if (field.type.kind === 'struct' && evidence.kind === 'ptr' && evidence.pointee.kind === 'unknown') {
+    return;
+  }
   field.type = meetTypes(field.type, evidence);
 }
 
@@ -1087,6 +1119,166 @@ function markFieldSigned(
   const field = def.fields.find(f => f.offset === decomp.offset);
   if (field && field.type.kind === 'int') {
     field.type = { ...field.type, signed: true };
+  }
+}
+
+// ── Nested Struct Linking ──
+
+/**
+ * Narrowest field that could hold an address.
+ *
+ * Pointer width is not carried on IRFunction, so this is the 32-bit answer and
+ * an x64 binary can in principle nest through a 4-byte field. In practice the
+ * load that produced the candidate base is a full-width `mov`, so the field is
+ * sized 8 there anyway; the constant only exists to reject the byte and word
+ * fields, which cannot be addresses under either model.
+ */
+const MIN_POINTER_FIELD_SIZE = 4;
+
+/**
+ * The struct a type names, if it names one — as a field type (`struct_0*`),
+ * behind a pointer, or as an array element.
+ */
+function referencedStructId(t: DecompType): string | null {
+  if (t.kind === 'struct') return t.id;
+  if (t.kind === 'ptr') return referencedStructId(t.pointee);
+  if (t.kind === 'array') return referencedStructId(t.element);
+  return null;
+}
+
+/**
+ * The struct field an address names, when it names one unambiguously.
+ *
+ * The no-index condition is the one `rewriteExpr` uses to decide a deref is a
+ * field access rather than an array element: `*(p + i*4 + 8)` is not field 8.
+ */
+function fieldAtAddress(
+  address: IRExpr,
+  baseToStruct: Map<string, StructDef>,
+  canonBase: (e: IRExpr) => string,
+): { def: StructDef; field: StructField } | null {
+  const decomp = decomposeAddress(address);
+  if (!decomp?.base || decomp.index) return null;
+  const def = baseToStruct.get(canonBase(decomp.base));
+  if (!def) return null;
+  const field = def.fields.find(f => f.offset === decomp.offset);
+  return field ? { def, field } : null;
+}
+
+/** Types a nesting may overwrite: the ones that assert nothing. */
+function isNestableFieldType(t: DecompType): boolean {
+  // PVOID — the guess inferFieldTypesFromUsage falls back on — is exactly the
+  // "some address, contents unknown" this pass exists to fill in. Anything
+  // else (handle, ntstatus, float, a signed int, an already-resolved nesting)
+  // came from a real observation and outranks a structural inference.
+  if (t.kind === 'ptr' && t.pointee.kind === 'unknown') return true;
+  return isUnrefinedFieldType(t);
+}
+
+/**
+ * Retype fields that hold a pointer to another struct.
+ *
+ * This is a *linking* pass, not a discovery one. By the time it runs, an inner
+ * object dereferenced at two or more offsets is already a struct candidate in
+ * its own right — `esi = rcx->field_0x8; esi->field_0x0 = 7; esi->field_0x4 = 9`
+ * produces two independent candidates, because `buildAliasMap` deliberately
+ * refuses to alias `esi` to `rcx` (the assignment is a load, not a copy). What
+ * is missing is the edge between them, and the load statement *is* that edge.
+ *
+ * That framing decides the shape of the pass. There is nothing to iterate to a
+ * fixpoint: `a->b->c->d` is three independent load statements, each naming its
+ * own pair, so one linear scan resolves the whole chain. The three-round loop
+ * the removed v1 stub drove would have spun twice for nothing.
+ *
+ * An inner object dereferenced at only *one* offset is out of reach by
+ * construction, and that is the right answer rather than a gap: a single
+ * offset is not evidence of a struct, and `fold` will have substituted the
+ * load into its one use anyway, leaving no statement to key on.
+ *
+ * Must run after inferFieldTypesFromUsage, whose PVOID guess is the type this
+ * one refines, and before the IR rewrite, which replaces the derefs this reads
+ * with field accesses.
+ */
+function linkNestedStructFields(
+  body: IRStmt[],
+  baseToStruct: Map<string, StructDef>,
+  canonBase: (e: IRExpr) => string,
+): void {
+  // Canonical base key → the field its value was loaded from, or null once two
+  // writes disagree about that. Same flow-insensitivity as buildAliasMap: one
+  // entry per name and no program point, so a register that holds two different
+  // objects over the function has no single correct answer and must be dropped.
+  // A missed nesting costs a `uint32_t` where a `struct_1*` was due; a kept one
+  // declares a field to point at an object it never points at.
+  const loadedFrom = new Map<string, { def: StructDef; field: StructField } | null>();
+
+  function record(key: string, src: { def: StructDef; field: StructField } | null): void {
+    const prev = loadedFrom.get(key);
+    if (prev === undefined) {
+      loadedFrom.set(key, src);
+      return;
+    }
+    if (!prev || !src || prev.def !== src.def || prev.field !== src.field) {
+      loadedFrom.set(key, null);
+    }
+  }
+
+  function walk(stmts: IRStmt[]): void {
+    for (const s of stmts) {
+      if (s.kind === 'assign' && (s.dest.kind === 'reg' || s.dest.kind === 'var')) {
+        const key = canonBase(s.dest);
+        // A copy buildAliasMap already folded into this key restates the value
+        // rather than redefining it, so it is not a second write.
+        const foldedCopy = (s.src.kind === 'reg' || s.src.kind === 'var') && canonBase(s.src) === key;
+        if (!foldedCopy) {
+          // Anything that is not a plain load — a call result, arithmetic, a
+          // cast-wrapped load — is a value this pass cannot attribute to a
+          // field, and records as ambiguous rather than as nothing.
+          record(key, s.src.kind === 'deref'
+            ? fieldAtAddress(s.src.address, baseToStruct, canonBase)
+            : null);
+        }
+      }
+      if (s.kind === 'if') {
+        walk(s.thenBody);
+        if (s.elseBody) walk(s.elseBody);
+      }
+      if (s.kind === 'while' || s.kind === 'do_while') walk(s.body);
+      if (s.kind === 'for') {
+        // init and update are statements too, and an assignment hidden in one
+        // of them is exactly the second write that makes a base ambiguous.
+        walk([s.init, s.update]);
+        walk(s.body);
+      }
+      if (s.kind === 'switch') {
+        for (const c of s.cases) walk(c.body);
+        if (s.defaultBody) walk(s.defaultBody);
+      }
+      if (s.kind === 'try') {
+        walk(s.body);
+        walk(s.handler);
+      }
+    }
+  }
+  walk(body);
+
+  for (const [key, src] of loadedFrom) {
+    if (!src) continue;
+    const inner = baseToStruct.get(key);
+    if (!inner) continue; // the loaded value is not used as a struct base
+    const { field } = src;
+    if (field.isArray) continue; // base + index is an element, not a pointer
+    if (field.size < MIN_POINTER_FIELD_SIZE) continue;
+    if (!isNestableFieldType(field.type)) continue;
+    // `struct` already spells itself `struct_0*` — see typeToString. Wrapping
+    // it in a ptr would emit `struct_0**`, one indirection too many.
+    //
+    // `inner` may be the struct being written to, when a base is loaded out of
+    // an object of its own type. That is the linked-list node, and it is the
+    // reading to want; it is also what a fingerprint collision between two
+    // unrelated same-shaped bases produces, in which case the conflation had
+    // already happened in findOrCreate and this only makes it legible.
+    field.type = { kind: 'struct', id: inner.id };
   }
 }
 

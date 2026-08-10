@@ -263,3 +263,119 @@ describe('decompileFunction — struct field types', () => {
     expect(declaredType(code, 'field_0x8')).toBe('uint32_t');
   });
 });
+
+/**
+ * Nested struct fields, as they reach the reader.
+ *
+ * The interesting part is what survives folding. A loaded value with one use is
+ * substituted into that use and leaves no statement behind — but it also leaves
+ * the inner object with one offset, which is not a struct anyway. The cases
+ * below are the ones where the load survives *because* the value is used more
+ * than once, which is the same condition that makes the inner object a
+ * candidate. Nothing else was ever reachable.
+ */
+describe('decompileFunction — nested struct fields', () => {
+  it('declares a field whose value is used as a struct base as a pointer to that struct', () => {
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['mov', 'esi, dword ptr [ebx + 8]'],
+      ['mov', 'dword ptr [esi], 7'],
+      ['mov', 'dword ptr [esi + 4], 9'],
+      ['ret'],
+    ]));
+
+    // The two objects, and the load that links them.
+    expect(code).toContain('esi = ebx->field_0x8');
+    expect(code).toContain('esi->field_0x0 = 7');
+    // Before this pass, `uint32_t field_0x8;` — the outer declaration said
+    // nothing about the object the rest of the function goes on to use.
+    expect(declaredType(code, 'field_0x8')).toBe('struct_1*');
+    // …and struct_1 has to be declared, or the block names a type it never
+    // defines.
+    expect(code).toContain('} struct_1;');
+  });
+
+  it('resolves a chain of nestings in one pass', () => {
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['mov', 'esi, dword ptr [ebx + 8]'],
+      ['mov', 'dword ptr [esi + 0x20], 2'],
+      ['mov', 'edi, dword ptr [esi + 0x24]'],
+      ['mov', 'dword ptr [edi], 7'],
+      ['mov', 'dword ptr [edi + 0xC], 9'],
+      ['ret'],
+    ]));
+
+    expect(declaredType(code, 'field_0x8')).toBe('struct_1*');
+    expect(declaredType(code, 'field_0x24')).toBe('struct_2*');
+    expect(code).toContain('} struct_2;');
+  });
+
+  it('leaves the field alone when the register holds two different objects', () => {
+    // ESI is loaded from field 8 and then from field 0x10. The struct grouping
+    // is already flow-insensitive enough to pool both objects' accesses; naming
+    // either one as field 8's pointee on top of that would be a guess.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['mov', 'esi, dword ptr [ebx + 8]'],
+      ['mov', 'dword ptr [esi], 7'],
+      ['mov', 'dword ptr [esi + 4], 9'],
+      ['mov', 'esi, dword ptr [ebx + 0x10]'],
+      ['mov', 'dword ptr [esi], 5'],
+      ['mov', 'dword ptr [esi + 4], 6'],
+      ['ret'],
+    ]));
+
+    expect(declaredType(code, 'field_0x8')).toBe('uint32_t');
+    expect(declaredType(code, 'field_0x10')).toBe('uint32_t');
+  });
+
+  it('keeps the type the callee signature established over the nesting', () => {
+    // The field is passed to CloseHandle *and* dereferenced at two offsets. The
+    // parameter type is evidence about this field; the dereferences are an
+    // inference about the value it happens to hold.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['push', 'dword ptr [ebx + 8]'],
+      ['call', 'dword ptr [0x402000]'],
+      ['mov', 'esi, dword ptr [ebx + 8]'],
+      ['mov', 'dword ptr [esi], 7'],
+      ['mov', 'dword ptr [esi + 4], 9'],
+      ['ret'],
+    ]), imports('CloseHandle'));
+
+    expect(declaredType(code, 'field_0x8')).toBe('HANDLE');
+  });
+
+  it('follows a copy of the loaded value to the base actually dereferenced', () => {
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['mov', 'eax, dword ptr [ebx + 8]'],
+      ['mov', 'esi, eax'],
+      ['mov', 'dword ptr [esi], 7'],
+      ['mov', 'dword ptr [esi + 4], 9'],
+      ['ret'],
+    ]));
+
+    expect(declaredType(code, 'field_0x8')).toBe('struct_1*');
+  });
+
+  it('emits a self-reference when the inner object shares the outer struct', () => {
+    // Both bases are read at offsets 0 and 8, so findOrCreate had already given
+    // them one struct on the exact-fingerprint path. Reading a base of that type
+    // out of field 8 is the linked-list node, and it is also what that
+    // conflation looks like when it is wrong — the nesting makes an existing
+    // claim legible rather than adding a new one.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx], 1'],
+      ['mov', 'esi, dword ptr [ebx + 8]'],
+      ['mov', 'dword ptr [esi], 7'],
+      ['mov', 'dword ptr [esi + 8], 9'],
+      ['ret'],
+    ]));
+
+    expect(declaredType(code, 'field_0x8')).toBe('struct_0*');
+    // One struct, so exactly one declaration — the closure must not loop.
+    expect(code.match(/typedef struct \{/g)).toHaveLength(1);
+  });
+});

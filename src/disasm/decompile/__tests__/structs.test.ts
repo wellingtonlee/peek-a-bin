@@ -1528,3 +1528,212 @@ describe('StructRegistry.findOrCreateLinked', () => {
     expect(reg.getParamView(0x401000, 1)).toBeUndefined();
   });
 });
+
+/**
+ * Fields that hold a pointer to another struct.
+ *
+ * The pass is a *linking* one: an object dereferenced at two or more offsets is
+ * already a candidate in its own right, whatever it was loaded from, so what is
+ * missing is only the edge between the two candidates. The load statement is
+ * that edge, and it survives to this point precisely when the loaded value has
+ * more than one use — which is the same condition that makes the inner object a
+ * candidate at all.
+ */
+describe('synthesizeStructs — nested struct fields', () => {
+  const nestFn = (extra: IRStmt[] = []) => fn([
+    // RCX at two offsets: the outer candidate.
+    assign(irReg('eax', 4), at(RCX, 0)),
+    // The edge: the value at RCX+8 becomes the base of a second candidate.
+    assign(irReg('rsi', 8), at(RCX, 8, 8)),
+    store(irReg('rsi', 8), irConst(7)),
+    store(irBinary('+', irReg('rsi', 8), irConst(4)), irConst(9)),
+    ...extra,
+  ]);
+
+  /** The type of field `offset` in the struct the function's base RCX names. */
+  const outerField = (f: IRFunction, offset: number): DecompType | undefined =>
+    f.typedefs?.find(d => d.fields.some(x => x.offset === 8 && x.size === 8))
+      ?.fields.find(x => x.offset === offset)?.type;
+
+  it('types a field whose value is used as another struct base as a pointer to it', () => {
+    const out = synthesizeStructs(nestFn(), new StructRegistry());
+    const inner = out.typedefs?.find(d => d.fields.every(x => x.offset < 8));
+    expect(outerField(out, 8)).toEqual({ kind: 'struct', id: inner?.id });
+  });
+
+  it('declares the struct a nested field names even though the base is elsewhere', () => {
+    // Both structs have to reach the emitted typedef block: one is only ever
+    // named by the other's field type, and a declaration referring to a type it
+    // never defines is worse output than no nesting at all.
+    const out = synthesizeStructs(nestFn(), new StructRegistry());
+    expect(out.typedefs).toHaveLength(2);
+  });
+
+  it('resolves a chain of nestings in a single pass', () => {
+    // a->b->c. Each link is an independent load statement naming its own pair,
+    // so there is nothing for a fixpoint loop to discover on a second round.
+    const RDI = irReg('rdi', 8);
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(RSI, at(RCX, 8, 8)),
+      assign(irReg('ebx', 4), at(RSI, 0x20)),
+      assign(RDI, at(RSI, 0x28, 8)),
+      store(RDI, irConst(7)),
+      store(irBinary('+', RDI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+
+    const byOffsets = (...offs: number[]) =>
+      out.typedefs?.find(d => d.fields.map(f => f.offset).join() === offs.join());
+    const outer = byOffsets(0, 8);
+    const middle = byOffsets(0x20, 0x28);
+    const inner = byOffsets(0, 4);
+    expect(outer?.fields.find(f => f.offset === 8)?.type).toEqual({ kind: 'struct', id: middle?.id });
+    expect(middle?.fields.find(f => f.offset === 0x28)?.type).toEqual({ kind: 'struct', id: inner?.id });
+  });
+
+  it('refuses the nesting when the register holds two different objects', () => {
+    // The map is flow-insensitive, so a register loaded from two fields has no
+    // single answer. Declaring either one would name an object the field never
+    // points at for half the function.
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(RSI, at(RCX, 8, 8)),
+      store(RSI, irConst(7)),
+      assign(RSI, at(RCX, 0, 8)),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+
+    for (const def of out.typedefs ?? []) {
+      for (const f of def.fields) expect(f.type.kind).not.toBe('struct');
+    }
+  });
+
+  it('refuses the nesting when the register is also written from a call', () => {
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(RSI, at(RCX, 8, 8)),
+      store(RSI, irConst(7)),
+      assign(RSI, { kind: 'call', target: 'sub_408000', args: [] }),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+
+    expect(outerField(out, 8)).toMatchObject({ kind: 'int' });
+  });
+
+  it('follows a copy of the loaded value to the base actually dereferenced', () => {
+    // `rsi = rcx->f; rdi = rsi; rdi->…` — buildAliasMap folds RDI onto RSI, and
+    // the copy between them must not read as a second definition of that base.
+    const RSI = irReg('rsi', 8);
+    const RDI = irReg('rdi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(RSI, at(RCX, 8, 8)),
+      assign(RDI, RSI),
+      store(RDI, irConst(7)),
+      store(irBinary('+', RDI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+
+    expect(outerField(out, 8)?.kind).toBe('struct');
+  });
+
+  it('leaves a field alone when the loaded value is never used as a base', () => {
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(irReg('rsi', 8), at(RCX, 8, 8)),
+    ]), new StructRegistry());
+    expect(outerField(out, 8)).toMatchObject({ kind: 'int' });
+  });
+
+  it('does not nest through a field too narrow to hold an address', () => {
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0, 8)),
+      assign(RSI, at(RCX, 8, 2)),
+      store(RSI, irConst(7)),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+    expect(outerField(out, 8)).toBeUndefined();
+    const outer = out.typedefs?.find(d => d.fields.some(x => x.offset === 8 && x.size === 2));
+    expect(outer?.fields.find(x => x.offset === 8)?.type).toMatchObject({ kind: 'int', size: 2 });
+  });
+
+  it('does not nest through an indexed load, which names an element and not a field', () => {
+    // `*(rcx + r9*8 + 0x18)` is an element of the array at 0x18, not the field
+    // at 0x18, so the value it produces says nothing about that field's type.
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(irReg('ebx', 4), at(RCX, 8)),
+      assign(RSI, irDeref(irBinary('+', irBinary('+', RCX, irBinary('*', irReg('r9', 8), irConst(8))), irConst(0x18)), 8)),
+      store(RSI, irConst(7)),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+
+    const outer = out.typedefs?.find(d => d.fields.some(x => x.offset === 0x18));
+    expect(outer?.fields.find(x => x.offset === 0x18)?.type.kind).not.toBe('struct');
+  });
+
+  it('upgrades the pointer guess rather than sitting behind it', () => {
+    // inferFieldTypesFromUsage has already made this field a PVOID, by way of
+    // the "a machine word passed to a function is an address" heuristic. The
+    // nesting is the same claim with the pointee filled in.
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      callStmt('sub_408000', [at(RCX, 8, 8)]),
+      assign(RSI, at(RCX, 8, 8)),
+      store(RSI, irConst(7)),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+    expect(outerField(out, 8)?.kind).toBe('struct');
+  });
+
+  it('keeps a type the callee signature established over the nesting', () => {
+    // CloseHandle's parameter is real evidence about the field; that the value
+    // is also dereferenced at two offsets is a structural inference. Evidence
+    // wins, exactly as it does against the pointer guess.
+    const RSI = irReg('rsi', 8);
+    const out = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      callStmt('CloseHandle', [at(RCX, 8, 8)]),
+      assign(RSI, at(RCX, 8, 8)),
+      store(RSI, irConst(7)),
+      store(irBinary('+', RSI, irConst(4)), irConst(9)),
+    ]), new StructRegistry());
+    expect(outerField(out, 8)).toEqual({ kind: 'handle' });
+  });
+
+  it('does not let a later function guess a resolved nesting away', () => {
+    // The mirror of the signedness case above. Field types are shared by
+    // reference across functions, and meetTypes ranks a bare ptr above a struct,
+    // so an unguarded refine would answer PVOID and quietly undo the nesting.
+    const reg = new StructRegistry();
+    const first = synthesizeStructs(nestFn(), reg);
+    const nested = outerField(first, 8);
+    expect(nested?.kind).toBe('struct');
+
+    synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RDX, 0)),
+      assign(irReg('ebx', 8), at(RDX, 8, 8)),
+      callStmt('sub_408000', [at(RDX, 8, 8)]),
+    ], { address: 0x402000 }), reg);
+
+    const outer = reg.getAll().find(d => d.fields.some(f => f.offset === 8 && f.size === 8));
+    expect(outer?.fields.find(f => f.offset === 8)?.type).toEqual(nested);
+  });
+
+  it('carries a nesting resolved by one function into another that only sees the outer struct', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(nestFn(), reg);
+    // A second function reads the same layout through RDX and never touches the
+    // inner object, but its typedef block still has to define what field 8 names.
+    const b = synthesizeStructs(fn([
+      assign(irReg('eax', 4), at(RDX, 0)),
+      assign(irReg('ebx', 8), at(RDX, 8, 8)),
+    ], { address: 0x402000 }), reg);
+    expect(b.typedefs).toHaveLength(2);
+  });
+});
