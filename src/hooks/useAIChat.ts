@@ -4,6 +4,11 @@ import { streamChat } from "../llm/client";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
 import type { PEFile } from "../pe/types";
+import {
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_READ,
+  IMAGE_SCN_MEM_WRITE,
+} from "../pe/constants";
 
 interface ChatState {
   messages: ChatMessage[];
@@ -57,9 +62,9 @@ function buildSystemPrompt(pe: PEFile | null, fileName: string | null, currentCo
     const sections = pe.sections.map(s => {
       const name = s.name.replace(/\0/g, "").trim();
       const flags: string[] = [];
-      if (s.characteristics & 0x20000000) flags.push("X");
-      if (s.characteristics & 0x40000000) flags.push("R");
-      if (s.characteristics & 0x80000000) flags.push("W");
+      if (s.characteristics & IMAGE_SCN_MEM_EXECUTE) flags.push("X");
+      if (s.characteristics & IMAGE_SCN_MEM_READ) flags.push("R");
+      if (s.characteristics & IMAGE_SCN_MEM_WRITE) flags.push("W");
       return `${name} (${flags.join("")}, 0x${s.virtualSize.toString(16)})`;
     }).join(", ");
 

@@ -2,52 +2,13 @@ import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
 import type { AppAction, AppState } from "./usePEFile";
 import type { DisasmFunction, } from "../disasm/types";
-import { disasmWorker } from "../workers/disasmClient";
 import { streamChat } from "../llm/client";
 import { parseScanResponse, toScanFinding } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_VULN_SCAN } from "../llm/prompt";
 import { DANGEROUS_APIS, matchesApi } from "../llm/apiLists";
+import { decompileForLLM } from "../llm/decompileForLLM";
 import { getDisplayName } from "./usePEFile";
-import type { PEFile } from "../pe/types";
-import { analyzeStackFrame } from "../disasm/stack";
-import { inferSignature } from "../disasm/signatures";
-
-async function decompileFunc(
-  fn: DisasmFunction,
-  pe: PEFile,
-  functions: DisasmFunction[],
-  renames: Record<number, string>,
-): Promise<string | null> {
-  const textSection = pe.sections.find(
-    s => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-  );
-  if (!textSection) return null;
-
-  const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
-  const offset = fn.address - baseAddr;
-  if (offset < 0 || offset + fn.size > textSection.sizeOfRawData) return null;
-
-  try {
-    const sectionBytes = new Uint8Array(pe.buffer, textSection.pointerToRawData, textSection.sizeOfRawData);
-    const funcBytes = sectionBytes.subarray(offset, offset + fn.size);
-    const instructions = await disasmWorker.disassemble(funcBytes, fn.address, pe.is64);
-    if (instructions.length === 0) return null;
-
-    const xrefMap = await disasmWorker.buildTypedXrefMap(instructions);
-    const sf = analyzeStackFrame(fn, instructions, pe.is64);
-    const sig = inferSignature(fn, instructions, pe.is64);
-    const funcEntries: [number, { name: string; address: number }][] =
-      functions.map(f => [f.address, { name: getDisplayName(f, renames), address: f.address }]);
-    const result = await disasmWorker.decompileFunction(
-      fn, instructions, xrefMap, sf, sig, pe.is64,
-      new Map(funcEntries), pe.runtimeFunctions,
-    );
-    return result.code;
-  } catch {
-    return null;
-  }
-}
 
 export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
   const abortRef = useRef<AbortController | null>(null);
@@ -89,7 +50,8 @@ export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
     const signal = bulkSignal ?? beginRequest().signal;
     if (standalone) dispatch({ type: "AI_SCAN_START", total: 1 });
 
-    const code = await decompileFunc(fn, pe, state.functions, state.renames);
+    // No line cap: a truncated body can hide the sink the scan is looking for.
+    const code = await decompileForLLM(fn, pe, state.functions, state.renames);
     if (signal.aborted) return;
     if (!code) {
       // Not a model failure, but still not a clean result — the user must not

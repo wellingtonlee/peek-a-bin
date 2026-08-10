@@ -1,5 +1,10 @@
 import type { PEFile } from "../pe/types";
 import { validateChecksum, detectOverlay } from "../pe/metadata";
+import {
+  IMAGE_SCN_CNT_CODE,
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_WRITE,
+} from "../pe/constants";
 
 export interface Anomaly {
   severity: "info" | "warning" | "critical";
@@ -7,10 +12,8 @@ export interface Anomaly {
   detail: string;
 }
 
-// Section characteristics flags
-const IMAGE_SCN_MEM_EXECUTE = 0x20000000;
-const IMAGE_SCN_MEM_WRITE = 0x80000000;
-const IMAGE_SCN_CNT_CODE = 0x00000020;
+// Section characteristics flags come from pe/constants — this file used to
+// redeclare IMAGE_SCN_MEM_EXECUTE/WRITE/CNT_CODE with its own literals.
 
 // DLL characteristics flags
 const IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE = 0x0040;

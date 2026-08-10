@@ -1,13 +1,7 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
-import type { DisasmFunction } from "../disasm/types";
 import type { Loop } from "../disasm/cfg";
 import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
-
-type DisplayRow =
-  | { kind: "label"; fn: DisasmFunction }
-  | { kind: "insn"; insn: { address: number }; blockIdx: number }
-  | { kind: "separator" }
-  | { kind: "data"; item: { address: number } };
+import type { DisplayRow } from "../hooks/useDisassemblyRows";
 
 interface DisassemblyMinimapProps {
   rows: DisplayRow[];

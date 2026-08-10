@@ -5,13 +5,20 @@ import { streamChat } from "../llm/client";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_REPORT } from "../llm/prompt";
 import { NOTABLE_APIS, matchesApi } from "../llm/apiLists";
+import { decompileForLLM } from "../llm/decompileForLLM";
 import { getDisplayName } from "./usePEFile";
 import type { PEFile } from "../pe/types";
+import { findCodeSection } from "../pe/sections";
+import {
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_READ,
+  IMAGE_SCN_MEM_WRITE,
+} from "../pe/constants";
 import type { Anomaly } from "../analysis/anomalies";
 import type { DisasmFunction, } from "../disasm/types";
-import { disasmWorker } from "../workers/disasmClient";
-import { analyzeStackFrame } from "../disasm/stack";
-import { inferSignature } from "../disasm/signatures";
+
+/** Report context is whole-binary, so each function gets a generous but bounded slice. */
+const MAX_REPORT_LINES_PER_FUNC = 200;
 
 function buildReportContext(
   pe: PEFile,
@@ -39,9 +46,9 @@ Sections: ${pe.sections.length}
   for (const s of pe.sections) {
     const name = s.name.replace(/\0/g, "").trim();
     const flags: string[] = [];
-    if (s.characteristics & 0x20000000) flags.push("X");
-    if (s.characteristics & 0x40000000) flags.push("R");
-    if (s.characteristics & 0x80000000) flags.push("W");
+    if (s.characteristics & IMAGE_SCN_MEM_EXECUTE) flags.push("X");
+    if (s.characteristics & IMAGE_SCN_MEM_READ) flags.push("R");
+    if (s.characteristics & IMAGE_SCN_MEM_WRITE) flags.push("W");
     ctx += `- ${name}: size=0x${s.virtualSize.toString(16)}, flags=${flags.join("")}\n`;
   }
 
@@ -156,12 +163,9 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
 
     // Decompile key functions for report context
     const decompiled: { name: string; code: string }[] = [];
-    const textSection = pe.sections.find(
-      s => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-    );
+    const textSection = findCodeSection(pe.sections);
 
     if (textSection && state.functions.length > 0) {
-      const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
       const entryVA = pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint;
 
       // Key functions: entry point, first few exports, highest-xref, largest
@@ -185,32 +189,13 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
       // Decompile each (cap at 8)
       for (const fn of candidates.slice(0, 8)) {
         if (controller.signal.aborted) break;
-        const offset = fn.address - baseAddr;
-        if (offset < 0 || offset + fn.size > textSection.sizeOfRawData) continue;
-
-        try {
-          const sectionBytes = new Uint8Array(pe.buffer, textSection.pointerToRawData, textSection.sizeOfRawData);
-          const funcBytes = sectionBytes.subarray(offset, offset + fn.size);
-          const instructions = await disasmWorker.disassemble(funcBytes, fn.address, pe.is64);
-          if (instructions.length === 0) continue;
-
-          const xrefMap = await disasmWorker.buildTypedXrefMap(instructions);
-          const sf = analyzeStackFrame(fn, instructions, pe.is64);
-          const sig = inferSignature(fn, instructions, pe.is64);
-          const funcEntries: [number, { name: string; address: number }][] =
-            state.functions.map(f => [f.address, { name: getDisplayName(f, state.renames), address: f.address }]);
-          const result = await disasmWorker.decompileFunction(
-            fn, instructions, xrefMap, sf, sig, pe.is64,
-            new Map(funcEntries), pe.runtimeFunctions,
-          );
-          if (result.code) {
-            const lines = result.code.split("\n").slice(0, 200);
-            decompiled.push({
-              name: getDisplayName(fn, state.renames),
-              code: lines.join("\n"),
-            });
-          }
-        } catch { /* skip */ }
+        const code = await decompileForLLM(fn, pe, state.functions, state.renames, {
+          section: textSection,
+          maxLines: MAX_REPORT_LINES_PER_FUNC,
+        });
+        if (code) {
+          decompiled.push({ name: getDisplayName(fn, state.renames), code });
+        }
       }
     }
 

@@ -18,6 +18,7 @@ import type {
   PEFile,
 } from './types';
 import { normalizeOptionalHeader } from './types';
+import { findCodeSection } from './sections';
 import {
   IMAGE_DOS_SIGNATURE,
   IMAGE_NT_SIGNATURE,
@@ -1017,9 +1018,7 @@ export function extractStrings(
     }
   }
 
-  const textSection = sections.find(
-    (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-  );
+  const textSection = findCodeSection(sections);
   if (textSection) {
     const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
     textAscii.forEach((v, k) => {

@@ -4,6 +4,7 @@
  */
 
 import { parsePE, extractStrings } from '../pe/parser';
+import { findCodeSection } from '../pe/sections';
 import type { PEFile } from '../pe/types';
 import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
 import { buildIATLookup } from '../disasm/operands';
@@ -63,9 +64,7 @@ export class FileSession {
     const driverMode = driverInfo.isDriver;
 
     // 5. Find text section
-    const textSection = pe.sections.find(
-      s => s.name === '.text' || (s.characteristics & 0x20000000) !== 0,
-    );
+    const textSection = findCodeSection(pe.sections);
 
     let textBytes: Uint8Array;
     let textBase: number;

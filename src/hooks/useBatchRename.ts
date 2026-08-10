@@ -2,43 +2,17 @@ import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
 import type { AppAction, AppState } from "./usePEFile";
 import type { BatchRenameResult } from "../llm/types";
-import type { DisasmFunction, Instruction } from "../disasm/types";
-import { disasmWorker } from "../workers/disasmClient";
+import type { DisasmFunction } from "../disasm/types";
 import { streamChat } from "../llm/client";
 import { parseBatchRenameResponse, toBatchRenameResult } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_BATCH_RENAME } from "../llm/prompt";
+import { decompileForLLM } from "../llm/decompileForLLM";
 import { getDisplayName } from "./usePEFile";
-import type { PEFile } from "../pe/types";
-import { analyzeStackFrame } from "../disasm/stack";
-import { inferSignature } from "../disasm/signatures";
+import { findCodeSection } from "../pe/sections";
 
 const BATCH_SIZE = 6;
 const MAX_LINES_PER_FUNC = 100;
-
-async function decompileOne(
-  fn: DisasmFunction,
-  pe: PEFile,
-  instructions: Instruction[],
-  functions: DisasmFunction[],
-  renames: Record<number, string>,
-): Promise<string | null> {
-  try {
-    const xrefMap = await disasmWorker.buildTypedXrefMap(instructions);
-    const sf = analyzeStackFrame(fn, instructions, pe.is64);
-    const sig = inferSignature(fn, instructions, pe.is64);
-    const funcEntries: [number, { name: string; address: number }][] =
-      functions.map(f => [f.address, { name: getDisplayName(f, renames), address: f.address }]);
-    const result = await disasmWorker.decompileFunction(
-      fn, instructions, xrefMap, sf, sig, pe.is64,
-      new Map(funcEntries),
-      pe.runtimeFunctions,
-    );
-    return result.code;
-  } catch {
-    return null;
-  }
-}
 
 export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
   const abortRef = useRef<AbortController | null>(null);
@@ -52,10 +26,9 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
     const pe = state.peFile;
     if (!pe) return;
 
-    // Find text section for disassembly
-    const textSection = pe.sections.find(
-      s => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-    );
+    // Located here rather than left to decompileForLLM so a binary with no code
+    // section bails out before BATCH_RENAME_START opens a modal it cannot fill.
+    const textSection = findCodeSection(pe.sections);
     if (!textSection) return;
 
     // We don't have direct buffer access; work through worker
@@ -81,31 +54,17 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
     try {
       // Phase 1: Disassemble + decompile each function
       const decompiled: { fn: DisasmFunction; code: string }[] = [];
-      const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
 
       for (let i = 0; i < unnamed.length; i++) {
         if (controller.signal.aborted) return;
         dispatch({ type: "BATCH_RENAME_PROGRESS", done: i });
 
         const fn = unnamed[i];
-        const offset = fn.address - baseAddr;
-        if (offset < 0 || offset + fn.size > textSection.sizeOfRawData) continue;
-
-        try {
-          // Disassemble this function's bytes
-          const sectionBytes = new Uint8Array(
-            pe.buffer, textSection.pointerToRawData, textSection.sizeOfRawData,
-          );
-          const funcBytes = sectionBytes.subarray(offset, offset + fn.size);
-          const instructions = await disasmWorker.disassemble(funcBytes, fn.address, pe.is64);
-          if (instructions.length === 0) continue;
-
-          const code = await decompileOne(fn, pe, instructions, state.functions, state.renames);
-          if (code) {
-            const lines = code.split("\n").slice(0, MAX_LINES_PER_FUNC);
-            decompiled.push({ fn, code: lines.join("\n") });
-          }
-        } catch { /* skip */ }
+        const code = await decompileForLLM(fn, pe, state.functions, state.renames, {
+          section: textSection,
+          maxLines: MAX_LINES_PER_FUNC,
+        });
+        if (code) decompiled.push({ fn, code });
       }
 
       if (decompiled.length === 0 || controller.signal.aborted) {

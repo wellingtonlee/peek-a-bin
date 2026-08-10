@@ -7,6 +7,7 @@ import {
   parseViewTab,
 } from "./hooks/usePEFile";
 import { parsePE } from "./pe/parser";
+import { dataSectionRanges, findCodeSection } from "./pe/sections";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
 import { detectDriver } from "./analysis/driver";
@@ -185,9 +186,7 @@ export default function App() {
     const buffer = bufferRef.current;
     if (!buffer) return;
 
-    const textSection = pe.sections.find(
-      (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-    );
+    const textSection = findCodeSection(pe.sections);
     if (!textSection) return;
 
     const sectionBytes = new Uint8Array(
@@ -265,13 +264,7 @@ export default function App() {
         // Derive func entries for call graph
         const funcEntries: [number, number][] = funcs.map(f => [f.address, f.size]);
         // Derive data section ranges for data xrefs
-        const dataSections: { va: number; size: number }[] = pe.sections
-          .filter(s => {
-            const n = s.name.replace(/\0/g, "").trim().toLowerCase();
-            return n === ".data" || n === ".rdata" || n === ".bss" ||
-              ((s.characteristics & 0x40000000) !== 0 && (s.characteristics & 0x20000000) === 0); // readable, not executable
-          })
-          .map(s => ({ va: pe.optionalHeader.imageBase + s.virtualAddress, size: s.virtualSize }));
+        const dataSections = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
 
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
         return disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries, dataSections)
@@ -304,9 +297,7 @@ export default function App() {
 
     // Re-build xrefs now that strings are available
     if (buffer && state.functions.length > 0) {
-      const textSection = pe.sections.find(
-        (s) => s.name === ".text" || (s.characteristics & 0x20000000) !== 0,
-      );
+      const textSection = findCodeSection(pe.sections);
       if (textSection) {
         const sectionBytes = new Uint8Array(buffer, textSection.pointerToRawData, textSection.sizeOfRawData);
         const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
@@ -316,13 +307,7 @@ export default function App() {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
         }
         const funcEntries2: [number, number][] = state.functions.map(f => [f.address, f.size]);
-        const dataSections2: { va: number; size: number }[] = pe.sections
-          .filter(s => {
-            const n = s.name.replace(/\0/g, "").trim().toLowerCase();
-            return n === ".data" || n === ".rdata" || n === ".bss" ||
-              ((s.characteristics & 0x40000000) !== 0 && (s.characteristics & 0x20000000) === 0);
-          })
-          .map(s => ({ va: pe.optionalHeader.imageBase + s.virtualAddress, size: s.virtualSize }));
+        const dataSections2 = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
         if (stringAddrs.length > 0 || iatAddrs.length > 0) {
           disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries2, dataSections2)
             .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {

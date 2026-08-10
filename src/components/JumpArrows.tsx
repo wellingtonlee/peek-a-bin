@@ -1,12 +1,8 @@
 import { useMemo } from "react";
 import type { VirtualItem } from "@tanstack/react-virtual";
 import type { DisasmFunction } from "../disasm/types";
-
-type DisplayRow =
-  | { kind: "label"; fn: DisasmFunction }
-  | { kind: "insn"; insn: { address: number; mnemonic: string; opStr: string; size: number }; blockIdx: number }
-  | { kind: "separator" }
-  | { kind: "data"; item: { address: number } };
+import type { DisplayRow } from "../hooks/useDisassemblyRows";
+import { parseBranchTarget } from "./shared";
 
 interface JumpArrowsProps {
   visibleItems: VirtualItem[];
@@ -24,19 +20,6 @@ interface Arrow {
   isBackward: boolean;
   isCurrent: boolean;
   clipped: "none" | "top" | "bottom";
-}
-
-function parseBranchTarget(mnemonic: string, opStr: string): number | null {
-  if (mnemonic === "jmp" || (mnemonic.startsWith("j") && mnemonic !== "jmp")) {
-    const m = opStr.match(/^0x([0-9a-fA-F]+)$/);
-    if (m) return parseInt(m[1], 16);
-  }
-  // Also handle jmp
-  if (mnemonic === "jmp") {
-    const m = opStr.match(/^0x([0-9a-fA-F]+)$/);
-    if (m) return parseInt(m[1], 16);
-  }
-  return null;
 }
 
 export function JumpArrows({
@@ -82,6 +65,11 @@ export function JumpArrows({
       if (row?.kind !== "insn") continue;
       const insn = row.insn;
       if (insn.address < funcStart || insn.address >= funcEnd) continue;
+
+      // Jumps only. The shared `parseBranchTarget` also resolves `call`
+      // immediates, and a recursive or intra-function call lands inside
+      // [funcStart, funcEnd) — it would sprout an arrow this view never drew.
+      if (!insn.mnemonic.startsWith("j")) continue;
 
       const target = parseBranchTarget(insn.mnemonic, insn.opStr);
       if (target === null) continue;

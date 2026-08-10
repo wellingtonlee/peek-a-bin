@@ -6,6 +6,7 @@ import type { Instruction, DisasmFunction, Xref, DataItem } from "../disasm/type
 import { buildCFG, detectLoops } from "../disasm/cfg";
 import type { Loop } from "../disasm/cfg";
 import { buildDataItems } from "../disasm/dataView";
+import { IMAGE_SCN_MEM_EXECUTE } from "../pe/constants";
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
@@ -71,7 +72,9 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
   const [disasmError, setDisasmError] = useState<string | null>(null);
   const [disassembling, setDisassembling] = useState(false);
 
-  const isExecutable = sectionInfo ? (sectionInfo.characteristics & 0x20000000) !== 0 : true;
+  const isExecutable = sectionInfo
+    ? (sectionInfo.characteristics & IMAGE_SCN_MEM_EXECUTE) !== 0
+    : true;
 
   // Disassemble the current section (off main thread via worker)
   useEffect(() => {

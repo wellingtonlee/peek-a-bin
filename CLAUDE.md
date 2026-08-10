@@ -75,7 +75,7 @@ exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast t
 
 **New state**: Add action to `AppAction` union in usePEFile.ts, handle in `appReducer` switch.
 
-**New component types**: If a component defines its own `DisplayRow` (JumpArrows, DisassemblyMinimap), keep it in sync with the canonical one in useDisassemblyRows.ts.
+**New component types**: `DisplayRow` has exactly one declaration — the exported union in `useDisassemblyRows.ts`. JumpArrows and DisassemblyMinimap used to keep private narrowed copies that had to be hand-synced; they now `import type` the canonical one. Do not reintroduce a local copy: a narrowed structural clone still accepts the canonical rows at the call site, so it drifts silently instead of failing the build.
 
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
@@ -166,7 +166,7 @@ Both merge directions scan `fingerprintIndex` in insertion order and take the fi
 - **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and Biome falls back to defaults — which looks like your rule settings randomly stopped applying. The a11y group is now mostly at `error` (301 findings were cleared); keep it there.
 - **A multi-line `biome-ignore` needs `//` on every line.** Biome only honours the directive on the line immediately preceding the offence, so put prose in a normal comment block above a single-line directive. Getting this wrong leaves bare text inside JSX and breaks the parse.
 - **DisassemblyView.tsx** is ~2000 lines. Read in chunks.
-- **JumpArrows.tsx** and **DisassemblyMinimap.tsx** have their own local `DisplayRow` types — must update when extending the canonical union.
+- **`parseBranchTarget` lives only in `components/shared.tsx`** and resolves `call` immediates as well as jumps. JumpArrows draws jump arrows only, so it guards with `mnemonic.startsWith("j")` *before* calling — dropping that guard makes recursive/intra-function calls sprout arrows. Covered by `src/components/__tests__/parseBranchTarget.test.ts`.
 - `sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`. Used to distinguish code vs data sections.
 - Worker uses Transferable for large arrays. Don't hold references to transferred buffers.
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`). First load fetches, subsequent loads read from cache.
