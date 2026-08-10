@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { decompileFunction } from '../pipeline';
+import { StructRegistry } from '../structs';
 import type { Instruction, DisasmFunction, Xref } from '../../types';
 
 /**
@@ -53,6 +54,41 @@ function run(instructions: Instruction[], is64 = false): string {
   );
   return result.code;
 }
+
+/**
+ * As `run`, but with a struct registry (struct synthesis is skipped without
+ * one) and an optional import table, so a call can resolve to a real API name.
+ */
+function runWithStructs(
+  instructions: Instruction[],
+  iatMap: Map<number, { lib: string; func: string }> = new Map(),
+): string {
+  const start = instructions[0].address;
+  const last = instructions[instructions.length - 1];
+  const func: DisasmFunction = { name: 'sub_401000', address: start, size: last.address + last.size - start };
+  return decompileFunction(
+    func,
+    instructions,
+    new Map<number, Xref[]>(),
+    null,
+    null,
+    false,
+    new Map(),
+    iatMap,
+    new Map(),
+    new Map(),
+    new StructRegistry(),
+  ).code;
+}
+
+/** The declared type of a field in the emitted `typedef struct` block. */
+function declaredType(code: string, fieldName: string): string | undefined {
+  const line = code.split('\n').find(l => l.trim().endsWith(`${fieldName};`));
+  return line?.trim().split(/\s+/)[0];
+}
+
+/** An import table with one entry, at the address the tests below call through. */
+const imports = (func: string) => new Map([[0x402000, { lib: 'kernel32.dll', func }]]);
 
 describe('decompileFunction — conditionals reach the output with the right sense', () => {
   // The regression test for peek-a-bin-h9v, written at the level the bug was
@@ -159,5 +195,71 @@ describe('decompileFunction — output shape', () => {
       expect(line).toBeLessThan(lineCount);
       expect(addr).toBeGreaterThanOrEqual(0x401000);
     }
+  });
+});
+
+/**
+ * Struct field types as they reach the reader, in the emitted `typedef struct`
+ * block. Every case here declared `PVOID field_0x8;` before peek-a-bin-2kz:
+ * struct synthesis turned any pointer-sized field passed to any function, and
+ * any field a loaded value was stored into, into a pointer to nothing, whatever
+ * else was known about it.
+ *
+ * `[ebx + 0x10]` is written in each fixture only to give the base its second
+ * distinct offset, which is what makes it a struct candidate at all.
+ */
+describe('decompileFunction — struct field types', () => {
+  it('takes the callee parameter type over the pointer guess', () => {
+    // Sleep's parameter is a DWORD, so the field it is loaded from is one too.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['push', 'dword ptr [ebx + 8]'],
+      ['call', 'dword ptr [0x402000]'],
+      ['ret'],
+    ]), imports('Sleep'));
+
+    expect(code).toContain('Sleep(ebx->field_0x8)');
+    expect(declaredType(code, 'field_0x8')).toBe('uint32_t');
+  });
+
+  it('takes a specific parameter type from the callee signature', () => {
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['push', 'dword ptr [ebx + 8]'],
+      ['call', 'dword ptr [0x402000]'],
+      ['ret'],
+    ]), imports('CloseHandle'));
+
+    expect(code).toContain('CloseHandle(ebx->field_0x8)');
+    expect(declaredType(code, 'field_0x8')).toBe('HANDLE');
+  });
+
+  it('still guesses a pointer when the callee is unknown', () => {
+    // The retained heuristic: nothing is known about sub_408000's parameters,
+    // so a machine word passed to it is still read as an address.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['push', 'dword ptr [ebx + 8]'],
+      ['call', '0x408000'],
+      ['ret'],
+    ]));
+
+    expect(code).toContain('sub_408000(ebx->field_0x8)');
+    expect(declaredType(code, 'field_0x8')).toBe('PVOID');
+  });
+
+  it('does not turn a field-to-field copy of a scalar into a pointer', () => {
+    // `ebx->field_0x8 = esi->field_0x4` copies an integer. The value having come
+    // from memory says nothing about whether it is an address.
+    const code = runWithStructs(seq(0x401000, [
+      ['mov', 'eax, dword ptr [esi + 4]'],
+      ['mov', 'dword ptr [ebx + 8], eax'],
+      ['mov', 'dword ptr [ebx + 0x10], 1'],
+      ['mov', 'dword ptr [esi + 0xC], 2'],
+      ['ret'],
+    ]));
+
+    expect(code).toContain('ebx->field_0x8 = esi->field_0x4');
+    expect(declaredType(code, 'field_0x8')).toBe('uint32_t');
   });
 });

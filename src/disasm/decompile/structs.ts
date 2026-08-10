@@ -1,6 +1,9 @@
-import type { IRExpr, IRStmt, IRFunction } from './ir';
+import type { IRExpr, IRStmt, IRFunction, IRCall } from './ir';
 import { irFieldAccess, irArrayAccess, irConst, canonReg } from './ir';
 import type { DecompType } from './typeInfer';
+import { meetTypes } from './typeInfer';
+import type { ApiFuncType } from './apitypes';
+import { API_TYPES } from './apitypes';
 
 /**
  * A parameter position — one function's argument slot, identified by the
@@ -893,12 +896,69 @@ export function synthesizeStructs(
 
 // ── Field Type Inference from Usage Context ──
 
+/** The guess two heuristics below fall back on when nothing better is known. */
+const GUESSED_POINTER: DecompType = { kind: 'ptr', pointee: { kind: 'unknown' } };
+
+/**
+ * Merge new evidence into a field's type instead of replacing it.
+ *
+ * `meetTypes` is the single place the "more specific wins" ordering is written
+ * down — handle beats ptr, handle/ntstatus/hresult/enum beat int, anything beats
+ * unknown — and reusing it is what keeps this pass from inventing a second,
+ * contradictory notion of specificity. Assigning `field.type` directly means a
+ * later, weaker observation silently replaces a better-founded one, and because
+ * StructDefs are shared across functions the loser can be a type some *other*
+ * function established.
+ */
+function refineFieldType(field: StructField, evidence: DecompType): void {
+  field.type = meetTypes(field.type, evidence);
+}
+
+/**
+ * Whether a field still carries only what `inferFieldType` seeded it with.
+ *
+ * Every field starts as an unsigned int of its access size, so "unsigned int"
+ * and "nothing known" are the same state. Anything else — signed, float, handle,
+ * ptr, ntstatus — came from an actual observation. The guessing paths below are
+ * gated on this rather than on `meetTypes` alone because meetTypes ranks ptr
+ * above float and ntstatus: for its usual callers a ptr *is* evidence, and for a
+ * guess it is not.
+ */
+function isUnrefinedFieldType(t: DecompType): boolean {
+  return t.kind === 'unknown' || (t.kind === 'int' && !t.signed);
+}
+
+/**
+ * Parameter types of a call whose target is a known API, or null.
+ *
+ * Name resolution matches `inferFromAPICalls` in typeInfer.ts: the display form
+ * is `lib!Func`, and the bare target is already the function name.
+ */
+function apiParamTypes(call: IRCall): DecompType[] | null {
+  const name = call.display?.split('!').pop() ?? call.target;
+  // The index type says this is always an ApiFuncType, but the object is
+  // indexed with a name lifted out of a binary: `toString` and `constructor`
+  // are inherited from Object and would otherwise look like hits. Checking the
+  // shape rejects both without needing an es2022 lib for `Object.hasOwn`.
+  const hit: ApiFuncType | undefined = API_TYPES[name];
+  return Array.isArray(hit?.params) ? hit.params : null;
+}
+
 function inferFieldTypesFromUsage(
   body: IRStmt[],
   baseToStruct: Map<string, StructDef>,
   canonBase: (expr: IRExpr) => string,
   _registry: StructRegistry,
 ): void {
+  /** The struct field an address expression names, if it names one. */
+  function fieldAt(address: IRExpr): StructField | null {
+    const decomp = decomposeAddress(address);
+    if (!decomp?.base) return null;
+    const def = baseToStruct.get(canonBase(decomp.base));
+    if (!def) return null;
+    return def.fields.find(f => f.offset === decomp.offset) ?? null;
+  }
+
   // Walk all expressions, looking for deref patterns that match struct fields
   // and infer types from how the loaded value is used
   function walkStmts(stmts: IRStmt[]): void {
@@ -908,42 +968,42 @@ function inferFieldTypesFromUsage(
         checkDerefUsage(s.src, stmts);
       }
       if (s.kind === 'store') {
-        // Store value type can refine field type
-        const decomp = decomposeAddress(s.address);
-        if (decomp?.base) {
-          const key = canonBase(decomp.base);
-          const def = baseToStruct.get(key);
-          if (def) {
-            const field = def.fields.find(f => f.offset === decomp.offset);
-            if (field) {
-              // If storing a float, field is float
-              // Simple heuristic: mark as pointer if the value is dereffed elsewhere
-              if (s.value.kind === 'deref') {
-                field.type = { kind: 'ptr', pointee: { kind: 'unknown' } };
-              }
-            }
+        // Store value type can refine field type.
+        const field = fieldAt(s.address);
+        if (field && s.value.kind === 'deref') {
+          const source = fieldAt(s.value.address);
+          if (source) {
+            // A field-to-field copy carries the source field's type across. It
+            // says nothing about pointerness either way: `dst->a = src->b` on
+            // two scalars is an ordinary copy, and the old rule turned every
+            // one of them into a PVOID.
+            refineFieldType(field, source.type);
+          } else if (isUnrefinedFieldType(field.type)) {
+            // The value came from memory we know nothing else about. That the
+            // address it was loaded from is not itself a tracked field is the
+            // whole of the evidence, so it may only fill an empty slot.
+            refineFieldType(field, GUESSED_POINTER);
           }
         }
       }
       if (s.kind === 'call_stmt') {
-        // Check args: if arg is a deref of struct field → field type from API
-        // Mark as pointer if arg is a struct base directly
-        for (const arg of s.call.args) {
-          if (arg.kind === 'deref') {
-            const decomp = decomposeAddress(arg.address);
-            if (decomp?.base) {
-              const key = canonBase(decomp.base);
-              const def = baseToStruct.get(key);
-              if (def) {
-                const field = def.fields.find(f => f.offset === decomp.offset);
-                if (field) {
-                  // Loaded value passed to function → likely pointer if size is 8/4
-                  if (field.size >= 4 && field.type.kind === 'int' && !field.type.signed) {
-                    field.type = { kind: 'ptr', pointee: { kind: 'unknown' } };
-                  }
-                }
-              }
-            }
+        // An argument that is a struct field load types that field: from the
+        // callee's real signature where there is one, and otherwise from the
+        // much weaker guess that a machine-word passed to a function is an
+        // address.
+        const params = apiParamTypes(s.call);
+        for (let i = 0; i < s.call.args.length; i++) {
+          const arg = s.call.args[i];
+          if (arg.kind !== 'deref') continue;
+          const field = fieldAt(arg.address);
+          if (!field) continue;
+          const declared = params?.[i];
+          if (declared) {
+            // A real parameter type. `Sleep(o->f)` makes f a DWORD and
+            // `CloseHandle(o->f)` makes it a HANDLE; neither is a PVOID.
+            refineFieldType(field, declared);
+          } else if (field.size >= 4 && isUnrefinedFieldType(field.type)) {
+            refineFieldType(field, GUESSED_POINTER);
           }
         }
       }
@@ -967,14 +1027,11 @@ function inferFieldTypesFromUsage(
 
   function checkDerefUsage(expr: IRExpr, _context: IRStmt[]): void {
     if (expr.kind !== 'deref') return;
-    const decomp = decomposeAddress(expr.address);
-    if (!decomp?.base) return;
-    const key = canonBase(decomp.base);
-    const def = baseToStruct.get(key);
-    if (!def) return;
-    const field = def.fields.find(f => f.offset === decomp.offset);
+    const field = fieldAt(expr.address);
     if (!field) return;
-    // XMM-sized access → float
+    // XMM-sized access → float. Assigned, not merged: the access width is a
+    // direct measurement rather than a guess, and meetTypes would hand the
+    // seeded int the win (int and float are unordered, so it returns the left).
     if (expr.size === 16) {
       field.type = { kind: 'float', size: 4 };
     }

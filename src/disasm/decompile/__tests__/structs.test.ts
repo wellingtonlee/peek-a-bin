@@ -24,8 +24,8 @@ function field(offset: number, size: number, over: Partial<StructField> = {}): S
 const assign = (dest: IRExpr, src: IRExpr): IRStmt => ({ kind: 'assign', dest, src });
 const store = (address: IRExpr, value: IRExpr, size = 4): IRStmt =>
   ({ kind: 'store', address, value, size });
-const callStmt = (target: string, args: IRExpr[] = []): IRStmt =>
-  ({ kind: 'call_stmt', call: { kind: 'call', target, args } });
+const callStmt = (target: string, args: IRExpr[] = [], display?: string): IRStmt =>
+  ({ kind: 'call_stmt', call: { kind: 'call', target, args, display } });
 
 /** `*(base + offset)` */
 const at = (base: IRExpr, offset: number, size = 4): IRExpr =>
@@ -931,6 +931,81 @@ describe('synthesizeStructs — field type inference', () => {
     ]);
     expect(typeAt(out, 8)).toEqual({ kind: 'ptr', pointee: { kind: 'unknown' } });
   });
+
+  // ── Evidence beats guesswork (peek-a-bin-2kz) ──
+  //
+  // Two rules above used to fire unconditionally: a field passed to *any*
+  // function became a pointer to nothing, and so did a field a *loaded* value
+  // was stored into. Both replaced the field's type rather than merging with it,
+  // so they also undid what other passes — and other functions, since StructDefs
+  // are shared through the registry — had established.
+
+  it('takes the callee parameter type over the pointer guess', () => {
+    // Sleep's only parameter is a DWORD. "It was passed somewhere" is not a
+    // reason to prefer PVOID over a signature that says otherwise.
+    const out = run([...twoFieldBody(), callStmt('Sleep', [at(RCX, 8)])]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'int', size: 4, signed: false });
+  });
+
+  it('takes a specific parameter type from the callee signature', () => {
+    const out = run([...twoFieldBody(), callStmt('CloseHandle', [at(RCX, 8)])]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'handle' });
+  });
+
+  it('resolves an imported callee through its display name', () => {
+    // An IAT call carries the name in `display` as lib!Func; the target is the
+    // thunk. Same resolution order as inferFromAPICalls in typeInfer.ts.
+    const out = run([
+      ...twoFieldBody(),
+      callStmt('sub_402000', [at(RCX, 8)], 'kernel32.dll!CloseHandle'),
+    ]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'handle' });
+  });
+
+  it('matches the parameter to the argument position', () => {
+    // CreateFileA's argument 1 is a DWORD; only argument 6 is a HANDLE.
+    const out = run([...twoFieldBody(), callStmt('CreateFileA', [irConst(0), at(RCX, 8)])]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'int', size: 4, signed: false });
+  });
+
+  // Not a behaviour change — this pins the fallback that survives, which the
+  // memcpy test above no longer covers now that memcpy resolves to a signature.
+  it('still guesses a pointer for an unknown callee', () => {
+    const out = run([...twoFieldBody(), callStmt('sub_408000', [at(RCX, 8)])]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'ptr', pointee: { kind: 'unknown' } });
+  });
+
+  it('does not make a field a pointer when another struct field is copied into it', () => {
+    // RDX gets a different shape so it stays a separate struct; typedefs[0] is
+    // still RCX's, created first.
+    const out = run([
+      ...twoFieldBody(),
+      assign(irReg('ecx', 4), at(RDX, 0)),
+      assign(irReg('edi', 4), at(RDX, 0x20)),
+      store(irBinary('+', RCX, irConst(8)), at(RDX, 0)),
+    ]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'int', size: 4, signed: false });
+  });
+
+  it('carries a specific source type across a field-to-field copy', () => {
+    const out = run([
+      ...twoFieldBody(),
+      assign(irReg('ecx', 4), at(RDX, 0)),
+      assign(irReg('edi', 4), at(RDX, 0x20)),
+      callStmt('CloseHandle', [at(RDX, 0)]),
+      store(irBinary('+', RCX, irConst(8)), at(RDX, 0)),
+    ]);
+    expect(typeAt(out, 8)).toEqual({ kind: 'handle' });
+  });
+
+  it('does not let a stored load displace a float field', () => {
+    const out = run([
+      assign(irReg('xmm0', 16), at(RCX, 0, 16)),
+      assign(irReg('ebx', 4), at(RCX, 0x20)),
+      store(RCX, irDeref(irReg('r8', 8), 8), 8),
+    ]);
+    expect(typeAt(out, 0)).toEqual({ kind: 'float', size: 4 });
+  });
 });
 
 describe('synthesizeStructs — cross-function registry state', () => {
@@ -1018,6 +1093,25 @@ describe('synthesizeStructs — cross-function registry state', () => {
 
     const later = synthesizeStructs(twoFn(twoFieldBody(RCX), 0x403000), reg);
     expect(later.typedefs?.[0].fields[0].type).toMatchObject({ signed: true });
+  });
+
+  // The other half of that sharing: a field type one function established is
+  // there to be *undone* by the next one's guesswork. A store of a loaded value
+  // used to overwrite the signedness discovered above with a pointer.
+  it('does not let a later function guess over a type an earlier one established', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(twoFn([
+      ...twoFieldBody(RCX),
+      { kind: 'if', condition: irBinary('<', at(RCX, 8), irConst(10)), thenBody: [] },
+    ], 0x401000), reg);
+
+    const b = synthesizeStructs(twoFn([
+      ...twoFieldBody(RDX),
+      store(irBinary('+', RDX, irConst(8)), irDeref(irReg('r8', 8), 8)),
+    ], 0x402000), reg);
+
+    expect(b.typedefs?.[0].fields.find(f => f.offset === 8)?.type)
+      .toMatchObject({ kind: 'int', signed: true });
   });
 
   it('isolates functions once the registry is cleared', () => {
