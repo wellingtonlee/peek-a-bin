@@ -39,7 +39,10 @@ describe('API_TYPES table', () => {
     // declarations in the file rather than trusting the built object.
     const src = readFileSync(fileURLToPath(new URL('../apitypes.ts', import.meta.url)), 'utf8');
     const body = src.slice(src.indexOf('export const API_TYPES'));
-    const declared = [...body.matchAll(/^ {2}(\w+): \{ returnType:/gm)].map(m => m[1]);
+    // Match the key alone. Requiring `{ returnType:` on the same line assumed
+    // one entry per line, which a formatter breaks the moment an entry passes
+    // the line-width limit and gets wrapped.
+    const declared = [...body.matchAll(/^ {2}(\w+): \{/gm)].map(m => m[1]);
     const dupes = declared.filter((n, i) => declared.indexOf(n) !== i);
     expect(dupes).toEqual([]);
     expect(declared.length).toBe(names.length);

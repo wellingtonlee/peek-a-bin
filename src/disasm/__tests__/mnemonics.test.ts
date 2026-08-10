@@ -52,7 +52,10 @@ describe('MNEMONIC_HINTS', () => {
       fileURLToPath(new URL('../decompile/regstate.ts', import.meta.url)),
       'utf8',
     );
-    const jccs = [...new Set([...src.matchAll(/'(jn?[a-z]{1,4})'/g)].map(m => m[1]))];
+    // Quote-agnostic: matching single quotes only found nothing once the repo
+    // was formatted to double quotes, and a guard that finds nothing passes
+    // vacuously. The length assertion below is what catches that.
+    const jccs = [...new Set([...src.matchAll(/["'](jn?[a-z]{1,4})["']/g)].map(m => m[1]))];
     expect(jccs.length).toBeGreaterThan(0);
     expect(jccs.filter(m => !(m in MNEMONIC_HINTS))).toEqual([]);
   });
