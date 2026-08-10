@@ -320,41 +320,40 @@ export function structureCFG(
         const fallthroughBlock = blockById.get(fallthrough);
 
         if (branchBlock && endsWithRet(branchBlock) && branchBlock.succs.length === 0) {
-          // if (cond) { ... return; }
+          // if (cond) { ... return; } — the branch target runs when the jcc is taken
           const thenBody = structureFrom(branchTarget, convergenceSet, loopBody);
-          result.push({ kind: 'if', condition: RegState.negate(condition), thenBody });
+          result.push({ kind: 'if', condition, thenBody });
           // Continue with fallthrough
           current = fallthrough;
           continue;
         }
 
         if (fallthroughBlock && endsWithRet(fallthroughBlock) && fallthroughBlock.succs.length === 0) {
-          // if (!cond) { ... return; }
+          // if (!cond) { ... return; } — the fallthrough runs when the jcc is *not* taken
           const thenBody = structureFrom(fallthrough, convergenceSet, loopBody);
-          result.push({ kind: 'if', condition, thenBody });
+          result.push({ kind: 'if', condition: RegState.negate(condition), thenBody });
           // Continue with branch target
           current = branchTarget;
           continue;
         }
 
-        // General if-else
-        // Branch target (jcc taken) = "then" with negated condition
-        // because: jne target → if (condition) goto target → if (!condition) { fallthrough }
-        // Actually: jne = jump if not equal. So the "then" for "jne target" is when cond IS true → go to target
-        // We want: if (cond) { branchTarget } else { fallthrough }
-        // But our condition already represents "when the jump is taken"
-        // So: if (condition) { branchBody } else { fallthroughBody }
+        // General if-else.
+        // `condition` is the condition under which the jcc is *taken*, so the
+        // branch target is the "then" body and the fallthrough is the "else":
+        //   if (condition) { branchBody } else { fallthroughBody }
+        // When only the fallthrough has statements the condition is negated so
+        // that body can be hoisted into the "then" slot.
 
         if (convergence >= 0) {
           const thenBody = structureFrom(branchTarget, convergenceSet, loopBody);
           const elseBody = structureFrom(fallthrough, convergenceSet, loopBody);
 
           if (thenBody.length > 0 && elseBody.length > 0) {
-            result.push({ kind: 'if', condition: RegState.negate(condition), thenBody, elseBody });
+            result.push({ kind: 'if', condition, thenBody, elseBody });
           } else if (thenBody.length > 0) {
-            result.push({ kind: 'if', condition: RegState.negate(condition), thenBody });
+            result.push({ kind: 'if', condition, thenBody });
           } else if (elseBody.length > 0) {
-            result.push({ kind: 'if', condition, thenBody: elseBody });
+            result.push({ kind: 'if', condition: RegState.negate(condition), thenBody: elseBody });
           }
 
           current = convergence;
@@ -363,7 +362,7 @@ export function structureCFG(
           const thenBody = structureFrom(branchTarget, stopAt, loopBody);
           const elseBody = structureFrom(fallthrough, stopAt, loopBody);
           if (thenBody.length > 0 || elseBody.length > 0) {
-            result.push({ kind: 'if', condition: RegState.negate(condition), thenBody, elseBody: elseBody.length > 0 ? elseBody : undefined });
+            result.push({ kind: 'if', condition, thenBody, elseBody: elseBody.length > 0 ? elseBody : undefined });
           }
           current = null;
         }
@@ -470,9 +469,9 @@ export function structureCFG(
         // If fallthrough goes to body (branch goes to exit): while(!condition)
         let whileCondition: IRExpr;
         if (bodyStart === branchTarget) {
-          whileCondition = RegState.negate(condition);
-        } else {
           whileCondition = condition;
+        } else {
+          whileCondition = RegState.negate(condition);
         }
 
         // Better loop classification: if body starts with if (cond) break; → while(!cond)
@@ -487,11 +486,10 @@ export function structureCFG(
         const bodyBlockIds = collectLoopBodyBlockIds(header, loop);
         const forLoop = detectForLoop(header, bodyBlockIds, liftedBlocks, blockById);
         if (forLoop) {
-          // Wire actual header condition
-          const forCond = whileCondition.kind === 'const' && whileCondition.value === 1
-            ? whileCondition
-            : whileCondition;
-          return [{ kind: 'for', init: forLoop.init, condition: forCond, update: forLoop.update, body: forLoop.bodyStmts }];
+          // detectForLoop returns `condition: irConst(1)` as a placeholder and
+          // documents that the caller fills it in — the header condition is
+          // only available here. Always override it.
+          return [{ kind: 'for', init: forLoop.init, condition: whileCondition, update: forLoop.update, body: forLoop.bodyStmts }];
         }
 
         return [{ kind: 'while', condition: whileCondition, body: fullBody }];

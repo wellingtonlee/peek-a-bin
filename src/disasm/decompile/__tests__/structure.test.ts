@@ -142,26 +142,30 @@ describe('structureCFG — conditionals', () => {
   it('builds an if/else from a diamond and continues after the join', () => {
     const out = structure(diamond(), { 1: [mark(1)], 2: [mark(2)], 3: [mark(3)] });
     expect(out).toEqual([
-      { kind: 'if', condition: ne0(), thenBody: [mark(2)], elseBody: [mark(1)] },
+      { kind: 'if', condition: eq0(), thenBody: [mark(2)], elseBody: [mark(1)] },
       mark(3),
     ]);
   });
 
-  it('negates the condition so the branch target is the then-branch', () => {
-    // `je target` is taken when ecx == 0; the emitted `if` keeps that body
-    // first, so the printed condition is the negation used by the structurer.
+  it('guards the branch target with the taken condition', () => {
+    // `je target` is taken when ecx == 0, and block 2 is the target, so block 2
+    // is the then-branch and the condition must be the un-negated `ecx == 0`.
+    // Emitting `ecx != 0` here would invert the meaning of every if in the
+    // decompiled output.
     const out = structure(diamond(), { 1: [mark(1)], 2: [mark(2)] });
-    expect((out[0] as { condition: IRExpr }).condition).toEqual(ne0());
+    expect((out[0] as { condition: IRExpr }).condition).toEqual(eq0());
   });
 
   it('emits a single-branch if when the else side is empty', () => {
     const out = structure(diamond(), { 2: [mark(2)] });
-    expect(out).toEqual([{ kind: 'if', condition: ne0(), thenBody: [mark(2)] }]);
+    expect(out).toEqual([{ kind: 'if', condition: eq0(), thenBody: [mark(2)] }]);
   });
 
   it('inverts the condition when only the fallthrough has statements', () => {
+    // Block 1 runs when the `je` is *not* taken, and it is hoisted into the
+    // then-slot, so the condition flips.
     const out = structure(diamond(), { 1: [mark(1)] });
-    expect(out).toEqual([{ kind: 'if', condition: eq0(), thenBody: [mark(1)] }]);
+    expect(out).toEqual([{ kind: 'if', condition: ne0(), thenBody: [mark(1)] }]);
   });
 
   it('drops the if entirely when neither side has statements', () => {
@@ -176,20 +180,21 @@ describe('structureCFG — conditionals', () => {
     ];
     const out = structure(blocks, { 1: [mark(1)], 2: [mark(2)] });
     expect(out).toEqual([
-      { kind: 'if', condition: ne0(), thenBody: [mark(2)] },
+      { kind: 'if', condition: eq0(), thenBody: [mark(2)] },
       mark(1),
     ]);
   });
 
-  it('keeps the unnegated condition when the fallthrough returns', () => {
+  it('negates the condition when the fallthrough returns', () => {
     const blocks = [
       bb(0, { succs: [2, 1], code: [['cmp', 'ecx, 0x0'], ['je', 2]] }),
       bb(1, { preds: [0], code: [['ret', '']] }),
       bb(2, { succs: [3], preds: [0], code: [['jmp', 3]] }),
       bb(3, { preds: [2], code: [['ret', '']] }),
     ];
+    // Block 1 is the fallthrough, reached when `je` is not taken → `ecx != 0`.
     const out = structure(blocks, { 1: [mark(1)], 2: [mark(2)], 3: [mark(3)] });
-    expect(out[0]).toEqual({ kind: 'if', condition: eq0(), thenBody: [mark(1)] });
+    expect(out[0]).toEqual({ kind: 'if', condition: ne0(), thenBody: [mark(1)] });
     expect(out.slice(1)).toEqual([mark(2), mark(3)]);
   });
 
@@ -201,9 +206,10 @@ describe('structureCFG — conditionals', () => {
       bb(3, { preds: [1, 2], code: [['ret', '']] }),
     ];
     const out = structure(blocks, { 1: [mark(1)], 2: [mark(2)] });
-    // jg → '>', negated to '<=' because the branch body comes first.
+    // jg → '>', and block 2 (the jump target) is the then-branch, so the
+    // comparison survives unflipped.
     expect((out[0] as { condition: IRExpr }).condition)
-      .toEqual(irBinary('<=', irReg('eax', 4), irConst(5, 4)));
+      .toEqual(irBinary('>', irReg('eax', 4), irConst(5, 4)));
   });
 
   it('reads a memory operand in the comparison', () => {
@@ -224,8 +230,11 @@ describe('structureCFG — conditionals', () => {
       bb(2, { succs: [3], preds: [0], code: [['jmp', 3]] }),
       bb(3, { preds: [1, 2], code: [['ret', '']] }),
     ];
-    const cond = (structure(blocks, { 1: [mark(1)] })[0] as { condition: IRExpr }).condition;
+    const cond = (structure(blocks, { 2: [mark(2)] })[0] as { condition: IRExpr }).condition;
     expect(cond).toEqual({ kind: 'unknown', text: 'je' });
+    // Negating an unrecognised condition falls back to a `!` wrapper.
+    const inverted = (structure(blocks, { 1: [mark(1)] })[0] as { condition: IRExpr }).condition;
+    expect(inverted).toEqual({ kind: 'unary', op: '!', operand: { kind: 'unknown', text: 'je' } });
   });
 
   it('stops when the branch target cannot be resolved', () => {
@@ -248,7 +257,7 @@ describe('structureCFG — conditionals', () => {
     const out = structure(blocks, { 1: [mark(1)], 2: [mark(2)], 3: [mark(3)], 4: [mark(4)] });
     expect(out).toEqual([{
       kind: 'if',
-      condition: ne0(),
+      condition: eq0(),
       thenBody: [mark(2), mark(4)],
       elseBody: [mark(1), mark(3)],
     }]);
@@ -304,9 +313,11 @@ describe('structureCFG — loops', () => {
   }
 
   it('builds a while loop from a pre-tested header', () => {
+    // The header's `je 3` leaves the loop when ecx == 0, so the loop runs while
+    // ecx != 0 — the exit test has to be negated to become the while condition.
     const out = structure(whileLoop(), { 0: [mark(0)], 2: [mark(2)], 3: [mark(3)] }, [loopOf(1, [2], 2)]);
     expect(out[0]).toEqual(mark(0));
-    expect(out[1]).toMatchObject({ kind: 'while', condition: eq0(), body: [mark(2)] });
+    expect(out[1]).toMatchObject({ kind: 'while', condition: ne0(), body: [mark(2)] });
     expect(out[2]).toEqual(mark(3));
   });
 
@@ -315,7 +326,9 @@ describe('structureCFG — loops', () => {
     expect(out[0]).toMatchObject({ kind: 'while', body: [mark(1), mark(2)] });
   });
 
-  it('negates the condition when the branch target is the loop body', () => {
+  it('keeps the condition when the branch target is the loop body', () => {
+    // Mirror image of the test above: here `je 2` jumps *into* the body, so the
+    // taken condition is already the continue-looping condition.
     const blocks = [
       bb(0, { succs: [1], code: [['jmp', 1]] }),
       bb(1, { succs: [2, 3], preds: [0, 2], code: [['cmp', 'ecx, 0x0'], ['je', 2]] }),
@@ -323,7 +336,7 @@ describe('structureCFG — loops', () => {
       bb(3, { preds: [1], code: [['ret', '']] }),
     ];
     const out = structure(blocks, { 2: [mark(2)] }, [loopOf(1, [2], 2)]);
-    expect(out[0]).toMatchObject({ kind: 'while', condition: ne0() });
+    expect(out[0]).toMatchObject({ kind: 'while', condition: eq0() });
   });
 
   // KNOWN BUG (reported, not fixed): insertContinueStmts rewrites `goto
@@ -414,6 +427,15 @@ describe('structureCFG — for loops', () => {
     const forStmt = findStmt(out, 'for');
     expect(forStmt).toBeDefined();
     expect(forStmt).toMatchObject({ init, update: inc, body: [mark(2)] });
+  });
+
+  it('wires the header condition into the for, not detectForLoop placeholder', () => {
+    // detectForLoop returns `condition: const 1` as a placeholder it documents
+    // the caller must replace. `jge 3` exits when ecx >= 10, so the loop runs
+    // while ecx < 10 — the same negation the equivalent while loop gets.
+    const out = structure(counted(), { 0: [init], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    const forStmt = findStmt(out, 'for') as { condition: IRExpr };
+    expect(forStmt.condition).toEqual(irBinary('<', irReg('ecx', 4), irConst(10, 4)));
   });
 
   // KNOWN BUG (reported, not fixed): the initialiser is emitted twice — once as
