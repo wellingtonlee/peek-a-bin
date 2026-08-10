@@ -137,9 +137,18 @@ describe('decomposeAddress', () => {
     expect(decomposeAddress(irBinary('+', RCX, irBinary('<<', RDX, irConst(32))))?.scale).toBe(1);
   });
 
-  it('returns null for a subtraction', () => {
-    // Only `+` chains decompose, so `base - offset` is never a struct access.
-    expect(decomposeAddress(irBinary('-', RCX, irConst(8)))).toBeNull();
+  it('decomposes a subtraction of a constant into a negative offset', () => {
+    // `base - 8` is the same access as `base + (-8)`.
+    expect(decomposeAddress(irBinary('-', RCX, irConst(8)))).toMatchObject({
+      base: RCX,
+      offset: -8,
+      index: null,
+    });
+  });
+
+  it('returns null when the subtrahend is not a constant', () => {
+    // Subtracting a register is not a field offset.
+    expect(decomposeAddress(irBinary('-', RCX, RDX))).toBeNull();
   });
 
   it('returns null for a non-additive expression', () => {
@@ -199,19 +208,49 @@ describe('StructRegistry', () => {
 
   it('merges a fingerprint that is a subset of an existing one', () => {
     const reg = new StructRegistry();
-    const big = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
-    const small = reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
+    const big = reg.findOrCreate('0:4,8:4,16:4,24:4', [field(0, 4), field(8, 4), field(16, 4), field(24, 4)]);
+    const small = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
     expect(small.id).toBe(big.id);
     expect(reg.getAll()).toHaveLength(1);
   });
 
   it('merges a fingerprint that is a superset of an existing one', () => {
     const reg = new StructRegistry();
-    const small = reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
-    const big = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    const small = reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    const big = reg.findOrCreate('0:4,8:4,16:4,24:4', [field(0, 4), field(8, 4), field(16, 4), field(24, 4)]);
     expect(big.id).toBe(small.id);
-    expect(big.fields.map(f => f.offset)).toEqual([0, 8, 16]);
-    expect(big.totalSize).toBe(20);
+    expect(big.fields.map(f => f.offset)).toEqual([0, 8, 16, 24]);
+    expect(big.totalSize).toBe(28);
+  });
+
+  // The cost of MIN_SUBSET_MERGE_FIELDS, pinned deliberately. Two distinct
+  // offsets is the minimum a candidate can have, so two-field shapes are both
+  // the most common and the weakest evidence; they no longer merge through the
+  // subset path. Failing to merge is the benign direction — two struct_N
+  // declarations instead of one wrongly shared. An *exact* fingerprint match
+  // still merges, whatever the field count.
+  it('refuses a subset merge when the smaller shape has fewer than three fields', () => {
+    const reg = new StructRegistry();
+    reg.findOrCreate('0:4,8:4,16:4', [field(0, 4), field(8, 4), field(16, 4)]);
+    reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
+    expect(reg.getAll()).toHaveLength(2);
+  });
+
+  it('still merges a two-field shape on an exact fingerprint match', () => {
+    const reg = new StructRegistry();
+    const a = reg.findOrCreate('0:8,8:8', [field(0, 8), field(8, 8)]);
+    const b = reg.findOrCreate('0:8,8:8', [field(0, 8), field(8, 8)]);
+    expect(b.id).toBe(a.id);
+    expect(reg.getAll()).toHaveLength(1);
+  });
+
+  it('refuses a subset merge whose layouts contradict each other', () => {
+    // 4:4 and 8:4 sit inside the 8-byte field at 0, so the two shapes cannot
+    // describe the same type however well their offset sets nest.
+    const reg = new StructRegistry();
+    reg.findOrCreate('0:8,4:4,8:4', [field(0, 8), field(4, 4), field(8, 4)]);
+    reg.findOrCreate('0:8,4:4,8:4,16:4', [field(0, 8), field(4, 4), field(8, 4), field(16, 4)]);
+    expect(reg.getAll()).toHaveLength(2);
   });
 
   it('keeps structs with overlapping but non-nested field sets apart', () => {
@@ -228,14 +267,15 @@ describe('StructRegistry', () => {
     expect(reg.getAll()).toHaveLength(2);
   });
 
-  // KNOWN BUG (reported, not fixed): isSubset() is vacuously true for an empty
-  // set, so a struct with no fields merges into whichever struct happens to be
-  // first in the fingerprint index instead of standing alone.
-  it('merges an empty fingerprint into an arbitrary existing struct', () => {
+  // isSubset() is vacuously true for an empty set, which used to fold a
+  // fieldless struct into whichever struct happened to be indexed first. The
+  // minimum-field-count guard rejects it as the degenerate case.
+  it('keeps an empty fingerprint separate from existing structs', () => {
     const reg = new StructRegistry();
     const first = reg.findOrCreate('0:4,8:4', [field(0, 4), field(8, 4)]);
     const empty = reg.findOrCreate('', []);
-    expect(empty.id).toBe(first.id);
+    expect(empty.id).not.toBe(first.id);
+    expect(reg.getAll()).toHaveLength(2);
   });
 
   describe('mergeFields', () => {
@@ -273,6 +313,27 @@ describe('StructRegistry', () => {
     it('ignores an unknown struct id', () => {
       const reg = new StructRegistry();
       expect(() => reg.mergeFields('struct_99', [field(0, 4)])).not.toThrow();
+    });
+
+    // The caller's array is scratch, rebuilt per function from that function's
+    // access patterns. Adopting its objects made the registry alias memory the
+    // caller still owned, so a later edit to the scratch field silently rewrote
+    // the shared struct definition.
+    it('copies an incoming field rather than adopting the caller object', () => {
+      const reg = new StructRegistry();
+      const def = reg.findOrCreate('0:4', [field(0, 4)]);
+      const incoming = field(8, 4);
+      reg.mergeFields(def.id, [incoming]);
+
+      incoming.name = 'mutated';
+      incoming.size = 99;
+      incoming.type = { kind: 'handle' };
+      incoming.isArray = true;
+
+      const stored = reg.get(def.id)?.fields.find(f => f.offset === 8);
+      expect(stored).not.toBe(incoming);
+      expect(stored).toMatchObject({ name: 'field_0x8', size: 4, isArray: false, type: UINT(4) });
+      expect(reg.get(def.id)?.totalSize).toBe(12);
     });
   });
 
@@ -382,6 +443,33 @@ describe('synthesizeStructs — candidate selection', () => {
     expect(out.typedefs).toHaveLength(2);
   });
 
+  // `base - 8` used to stop decomposition dead, so a base reached through a
+  // mix of negative and positive displacements — the normal shape for a frame
+  // pointer, or for a header stored before the payload — looked like a single
+  // offset and never became a candidate.
+  it('synthesizes a struct from a negative and a positive offset on one base', () => {
+    const out = run([
+      assign(irReg('eax', 4), irDeref(irBinary('-', RCX, irConst(8)), 4)),
+      assign(irReg('ebx', 4), at(RCX, 0)),
+    ]);
+    expect(out.typedefs).toHaveLength(1);
+    expect(out.typedefs?.[0].fields.map(f => f.offset)).toEqual([-8, 0]);
+    expect(out.body[0]).toMatchObject({
+      src: { kind: 'field_access', base: RCX, fieldOffset: -8, size: 4 },
+    });
+  });
+
+  it('names a negative-offset field with a valid C identifier', () => {
+    // `field_0x-8` is not an identifier, and this name is emitted verbatim.
+    const out = run([
+      assign(irReg('eax', 4), irDeref(irBinary('-', RCX, irConst(8)), 4)),
+      assign(irReg('ebx', 4), at(RCX, 0)),
+    ]);
+    const names = out.typedefs?.[0].fields.map(f => f.name);
+    expect(names).toEqual(['field_neg_0x8', 'field_0x0']);
+    for (const n of names ?? []) expect(n).toMatch(/^[A-Za-z_][A-Za-z0-9_]*$/);
+  });
+
   it('treats a variable base like a register base', () => {
     const p = irVar('p', 8);
     const out = run(twoFieldBody(p));
@@ -422,6 +510,26 @@ describe('synthesizeStructs — stores and nesting', () => {
   it('leaves a store to an unrelated address alone', () => {
     const out = run([...twoFieldBody(), store(irReg('r8', 8), irConst(1))]);
     expect(out.body[2]).toMatchObject({ kind: 'store', address: irReg('r8', 8) });
+  });
+
+  // The assign case used to walk `dest` only when it was itself a deref, so an
+  // access buried in a compound destination — `((int *)rcx->f8)[i] = 1` — was
+  // never counted, and a base whose second offset only ever appeared there
+  // failed to reach the two-offset candidate threshold.
+  it('collects a struct access nested inside a non-deref assignment destination', () => {
+    const out = run([
+      assign(irReg('eax', 4), at(RCX, 0)),
+      assign(
+        { kind: 'array_access', base: at(RCX, 8, 8), index: RDX, elementSize: 4, size: 4 },
+        irConst(1),
+      ),
+    ]);
+    expect(out.typedefs).toHaveLength(1);
+    expect(out.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8]);
+    // and the nested access is rewritten in place, not merely counted
+    expect(out.body[1]).toMatchObject({
+      dest: { kind: 'array_access', base: { kind: 'field_access', fieldOffset: 8 } },
+    });
   });
 
   it('rewrites accesses nested in every compound statement', () => {
@@ -590,11 +698,11 @@ describe('synthesizeStructs — base aliasing', () => {
     expect(out.typedefs).toHaveLength(1);
   });
 
-  // KNOWN BUG (reported, not fixed): the alias map is flow-insensitive and the
-  // last copy in the function wins, so accesses made through a register before
-  // it was reassigned are attributed to the wrong base. Here the two RBX reads
-  // happen while RBX aliases RCX, but they are credited to RDX.
-  it('attributes accesses to the last base a register was ever copied from', () => {
+  // The reassigned register is dropped from the alias map, so its accesses are
+  // no longer credited to whichever base it happened to hold last. RCX and RDX
+  // have no accesses of their own here, so all three offsets still group under
+  // RBX itself — the grouping survives, the misattribution does not.
+  it('does not credit accesses to the last base a register was ever copied from', () => {
     const out = run([
       assign(irReg('rbx', 8), RCX),
       assign(irReg('eax', 4), at(irReg('rbx', 8), 0)),
@@ -602,10 +710,52 @@ describe('synthesizeStructs — base aliasing', () => {
       assign(irReg('rbx', 8), RDX),
       assign(irReg('edi', 4), at(irReg('rbx', 8), 0x10)),
     ]);
-    // All three offsets land in one struct keyed on RDX, even though 0 and 8
-    // were read through RCX.
     expect(out.typedefs).toHaveLength(1);
     expect(out.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 0x10]);
+  });
+
+  // The map is flow-insensitive — one entry per name, no program point — so a
+  // name that holds different things at different points has no single correct
+  // answer and is dropped entirely. Dropping costs a missed grouping; keeping
+  // the last write credits earlier accesses to the wrong base.
+  it('keeps the alias when a register is copied from the same base twice', () => {
+    // Two writes that agree are not ambiguity, so RBX still resolves to RCX.
+    const out = run([
+      assign(irReg('rbx', 8), RCX),
+      assign(irReg('eax', 4), at(irReg('rbx', 8), 0)),
+      assign(irReg('rbx', 8), RCX),
+      assign(irReg('edx', 4), at(RCX, 8)),
+    ]);
+    expect(out.typedefs).toHaveLength(1);
+    expect(out.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8]);
+  });
+
+  it('drops the alias of a register copied from two different bases', () => {
+    const out = run([
+      assign(irReg('rbx', 8), RCX),
+      assign(irReg('eax', 4), at(irReg('rbx', 8), 0)),
+      assign(irReg('esi', 4), at(irReg('rbx', 8), 8)),
+      assign(irReg('rbx', 8), RDX),
+      assign(irReg('edi', 4), at(RDX, 0x10)),
+      assign(irReg('r9d', 4), at(RDX, 0x18)),
+    ]);
+    // RBX becomes its own base rather than being folded into RDX, so RDX's
+    // struct is not polluted with offsets that were read through RCX.
+    expect(out.typedefs?.map(d => d.fields.map(f => f.offset))).toEqual([[0, 8], [0x10, 0x18]]);
+  });
+
+  it('drops the alias of a register later overwritten with a computed value', () => {
+    const out = run([
+      assign(irReg('rbx', 8), RCX),
+      assign(irReg('eax', 4), at(irReg('rbx', 8), 0)),
+      assign(irReg('esi', 4), at(irReg('rbx', 8), 8)),
+      assign(irReg('rbx', 8), irBinary('+', RCX, irConst(8))),
+      assign(irReg('edi', 4), at(RCX, 0x10)),
+      assign(irReg('r9d', 4), at(RCX, 0x18)),
+    ]);
+    // After the arithmetic write RBX no longer holds RCX, so the two reads
+    // through it cannot be merged into RCX's struct for the whole function.
+    expect(out.typedefs?.map(d => d.fields.map(f => f.offset))).toEqual([[0, 8], [0x10, 0x18]]);
   });
 
   it('only follows plain copies, not arithmetic', () => {
@@ -624,14 +774,22 @@ describe('synthesizeStructs — base aliasing', () => {
 describe('synthesizeStructs — array accesses', () => {
   const run = (body: IRStmt[]) => synthesizeStructs(fn(body), new StructRegistry());
 
-  // KNOWN BUG (reported, not fixed): synthesizeStructs returns early when no
-  // base has 2+ distinct offsets, so the IR rewrite never runs. An indexed
-  // access is only converted to IRArrayAccess when some *other* base in the
-  // same function happens to qualify as a struct.
-  it('leaves an indexed access alone when the function has no struct candidate', () => {
+  // synthesizeStructs used to return early when no base had 2+ distinct
+  // offsets, which made array rewriting reachable only for functions that
+  // happened to have a struct elsewhere.
+  it('converts an indexed access even when the function has no struct candidate', () => {
     const body = [assign(irReg('eax', 4), idx(RCX, RDX, 4))];
     const out = synthesizeStructs(fn(body), new StructRegistry());
-    expect(out.body).toBe(body); // unchanged — no array_access
+    expect(out.body[0]).toMatchObject({
+      src: { kind: 'array_access', base: RCX, index: RDX, elementSize: 4, size: 4 },
+    });
+    expect(out.typedefs).toBeUndefined();
+  });
+
+  it('still returns the function untouched when nothing indexes and nothing structs', () => {
+    const body = [assign(irReg('eax', 4), irDeref(RCX, 4))];
+    const out = synthesizeStructs(fn(body), new StructRegistry());
+    expect(out.body).toBe(body);
   });
 
   it('converts an indexed access once any struct candidate exists', () => {
@@ -711,6 +869,39 @@ describe('synthesizeStructs — field type inference', () => {
     expect(typeAt(out, 0)).toMatchObject({ signed: true });
   });
 
+  // The signed-comparison walker used to skip try statements entirely, which
+  // loses every comparison in a __try/__except body — and SEH wrapping covers
+  // whole function bodies, not small fragments.
+  it('marks a field signed from a comparison inside a try body or handler', () => {
+    const out = run([
+      ...twoFieldBody(),
+      {
+        kind: 'try',
+        body: [{ kind: 'if', condition: irBinary('<', at(RCX, 0), irConst(10)), thenBody: [] }],
+        handler: [{ kind: 'if', condition: irBinary('>', at(RCX, 8), irConst(0)), thenBody: [] }],
+      },
+    ]);
+    expect(typeAt(out, 0)).toMatchObject({ signed: true });
+    expect(typeAt(out, 8)).toMatchObject({ signed: true });
+  });
+
+  // A `for` was recursed into but its own condition was never inspected, so
+  // `for (i = 0; p->count > i; i++)` left the field unsigned even though the
+  // equivalent `while` form was handled.
+  it('marks a field signed from a for-loop condition', () => {
+    const out = run([
+      ...twoFieldBody(),
+      {
+        kind: 'for',
+        init: assign(irReg('esi', 4), irConst(0)),
+        condition: irBinary('>', at(RCX, 0), irReg('esi', 4)),
+        update: assign(irReg('esi', 4), irBinary('+', irReg('esi', 4), irConst(1))),
+        body: [],
+      },
+    ]);
+    expect(typeAt(out, 0)).toMatchObject({ signed: true });
+  });
+
   it('types a 16-byte access as a float', () => {
     const out = run([
       assign(irReg('xmm0', 16), at(RCX, 0, 16)),
@@ -755,28 +946,30 @@ describe('synthesizeStructs — cross-function registry state', () => {
 
   // This is the designed sharing, and it is why the registry is not cleared
   // between functions: a struct seen partially in one function is completed by
-  // another. The merge criterion is field *shape* only, though — see below.
+  // another. Since the subset path requires 3+ shared fields, completion now
+  // starts from a three-field partial view rather than a two-field one.
   it('completes a struct across two functions that see different fields', () => {
     const reg = new StructRegistry();
     synthesizeStructs(twoFn([
       assign(irReg('eax', 4), at(RCX, 0)),
       assign(irReg('ebx', 4), at(RCX, 8)),
+      assign(irReg('ecx', 4), at(RCX, 16)),
     ], 0x401000), reg);
     const b = synthesizeStructs(twoFn([
       assign(irReg('eax', 4), at(RCX, 0)),
       assign(irReg('ebx', 4), at(RCX, 8)),
       assign(irReg('ecx', 4), at(RCX, 16)),
+      assign(irReg('edx', 4), at(RCX, 24)),
     ], 0x402000), reg);
     expect(reg.getAll()).toHaveLength(1);
-    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16]);
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16, 24]);
   });
 
-  // KNOWN BUG (reported, not fixed): the only evidence used to decide that two
-  // bases are the same type is the set of "offset:size" pairs, so unrelated
-  // structs whose observed fields happen to nest are merged session-wide. The
-  // second function is then emitted with a typedef containing a field it never
-  // touched, and both functions print the same struct name.
-  it('merges unrelated types whose observed fields happen to nest', () => {
+  // The only evidence used to decide that two bases are the same type is the
+  // set of "offset:size" pairs. A two-field shape is the weakest possible
+  // evidence — it is the minimum a candidate can have — so it no longer
+  // absorbs an unrelated larger struct.
+  it('keeps an unrelated two-field base out of a larger struct', () => {
     const reg = new StructRegistry();
     // Function A sees a 3-field object.
     synthesizeStructs(twoFn([
@@ -789,15 +982,17 @@ describe('synthesizeStructs — cross-function registry state', () => {
       assign(irReg('eax', 4), at(irVar('unrelated', 8), 0)),
       assign(irReg('ebx', 4), at(irVar('unrelated', 8), 8)),
     ], 0x402000), reg);
-    expect(reg.getAll()).toHaveLength(1);
-    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8, 16]); // 16 is A's
+    expect(reg.getAll()).toHaveLength(2);
+    // B is emitted with only the fields it actually touched.
+    expect(b.typedefs?.[0].fields.map(f => f.offset)).toEqual([0, 8]);
   });
 
-  // KNOWN BUG (reported, not fixed): StructDef objects are shared by reference.
-  // A later function's type inference mutates the definition an earlier
-  // function already returned, so an IRFunction's typedefs change after the
-  // fact — its emitted C depends on what was decompiled afterwards.
-  it('mutates an already-returned typedef when a later function is processed', () => {
+  // StructDef objects are shared by reference *inside* the registry — that
+  // in-place mutation is how one function's pass refines a field type another
+  // discovered — but what escapes into an IRFunction's typedefs is a snapshot.
+  // Without it, an already-returned declaration changes after the fact and a
+  // function's emitted C depends on what was decompiled afterwards.
+  it('does not mutate an already-returned typedef when a later function is processed', () => {
     const reg = new StructRegistry();
     const a = synthesizeStructs(twoFn(twoFieldBody(RCX), 0x401000), reg);
     expect(a.typedefs?.[0].fields[0].type).toMatchObject({ kind: 'int', signed: false });
@@ -807,8 +1002,22 @@ describe('synthesizeStructs — cross-function registry state', () => {
       { kind: 'if', condition: irBinary('<', at(RDX, 0), irConst(0)), thenBody: [] },
     ], 0x402000), reg);
 
-    // A's typedef was never re-derived, yet it changed.
-    expect(a.typedefs?.[0].fields[0].type).toMatchObject({ signed: true });
+    expect(a.typedefs?.[0].fields[0].type).toMatchObject({ signed: false });
+  });
+
+  // The snapshot must not disable the cross-function refinement it protects:
+  // the registry still learns the signed field, so a function decompiled after
+  // that discovery sees it.
+  it('still refines a field type across functions inside the registry', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(twoFn(twoFieldBody(RCX), 0x401000), reg);
+    synthesizeStructs(twoFn([
+      ...twoFieldBody(RDX),
+      { kind: 'if', condition: irBinary('<', at(RDX, 0), irConst(0)), thenBody: [] },
+    ], 0x402000), reg);
+
+    const later = synthesizeStructs(twoFn(twoFieldBody(RCX), 0x403000), reg);
+    expect(later.typedefs?.[0].fields[0].type).toMatchObject({ signed: true });
   });
 
   it('isolates functions once the registry is cleared', () => {
@@ -863,14 +1072,21 @@ describe('synthesizeStructs — call-site propagation', () => {
     expect(reg.getParamStruct(Number.NaN, 0)).toBeUndefined();
   });
 
-  // KNOWN BUG (reported, not fixed): the call target is turned into an address
-  // with `parseInt(target, 16)`, which happily parses the leading hex-looking
-  // characters of an imported function's *name*. `CloseHandle` becomes 0xC, so
-  // parameter links are recorded against nonsense addresses that collide with
-  // each other and with real function addresses.
-  it('parses an import name that starts with hex digits as an address', () => {
+  // The call target used to be turned into an address with
+  // `parseInt(target, 16)`, which happily parsed the leading hex-looking
+  // characters of an imported function's *name*: `CloseHandle` became 0xC, so
+  // parameter links were recorded against nonsense addresses that collided
+  // with each other and with real function addresses. Only `sub_<hex>` is an
+  // address.
+  it('does not treat an import name that starts with hex digits as an address', () => {
     const reg = new StructRegistry();
     synthesizeStructs(fn([...twoFieldBody(), callStmt('CloseHandle', [RCX])]), reg);
-    expect(reg.getParamStruct(0xc, 0)).toBeDefined(); // 'C' parsed as an address
+    expect(reg.getParamStruct(0xc, 0)).toBeUndefined();
+  });
+
+  it('does not treat an all-hex import name as an address', () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(fn([...twoFieldBody(), callStmt('DECADE', [RCX])]), reg);
+    expect(reg.getParamStruct(0xdecade, 0)).toBeUndefined();
   });
 });

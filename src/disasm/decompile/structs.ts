@@ -1,5 +1,5 @@
 import type { IRExpr, IRStmt, IRFunction } from './ir';
-import { irFieldAccess, irArrayAccess, canonReg } from './ir';
+import { irFieldAccess, irArrayAccess, irConst, canonReg } from './ir';
 import type { DecompType } from './typeInfer';
 
 // ── Struct Definition Types ──
@@ -36,11 +36,13 @@ export class StructRegistry {
       return def;
     }
 
-    // Subset check: if new fingerprint is a subset of existing, merge into existing
+    // Subset check: if new fingerprint is a subset of existing, merge into existing.
+    // Guarded — see canMergeBySubset. Shape alone is weak evidence, and the exact
+    // fingerprint path above already covers the safe case.
     const newOffsets = parseFingerprint(fingerprint);
     for (const [fp, id] of this.fingerprintIndex) {
       const existingOffsets = parseFingerprint(fp);
-      if (isSubset(newOffsets, existingOffsets) || isSubset(existingOffsets, newOffsets)) {
+      if (canMergeBySubset(newOffsets, existingOffsets)) {
         const def = this.structs.get(id)!;
         this.mergeFields(def.id, fields);
         // Update fingerprint index with merged fingerprint
@@ -72,7 +74,10 @@ export class StructRegistry {
     for (const nf of newFields) {
       const ef = existing.get(nf.offset);
       if (!ef) {
-        existing.set(nf.offset, nf);
+        // Copy rather than adopt: the caller's array is scratch built per
+        // function, and adopting it makes the registry alias objects the
+        // caller may still mutate.
+        existing.set(nf.offset, { ...nf });
       } else {
         // Use largest size, preserve array info
         if (nf.size > ef.size) ef.size = nf.size;
@@ -125,6 +130,85 @@ function isSubset(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
+/**
+ * Smallest field count that may be merged through the subset path.
+ *
+ * Two distinct offsets is the *minimum* a candidate can have (synthesizeStructs
+ * requires 2+ distinct offsets), so two-field candidates are simultaneously the
+ * most common shape and the weakest evidence — `{0:8,8:8}` is a pointer pair and
+ * describes a large fraction of all structs in any binary. Requiring three
+ * shared fields keeps the subset path for layouts specific enough to mean
+ * something. Failing to merge is the benign direction: two struct_N declarations
+ * instead of one wrong shared one.
+ *
+ * This also rejects the empty fingerprint, for which isSubset is vacuously true
+ * and which would otherwise fold into whichever struct happened to be indexed
+ * first.
+ */
+const MIN_SUBSET_MERGE_FIELDS = 3;
+
+/** [offset, offset+size) extent of an "offset:size" fingerprint entry. */
+function parseExtent(entry: string): { start: number; end: number } | null {
+  const [o, s] = entry.split(':');
+  const offset = Number(o);
+  const size = Number(s);
+  if (!Number.isFinite(offset) || !Number.isFinite(size)) return null;
+  return { start: offset, end: offset + size };
+}
+
+/**
+ * True when merging the two field sets would produce a layout in which two
+ * fields overlap without being identical (e.g. a 4-byte field at 4 sitting
+ * inside an 8-byte field at 0). Such layouts contradict each other, so the
+ * shape match is a coincidence rather than evidence of the same type.
+ */
+function hasBoundaryConflict(a: Set<string>, b: Set<string>): boolean {
+  const extents: { start: number; end: number }[] = [];
+  for (const entry of new Set([...a, ...b])) {
+    const e = parseExtent(entry);
+    if (e) extents.push(e);
+  }
+  extents.sort((x, y) => x.start - y.start);
+  for (let i = 1; i < extents.length; i++) {
+    if (extents[i].start < extents[i - 1].end) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether two fingerprints are close enough to be treated as the same struct.
+ * Nesting alone is not enough — see MIN_SUBSET_MERGE_FIELDS and
+ * hasBoundaryConflict. Size agreement is already implied: the fingerprint
+ * entries are "offset:size" pairs, so a differing size at the same offset is a
+ * different entry and breaks the subset relation.
+ */
+function canMergeBySubset(a: Set<string>, b: Set<string>): boolean {
+  const smaller = a.size <= b.size ? a : b;
+  const larger = a.size <= b.size ? b : a;
+  if (smaller.size < MIN_SUBSET_MERGE_FIELDS) return false;
+  if (!isSubset(smaller, larger)) return false;
+  return !hasBoundaryConflict(a, b);
+}
+
+/**
+ * Snapshot a StructDef so a caller holding it is unaffected by later registry
+ * mutation. The registry deliberately hands out live objects to the inference
+ * passes — that in-place mutation IS how one function's pass refines a field
+ * type another function discovered — but anything that escapes the pass (an
+ * IRFunction's typedefs) must be frozen, or its emitted declaration changes
+ * retroactively when an unrelated function is decompiled later.
+ *
+ * Field *types* are always replaced wholesale rather than mutated in place, so
+ * copying the field object is sufficient; the type object needs no deep clone.
+ */
+export function cloneStructDef(def: StructDef): StructDef {
+  return {
+    id: def.id,
+    totalSize: def.totalSize,
+    fields: def.fields.map(f => ({ ...f })),
+  };
+}
+
 export function buildFingerprint(fields: StructField[]): string {
   return [...fields]
     .sort((a, b) => a.offset - b.offset)
@@ -150,7 +234,10 @@ export function decomposeAddress(addr: IRExpr): DecomposedAddress | null {
     return { base: null, offset: addr.value, index: null, scale: 0 };
   }
 
-  if (addr.kind !== 'binary' || addr.op !== '+') return null;
+  if (addr.kind !== 'binary') return null;
+  // `+` chains, plus a top-level `- const` (subtracting a register is not an
+  // offset, and treating the whole subtraction as a base only invents noise).
+  if (addr.op !== '+' && !(addr.op === '-' && addr.right.kind === 'const')) return null;
 
   // Collect all terms from the addition chain
   const terms: IRExpr[] = [];
@@ -191,9 +278,16 @@ function collectAddTerms(expr: IRExpr, terms: IRExpr[]): void {
   if (expr.kind === 'binary' && expr.op === '+') {
     collectAddTerms(expr.left, terms);
     collectAddTerms(expr.right, terms);
-  } else {
-    terms.push(expr);
+    return;
   }
+  // `base - 8` is the same access as `base + (-8)`. Only a constant subtrahend
+  // folds — subtracting a register is not a field offset.
+  if (expr.kind === 'binary' && expr.op === '-' && expr.right.kind === 'const') {
+    collectAddTerms(expr.left, terms);
+    terms.push(irConst(-expr.right.value, expr.right.size));
+    return;
+  }
+  terms.push(expr);
 }
 
 function isScaledIndex(expr: IRExpr): boolean {
@@ -243,7 +337,10 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
       switch (s.kind) {
         case 'assign':
           walkExprs(s.src);
-          if (s.dest.kind === 'deref') walkDeref(s.dest);
+          // walkExprs handles a deref dest and also reaches accesses nested in a
+          // field_access / array_access / binary dest, which the old
+          // deref-only check dropped.
+          walkExprs(s.dest);
           break;
         case 'store':
           walkDeref({ kind: 'deref', address: s.address, size: s.size });
@@ -339,16 +436,28 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
 
 function buildAliasMap(body: IRStmt[]): Map<string, string> {
   const aliases = new Map<string, string>();
+  // Keys whose alias cannot be stated for the whole function. The map is
+  // flow-insensitive — one entry per name, no program point — so a name that
+  // holds different things at different points has no single correct answer.
+  // Dropping it costs a missed struct grouping; keeping the last write credits
+  // accesses made through the earlier value to the wrong base.
+  const ambiguous = new Set<string>();
 
   function scan(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      // reg = reg or var = var (direct copy, no arithmetic)
-      if (s.kind === 'assign' &&
-          (s.dest.kind === 'reg' || s.dest.kind === 'var') &&
-          (s.src.kind === 'reg' || s.src.kind === 'var')) {
+      if (s.kind === 'assign' && (s.dest.kind === 'reg' || s.dest.kind === 'var')) {
         const destKey = s.dest.kind === 'reg' ? `reg:${canonReg(s.dest.name)}` : `var:${s.dest.name}`;
-        const srcKey = s.src.kind === 'reg' ? `reg:${canonReg(s.src.name)}` : `var:${s.src.name}`;
-        aliases.set(destKey, srcKey);
+        if (s.src.kind === 'reg' || s.src.kind === 'var') {
+          // Direct copy, no arithmetic
+          const srcKey = s.src.kind === 'reg' ? `reg:${canonReg(s.src.name)}` : `var:${s.src.name}`;
+          const prev = aliases.get(destKey);
+          if (prev !== undefined && prev !== srcKey) ambiguous.add(destKey);
+          else aliases.set(destKey, srcKey);
+        } else {
+          // Overwritten with something that is not a copy: whatever it aliased
+          // before, it does not alias it across the whole function.
+          ambiguous.add(destKey);
+        }
       }
       // Recurse into compound statements
       if (s.kind === 'if') {
@@ -368,6 +477,7 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
     }
   }
   scan(body);
+  for (const key of ambiguous) aliases.delete(key);
 
   // Resolve transitive aliases to canonical roots
   function resolve(key: string, visited: Set<string>): string {
@@ -390,6 +500,20 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
 function inferFieldType(size: number): DecompType {
   // Default: unsigned int of access size
   return { kind: 'int', size, signed: false };
+}
+
+/** Index scales that denote an array element rather than an arbitrary product. */
+const ARRAY_SCALES = new Set([1, 2, 4, 8]);
+
+/**
+ * Offset as a C identifier fragment. Negative offsets are real — a frame or
+ * object pointer biased into the middle of its allocation is common — and
+ * `0x-8` is not a valid identifier, so the sign is spelled out.
+ */
+function offsetLabel(offset: number): string {
+  return offset < 0
+    ? `neg_0x${(-offset).toString(16).toUpperCase()}`
+    : `0x${offset.toString(16).toUpperCase()}`;
 }
 
 // ── Struct Synthesis Pass ──
@@ -432,7 +556,14 @@ export function synthesizeStructs(
     }
   }
 
-  if (candidates.size === 0) return func;
+  if (candidates.size === 0) {
+    // No struct candidate, but an indexed access still rewrites to array
+    // syntax. This used to return early, which made array-access rewriting
+    // reachable only for functions that happened to have a struct elsewhere.
+    const hasIndexedAccess = patterns.some(p => p.index !== null && ARRAY_SCALES.has(p.scale));
+    if (!hasIndexedAccess) return func;
+    return { ...func, body: rewriteStmts(func.body, new Map(), canonBase) };
+  }
 
   // 4c. Build StructDefs
   const baseToStruct = new Map<string, StructDef>();
@@ -458,9 +589,7 @@ export function synthesizeStructs(
 
     const fields: StructField[] = [];
     for (const [offset, info] of fieldMap) {
-      const name = info.isArray
-        ? `array_0x${offset.toString(16).toUpperCase()}`
-        : `field_0x${offset.toString(16).toUpperCase()}`;
+      const name = `${info.isArray ? 'array' : 'field'}_${offsetLabel(offset)}`;
       fields.push({
         offset,
         size: info.size,
@@ -479,29 +608,10 @@ export function synthesizeStructs(
   // 4d. Enhanced field type inference from usage context
   inferFieldTypesFromUsage(func.body, baseToStruct, canonBase, registry);
 
-  // 4e. Nested struct detection (max 3 rounds)
-  for (let round = 0; round < 3; round++) {
-    let changed = false;
-    for (const [, def] of baseToStruct) {
-      for (const field of def.fields) {
-        if (field.type.kind === 'ptr' && field.type.pointee.kind === 'unknown') {
-          // Check if loaded values from this field are used as struct bases
-          const nestedId = findNestedStructUse(func.body, def.id, field.offset, baseToStruct, canonBase);
-          if (nestedId) {
-            field.type = { kind: 'ptr', pointee: { kind: 'struct', id: nestedId } };
-            field.name = `field_0x${field.offset.toString(16).toUpperCase()}`;
-            changed = true;
-          }
-        }
-      }
-    }
-    if (!changed) break;
-  }
-
-  // 4f. IR Rewrite (struct fields + array access)
+  // 4e. IR Rewrite (struct fields + array access)
   const rewrittenBody = rewriteStmts(func.body, baseToStruct, canonBase);
 
-  // 4g. Call-site propagation
+  // 4f. Call-site propagation
   propagateCallSites(rewrittenBody, baseToStruct, canonBase, registry);
 
   // Collect typedefs for this function
@@ -509,7 +619,13 @@ export function synthesizeStructs(
   for (const [, def] of baseToStruct) {
     usedStructIds.add(def.id);
   }
-  const typedefs = registry.getAll().filter(d => usedStructIds.has(d.id));
+  // Snapshot, do not hand out the registry's live objects: a later function's
+  // inference pass mutates field types in place, which would otherwise rewrite
+  // this function's already-returned declarations after the fact.
+  const typedefs = registry
+    .getAll()
+    .filter(d => usedStructIds.has(d.id))
+    .map(cloneStructDef);
 
   return {
     ...func,
@@ -612,15 +728,8 @@ function inferFieldTypesFromUsage(
   // Second pass: detect signed fields from comparison context
   function walkForSigned(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'if' || s.kind === 'while' || s.kind === 'do_while') {
-        const cond = s.kind === 'if' ? s.condition : s.condition;
-        if (cond.kind === 'binary') {
-          const signedOps = new Set(['<', '<=', '>', '>=']);
-          if (signedOps.has(cond.op)) {
-            markFieldSigned(cond.left, baseToStruct, canonBase);
-            markFieldSigned(cond.right, baseToStruct, canonBase);
-          }
-        }
+      if (s.kind === 'if' || s.kind === 'while' || s.kind === 'do_while' || s.kind === 'for') {
+        checkSignedCondition(s.condition);
       }
       if (s.kind === 'if') {
         walkForSigned(s.thenBody);
@@ -632,7 +741,19 @@ function inferFieldTypesFromUsage(
         for (const c of s.cases) walkForSigned(c.body);
         if (s.defaultBody) walkForSigned(s.defaultBody);
       }
+      if (s.kind === 'try') {
+        walkForSigned(s.body);
+        walkForSigned(s.handler);
+      }
     }
+  }
+
+  function checkSignedCondition(cond: IRExpr): void {
+    if (cond.kind !== 'binary') return;
+    const signedOps = new Set(['<', '<=', '>', '>=']);
+    if (!signedOps.has(cond.op)) return;
+    markFieldSigned(cond.left, baseToStruct, canonBase);
+    markFieldSigned(cond.right, baseToStruct, canonBase);
   }
 
   walkForSigned(body);
@@ -653,23 +774,6 @@ function markFieldSigned(
   if (field && field.type.kind === 'int') {
     field.type = { ...field.type, signed: true };
   }
-}
-
-// ── Nested Struct Detection ──
-
-function findNestedStructUse(
-  body: IRStmt[],
-  _parentStructId: string,
-  _fieldOffset: number,
-  _baseToStruct: Map<string, StructDef>,
-  _canonBase: (e: IRExpr) => string,
-): string | null {
-  // Simplified: look for deref chains where a loaded value from this field
-  // is then used as a base with 2+ offsets. Full implementation would track
-  // through assignments, but for v1 we rely on the main synthesis pass
-  // catching these in subsequent rounds via registry re-use.
-  void body;
-  return null;
 }
 
 // ── IR Rewrite ──
@@ -793,8 +897,7 @@ function rewriteExpr(
         }
       }
       // Array access: base + index * scale where scale ∈ {1,2,4,8}
-      if (decomp?.base && decomp.index && decomp.offset === 0 &&
-          (decomp.scale === 1 || decomp.scale === 2 || decomp.scale === 4 || decomp.scale === 8)) {
+      if (decomp?.base && decomp.index && decomp.offset === 0 && ARRAY_SCALES.has(decomp.scale)) {
         const base = rewriteExpr(decomp.base, baseToStruct, canonBase);
         const index = rewriteExpr(decomp.index, baseToStruct, canonBase);
         return irArrayAccess(base, index, decomp.scale, expr.size);
@@ -831,6 +934,21 @@ function rewriteExpr(
 
 // ── Call-Site Propagation ──
 
+/**
+ * An address for a call target, or null when the target is not one.
+ *
+ * `sub_<hex>` is the only form resolveCallTarget emits that *is* an address —
+ * the others are import names, user function names and register names. Running
+ * parseInt over those parses a prefix of the name as hex, so `CloseHandle`
+ * became 0xC and `ExitProcess` 0xE, both silently linked as call targets.
+ */
+function parseCallTargetAddr(target: string): number | null {
+  const m = /^sub_([0-9a-fA-F]+)$/.exec(target);
+  if (!m) return null;
+  const addr = parseInt(m[1], 16);
+  return Number.isFinite(addr) && addr > 0 ? addr : null;
+}
+
 function propagateCallSites(
   body: IRStmt[],
   baseToStruct: Map<string, StructDef>,
@@ -840,10 +958,8 @@ function propagateCallSites(
   function walk(stmts: IRStmt[]): void {
     for (const s of stmts) {
       if (s.kind === 'call_stmt') {
-        // Parse call target address
-        const target = s.call.target;
-        const targetAddr = parseInt(target, 16) || parseInt(target.replace('sub_', ''), 16);
-        if (!Number.isNaN(targetAddr) && targetAddr > 0) {
+        const targetAddr = parseCallTargetAddr(s.call.target);
+        if (targetAddr !== null) {
           for (let i = 0; i < s.call.args.length; i++) {
             const arg = s.call.args[i];
             if (arg.kind === 'reg' || arg.kind === 'var') {
