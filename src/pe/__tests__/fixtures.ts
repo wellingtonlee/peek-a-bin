@@ -13,6 +13,13 @@ import {
   IMAGE_SCN_MEM_READ,
   IMAGE_SCN_MEM_EXECUTE,
   IMAGE_SCN_CNT_CODE,
+  IMAGE_SCN_CNT_INITIALIZED_DATA,
+  IMAGE_ORDINAL_FLAG32,
+  IMAGE_ORDINAL_FLAG64,
+  IMAGE_DIRECTORY_ENTRY_EXPORT,
+  IMAGE_DIRECTORY_ENTRY_IMPORT,
+  IMAGE_DIRECTORY_ENTRY_TLS,
+  IMAGE_DIRECTORY_ENTRY_BASERELOC,
 } from '../constants';
 
 export interface SectionDef {
@@ -21,6 +28,59 @@ export interface SectionDef {
   virtualSize: number;
   data: Uint8Array;
   characteristics: number;
+}
+
+/** One imported symbol: by name (with an optional hint) or by ordinal. */
+export interface ImportFunctionDef {
+  name?: string;
+  hint?: number;
+  ordinal?: number;
+}
+
+export interface ImportLibraryDef {
+  libraryName: string;
+  functions: ImportFunctionDef[];
+}
+
+export interface ExportDirDef {
+  dllName: string;
+  /** Written to the directory's Base field. */
+  ordinalBase?: number;
+  /** Function RVAs, in export-address-table order. */
+  addresses: number[];
+  /**
+   * Named exports. `addressIndex` is the value written to the ordinal table —
+   * the slot in `addresses` that this name resolves to.
+   */
+  names: { name: string; addressIndex: number }[];
+}
+
+export interface TLSDef {
+  startAddressOfRawData?: number;
+  endAddressOfRawData?: number;
+  addressOfIndex?: number;
+  /** Callback VAs (image-based). Empty/omitted leaves AddressOfCallBacks null. */
+  callbacks?: number[];
+  /** Write this VA into AddressOfCallBacks verbatim (overrides `callbacks`). */
+  addressOfCallBacks?: number;
+  sizeOfZeroFill?: number;
+  characteristics?: number;
+}
+
+export interface RelocBlockDef {
+  virtualAddress: number;
+  entries: { type: number; offset: number }[];
+}
+
+/**
+ * Real data directories to synthesize. Everything requested here is laid out
+ * into one extra section and the matching data directory entries are filled in.
+ */
+export interface DirectorySpec {
+  imports?: ImportLibraryDef[];
+  exports?: ExportDirDef;
+  tls?: TLSDef;
+  relocations?: RelocBlockDef[];
 }
 
 export interface PEFixtureOptions {
@@ -32,10 +92,18 @@ export interface PEFixtureOptions {
   numberOfRvaAndSizes?: number;
   /** Override data directory entries: index -> {virtualAddress, size} */
   dataDirectories?: Map<number, { virtualAddress: number; size: number }>;
+  /** Synthesize real import/export/TLS/relocation directories in an extra section. */
+  directories?: DirectorySpec;
+  /** RVA of the synthesized directory section (default 0x2000). */
+  directoryRVA?: number;
+  /** Name of the synthesized directory section (default '.rdata'). */
+  directorySectionName?: string;
 }
 
 const NUM_DATA_DIRS = 16;
 const DATA_DIR_ENTRY_SIZE = 8;
+/** Backing size for the synthesized directory section; trimmed to what is used. */
+const DIRECTORY_BLOB_SIZE = 0x4000;
 
 function writeString(view: DataView, offset: number, str: string, maxLen: number): void {
   for (let i = 0; i < maxLen; i++) {
@@ -52,6 +120,187 @@ function defaultTextSection(_fileOffset: number): SectionDef {
     data: code,
     characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
   };
+}
+
+/**
+ * Lay out import/export/TLS/relocation structures into a single section body.
+ *
+ * Everything is allocated from one bump pointer, so every internal RVA is real
+ * and the parser's rvaToFileOffset walk exercises the same code path it would on
+ * a linker-produced binary.
+ */
+function buildDirectorySection(
+  spec: DirectorySpec,
+  cfg: { is64: boolean; imageBase: number; rva: number },
+): { data: Uint8Array; dirs: Map<number, { virtualAddress: number; size: number }> } {
+  const { is64, imageBase, rva: baseRVA } = cfg;
+  const backing = new Uint8Array(DIRECTORY_BLOB_SIZE);
+  const dv = new DataView(backing.buffer);
+  const dirs = new Map<number, { virtualAddress: number; size: number }>();
+  const ptrSize = is64 ? 8 : 4;
+
+  let pos = 0;
+  const alloc = (n: number, align = 4): number => {
+    pos = Math.ceil(pos / align) * align;
+    const at = pos;
+    pos += n;
+    if (pos > DIRECTORY_BLOB_SIZE) throw new Error('fixture directory section overflow');
+    return at;
+  };
+  /** RVA of a byte offset within this section. */
+  const rvaOf = (off: number): number => baseRVA + off;
+  const putString = (s: string): number => {
+    const at = alloc(s.length + 1, 1);
+    for (let i = 0; i < s.length; i++) backing[at + i] = s.charCodeAt(i);
+    return at;
+  };
+  const writePtr = (off: number, value: number | bigint): void => {
+    if (is64) dv.setBigUint64(off, BigInt(value), true);
+    else dv.setUint32(off, Number(value), true);
+  };
+
+  // --- Imports ---
+  if (spec.imports) {
+    const descriptorTable = alloc((spec.imports.length + 1) * 20);
+    spec.imports.forEach((lib, i) => {
+      const nameOff = putString(lib.libraryName);
+
+      // Hint/name entries are emitted first so the thunk values can point at them.
+      const thunkValues = lib.functions.map((fn) => {
+        if (fn.ordinal !== undefined) {
+          const flag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
+          return flag | BigInt(fn.ordinal);
+        }
+        const name = fn.name ?? '';
+        const hintName = alloc(2 + name.length + 1, 2);
+        dv.setUint16(hintName, fn.hint ?? 0, true);
+        for (let j = 0; j < name.length; j++) backing[hintName + 2 + j] = name.charCodeAt(j);
+        return BigInt(rvaOf(hintName));
+      });
+
+      // INT and IAT both hold the same thunk values pre-load; both are null-terminated.
+      const intOff = alloc((thunkValues.length + 1) * ptrSize, ptrSize);
+      const iatOff = alloc((thunkValues.length + 1) * ptrSize, ptrSize);
+      thunkValues.forEach((v, j) => {
+        writePtr(intOff + j * ptrSize, v);
+        writePtr(iatOff + j * ptrSize, v);
+      });
+
+      const d = descriptorTable + i * 20;
+      dv.setUint32(d, rvaOf(intOff), true);       // OriginalFirstThunk
+      dv.setUint32(d + 12, rvaOf(nameOff), true); // Name
+      dv.setUint32(d + 16, rvaOf(iatOff), true);  // FirstThunk
+    });
+    dirs.set(IMAGE_DIRECTORY_ENTRY_IMPORT, {
+      virtualAddress: rvaOf(descriptorTable),
+      size: (spec.imports.length + 1) * 20,
+    });
+  }
+
+  // --- Exports ---
+  if (spec.exports) {
+    const e = spec.exports;
+    const dirOff = alloc(40);
+    const dllNameOff = putString(e.dllName);
+
+    const addrTable = alloc(e.addresses.length * 4);
+    e.addresses.forEach((a, i) => dv.setUint32(addrTable + i * 4, a, true));
+
+    const nameStringOffsets = e.names.map((n) => putString(n.name));
+    const namePtrTable = alloc(e.names.length * 4);
+    nameStringOffsets.forEach((o, i) => dv.setUint32(namePtrTable + i * 4, rvaOf(o), true));
+
+    const ordinalTable = alloc(e.names.length * 2, 2);
+    e.names.forEach((n, i) => dv.setUint16(ordinalTable + i * 2, n.addressIndex, true));
+
+    dv.setUint32(dirOff + 12, rvaOf(dllNameOff), true);   // Name
+    dv.setUint32(dirOff + 16, e.ordinalBase ?? 1, true);  // Base
+    dv.setUint32(dirOff + 20, e.addresses.length, true);  // NumberOfFunctions
+    dv.setUint32(dirOff + 24, e.names.length, true);      // NumberOfNames
+    dv.setUint32(dirOff + 28, rvaOf(addrTable), true);
+    dv.setUint32(dirOff + 32, rvaOf(namePtrTable), true);
+    dv.setUint32(dirOff + 36, rvaOf(ordinalTable), true);
+
+    dirs.set(IMAGE_DIRECTORY_ENTRY_EXPORT, { virtualAddress: rvaOf(dirOff), size: 40 });
+  }
+
+  // --- TLS ---
+  if (spec.tls) {
+    const t = spec.tls;
+    const callbacks = t.callbacks ?? [];
+    let addressOfCallBacks = t.addressOfCallBacks ?? 0;
+    if (t.addressOfCallBacks === undefined && callbacks.length > 0) {
+      const cbOff = alloc((callbacks.length + 1) * ptrSize, ptrSize);
+      callbacks.forEach((c, i) => writePtr(cbOff + i * ptrSize, c));
+      addressOfCallBacks = imageBase + rvaOf(cbOff);
+    }
+
+    const structSize = is64 ? 40 : 24;
+    const tlsOff = alloc(structSize, ptrSize);
+    writePtr(tlsOff, t.startAddressOfRawData ?? 0);
+    writePtr(tlsOff + ptrSize, t.endAddressOfRawData ?? 0);
+    writePtr(tlsOff + ptrSize * 2, t.addressOfIndex ?? 0);
+    writePtr(tlsOff + ptrSize * 3, addressOfCallBacks);
+    dv.setUint32(tlsOff + ptrSize * 4, t.sizeOfZeroFill ?? 0, true);
+    dv.setUint32(tlsOff + ptrSize * 4 + 4, t.characteristics ?? 0, true);
+
+    dirs.set(IMAGE_DIRECTORY_ENTRY_TLS, { virtualAddress: rvaOf(tlsOff), size: structSize });
+  }
+
+  // --- Base relocations ---
+  if (spec.relocations) {
+    // Blocks must be byte-contiguous: the parser advances by each block's own
+    // SizeOfBlock, so a padding gap would desynchronize the walk.
+    const totalSize = spec.relocations.reduce((s, b) => s + 8 + b.entries.length * 2, 0);
+    const relocOff = alloc(totalSize, 4);
+    let p = relocOff;
+    for (const block of spec.relocations) {
+      const blockSize = 8 + block.entries.length * 2;
+      dv.setUint32(p, block.virtualAddress, true);
+      dv.setUint32(p + 4, blockSize, true);
+      block.entries.forEach((en, i) => {
+        dv.setUint16(p + 8 + i * 2, ((en.type & 0xf) << 12) | (en.offset & 0xfff), true);
+      });
+      p += blockSize;
+    }
+    dirs.set(IMAGE_DIRECTORY_ENTRY_BASERELOC, {
+      virtualAddress: rvaOf(relocOff),
+      size: totalSize,
+    });
+  }
+
+  return { data: backing.subarray(0, Math.max(Math.ceil(pos / 4) * 4, 4)), dirs };
+}
+
+/**
+ * Resolve the final section list and data directory table for a fixture,
+ * appending the synthesized directory section when one was requested.
+ * Explicit `dataDirectories` overrides win over synthesized entries.
+ */
+function resolveLayout(
+  opts: PEFixtureOptions,
+  is64: boolean,
+  imageBase: number,
+): { sections: SectionDef[]; dirs: Map<number, { virtualAddress: number; size: number }> } {
+  const sections = [...(opts.sections ?? [defaultTextSection(0)])];
+  const dirs = new Map(opts.dataDirectories ?? []);
+
+  if (opts.directories) {
+    const rva = opts.directoryRVA ?? 0x2000;
+    const built = buildDirectorySection(opts.directories, { is64, imageBase, rva });
+    sections.push({
+      name: opts.directorySectionName ?? '.rdata',
+      virtualAddress: rva,
+      virtualSize: built.data.length,
+      data: built.data,
+      characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+    });
+    for (const [idx, dir] of built.dirs) {
+      if (!dirs.has(idx)) dirs.set(idx, dir);
+    }
+  }
+
+  return { sections, dirs };
 }
 
 /**
@@ -78,7 +327,7 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   const sectionHeadersOffset = optionalHeaderOffset + optionalHeaderSize;
 
   // Sections
-  const sections = opts.sections ?? [defaultTextSection(0)];
+  const { sections, dirs } = resolveLayout(opts, false, imageBase);
   const numSections = sections.length;
   const sectionHeadersSize = numSections * 40;
 
@@ -136,13 +385,11 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
 
   // --- Data Directories ---
   const dataDirOffset = o + 96;
-  if (opts.dataDirectories) {
-    for (const [idx, dir] of opts.dataDirectories) {
-      if (idx < numDataDirs) {
-        const ddOff = dataDirOffset + idx * DATA_DIR_ENTRY_SIZE;
-        view.setUint32(ddOff, dir.virtualAddress, true);
-        view.setUint32(ddOff + 4, dir.size, true);
-      }
+  for (const [idx, dir] of dirs) {
+    if (idx < numDataDirs) {
+      const ddOff = dataDirOffset + idx * DATA_DIR_ENTRY_SIZE;
+      view.setUint32(ddOff, dir.virtualAddress, true);
+      view.setUint32(ddOff + 4, dir.size, true);
     }
   }
 
@@ -188,7 +435,7 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
   const optionalHeaderOffset = coffOffset + coffHeaderSize;
   const sectionHeadersOffset = optionalHeaderOffset + optionalHeaderSize;
 
-  const sections = opts.sections ?? [defaultTextSection(0)];
+  const { sections, dirs } = resolveLayout(opts, true, imageBase);
   const numSections = sections.length;
   const sectionHeadersSize = numSections * 40;
 
@@ -244,13 +491,11 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
 
   // --- Data Directories ---
   const dataDirOffset = o + 112;
-  if (opts.dataDirectories) {
-    for (const [idx, dir] of opts.dataDirectories) {
-      if (idx < numDataDirs) {
-        const ddOff = dataDirOffset + idx * DATA_DIR_ENTRY_SIZE;
-        view.setUint32(ddOff, dir.virtualAddress, true);
-        view.setUint32(ddOff + 4, dir.size, true);
-      }
+  for (const [idx, dir] of dirs) {
+    if (idx < numDataDirs) {
+      const ddOff = dataDirOffset + idx * DATA_DIR_ENTRY_SIZE;
+      view.setUint32(ddOff, dir.virtualAddress, true);
+      view.setUint32(ddOff + 4, dir.size, true);
     }
   }
 

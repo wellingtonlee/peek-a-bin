@@ -28,7 +28,7 @@ Adjustable from 10px to 16px via a slider in **Settings > Display** tab. The fon
 ### Creating a Custom Theme
 
 1. Export a built-in theme as a baseline (use the **Export** button in Settings > Theme)
-2. Edit the JSON — modify any of the 51 color tokens
+2. Edit the JSON — modify any of the 36 color tokens
 3. Import the modified JSON (use the **Import** button)
 
 ### JSON Format
@@ -45,7 +45,7 @@ Adjustable from 10px to 16px via a slider in **Settings > Display** tab. The fon
 }
 ```
 
-All 51 color keys must be present. Missing keys will cause a validation error on import.
+All 36 color keys must be present. Missing keys will cause a validation error on import.
 
 ### Managing Custom Themes
 
@@ -55,7 +55,7 @@ All 51 color keys must be present. Missing keys will cause a validation error on
 
 ## Color Token Reference
 
-All 51 tokens from `src/styles/themes.ts`, grouped by category:
+All 36 tokens from the `ThemeColors` interface in `src/styles/themes.ts`, grouped by category:
 
 ### Backgrounds
 

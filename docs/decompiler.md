@@ -1,6 +1,6 @@
 # Decompiler Internals
 
-The built-in decompiler is an IR-based pipeline that transforms x86/x64 assembly into C-like pseudocode. Located in `src/disasm/decompile/` (~6,360 LOC across 16 code files + 5 test files).
+The built-in decompiler is an IR-based pipeline that transforms x86/x64 assembly into C-like pseudocode. Located in `src/disasm/decompile/` (~6,490 LOC across 16 code files, plus 7 test files in `__tests__/`).
 
 ## Pipeline
 
@@ -44,7 +44,7 @@ Entry point: `decompileFunction()` in `pipeline.ts`.
 
 Defined in `ir.ts`.
 
-### IRExpr (13 kinds)
+### IRExpr (12 kinds)
 
 | Kind | Description |
 |------|-------------|
@@ -83,26 +83,56 @@ Defined in `ir.ts`.
 | `phi` | SSA phi node |
 | `try` | `__try/__except` exception handling |
 
-## Adding New IRExpr Kinds
+## Adding New IRExpr / IRStmt Kinds
 
-**All 6 files must be updated** — missing any walker causes silent data loss:
+Roughly 30 switches across the pipeline dispatch on `expr.kind` / `stmt.kind`. Missing one does
+not throw — it silently drops the expression from the output, which is why this checklist
+matters. The switches fall into three groups.
 
-1. `ir.ts` — Add to `IRExpr` union type + `walkExpr` switch
-2. `fold.ts` — `foldExpr`, `countReads`, `substituteReg`, `hasSideEffects`
-3. `ssaopt.ts` — `replaceRegInExpr`, `countExprUses`, `hasSideEffects`
-4. `promote.ts` — `promoteExpr`
-5. `structs.ts` — `walkExprs`, `rewriteExpr`
-6. `emit.ts` — `emitExpr`
+### 1. The compiler catches these
 
-## Adding New IRStmt Kinds
+Seven switches end in a `const _exhaustive: never = …` binding, so a new union member is a
+build error until it is handled. `npm run typecheck` finds them for you:
 
-Update these 5 locations:
+| File | Functions |
+|------|-----------|
+| `ssa.ts` | `renameExpr` / `renameStmt` (nested in `renameVariables`) |
+| `ssadestroy.ts` | `stripVersionsExpr` / `stripVersionsStmt` |
+| `emit.ts` | `emitExpr` / `emitStmt` |
+| `workers/disasm.worker.ts` | RPC method dispatch — guards `WorkerMethod`, not IR, but same pattern |
 
-1. `ir.ts` — Add to `IRStmt` union type + `walkStmts` switch
-2. `fold.ts` — `foldStmt`
-3. `emit.ts` — `emitStmt`
-4. `structure.ts` — Control flow handlers
-5. `cleanup.ts` — Cleanup pass handlers
+### 2. Silent `default:` fallback — update by hand
+
+| File | Functions |
+|------|-----------|
+| `fold.ts` | `foldStmt`, `countReads`, `countReadsInStmt`, `substituteReg`, `substituteRegInStmt` |
+| `ssaopt.ts` | `replaceRegInExpr`, `replaceRegInStmt` |
+| `structs.ts` | `exprKey`, `rewriteExpr`, `rewriteStmt` |
+| `promote.ts` | `renameVarsInExpr`, `renameVarsInStmt`, `promoteExpr`, `promoteStmt` |
+| `cleanup.ts` | `cleanupStmt` |
+
+### 3. No `default:` and no exhaustiveness check — the worst case
+
+Control falls off the end of the switch, so the new kind vanishes with no fallback branch and
+no compile error:
+
+| File | Functions |
+|------|-----------|
+| `ir.ts` | `walkExpr`, `walkStmts` |
+| `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
+| `structs.ts` | `walkExprs` and the stmt walker in `collectAccessPatterns` (both nested) |
+
+### Not switches
+
+`foldExpr` (`fold.ts`), `hasSideEffects` (defined independently in *both* `fold.ts` and
+`ssaopt.ts`) and `countExprUses` (nested in `ssaopt.ts`'s `deadCodeElimination`) are if-chains
+on `expr.kind`. Grep the function name rather than looking for `case`.
+
+New `IRStmt` kinds additionally need control flow handling in `structure.ts`, and
+`typeInfer.ts`'s `parseCastType` matters only if the kind gets a cast spelling.
+
+> Extending `IRExpr` also means extending `DisplayRow` consumers if the kind surfaces in the UI
+> — see the note in `CLAUDE.md` about `JumpArrows.tsx` / `DisassemblyMinimap.tsx`.
 
 ## SSA Pass
 
@@ -158,7 +188,7 @@ Runs after `structureCFG`, before `inferTypes`:
 
 ## Type System (`typeInfer.ts`)
 
-`DecompType` lattice with 11 kinds:
+`DecompType` lattice with 12 kinds:
 
 | Kind | Description |
 |------|-------------|
@@ -173,6 +203,7 @@ Runs after `structureCFG`, before `inferTypes`:
 | `handle` | Win32 HANDLE |
 | `ntstatus` | NTSTATUS return value |
 | `hresult` | COM HRESULT return value |
+| `enum` | Synthesized enum — carries a name and a `Map<number, string>` of members, inferred from switches with 3+ cases |
 
 **`meetTypes()`** merges types: specific wins over unknown; handle/ntstatus/hresult win over int/ptr.
 
@@ -234,7 +265,8 @@ Use type shorthands (`PVOID`, `HANDLE_T`, `NTSTATUS_T`, etc.) for consistency.
 - **Location:** `src/disasm/decompile/__tests__/`
 - **Framework:** Vitest
 - **Fixture builders:** `buildMinimalPE32()` / `buildMinimalPE64()` — programmatic PE buffer construction (no binary fixture files)
-- **Coverage:** Fold rules (20+ tests), SSA optimizations, GVN, enum inference, LICM, exception handling
+- **Coverage:** Fold rules, SSA construction and optimization, dominator/loop analysis, GVN, enum inference, LICM, emission, exception handling, API signatures, register state
+- **Run:** `npm test` (or `npm run test:coverage`). Test counts are deliberately not quoted here — they go stale fast.
 
 ## Gotchas
 

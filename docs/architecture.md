@@ -40,12 +40,16 @@ The pipeline is phased via `analysisPhase` state:
 6. **Anomalies:** Security characteristic scanning (WX sections, packer indicators, etc.)
 7. **Driver:** `.sys` driver detection (NATIVE subsystem, WDM flag, kernel imports)
 
+`AnalysisPhase` also has a terminal `"failed"` value. If any stage of the chain rejects, the
+phase moves to `"failed"` and the status bar reports it, rather than leaving the UI pinned on
+the last phase it reached.
+
 ## State Management
 
 `useReducer` + React Context in `src/hooks/usePEFile.ts`.
 
-- **`AppState`**: 33+ fields covering PE data, analysis results, UI state, annotations, AI state
-- **`AppAction`**: Discriminated union with 48 action types
+- **`AppState`**: 31 fields covering PE data, analysis results, UI state, annotations, AI state
+- **`AppAction`**: Discriminated union with 50 action types
 - **Access:** `useAppState()` for reading, `useAppDispatch()` for dispatching
 - **Annotations:** Bookmarks, renames, comments auto-persist to localStorage per file with undo/redo via snapshot stack
 
@@ -85,7 +89,11 @@ Custom events for decoupled communication:
 | `peek-a-bin:batch-rename` | Start batch auto-rename |
 | `peek-a-bin:generate-report` | Generate AI report |
 | `peek-a-bin:ai-scan` | Start vulnerability scan |
+| `peek-a-bin:open-settings` | Open the settings modal (e.g. when no API key is configured) |
+| `peek-a-bin:show-xrefs` | Open the xref panel filtered to an address |
 | `peek-a-bin:font-size-changed` | Font size setting changed |
+| `peek-a-bin:theme-changed` | Active theme changed |
+| `peek-a-bin:profile-changed` | Active LLM profile changed |
 
 Pattern: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))`
 
@@ -96,6 +104,7 @@ All keys use the `peek-a-bin:` prefix:
 | Key | Description |
 |-----|-------------|
 | `peek-a-bin:llm-profiles` | AI provider profiles |
+| `peek-a-bin:llm-settings` | Legacy single-profile key; migrated to `llm-profiles` on first load |
 | `peek-a-bin:font-size` | Font size (10–16px) |
 | `peek-a-bin:view-mode` | Linear or graph view mode |
 | `peek-a-bin:theme-id` | Active theme ID |
@@ -104,6 +113,14 @@ All keys use the `peek-a-bin:` prefix:
 | `peek-a-bin:chat:${fileName}` | AI chat messages per file |
 | `peek-a-bin:chat-width` | Chat panel width |
 | `peek-a-bin:report:${fileName}` | Cached AI report per file |
+| `peek-a-bin:sidebar-width` | Sidebar width |
+| `peek-a-bin:decompile-width` | Decompile panel width |
+| `peek-a-bin:bottom-panel-height` | Tabbed bottom panel height |
+| `peek-a-bin:sections-open` | Sidebar sections panel collapsed state |
+| `peek-a-bin:callers-open` | Sidebar call graph panel collapsed state |
+| `peek-a-bin:graph-overview-open` | Sidebar graph overview collapsed state |
+| `peek-a-bin:scroll-sync` | Disassembly ↔ decompile scroll sync toggle |
+| `peek-a-bin:show-bytes` | Raw bytes column visibility |
 
 Per-file annotation keys are derived from the filename and stored automatically.
 

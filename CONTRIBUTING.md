@@ -16,7 +16,7 @@ npm run dev
 
 1. Create a feature branch from `main`
 2. Make your changes
-3. Verify: `npx tsc --noEmit && npx vite build && npm test`
+3. Verify: `npm run lint && npm run typecheck && npm test && npm run build`
 4. Commit with a descriptive message
 5. Open a PR against `main`
 
@@ -25,11 +25,14 @@ npm run dev
 Always run before submitting:
 
 ```bash
-npx tsc --noEmit && npx vite build
+npm run lint
+npm run typecheck
 npm test
+npm run build
 ```
 
-CI runs type-check and tests on every PR.
+CI runs `lint`, `typecheck`, `test` and `build` on every push and PR to `main`, plus a separate
+`npm audit --audit-level=high` job.
 
 ## Code Style
 
@@ -42,7 +45,10 @@ CI runs type-check and tests on every PR.
 
 - Framework: [Vitest](https://vitest.dev/)
 - PE parsing tests: `src/pe/__tests__/`
+- Disassembly tests: `src/disasm/__tests__/`
 - Decompiler tests: `src/disasm/decompile/__tests__/`
+- MCP server tests: `src/mcp/__tests__/`
+- Utility tests: `src/utils/__tests__/`
 - Fixture builders: `buildMinimalPE32()` / `buildMinimalPE64()` — no binary fixture files
 - Run tests: `npm test` or `npm run test:watch` for watch mode
 
@@ -55,11 +61,11 @@ CI runs type-check and tests on every PR.
 | New IR statement | Follow checklist in [docs/decompiler.md](docs/decompiler.md#adding-new-irstmt-kinds) |
 | New MCP client | Add entry to registry in `src/mcp/clients.ts` — see [docs/mcp-server.md](docs/mcp-server.md#adding-new-clients) |
 | New theme | See [docs/theming.md](docs/theming.md#custom-themes) |
-| New keyboard shortcut | Update `ShortcutsPanel` component + [docs/keyboard.md](docs/keyboard.md) |
+| New keyboard shortcut | Add to `SHORTCUT_GROUPS` in `src/components/KeyboardShortcuts.tsx` + [docs/keyboard.md](docs/keyboard.md) |
 
 ## Pull Request Process
 
-- CI must pass (type-check + tests)
+- CI must pass (lint, type-check, tests, build, audit)
 - One feature per PR — keep changes focused
 - Update `CHANGELOG.md` under `[Unreleased]` with a timestamp: `(YYYY-MM-DD HH:MM)`
 - Update relevant docs if your change affects user-facing behavior
@@ -81,12 +87,6 @@ If your change introduces new conventions, gotchas, pipeline stages, or source d
 
 ## Documentation
 
-Update relevant `docs/` files when changes affect:
-- Keyboard shortcuts → `docs/keyboard.md`
-- Theme system → `docs/theming.md`
-- AI features → `docs/ai-features.md`
-- MCP server → `docs/mcp-server.md`
-- Ghidra server → `docs/ghidra-server.md`
-- Architecture → `docs/architecture.md`
-- Decompiler internals → `docs/decompiler.md`
-- Build/deploy → `docs/deployment.md`
+If your change affects user-facing behavior, update the matching `docs/` file. The mapping from
+"what you changed" to "what to update" lives in one place:
+**[docs/README.md → Which doc do I update?](docs/README.md#which-doc-do-i-update)**

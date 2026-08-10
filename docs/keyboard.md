@@ -24,6 +24,29 @@ Press `?` in the app to see an interactive shortcuts panel.
 | `Ctrl+F` | Search disassembly (supports `/regex/` and `/regex/i` syntax) |
 | `/` | Search in graph mode (opens search overlay in CFG view) |
 
+## Disassembly
+
+| Key | Action |
+|-----|--------|
+| `Arrow Up/Down` | Navigate instructions |
+| `PgUp` / `PgDn` | Scroll 40 instructions |
+
+## Clipboard
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Copy instruction (or the selected range) |
+| `Ctrl+Shift+C` | Copy address |
+
+## Mouse
+
+| Action | Result |
+|--------|--------|
+| Double-click an address | Copy address |
+| Double-click a function label | Rename function |
+| `Shift`+Click | Select a range of instructions |
+| Right-click | Context menu |
+
 ## Annotations
 
 | Key | Action |

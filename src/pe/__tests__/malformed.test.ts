@@ -136,6 +136,72 @@ describe('malformed PE handling', () => {
     });
   });
 
+  describe('base relocations', () => {
+    it('bounds the entry walk when SizeOfBlock is 0xFFFFFFFF', { timeout: TIMEOUT }, () => {
+      // entryCount is derived from SizeOfBlock, so a hostile value asks for ~2
+      // billion iterations. The walk must stop at the end of the buffer instead.
+      const rva = 0x1000;
+      const data = new Uint8Array(0x200);
+      const dv = new DataView(data.buffer);
+      dv.setUint32(0, 0x1000, true); // VirtualAddress
+      dv.setUint32(4, 0xffffffff, true); // SizeOfBlock
+
+      const buf = buildMinimalPE32({
+        sections: [dataSection('.reloc', rva, data)],
+        dataDirectories: new Map([[5, { virtualAddress: rva, size: 0x200 }]]),
+      });
+
+      const started = Date.now();
+      const pe = parsePE(buf);
+      expect(Date.now() - started).toBeLessThan(TIMEOUT);
+      expect(pe.relocations?.[0].entries.length).toBeLessThan(buf.byteLength);
+    });
+
+    it('bounds the block walk when the directory size is 0xFFFFFFFF', { timeout: TIMEOUT }, () => {
+      // endPos is baseOffset + the declared directory size, so an oversized
+      // directory leaves the buffer length as the only backstop.
+      const rva = 0x1000;
+      const data = new Uint8Array(0x200);
+      const dv = new DataView(data.buffer);
+      for (let i = 0; i < 0x200; i += 8) {
+        dv.setUint32(i, 0x1000 + i, true); // VirtualAddress — always non-zero
+        dv.setUint32(i + 4, 8, true); // SizeOfBlock — smallest legal block
+      }
+
+      const buf = buildMinimalPE32({
+        sections: [dataSection('.reloc', rva, data)],
+        dataDirectories: new Map([[5, { virtualAddress: rva, size: 0xffffffff }]]),
+      });
+
+      const started = Date.now();
+      const pe = parsePE(buf);
+      expect(Date.now() - started).toBeLessThan(TIMEOUT);
+      expect(pe.relocations!.length).toBeLessThanOrEqual(buf.byteLength / 8);
+    });
+  });
+
+  describe('TLS callbacks', () => {
+    it('caps the callback walk on an array of non-zero pointers', { timeout: TIMEOUT }, () => {
+      // The array is null-terminated, so a section full of non-zero pointers has
+      // no terminator; only the hard iteration cap ends the walk.
+      const rva = 0x1000;
+      const data = new Uint8Array(0x400);
+      const dv = new DataView(data.buffer);
+      for (let i = 0; i < 0x100; i += 4) dv.setUint32(i, 0x00401000, true);
+      dv.setUint32(0x100 + 12, 0x00400000 + rva, true); // AddressOfCallBacks -> offset 0
+
+      const buf = buildMinimalPE32({
+        sections: [dataSection('.rdata', rva, data)],
+        dataDirectories: new Map([[9, { virtualAddress: rva + 0x100, size: 24 }]]),
+      });
+
+      const started = Date.now();
+      const pe = parsePE(buf);
+      expect(Date.now() - started).toBeLessThan(TIMEOUT);
+      expect(pe.tlsDirectory!.callbacks.length).toBeLessThanOrEqual(256);
+    });
+  });
+
   describe('authenticode DER', () => {
     it('rejects a 4-byte DER length with the high bit set', { timeout: TIMEOUT }, () => {
       // `contentLen = (contentLen << 8) | byte` is signed-32 in JS, so 0xFF...

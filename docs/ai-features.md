@@ -93,14 +93,20 @@ Automatically generates meaningful names for unnamed functions:
 
 **Toolbar:** Report button | **Command palette:** "AI: Generate Analysis Report"
 
-Generates a comprehensive Markdown report by assembling ~12K tokens of binary context:
+Generates a comprehensive Markdown report. `buildReportContext()` in `src/hooks/useAIReport.ts`
+assembles:
 
 - PE headers and metadata
-- Notable imports and exports
+- Notable imports (filtered against a 39-entry watchlist, capped at 50; falls back to the first
+  30 imports if none match) and the first 20 exports
 - Security anomalies
 - Driver detection info
 - Decompiled key functions
 - Interesting strings
+
+> The context is bounded by those per-section item caps, not by a token budget — nothing counts
+> or enforces tokens. The only token limit in the codebase is `max_tokens: 8192` on the LLM
+> *response* (`src/llm/client.ts`).
 
 The report includes:
 - Executive summary and binary classification
@@ -130,11 +136,23 @@ Right-click any function in linear or graph mode to scan it for security issues.
 
 ### Bulk Scan
 
-The "Scan" toolbar button or command palette action scans all functions that call dangerous APIs:
-- `VirtualAlloc`, `VirtualProtect`
-- `WriteProcessMemory`, `CreateRemoteThread`
-- `NtCreateSection`, `NtMapViewOfSection`
-- And other commonly abused APIs
+The "Scan" toolbar button or command palette action scans every function that references an API
+in the `DANGEROUS_APIS` set in `src/hooks/useVulnScanner.ts` (32 entries). Names are matched with
+a trailing `A`/`W` stripped, so `CreateProcessW` matches `CreateProcess`. The categories are:
+
+- Memory: `VirtualAlloc`, `VirtualAllocEx`, `VirtualProtect`, `VirtualProtectEx`,
+  `NtAllocateVirtualMemory`, `MapViewOfFile`, `NtMapViewOfSection`
+- Cross-process: `WriteProcessMemory`, `ReadProcessMemory`, `NtWriteVirtualMemory`,
+  `CreateRemoteThread`, `NtCreateThread`, `OpenProcess`, `NtOpenProcess`
+- Execution: `CreateProcess`, `ShellExecute`, `WinExec`
+- Injection / hooking: `SetWindowsHookEx`, `LoadLibrary`, `GetProcAddress`
+- Crypto: `CryptEncrypt`, `CryptDecrypt`, `BCryptEncrypt`, `BCryptDecrypt`
+
+> This list is **not** the same as the 39-entry `notableAPIs` watchlist used to build the AI
+> report context in `src/hooks/useAIReport.ts`. That one is broader (registry, network, file
+> I/O, anti-debug) and serves a different purpose; the two sets share only 17 names. **Neither
+> contains `NtCreateSection`**, despite earlier revisions of this document listing it. Consult
+> the source before relying on either set.
 
 ### Results
 

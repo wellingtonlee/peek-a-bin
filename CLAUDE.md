@@ -4,14 +4,29 @@ Browser-based PE disassembler/analyzer. Fully client-side (no server). PWA with 
 
 **Tech**: React 19, TypeScript 5.7 (strict), Vite 6, Tailwind CSS 4, capstone-wasm (WASM disassembly engine), @tanstack/react-virtual, @dagrejs/dagre
 
+**Requires Node 20+** (`engines.node` in package.json). On Node 18 the build reaches the end of
+bundling and then dies with `ReferenceError: crypto is not defined` — `serialize-javascript`
+(pulled in via `@rollup/plugin-terser`, i.e. the PWA/Workbox path) calls the global `crypto`,
+which Node only exposes unflagged from 20 onward. Workaround if you are stuck on 18:
+`node --experimental-global-webcrypto ./node_modules/vite/bin/vite.js build`.
+
 ## Commands
 
 ```sh
-npm run dev          # dev server
-npm run build        # tsc -b && vite build (use for verification)
-npm test             # vitest run (78 tests: PE parsing + decompiler)
-npx tsc --noEmit     # type check only (faster than full build)
+npm run dev            # dev server
+npm run build          # tsc -b && vite build (use for verification)
+npm test               # vitest run (PE parsing + disasm + decompiler + MCP + utils)
+npm run typecheck      # tsc --noEmit (faster than full build)
+npm run lint           # biome lint src
+npm run format         # biome format --write
+npm run check          # biome check
+npm run test:coverage  # vitest run --coverage (v8 provider)
 ```
+
+**Biome** (`biome.json`) is the linter/formatter. The whole `a11y` group is set to `warn`, not
+error — there is a real accessibility backlog and the warnings keep it visible without blocking
+CI. `correctness/useHookAtTopLevel` is `error`. CI runs `lint`, `typecheck`, `test` and `build`
+on every PR, plus a separate `npm audit --audit-level=high` job.
 
 ## Source Layout (`src/`)
 
@@ -28,7 +43,12 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (33+ fields), `AppAction` discriminated union (48 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (31 fields), `AppAction` discriminated union (50 action types). Access via `useAppState()` / `useAppDispatch()`.
+
+`AnalysisPhase` includes a `"failed"` value — the analysis chain rejects into it, and the status
+bar surfaces it. Without it a failed parse left the UI spinning forever. `usePEFile.ts` also
+exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast that string to
+`ViewTab` directly.
 
 **Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches).
 
@@ -56,21 +76,67 @@ npx tsc --noEmit     # type check only (faster than full build)
 
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
-**Tests**: `src/pe/__tests__/` for PE parsing. `src/disasm/decompile/__tests__/` for decompiler (fold rules, SSA). Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders (no binary files).
+**Tests**: `src/pe/__tests__/` for PE parsing (including `malformed.test.ts` for adversarial input), `src/disasm/__tests__/` for CFG/operands/signatures/mnemonics, `src/disasm/decompile/__tests__/` for the decompiler (fold rules, SSA, dominators, emit, enum, loops, exceptions), `src/mcp/__tests__/` for the MCP server, `src/utils/__tests__/` for the export schema and annotation validation. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders from `src/pe/__tests__/fixtures.ts` (no binary files).
+
+Don't hard-code a test count in docs — it goes stale within a session. Run `npm test` for the current number.
 
 **MCP setup CLI**: `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue). Registry in `src/mcp/clients.ts` — add new clients by inserting a map entry. `.mcp.json` at project root enables Claude Code auto-discovery.
 
 ## Decompiler Architecture (`src/disasm/decompile/`)
 
-**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → inferTypes → promoteVars → synthesizeStructs → emitFunction`
+**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes → promoteVars → synthesizeStructs → emitFunction`
 
-**IR** (`ir.ts`): `IRExpr` union (13 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (17 kinds including if/while/do_while/for/switch/break/continue/phi). All expression walkers (`walkExpr`, `walkStmts`) must handle every `IRExpr` kind.
+(`wrapExceptionRegions` is local to `pipeline.ts` and only runs when `.pdata` exception info is
+present. The docstring at the top of `pipeline.ts` lists a shorter, outdated order — trust the
+code, not that comment.)
 
-**Adding new IRExpr kinds**: Update walkers in `ir.ts` (`walkExpr`), `fold.ts` (`foldExpr`, `countReads`, `substituteReg`, `hasSideEffects`), `ssaopt.ts` (`replaceRegInExpr`, `countExprUses`, `hasSideEffects`), `promote.ts` (`promoteExpr`), `structs.ts` (`walkExprs`, `rewriteExpr`), `emit.ts` (`emitExpr`). Missing any walker causes silent data loss.
+**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (17 kinds including if/while/do_while/for/switch/break/continue/phi/try).
 
-**Adding new IRStmt kinds**: Update `foldStmt` in `fold.ts`, `emitStmt` in `emit.ts`, `walkStmts` in `ir.ts`, and control flow handlers in `structure.ts`/`cleanup.ts`.
+### Adding new IRExpr / IRStmt kinds
 
-**Type system** (`typeInfer.ts`): `DecompType` lattice with 11 kinds (unknown, int, float, ptr, bool, void, struct, array, handle, ntstatus, hresult). `meetTypes()` merges types — specific wins over unknown, handle/ntstatus/hresult win over int/ptr.
+Adding a kind means updating every switch that dispatches on `expr.kind` / `stmt.kind` — there
+are ~30 of them, and a missed one silently drops data rather than failing. They split into two
+groups:
+
+**The compiler catches these.** Seven switches end in a `const _exhaustive: never = …` binding,
+so adding a union member breaks the build until they are handled. Just run `npm run typecheck`:
+
+| File | Functions |
+|------|-----------|
+| `ssa.ts` | `renameExpr` / `renameStmt` (inside `renameVariables`) |
+| `ssadestroy.ts` | `stripVersionsExpr` / `stripVersionsStmt` |
+| `emit.ts` | `emitExpr` / `emitStmt` |
+| `workers/disasm.worker.ts` | the RPC method dispatch (guards `WorkerMethod`, not IR) |
+
+**You must find these by hand.** The typechecker stays silent on all of them.
+
+*Switches ending in `default:`* — the new kind takes the fallback branch:
+
+| File | Functions |
+|------|-----------|
+| `fold.ts` | `foldStmt`, `countReads`, `countReadsInStmt`, `substituteReg`, `substituteRegInStmt` |
+| `ssaopt.ts` | `replaceRegInExpr`, `replaceRegInStmt` |
+| `structs.ts` | `exprKey`, `rewriteExpr`, `rewriteStmt` |
+| `promote.ts` | `renameVarsInExpr`, `renameVarsInStmt`, `promoteExpr`, `promoteStmt` |
+| `cleanup.ts` | `cleanupStmt` |
+
+*Switches with neither `default:` nor a `never` assert* — control simply falls off the end, so
+the new kind is dropped with no trace at all. These are the dangerous ones:
+
+| File | Functions |
+|------|-----------|
+| `ir.ts` | `walkExpr`, `walkStmts` |
+| `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
+| `structs.ts` | `walkExprs` and the stmt walker in `collectAccessPatterns` (both nested functions) |
+
+*Not switches at all* — `foldExpr` (`fold.ts`), `hasSideEffects` (defined separately in both
+`fold.ts` and `ssaopt.ts`) and `countExprUses` (nested in `ssaopt.ts`'s
+`deadCodeElimination`) are if-chains on `expr.kind`. Grep the function name, not `case`.
+
+`typeInfer.ts`'s `parseCastType` keys off type *strings*, not kinds — only relevant if the new
+kind gets a cast spelling.
+
+**Type system** (`typeInfer.ts`): `DecompType` lattice with 12 kinds (unknown, int, float, ptr, bool, void, struct, array, handle, ntstatus, hresult, enum). `meetTypes()` merges types — specific wins over unknown, handle/ntstatus/hresult win over int/ptr. `enum` carries a name and a `Map<number, string>` of members, synthesized from switches with 3+ cases.
 
 **API signatures** (`apitypes.ts`): ~130 Win32/NT API type signatures. Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T, etc.) for consistency. Return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
 
@@ -94,25 +160,18 @@ npx tsc --noEmit     # type check only (faster than full build)
 Always run after changes:
 
 ```sh
-npx tsc --noEmit && npx vite build
+npm run typecheck && npm run build
 npm test
+npm run lint
 ```
 
 ## Documentation
 
-Documentation lives in `docs/` with topic-specific files. See `docs/README.md` for the full index.
+Documentation lives in `docs/`. **`docs/README.md` is the canonical index and holds the
+"which doc do I update when I change X" mapping table** — consult it there rather than keeping
+a second copy here or in `CONTRIBUTING.md`.
 
 When making architectural changes, adding major features, or changing conventions, update this file (`CLAUDE.md`) so future AI agents have accurate context. This includes new source directories, new pipeline stages, new conventions, new gotchas, and changes to the build/test commands.
-
-When changes affect public-facing behavior, update the relevant `docs/` file(s) — not just `README.md`. Key mappings:
-- Keyboard shortcuts → `docs/keyboard.md`
-- Theme system → `docs/theming.md`
-- AI features → `docs/ai-features.md`
-- MCP server → `docs/mcp-server.md`
-- Ghidra server → `docs/ghidra-server.md`
-- Architecture → `docs/architecture.md`
-- Decompiler → `docs/decompiler.md`
-- Build/deploy → `docs/deployment.md`
 
 Update `README.md` only when changes affect the top-level project description (new major features, setup changes).
 

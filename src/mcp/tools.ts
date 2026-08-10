@@ -3,7 +3,7 @@
  */
 
 import { z } from 'zod';
-import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, resolve, sep } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AnalyzedFile, FileSession } from './session';
@@ -99,7 +99,25 @@ function resolveExportPath(outputPath: string): { path: string } | { error: stri
     };
   }
 
-  return { path: resolve(realDir, basename(target)) };
+  const finalPath = resolve(realDir, basename(target));
+
+  // Resolving the parent is not enough: the FINAL component can itself be a
+  // symlink that writeFileSync would follow straight out of the root. lstat does
+  // not follow it, so we can detect and refuse that case. (An attacker needs to
+  // pre-plant the link inside the export directory, but the whole point of this
+  // function is that a path under the root cannot redirect the write elsewhere.)
+  try {
+    if (lstatSync(finalPath).isSymbolicLink()) {
+      return {
+        error: `outputPath "${basename(target)}" is a symlink; refusing to follow it out of `
+          + `the export directory. Remove it or choose another name.`,
+      };
+    }
+  } catch {
+    // ENOENT is the normal case — the file does not exist yet.
+  }
+
+  return { path: finalPath };
 }
 
 export function registerTools(server: McpServer, session: FileSession): void {
