@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { ModalBackdrop } from "./ModalBackdrop";
+import { Modal } from "./Modal";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
@@ -28,11 +28,12 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Focusing the search field is Modal's job now (via initialFocusRef) — it runs
+  // on mount, which is the same moment, without the setTimeout(0) trampoline.
   useEffect(() => {
     if (open) {
       setQuery("");
       setSelectedIdx(0);
-      setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open]);
 
@@ -137,11 +138,9 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     } else if (e.key === "Enter" && results.length > 0) {
       e.preventDefault();
       handleSelect(results[selectedIdx]);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
-  }, [results, selectedIdx, handleSelect, onClose]);
+    // Escape is not handled here — it bubbles to Modal, which closes the dialog.
+  }, [results, selectedIdx, handleSelect]);
 
   // Scroll selected into view
   useEffect(() => {
@@ -157,69 +156,67 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   let currentCategory = "";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
-      <ModalBackdrop onClose={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        className="relative w-[600px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-      >
-        <div className="p-3 border-b border-gray-700">
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Search functions, imports, exports, strings..."
-            className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-          />
-        </div>
-        <div ref={listRef} className="max-h-[400px] overflow-auto">
-          {query && results.length === 0 && (
-            <div className="px-4 py-8 text-center text-gray-500 text-sm">No results</div>
-          )}
-          {!query && (
-            <div className="px-4 py-8 text-center text-gray-500 text-sm">
-              Type to search across functions, imports, exports, and strings
-            </div>
-          )}
-          {results.map((item, i) => {
-            const showHeader = item.category !== currentCategory;
-            currentCategory = item.category;
-            return (
-              <div key={`${item.category}-${item.address}-${i}`}>
-                {showHeader && (
-                  <div className="px-4 py-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider bg-gray-800/80 sticky top-0">
-                    {item.category}
-                  </div>
-                )}
-                <button type="button"
-                  data-idx={i}
-                  className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs ${
-                    i === selectedIdx
-                      ? "bg-blue-600/30 text-white"
-                      : "text-gray-300 hover:bg-gray-700/50"
-                  }`}
-                  onClick={() => handleSelect(item)}
-                  onMouseEnter={() => setSelectedIdx(i)}
-                >
-                  <span className="text-gray-500 font-mono text-[10px] w-28 shrink-0">
-                    0x{item.address.toString(16).toUpperCase()}
-                  </span>
-                  <span className="truncate">{item.label}</span>
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 flex items-center gap-4">
-          <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Enter</kbd> navigate</span>
-          <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Up/Down</kbd> select</span>
-          <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Esc</kbd> close</span>
-        </div>
+    <Modal
+      label="Command palette"
+      onClose={onClose}
+      placement="top"
+      initialFocusRef={inputRef}
+      className="w-[600px] shadow-2xl overflow-hidden"
+    >
+      <div className="p-3 border-b border-gray-700">
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Search functions, imports, exports, strings..."
+          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+        />
       </div>
-    </div>
+      <div ref={listRef} className="max-h-[400px] overflow-auto">
+        {query && results.length === 0 && (
+          <div className="px-4 py-8 text-center text-gray-500 text-sm">No results</div>
+        )}
+        {!query && (
+          <div className="px-4 py-8 text-center text-gray-500 text-sm">
+            Type to search across functions, imports, exports, and strings
+          </div>
+        )}
+        {results.map((item, i) => {
+          const showHeader = item.category !== currentCategory;
+          currentCategory = item.category;
+          return (
+            <div key={`${item.category}-${item.address}-${i}`}>
+              {showHeader && (
+                <div className="px-4 py-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider bg-gray-800/80 sticky top-0">
+                  {item.category}
+                </div>
+              )}
+              <button type="button"
+                data-idx={i}
+                className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs ${
+                  i === selectedIdx
+                    ? "bg-blue-600/30 text-white"
+                    : "text-gray-300 hover:bg-gray-700/50"
+                }`}
+                onClick={() => handleSelect(item)}
+                onMouseEnter={() => setSelectedIdx(i)}
+              >
+                <span className="text-gray-500 font-mono text-[10px] w-28 shrink-0">
+                  0x{item.address.toString(16).toUpperCase()}
+                </span>
+                <span className="truncate">{item.label}</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 flex items-center gap-4">
+        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Enter</kbd> navigate</span>
+        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Up/Down</kbd> select</span>
+        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Esc</kbd> close</span>
+      </div>
+    </Modal>
   );
 }

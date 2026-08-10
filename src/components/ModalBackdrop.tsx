@@ -9,12 +9,16 @@ interface Props {
  *
  * The click target is a real <button> rather than a click handler on the wrapper
  * div, so it is a control the platform already understands. Dismissing by mouse
- * this way is a convenience — every modal that uses this also closes on Escape
- * via a window keydown listener — so the button is kept out of the tab order with
+ * this way is a convenience — {@link ./Modal} only renders this for dialogs that
+ * also close on Escape — so the button is kept out of the tab order with
  * tabIndex={-1} instead of adding a second, redundant tab stop before the dialog.
+ * Being out of the tab order also keeps it out of the focus trap's reach, which
+ * is what stops Tab from landing on the page dim.
  *
  * Renders absolutely inside the modal's `fixed inset-0` wrapper, so the dialog
- * box itself needs `relative` (or any positioning) to paint above it.
+ * box itself needs `relative` (or any positioning) to paint above it. It also
+ * carries the overlay dim; a dialog with no backdrop has the dim on the wrapper
+ * instead. Prefer {@link ./Modal} over reaching for this directly.
  */
 export function ModalBackdrop({ onClose, className = "bg-black/50" }: Props) {
   return (

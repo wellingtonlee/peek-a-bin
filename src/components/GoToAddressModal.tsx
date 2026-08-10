@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { ModalBackdrop } from "./ModalBackdrop";
+import { Modal } from "./Modal";
 import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type AddrMode = "va" | "rva" | "file";
@@ -17,11 +17,10 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
   const [mode, setMode] = useState<AddrMode>("va");
   const [input, setInput] = useState("");
 
+  // Focusing the input is Modal's job now (via initialFocusRef) — it runs on
+  // mount, which is the same moment, without the setTimeout(0) trampoline.
   useEffect(() => {
-    if (open) {
-      setInput("");
-      setTimeout(() => inputRef.current?.focus(), 0);
-    }
+    if (open) setInput("");
   }, [open]);
 
   const parsedValue = useMemo(() => {
@@ -66,81 +65,80 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <ModalBackdrop onClose={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Go to address"
-        className="relative bg-gray-800 border border-gray-600 rounded-lg shadow-xl p-4 w-80"
-      >
-        <h3 className="text-sm font-semibold text-gray-200 mb-3">Go to Address</h3>
+    <Modal
+      label="Go to address"
+      onClose={onClose}
+      initialFocusRef={inputRef}
+      className="shadow-xl p-4 w-80"
+    >
+      <h3 className="text-sm font-semibold text-gray-200 mb-3">Go to Address</h3>
 
-        {/* Format toggle */}
-        <div className="flex gap-1 mb-3">
-          {(["va", "rva", "file"] as AddrMode[]).map((m) => (
-            <button type="button"
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-3 py-1 rounded text-xs font-semibold ${
-                mode === m
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-700 text-gray-400 hover:bg-gray-600"
-              }`}
-            >
-              {m === "va" ? "VA" : m === "rva" ? "RVA" : "File Offset"}
-            </button>
-          ))}
-        </div>
-
-        {/* Hex input */}
-        <div className="flex items-center gap-1 mb-3">
-          <span className="text-gray-500 text-sm font-mono">0x</span>
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value.replace(/[^0-9a-fA-F]/g, ""))}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleGo();
-              if (e.key === "Escape") onClose();
-              e.stopPropagation();
-            }}
-            placeholder="Enter hex address..."
-            className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-gray-200 font-mono text-sm placeholder-gray-500 focus:outline-none focus:border-blue-500"
-          />
-        </div>
-
-        {/* Result preview */}
-        <div className="text-xs mb-3 h-5">
-          {resolvedVA !== null ? (
-            <span className="text-green-400">
-              Resolves to VA: 0x{resolvedVA.toString(16).toUpperCase()}
-            </span>
-          ) : parsedValue !== null ? (
-            <span className="text-red-400">
-              {mode === "file" ? "No section contains this file offset" : "Invalid address"}
-            </span>
-          ) : null}
-        </div>
-
-        {/* Actions */}
-        <div className="flex justify-end gap-2">
+      {/* Format toggle */}
+      <div className="flex gap-1 mb-3">
+        {(["va", "rva", "file"] as AddrMode[]).map((m) => (
           <button type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600"
+            key={m}
+            onClick={() => setMode(m)}
+            className={`px-3 py-1 rounded text-xs font-semibold ${
+              mode === m
+                ? "bg-blue-600 text-white"
+                : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+            }`}
           >
-            Cancel
+            {m === "va" ? "VA" : m === "rva" ? "RVA" : "File Offset"}
           </button>
-          <button type="button"
-            onClick={handleGo}
-            disabled={resolvedVA === null}
-            className="px-3 py-1.5 rounded text-xs bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default"
-          >
-            Go
-          </button>
-        </div>
+        ))}
       </div>
-    </div>
+
+      {/* Hex input */}
+      <div className="flex items-center gap-1 mb-3">
+        <span className="text-gray-500 text-sm font-mono">0x</span>
+        <input
+          ref={inputRef}
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value.replace(/[^0-9a-fA-F]/g, ""))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleGo();
+            // Typing must not reach App's window-level hotkeys — Ctrl+G would
+            // close the dialog you are typing into. Tab and Escape are left to
+            // bubble: the focus trap and Escape handling live on the dialog.
+            if (e.key !== "Tab" && e.key !== "Escape") e.stopPropagation();
+          }}
+          placeholder="Enter hex address..."
+          className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-gray-200 font-mono text-sm placeholder-gray-500 focus:outline-none focus:border-blue-500"
+        />
+      </div>
+
+      {/* Result preview */}
+      <div className="text-xs mb-3 h-5">
+        {resolvedVA !== null ? (
+          <span className="text-green-400">
+            Resolves to VA: 0x{resolvedVA.toString(16).toUpperCase()}
+          </span>
+        ) : parsedValue !== null ? (
+          <span className="text-red-400">
+            {mode === "file" ? "No section contains this file offset" : "Invalid address"}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Actions */}
+      <div className="flex justify-end gap-2">
+        <button type="button"
+          onClick={onClose}
+          className="px-3 py-1.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600"
+        >
+          Cancel
+        </button>
+        <button type="button"
+          onClick={handleGo}
+          disabled={resolvedVA === null}
+          className="px-3 py-1.5 rounded text-xs bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default"
+        >
+          Go
+        </button>
+      </div>
+    </Modal>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { Modal } from "./Modal";
 import { loadSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
 import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
 import { GhidraClient } from "../ghidra/client";
@@ -187,400 +188,401 @@ export function SettingsModal({ open, onClose }: Props) {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50">
-      {/* The stopPropagation handler that used to be here was dead: this modal's
-          backdrop has no click handler to stop propagation to. */}
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Settings"
-        className="w-[440px] bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-      >
-        <div className="px-4 py-3 border-b border-gray-700">
-          <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
-        </div>
-
-        {/* Tab bar */}
-        <div className="flex border-b border-gray-700">
-          {TABS.map((tab) => (
-            <button type="button"
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2 text-xs font-medium transition-colors ${
-                activeTab === tab.id
-                  ? "text-blue-400 border-b-2 border-blue-400 -mb-px"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="px-4 py-3 space-y-3">
-          {/* AI Tab */}
-          {activeTab === "ai" && (
-            <>
-              {/* Profile selector */}
-              <div>
-                <label htmlFor="settings-profile" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Profile
-                </label>
-                <div className="flex gap-1">
-                  <select
-                    id="settings-profile"
-                    value={selectedProfileId}
-                    onChange={(e) => {
-                      if (e.target.value === "__new__") {
-                        handleNewProfile();
-                      } else {
-                        handleSelectProfile(e.target.value);
-                      }
-                    }}
-                    className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-                  >
-                    {profileStore.profiles.map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                    {canAddProfile(profileStore) && (
-                      <option value="__new__">+ New Profile</option>
-                    )}
-                  </select>
-                  <button type="button"
-                    onClick={handleDeleteProfile}
-                    disabled={profileStore.profiles.length <= 1}
-                    className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
-                    title="Delete profile"
-                  >
-                    <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-
-              {/* Profile name */}
-              <div>
-                <label htmlFor="settings-profile-name" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Profile Name
-                </label>
-                <input
-                  id="settings-profile-name"
-                  type="text"
-                  value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                  placeholder="Profile name"
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              {/* Provider */}
-              {/* fieldset/legend so the radio group is announced with its caption.
-                  Tailwind preflight zeroes fieldset/legend padding and margin, so
-                  this renders identically to the previous div/label. */}
-              <fieldset>
-                <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Provider
-                </legend>
-                <div className="flex gap-3">
-                  {(["anthropic", "openai"] as const).map((p) => (
-                    <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="provider"
-                        checked={settings.provider === p}
-                        onChange={() => handleProviderChange(p)}
-                        className="accent-blue-500"
-                      />
-                      {p === "anthropic" ? "Anthropic Claude" : "OpenAI-compatible"}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-
-              {/* API Key */}
-              <div>
-                <label htmlFor="settings-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  API Key
-                </label>
-                <div className="flex gap-1">
-                  <input
-                    id="settings-api-key"
-                    type={showKey ? "text" : "password"}
-                    value={settings.apiKey}
-                    onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
-                    placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
-                    className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                  />
-                  <button type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
-                  >
-                    {showKey ? "Hide" : "Show"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Model */}
-              <div>
-                <label htmlFor="settings-model" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Model
-                </label>
-                <input
-                  id="settings-model"
-                  type="text"
-                  list="settings-model-options"
-                  value={settings.model}
-                  onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
-                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
-                />
-                {/* Suggestions only — the field stays free text on purpose, so a
-                    model newer than this build can still be entered by hand. */}
-                <datalist id="settings-model-options">
-                  {(settings.provider === "anthropic" ? ANTHROPIC_MODELS : OPENAI_MODELS).map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.note ? `${m.label} — ${m.note}` : m.label}
-                    </option>
-                  ))}
-                </datalist>
-              </div>
-
-              {/* Enhance Source */}
-              <fieldset>
-                <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Enhance Source
-                </legend>
-                <div className="flex gap-3">
-                  {(["pseudocode", "assembly"] as const).map((s) => (
-                    <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="enhanceSource"
-                        checked={settings.enhanceSource === s}
-                        onChange={() => setSettings((prev) => ({ ...prev, enhanceSource: s }))}
-                        className="accent-blue-500"
-                      />
-                      {s === "pseudocode" ? "Pseudocode (default)" : "Assembly"}
-                    </label>
-                  ))}
-                </div>
-                <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
-              </fieldset>
-
-              {/* Base URL (OpenAI only) */}
-              {settings.provider === "openai" && (
-                <div>
-                  <label htmlFor="settings-base-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                    Base URL
-                  </label>
-                  <input
-                    id="settings-base-url"
-                    type="text"
-                    value={settings.baseUrl}
-                    onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
-                    placeholder="https://api.openai.com"
-                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                  />
-                  <p className="text-[10px] text-gray-600 mt-0.5">For Ollama, LM Studio, vLLM, etc.</p>
-                </div>
-              )}
-
-              {/* Warning */}
-              <p className="text-[10px] text-gray-500 border border-gray-700 rounded px-2 py-1.5 bg-gray-900/50">
-                Key is stored in localStorage and sent only to the configured endpoint.
-              </p>
-            </>
-          )}
-
-          {/* Ghidra Tab */}
-          {activeTab === "ghidra" && (
-            <div>
-                {/* Section caption, not a control label — the checkbox below carries
-                    its own <label>. A <label> with no control is invisible to
-                    assistive tech anyway, so a plain div is more honest. */}
-                <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Decompilation Server
-                </div>
-                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
-                  <input
-                    type="checkbox"
-                    checked={decompServer.enabled}
-                    onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
-                    className="accent-blue-500"
-                  />
-                  Enable Ghidra server
-                </label>
-                {decompServer.enabled && (
-                  <div className="space-y-2">
-                    <div>
-                      <label htmlFor="ghidra-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                        Ghidra URL
-                      </label>
-                      <input
-                        id="ghidra-url"
-                        type="text"
-                        value={decompServer.ghidraUrl}
-                        onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
-                        placeholder="http://localhost:8765"
-                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="ghidra-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                        API Key
-                      </label>
-                      <input
-                        id="ghidra-api-key"
-                        type="text"
-                        value={decompServer.apiKey}
-                        onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
-                        placeholder="API key (optional)"
-                        className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <button type="button"
-                        onClick={async () => {
-                          setConnStatus("testing");
-                          setConnMessage("");
-                          try {
-                            const client = new GhidraClient(decompServer.ghidraUrl, decompServer.apiKey);
-                            const res = await client.ping();
-                            const ver = res.ghidraVersion ? ` (Ghidra ${res.ghidraVersion})` : "";
-                            setConnStatus("success");
-                            setConnMessage(`Connected — server v${res.version}${ver}`);
-                          } catch (err) {
-                            setConnStatus("error");
-                            setConnMessage(err instanceof Error ? err.message : "Connection failed");
-                          }
-                        }}
-                        disabled={connStatus === "testing"}
-                        className="px-3 py-1.5 text-xs text-gray-300 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {connStatus === "testing" ? "Testing..." : "Test Connection"}
-                      </button>
-                      {connStatus === "success" && (
-                        <p className="text-[10px] text-green-400 mt-1">{connMessage}</p>
-                      )}
-                      {connStatus === "error" && (
-                        <p className="text-[10px] text-red-400 mt-1">{connMessage}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-                <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
-              </div>
-          )}
-
-          {/* Display Tab */}
-          {activeTab === "display" && (
-            <div>
-                <label htmlFor="display-font-size" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Font Size
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    id="display-font-size"
-                    type="range"
-                    min={10}
-                    max={16}
-                    step={1}
-                    value={fontSize}
-                    onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                    className="flex-1 accent-blue-500"
-                  />
-                  <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
-                </div>
-              </div>
-          )}
-
-          {/* Theme Tab */}
-          {activeTab === "theme" && (
-            <>
-              <div>
-                {/* Section caption for the theme card grid — not a control label. */}
-                <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                  Color Theme
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {themes.map((theme) => {
-                    const isBuiltin = BUILTIN_THEMES.some(b => b.id === theme.id);
-                    return (
-                      // The delete "×" is a sibling rather than a child so the card
-                      // itself can be a real <button> (buttons cannot nest).
-                      <div key={theme.id} className="relative">
-                        <button
-                          type="button"
-                          onClick={() => setThemeId(theme.id)}
-                          aria-pressed={themeId === theme.id}
-                          className={`w-full text-left p-2 rounded-lg border cursor-pointer transition-colors ${
-                            themeId === theme.id
-                              ? "border-blue-500 bg-blue-500/10"
-                              : "border-gray-600 hover:border-gray-500 bg-gray-900/50"
-                          }`}
-                        >
-                          <div className="text-xs text-gray-200 font-medium">{theme.name}</div>
-                          <ThemeSwatches theme={theme} />
-                        </button>
-                        {!isBuiltin && (
-                          <button type="button"
-                            onClick={() => handleDeleteTheme(theme.id)}
-                            className="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-[10px]"
-                            title="Delete theme"
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <button type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
-                >
-                  Import Theme
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".json"
-                  onChange={handleImportTheme}
-                  className="hidden"
-                />
-                <button type="button"
-                  onClick={handleExportTheme}
-                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
-                >
-                  Export Current
-                </button>
-              </div>
-
-              {importError && (
-                <p className="text-[10px] text-red-400">{importError}</p>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-          <button type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
-          >
-            Cancel
-          </button>
-          <button type="button"
-            onClick={handleSave}
-            className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded"
-          >
-            Save
-          </button>
-        </div>
+    // Deliberately not dismissible: no Escape, no backdrop click. Users were
+    // closing this by accident and losing unsaved settings, so Save and Cancel
+    // are the only ways out. Do not "unify" this with the other dialogs.
+    <Modal
+      label="Settings"
+      onClose={onClose}
+      placement="top"
+      closeOnEscape={false}
+      closeOnBackdropClick={false}
+      className="w-[440px] shadow-2xl overflow-hidden"
+    >
+      <div className="px-4 py-3 border-b border-gray-700">
+        <h2 className="text-sm font-semibold text-gray-200">Settings</h2>
       </div>
-    </div>
+
+      {/* Tab bar */}
+      <div className="flex border-b border-gray-700">
+        {TABS.map((tab) => (
+          <button type="button"
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-xs font-medium transition-colors ${
+              activeTab === tab.id
+                ? "text-blue-400 border-b-2 border-blue-400 -mb-px"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="px-4 py-3 space-y-3">
+        {/* AI Tab */}
+        {activeTab === "ai" && (
+          <>
+            {/* Profile selector */}
+            <div>
+              <label htmlFor="settings-profile" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Profile
+              </label>
+              <div className="flex gap-1">
+                <select
+                  id="settings-profile"
+                  value={selectedProfileId}
+                  onChange={(e) => {
+                    if (e.target.value === "__new__") {
+                      handleNewProfile();
+                    } else {
+                      handleSelectProfile(e.target.value);
+                    }
+                  }}
+                  className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                >
+                  {profileStore.profiles.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                  {canAddProfile(profileStore) && (
+                    <option value="__new__">+ New Profile</option>
+                  )}
+                </select>
+                <button type="button"
+                  onClick={handleDeleteProfile}
+                  disabled={profileStore.profiles.length <= 1}
+                  className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="Delete profile"
+                >
+                  <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Profile name */}
+            <div>
+              <label htmlFor="settings-profile-name" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Profile Name
+              </label>
+              <input
+                id="settings-profile-name"
+                type="text"
+                value={profileName}
+                onChange={(e) => setProfileName(e.target.value)}
+                placeholder="Profile name"
+                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Provider */}
+            {/* fieldset/legend so the radio group is announced with its caption.
+                Tailwind preflight zeroes fieldset/legend padding and margin, so
+                this renders identically to the previous div/label. */}
+            <fieldset>
+              <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Provider
+              </legend>
+              <div className="flex gap-3">
+                {(["anthropic", "openai"] as const).map((p) => (
+                  <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="provider"
+                      checked={settings.provider === p}
+                      onChange={() => handleProviderChange(p)}
+                      className="accent-blue-500"
+                    />
+                    {p === "anthropic" ? "Anthropic Claude" : "OpenAI-compatible"}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            {/* API Key */}
+            <div>
+              <label htmlFor="settings-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                API Key
+              </label>
+              <div className="flex gap-1">
+                <input
+                  id="settings-api-key"
+                  type={showKey ? "text" : "password"}
+                  value={settings.apiKey}
+                  onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
+                  placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
+                  className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+                <button type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
+                >
+                  {showKey ? "Hide" : "Show"}
+                </button>
+              </div>
+            </div>
+
+            {/* Model */}
+            <div>
+              <label htmlFor="settings-model" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Model
+              </label>
+              <input
+                id="settings-model"
+                type="text"
+                list="settings-model-options"
+                value={settings.model}
+                onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
+                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              />
+              {/* Suggestions only — the field stays free text on purpose, so a
+                  model newer than this build can still be entered by hand. */}
+              <datalist id="settings-model-options">
+                {(settings.provider === "anthropic" ? ANTHROPIC_MODELS : OPENAI_MODELS).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.note ? `${m.label} — ${m.note}` : m.label}
+                  </option>
+                ))}
+              </datalist>
+            </div>
+
+            {/* Enhance Source */}
+            <fieldset>
+              <legend className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Enhance Source
+              </legend>
+              <div className="flex gap-3">
+                {(["pseudocode", "assembly"] as const).map((s) => (
+                  <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="enhanceSource"
+                      checked={settings.enhanceSource === s}
+                      onChange={() => setSettings((prev) => ({ ...prev, enhanceSource: s }))}
+                      className="accent-blue-500"
+                    />
+                    {s === "pseudocode" ? "Pseudocode (default)" : "Assembly"}
+                  </label>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
+            </fieldset>
+
+            {/* Base URL (OpenAI only) */}
+            {settings.provider === "openai" && (
+              <div>
+                <label htmlFor="settings-base-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Base URL
+                </label>
+                <input
+                  id="settings-base-url"
+                  type="text"
+                  value={settings.baseUrl}
+                  onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
+                  placeholder="https://api.openai.com"
+                  className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+                <p className="text-[10px] text-gray-600 mt-0.5">For Ollama, LM Studio, vLLM, etc.</p>
+              </div>
+            )}
+
+            {/* Warning */}
+            <p className="text-[10px] text-gray-500 border border-gray-700 rounded px-2 py-1.5 bg-gray-900/50">
+              Key is stored in localStorage and sent only to the configured endpoint.
+            </p>
+          </>
+        )}
+
+        {/* Ghidra Tab */}
+        {activeTab === "ghidra" && (
+          <div>
+              {/* Section caption, not a control label — the checkbox below carries
+                  its own <label>. A <label> with no control is invisible to
+                  assistive tech anyway, so a plain div is more honest. */}
+              <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Decompilation Server
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={decompServer.enabled}
+                  onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
+                  className="accent-blue-500"
+                />
+                Enable Ghidra server
+              </label>
+              {decompServer.enabled && (
+                <div className="space-y-2">
+                  <div>
+                    <label htmlFor="ghidra-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                      Ghidra URL
+                    </label>
+                    <input
+                      id="ghidra-url"
+                      type="text"
+                      value={decompServer.ghidraUrl}
+                      onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
+                      placeholder="http://localhost:8765"
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="ghidra-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                      API Key
+                    </label>
+                    <input
+                      id="ghidra-api-key"
+                      type="text"
+                      value={decompServer.apiKey}
+                      onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
+                      placeholder="API key (optional)"
+                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <button type="button"
+                      onClick={async () => {
+                        setConnStatus("testing");
+                        setConnMessage("");
+                        try {
+                          const client = new GhidraClient(decompServer.ghidraUrl, decompServer.apiKey);
+                          const res = await client.ping();
+                          const ver = res.ghidraVersion ? ` (Ghidra ${res.ghidraVersion})` : "";
+                          setConnStatus("success");
+                          setConnMessage(`Connected — server v${res.version}${ver}`);
+                        } catch (err) {
+                          setConnStatus("error");
+                          setConnMessage(err instanceof Error ? err.message : "Connection failed");
+                        }
+                      }}
+                      disabled={connStatus === "testing"}
+                      className="px-3 py-1.5 text-xs text-gray-300 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {connStatus === "testing" ? "Testing..." : "Test Connection"}
+                    </button>
+                    {connStatus === "success" && (
+                      <p className="text-[10px] text-green-400 mt-1">{connMessage}</p>
+                    )}
+                    {connStatus === "error" && (
+                      <p className="text-[10px] text-red-400 mt-1">{connMessage}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
+            </div>
+        )}
+
+        {/* Display Tab */}
+        {activeTab === "display" && (
+          <div>
+              <label htmlFor="display-font-size" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Font Size
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  id="display-font-size"
+                  type="range"
+                  min={10}
+                  max={16}
+                  step={1}
+                  value={fontSize}
+                  onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                  className="flex-1 accent-blue-500"
+                />
+                <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
+              </div>
+            </div>
+        )}
+
+        {/* Theme Tab */}
+        {activeTab === "theme" && (
+          <>
+            <div>
+              {/* Section caption for the theme card grid — not a control label. */}
+              <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Color Theme
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {themes.map((theme) => {
+                  const isBuiltin = BUILTIN_THEMES.some(b => b.id === theme.id);
+                  return (
+                    // The delete "×" is a sibling rather than a child so the card
+                    // itself can be a real <button> (buttons cannot nest).
+                    <div key={theme.id} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setThemeId(theme.id)}
+                        aria-pressed={themeId === theme.id}
+                        className={`w-full text-left p-2 rounded-lg border cursor-pointer transition-colors ${
+                          themeId === theme.id
+                            ? "border-blue-500 bg-blue-500/10"
+                            : "border-gray-600 hover:border-gray-500 bg-gray-900/50"
+                        }`}
+                      >
+                        <div className="text-xs text-gray-200 font-medium">{theme.name}</div>
+                        <ThemeSwatches theme={theme} />
+                      </button>
+                      {!isBuiltin && (
+                        <button type="button"
+                          onClick={() => handleDeleteTheme(theme.id)}
+                          className="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-[10px]"
+                          title="Delete theme"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
+              >
+                Import Theme
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json"
+                onChange={handleImportTheme}
+                className="hidden"
+              />
+              <button type="button"
+                onClick={handleExportTheme}
+                className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
+              >
+                Export Current
+              </button>
+            </div>
+
+            {importError && (
+              <p className="text-[10px] text-red-400">{importError}</p>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
+        <button type="button"
+          onClick={onClose}
+          className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
+        >
+          Cancel
+        </button>
+        <button type="button"
+          onClick={handleSave}
+          className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded"
+        >
+          Save
+        </button>
+      </div>
+    </Modal>
   );
 }

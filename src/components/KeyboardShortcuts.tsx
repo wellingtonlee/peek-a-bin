@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import { ModalBackdrop } from "./ModalBackdrop";
+import { Modal } from "./Modal";
 
 interface Props {
   open: boolean;
@@ -99,63 +98,51 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 ];
 
 export function KeyboardShortcuts({ open, onClose }: Props) {
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, onClose]);
-
   if (!open) return null;
 
+  // Escape used to be a window-level listener here. It is now handled on the
+  // dialog itself, which is equivalent because Modal puts focus inside the
+  // dialog on open and keeps it there.
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
-      <ModalBackdrop onClose={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Keyboard shortcuts"
-        className="relative w-[512px] max-w-lg bg-gray-800 border border-gray-600 rounded-lg shadow-2xl overflow-hidden"
-      >
-        <div className="px-4 py-3 border-b border-gray-700">
-          <h2 className="text-sm font-semibold text-gray-200">Keyboard Shortcuts</h2>
-        </div>
-        <div className="max-h-[400px] overflow-auto px-4 py-2">
-          {SHORTCUT_GROUPS.map((group) => (
-            <div key={group.category} className="mb-3">
-              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                {group.category}
-              </div>
-              {group.shortcuts.map((shortcut) => (
-                <div
-                  key={shortcut.key}
-                  className="flex items-center justify-between py-1 text-xs"
-                >
-                  <span className="text-gray-300">{shortcut.action}</span>
-                  <span className="flex items-center gap-1">
-                    {shortcut.key.split(" / ").map((k, i) => (
-                      <span key={i} className="flex items-center gap-1">
-                        {i > 0 && <span className="text-gray-500">/</span>}
-                        <kbd className="bg-gray-700 rounded px-1.5 py-0.5 text-xs font-mono text-gray-300 border border-gray-600">
-                          {k}
-                        </kbd>
-                      </span>
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 text-center">
-          Press <kbd className="px-1 py-0.5 bg-gray-700 rounded">?</kbd> to toggle this panel
-        </div>
+    <Modal
+      label="Keyboard shortcuts"
+      onClose={onClose}
+      placement="top"
+      className="w-[512px] max-w-lg shadow-2xl overflow-hidden"
+    >
+      <div className="px-4 py-3 border-b border-gray-700">
+        <h2 className="text-sm font-semibold text-gray-200">Keyboard Shortcuts</h2>
       </div>
-    </div>
+      <div className="max-h-[400px] overflow-auto px-4 py-2">
+        {SHORTCUT_GROUPS.map((group) => (
+          <div key={group.category} className="mb-3">
+            <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              {group.category}
+            </div>
+            {group.shortcuts.map((shortcut) => (
+              <div
+                key={shortcut.key}
+                className="flex items-center justify-between py-1 text-xs"
+              >
+                <span className="text-gray-300">{shortcut.action}</span>
+                <span className="flex items-center gap-1">
+                  {shortcut.key.split(" / ").map((k, i) => (
+                    <span key={i} className="flex items-center gap-1">
+                      {i > 0 && <span className="text-gray-500">/</span>}
+                      <kbd className="bg-gray-700 rounded px-1.5 py-0.5 text-xs font-mono text-gray-300 border border-gray-600">
+                        {k}
+                      </kbd>
+                    </span>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 text-center">
+        Press <kbd className="px-1 py-0.5 bg-gray-700 rounded">?</kbd> to toggle this panel
+      </div>
+    </Modal>
   );
 }
