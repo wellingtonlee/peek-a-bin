@@ -107,37 +107,38 @@ function SignatureSection() {
 
   return (
     <section>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
         <span className="text-[8px]">{open ? "\u25BC" : "\u25B6"}</span>
         Digital Signature
         {cert?.signed ? (
-          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">Signed</span>
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
+            Signed
+          </span>
         ) : (
-          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-700 text-gray-400">Unsigned</span>
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-700 text-gray-400">
+            Unsigned
+          </span>
         )}
       </button>
       {open && cert?.signed && (
         <table>
           <tbody>
-            {cert.subject && (
-              <Row label="Subject">{cert.subject}</Row>
-            )}
-            {cert.issuer && (
-              <Row label="Issuer">{cert.issuer}</Row>
-            )}
-            {cert.notBefore && (
-              <Row label="Valid From">{cert.notBefore}</Row>
-            )}
-            {cert.notAfter && (
-              <Row label="Valid Until">{cert.notAfter}</Row>
-            )}
+            {cert.subject && <Row label="Subject">{cert.subject}</Row>}
+            {cert.issuer && <Row label="Issuer">{cert.issuer}</Row>}
+            {cert.notBefore && <Row label="Valid From">{cert.notBefore}</Row>}
+            {cert.notAfter && <Row label="Valid Until">{cert.notAfter}</Row>}
             <Row label="Signature Size">{cert.signatureSize.toLocaleString()} bytes</Row>
-            <Row label="Revision">0x{cert.revision.toString(16).toUpperCase().padStart(4, '0')}</Row>
+            <Row label="Revision">
+              0x{cert.revision.toString(16).toUpperCase().padStart(4, "0")}
+            </Row>
             <Row label="Certificate Type">
-              {cert.certificateType === 0x0002 ? 'PKCS#7 SignedData' : `0x${cert.certificateType.toString(16).toUpperCase()}`}
+              {cert.certificateType === 0x0002
+                ? "PKCS#7 SignedData"
+                : `0x${cert.certificateType.toString(16).toUpperCase()}`}
             </Row>
           </tbody>
         </table>
@@ -165,7 +166,8 @@ function TLSSection() {
 
   return (
     <section>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
@@ -199,7 +201,8 @@ function TLSSection() {
                 <div className="space-y-0.5">
                   {tls.callbacks.map((cb, i) => (
                     <div key={i}>
-                      <button type="button"
+                      <button
+                        type="button"
                         onClick={() => navigateTo(cb)}
                         className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer font-mono"
                       >
@@ -227,14 +230,16 @@ function RelocationsSection() {
 
   return (
     <section>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => setOpen(!open)}
         className="text-sm font-semibold text-gray-200 mb-2 flex items-center gap-1 w-full text-left"
       >
         <span className="text-[8px]">{open ? "▼" : "▶"}</span>
         Base Relocations
         <span className="text-gray-500 font-normal ml-1">
-          ({blocks.length} block{blocks.length !== 1 ? "s" : ""}, {totalEntries.toLocaleString()} entries)
+          ({blocks.length} block{blocks.length !== 1 ? "s" : ""}, {totalEntries.toLocaleString()}{" "}
+          entries)
         </span>
       </button>
       {open && (
@@ -253,9 +258,7 @@ function RelocationsSection() {
                 <span className="text-blue-400 font-mono">
                   0x{block.virtualAddress.toString(16).toUpperCase().padStart(8, "0")}
                 </span>
-                <span className="text-gray-500 ml-2">
-                  {block.entries.length} entries
-                </span>
+                <span className="text-gray-500 ml-2">{block.entries.length} entries</span>
                 <div className="text-gray-400 text-[10px] ml-2">{typeStr}</div>
               </div>
             );
@@ -272,9 +275,27 @@ function AnomalyBanners() {
   if (state.anomalies.length === 0) return null;
 
   const severityConfig = {
-    critical: { bg: "bg-red-900/40", border: "border-red-700/50", text: "text-red-300", icon: "!!", label: "text-red-400" },
-    warning: { bg: "bg-amber-900/40", border: "border-amber-700/50", text: "text-amber-300", icon: "!", label: "text-amber-400" },
-    info: { bg: "bg-blue-900/40", border: "border-blue-700/50", text: "text-blue-300", icon: "i", label: "text-blue-400" },
+    critical: {
+      bg: "bg-red-900/40",
+      border: "border-red-700/50",
+      text: "text-red-300",
+      icon: "!!",
+      label: "text-red-400",
+    },
+    warning: {
+      bg: "bg-amber-900/40",
+      border: "border-amber-700/50",
+      text: "text-amber-300",
+      icon: "!",
+      label: "text-amber-400",
+    },
+    info: {
+      bg: "bg-blue-900/40",
+      border: "border-blue-700/50",
+      text: "text-blue-300",
+      icon: "i",
+      label: "text-blue-400",
+    },
   };
   const order: ("critical" | "warning" | "info")[] = ["critical", "warning", "info"];
 
@@ -287,13 +308,21 @@ function AnomalyBanners() {
         if (items.length === 0) return null;
         const cfg = severityConfig[severity];
         return items.map((a) => (
-          <div key={a.idx} className={`${cfg.bg} border-l-4 ${cfg.border} px-3 py-2 flex items-start gap-2 rounded-r text-xs`}>
-            <span className={`${cfg.label} font-bold text-sm leading-none mt-0.5 shrink-0 w-4 text-center`}>{cfg.icon}</span>
+          <div
+            key={a.idx}
+            className={`${cfg.bg} border-l-4 ${cfg.border} px-3 py-2 flex items-start gap-2 rounded-r text-xs`}
+          >
+            <span
+              className={`${cfg.label} font-bold text-sm leading-none mt-0.5 shrink-0 w-4 text-center`}
+            >
+              {cfg.icon}
+            </span>
             <div className="flex-1 min-w-0">
               <span className={`${cfg.label} font-semibold`}>{a.title}</span>
               <span className={`${cfg.text} ml-2`}>{a.detail}</span>
             </div>
-            <button type="button"
+            <button
+              type="button"
               onClick={() => setDismissed((prev) => new Set([...prev, a.idx]))}
               className={`${cfg.label} hover:opacity-80 text-sm leading-none shrink-0`}
               title="Dismiss"
@@ -348,16 +377,12 @@ export function HeaderView() {
 
       {/* COFF Header */}
       <section>
-        <h2 className="text-sm font-semibold text-gray-200 mb-2">
-          COFF Header
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-200 mb-2">COFF Header</h2>
         <table>
           <tbody>
             <Row label="Machine">
               <CopyableHex value={coff.machine} width={4} />{" "}
-              <span className="text-gray-400">
-                ({MACHINE_TYPES[coff.machine] ?? "Unknown"})
-              </span>
+              <span className="text-gray-400">({MACHINE_TYPES[coff.machine] ?? "Unknown"})</span>
             </Row>
             <Row label="Number of Sections">{coff.numberOfSections}</Row>
             <Row label="Timestamp">
@@ -379,23 +404,24 @@ export function HeaderView() {
 
       {/* Optional Header */}
       <section>
-        <h2 className="text-sm font-semibold text-gray-200 mb-2">
-          Optional Header
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-200 mb-2">Optional Header</h2>
         <table>
           <tbody>
             <Row label="Magic">
               <CopyableHex value={opt.magic} width={4} />{" "}
-              <span className="text-gray-400">
-                ({pe.is64 ? "PE32+" : "PE32"})
-              </span>
+              <span className="text-gray-400">({pe.is64 ? "PE32+" : "PE32"})</span>
             </Row>
             <Row label="Entry Point">
-              <button type="button"
+              <button
+                type="button"
                 onClick={navigateToEntry}
                 className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
               >
-                0x{entryVA.toString(16).toUpperCase().padStart(pe.is64 ? 16 : 8, "0")}
+                0x
+                {entryVA
+                  .toString(16)
+                  .toUpperCase()
+                  .padStart(pe.is64 ? 16 : 8, "0")}
               </button>
               <span className="text-gray-500 ml-2">
                 (RVA: <CopyableHex value={opt.addressOfEntryPoint} />)
@@ -417,9 +443,7 @@ export function HeaderView() {
             </Row>
             <Row label="Subsystem">
               {opt.subsystem}{" "}
-              <span className="text-gray-400">
-                ({SUBSYSTEM_NAMES[opt.subsystem] ?? "Unknown"})
-              </span>
+              <span className="text-gray-400">({SUBSYSTEM_NAMES[opt.subsystem] ?? "Unknown"})</span>
             </Row>
             <Row label="DLL Characteristics">
               <CopyableHex value={opt.dllCharacteristics} width={4} />
@@ -427,18 +451,14 @@ export function HeaderView() {
                 <FlagChips flags={dllFlags} />
               </div>
             </Row>
-            <Row label="Number of RVA and Sizes">
-              {opt.numberOfRvaAndSizes}
-            </Row>
+            <Row label="Number of RVA and Sizes">{opt.numberOfRvaAndSizes}</Row>
           </tbody>
         </table>
       </section>
 
       {/* Data Directories */}
       <section>
-        <h2 className="text-sm font-semibold text-gray-200 mb-2">
-          Data Directories
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-200 mb-2">Data Directories</h2>
         <table>
           <thead>
             <tr className="text-gray-400 border-b border-gray-700">
@@ -452,9 +472,7 @@ export function HeaderView() {
             {pe.dataDirectories.map((dd, i) => (
               <tr key={i} className="border-b border-gray-800">
                 <td className="py-1 pr-6 text-gray-500">{i}</td>
-                <td className="py-1 pr-6 text-gray-300">
-                  {DATA_DIR_NAMES[i] ?? `Directory ${i}`}
-                </td>
+                <td className="py-1 pr-6 text-gray-300">{DATA_DIR_NAMES[i] ?? `Directory ${i}`}</td>
                 <td className="py-1 pr-6">
                   <CopyableHex value={dd.virtualAddress} />
                 </td>
@@ -481,7 +499,8 @@ export function HeaderView() {
                 <span className="text-green-400">Valid</span>
               ) : (
                 <span className="text-red-400">
-                  Invalid (expected <CopyableHex value={checksum.expected} />, actual <CopyableHex value={checksum.actual} />)
+                  Invalid (expected <CopyableHex value={checksum.expected} />, actual{" "}
+                  <CopyableHex value={checksum.actual} />)
                 </span>
               )}
             </Row>
@@ -504,7 +523,8 @@ export function HeaderView() {
                 <span>
                   <span className="text-yellow-400">Detected</span>{" "}
                   <span className="text-gray-400">
-                    at offset 0x{overlay.offset.toString(16).toUpperCase()}, {overlay.size.toLocaleString()} bytes
+                    at offset 0x{overlay.offset.toString(16).toUpperCase()},{" "}
+                    {overlay.size.toLocaleString()} bytes
                   </span>
                 </span>
               ) : (
@@ -525,7 +545,11 @@ export function HeaderView() {
                     <td className="py-1 pr-4 text-gray-400">{d.typeName}</td>
                     <td className="py-1 text-gray-200">
                       {d.pdbPath && <div className="text-green-400 font-mono">{d.pdbPath}</div>}
-                      {d.guid && <div className="text-gray-500 text-[10px]">GUID: {d.guid} Age: {d.age}</div>}
+                      {d.guid && (
+                        <div className="text-gray-500 text-[10px]">
+                          GUID: {d.guid} Age: {d.age}
+                        </div>
+                      )}
                       {!d.pdbPath && !d.guid && <span className="text-gray-500">—</span>}
                     </td>
                   </tr>
@@ -538,7 +562,9 @@ export function HeaderView() {
         {/* Rich Header */}
         {richHeader && richHeader.length > 0 && (
           <div className="mt-3">
-            <h3 className="text-xs font-semibold text-gray-300 mb-1">Rich Header ({richHeader.length} entries)</h3>
+            <h3 className="text-xs font-semibold text-gray-300 mb-1">
+              Rich Header ({richHeader.length} entries)
+            </h3>
             <table className="w-full">
               <thead>
                 <tr className="text-gray-400 border-b border-gray-700">
@@ -550,7 +576,9 @@ export function HeaderView() {
               <tbody>
                 {richHeader.map((entry, i) => (
                   <tr key={i} className="border-b border-gray-800">
-                    <td className="py-1 pr-4 text-blue-400 font-mono">0x{entry.toolId.toString(16).toUpperCase()}</td>
+                    <td className="py-1 pr-4 text-blue-400 font-mono">
+                      0x{entry.toolId.toString(16).toUpperCase()}
+                    </td>
                     <td className="py-1 pr-4 text-gray-300 font-mono">{entry.buildId}</td>
                     <td className="py-1 text-gray-400">{entry.useCount}</td>
                   </tr>

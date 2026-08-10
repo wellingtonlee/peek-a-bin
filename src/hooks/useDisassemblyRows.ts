@@ -115,7 +115,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     // Use hybrid disassembly when functions are detected (seeds available)
     let disasmPromise: Promise<Instruction[]>;
     if (state.functions.length > 0) {
-      const pdataRanges = pe.runtimeFunctions?.map(rf => ({
+      const pdataRanges = pe.runtimeFunctions?.map((rf) => ({
         beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
         endAddress: pe.optionalHeader.imageBase + rf.endAddress,
       }));
@@ -123,7 +123,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
         bytesToDisasm,
         baseAddr,
         pe.is64,
-        state.functions.map(f => f.address),
+        state.functions.map((f) => f.address),
         pdataRanges,
       );
     } else {
@@ -147,7 +147,9 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
         if (!cancelled) setDisassembling(false);
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size, state.functions, isExecutable]);
 
   // Build funcMap for O(1) lookup
@@ -185,7 +187,9 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
       .catch((err) => {
         console.error("[peek-a-bin] failed to build typed xref map", err);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [instructions]);
 
   // Legacy xref map — stabilized to avoid unnecessary row rebuilds
@@ -196,7 +200,10 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     if (newSet.size === prev.size) {
       let same = true;
       for (const k of newSet) {
-        if (!prev.has(k)) { same = false; break; }
+        if (!prev.has(k)) {
+          same = false;
+          break;
+        }
       }
       if (same) return prev;
     }
@@ -207,7 +214,10 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
   const xrefMap = useMemo(() => {
     const m = new Map<number, number[]>();
     for (const [addr, xrefs] of typedXrefMap) {
-      m.set(addr, xrefs.map((x) => x.from));
+      m.set(
+        addr,
+        xrefs.map((x) => x.from),
+      );
     }
     return m;
   }, [typedXrefMap]);
@@ -235,22 +245,35 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
   // Data items for non-executable sections
   const dataItems = useMemo((): DataItem[] => {
     if (isExecutable || !pe || !sectionInfo) return [];
-    const bytes = new Uint8Array(pe.buffer, sectionInfo.pointerToRawData, sectionInfo.sizeOfRawData);
+    const bytes = new Uint8Array(
+      pe.buffer,
+      sectionInfo.pointerToRawData,
+      sectionInfo.sizeOfRawData,
+    );
     const baseAddress = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
     const iatMap = state.iatMap;
     const funcAddrsMap = new Map<number, string>();
     for (const fn of state.functions) funcAddrsMap.set(fn.address, fn.name);
-    const sectionRanges = pe.sections.map(s => ({
+    const sectionRanges = pe.sections.map((s) => ({
       start: pe.optionalHeader.imageBase + s.virtualAddress,
       end: pe.optionalHeader.imageBase + s.virtualAddress + s.virtualSize,
     }));
-    return buildDataItems(bytes, baseAddress, pe.is64, pe.strings, pe.stringTypes, iatMap, funcAddrsMap, sectionRanges);
+    return buildDataItems(
+      bytes,
+      baseAddress,
+      pe.is64,
+      pe.strings,
+      pe.stringTypes,
+      iatMap,
+      funcAddrsMap,
+      sectionRanges,
+    );
   }, [isExecutable, pe, sectionInfo, state.functions]);
 
   // Build display rows (with basic block separators and block indices)
   const rows: DisplayRow[] = useMemo(() => {
     if (!isExecutable) {
-      return dataItems.map(item => ({ kind: "data" as const, item }));
+      return dataItems.map((item) => ({ kind: "data" as const, item }));
     }
     const result: DisplayRow[] = [];
     const separatorMnemonics = new Set(["ret", "retn", "jmp", "int3"]);

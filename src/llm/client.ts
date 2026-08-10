@@ -143,7 +143,9 @@ function streamSSE(
           accumulated += text;
           scheduleFlush();
         }
-      } catch { /* skip malformed JSON */ }
+      } catch {
+        /* skip malformed JSON */
+      }
     }
   }
 
@@ -268,7 +270,8 @@ export function streamEnhance(
   options: StreamOptions = {},
 ): void {
   const isAnthropic = config.provider === "anthropic";
-  const prompt = systemPrompt ?? (config.enhanceSource === "assembly" ? SYSTEM_PROMPT_ASM : SYSTEM_PROMPT);
+  const prompt =
+    systemPrompt ?? (config.enhanceSource === "assembly" ? SYSTEM_PROMPT_ASM : SYSTEM_PROMPT);
   const url = buildUrl(config, isAnthropic);
   const headers = buildHeaders(config, isAnthropic);
   const maxTokens = maxTokensFor("enhance");

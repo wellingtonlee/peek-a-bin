@@ -20,9 +20,7 @@ export const ANTHROPIC_MODELS = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", note: "Fastest and cheapest" },
 ] as const;
 
-export const OPENAI_MODELS = [
-  { id: "gpt-4o", label: "GPT-4o", note: "" },
-] as const;
+export const OPENAI_MODELS = [{ id: "gpt-4o", label: "GPT-4o", note: "" }] as const;
 
 export const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5";
 export const OPENAI_DEFAULT_MODEL = "gpt-4o";
@@ -47,8 +45,7 @@ export const LEGACY_DEFAULT_MODELS: Record<LLMProvider, readonly string[]> = {
 /** Is `model` either the current default for `provider`, or a superseded one? */
 export function isDefaultModel(provider: LLMProvider, model: string): boolean {
   return (
-    model === PROVIDER_DEFAULTS[provider].model ||
-    LEGACY_DEFAULT_MODELS[provider].includes(model)
+    model === PROVIDER_DEFAULTS[provider].model || LEGACY_DEFAULT_MODELS[provider].includes(model)
   );
 }
 

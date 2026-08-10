@@ -1,6 +1,12 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { focusOnMount } from "./focusOnMount";
-import { useAppState, useAppDispatch, getDisplayName, type ViewTab, type Bookmark } from "../hooks/usePEFile";
+import {
+  useAppState,
+  useAppDispatch,
+  getDisplayName,
+  type ViewTab,
+  type Bookmark,
+} from "../hooks/usePEFile";
 import { serializeState, validateImport } from "../utils/exportSchema";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
@@ -72,10 +78,15 @@ export function AddressBar() {
       seen.add(addr);
       // Find containing function
       let funcName: string | null = null;
-      let lo = 0, hi = sortedFuncs.length - 1;
+      let lo = 0,
+        hi = sortedFuncs.length - 1;
       while (lo <= hi) {
         const mid = (lo + hi) >>> 1;
-        if (sortedFuncs[mid].address <= addr) { lo = mid + 1; } else { hi = mid - 1; }
+        if (sortedFuncs[mid].address <= addr) {
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
       }
       if (hi >= 0) {
         const fn = sortedFuncs[hi];
@@ -100,71 +111,83 @@ export function AddressBar() {
     onDismiss: () => setShowHistory(false),
   });
 
-  const computeSuggestions = useCallback((query: string) => {
-    if (!query || query.length < 1) {
+  const computeSuggestions = useCallback(
+    (query: string) => {
+      if (!query || query.length < 1) {
+        setSuggestions([]);
+        setShowSuggestions(false);
+        return;
+      }
+
+      const results: Suggestion[] = [];
+
+      // Match functions (cap 5)
+      let count = 0;
+      for (const fn of sortedFuncs) {
+        if (count >= 5) break;
+        const name = getDisplayName(fn, state.renames);
+        if (fuzzyMatch(query, name)) {
+          results.push({ label: name, address: fn.address, category: "function" });
+          count++;
+        }
+      }
+
+      // Match exports (cap 3)
+      count = 0;
+      for (const exp of exports) {
+        if (count >= 3) break;
+        if (fuzzyMatch(query, exp.name)) {
+          // Avoid duplicates
+          if (!results.some((r) => r.address === exp.address)) {
+            results.push({ label: exp.name, address: exp.address, category: "export" });
+            count++;
+          }
+        }
+      }
+
+      // Match bookmarks (cap 3)
+      count = 0;
+      for (const bm of state.bookmarks) {
+        if (count >= 3) break;
+        const label = bm.label || `0x${bm.address.toString(16).toUpperCase()}`;
+        if (
+          fuzzyMatch(query, label) ||
+          bm.address.toString(16).includes(query.replace(/^0x/i, ""))
+        ) {
+          if (!results.some((r) => r.address === bm.address)) {
+            results.push({ label, address: bm.address, category: "bookmark" });
+            count++;
+          }
+        }
+      }
+
+      setSuggestions(results.slice(0, 8));
+      setSuggestionIdx(-1);
+      setShowSuggestions(results.length > 0);
+    },
+    [sortedFuncs, exports, state.renames, state.bookmarks],
+  );
+
+  const handleInputChange = useCallback(
+    (value: string) => {
+      setInput(value);
+      clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => computeSuggestions(value), 80);
+    },
+    [computeSuggestions],
+  );
+
+  const selectSuggestion = useCallback(
+    (s: Suggestion) => {
+      dispatch({ type: "SET_ADDRESS", address: s.address });
+      dispatch({ type: "SET_TAB", tab: "disassembly" });
+      setInput("");
       setSuggestions([]);
       setShowSuggestions(false);
-      return;
-    }
-
-    const results: Suggestion[] = [];
-
-    // Match functions (cap 5)
-    let count = 0;
-    for (const fn of sortedFuncs) {
-      if (count >= 5) break;
-      const name = getDisplayName(fn, state.renames);
-      if (fuzzyMatch(query, name)) {
-        results.push({ label: name, address: fn.address, category: "function" });
-        count++;
-      }
-    }
-
-    // Match exports (cap 3)
-    count = 0;
-    for (const exp of exports) {
-      if (count >= 3) break;
-      if (fuzzyMatch(query, exp.name)) {
-        // Avoid duplicates
-        if (!results.some((r) => r.address === exp.address)) {
-          results.push({ label: exp.name, address: exp.address, category: "export" });
-          count++;
-        }
-      }
-    }
-
-    // Match bookmarks (cap 3)
-    count = 0;
-    for (const bm of state.bookmarks) {
-      if (count >= 3) break;
-      const label = bm.label || `0x${bm.address.toString(16).toUpperCase()}`;
-      if (fuzzyMatch(query, label) || bm.address.toString(16).includes(query.replace(/^0x/i, ""))) {
-        if (!results.some((r) => r.address === bm.address)) {
-          results.push({ label, address: bm.address, category: "bookmark" });
-          count++;
-        }
-      }
-    }
-
-    setSuggestions(results.slice(0, 8));
-    setSuggestionIdx(-1);
-    setShowSuggestions(results.length > 0);
-  }, [sortedFuncs, exports, state.renames, state.bookmarks]);
-
-  const handleInputChange = useCallback((value: string) => {
-    setInput(value);
-    clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => computeSuggestions(value), 80);
-  }, [computeSuggestions]);
-
-  const selectSuggestion = useCallback((s: Suggestion) => {
-    dispatch({ type: "SET_ADDRESS", address: s.address });
-    dispatch({ type: "SET_TAB", tab: "disassembly" });
-    setInput("");
-    setSuggestions([]);
-    setShowSuggestions(false);
-    setInvalid(false);
-  }, [dispatch]);
+      setInvalid(false);
+    },
+    [dispatch],
+  );
 
   const handleGo = useCallback(() => {
     // If a suggestion is selected, use it
@@ -216,8 +239,14 @@ export function AddressBar() {
           return;
         }
       } else {
-        if (e.key === "Enter") { handleGo(); return; }
-        if (e.key === "Escape") { (e.target as HTMLElement).blur(); return; }
+        if (e.key === "Enter") {
+          handleGo();
+          return;
+        }
+        if (e.key === "Escape") {
+          (e.target as HTMLElement).blur();
+          return;
+        }
       }
     },
     [handleGo, showSuggestions, suggestions, suggestionIdx, selectSuggestion],
@@ -247,53 +276,63 @@ export function AddressBar() {
     URL.revokeObjectURL(url);
   }, [state]);
 
-  const handleImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result as string);
-        const validated = validateImport(data);
-        if (validated) {
-          // V1 schema: full analysis import
-          const renames: Record<number, string> = {};
-          for (const [k, v] of Object.entries(validated.renames)) {
-            renames[parseInt(k, 10)] = v;
-          }
-          const comments: Record<number, string> = {};
-          for (const [k, v] of Object.entries(validated.comments)) {
-            comments[parseInt(k, 10)] = v;
-          }
-          const hexPatches = new Map<number, number>();
-          for (const [offset, value] of validated.hexPatches) {
-            if (value >= 0 && value <= 255) {
-              hexPatches.set(offset, value);
+  const handleImport = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result as string);
+          const validated = validateImport(data);
+          if (validated) {
+            // V1 schema: full analysis import
+            const renames: Record<number, string> = {};
+            for (const [k, v] of Object.entries(validated.renames)) {
+              renames[parseInt(k, 10)] = v;
             }
+            const comments: Record<number, string> = {};
+            for (const [k, v] of Object.entries(validated.comments)) {
+              comments[parseInt(k, 10)] = v;
+            }
+            const hexPatches = new Map<number, number>();
+            for (const [offset, value] of validated.hexPatches) {
+              if (value >= 0 && value <= 255) {
+                hexPatches.set(offset, value);
+              }
+            }
+            dispatch({
+              type: "IMPORT_FULL_ANALYSIS",
+              bookmarks: validated.bookmarks,
+              renames,
+              comments,
+              hexPatches,
+            });
+          } else if (
+            data &&
+            (Array.isArray(data.bookmarks) ||
+              (data.renames && typeof data.renames === "object") ||
+              (data.comments && typeof data.comments === "object"))
+          ) {
+            // Legacy format: annotation-only import
+            const bookmarks: Bookmark[] = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+            const renames: Record<number, string> =
+              data.renames && typeof data.renames === "object" ? data.renames : {};
+            const comments: Record<number, string> =
+              data.comments && typeof data.comments === "object" ? data.comments : {};
+            dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
+          } else {
+            alert("Invalid analysis file format.");
           }
-          dispatch({
-            type: "IMPORT_FULL_ANALYSIS",
-            bookmarks: validated.bookmarks,
-            renames,
-            comments,
-            hexPatches,
-          });
-        } else if (data && (Array.isArray(data.bookmarks) || (data.renames && typeof data.renames === "object") || (data.comments && typeof data.comments === "object"))) {
-          // Legacy format: annotation-only import
-          const bookmarks: Bookmark[] = Array.isArray(data.bookmarks) ? data.bookmarks : [];
-          const renames: Record<number, string> = data.renames && typeof data.renames === "object" ? data.renames : {};
-          const comments: Record<number, string> = data.comments && typeof data.comments === "object" ? data.comments : {};
-          dispatch({ type: "IMPORT_ANNOTATIONS", bookmarks, renames, comments });
-        } else {
-          alert("Invalid analysis file format.");
+        } catch {
+          alert("Failed to parse the imported file.");
         }
-      } catch {
-        alert("Failed to parse the imported file.");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
-  }, [dispatch]);
+      };
+      reader.readAsText(file);
+      e.target.value = "";
+    },
+    [dispatch],
+  );
 
   // Global keyboard shortcuts for tab switching and nav
   useEffect(() => {
@@ -351,7 +390,8 @@ export function AddressBar() {
 
   return (
     <div className="flex items-center gap-1 px-3 py-1.5 toolbar-bg border-b border-theme text-sm">
-      <button type="button"
+      <button
+        type="button"
         onClick={handleReset}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
         title="Load new file"
@@ -362,7 +402,8 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* Back / Forward */}
-      <button type="button"
+      <button
+        type="button"
         onClick={() => dispatch({ type: "NAV_BACK" })}
         disabled={!canGoBack}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
@@ -370,7 +411,8 @@ export function AddressBar() {
       >
         ◀
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => dispatch({ type: "NAV_FORWARD" })}
         disabled={!canGoForward}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
@@ -382,7 +424,8 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* Undo / Redo */}
-      <button type="button"
+      <button
+        type="button"
         onClick={() => dispatch({ type: "UNDO_ANNOTATION" })}
         disabled={state.annotationUndoStack.length === 0}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
@@ -390,7 +433,8 @@ export function AddressBar() {
       >
         Undo
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => dispatch({ type: "REDO_ANNOTATION" })}
         disabled={state.annotationRedoStack.length === 0}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
@@ -409,22 +453,32 @@ export function AddressBar() {
         const scanNote = !isAnomalies
           ? null
           : state.aiScan.phase === "failed"
-          ? "AI scan failed — findings are not a clean result"
-          : state.aiScan.phase === "complete" && state.aiScan.failed > 0
-          ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
-          : null;
+            ? "AI scan failed — findings are not a clean result"
+            : state.aiScan.phase === "complete" && state.aiScan.failed > 0
+              ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
+              : null;
         const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
-        const maxSeverity = isAnomalies && anomalyCount > 0
-          ? (state.anomalies.some(a => a.severity === "critical") || state.aiScanResults.some(a => a.severity === "critical" || a.severity === "high")) ? "critical"
-            : (state.anomalies.some(a => a.severity === "warning") || state.aiScanResults.some(a => a.severity === "medium")) ? "warning"
-            : "info"
-          : null;
-        const badgeColor = maxSeverity === "critical" ? "bg-red-500"
-          : maxSeverity === "warning" ? "bg-amber-500"
-          : maxSeverity === "info" ? "bg-blue-500"
-          : "";
+        const maxSeverity =
+          isAnomalies && anomalyCount > 0
+            ? state.anomalies.some((a) => a.severity === "critical") ||
+              state.aiScanResults.some((a) => a.severity === "critical" || a.severity === "high")
+              ? "critical"
+              : state.anomalies.some((a) => a.severity === "warning") ||
+                  state.aiScanResults.some((a) => a.severity === "medium")
+                ? "warning"
+                : "info"
+            : null;
+        const badgeColor =
+          maxSeverity === "critical"
+            ? "bg-red-500"
+            : maxSeverity === "warning"
+              ? "bg-amber-500"
+              : maxSeverity === "info"
+                ? "bg-blue-500"
+                : "";
         return (
-          <button type="button"
+          <button
+            type="button"
             key={tab.id}
             onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
             className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
@@ -437,7 +491,9 @@ export function AddressBar() {
           >
             {tab.label}
             {isAnomalies && anomalyCount > 0 && (
-              <span className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}>
+              <span
+                className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
+              >
                 {anomalyCount}
               </span>
             )}
@@ -458,78 +514,117 @@ export function AddressBar() {
       {!state.disasmReady && (
         <span className="text-yellow-500 text-xs mr-2 flex items-center gap-1">
           <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+              fill="none"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+            />
           </svg>
           Loading engine...
         </span>
       )}
 
       <span className="text-gray-500 text-xs mr-2">
-        VA: 0x{state.currentAddress.toString(16).toUpperCase().padStart(state.peFile?.is64 ? 16 : 8, "0")}
+        VA: 0x
+        {state.currentAddress
+          .toString(16)
+          .toUpperCase()
+          .padStart(state.peFile?.is64 ? 16 : 8, "0")}
       </span>
 
       {/* Recent addresses dropdown */}
       <div ref={historyRef} className="relative">
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setShowHistory((v) => !v)}
           className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
           title="Recent addresses (Alt+H)"
         >
-          <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
+          <svg
+            aria-hidden="true"
+            className="w-3.5 h-3.5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"
+            />
           </svg>
         </button>
-        {showHistory && recentAddresses.length > 0 && (() => {
-          const q = historyFilter.toLowerCase().replace(/^0x/i, "");
-          const filtered = q
-            ? recentAddresses.filter((e) =>
-                e.address.toString(16).toLowerCase().includes(q) ||
-                (e.funcName?.toLowerCase().includes(q))
-              )
-            : recentAddresses;
-          return (
-            <div className="absolute top-full right-0 mt-0.5 w-80 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-96 flex flex-col">
-              <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">Recent Addresses</div>
-              <div className="px-2 py-1 border-b border-gray-700">
-                <input
-                  ref={focusOnMount}
-                  type="text"
-                  value={historyFilter}
-                  onChange={(e) => setHistoryFilter(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") { setShowHistory(false); e.stopPropagation(); }
-                  }}
-                  placeholder="Filter addresses..."
-                  className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-[10px] text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div className="overflow-auto flex-1">
-                {filtered.length === 0 && (
-                  <div className="px-3 py-3 text-[10px] text-gray-500 text-center">No matches</div>
-                )}
-                {filtered.map((entry, i) => (
-                  <button type="button"
-                    key={`${entry.address}-${i}`}
-                    className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
-                    onClick={() => {
-                      dispatch({ type: "SET_ADDRESS", address: entry.address });
-                      dispatch({ type: "SET_TAB", tab: "disassembly" });
-                      setShowHistory(false);
+        {showHistory &&
+          recentAddresses.length > 0 &&
+          (() => {
+            const q = historyFilter.toLowerCase().replace(/^0x/i, "");
+            const filtered = q
+              ? recentAddresses.filter(
+                  (e) =>
+                    e.address.toString(16).toLowerCase().includes(q) ||
+                    e.funcName?.toLowerCase().includes(q),
+                )
+              : recentAddresses;
+            return (
+              <div className="absolute top-full right-0 mt-0.5 w-80 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-96 flex flex-col">
+                <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700 font-semibold">
+                  Recent Addresses
+                </div>
+                <div className="px-2 py-1 border-b border-gray-700">
+                  <input
+                    ref={focusOnMount}
+                    type="text"
+                    value={historyFilter}
+                    onChange={(e) => setHistoryFilter(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        setShowHistory(false);
+                        e.stopPropagation();
+                      }
                     }}
-                  >
-                    <span className="text-blue-400 font-mono text-[10px] shrink-0">
-                      0x{entry.address.toString(16).toUpperCase()}
-                    </span>
-                    {entry.funcName && (
-                      <span className="text-gray-500 truncate">{entry.funcName}</span>
-                    )}
-                  </button>
-                ))}
+                    placeholder="Filter addresses..."
+                    className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-[10px] text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="overflow-auto flex-1">
+                  {filtered.length === 0 && (
+                    <div className="px-3 py-3 text-[10px] text-gray-500 text-center">
+                      No matches
+                    </div>
+                  )}
+                  {filtered.map((entry, i) => (
+                    <button
+                      type="button"
+                      key={`${entry.address}-${i}`}
+                      className="w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 text-gray-300 hover:bg-gray-700/50"
+                      onClick={() => {
+                        dispatch({ type: "SET_ADDRESS", address: entry.address });
+                        dispatch({ type: "SET_TAB", tab: "disassembly" });
+                        setShowHistory(false);
+                      }}
+                    >
+                      <span className="text-blue-400 font-mono text-[10px] shrink-0">
+                        0x{entry.address.toString(16).toUpperCase()}
+                      </span>
+                      {entry.funcName && (
+                        <span className="text-gray-500 truncate">{entry.funcName}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          );
-        })()}
+            );
+          })()}
       </div>
 
       {/* Address input with autocomplete */}
@@ -540,7 +635,9 @@ export function AddressBar() {
           value={input}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true); }}
+          onFocus={() => {
+            if (suggestions.length > 0) setShowSuggestions(true);
+          }}
           placeholder="Go to address (G)"
           className={`w-48 px-2 py-1 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 text-xs focus:outline-none focus:border-blue-500 transition-colors ${
             invalid ? "border-red-500" : "border-gray-600"
@@ -549,12 +646,18 @@ export function AddressBar() {
         {showSuggestions && suggestions.length > 0 && (
           <div className="absolute top-full left-0 mt-0.5 w-72 bg-gray-800 border border-gray-600 rounded shadow-xl z-50 max-h-52 overflow-auto">
             {suggestions.map((s, i) => (
-              <button type="button"
+              <button
+                type="button"
                 key={`${s.address}-${i}`}
                 className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 ${
-                  i === suggestionIdx ? "bg-blue-600/30 text-white" : "text-gray-300 hover:bg-gray-700/50"
+                  i === suggestionIdx
+                    ? "bg-blue-600/30 text-white"
+                    : "text-gray-300 hover:bg-gray-700/50"
                 }`}
-                onMouseDown={(e) => { e.preventDefault(); selectSuggestion(s); }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  selectSuggestion(s);
+                }}
                 onMouseEnter={() => setSuggestionIdx(i)}
               >
                 <span className="text-gray-500 font-mono text-[10px] w-24 shrink-0">
@@ -567,7 +670,8 @@ export function AddressBar() {
           </div>
         )}
       </div>
-      <button type="button"
+      <button
+        type="button"
         onClick={handleGo}
         className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs"
       >
@@ -576,14 +680,16 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      <button type="button"
+      <button
+        type="button"
         onClick={handleExport}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="Export annotations (bookmarks, renames, comments)"
       >
         Export
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => importInputRef.current?.click()}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="Import annotations from JSON file"
@@ -601,28 +707,32 @@ export function AddressBar() {
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
       {/* AI toolbar buttons */}
-      <button type="button"
+      <button
+        type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI Chat (Ctrl+Shift+A)"
       >
         Chat
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:batch-rename"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Rename All Functions"
       >
         Rename
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:generate-report"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Generate Analysis Report"
       >
         Report
       </button>
-      <button type="button"
+      <button
+        type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:ai-scan"))}
         className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded text-xs transition-colors"
         title="AI: Scan Suspicious Functions"
@@ -632,13 +742,25 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      <button type="button"
+      <button
+        type="button"
         onClick={() => window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"))}
         className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
         title="Settings"
       >
-        <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+        <svg
+          aria-hidden="true"
+          className="w-3.5 h-3.5"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          strokeWidth={2}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+          />
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>
       </button>

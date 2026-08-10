@@ -6,14 +6,14 @@
  * The only genuine divergence was the line cap, which is per-caller because the
  * three features have different token budgets; it stays a parameter.
  */
-import type { DisasmFunction } from '../disasm/types';
-import type { PEFile, SectionHeader } from '../pe/types';
-import { findCodeSection } from '../pe/sections';
-import { disasmWorker } from '../workers/disasmClient';
-import { analyzeStackFrame } from '../disasm/stack';
-import { inferSignature } from '../disasm/signatures';
-import { getDisplayName } from '../hooks/usePEFile';
-import { functionByteRange, truncateCode } from './decompileTarget';
+import type { DisasmFunction } from "../disasm/types";
+import type { PEFile, SectionHeader } from "../pe/types";
+import { findCodeSection } from "../pe/sections";
+import { disasmWorker } from "../workers/disasmClient";
+import { analyzeStackFrame } from "../disasm/stack";
+import { inferSignature } from "../disasm/signatures";
+import { getDisplayName } from "../hooks/usePEFile";
+import { functionByteRange, truncateCode } from "./decompileTarget";
 
 export interface DecompileForLLMOptions {
   /** Cap the returned pseudocode at this many lines. Omit for no cap. */
@@ -55,11 +55,19 @@ export async function decompileForLLM(
     const xrefMap = await disasmWorker.buildTypedXrefMap(instructions);
     const sf = analyzeStackFrame(fn, instructions, pe.is64);
     const sig = inferSignature(fn, instructions, pe.is64);
-    const funcEntries: [number, { name: string; address: number }][] =
-      functions.map(f => [f.address, { name: getDisplayName(f, renames), address: f.address }]);
+    const funcEntries: [number, { name: string; address: number }][] = functions.map((f) => [
+      f.address,
+      { name: getDisplayName(f, renames), address: f.address },
+    ]);
     const result = await disasmWorker.decompileFunction(
-      fn, instructions, xrefMap, sf, sig, pe.is64,
-      new Map(funcEntries), pe.runtimeFunctions,
+      fn,
+      instructions,
+      xrefMap,
+      sf,
+      sig,
+      pe.is64,
+      new Map(funcEntries),
+      pe.runtimeFunctions,
     );
     if (!result.code) return null;
     return truncateCode(result.code, options.maxLines);

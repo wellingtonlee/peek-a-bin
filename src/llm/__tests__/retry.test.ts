@@ -315,7 +315,7 @@ describe("RequestLimiter", () => {
     const b = await limiter.acquire();
 
     let thirdStarted = false;
-    const third = limiter.acquire().then(release => {
+    const third = limiter.acquire().then((release) => {
       thirdStarted = true;
       return release;
     });

@@ -1,9 +1,40 @@
 import { useState, useEffect, useRef } from "react";
 import { Modal } from "./Modal";
-import { loadSettings, loadFontSize, saveFontSize, loadDecompileServer, saveDecompileServer, loadProfiles, saveProfiles, getActiveProfile, canAddProfile, type LLMSettings, type LLMProfile, type LLMProfileStore, type DecompileServerSettings } from "../llm/settings";
-import { getAllThemes, loadThemeId, saveThemeId, saveCustomTheme, deleteCustomTheme, exportTheme, importTheme, BUILTIN_THEMES, type Theme } from "../styles/themes";
+import {
+  loadSettings,
+  loadFontSize,
+  saveFontSize,
+  loadDecompileServer,
+  saveDecompileServer,
+  loadProfiles,
+  saveProfiles,
+  getActiveProfile,
+  canAddProfile,
+  type LLMSettings,
+  type LLMProfile,
+  type LLMProfileStore,
+  type DecompileServerSettings,
+} from "../llm/settings";
+import {
+  getAllThemes,
+  loadThemeId,
+  saveThemeId,
+  saveCustomTheme,
+  deleteCustomTheme,
+  exportTheme,
+  importTheme,
+  BUILTIN_THEMES,
+  type Theme,
+} from "../styles/themes";
 import { GhidraClient } from "../ghidra/client";
-import { PROVIDER_DEFAULTS, ANTHROPIC_DEFAULT_MODEL, ANTHROPIC_DEFAULT_BASE_URL, ANTHROPIC_MODELS, OPENAI_MODELS, isDefaultModel } from "../llm/models";
+import {
+  PROVIDER_DEFAULTS,
+  ANTHROPIC_DEFAULT_MODEL,
+  ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_MODELS,
+  OPENAI_MODELS,
+  isDefaultModel,
+} from "../llm/models";
 
 interface Props {
   open: boolean;
@@ -60,7 +91,7 @@ export function SettingsModal({ open, onClose }: Props) {
   }, [open]);
 
   const handleSelectProfile = (id: string) => {
-    const profile = profileStore.profiles.find(p => p.id === id);
+    const profile = profileStore.profiles.find((p) => p.id === id);
     if (!profile) return;
     setSelectedProfileId(id);
     const { id: _, name: __, ...s } = profile;
@@ -94,17 +125,17 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const handleDeleteProfile = () => {
     if (profileStore.profiles.length <= 1) return;
-    const remaining = profileStore.profiles.filter(p => p.id !== selectedProfileId);
-    const newActiveId = profileStore.activeId === selectedProfileId ? remaining[0].id : profileStore.activeId;
+    const remaining = profileStore.profiles.filter((p) => p.id !== selectedProfileId);
+    const newActiveId =
+      profileStore.activeId === selectedProfileId ? remaining[0].id : profileStore.activeId;
     const newStore: LLMProfileStore = { profiles: remaining, activeId: newActiveId };
     setProfileStore(newStore);
-    const fallback = remaining.find(p => p.id === newActiveId) ?? remaining[0];
+    const fallback = remaining.find((p) => p.id === newActiveId) ?? remaining[0];
     setSelectedProfileId(fallback.id);
     const { id: _, name: __, ...s } = fallback;
     setSettings(s);
     setProfileName(fallback.name);
   };
-
 
   if (!open) return null;
 
@@ -124,8 +155,8 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const handleSave = () => {
     // Update selected profile in store
-    const updatedProfiles = profileStore.profiles.map(p =>
-      p.id === selectedProfileId ? { ...p, ...settings, name: profileName } : p
+    const updatedProfiles = profileStore.profiles.map((p) =>
+      p.id === selectedProfileId ? { ...p, ...settings, name: profileName } : p,
     );
     const store: LLMProfileStore = {
       profiles: updatedProfiles,
@@ -160,7 +191,7 @@ export function SettingsModal({ open, onClose }: Props) {
   };
 
   const handleExportTheme = () => {
-    const theme = themes.find(t => t.id === themeId);
+    const theme = themes.find((t) => t.id === themeId);
     if (!theme) return;
     const json = exportTheme(theme);
     const blob = new Blob([json], { type: "application/json" });
@@ -181,7 +212,15 @@ export function SettingsModal({ open, onClose }: Props) {
   // Preview theme colors as small swatches
   const ThemeSwatches = ({ theme }: { theme: Theme }) => (
     <div className="flex gap-0.5 mt-1">
-      {[theme.colors.bg, theme.colors.mnemonic, theme.colors.mnCall, theme.colors.mnRet, theme.colors.mnJump, theme.colors.opRegister, theme.colors.comment].map((c, i) => (
+      {[
+        theme.colors.bg,
+        theme.colors.mnemonic,
+        theme.colors.mnCall,
+        theme.colors.mnRet,
+        theme.colors.mnJump,
+        theme.colors.opRegister,
+        theme.colors.comment,
+      ].map((c, i) => (
         <div key={i} className="w-3 h-3 rounded-sm" style={{ background: c }} />
       ))}
     </div>
@@ -208,7 +247,8 @@ export function SettingsModal({ open, onClose }: Props) {
       {/* Tab bar */}
       <div className="flex border-b border-gray-700">
         {TABS.map((tab) => (
-          <button type="button"
+          <button
+            type="button"
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`px-4 py-2 text-xs font-medium transition-colors ${
@@ -228,7 +268,10 @@ export function SettingsModal({ open, onClose }: Props) {
           <>
             {/* Profile selector */}
             <div>
-              <label htmlFor="settings-profile" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              <label
+                htmlFor="settings-profile"
+                className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+              >
                 Profile
               </label>
               <div className="flex gap-1">
@@ -244,21 +287,33 @@ export function SettingsModal({ open, onClose }: Props) {
                   }}
                   className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 focus:outline-none focus:border-blue-500"
                 >
-                  {profileStore.profiles.map(p => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
+                  {profileStore.profiles.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
                   ))}
-                  {canAddProfile(profileStore) && (
-                    <option value="__new__">+ New Profile</option>
-                  )}
+                  {canAddProfile(profileStore) && <option value="__new__">+ New Profile</option>}
                 </select>
-                <button type="button"
+                <button
+                  type="button"
                   onClick={handleDeleteProfile}
                   disabled={profileStore.profiles.length <= 1}
                   className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-red-400 rounded disabled:opacity-30 disabled:cursor-not-allowed"
                   title="Delete profile"
                 >
-                  <svg aria-hidden="true" className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  <svg
+                    aria-hidden="true"
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
                   </svg>
                 </button>
               </div>
@@ -266,7 +321,10 @@ export function SettingsModal({ open, onClose }: Props) {
 
             {/* Profile name */}
             <div>
-              <label htmlFor="settings-profile-name" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              <label
+                htmlFor="settings-profile-name"
+                className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+              >
                 Profile Name
               </label>
               <input
@@ -289,7 +347,10 @@ export function SettingsModal({ open, onClose }: Props) {
               </legend>
               <div className="flex gap-3">
                 {(["anthropic", "openai"] as const).map((p) => (
-                  <label key={p} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <label
+                    key={p}
+                    className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer"
+                  >
                     <input
                       type="radio"
                       name="provider"
@@ -305,7 +366,10 @@ export function SettingsModal({ open, onClose }: Props) {
 
             {/* API Key */}
             <div>
-              <label htmlFor="settings-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              <label
+                htmlFor="settings-api-key"
+                className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+              >
                 API Key
               </label>
               <div className="flex gap-1">
@@ -317,7 +381,8 @@ export function SettingsModal({ open, onClose }: Props) {
                   placeholder={settings.provider === "anthropic" ? "sk-ant-..." : "sk-..."}
                   className="flex-1 px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
                 />
-                <button type="button"
+                <button
+                  type="button"
                   onClick={() => setShowKey((v) => !v)}
                   className="px-2 py-1 text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 rounded"
                 >
@@ -328,7 +393,10 @@ export function SettingsModal({ open, onClose }: Props) {
 
             {/* Model */}
             <div>
-              <label htmlFor="settings-model" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              <label
+                htmlFor="settings-model"
+                className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+              >
                 Model
               </label>
               <input
@@ -357,7 +425,10 @@ export function SettingsModal({ open, onClose }: Props) {
               </legend>
               <div className="flex gap-3">
                 {(["pseudocode", "assembly"] as const).map((s) => (
-                  <label key={s} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <label
+                    key={s}
+                    className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer"
+                  >
                     <input
                       type="radio"
                       name="enhanceSource"
@@ -369,13 +440,18 @@ export function SettingsModal({ open, onClose }: Props) {
                   </label>
                 ))}
               </div>
-              <p className="text-[10px] text-gray-600 mt-0.5">What to send to the AI for enhancement</p>
+              <p className="text-[10px] text-gray-600 mt-0.5">
+                What to send to the AI for enhancement
+              </p>
             </fieldset>
 
             {/* Base URL (OpenAI only) */}
             {settings.provider === "openai" && (
               <div>
-                <label htmlFor="settings-base-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                <label
+                  htmlFor="settings-base-url"
+                  className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+                >
                   Base URL
                 </label>
                 <input
@@ -386,7 +462,9 @@ export function SettingsModal({ open, onClose }: Props) {
                   placeholder="https://api.openai.com"
                   className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
                 />
-                <p className="text-[10px] text-gray-600 mt-0.5">For Ollama, LM Studio, vLLM, etc.</p>
+                <p className="text-[10px] text-gray-600 mt-0.5">
+                  For Ollama, LM Studio, vLLM, etc.
+                </p>
               </div>
             )}
 
@@ -400,103 +478,118 @@ export function SettingsModal({ open, onClose }: Props) {
         {/* Ghidra Tab */}
         {activeTab === "ghidra" && (
           <div>
-              {/* Section caption, not a control label — the checkbox below carries
+            {/* Section caption, not a control label — the checkbox below carries
                   its own <label>. A <label> with no control is invisible to
                   assistive tech anyway, so a plain div is more honest. */}
-              <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                Decompilation Server
-              </div>
-              <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
-                <input
-                  type="checkbox"
-                  checked={decompServer.enabled}
-                  onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
-                  className="accent-blue-500"
-                />
-                Enable Ghidra server
-              </label>
-              {decompServer.enabled && (
-                <div className="space-y-2">
-                  <div>
-                    <label htmlFor="ghidra-url" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                      Ghidra URL
-                    </label>
-                    <input
-                      id="ghidra-url"
-                      type="text"
-                      value={decompServer.ghidraUrl}
-                      onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
-                      placeholder="http://localhost:8765"
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="ghidra-api-key" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                      API Key
-                    </label>
-                    <input
-                      id="ghidra-api-key"
-                      type="text"
-                      value={decompServer.apiKey}
-                      onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
-                      placeholder="API key (optional)"
-                      className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <button type="button"
-                      onClick={async () => {
-                        setConnStatus("testing");
-                        setConnMessage("");
-                        try {
-                          const client = new GhidraClient(decompServer.ghidraUrl, decompServer.apiKey);
-                          const res = await client.ping();
-                          const ver = res.ghidraVersion ? ` (Ghidra ${res.ghidraVersion})` : "";
-                          setConnStatus("success");
-                          setConnMessage(`Connected — server v${res.version}${ver}`);
-                        } catch (err) {
-                          setConnStatus("error");
-                          setConnMessage(err instanceof Error ? err.message : "Connection failed");
-                        }
-                      }}
-                      disabled={connStatus === "testing"}
-                      className="px-3 py-1.5 text-xs text-gray-300 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {connStatus === "testing" ? "Testing..." : "Test Connection"}
-                    </button>
-                    {connStatus === "success" && (
-                      <p className="text-[10px] text-green-400 mt-1">{connMessage}</p>
-                    )}
-                    {connStatus === "error" && (
-                      <p className="text-[10px] text-red-400 mt-1">{connMessage}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-              <p className="text-[10px] text-gray-600 mt-0.5">When disabled, High Level tab uses built-in engine (if available).</p>
+            <div className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+              Decompilation Server
             </div>
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer mb-2">
+              <input
+                type="checkbox"
+                checked={decompServer.enabled}
+                onChange={(e) => setDecompServer((s) => ({ ...s, enabled: e.target.checked }))}
+                className="accent-blue-500"
+              />
+              Enable Ghidra server
+            </label>
+            {decompServer.enabled && (
+              <div className="space-y-2">
+                <div>
+                  <label
+                    htmlFor="ghidra-url"
+                    className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+                  >
+                    Ghidra URL
+                  </label>
+                  <input
+                    id="ghidra-url"
+                    type="text"
+                    value={decompServer.ghidraUrl}
+                    onChange={(e) => setDecompServer((s) => ({ ...s, ghidraUrl: e.target.value }))}
+                    placeholder="http://localhost:8765"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="ghidra-api-key"
+                    className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+                  >
+                    API Key
+                  </label>
+                  <input
+                    id="ghidra-api-key"
+                    type="text"
+                    value={decompServer.apiKey}
+                    onChange={(e) => setDecompServer((s) => ({ ...s, apiKey: e.target.value }))}
+                    placeholder="API key (optional)"
+                    className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setConnStatus("testing");
+                      setConnMessage("");
+                      try {
+                        const client = new GhidraClient(
+                          decompServer.ghidraUrl,
+                          decompServer.apiKey,
+                        );
+                        const res = await client.ping();
+                        const ver = res.ghidraVersion ? ` (Ghidra ${res.ghidraVersion})` : "";
+                        setConnStatus("success");
+                        setConnMessage(`Connected — server v${res.version}${ver}`);
+                      } catch (err) {
+                        setConnStatus("error");
+                        setConnMessage(err instanceof Error ? err.message : "Connection failed");
+                      }
+                    }}
+                    disabled={connStatus === "testing"}
+                    className="px-3 py-1.5 text-xs text-gray-300 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {connStatus === "testing" ? "Testing..." : "Test Connection"}
+                  </button>
+                  {connStatus === "success" && (
+                    <p className="text-[10px] text-green-400 mt-1">{connMessage}</p>
+                  )}
+                  {connStatus === "error" && (
+                    <p className="text-[10px] text-red-400 mt-1">{connMessage}</p>
+                  )}
+                </div>
+              </div>
+            )}
+            <p className="text-[10px] text-gray-600 mt-0.5">
+              When disabled, High Level tab uses built-in engine (if available).
+            </p>
+          </div>
         )}
 
         {/* Display Tab */}
         {activeTab === "display" && (
           <div>
-              <label htmlFor="display-font-size" className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-                Font Size
-              </label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="display-font-size"
-                  type="range"
-                  min={10}
-                  max={16}
-                  step={1}
-                  value={fontSize}
-                  onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
-                  className="flex-1 accent-blue-500"
-                />
-                <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
-              </div>
+            <label
+              htmlFor="display-font-size"
+              className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5"
+            >
+              Font Size
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                id="display-font-size"
+                type="range"
+                min={10}
+                max={16}
+                step={1}
+                value={fontSize}
+                onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                className="flex-1 accent-blue-500"
+              />
+              <span className="text-xs text-gray-300 w-8 text-right">{fontSize}px</span>
             </div>
+          </div>
         )}
 
         {/* Theme Tab */}
@@ -509,7 +602,7 @@ export function SettingsModal({ open, onClose }: Props) {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 {themes.map((theme) => {
-                  const isBuiltin = BUILTIN_THEMES.some(b => b.id === theme.id);
+                  const isBuiltin = BUILTIN_THEMES.some((b) => b.id === theme.id);
                   return (
                     // The delete "×" is a sibling rather than a child so the card
                     // itself can be a real <button> (buttons cannot nest).
@@ -528,7 +621,8 @@ export function SettingsModal({ open, onClose }: Props) {
                         <ThemeSwatches theme={theme} />
                       </button>
                       {!isBuiltin && (
-                        <button type="button"
+                        <button
+                          type="button"
                           onClick={() => handleDeleteTheme(theme.id)}
                           className="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-[10px]"
                           title="Delete theme"
@@ -543,7 +637,8 @@ export function SettingsModal({ open, onClose }: Props) {
             </div>
 
             <div className="flex gap-2">
-              <button type="button"
+              <button
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
                 className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
               >
@@ -556,7 +651,8 @@ export function SettingsModal({ open, onClose }: Props) {
                 onChange={handleImportTheme}
                 className="hidden"
               />
-              <button type="button"
+              <button
+                type="button"
                 onClick={handleExportTheme}
                 className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
               >
@@ -564,21 +660,21 @@ export function SettingsModal({ open, onClose }: Props) {
               </button>
             </div>
 
-            {importError && (
-              <p className="text-[10px] text-red-400">{importError}</p>
-            )}
+            {importError && <p className="text-[10px] text-red-400">{importError}</p>}
           </>
         )}
       </div>
 
       <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-        <button type="button"
+        <button
+          type="button"
           onClick={onClose}
           className="px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700 hover:bg-gray-600 rounded"
         >
           Cancel
         </button>
-        <button type="button"
+        <button
+          type="button"
           onClick={handleSave}
           className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded"
         >

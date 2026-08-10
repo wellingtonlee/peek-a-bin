@@ -34,7 +34,7 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
     // We don't have direct buffer access; work through worker
 
     // Collect unnamed functions
-    const unnamed = state.functions.filter(fn => {
+    const unnamed = state.functions.filter((fn) => {
       if (state.renames[fn.address]) return false;
       if (fn.name.startsWith("thunk_")) return false;
       if (fn.size <= 16) return false;
@@ -85,10 +85,12 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
         if (controller.signal.aborted) return;
         const batch = decompiled.slice(b, b + BATCH_SIZE);
 
-        const prompt = batch.map(({ fn, code }) => {
-          const name = getDisplayName(fn, state.renames);
-          return `=== Function at 0x${fn.address.toString(16).toUpperCase()} (${name}) ===\n${code}`;
-        }).join("\n\n");
+        const prompt = batch
+          .map(({ fn, code }) => {
+            const name = getDisplayName(fn, state.renames);
+            return `=== Function at 0x${fn.address.toString(16).toUpperCase()} (${name}) ===\n${code}`;
+          })
+          .join("\n\n");
 
         const result = await new Promise<string>((resolve, reject) => {
           let acc = "";
@@ -98,7 +100,9 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
             config,
             controller.signal,
             {
-              onToken: (accumulated) => { acc = accumulated; },
+              onToken: (accumulated) => {
+                acc = accumulated;
+              },
               onDone: () => resolve(acc),
               onError: (err) => reject(new Error(err)),
             },
@@ -109,7 +113,7 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
         const parsed = parseBatchRenameResponse(result);
         if (parsed.ok) {
           for (const item of parsed.value) {
-            const batchFn = batch.find(entry => entry.fn.address === item.address);
+            const batchFn = batch.find((entry) => entry.fn.address === item.address);
             const currentName = batchFn
               ? getDisplayName(batchFn.fn, state.renames)
               : `sub_${item.address.toString(16)}`;
@@ -127,16 +131,20 @@ export function useBatchRename(state: AppState, dispatch: Dispatch<AppAction>) {
       if (allResults.length === 0) {
         dispatch({
           type: "BATCH_RENAME_ERROR",
-          error: parseFailures.length > 0
-            ? `No rename suggestions could be parsed — ${parseFailures[0]}`
-            : "No rename suggestions could be parsed",
+          error:
+            parseFailures.length > 0
+              ? `No rename suggestions could be parsed — ${parseFailures[0]}`
+              : "No rename suggestions could be parsed",
         });
       } else {
         dispatch({ type: "BATCH_RENAME_DONE", results: allResults });
       }
     } catch (err) {
       if (!controller.signal.aborted) {
-        dispatch({ type: "BATCH_RENAME_ERROR", error: err instanceof Error ? err.message : "Batch rename failed" });
+        dispatch({
+          type: "BATCH_RENAME_ERROR",
+          error: err instanceof Error ? err.message : "Batch rename failed",
+        });
       }
     }
   }, [state.peFile, state.functions, state.renames, dispatch]);

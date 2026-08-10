@@ -1,6 +1,6 @@
-import { useEffect, useState, type Dispatch } from 'react';
-import type { AppAction } from './usePEFile';
-import { validateAnnotations, type AnnotationPayload } from '../utils/exportSchema';
+import { useEffect, useState, type Dispatch } from "react";
+import type { AppAction } from "./usePEFile";
+import { validateAnnotations, type AnnotationPayload } from "../utils/exportSchema";
 
 const WS_URL = `ws://localhost:${19283}`;
 const RECONNECT_DELAY = 3000;
@@ -16,20 +16,17 @@ const RECONNECT_DELAY = 3000;
  * Never throws: this is remote input, and a bad frame must not take down the
  * socket handler.
  */
-export function parseAnnotationMessage(
-  raw: unknown,
-  fileName: string,
-): AnnotationPayload | null {
+export function parseAnnotationMessage(raw: unknown, fileName: string): AnnotationPayload | null {
   let msg: unknown;
   try {
     msg = JSON.parse(String(raw));
   } catch {
     return null;
   }
-  if (typeof msg !== 'object' || msg === null) return null;
+  if (typeof msg !== "object" || msg === null) return null;
 
   const envelope = msg as { type?: unknown; fileName?: unknown };
-  if (envelope.type !== 'annotations') return null;
+  if (envelope.type !== "annotations") return null;
   if (envelope.fileName !== fileName) return null;
 
   // Remote input over a WebSocket — validate the shape (and coerce the string
@@ -40,8 +37,8 @@ export function parseAnnotationMessage(
 export function useMcpSync(
   fileName: string | null,
   dispatch: Dispatch<AppAction>,
-): 'connected' | 'disconnected' {
-  const [status, setStatus] = useState<'connected' | 'disconnected'>('disconnected');
+): "connected" | "disconnected" {
+  const [status, setStatus] = useState<"connected" | "disconnected">("disconnected");
 
   useEffect(() => {
     if (!fileName) return;
@@ -57,7 +54,7 @@ export function useMcpSync(
       ws = new WebSocket(WS_URL);
 
       ws.onopen = () => {
-        if (!disposed) setStatus('connected');
+        if (!disposed) setStatus("connected");
       };
 
       ws.onmessage = (ev) => {
@@ -66,19 +63,19 @@ export function useMcpSync(
         if (!data) return;
 
         dispatch({
-          type: 'IMPORT_ANNOTATIONS',
+          type: "IMPORT_ANNOTATIONS",
           bookmarks: data.bookmarks,
           renames: data.renames,
           comments: data.comments,
           // Background sync: clears the redo branch (so a stale redo cannot
           // revert what just arrived) without consuming an undo slot.
-          source: 'mcp',
+          source: "mcp",
         });
       };
 
       ws.onclose = () => {
         if (disposed) return;
-        setStatus('disconnected');
+        setStatus("disconnected");
         reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
       };
 

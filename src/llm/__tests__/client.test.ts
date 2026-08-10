@@ -120,8 +120,16 @@ describe("streamChat — happy path", () => {
       ]),
     );
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(result.done).toBe(true);
@@ -137,8 +145,16 @@ describe("streamChat — happy path", () => {
       ]),
     );
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", OPENAI, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        OPENAI,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(result.done).toBe(true);
@@ -158,8 +174,16 @@ describe("streamChat — happy path", () => {
       ]),
     );
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(last(result.tokens)).toBe("answer");
@@ -173,24 +197,48 @@ describe("streamChat — token budget", () => {
 
   it("sends a per-task max_tokens on Anthropic", async () => {
     fetchMock.mockResolvedValue(fakeResponse([]));
-    await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "report", TEST_OPTS),
+    await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "report",
+        TEST_OPTS,
+      ),
     );
     expect(bodyOf(0).max_tokens).toBe(32768);
   });
 
   it("sends max_tokens on OpenAI too — the branch previously had no limit at all", async () => {
     fetchMock.mockResolvedValue(fakeResponse([]));
-    await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", OPENAI, new AbortController().signal, cb, "vuln-scan", TEST_OPTS),
+    await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        OPENAI,
+        new AbortController().signal,
+        cb,
+        "vuln-scan",
+        TEST_OPTS,
+      ),
     );
     expect(bodyOf(0).max_tokens).toBe(8192);
   });
 
   it("varies the budget by task", async () => {
     fetchMock.mockResolvedValue(fakeResponse([]));
-    await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "batch-rename", TEST_OPTS),
+    await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "batch-rename",
+        TEST_OPTS,
+      ),
     );
     expect(bodyOf(0).max_tokens).toBe(8192);
   });
@@ -202,8 +250,16 @@ describe("streamChat — retry", () => {
       .mockResolvedValueOnce(errorResponse(429, { "retry-after": "1" }))
       .mockResolvedValueOnce(fakeResponse([{ kind: "data", text: anthropicChunk("ok") }]));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -216,8 +272,16 @@ describe("streamChat — retry", () => {
       .mockResolvedValueOnce(errorResponse(500))
       .mockResolvedValueOnce(fakeResponse([{ kind: "data", text: anthropicChunk("ok") }]));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -229,8 +293,16 @@ describe("streamChat — retry", () => {
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
       .mockResolvedValueOnce(fakeResponse([{ kind: "data", text: anthropicChunk("ok") }]));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -240,8 +312,16 @@ describe("streamChat — retry", () => {
   it("does not retry a 401 and keeps the original message", async () => {
     fetchMock.mockResolvedValue(errorResponse(401));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -251,8 +331,16 @@ describe("streamChat — retry", () => {
   it("does not retry a 403", async () => {
     fetchMock.mockResolvedValue(errorResponse(403));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -262,8 +350,16 @@ describe("streamChat — retry", () => {
   it("stops at the attempt cap and says the failure survived retries", async () => {
     fetchMock.mockResolvedValue(errorResponse(503));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(TEST_POLICY.maxAttempts);
@@ -277,8 +373,16 @@ describe("streamChat — the streaming retry boundary", () => {
       .mockResolvedValueOnce(fakeResponse([{ kind: "fail", message: "connection reset" }]))
       .mockResolvedValueOnce(fakeResponse([{ kind: "data", text: anthropicChunk("recovered") }]));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        new AbortController().signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -296,11 +400,21 @@ describe("streamChat — the streaming retry boundary", () => {
           { kind: "fail", message: "connection reset" },
         ]),
       )
-      .mockResolvedValue(fakeResponse([{ kind: "data", text: anthropicChunk("SHOULD NOT APPEAR") }]));
+      .mockResolvedValue(
+        fakeResponse([{ kind: "data", text: anthropicChunk("SHOULD NOT APPEAR") }]),
+      );
 
     const result = await collect(
-      cb =>
-        streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, new AbortController().signal, cb, "chat", TEST_OPTS),
+      (cb) =>
+        streamChat(
+          [{ role: "user", content: "hi" }],
+          "sys",
+          ANTHROPIC,
+          new AbortController().signal,
+          cb,
+          "chat",
+          TEST_OPTS,
+        ),
       400,
     );
 
@@ -323,8 +437,16 @@ describe("streamChat — abort", () => {
       ]),
     );
 
-    const result = await collect(cb => {
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, controller.signal, cb, "chat", TEST_OPTS);
+    const result = await collect((cb) => {
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        controller.signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      );
       setTimeout(() => controller.abort(), 20);
     }, 300);
 
@@ -337,8 +459,16 @@ describe("streamChat — abort", () => {
     controller.abort();
     fetchMock.mockResolvedValue(fakeResponse([]));
 
-    const result = await collect(cb =>
-      streamChat([{ role: "user", content: "hi" }], "sys", ANTHROPIC, controller.signal, cb, "chat", TEST_OPTS),
+    const result = await collect((cb) =>
+      streamChat(
+        [{ role: "user", content: "hi" }],
+        "sys",
+        ANTHROPIC,
+        controller.signal,
+        cb,
+        "chat",
+        TEST_OPTS,
+      ),
     );
 
     expect(fetchMock).not.toHaveBeenCalled();

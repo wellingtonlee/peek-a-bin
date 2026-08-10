@@ -11,10 +11,7 @@ export function useSortedFuncs(): DisasmFunction[] {
   );
 }
 
-function binarySearchFunc(
-  sortedFuncs: DisasmFunction[],
-  addr: number,
-): DisasmFunction | null {
+function binarySearchFunc(sortedFuncs: DisasmFunction[], addr: number): DisasmFunction | null {
   let lo = 0;
   let hi = sortedFuncs.length - 1;
   let best: DisasmFunction | null = null;

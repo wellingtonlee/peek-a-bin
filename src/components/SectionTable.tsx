@@ -37,9 +37,7 @@ export function SectionTable() {
 
   return (
     <div className="p-4 text-xs overflow-auto h-full">
-      <h2 className="text-sm font-semibold text-gray-200 mb-3">
-        Section Table
-      </h2>
+      <h2 className="text-sm font-semibold text-gray-200 mb-3">Section Table</h2>
       <table className="w-full">
         <thead>
           <tr className="text-gray-400 border-b border-gray-700">
@@ -61,14 +59,10 @@ export function SectionTable() {
                 key={i}
                 onClick={() => handleClick(sec)}
                 className={`border-b border-gray-800 cursor-pointer transition-colors ${
-                  i === activeIdx
-                    ? "bg-blue-900/30 hover:bg-blue-900/40"
-                    : "hover:bg-gray-800/50"
+                  i === activeIdx ? "bg-blue-900/30 hover:bg-blue-900/40" : "hover:bg-gray-800/50"
                 }`}
               >
-                <td className="py-2 pr-4 text-gray-200 font-semibold">
-                  {sec.name}
-                </td>
+                <td className="py-2 pr-4 text-gray-200 font-semibold">{sec.name}</td>
                 <td className="py-2 pr-4 text-blue-400">
                   0x{(sec.virtualSize >>> 0).toString(16).toUpperCase()}
                 </td>

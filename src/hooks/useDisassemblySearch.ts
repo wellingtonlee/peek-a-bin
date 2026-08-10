@@ -129,10 +129,15 @@ export function useDisassemblySearch(
           // Binary search for containing function
           let funcName = "(unknown)";
           let funcAddr = 0;
-          let lo = 0, hi = sortedFuncs.length - 1;
+          let lo = 0,
+            hi = sortedFuncs.length - 1;
           while (lo <= hi) {
             const mid = (lo + hi) >>> 1;
-            if (sortedFuncs[mid].address <= addr) { lo = mid + 1; } else { hi = mid - 1; }
+            if (sortedFuncs[mid].address <= addr) {
+              lo = mid + 1;
+            } else {
+              hi = mid - 1;
+            }
           }
           if (hi >= 0) {
             const fn = sortedFuncs[hi];
@@ -143,13 +148,14 @@ export function useDisassemblySearch(
           if (!groups.has(funcAddr)) {
             groups.set(funcAddr, { funcName, funcAddr, matches: [] });
           }
-          const text = row.kind === "insn"
-            ? `${row.insn.mnemonic} ${row.insn.opStr}`
-            : row.kind === "label"
-              ? getDisplayName(row.fn, state.renames)
-              : row.kind === "data"
-                ? `${row.item.directive} ${row.item.stringValue ?? ""}`
-                : "";
+          const text =
+            row.kind === "insn"
+              ? `${row.insn.mnemonic} ${row.insn.opStr}`
+              : row.kind === "label"
+                ? getDisplayName(row.fn, state.renames)
+                : row.kind === "data"
+                  ? `${row.item.directive} ${row.item.stringValue ?? ""}`
+                  : "";
           groups.get(funcAddr)!.matches.push({ rowIdx: mi, address: addr, text });
         }
         setSearchMatchGroups(Array.from(groups.values()));
@@ -213,7 +219,9 @@ export function useDisassemblySearch(
               if (results.length >= 100) break;
             }
           }
-        } catch { /* skip bad sections */ }
+        } catch {
+          /* skip bad sections */
+        }
         if (results.length >= 100) break;
       }
       setCrossResults(results);

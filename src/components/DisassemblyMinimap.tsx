@@ -180,10 +180,10 @@ export function DisassemblyMinimap({
     ctx.clearRect(0, 0, canvasW, canvasH);
 
     // Compute graph bounds
-    const minX = Math.min(...graphBlocks.map(b => b.x));
-    const maxX = Math.max(...graphBlocks.map(b => b.x + b.w));
-    const minY = Math.min(...graphBlocks.map(b => b.y));
-    const maxY = Math.max(...graphBlocks.map(b => b.y + b.h));
+    const minX = Math.min(...graphBlocks.map((b) => b.x));
+    const maxX = Math.max(...graphBlocks.map((b) => b.x + b.w));
+    const minY = Math.min(...graphBlocks.map((b) => b.y));
+    const maxY = Math.max(...graphBlocks.map((b) => b.y + b.h));
     const graphW = maxX - minX;
     const graphH = maxY - minY;
 
@@ -227,7 +227,12 @@ export function DisassemblyMinimap({
 
       ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
       ctx.lineWidth = 1;
-      ctx.strokeRect(Math.max(0, vx) + 0.5, Math.max(0, vy) + 0.5, Math.min(canvasW, vw), Math.min(canvasH, vh));
+      ctx.strokeRect(
+        Math.max(0, vx) + 0.5,
+        Math.max(0, vy) + 0.5,
+        Math.min(canvasW, vw),
+        Math.min(canvasH, vh),
+      );
     }
   }, [graphBlocks, graphPan, graphZoom, graphViewport, currentBlockId]);
 
@@ -245,75 +250,88 @@ export function DisassemblyMinimap({
     return () => observer.disconnect();
   }, [draw]);
 
-  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (mode === "graph") {
-      if (!graphBlocks || graphBlocks.length === 0 || !onGraphPanTo || !graphZoom || !graphViewport) return;
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      const clickY = e.clientY - rect.top;
-      const clickX = e.clientX - rect.left;
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (mode === "graph") {
+        if (
+          !graphBlocks ||
+          graphBlocks.length === 0 ||
+          !onGraphPanTo ||
+          !graphZoom ||
+          !graphViewport
+        )
+          return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const clickY = e.clientY - rect.top;
+        const clickX = e.clientX - rect.left;
 
-      const minX = Math.min(...graphBlocks.map(b => b.x));
-      const maxX = Math.max(...graphBlocks.map(b => b.x + b.w));
-      const minY = Math.min(...graphBlocks.map(b => b.y));
-      const maxY = Math.max(...graphBlocks.map(b => b.y + b.h));
-      const graphW = maxX - minX;
-      const graphH = maxY - minY;
-      if (graphW === 0 || graphH === 0) return;
+        const minX = Math.min(...graphBlocks.map((b) => b.x));
+        const maxX = Math.max(...graphBlocks.map((b) => b.x + b.w));
+        const minY = Math.min(...graphBlocks.map((b) => b.y));
+        const maxY = Math.max(...graphBlocks.map((b) => b.y + b.h));
+        const graphW = maxX - minX;
+        const graphH = maxY - minY;
+        if (graphW === 0 || graphH === 0) return;
 
-      const canvasW = 20;
-      const canvasH = rect.height;
-      const padding = 2;
-      const scaleX = (canvasW - padding * 2) / graphW;
-      const scaleY = (canvasH - padding * 2) / graphH;
-      const scale = Math.min(scaleX, scaleY);
-      const offsetX = padding + (canvasW - padding * 2 - graphW * scale) / 2;
-      const offsetY = padding + (canvasH - padding * 2 - graphH * scale) / 2;
+        const canvasW = 20;
+        const canvasH = rect.height;
+        const padding = 2;
+        const scaleX = (canvasW - padding * 2) / graphW;
+        const scaleY = (canvasH - padding * 2) / graphH;
+        const scale = Math.min(scaleX, scaleY);
+        const offsetX = padding + (canvasW - padding * 2 - graphW * scale) / 2;
+        const offsetY = padding + (canvasH - padding * 2 - graphH * scale) / 2;
 
-      const graphClickX = (clickX - offsetX) / scale + minX;
-      const graphClickY = (clickY - offsetY) / scale + minY;
+        const graphClickX = (clickX - offsetX) / scale + minX;
+        const graphClickY = (clickY - offsetY) / scale + minY;
 
-      onGraphPanTo({
-        x: graphViewport.width / 2 - graphClickX * graphZoom,
-        y: graphViewport.height / 2 - graphClickY * graphZoom,
-      });
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    if (!canvas || rows.length === 0) return;
-    const rect = canvas.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const rowIdx = Math.floor((y / rect.height) * rows.length);
-    if (rowIdx >= 0 && rowIdx < rows.length) {
-      onScrollTo(rowIdx);
-    }
-  }, [mode, rows, onScrollTo, graphBlocks, graphZoom, graphViewport, onGraphPanTo]);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (mode === "graph") {
-      setTooltip(null);
-      return;
-    }
-    const canvas = canvasRef.current;
-    if (!canvas || rows.length === 0) return;
-    const rect = canvas.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const rowIdx = Math.floor((y / rect.height) * rows.length);
-    if (rowIdx >= 0 && rowIdx < rows.length) {
-      const row = rows[rowIdx];
-      let text: string;
-      if (row.kind === "insn") {
-        text = `0x${row.insn.address.toString(16).toUpperCase()}`;
-      } else if (row.kind === "label") {
-        text = row.fn.name;
-      } else {
-        text = `Row ${rowIdx}`;
+        onGraphPanTo({
+          x: graphViewport.width / 2 - graphClickX * graphZoom,
+          y: graphViewport.height / 2 - graphClickY * graphZoom,
+        });
+        return;
       }
-      setTooltip({ y: e.clientY - rect.top, text });
-    }
-  }, [mode, rows]);
+
+      const canvas = canvasRef.current;
+      if (!canvas || rows.length === 0) return;
+      const rect = canvas.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const rowIdx = Math.floor((y / rect.height) * rows.length);
+      if (rowIdx >= 0 && rowIdx < rows.length) {
+        onScrollTo(rowIdx);
+      }
+    },
+    [mode, rows, onScrollTo, graphBlocks, graphZoom, graphViewport, onGraphPanTo],
+  );
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (mode === "graph") {
+        setTooltip(null);
+        return;
+      }
+      const canvas = canvasRef.current;
+      if (!canvas || rows.length === 0) return;
+      const rect = canvas.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const rowIdx = Math.floor((y / rect.height) * rows.length);
+      if (rowIdx >= 0 && rowIdx < rows.length) {
+        const row = rows[rowIdx];
+        let text: string;
+        if (row.kind === "insn") {
+          text = `0x${row.insn.address.toString(16).toUpperCase()}`;
+        } else if (row.kind === "label") {
+          text = row.fn.name;
+        } else {
+          text = `Row ${rowIdx}`;
+        }
+        setTooltip({ y: e.clientY - rect.top, text });
+      }
+    },
+    [mode, rows],
+  );
 
   return (
     <div

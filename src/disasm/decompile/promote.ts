@@ -1,44 +1,57 @@
-import type { StackFrame } from '../types';
-import { stackVarKey } from '../stack';
-import type { FunctionSignature } from '../signatures';
-import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from './ir';
-import { irVar, walkStmts } from './ir';
-import type { TypeContext } from './typeInfer';
-import { typeToString } from './typeInfer';
+import type { StackFrame } from "../types";
+import { stackVarKey } from "../stack";
+import type { FunctionSignature } from "../signatures";
+import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from "./ir";
+import { irVar, walkStmts } from "./ir";
+import type { TypeContext } from "./typeInfer";
+import { typeToString } from "./typeInfer";
 
 // ── Type-based variable renaming ──
 
 const TYPE_BASED_NAMES: Record<string, string> = {
-  'HANDLE': 'hFile',
-  'NTSTATUS': 'status',
-  'HRESULT': 'hr',
-  'PVOID': 'pBuffer',
-  'BOOL': 'bResult',
+  HANDLE: "hFile",
+  NTSTATUS: "status",
+  HRESULT: "hr",
+  PVOID: "pBuffer",
+  BOOL: "bResult",
 };
 
 function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr {
-  if (expr.kind === 'var') {
+  if (expr.kind === "var") {
     const newName = renameMap.get(expr.name);
     if (newName) return { ...expr, name: newName };
     return expr;
   }
   switch (expr.kind) {
-    case 'binary':
-      return { ...expr, left: renameVarsInExpr(expr.left, renameMap), right: renameVarsInExpr(expr.right, renameMap) };
-    case 'unary':
+    case "binary":
+      return {
+        ...expr,
+        left: renameVarsInExpr(expr.left, renameMap),
+        right: renameVarsInExpr(expr.right, renameMap),
+      };
+    case "unary":
       return { ...expr, operand: renameVarsInExpr(expr.operand, renameMap) };
-    case 'deref':
+    case "deref":
       return { ...expr, address: renameVarsInExpr(expr.address, renameMap) };
-    case 'call':
-      return { ...expr, args: expr.args.map(a => renameVarsInExpr(a, renameMap)) } as IRExpr;
-    case 'ternary':
-      return { ...expr, condition: renameVarsInExpr(expr.condition, renameMap), then: renameVarsInExpr(expr.then, renameMap), else: renameVarsInExpr(expr.else, renameMap) };
-    case 'cast':
+    case "call":
+      return { ...expr, args: expr.args.map((a) => renameVarsInExpr(a, renameMap)) } as IRExpr;
+    case "ternary":
+      return {
+        ...expr,
+        condition: renameVarsInExpr(expr.condition, renameMap),
+        then: renameVarsInExpr(expr.then, renameMap),
+        else: renameVarsInExpr(expr.else, renameMap),
+      };
+    case "cast":
       return { ...expr, operand: renameVarsInExpr(expr.operand, renameMap) };
-    case 'field_access':
+    case "field_access":
       return { ...expr, base: renameVarsInExpr(expr.base, renameMap) };
-    case 'array_access':
-      return { ...expr, base: renameVarsInExpr(expr.base, renameMap), index: renameVarsInExpr(expr.index, renameMap) };
+    case "array_access":
+      return {
+        ...expr,
+        base: renameVarsInExpr(expr.base, renameMap),
+        index: renameVarsInExpr(expr.index, renameMap),
+      };
     default:
       return expr;
   }
@@ -46,26 +59,66 @@ function renameVarsInExpr(expr: IRExpr, renameMap: Map<string, string>): IRExpr 
 
 function renameVarsInStmt(stmt: IRStmt, renameMap: Map<string, string>): IRStmt {
   switch (stmt.kind) {
-    case 'assign':
-      return { ...stmt, dest: renameVarsInExpr(stmt.dest, renameMap), src: renameVarsInExpr(stmt.src, renameMap) };
-    case 'store':
-      return { ...stmt, address: renameVarsInExpr(stmt.address, renameMap), value: renameVarsInExpr(stmt.value, renameMap) };
-    case 'call_stmt':
+    case "assign":
+      return {
+        ...stmt,
+        dest: renameVarsInExpr(stmt.dest, renameMap),
+        src: renameVarsInExpr(stmt.src, renameMap),
+      };
+    case "store":
+      return {
+        ...stmt,
+        address: renameVarsInExpr(stmt.address, renameMap),
+        value: renameVarsInExpr(stmt.value, renameMap),
+      };
+    case "call_stmt":
       return { ...stmt, call: renameVarsInExpr(stmt.call, renameMap) as IRCall };
-    case 'return':
+    case "return":
       return stmt.value ? { ...stmt, value: renameVarsInExpr(stmt.value, renameMap) } : stmt;
-    case 'if':
-      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), thenBody: stmt.thenBody.map(s => renameVarsInStmt(s, renameMap)), elseBody: stmt.elseBody?.map(s => renameVarsInStmt(s, renameMap)) };
-    case 'while':
-      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
-    case 'do_while':
-      return { ...stmt, condition: renameVarsInExpr(stmt.condition, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
-    case 'for':
-      return { ...stmt, init: renameVarsInStmt(stmt.init, renameMap), condition: renameVarsInExpr(stmt.condition, renameMap), update: renameVarsInStmt(stmt.update, renameMap), body: stmt.body.map(s => renameVarsInStmt(s, renameMap)) };
-    case 'switch':
-      return { ...stmt, expr: renameVarsInExpr(stmt.expr, renameMap), cases: stmt.cases.map(c => ({ ...c, body: c.body.map(s => renameVarsInStmt(s, renameMap)) })), defaultBody: stmt.defaultBody?.map(s => renameVarsInStmt(s, renameMap)) };
-    case 'try':
-      return { ...stmt, body: stmt.body.map(s => renameVarsInStmt(s, renameMap)), handler: stmt.handler.map(s => renameVarsInStmt(s, renameMap)), filterExpr: stmt.filterExpr ? renameVarsInExpr(stmt.filterExpr, renameMap) : undefined };
+    case "if":
+      return {
+        ...stmt,
+        condition: renameVarsInExpr(stmt.condition, renameMap),
+        thenBody: stmt.thenBody.map((s) => renameVarsInStmt(s, renameMap)),
+        elseBody: stmt.elseBody?.map((s) => renameVarsInStmt(s, renameMap)),
+      };
+    case "while":
+      return {
+        ...stmt,
+        condition: renameVarsInExpr(stmt.condition, renameMap),
+        body: stmt.body.map((s) => renameVarsInStmt(s, renameMap)),
+      };
+    case "do_while":
+      return {
+        ...stmt,
+        condition: renameVarsInExpr(stmt.condition, renameMap),
+        body: stmt.body.map((s) => renameVarsInStmt(s, renameMap)),
+      };
+    case "for":
+      return {
+        ...stmt,
+        init: renameVarsInStmt(stmt.init, renameMap),
+        condition: renameVarsInExpr(stmt.condition, renameMap),
+        update: renameVarsInStmt(stmt.update, renameMap),
+        body: stmt.body.map((s) => renameVarsInStmt(s, renameMap)),
+      };
+    case "switch":
+      return {
+        ...stmt,
+        expr: renameVarsInExpr(stmt.expr, renameMap),
+        cases: stmt.cases.map((c) => ({
+          ...c,
+          body: c.body.map((s) => renameVarsInStmt(s, renameMap)),
+        })),
+        defaultBody: stmt.defaultBody?.map((s) => renameVarsInStmt(s, renameMap)),
+      };
+    case "try":
+      return {
+        ...stmt,
+        body: stmt.body.map((s) => renameVarsInStmt(s, renameMap)),
+        handler: stmt.handler.map((s) => renameVarsInStmt(s, renameMap)),
+        filterExpr: stmt.filterExpr ? renameVarsInExpr(stmt.filterExpr, renameMap) : undefined,
+      };
     default:
       return stmt;
   }
@@ -75,11 +128,16 @@ function renameVarsInStmt(stmt: IRStmt, renameMap: Map<string, string>): IRStmt 
 
 function sizeToType(size: number): string {
   switch (size) {
-    case 1: return 'uint8_t';
-    case 2: return 'uint16_t';
-    case 4: return 'int32_t';
-    case 8: return 'int64_t';
-    default: return 'int32_t';
+    case 1:
+      return "uint8_t";
+    case 2:
+      return "uint16_t";
+    case 4:
+      return "int32_t";
+    case 8:
+      return "int64_t";
+    default:
+      return "int32_t";
   }
 }
 
@@ -88,7 +146,7 @@ function sizeToType(size: number): string {
 interface StackAccess {
   /** Slot identity — see `stackVarKey`. `[rbp-0x10]` and `[rsp+0x10]` differ. */
   key: string;
-  base: 'bp' | 'sp';
+  base: "bp" | "sp";
   /** Offset as written in the operand (always positive). */
   offset: number;
   isParam: boolean;
@@ -96,42 +154,55 @@ interface StackAccess {
 
 /** Check if expr is [rbp - const] or [rsp + const] and return the slot. */
 function matchStackAccess(expr: IRExpr, is64: boolean): StackAccess | null {
-  if (expr.kind !== 'deref') return null;
+  if (expr.kind !== "deref") return null;
   const addr = expr.address;
 
-  const bp = is64 ? 'rbp' : 'ebp';
-  const sp = is64 ? 'rsp' : 'esp';
+  const bp = is64 ? "rbp" : "ebp";
+  const sp = is64 ? "rsp" : "esp";
 
   // [rbp - offset] → local
-  if (addr.kind === 'binary' && addr.op === '-' &&
-      addr.left.kind === 'reg' && addr.left.name.toLowerCase() === bp &&
-      addr.right.kind === 'const') {
+  if (
+    addr.kind === "binary" &&
+    addr.op === "-" &&
+    addr.left.kind === "reg" &&
+    addr.left.name.toLowerCase() === bp &&
+    addr.right.kind === "const"
+  ) {
     const offset = addr.right.value;
-    return { key: stackVarKey('bp', -offset), base: 'bp', offset, isParam: false };
+    return { key: stackVarKey("bp", -offset), base: "bp", offset, isParam: false };
   }
 
   // [rbp + offset] → param (if offset >= threshold)
-  if (addr.kind === 'binary' && addr.op === '+' &&
-      addr.left.kind === 'reg' && addr.left.name.toLowerCase() === bp &&
-      addr.right.kind === 'const') {
+  if (
+    addr.kind === "binary" &&
+    addr.op === "+" &&
+    addr.left.kind === "reg" &&
+    addr.left.name.toLowerCase() === bp &&
+    addr.right.kind === "const"
+  ) {
     const minParam = is64 ? 0x10 : 0x8;
     const offset = addr.right.value;
-    if (offset >= minParam) return { key: stackVarKey('bp', offset), base: 'bp', offset, isParam: true };
+    if (offset >= minParam)
+      return { key: stackVarKey("bp", offset), base: "bp", offset, isParam: true };
   }
 
   // [rsp + offset] → local
-  if (addr.kind === 'binary' && addr.op === '+' &&
-      addr.left.kind === 'reg' && addr.left.name.toLowerCase() === sp &&
-      addr.right.kind === 'const') {
+  if (
+    addr.kind === "binary" &&
+    addr.op === "+" &&
+    addr.left.kind === "reg" &&
+    addr.left.name.toLowerCase() === sp &&
+    addr.right.kind === "const"
+  ) {
     const offset = addr.right.value;
-    return { key: stackVarKey('sp', offset), base: 'sp', offset, isParam: false };
+    return { key: stackVarKey("sp", offset), base: "sp", offset, isParam: false };
   }
 
   // Direct register (rbp/rsp alone) with const
-  if (addr.kind === 'reg') {
+  if (addr.kind === "reg") {
     const name = addr.name.toLowerCase();
-    if (name === bp) return { key: stackVarKey('bp', 0), base: 'bp', offset: 0, isParam: false };
-    if (name === sp) return { key: stackVarKey('sp', 0), base: 'sp', offset: 0, isParam: false };
+    if (name === bp) return { key: stackVarKey("bp", 0), base: "bp", offset: 0, isParam: false };
+    if (name === sp) return { key: stackVarKey("sp", 0), base: "sp", offset: 0, isParam: false };
   }
 
   return null;
@@ -151,32 +222,40 @@ function promoteExpr(
     const lookup = stackAccess.isParam ? paramLookup : varLookup;
     const name = lookup.get(stackAccess.key);
     if (name) {
-      return irVar(name, expr.kind === 'deref' ? expr.size : 4);
+      return irVar(name, expr.kind === "deref" ? expr.size : 4);
     }
   }
 
   switch (expr.kind) {
-    case 'binary':
-      return { ...expr, left: promoteExpr(expr.left, is64, varLookup, paramLookup), right: promoteExpr(expr.right, is64, varLookup, paramLookup) };
-    case 'unary':
+    case "binary":
+      return {
+        ...expr,
+        left: promoteExpr(expr.left, is64, varLookup, paramLookup),
+        right: promoteExpr(expr.right, is64, varLookup, paramLookup),
+      };
+    case "unary":
       return { ...expr, operand: promoteExpr(expr.operand, is64, varLookup, paramLookup) };
-    case 'deref':
+    case "deref":
       return { ...expr, address: promoteExpr(expr.address, is64, varLookup, paramLookup) };
-    case 'call':
-      return { ...expr, args: expr.args.map(a => promoteExpr(a, is64, varLookup, paramLookup)) };
-    case 'ternary':
+    case "call":
+      return { ...expr, args: expr.args.map((a) => promoteExpr(a, is64, varLookup, paramLookup)) };
+    case "ternary":
       return {
         ...expr,
         condition: promoteExpr(expr.condition, is64, varLookup, paramLookup),
         then: promoteExpr(expr.then, is64, varLookup, paramLookup),
         else: promoteExpr(expr.else, is64, varLookup, paramLookup),
       };
-    case 'cast':
+    case "cast":
       return { ...expr, operand: promoteExpr(expr.operand, is64, varLookup, paramLookup) };
-    case 'field_access':
+    case "field_access":
       return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup) };
-    case 'array_access':
-      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup), index: promoteExpr(expr.index, is64, varLookup, paramLookup) };
+    case "array_access":
+      return {
+        ...expr,
+        base: promoteExpr(expr.base, is64, varLookup, paramLookup),
+        index: promoteExpr(expr.index, is64, varLookup, paramLookup),
+      };
     default:
       return expr;
   }
@@ -189,73 +268,90 @@ function promoteStmt(
   paramLookup: Map<string, string>,
 ): IRStmt {
   switch (stmt.kind) {
-    case 'assign': {
+    case "assign": {
       const dest = promoteExpr(stmt.dest, is64, varLookup, paramLookup);
       const src = promoteExpr(stmt.src, is64, varLookup, paramLookup);
       return { ...stmt, dest, src };
     }
-    case 'store': {
+    case "store": {
       // Check if store target is a stack variable
-      const stackAccess = matchStackAccess({ kind: 'deref', address: stmt.address, size: stmt.size }, is64);
+      const stackAccess = matchStackAccess(
+        { kind: "deref", address: stmt.address, size: stmt.size },
+        is64,
+      );
       if (stackAccess) {
         const lookup = stackAccess.isParam ? paramLookup : varLookup;
         const name = lookup.get(stackAccess.key);
         if (name) {
           // Convert store to assign to variable
           return {
-            kind: 'assign',
+            kind: "assign",
             dest: irVar(name, stmt.size),
             src: promoteExpr(stmt.value, is64, varLookup, paramLookup),
             addr: stmt.addr,
           };
         }
       }
-      return { ...stmt, address: promoteExpr(stmt.address, is64, varLookup, paramLookup), value: promoteExpr(stmt.value, is64, varLookup, paramLookup) };
+      return {
+        ...stmt,
+        address: promoteExpr(stmt.address, is64, varLookup, paramLookup),
+        value: promoteExpr(stmt.value, is64, varLookup, paramLookup),
+      };
     }
-    case 'call_stmt':
-      return { ...stmt, call: promoteExpr(stmt.call, is64, varLookup, paramLookup) as IRExpr & { kind: 'call' } };
-    case 'return':
-      return stmt.value ? { ...stmt, value: promoteExpr(stmt.value, is64, varLookup, paramLookup) } : stmt;
-    case 'if':
+    case "call_stmt":
+      return {
+        ...stmt,
+        call: promoteExpr(stmt.call, is64, varLookup, paramLookup) as IRExpr & { kind: "call" },
+      };
+    case "return":
+      return stmt.value
+        ? { ...stmt, value: promoteExpr(stmt.value, is64, varLookup, paramLookup) }
+        : stmt;
+    case "if":
       return {
         ...stmt,
         condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        thenBody: stmt.thenBody.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
-        elseBody: stmt.elseBody?.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        thenBody: stmt.thenBody.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        elseBody: stmt.elseBody?.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
       };
-    case 'while':
+    case "while":
       return {
         ...stmt,
         condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
       };
-    case 'do_while':
+    case "do_while":
       return {
         ...stmt,
         condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
       };
-    case 'switch':
+    case "switch":
       return {
         ...stmt,
         expr: promoteExpr(stmt.expr, is64, varLookup, paramLookup),
-        cases: stmt.cases.map(c => ({ ...c, body: c.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)) })),
-        defaultBody: stmt.defaultBody?.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        cases: stmt.cases.map((c) => ({
+          ...c,
+          body: c.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        })),
+        defaultBody: stmt.defaultBody?.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
       };
-    case 'for':
+    case "for":
       return {
         ...stmt,
         init: promoteStmt(stmt.init, is64, varLookup, paramLookup),
         condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
         update: promoteStmt(stmt.update, is64, varLookup, paramLookup),
-        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
       };
-    case 'try':
+    case "try":
       return {
         ...stmt,
-        body: stmt.body.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
-        handler: stmt.handler.map(s => promoteStmt(s, is64, varLookup, paramLookup)),
-        filterExpr: stmt.filterExpr ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup) : undefined,
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        handler: stmt.handler.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        filterExpr: stmt.filterExpr
+          ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup)
+          : undefined,
       };
     default:
       return stmt;
@@ -266,17 +362,17 @@ function promoteStmt(
 
 function hasReturnValue(body: IRStmt[]): boolean {
   for (const stmt of body) {
-    if (stmt.kind === 'return' && stmt.value) {
+    if (stmt.kind === "return" && stmt.value) {
       // Check if value is a call result or non-trivial expression
-      if (stmt.value.kind !== 'reg') return true;
+      if (stmt.value.kind !== "reg") return true;
       // Even a bare register return counts
       return true;
     }
-    if (stmt.kind === 'if') {
+    if (stmt.kind === "if") {
       if (hasReturnValue(stmt.thenBody)) return true;
       if (stmt.elseBody && hasReturnValue(stmt.elseBody)) return true;
     }
-    if (stmt.kind === 'while' || stmt.kind === 'do_while') {
+    if (stmt.kind === "while" || stmt.kind === "do_while") {
       if (hasReturnValue(stmt.body)) return true;
     }
   }
@@ -303,15 +399,15 @@ function inferVarTypes(
 
   walkStmts(body, (expr) => {
     // Check for cast wrapping a stack deref: (int8_t)*(deref)
-    if (expr.kind === 'cast') {
+    if (expr.kind === "cast") {
       const inner = expr.operand;
       const sa = matchStackAccess(inner, is64);
       if (sa) {
         const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
           const entry = info.get(name) ?? { minSize: 8, signed: null };
-          const castSigned = expr.type.startsWith('int');
-          const castSize = parseInt(expr.type.replace(/\D/g, ''), 10) / 8 || 4;
+          const castSigned = expr.type.startsWith("int");
+          const castSize = parseInt(expr.type.replace(/\D/g, ""), 10) / 8 || 4;
           entry.minSize = Math.min(entry.minSize, castSize);
           if (entry.signed === null) entry.signed = castSigned;
           else if (castSigned) entry.signed = true; // signed wins
@@ -320,7 +416,7 @@ function inferVarTypes(
       }
     }
     // Track deref sizes for stack variables
-    if (expr.kind === 'deref') {
+    if (expr.kind === "deref") {
       const sa = matchStackAccess(expr, is64);
       if (sa) {
         const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
@@ -338,7 +434,7 @@ function inferVarTypes(
     const local = localsByName.get(name);
     if (!local) continue;
     const bits = minSize * 8;
-    const prefix = signed ? 'int' : 'uint';
+    const prefix = signed ? "int" : "uint";
     local.type = `${prefix}${bits}_t`;
   }
 }
@@ -356,12 +452,17 @@ function synthesizeStackFrame(
 ): void {
   // Keyed by slot, not by bare offset: [rbp-0x10] and [rsp+0x10] are different
   // slots and must not be collapsed into one local.
-  interface Access { key: string; base: 'bp' | 'sp'; offset: number; size: number }
+  interface Access {
+    key: string;
+    base: "bp" | "sp";
+    offset: number;
+    size: number;
+  }
   const accesses = new Map<string, Access>();
 
   walkStmts(body, (expr) => {
     const sa = matchStackAccess(expr, is64);
-    if (sa && !sa.isParam && expr.kind === 'deref') {
+    if (sa && !sa.isParam && expr.kind === "deref") {
       const existing = accesses.get(sa.key);
       if (!existing) {
         accesses.set(sa.key, { key: sa.key, base: sa.base, offset: sa.offset, size: expr.size });
@@ -373,7 +474,9 @@ function synthesizeStackFrame(
 
   // Deduplicate overlapping accesses (largest size wins). Overlap is only
   // meaningful between slots off the same base register.
-  const sorted = [...accesses.values()].sort((a, b) => a.offset - b.offset || a.base.localeCompare(b.base));
+  const sorted = [...accesses.values()].sort(
+    (a, b) => a.offset - b.offset || a.base.localeCompare(b.base),
+  );
   const seen: Access[] = [];
   const usedNames = new Set<string>();
   for (const acc of sorted) {
@@ -397,7 +500,6 @@ function synthesizeStackFrame(
   }
 }
 
-
 /**
  * Promote stack variable references to named variables and
  * build function signature from stack frame + signature analysis.
@@ -412,7 +514,7 @@ export function promoteVars(
   typeCtx?: TypeContext,
 ): IRFunction {
   // Build lookup maps from stack frame vars
-  const varLookup = new Map<string, string>();  // slot key → var name (locals)
+  const varLookup = new Map<string, string>(); // slot key → var name (locals)
   const paramLookup = new Map<string, string>(); // slot key → param name
   const locals: IRLocal[] = [];
   const params: IRParam[] = [];
@@ -420,11 +522,11 @@ export function promoteVars(
   if (stackFrame) {
     for (const v of stackFrame.vars) {
       const type = sizeToType(v.size);
-      const isParam = v.name.startsWith('arg_');
+      const isParam = v.name.startsWith("arg_");
       // `key` identifies the slot (base + signed offset). Fall back to the old
       // offset-only interpretation for StackFrames produced before it existed:
       // params are [rbp + N], locals [rbp - N].
-      const key = v.key ?? stackVarKey('bp', isParam ? v.offset : -v.offset);
+      const key = v.key ?? stackVarKey("bp", isParam ? v.offset : -v.offset);
       if (isParam) {
         paramLookup.set(key, v.name);
         params.push({ name: v.name, type });
@@ -443,8 +545,8 @@ export function promoteVars(
     for (let i = 0; i < Math.min(signature.paramCount, 4); i++) {
       const paramName = `arg${i}`;
       // Only add if not already present from stack frame
-      if (!params.some(p => p.name === paramName)) {
-        params.push({ name: paramName, type: 'int64_t' });
+      if (!params.some((p) => p.name === paramName)) {
+        params.push({ name: paramName, type: "int64_t" });
       }
     }
   }
@@ -456,26 +558,26 @@ export function promoteVars(
   if (typeCtx) {
     for (const local of locals) {
       const inferred = typeCtx.types.get(local.name);
-      if (inferred && inferred.kind !== 'unknown') {
+      if (inferred && inferred.kind !== "unknown") {
         local.type = typeToString(inferred);
       }
     }
     for (const param of params) {
       const inferred = typeCtx.types.get(param.name);
-      if (inferred && inferred.kind !== 'unknown') {
+      if (inferred && inferred.kind !== "unknown") {
         param.type = typeToString(inferred);
       }
     }
   }
 
   // Promote body
-  const promoted = body.map(s => promoteStmt(s, is64, varLookup, paramLookup));
+  const promoted = body.map((s) => promoteStmt(s, is64, varLookup, paramLookup));
 
   // Type-based variable renaming
   const renameMap = new Map<string, string>();
-  const allNames = new Set([...locals.map(l => l.name), ...params.map(p => p.name)]);
+  const allNames = new Set([...locals.map((l) => l.name), ...params.map((p) => p.name)]);
   for (const local of locals) {
-    if (!local.name.startsWith('var_')) continue;
+    if (!local.name.startsWith("var_")) continue;
     const prefix = TYPE_BASED_NAMES[local.type];
     if (!prefix) continue;
     let candidate = prefix;
@@ -488,10 +590,11 @@ export function promoteVars(
     allNames.add(candidate);
     local.name = candidate;
   }
-  const finalBody = renameMap.size > 0 ? promoted.map(s => renameVarsInStmt(s, renameMap)) : promoted;
+  const finalBody =
+    renameMap.size > 0 ? promoted.map((s) => renameVarsInStmt(s, renameMap)) : promoted;
 
   // Determine return type
-  const returnType = hasReturnValue(finalBody) ? 'int' : 'void';
+  const returnType = hasReturnValue(finalBody) ? "int" : "void";
 
   return {
     name,

@@ -77,7 +77,12 @@ export function validateImport(data: unknown): ExportSchemaV1 | null {
     for (const f of obj.functions) {
       if (typeof f !== "object" || f === null) return null;
       const fn = f as Record<string, unknown>;
-      if (typeof fn.address !== "number" || typeof fn.name !== "string" || typeof fn.size !== "number") return null;
+      if (
+        typeof fn.address !== "number" ||
+        typeof fn.name !== "string" ||
+        typeof fn.size !== "number"
+      )
+        return null;
     }
   }
 
@@ -140,7 +145,9 @@ export function generateMarkdownReport(state: AppState): string {
       lines.push("| IRP Major | Name | Handler Address |");
       lines.push("|-----------|------|-----------------|");
       for (const h of state.irpHandlers) {
-        lines.push(`| ${h.irpMajor} | ${h.irpName} | 0x${h.handlerAddress.toString(16).toUpperCase()} |`);
+        lines.push(
+          `| ${h.irpMajor} | ${h.irpName} | 0x${h.handlerAddress.toString(16).toUpperCase()} |`,
+        );
       }
     }
     lines.push("");

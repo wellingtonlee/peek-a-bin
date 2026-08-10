@@ -92,21 +92,21 @@ class FakeObjectStore {
 
   getAll(): FakeRequest {
     return this.tx.run((req) => {
-      if (this.db.options.failGetAll) throw new Error('getAll failed');
+      if (this.db.options.failGetAll) throw new Error("getAll failed");
       req.result = [...this.db.records.values()];
     });
   }
 
   get(key: string): FakeRequest {
     return this.tx.run((req) => {
-      if (this.db.options.failGet) throw new Error('get failed');
+      if (this.db.options.failGet) throw new Error("get failed");
       req.result = this.db.records.get(key);
     });
   }
 
   put(value: Record<string, unknown>): FakeRequest {
     return this.tx.run(() => {
-      if (this.db.options.failPut) throw new Error('QuotaExceededError');
+      if (this.db.options.failPut) throw new Error("QuotaExceededError");
       this.db.records.set(String(value[this.db.keyPath]), value);
       this.db.puts.push(value);
     });
@@ -114,7 +114,7 @@ class FakeObjectStore {
 
   delete(key: string): FakeRequest {
     return this.tx.run(() => {
-      if (this.db.options.failDelete) throw new Error('delete failed');
+      if (this.db.options.failDelete) throw new Error("delete failed");
       this.db.records.delete(key);
       this.db.deletes.push(key);
     });
@@ -122,7 +122,7 @@ class FakeObjectStore {
 }
 
 class FakeDatabase {
-  keyPath = '';
+  keyPath = "";
   readonly objectStoreNames = {
     contains: (name: string) => this.storeNames.has(name),
   };
@@ -141,7 +141,7 @@ class FakeDatabase {
   }
 
   transaction(_store: string, _mode?: string): FakeTransaction {
-    if (this.options.throwOnTransaction) throw new Error('InvalidStateError');
+    if (this.options.throwOnTransaction) throw new Error("InvalidStateError");
     return new FakeTransaction(this);
   }
 }
@@ -177,7 +177,7 @@ export function createFakeIDB(
 
   const db = new FakeDatabase(records, options, puts, deletes);
   // Seeding happens after construction so the keyPath is known.
-  db.keyPath = 'name';
+  db.keyPath = "name";
   for (const record of seed) records.set(String(record.name), record);
 
   const indexedDB = {
@@ -188,7 +188,7 @@ export function createFakeIDB(
       req.result = db;
       queueMicrotask(() => {
         if (options.failOpen) {
-          req.error = new Error('open failed');
+          req.error = new Error("open failed");
           req.onerror?.();
           return;
         }

@@ -8,15 +8,15 @@
  * enforces that.
  */
 
-import { lstatSync, realpathSync } from 'node:fs';
-import { basename, dirname, extname, resolve, sep } from 'node:path';
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, extname, resolve, sep } from "node:path";
 
 /**
  * Parse a tool `address` argument. Hex strings may carry an optional `0x` prefix.
  * Returns null for anything that would otherwise become NaN and surface as `0xNaN`.
  */
 export function parseAddr(address: number | string): number | null {
-  if (typeof address === 'number') {
+  if (typeof address === "number") {
     return Number.isFinite(address) ? address : null;
   }
   const n = parseInt(address.trim(), 16);
@@ -39,7 +39,7 @@ export function resolveExportPath(outputPath: string): { path: string } | { erro
   }
 
   const target = resolve(root, outputPath);
-  if (extname(target).toLowerCase() !== '.json') {
+  if (extname(target).toLowerCase() !== ".json") {
     return { error: `outputPath must end in .json (got "${outputPath}")` };
   }
 
@@ -54,8 +54,9 @@ export function resolveExportPath(outputPath: string): { path: string } | { erro
   const contained = realDir === root || realDir.startsWith(root + sep);
   if (!contained) {
     return {
-      error: `outputPath escapes the allowed export directory "${root}". `
-        + `Set PEEK_A_BIN_EXPORT_DIR to write elsewhere.`,
+      error:
+        `outputPath escapes the allowed export directory "${root}". ` +
+        `Set PEEK_A_BIN_EXPORT_DIR to write elsewhere.`,
     };
   }
 
@@ -69,8 +70,9 @@ export function resolveExportPath(outputPath: string): { path: string } | { erro
   try {
     if (lstatSync(finalPath).isSymbolicLink()) {
       return {
-        error: `outputPath "${basename(target)}" is a symlink; refusing to follow it out of `
-          + `the export directory. Remove it or choose another name.`,
+        error:
+          `outputPath "${basename(target)}" is a symlink; refusing to follow it out of ` +
+          `the export directory. Remove it or choose another name.`,
       };
     }
   } catch {

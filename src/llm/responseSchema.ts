@@ -50,7 +50,7 @@ export function parseJSONResponse(raw: string): ParseResult<unknown> {
 function formatIssues(error: z.ZodError): string {
   return error.issues
     .slice(0, 3)
-    .map(issue => {
+    .map((issue) => {
       const path = issue.path.join(".");
       return path ? `${path}: ${issue.message}` : issue.message;
     })
@@ -61,8 +61,7 @@ function formatIssues(error: z.ZodError): string {
 
 /** Addresses come back either as a number or as a "0x..." string. */
 const addressSchema = z.union([z.number(), z.string()]).transform((value, ctx) => {
-  const parsed =
-    typeof value === "number" ? value : Number.parseInt(value.replace(/^0x/i, ""), 16);
+  const parsed = typeof value === "number" ? value : Number.parseInt(value.replace(/^0x/i, ""), 16);
   if (!Number.isFinite(parsed)) {
     ctx.addIssue({ code: "custom", message: `not a valid address: ${String(value)}` });
     return z.NEVER;

@@ -11,7 +11,7 @@ import {
 describe("unwrapJSON", () => {
   it("passes bare JSON through", () => {
     expect(unwrapJSON('{"a":1}')).toBe('{"a":1}');
-    expect(unwrapJSON('  [1, 2]  ')).toBe("[1, 2]");
+    expect(unwrapJSON("  [1, 2]  ")).toBe("[1, 2]");
   });
 
   it("strips a ```json fence", () => {
@@ -19,13 +19,13 @@ describe("unwrapJSON", () => {
   });
 
   it("strips a bare ``` fence", () => {
-    expect(unwrapJSON('```\n[]\n```')).toBe("[]");
+    expect(unwrapJSON("```\n[]\n```")).toBe("[]");
   });
 
   it("strips a fence with an unexpected info string", () => {
     // The two hand-rolled copies of this regex only matched `json`/`jso`.
-    expect(unwrapJSON('```JSON\n[]\n```')).toBe("[]");
-    expect(unwrapJSON('```javascript\n[]\n```')).toBe("[]");
+    expect(unwrapJSON("```JSON\n[]\n```")).toBe("[]");
+    expect(unwrapJSON("```javascript\n[]\n```")).toBe("[]");
   });
 
   it("extracts the first fenced block when the model wraps it in prose", () => {
@@ -67,7 +67,12 @@ describe("parseBatchRenameResponse", () => {
     expect(result).toEqual({
       ok: true,
       value: [
-        { address: 4198400, suggestedName: "parse_header", confidence: 0.9, reasoning: "reads magic" },
+        {
+          address: 4198400,
+          suggestedName: "parse_header",
+          confidence: 0.9,
+          reasoning: "reads magic",
+        },
       ],
     });
   });

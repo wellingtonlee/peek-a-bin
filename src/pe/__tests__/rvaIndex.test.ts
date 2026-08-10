@@ -14,19 +14,11 @@
  * `padded()`. Anything asserting on the *answer* does not have to care.
  */
 
-import { describe, it, expect } from 'vitest';
-import {
-  buildSectionIndex,
-  parsePE,
-  rvaToFileOffset,
-  rvaToFileOffsetIndexed,
-} from '../parser';
-import type { SectionHeader } from '../types';
-import { buildMinimalPE32 } from './fixtures';
-import {
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_CNT_INITIALIZED_DATA,
-} from '../constants';
+import { describe, it, expect } from "vitest";
+import { buildSectionIndex, parsePE, rvaToFileOffset, rvaToFileOffsetIndexed } from "../parser";
+import type { SectionHeader } from "../types";
+import { buildMinimalPE32 } from "./fixtures";
+import { IMAGE_SCN_MEM_READ, IMAGE_SCN_CNT_INITIALIZED_DATA } from "../constants";
 
 function sec(
   name: string,
@@ -72,201 +64,199 @@ function lookup(rva: number, sections: SectionHeader[]): number {
   return scanned;
 }
 
-describe('buildSectionIndex', () => {
-  it('leaves a short table to the scan', () => {
+describe("buildSectionIndex", () => {
+  it("leaves a short table to the scan", () => {
     // Real images have a handful of sections and a scan over a handful beats a
     // binary search over them; the index is for the pathological end.
     expect(
       buildSectionIndex([
-        sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-        sec('.data', 0x2000, 0x1000, 0x1400, 0x1000),
+        sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+        sec(".data", 0x2000, 0x1000, 0x1400, 0x1000),
       ]).sorted,
     ).toBeNull();
     expect(buildSectionIndex([]).sorted).toBeNull();
   });
 
-  it('builds a searchable form for a long sorted, disjoint table', () => {
+  it("builds a searchable form for a long sorted, disjoint table", () => {
     const table = padded([]);
     const index = buildSectionIndex(table);
     expect(index.sorted).not.toBeNull();
-    expect(Array.from(index.sorted?.starts ?? [])).toEqual(
-      table.map((s) => s.virtualAddress),
-    );
+    expect(Array.from(index.sorted?.starts ?? [])).toEqual(table.map((s) => s.virtualAddress));
     // Already in order, so the table is reused rather than copied.
     expect(index.sorted?.sections).toBe(index.sections);
   });
 
-  it('builds it when sections abut exactly', () => {
+  it("builds it when sections abut exactly", () => {
     // .text ends at 0x2000 and .data starts there: adjacent, not overlapping.
     const index = buildSectionIndex(
       padded([
-        sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-        sec('.data', 0x2000, 0x1000, 0x1400, 0x1000),
+        sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+        sec(".data", 0x2000, 0x1000, 0x1400, 0x1000),
       ]),
     );
     expect(index.sorted).not.toBeNull();
   });
 
-  it('builds it across a zero-virtualSize section sharing its neighbour’s RVA', () => {
+  it("builds it across a zero-virtualSize section sharing its neighbour’s RVA", () => {
     const index = buildSectionIndex(
       padded([
-        sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-        sec('.empty', 0x2000, 0, 0x1400, 0),
-        sec('.data', 0x2000, 0x1000, 0x1400, 0x1000),
+        sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+        sec(".empty", 0x2000, 0, 0x1400, 0),
+        sec(".data", 0x2000, 0x1000, 0x1400, 0x1000),
       ]),
     );
     expect(index.sorted).not.toBeNull();
   });
 
-  it('sorts an out-of-order but disjoint table instead of giving up on it', () => {
+  it("sorts an out-of-order but disjoint table instead of giving up on it", () => {
     // Nothing overlaps, so no RVA has more than one candidate and file order
     // cannot change any answer — the copy is safe to search.
     const index = buildSectionIndex(
       padded([
-        sec('.data', 0x2000, 0x1000, 0x1400, 0x1000),
-        sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
+        sec(".data", 0x2000, 0x1000, 0x1400, 0x1000),
+        sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
       ]),
     );
     expect(index.sorted).not.toBeNull();
-    expect(index.sorted?.sections.slice(0, 2).map((s) => s.name)).toEqual(['.text', '.data']);
+    expect(index.sorted?.sections.slice(0, 2).map((s) => s.name)).toEqual([".text", ".data"]);
     // The original order is kept for the reference scan.
-    expect(index.sections.slice(0, 2).map((s) => s.name)).toEqual(['.data', '.text']);
+    expect(index.sections.slice(0, 2).map((s) => s.name)).toEqual([".data", ".text"]);
   });
 
-  it('falls back to the scan for an overlapping table', () => {
+  it("falls back to the scan for an overlapping table", () => {
     expect(
       buildSectionIndex(
         padded([
-          sec('.text', 0x1000, 0x2000, 0x400, 0x2000),
-          sec('.data', 0x2000, 0x1000, 0x2400, 0x1000),
+          sec(".text", 0x1000, 0x2000, 0x400, 0x2000),
+          sec(".data", 0x2000, 0x1000, 0x2400, 0x1000),
         ]),
       ).sorted,
     ).toBeNull();
   });
 
-  it('falls back to the scan when a poisoned virtualSize swallows the next section', () => {
+  it("falls back to the scan when a poisoned virtualSize swallows the next section", () => {
     expect(
       buildSectionIndex(
         padded([
-          sec('.text', 0x1000, 0xFFFFFFFF, 0x400, 0x200),
-          sec('.data', 0x2000, 0x1000, 0x600, 0x1000),
+          sec(".text", 0x1000, 0xffffffff, 0x400, 0x200),
+          sec(".data", 0x2000, 0x1000, 0x600, 0x1000),
         ]),
       ).sorted,
     ).toBeNull();
   });
 
-  it('falls back to the scan on a NaN virtual size', () => {
+  it("falls back to the scan on a NaN virtual size", () => {
     expect(
       buildSectionIndex(
         padded([
-          sec('.text', 0x1000, Number.NaN, 0x400, 0x200),
-          sec('.data', 0x2000, 0x1000, 0x600, 0x1000),
+          sec(".text", 0x1000, Number.NaN, 0x400, 0x200),
+          sec(".data", 0x2000, 0x1000, 0x600, 0x1000),
         ]),
       ).sorted,
     ).toBeNull();
   });
 
-  it('falls back to the scan on a NaN virtual address', () => {
+  it("falls back to the scan on a NaN virtual address", () => {
     expect(
       buildSectionIndex(
         padded([
-          sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-          sec('.data', Number.NaN, 0x1000, 0x1400, 0x1000),
+          sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+          sec(".data", Number.NaN, 0x1000, 0x1400, 0x1000),
         ]),
       ).sorted,
     ).toBeNull();
   });
 });
 
-describe('rvaToFileOffsetIndexed', () => {
+describe("rvaToFileOffsetIndexed", () => {
   const sections = [
-    sec('.text', 0x1000, 0x1000, 0x400, 0x800),
-    sec('.data', 0x2000, 0x0500, 0xC00, 0x200),
+    sec(".text", 0x1000, 0x1000, 0x400, 0x800),
+    sec(".data", 0x2000, 0x0500, 0xc00, 0x200),
   ];
 
-  it('resolves the first byte of a section', () => {
+  it("resolves the first byte of a section", () => {
     expect(lookup(0x1000, sections)).toBe(0x400);
-    expect(lookup(0x2000, sections)).toBe(0xC00);
+    expect(lookup(0x2000, sections)).toBe(0xc00);
   });
 
-  it('resolves the last mapped byte of a section', () => {
+  it("resolves the last mapped byte of a section", () => {
     // .text has 0x800 raw bytes: 0x17FF is the last that exists on disk.
-    expect(lookup(0x17FF, sections)).toBe(0xBFF);
-    expect(lookup(0x21FF, sections)).toBe(0xDFF);
+    expect(lookup(0x17ff, sections)).toBe(0xbff);
+    expect(lookup(0x21ff, sections)).toBe(0xdff);
   });
 
-  it('returns -1 one byte past the raw data, without falling into a later section', () => {
+  it("returns -1 one byte past the raw data, without falling into a later section", () => {
     expect(lookup(0x1800, sections)).toBe(-1);
     expect(lookup(0x2200, sections)).toBe(-1);
   });
 
-  it('returns -1 one byte past the virtual end of the last section', () => {
+  it("returns -1 one byte past the virtual end of the last section", () => {
     expect(lookup(0x2500, sections)).toBe(-1);
   });
 
-  it('returns -1 below the first section', () => {
+  it("returns -1 below the first section", () => {
     expect(lookup(0, sections)).toBe(-1);
-    expect(lookup(0xFFF, sections)).toBe(-1);
+    expect(lookup(0xfff, sections)).toBe(-1);
   });
 
-  it('returns -1 in the gap between two sections', () => {
+  it("returns -1 in the gap between two sections", () => {
     // .text's virtual extent ends at 0x2000, .data starts at 0x2000 — so widen
     // the gap deliberately rather than relying on the abutting fixture.
     const gapped = [
-      sec('.text', 0x1000, 0x0800, 0x400, 0x800),
-      sec('.data', 0x3000, 0x0500, 0xC00, 0x200),
+      sec(".text", 0x1000, 0x0800, 0x400, 0x800),
+      sec(".data", 0x3000, 0x0500, 0xc00, 0x200),
     ];
     expect(lookup(0x1800, gapped)).toBe(-1);
-    expect(lookup(0x2FFF, gapped)).toBe(-1);
+    expect(lookup(0x2fff, gapped)).toBe(-1);
   });
 
-  it('returns -1 for every RVA in a section with zero raw size', () => {
+  it("returns -1 for every RVA in a section with zero raw size", () => {
     // A .bss-style section: mapped at run time, absent from the file.
     const bss = [
-      sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-      sec('.bss', 0x2000, 0x4000, 0x1400, 0),
-      sec('.data', 0x6000, 0x1000, 0x1400, 0x1000),
+      sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+      sec(".bss", 0x2000, 0x4000, 0x1400, 0),
+      sec(".data", 0x6000, 0x1000, 0x1400, 0x1000),
     ];
     expect(lookup(0x2000, bss)).toBe(-1);
     expect(lookup(0x3000, bss)).toBe(-1);
-    expect(lookup(0x5FFF, bss)).toBe(-1);
+    expect(lookup(0x5fff, bss)).toBe(-1);
     // and the sections either side still resolve
     expect(lookup(0x1000, bss)).toBe(0x400);
     expect(lookup(0x6000, bss)).toBe(0x1400);
   });
 
-  it('never matches a zero-virtualSize section', () => {
+  it("never matches a zero-virtualSize section", () => {
     const empty = [
-      sec('.empty', 0x1000, 0, 0x400, 0x200),
-      sec('.text', 0x1000, 0x1000, 0x600, 0x1000),
+      sec(".empty", 0x1000, 0, 0x400, 0x200),
+      sec(".text", 0x1000, 0x1000, 0x600, 0x1000),
     ];
     // Two sections share a start RVA, which is only not an overlap because the
     // first is zero-length. It contains nothing, so .text has to answer.
     expect(lookup(0x1000, empty)).toBe(0x600);
   });
 
-  it('returns -1 for an empty section table', () => {
+  it("returns -1 for an empty section table", () => {
     expect(lookup(0x1000, [])).toBe(-1);
   });
 
-  it('returns -1 for a negative or NaN RVA rather than looping', () => {
+  it("returns -1 for a negative or NaN RVA rather than looping", () => {
     expect(lookup(-1, sections)).toBe(-1);
     expect(lookup(Number.NaN, sections)).toBe(-1);
     expect(lookup(Number.NEGATIVE_INFINITY, sections)).toBe(-1);
   });
 
-  it('resolves a single-section table', () => {
-    const one = [sec('.text', 0x1000, 0x1000, 0x200, 0x1000)];
+  it("resolves a single-section table", () => {
+    const one = [sec(".text", 0x1000, 0x1000, 0x200, 0x1000)];
     expect(lookup(0x1000, one)).toBe(0x200);
-    expect(lookup(0x1FFF, one)).toBe(0x11FF);
+    expect(lookup(0x1fff, one)).toBe(0x11ff);
     expect(lookup(0x2000, one)).toBe(-1);
   });
 
-  it('agrees with the scan on an unsorted table', () => {
+  it("agrees with the scan on an unsorted table", () => {
     const unsorted = [
-      sec('.data', 0x3000, 0x1000, 0x1400, 0x1000),
-      sec('.text', 0x1000, 0x1000, 0x400, 0x1000),
-      sec('.rsrc', 0x2000, 0x1000, 0x2400, 0x1000),
+      sec(".data", 0x3000, 0x1000, 0x1400, 0x1000),
+      sec(".text", 0x1000, 0x1000, 0x400, 0x1000),
+      sec(".rsrc", 0x2000, 0x1000, 0x2400, 0x1000),
     ];
     expect(lookup(0x1000, unsorted)).toBe(0x400);
     expect(lookup(0x2000, unsorted)).toBe(0x2400);
@@ -274,27 +264,27 @@ describe('rvaToFileOffsetIndexed', () => {
     expect(lookup(0x4000, unsorted)).toBe(-1);
   });
 
-  it('agrees with the scan on an overlapping table, where the earlier entry wins', () => {
+  it("agrees with the scan on an overlapping table, where the earlier entry wins", () => {
     const overlapping = [
-      sec('.a', 0x1000, 0x3000, 0x400, 0x3000),
-      sec('.b', 0x2000, 0x1000, 0x4000, 0x1000),
+      sec(".a", 0x1000, 0x3000, 0x400, 0x3000),
+      sec(".b", 0x2000, 0x1000, 0x4000, 0x1000),
     ];
     // 0x2000 is inside both; the scan takes .a because it comes first.
     expect(lookup(0x2000, overlapping)).toBe(0x1400);
   });
 
-  it('agrees with the scan when an earlier overlapping section has no raw data there', () => {
+  it("agrees with the scan when an earlier overlapping section has no raw data there", () => {
     // The nastiest overlap: .a claims the RVA but cannot supply a byte for it,
     // and the linear scan gives up rather than trying .b. Losing that would
     // silently start resolving RVAs to a different section's bytes.
     const overlapping = [
-      sec('.a', 0x1000, 0x3000, 0x400, 0x100),
-      sec('.b', 0x2000, 0x1000, 0x4000, 0x1000),
+      sec(".a", 0x1000, 0x3000, 0x400, 0x100),
+      sec(".b", 0x2000, 0x1000, 0x4000, 0x1000),
     ];
     expect(lookup(0x2000, overlapping)).toBe(-1);
   });
 
-  it('agrees with the scan on 10k random tables, short and long, sorted and not', () => {
+  it("agrees with the scan on 10k random tables, short and long, sorted and not", () => {
     // Deterministic LCG: a failure has to be reproducible to be worth anything.
     let seed = 0x2545f491;
     const rand = (n: number) => {
@@ -354,9 +344,7 @@ describe('rvaToFileOffsetIndexed', () => {
         if (searchedOffset !== scannedOffset) {
           mismatches.push(
             `trial ${trial} rva 0x${rva.toString(16)}: index ${searchedOffset} != scan ${scannedOffset} for ` +
-              JSON.stringify(
-                table.map((s) => [s.virtualAddress, s.virtualSize, s.sizeOfRawData]),
-              ),
+              JSON.stringify(table.map((s) => [s.virtualAddress, s.virtualSize, s.sizeOfRawData])),
           );
         }
       }
@@ -370,7 +358,7 @@ describe('rvaToFileOffsetIndexed', () => {
   });
 });
 
-describe('parsePE with a hostile section table', () => {
+describe("parsePE with a hostile section table", () => {
   const data = (name: string, virtualAddress: number, bytes: Uint8Array) => ({
     name,
     virtualAddress,
@@ -379,38 +367,38 @@ describe('parsePE with a hostile section table', () => {
     characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
   });
 
-  it('parses imports through a section table written out of order', () => {
+  it("parses imports through a section table written out of order", () => {
     // The directory section is emitted last by the builder but mapped lowest,
     // so the table the parser sees is genuinely unsorted.
     const buf = buildMinimalPE32({
-      sections: [data('.high', 0x9000, new Uint8Array(0x40).fill(0xAA))],
+      sections: [data(".high", 0x9000, new Uint8Array(0x40).fill(0xaa))],
       directoryRVA: 0x2000,
       directories: {
         imports: [
-          { libraryName: 'KERNEL32.dll', functions: [{ name: 'Sleep' }, { name: 'ExitProcess' }] },
+          { libraryName: "KERNEL32.dll", functions: [{ name: "Sleep" }, { name: "ExitProcess" }] },
         ],
       },
     });
 
     const pe = parsePE(buf);
     expect(pe.sections.map((s) => s.virtualAddress)).toEqual([0x9000, 0x2000]);
-    expect(pe.imports.map((i) => i.libraryName)).toEqual(['KERNEL32.dll']);
-    expect(pe.imports[0].functions).toEqual(['Sleep', 'ExitProcess']);
+    expect(pe.imports.map((i) => i.libraryName)).toEqual(["KERNEL32.dll"]);
+    expect(pe.imports[0].functions).toEqual(["Sleep", "ExitProcess"]);
   });
 
-  it('does not hang or throw on overlapping sections with absurd virtual sizes', () => {
+  it("does not hang or throw on overlapping sections with absurd virtual sizes", () => {
     const bytes = new Uint8Array(0x40).fill(0x41);
     const buf = buildMinimalPE32({
       sections: [
-        { ...data('.a', 0x1000, bytes), virtualSize: 0x7FFFFFFF },
-        { ...data('.b', 0x1000, bytes), virtualSize: 0x7FFFFFFF },
+        { ...data(".a", 0x1000, bytes), virtualSize: 0x7fffffff },
+        { ...data(".b", 0x1000, bytes), virtualSize: 0x7fffffff },
       ],
     });
 
     const pe = parsePE(buf);
     expect(pe.sections).toHaveLength(2);
     const index = buildSectionIndex(pe.sections);
-    for (const rva of [0, 0x1000, 0x1020, 0x40000000, 0x7FFFFFFF]) {
+    for (const rva of [0, 0x1000, 0x1020, 0x40000000, 0x7fffffff]) {
       expect(rvaToFileOffsetIndexed(rva, index)).toBe(rvaToFileOffset(rva, pe.sections));
     }
   });

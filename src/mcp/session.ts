@@ -3,20 +3,20 @@
  * Manages loaded PE files and their analysis results.
  */
 
-import { parsePE, extractStrings } from '../pe/parser';
-import { findCodeSection } from '../pe/sections';
-import type { PEFile } from '../pe/types';
-import type { Instruction, DisasmFunction, Xref } from '../disasm/types';
-import { buildIATLookup } from '../disasm/operands';
-import { detectAnomalies, type Anomaly } from '../analysis/anomalies';
-import { detectDriver, type DriverInfo } from '../analysis/driver';
-import { StructRegistry } from '../disasm/decompile/structs';
+import { parsePE, extractStrings } from "../pe/parser";
+import { findCodeSection } from "../pe/sections";
+import type { PEFile } from "../pe/types";
+import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
+import { buildIATLookup } from "../disasm/operands";
+import { detectAnomalies, type Anomaly } from "../analysis/anomalies";
+import { detectDriver, type DriverInfo } from "../analysis/driver";
+import { StructRegistry } from "../disasm/decompile/structs";
 import {
   initCapstone,
   detectFunctionsFromBytes,
   hybridDisassembleBytes,
   buildXrefMap,
-} from './disasm';
+} from "./disasm";
 
 export interface AnalyzedFile {
   id: string;
@@ -27,7 +27,7 @@ export interface AnalyzedFile {
   xrefMap: Map<number, Xref[]>;
   iatMap: Map<number, { lib: string; func: string }>;
   stringMap: Map<number, string>;
-  stringTypes: Map<number, 'ascii' | 'utf16le'>;
+  stringTypes: Map<number, "ascii" | "utf16le">;
   jumpTables: Map<number, number[]>;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
@@ -57,7 +57,12 @@ export class FileSession {
     const iatMap = buildIATLookup(pe.imports);
 
     // 3. Extract strings
-    const { strings: stringMap, stringTypes } = extractStrings(buffer, pe.sections, imageBase, is64);
+    const { strings: stringMap, stringTypes } = extractStrings(
+      buffer,
+      pe.sections,
+      imageBase,
+      is64,
+    );
 
     // 4. Detect driver mode
     const driverInfo = detectDriver(pe);
@@ -80,18 +85,23 @@ export class FileSession {
     }
 
     // 6. Detect functions
-    const pdataFunctions = pe.runtimeFunctions?.map(rf => ({
+    const pdataFunctions = pe.runtimeFunctions?.map((rf) => ({
       beginAddress: imageBase + rf.beginAddress,
       endAddress: imageBase + rf.endAddress,
     }));
     const handlerAddresses = pe.runtimeFunctions
-      ?.filter(rf => rf.handlerAddress !== undefined)
-      .map(rf => imageBase + rf.handlerAddress!);
+      ?.filter((rf) => rf.handlerAddress !== undefined)
+      .map((rf) => imageBase + rf.handlerAddress!);
 
     const detectResult = detectFunctionsFromBytes(
-      textBytes, textBase, is64, stringMap, iatMap, driverMode,
+      textBytes,
+      textBase,
+      is64,
+      stringMap,
+      iatMap,
+      driverMode,
       {
-        exports: pe.exports.map(e => ({ name: e.name, address: e.address })),
+        exports: pe.exports.map((e) => ({ name: e.name, address: e.address })),
         entryPoint: imageBase + pe.optionalHeader.addressOfEntryPoint,
         pdataFunctions,
         handlerAddresses,
@@ -101,9 +111,15 @@ export class FileSession {
     const jumpTables = new Map(detectResult.jumpTables);
 
     // 7. Hybrid disassemble
-    const seeds = functions.map(f => f.address);
+    const seeds = functions.map((f) => f.address);
     const instructions = hybridDisassembleBytes(
-      textBytes, textBase, is64, seeds, stringMap, iatMap, driverMode,
+      textBytes,
+      textBase,
+      is64,
+      seeds,
+      stringMap,
+      iatMap,
+      driverMode,
       pdataFunctions,
     );
 
@@ -147,7 +163,7 @@ export class FileSession {
   }
 
   listFiles(): { id: string; fileName: string }[] {
-    return Array.from(this.files.values()).map(f => ({ id: f.id, fileName: f.fileName }));
+    return Array.from(this.files.values()).map((f) => ({ id: f.id, fileName: f.fileName }));
   }
 
   removeFile(id: string): boolean {
@@ -197,7 +213,7 @@ export class FileSession {
   removeBookmark(fileId: string, address: number): boolean {
     const af = this.files.get(fileId);
     if (!af) return false;
-    af.bookmarks = af.bookmarks.filter(b => b.address !== address);
+    af.bookmarks = af.bookmarks.filter((b) => b.address !== address);
     this.onAnnotationChange?.(fileId, af);
     return true;
   }

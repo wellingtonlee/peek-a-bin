@@ -1,4 +1,4 @@
-import type { DecompType } from './typeInfer';
+import type { DecompType } from "./typeInfer";
 
 export interface ApiFuncType {
   returnType: DecompType;
@@ -6,18 +6,18 @@ export interface ApiFuncType {
 }
 
 // ── Type shorthands ──
-const PVOID: DecompType = { kind: 'ptr', pointee: { kind: 'unknown' } };
-const PCHAR: DecompType = { kind: 'ptr', pointee: { kind: 'int', size: 1, signed: true } };
-const PWCHAR: DecompType = { kind: 'ptr', pointee: { kind: 'int', size: 2, signed: false } };
-const DWORD: DecompType = { kind: 'int', size: 4, signed: false };
-const INT32: DecompType = { kind: 'int', size: 4, signed: true };
-const SIZE_T: DecompType = { kind: 'int', size: 8, signed: false };
-const BOOL_T: DecompType = { kind: 'bool' };
-const VOID_T: DecompType = { kind: 'void' };
-const HANDLE_T: DecompType = { kind: 'handle' };
-const NTSTATUS_T: DecompType = { kind: 'ntstatus' };
-const HRESULT_T: DecompType = { kind: 'hresult' };
-const PDWORD: DecompType = { kind: 'ptr', pointee: DWORD };
+const PVOID: DecompType = { kind: "ptr", pointee: { kind: "unknown" } };
+const PCHAR: DecompType = { kind: "ptr", pointee: { kind: "int", size: 1, signed: true } };
+const PWCHAR: DecompType = { kind: "ptr", pointee: { kind: "int", size: 2, signed: false } };
+const DWORD: DecompType = { kind: "int", size: 4, signed: false };
+const INT32: DecompType = { kind: "int", size: 4, signed: true };
+const SIZE_T: DecompType = { kind: "int", size: 8, signed: false };
+const BOOL_T: DecompType = { kind: "bool" };
+const VOID_T: DecompType = { kind: "void" };
+const HANDLE_T: DecompType = { kind: "handle" };
+const NTSTATUS_T: DecompType = { kind: "ntstatus" };
+const HRESULT_T: DecompType = { kind: "hresult" };
+const PDWORD: DecompType = { kind: "ptr", pointee: DWORD };
 
 /** Map of well-known Win32/C API function names → type signatures. */
 export const API_TYPES: Record<string, ApiFuncType> = {
@@ -55,12 +55,21 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   wcsncpy: { returnType: PWCHAR, params: [PWCHAR, PWCHAR, SIZE_T] },
   wcscmp: { returnType: INT32, params: [PWCHAR, PWCHAR] },
   MultiByteToWideChar: { returnType: INT32, params: [DWORD, DWORD, PCHAR, INT32, PWCHAR, INT32] },
-  WideCharToMultiByte: { returnType: INT32, params: [DWORD, DWORD, PWCHAR, INT32, PCHAR, INT32, PCHAR, PVOID] },
+  WideCharToMultiByte: {
+    returnType: INT32,
+    params: [DWORD, DWORD, PWCHAR, INT32, PCHAR, INT32, PCHAR, PVOID],
+  },
   RtlInitUnicodeString: { returnType: VOID_T, params: [PVOID, PWCHAR] },
 
   // ── File I/O ──
-  CreateFileA: { returnType: HANDLE_T, params: [PCHAR, DWORD, DWORD, PVOID, DWORD, DWORD, HANDLE_T] },
-  CreateFileW: { returnType: HANDLE_T, params: [PWCHAR, DWORD, DWORD, PVOID, DWORD, DWORD, HANDLE_T] },
+  CreateFileA: {
+    returnType: HANDLE_T,
+    params: [PCHAR, DWORD, DWORD, PVOID, DWORD, DWORD, HANDLE_T],
+  },
+  CreateFileW: {
+    returnType: HANDLE_T,
+    params: [PWCHAR, DWORD, DWORD, PVOID, DWORD, DWORD, HANDLE_T],
+  },
   ReadFile: { returnType: BOOL_T, params: [HANDLE_T, PVOID, DWORD, PDWORD, PVOID] },
   WriteFile: { returnType: BOOL_T, params: [HANDLE_T, PVOID, DWORD, PDWORD, PVOID] },
   CloseHandle: { returnType: BOOL_T, params: [HANDLE_T] },
@@ -104,7 +113,10 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   GetCurrentThreadId: { returnType: DWORD, params: [] },
   OpenProcess: { returnType: HANDLE_T, params: [DWORD, BOOL_T, DWORD] },
   CreateThread: { returnType: HANDLE_T, params: [PVOID, SIZE_T, PVOID, PVOID, DWORD, PDWORD] },
-  CreateRemoteThread: { returnType: HANDLE_T, params: [HANDLE_T, PVOID, SIZE_T, PVOID, PVOID, DWORD, PDWORD] },
+  CreateRemoteThread: {
+    returnType: HANDLE_T,
+    params: [HANDLE_T, PVOID, SIZE_T, PVOID, PVOID, DWORD, PDWORD],
+  },
   ExitThread: { returnType: VOID_T, params: [DWORD] },
   ResumeThread: { returnType: DWORD, params: [HANDLE_T] },
   SuspendThread: { returnType: DWORD, params: [HANDLE_T] },
@@ -133,10 +145,16 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   RegOpenKeyExW: { returnType: INT32, params: [HANDLE_T, PWCHAR, DWORD, DWORD, PVOID] },
   RegCloseKey: { returnType: INT32, params: [HANDLE_T] },
   RegQueryValueExA: { returnType: INT32, params: [HANDLE_T, PCHAR, PDWORD, PDWORD, PVOID, PDWORD] },
-  RegQueryValueExW: { returnType: INT32, params: [HANDLE_T, PWCHAR, PDWORD, PDWORD, PVOID, PDWORD] },
+  RegQueryValueExW: {
+    returnType: INT32,
+    params: [HANDLE_T, PWCHAR, PDWORD, PDWORD, PVOID, PDWORD],
+  },
   RegSetValueExA: { returnType: INT32, params: [HANDLE_T, PCHAR, DWORD, DWORD, PVOID, DWORD] },
   RegSetValueExW: { returnType: INT32, params: [HANDLE_T, PWCHAR, DWORD, DWORD, PVOID, DWORD] },
-  RegCreateKeyExA: { returnType: INT32, params: [HANDLE_T, PCHAR, DWORD, PCHAR, DWORD, DWORD, PVOID, PVOID, PDWORD] },
+  RegCreateKeyExA: {
+    returnType: INT32,
+    params: [HANDLE_T, PCHAR, DWORD, PCHAR, DWORD, DWORD, PVOID, PVOID, PDWORD],
+  },
   RegDeleteValueA: { returnType: INT32, params: [HANDLE_T, PCHAR] },
   RegDeleteValueW: { returnType: INT32, params: [HANDLE_T, PWCHAR] },
 
@@ -174,7 +192,10 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   CryptCreateHash: { returnType: BOOL_T, params: [HANDLE_T, DWORD, HANDLE_T, DWORD, PVOID] },
   CryptHashData: { returnType: BOOL_T, params: [HANDLE_T, PVOID, DWORD, DWORD] },
   CryptDeriveKey: { returnType: BOOL_T, params: [HANDLE_T, DWORD, HANDLE_T, DWORD, PVOID] },
-  CryptEncrypt: { returnType: BOOL_T, params: [HANDLE_T, HANDLE_T, BOOL_T, DWORD, PVOID, PDWORD, DWORD] },
+  CryptEncrypt: {
+    returnType: BOOL_T,
+    params: [HANDLE_T, HANDLE_T, BOOL_T, DWORD, PVOID, PDWORD, DWORD],
+  },
   CryptDecrypt: { returnType: BOOL_T, params: [HANDLE_T, HANDLE_T, BOOL_T, DWORD, PVOID, PDWORD] },
   CryptDestroyHash: { returnType: BOOL_T, params: [HANDLE_T] },
   CryptDestroyKey: { returnType: BOOL_T, params: [HANDLE_T] },
@@ -194,17 +215,29 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   SysStringLen: { returnType: DWORD, params: [PWCHAR] },
 
   // ── NT/Zw ──
-  NtQueryInformationProcess: { returnType: NTSTATUS_T, params: [HANDLE_T, DWORD, PVOID, DWORD, PDWORD] },
+  NtQueryInformationProcess: {
+    returnType: NTSTATUS_T,
+    params: [HANDLE_T, DWORD, PVOID, DWORD, PDWORD],
+  },
   NtQuerySystemInformation: { returnType: NTSTATUS_T, params: [DWORD, PVOID, DWORD, PDWORD] },
-  NtCreateFile: { returnType: NTSTATUS_T, params: [PVOID, DWORD, PVOID, PVOID, PVOID, DWORD, DWORD, DWORD, DWORD, PVOID, DWORD] },
+  NtCreateFile: {
+    returnType: NTSTATUS_T,
+    params: [PVOID, DWORD, PVOID, PVOID, PVOID, DWORD, DWORD, DWORD, DWORD, PVOID, DWORD],
+  },
   NtClose: { returnType: NTSTATUS_T, params: [HANDLE_T] },
-  NtAllocateVirtualMemory: { returnType: NTSTATUS_T, params: [HANDLE_T, PVOID, SIZE_T, PVOID, DWORD, DWORD] },
+  NtAllocateVirtualMemory: {
+    returnType: NTSTATUS_T,
+    params: [HANDLE_T, PVOID, SIZE_T, PVOID, DWORD, DWORD],
+  },
   NtFreeVirtualMemory: { returnType: NTSTATUS_T, params: [HANDLE_T, PVOID, PVOID, DWORD] },
   NtWriteVirtualMemory: { returnType: NTSTATUS_T, params: [HANDLE_T, PVOID, PVOID, SIZE_T, PVOID] },
   NtReadVirtualMemory: { returnType: NTSTATUS_T, params: [HANDLE_T, PVOID, PVOID, SIZE_T, PVOID] },
   RtlAllocateHeap: { returnType: PVOID, params: [HANDLE_T, DWORD, SIZE_T] },
   RtlFreeHeap: { returnType: BOOL_T, params: [HANDLE_T, DWORD, PVOID] },
-  ZwQueryInformationProcess: { returnType: NTSTATUS_T, params: [HANDLE_T, DWORD, PVOID, DWORD, PDWORD] },
+  ZwQueryInformationProcess: {
+    returnType: NTSTATUS_T,
+    params: [HANDLE_T, DWORD, PVOID, DWORD, PDWORD],
+  },
   ZwClose: { returnType: NTSTATUS_T, params: [HANDLE_T] },
 
   // ── Network ──
@@ -227,13 +260,34 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   gethostbyname: { returnType: PVOID, params: [PCHAR] },
   inet_addr: { returnType: DWORD, params: [PCHAR] },
   inet_ntoa: { returnType: PCHAR, params: [DWORD] },
-  htons: { returnType: { kind: 'int', size: 2, signed: false }, params: [{ kind: 'int', size: 2, signed: false }] },
-  ntohs: { returnType: { kind: 'int', size: 2, signed: false }, params: [{ kind: 'int', size: 2, signed: false }] },
+  htons: {
+    returnType: { kind: "int", size: 2, signed: false },
+    params: [{ kind: "int", size: 2, signed: false }],
+  },
+  ntohs: {
+    returnType: { kind: "int", size: 2, signed: false },
+    params: [{ kind: "int", size: 2, signed: false }],
+  },
   InternetOpenA: { returnType: HANDLE_T, params: [PCHAR, DWORD, PCHAR, PCHAR, DWORD] },
   InternetOpenW: { returnType: HANDLE_T, params: [PWCHAR, DWORD, PWCHAR, PWCHAR, DWORD] },
-  InternetConnectA: { returnType: HANDLE_T, params: [HANDLE_T, PCHAR, { kind: 'int', size: 2, signed: false }, PCHAR, PCHAR, DWORD, DWORD, SIZE_T] },
+  InternetConnectA: {
+    returnType: HANDLE_T,
+    params: [
+      HANDLE_T,
+      PCHAR,
+      { kind: "int", size: 2, signed: false },
+      PCHAR,
+      PCHAR,
+      DWORD,
+      DWORD,
+      SIZE_T,
+    ],
+  },
   InternetCloseHandle: { returnType: BOOL_T, params: [HANDLE_T] },
-  HttpOpenRequestA: { returnType: HANDLE_T, params: [HANDLE_T, PCHAR, PCHAR, PCHAR, PCHAR, PVOID, DWORD, SIZE_T] },
+  HttpOpenRequestA: {
+    returnType: HANDLE_T,
+    params: [HANDLE_T, PCHAR, PCHAR, PCHAR, PCHAR, PVOID, DWORD, SIZE_T],
+  },
   HttpSendRequestA: { returnType: BOOL_T, params: [HANDLE_T, PCHAR, DWORD, PVOID, DWORD] },
   InternetReadFile: { returnType: BOOL_T, params: [HANDLE_T, PVOID, DWORD, PDWORD] },
 
@@ -244,7 +298,7 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   QueryPerformanceCounter: { returnType: BOOL_T, params: [PVOID] },
   QueryPerformanceFrequency: { returnType: BOOL_T, params: [PVOID] },
   GetTickCount: { returnType: DWORD, params: [] },
-  GetTickCount64: { returnType: { kind: 'int', size: 8, signed: false }, params: [] },
+  GetTickCount64: { returnType: { kind: "int", size: 8, signed: false }, params: [] },
   GetSystemTimeAsFileTime: { returnType: VOID_T, params: [PVOID] },
   GetCommandLineA: { returnType: PCHAR, params: [] },
   GetCommandLineW: { returnType: PWCHAR, params: [] },
@@ -256,9 +310,18 @@ export const API_TYPES: Record<string, ApiFuncType> = {
   GetWindowsDirectoryW: { returnType: DWORD, params: [PWCHAR, DWORD] },
 
   // ── Device I/O ──
-  DeviceIoControl: { returnType: BOOL_T, params: [HANDLE_T, DWORD, PVOID, DWORD, PVOID, DWORD, PDWORD, PVOID] },
-  IoCreateDevice: { returnType: NTSTATUS_T, params: [PVOID, DWORD, PVOID, DWORD, DWORD, BOOL_T, PVOID] },
+  DeviceIoControl: {
+    returnType: BOOL_T,
+    params: [HANDLE_T, DWORD, PVOID, DWORD, PVOID, DWORD, PDWORD, PVOID],
+  },
+  IoCreateDevice: {
+    returnType: NTSTATUS_T,
+    params: [PVOID, DWORD, PVOID, DWORD, DWORD, BOOL_T, PVOID],
+  },
   IoDeleteDevice: { returnType: VOID_T, params: [PVOID] },
   IoCreateSymbolicLink: { returnType: NTSTATUS_T, params: [PVOID, PVOID] },
-  IofCompleteRequest: { returnType: VOID_T, params: [PVOID, { kind: 'int', size: 1, signed: true }] },
+  IofCompleteRequest: {
+    returnType: VOID_T,
+    params: [PVOID, { kind: "int", size: 1, signed: true }],
+  },
 };

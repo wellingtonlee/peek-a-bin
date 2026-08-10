@@ -1,7 +1,7 @@
-import type { Instruction, DisasmFunction, Xref, StackFrame } from '../disasm/types';
-import type { FunctionSignature } from '../disasm/signatures';
-import type { SectionHeader } from '../pe/types';
-import type { IRPDispatchEntry } from '../analysis/driver';
+import type { Instruction, DisasmFunction, Xref, StackFrame } from "../disasm/types";
+import type { FunctionSignature } from "../disasm/signatures";
+import type { SectionHeader } from "../pe/types";
+import type { IRPDispatchEntry } from "../analysis/driver";
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -36,7 +36,7 @@ class DisasmWorkerClient {
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
 
   constructor() {
-    this.worker = new Worker(new URL('./disasm.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = new Worker(new URL("./disasm.worker.ts", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => {
       const { id, result, error } = e.data;
       const p = this.take(id);
@@ -45,17 +45,17 @@ class DisasmWorkerClient {
       else p.resolve(result);
     };
     this.worker.onerror = (e) => {
-      console.error('[disasm worker] load error:', e.message ?? e);
+      console.error("[disasm worker] load error:", e.message ?? e);
       // Reject all pending requests so callers don't hang
-      this.rejectAll(`Worker error: ${e.message ?? 'unknown'}`);
+      this.rejectAll(`Worker error: ${e.message ?? "unknown"}`);
     };
     this.worker.onmessageerror = () => {
       // A reply that failed structured clone (the large Instruction[] payloads
       // are the risk) never reaches onmessage, and the event carries no usable
       // data identifying which request it belonged to — so fail everything
       // outstanding instead of letting them hang until the watchdog fires.
-      console.error('[disasm worker] message deserialization failed');
-      this.rejectAll('Worker reply could not be deserialized (structured clone failed)');
+      console.error("[disasm worker] message deserialization failed");
+      this.rejectAll("Worker reply could not be deserialized (structured clone failed)");
     };
   }
 
@@ -79,9 +79,9 @@ class DisasmWorkerClient {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
-        this.take(id)?.reject(new Error(
-          `Worker request '${method}' timed out after ${REQUEST_TIMEOUT_MS / 1000}s`,
-        ));
+        this.take(id)?.reject(
+          new Error(`Worker request '${method}' timed out after ${REQUEST_TIMEOUT_MS / 1000}s`),
+        );
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, method, timer });
       try {
@@ -95,7 +95,7 @@ class DisasmWorkerClient {
   }
 
   async init(): Promise<void> {
-    await this.send('init');
+    await this.send("init");
   }
 
   async configure(
@@ -105,7 +105,7 @@ class DisasmWorkerClient {
   ): Promise<void> {
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
-    await this.send('configure', {
+    await this.send("configure", {
       stringEntries: Array.from(strings.entries()),
       iatEntries: Array.from(iat.entries()),
       driverMode: options?.driverMode,
@@ -122,7 +122,7 @@ class DisasmWorkerClient {
     const key = `${baseAddress}:${is64}`;
     const cached = this.disasmCache.get(key);
     if (cached) return cached;
-    const result: Instruction[] = await this.send('disassemble', { bytes, baseAddress, is64 });
+    const result: Instruction[] = await this.send("disassemble", { bytes, baseAddress, is64 });
     this.disasmCache.set(key, result);
     return result;
   }
@@ -137,7 +137,13 @@ class DisasmWorkerClient {
     const key = `hybrid:${baseAddress}:${is64}`;
     const cached = this.disasmCache.get(key);
     if (cached) return cached;
-    const result: Instruction[] = await this.send('hybridDisassemble', { bytes, baseAddress, is64, seeds, pdataRanges });
+    const result: Instruction[] = await this.send("hybridDisassemble", {
+      bytes,
+      baseAddress,
+      is64,
+      seeds,
+      pdataRanges,
+    });
     this.disasmCache.set(key, result);
     return result;
   }
@@ -151,10 +157,10 @@ class DisasmWorkerClient {
       entryPoint?: number;
       pdataFunctions?: { beginAddress: number; endAddress: number }[];
       handlerAddresses?: number[];
-    }
+    },
   ): Promise<DisasmFunction[]> {
     const result: { functions: DisasmFunction[]; jumpTables: [number, number[]][] } =
-      await this.send('detectFunctions', { bytes, baseAddress, is64, options });
+      await this.send("detectFunctions", { bytes, baseAddress, is64, options });
     this.jumpTables = new Map(result.jumpTables);
     return result.functions;
   }
@@ -178,7 +184,15 @@ class DisasmWorkerClient {
       importXrefs: [number, number[]][];
       callGraph: [number, number[]][];
       dataXrefs: [number, number[]][];
-    } = await this.send('buildAllXrefs', { bytes, baseAddress, is64, stringAddrs, iatAddrs, funcEntries, dataSections });
+    } = await this.send("buildAllXrefs", {
+      bytes,
+      baseAddress,
+      is64,
+      stringAddrs,
+      iatAddrs,
+      funcEntries,
+      dataSections,
+    });
     return {
       stringXrefs: new Map(result.stringXrefs),
       importXrefs: new Map(result.importXrefs),
@@ -194,21 +208,24 @@ class DisasmWorkerClient {
     is64?: boolean,
   ): Promise<{ strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }> {
     const result: { strings: [number, string][]; stringTypes: [number, "ascii" | "utf16le"][] } =
-      await this.send('extractStrings', { buffer, sections, imageBase, is64 });
+      await this.send("extractStrings", { buffer, sections, imageBase, is64 });
     return {
       strings: new Map(result.strings),
       stringTypes: new Map(result.stringTypes),
     };
   }
 
-  async detectIRPDispatches(instructions: Instruction[], is64: boolean): Promise<IRPDispatchEntry[]> {
-    return this.send('detectIRPDispatches', { instructions, is64 });
+  async detectIRPDispatches(
+    instructions: Instruction[],
+    is64: boolean,
+  ): Promise<IRPDispatchEntry[]> {
+    return this.send("detectIRPDispatches", { instructions, is64 });
   }
 
   async buildTypedXrefMap(instructions: Instruction[]): Promise<Map<number, Xref[]>> {
     const cached = this.xrefCache.get(instructions);
     if (cached) return cached;
-    const entries: [number, Xref[]][] = await this.send('buildTypedXrefMap', { instructions });
+    const entries: [number, Xref[]][] = await this.send("buildTypedXrefMap", { instructions });
     const result = new Map(entries);
     this.xrefCache.set(instructions, result);
     return result;
@@ -217,7 +234,7 @@ class DisasmWorkerClient {
   async configureDecompileMaps(
     funcMap: Map<number, { name: string; address: number }>,
   ): Promise<void> {
-    await this.send('configureDecompileMaps', {
+    await this.send("configureDecompileMaps", {
       funcEntries: Array.from(funcMap.entries()),
       jumpTableEntries: Array.from(this.jumpTables.entries()),
     });
@@ -231,20 +248,23 @@ class DisasmWorkerClient {
     signature: FunctionSignature | null,
     is64: boolean,
     funcMap: Map<number, { name: string; address: number }>,
-    runtimeFunctions?: import('../pe/types').RuntimeFunction[],
+    runtimeFunctions?: import("../pe/types").RuntimeFunction[],
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
     const cached = this.decompileCache.get(func.address);
     if (cached) return cached;
-    const result: { code: string; lineMap: [number, number][] } = await this.send('decompileFunction', {
-      func,
-      instructions,
-      xrefEntries: Array.from(xrefMap.entries()),
-      stackFrame,
-      signature,
-      is64,
-      funcEntries: Array.from(funcMap.entries()),
-      runtimeFunctions,
-    });
+    const result: { code: string; lineMap: [number, number][] } = await this.send(
+      "decompileFunction",
+      {
+        func,
+        instructions,
+        xrefEntries: Array.from(xrefMap.entries()),
+        stackFrame,
+        signature,
+        is64,
+        funcEntries: Array.from(funcMap.entries()),
+        runtimeFunctions,
+      },
+    );
     const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
     this.decompileCache.set(func.address, parsed);
     return parsed;
@@ -256,7 +276,7 @@ class DisasmWorkerClient {
 
   async resetStructRegistry(): Promise<void> {
     this.decompileCache.clear();
-    await this.send('resetStructRegistry');
+    await this.send("resetStructRegistry");
   }
 }
 

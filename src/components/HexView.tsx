@@ -13,7 +13,10 @@ function parseBytePattern(input: string): (number | null)[] | null {
   if (parts.length === 0 || (parts.length === 1 && parts[0] === "")) return null;
   const bytes: (number | null)[] = [];
   for (const p of parts) {
-    if (p === "??" || p === "?") { bytes.push(null); continue; }
+    if (p === "??" || p === "?") {
+      bytes.push(null);
+      continue;
+    }
     const v = parseInt(p, 16);
     if (Number.isNaN(v) || v < 0 || v > 255) return null;
     bytes.push(v);
@@ -21,10 +24,7 @@ function parseBytePattern(input: string): (number | null)[] | null {
   return bytes.length > 0 ? bytes : null;
 }
 
-function findBytePatternMatches(
-  data: Uint8Array,
-  pattern: (number | null)[],
-): number[] {
+function findBytePatternMatches(data: Uint8Array, pattern: (number | null)[]): number[] {
   const matches: number[] = [];
   if (pattern.length === 0) return matches;
   const end = data.length - pattern.length;
@@ -74,8 +74,19 @@ export function HexView() {
   const [showEntropy, setShowEntropy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [hexCtxMenu, setHexCtxMenu] = useState<{ x: number; y: number } | null>(null);
-  const [entropyTooltip, setEntropyTooltip] = useState<{ x: number; blockIdx: number; offset: number; endOffset: number; value: number } | null>(null);
-  const [xrefPopup, setXrefPopup] = useState<{ addr: number; refs: number[]; x: number; y: number } | null>(null);
+  const [entropyTooltip, setEntropyTooltip] = useState<{
+    x: number;
+    blockIdx: number;
+    offset: number;
+    endOffset: number;
+    value: number;
+  } | null>(null);
+  const [xrefPopup, setXrefPopup] = useState<{
+    addr: number;
+    refs: number[];
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Selection range helpers
   const selectionRange = useMemo((): { start: number; end: number } | null => {
@@ -88,10 +99,13 @@ export function HexView() {
 
   const selectionCount = selectionRange ? selectionRange.end - selectionRange.start + 1 : 0;
 
-  const isInSelection = useCallback((offset: number): boolean => {
-    if (!selectionRange) return false;
-    return offset >= selectionRange.start && offset <= selectionRange.end;
-  }, [selectionRange]);
+  const isInSelection = useCallback(
+    (offset: number): boolean => {
+      if (!selectionRange) return false;
+      return offset >= selectionRange.start && offset <= selectionRange.end;
+    },
+    [selectionRange],
+  );
 
   const sectionInfo = useMemo(() => {
     if (!pe) return null;
@@ -106,11 +120,7 @@ export function HexView() {
 
   const sectionBytes = useMemo(() => {
     if (!pe || !sectionInfo) return null;
-    return new Uint8Array(
-      pe.buffer,
-      sectionInfo.pointerToRawData,
-      sectionInfo.sizeOfRawData,
-    );
+    return new Uint8Array(pe.buffer, sectionInfo.pointerToRawData, sectionInfo.sizeOfRawData);
   }, [pe, sectionInfo]);
 
   const entropyBlocks = useMemo(() => {
@@ -118,13 +128,10 @@ export function HexView() {
     return computeEntropyBlocks(sectionBytes);
   }, [sectionBytes]);
 
-  const rowCount = sectionBytes
-    ? Math.ceil(sectionBytes.length / BYTES_PER_ROW)
-    : 0;
+  const rowCount = sectionBytes ? Math.ceil(sectionBytes.length / BYTES_PER_ROW) : 0;
 
-  const baseAddress = pe && sectionInfo
-    ? pe.optionalHeader.imageBase + sectionInfo.virtualAddress
-    : 0;
+  const baseAddress =
+    pe && sectionInfo ? pe.optionalHeader.imageBase + sectionInfo.virtualAddress : 0;
 
   const virtualizer = useVirtualizer({
     count: rowCount,
@@ -204,37 +211,49 @@ export function HexView() {
     [dispatch],
   );
 
-  const handleEntropyClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || entropyBlocks.length === 0 || !sectionBytes) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const blockWidth = rect.width / entropyBlocks.length;
-    const blockIdx = Math.floor(x / blockWidth);
-    if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
-      const offset = blockIdx * 256;
-      const rowIdx = Math.floor(offset / BYTES_PER_ROW);
-      virtualizer.scrollToIndex(rowIdx, { align: "center" });
-      dispatch({ type: "SET_ADDRESS", address: baseAddress + offset });
-    }
-  }, [entropyBlocks, sectionBytes, baseAddress, dispatch, virtualizer]);
+  const handleEntropyClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!canvasRef.current || entropyBlocks.length === 0 || !sectionBytes) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const blockWidth = rect.width / entropyBlocks.length;
+      const blockIdx = Math.floor(x / blockWidth);
+      if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
+        const offset = blockIdx * 256;
+        const rowIdx = Math.floor(offset / BYTES_PER_ROW);
+        virtualizer.scrollToIndex(rowIdx, { align: "center" });
+        dispatch({ type: "SET_ADDRESS", address: baseAddress + offset });
+      }
+    },
+    [entropyBlocks, sectionBytes, baseAddress, dispatch, virtualizer],
+  );
 
-  const handleEntropyMouse = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || entropyBlocks.length === 0 || !sectionBytes) {
-      setEntropyTooltip(null);
-      return;
-    }
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const blockWidth = rect.width / entropyBlocks.length;
-    const blockIdx = Math.floor(x / blockWidth);
-    if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
-      const offset = blockIdx * 256;
-      const endOffset = Math.min(offset + 256, sectionBytes.length);
-      setEntropyTooltip({ x: e.clientX - rect.left, blockIdx, offset, endOffset, value: entropyBlocks[blockIdx] });
-    } else {
-      setEntropyTooltip(null);
-    }
-  }, [entropyBlocks, sectionBytes]);
+  const handleEntropyMouse = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!canvasRef.current || entropyBlocks.length === 0 || !sectionBytes) {
+        setEntropyTooltip(null);
+        return;
+      }
+      const rect = canvasRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const blockWidth = rect.width / entropyBlocks.length;
+      const blockIdx = Math.floor(x / blockWidth);
+      if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
+        const offset = blockIdx * 256;
+        const endOffset = Math.min(offset + 256, sectionBytes.length);
+        setEntropyTooltip({
+          x: e.clientX - rect.left,
+          blockIdx,
+          offset,
+          endOffset,
+          value: entropyBlocks[blockIdx],
+        });
+      } else {
+        setEntropyTooltip(null);
+      }
+    },
+    [entropyBlocks, sectionBytes],
+  );
 
   const handleDownload = useCallback(() => {
     if (!pe || state.hexPatches.size === 0) return;
@@ -252,22 +271,31 @@ export function HexView() {
     URL.revokeObjectURL(url);
   }, [pe, state.hexPatches, state.fileName]);
 
-  const getByteValue = useCallback((localOffset: number): number => {
-    if (!sectionInfo || !sectionBytes) return 0;
-    const fileOffset = sectionInfo.pointerToRawData + localOffset;
-    if (state.hexPatches.has(fileOffset)) return state.hexPatches.get(fileOffset)!;
-    return sectionBytes[localOffset];
-  }, [sectionInfo, sectionBytes, state.hexPatches]);
+  const getByteValue = useCallback(
+    (localOffset: number): number => {
+      if (!sectionInfo || !sectionBytes) return 0;
+      const fileOffset = sectionInfo.pointerToRawData + localOffset;
+      if (state.hexPatches.has(fileOffset)) return state.hexPatches.get(fileOffset)!;
+      return sectionBytes[localOffset];
+    },
+    [sectionInfo, sectionBytes, state.hexPatches],
+  );
 
-  const isPatched = useCallback((localOffset: number): boolean => {
-    if (!sectionInfo) return false;
-    return state.hexPatches.has(sectionInfo.pointerToRawData + localOffset);
-  }, [sectionInfo, state.hexPatches]);
+  const isPatched = useCallback(
+    (localOffset: number): boolean => {
+      if (!sectionInfo) return false;
+      return state.hexPatches.has(sectionInfo.pointerToRawData + localOffset);
+    },
+    [sectionInfo, state.hexPatches],
+  );
 
-  const getOriginalByte = useCallback((localOffset: number): number => {
-    if (!sectionBytes) return 0;
-    return sectionBytes[localOffset];
-  }, [sectionBytes]);
+  const getOriginalByte = useCallback(
+    (localOffset: number): number => {
+      if (!sectionBytes) return 0;
+      return sectionBytes[localOffset];
+    },
+    [sectionBytes],
+  );
 
   // Dismiss hex context menu on click outside or Escape
   useDismissOnOutsideClick({
@@ -280,11 +308,14 @@ export function HexView() {
     dismissIfRefMissing: true,
   });
 
-  const handleHexContextMenu = useCallback((e: React.MouseEvent) => {
-    if (!selectionRange || !sectionBytes) return;
-    e.preventDefault();
-    setHexCtxMenu({ x: e.clientX, y: e.clientY });
-  }, [selectionRange, sectionBytes]);
+  const handleHexContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      if (!selectionRange || !sectionBytes) return;
+      e.preventDefault();
+      setHexCtxMenu({ x: e.clientX, y: e.clientY });
+    },
+    [selectionRange, sectionBytes],
+  );
 
   const copyAsCArray = useCallback(() => {
     if (!selectionRange || !sectionBytes) return;
@@ -337,7 +368,14 @@ export function HexView() {
   // Build sorted patches list for diff table
   const patchesList = useMemo(() => {
     if (!sectionInfo || !sectionBytes || !pe) return [];
-    const list: { fileOffset: number; localOffset: number; original: number; patched: number; address: number; sectionName: string }[] = [];
+    const list: {
+      fileOffset: number;
+      localOffset: number;
+      original: number;
+      patched: number;
+      address: number;
+      sectionName: string;
+    }[] = [];
     state.hexPatches.forEach((patched, fileOffset) => {
       const localOffset = fileOffset - sectionInfo.pointerToRawData;
       if (localOffset >= 0 && localOffset < sectionBytes.length) {
@@ -367,7 +405,10 @@ export function HexView() {
         const localOffset = addr - sectionVA;
         const rowIdx = Math.floor(localOffset / BYTES_PER_ROW);
         let arr = map.get(rowIdx);
-        if (!arr) { arr = []; map.set(rowIdx, arr); }
+        if (!arr) {
+          arr = [];
+          map.set(rowIdx, arr);
+        }
         arr.push({ addr, count: refs.length });
       }
     }
@@ -388,13 +429,11 @@ export function HexView() {
   const addrWidth = pe?.is64 ? 16 : 8;
 
   if (!pe || !sectionBytes) {
-    return (
-      <div className="p-4 text-gray-400 text-sm">No section data to display.</div>
-    );
+    return <div className="p-4 text-gray-400 text-sm">No section data to display.</div>;
   }
 
   return (
-    <div className="flex flex-col h-full" style={{ fontSize: 'var(--mono-font-size)' }}>
+    <div className="flex flex-col h-full" style={{ fontSize: "var(--mono-font-size)" }}>
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b border-theme toolbar-bg flex-wrap">
         <span className="text-gray-400">Section:</span>
@@ -459,14 +498,16 @@ export function HexView() {
 
         <div className="w-px h-4 bg-gray-700 mx-1" />
 
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setShowEntropy((v) => !v)}
           className={`px-2 py-1 rounded text-[10px] ${showEntropy ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}
         >
           Entropy
         </button>
 
-        <button type="button"
+        <button
+          type="button"
           onClick={() => {
             dispatch({ type: "SET_ADDRESS", address: state.currentAddress });
             dispatch({ type: "SET_TAB", tab: "disassembly" });
@@ -481,19 +522,22 @@ export function HexView() {
           <>
             <div className="w-px h-4 bg-gray-700 mx-1" />
             <span className="text-orange-400 text-[10px]">Patches: {state.hexPatches.size}</span>
-            <button type="button"
+            <button
+              type="button"
               onClick={() => setShowDiff((v) => !v)}
               className={`px-2 py-1 rounded text-[10px] ${showDiff ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-300 hover:bg-gray-600"}`}
             >
               Diff
             </button>
-            <button type="button"
+            <button
+              type="button"
               onClick={() => dispatch({ type: "CLEAR_PATCHES" })}
               className="px-2 py-1 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600"
             >
               Clear
             </button>
-            <button type="button"
+            <button
+              type="button"
               onClick={handleDownload}
               className="px-2 py-1 rounded text-[10px] bg-green-700 text-white hover:bg-green-600"
             >
@@ -519,7 +563,8 @@ export function HexView() {
               className="absolute z-30 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-[10px] text-gray-300 pointer-events-none"
               style={{ left: Math.min(entropyTooltip.x, 300), top: 18 }}
             >
-              Block {entropyTooltip.blockIdx} | 0x{entropyTooltip.offset.toString(16)}-0x{entropyTooltip.endOffset.toString(16)} | Entropy: {entropyTooltip.value.toFixed(2)}
+              Block {entropyTooltip.blockIdx} | 0x{entropyTooltip.offset.toString(16)}-0x
+              {entropyTooltip.endOffset.toString(16)} | Entropy: {entropyTooltip.value.toFixed(2)}
             </div>
           )}
         </div>
@@ -528,7 +573,9 @@ export function HexView() {
       {/* Patches diff table */}
       {showDiff && patchesList.length > 0 && (
         <div className="px-4 py-2 bg-gray-900/80 border-b border-gray-700 max-h-32 overflow-auto">
-          <div className="text-gray-400 text-[10px] font-semibold mb-1">Patches ({patchesList.length})</div>
+          <div className="text-gray-400 text-[10px] font-semibold mb-1">
+            Patches ({patchesList.length})
+          </div>
           <table className="w-full text-[10px] font-mono">
             <thead>
               <tr className="text-gray-500">
@@ -547,10 +594,18 @@ export function HexView() {
                     dispatch({ type: "SET_ADDRESS", address: p.address });
                   }}
                 >
-                  <td className="pr-3 text-blue-400">0x{p.fileOffset.toString(16).toUpperCase()}</td>
-                  <td className="pr-3 text-gray-400 line-through">0x{p.original.toString(16).toUpperCase().padStart(2, "0")}</td>
-                  <td className="pr-3 text-red-400 font-bold">0x{p.patched.toString(16).toUpperCase().padStart(2, "0")}</td>
-                  <td className="text-gray-500">{p.sectionName}+0x{p.localOffset.toString(16).toUpperCase()}</td>
+                  <td className="pr-3 text-blue-400">
+                    0x{p.fileOffset.toString(16).toUpperCase()}
+                  </td>
+                  <td className="pr-3 text-gray-400 line-through">
+                    0x{p.original.toString(16).toUpperCase().padStart(2, "0")}
+                  </td>
+                  <td className="pr-3 text-red-400 font-bold">
+                    0x{p.patched.toString(16).toUpperCase().padStart(2, "0")}
+                  </td>
+                  <td className="text-gray-500">
+                    {p.sectionName}+0x{p.localOffset.toString(16).toUpperCase()}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -577,7 +632,11 @@ export function HexView() {
           button is invalid (it contains the byte-cell buttons) and there is no
           keyboard gesture to attach — the browser's own context-menu key already
           fires this event on whatever is focused inside. */}
-      <div ref={parentRef} className="flex-1 overflow-auto relative" onContextMenu={handleHexContextMenu}>
+      <div
+        ref={parentRef}
+        className="flex-1 overflow-auto relative"
+        onContextMenu={handleHexContextMenu}
+      >
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -614,9 +673,7 @@ export function HexView() {
             return (
               <div
                 key={vItem.index}
-                className={`flex px-4 disasm-row ${
-                  isCurrentRow ? "bg-blue-900/30" : ""
-                }`}
+                className={`flex px-4 disasm-row ${isCurrentRow ? "bg-blue-900/30" : ""}`}
                 style={{
                   position: "absolute",
                   top: 0,
@@ -654,7 +711,9 @@ export function HexView() {
                             className="w-5 bg-gray-700 border border-blue-500 rounded-sm text-center text-red-400 font-bold outline-none text-xs"
                             value={editValue}
                             maxLength={2}
-                            onChange={(e) => setEditValue(e.target.value.replace(/[^0-9a-fA-F]/g, "").slice(0, 2))}
+                            onChange={(e) =>
+                              setEditValue(e.target.value.replace(/[^0-9a-fA-F]/g, "").slice(0, 2))
+                            }
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 const val = parseInt(editValue, 16);
@@ -670,7 +729,10 @@ export function HexView() {
                               }
                               e.stopPropagation();
                             }}
-                            onBlur={() => { setEditingByte(null); setEditValue(""); }}
+                            onBlur={() => {
+                              setEditingByte(null);
+                              setEditValue("");
+                            }}
                           />
                         </span>
                       );
@@ -684,7 +746,9 @@ export function HexView() {
                     const origByte = getOriginalByte(offset + i);
                     const origHex = origByte.toString(16).padStart(2, "0");
                     const showOrig = showDiff && isPatch;
-                    const tooltipText = showOrig ? `Original: 0x${origHex.toUpperCase()} → Patched: 0x${h.toUpperCase()}` : undefined;
+                    const tooltipText = showOrig
+                      ? `Original: 0x${origHex.toUpperCase()} → Patched: 0x${h.toUpperCase()}`
+                      : undefined;
 
                     return (
                       <span key={i} title={tooltipText}>
@@ -731,13 +795,18 @@ export function HexView() {
                     if (isSelected) cls = "ring-1 ring-blue-500 rounded-sm bg-blue-900/40";
                     else if (isHighlighted) cls = "bg-yellow-600/50 text-yellow-200";
                     else if (isPatch) cls = "text-red-400 font-bold";
-                    const origChar = showDiff && isPatch ? (() => {
-                      const ob = getOriginalByte(offset + i);
-                      return ob >= 0x20 && ob <= 0x7e ? String.fromCharCode(ob) : ".";
-                    })() : null;
+                    const origChar =
+                      showDiff && isPatch
+                        ? (() => {
+                            const ob = getOriginalByte(offset + i);
+                            return ob >= 0x20 && ob <= 0x7e ? String.fromCharCode(ob) : ".";
+                          })()
+                        : null;
                     return (
                       <span key={i} className={cls}>
-                        {origChar && <span className="text-gray-600 text-[8px] line-through">{origChar}</span>}
+                        {origChar && (
+                          <span className="text-gray-600 text-[8px] line-through">{origChar}</span>
+                        )}
                         {c}
                       </span>
                     );
@@ -772,13 +841,25 @@ export function HexView() {
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs min-w-[180px]"
           style={{ left: hexCtxMenu.x, top: hexCtxMenu.y }}
         >
-          <button type="button" onClick={copyAsCArray} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button
+            type="button"
+            onClick={copyAsCArray}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
+          >
             Copy as C byte array
           </button>
-          <button type="button" onClick={copyAsHexString} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button
+            type="button"
+            onClick={copyAsHexString}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
+          >
             Copy as hex string
           </button>
-          <button type="button" onClick={copySelectionAddress} className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200">
+          <button
+            type="button"
+            onClick={copySelectionAddress}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200"
+          >
             Copy address
           </button>
         </div>
@@ -795,7 +876,8 @@ export function HexView() {
             Xrefs to 0x{xrefPopup.addr.toString(16).toUpperCase()} ({xrefPopup.refs.length})
           </div>
           {xrefPopup.refs.map((ref, i) => (
-            <button type="button"
+            <button
+              type="button"
               key={i}
               className="w-full text-left px-3 py-1 hover:bg-gray-700 text-blue-400 font-mono"
               onClick={() => {
@@ -812,11 +894,7 @@ export function HexView() {
 
       {/* Data Inspector */}
       {selectedOffset !== null && selectionEnd === null && sectionBytes && (
-        <DataInspector
-          offset={selectedOffset}
-          bytes={sectionBytes}
-          baseAddress={baseAddress}
-        />
+        <DataInspector offset={selectedOffset} bytes={sectionBytes} baseAddress={baseAddress} />
       )}
     </div>
   );

@@ -1,12 +1,12 @@
-import type { Instruction, DisasmFunction } from './types';
-import { getFuncInsns } from './funcInsns';
+import type { Instruction, DisasmFunction } from "./types";
+import { getFuncInsns } from "./funcInsns";
 
 export interface FunctionSignature {
   convention: string;
   paramCount: number;
 }
 
-const FASTCALL_REGS_64 = ['rcx', 'rdx', 'r8', 'r9'];
+const FASTCALL_REGS_64 = ["rcx", "rdx", "r8", "r9"];
 
 /**
  * Canonical 64-bit parent + width of a general-purpose register token.
@@ -16,14 +16,42 @@ const FASTCALL_REGS_64 = ['rcx', 'rdx', 'r8', 'r9'];
  * which is not enough to tell `ptr` from `rdx` when scanning operand text.
  */
 const LEGACY_REGS: Record<string, [canon: string, width: number]> = {
-  rax: ['rax', 8], eax: ['rax', 4], ax: ['rax', 2], al: ['rax', 1], ah: ['rax', 1],
-  rbx: ['rbx', 8], ebx: ['rbx', 4], bx: ['rbx', 2], bl: ['rbx', 1], bh: ['rbx', 1],
-  rcx: ['rcx', 8], ecx: ['rcx', 4], cx: ['rcx', 2], cl: ['rcx', 1], ch: ['rcx', 1],
-  rdx: ['rdx', 8], edx: ['rdx', 4], dx: ['rdx', 2], dl: ['rdx', 1], dh: ['rdx', 1],
-  rsi: ['rsi', 8], esi: ['rsi', 4], si: ['rsi', 2], sil: ['rsi', 1],
-  rdi: ['rdi', 8], edi: ['rdi', 4], di: ['rdi', 2], dil: ['rdi', 1],
-  rbp: ['rbp', 8], ebp: ['rbp', 4], bp: ['rbp', 2], bpl: ['rbp', 1],
-  rsp: ['rsp', 8], esp: ['rsp', 4], sp: ['rsp', 2], spl: ['rsp', 1],
+  rax: ["rax", 8],
+  eax: ["rax", 4],
+  ax: ["rax", 2],
+  al: ["rax", 1],
+  ah: ["rax", 1],
+  rbx: ["rbx", 8],
+  ebx: ["rbx", 4],
+  bx: ["rbx", 2],
+  bl: ["rbx", 1],
+  bh: ["rbx", 1],
+  rcx: ["rcx", 8],
+  ecx: ["rcx", 4],
+  cx: ["rcx", 2],
+  cl: ["rcx", 1],
+  ch: ["rcx", 1],
+  rdx: ["rdx", 8],
+  edx: ["rdx", 4],
+  dx: ["rdx", 2],
+  dl: ["rdx", 1],
+  dh: ["rdx", 1],
+  rsi: ["rsi", 8],
+  esi: ["rsi", 4],
+  si: ["rsi", 2],
+  sil: ["rsi", 1],
+  rdi: ["rdi", 8],
+  edi: ["rdi", 4],
+  di: ["rdi", 2],
+  dil: ["rdi", 1],
+  rbp: ["rbp", 8],
+  ebp: ["rbp", 4],
+  bp: ["rbp", 2],
+  bpl: ["rbp", 1],
+  rsp: ["rsp", 8],
+  esp: ["rsp", 4],
+  sp: ["rsp", 2],
+  spl: ["rsp", 1],
 };
 
 const EXT_REG_RE = /^(r(?:[89]|1[0-5]))([bwd])?$/;
@@ -52,14 +80,28 @@ function canonRegsIn(text: string): string[] {
 }
 
 // Destination is operand 0, remaining operands are pure sources.
-const MOV_LIKE = new Set(['mov', 'movabs', 'movzx', 'movsx', 'movsxd', 'lea']);
+const MOV_LIKE = new Set(["mov", "movabs", "movzx", "movsx", "movsxd", "lea"]);
 // Every operand is a source; nothing is written.
-const READ_ONLY = new Set(['cmp', 'test', 'push']);
+const READ_ONLY = new Set(["cmp", "test", "push"]);
 // Operand 0 is read *and* written (except the 3-operand `imul` form).
 const READ_MODIFY_WRITE = new Set([
-  'add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb',
-  'shl', 'shr', 'sar', 'rol', 'ror', 'imul',
-  'inc', 'dec', 'neg', 'not',
+  "add",
+  "sub",
+  "and",
+  "or",
+  "xor",
+  "adc",
+  "sbb",
+  "shl",
+  "shr",
+  "sar",
+  "rol",
+  "ror",
+  "imul",
+  "inc",
+  "dec",
+  "neg",
+  "not",
 ]);
 
 interface RegEffects {
@@ -80,7 +122,10 @@ function analyzeInsn(mnemonic: string, opStr: string): RegEffects {
   const writes = new Set<string>();
   const mn = mnemonic.toLowerCase();
 
-  const parts = opStr.split(',').map(p => p.trim()).filter(p => p.length > 0);
+  const parts = opStr
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
   if (parts.length === 0) return { reads, writes };
 
   const addReads = (text: string) => {
@@ -88,14 +133,14 @@ function analyzeInsn(mnemonic: string, opStr: string): RegEffects {
   };
 
   const dest = parts[0];
-  const destInfo = dest.includes('[') ? null : regInfo(dest);
+  const destInfo = dest.includes("[") ? null : regInfo(dest);
   const addDestWrite = () => {
     if (destInfo && destInfo.width >= 4) writes.add(destInfo.canon);
   };
-  const srcText = parts.slice(1).join(',');
+  const srcText = parts.slice(1).join(",");
 
   // Arguments are counted where they are set up, not at the call itself.
-  if (mn === 'call') return { reads, writes };
+  if (mn === "call") return { reads, writes };
 
   if (MOV_LIKE.has(mn)) {
     addReads(srcText);
@@ -109,7 +154,7 @@ function analyzeInsn(mnemonic: string, opStr: string): RegEffects {
     return { reads, writes };
   }
 
-  if (mn === 'pop') {
+  if (mn === "pop") {
     if (destInfo) addDestWrite();
     else addReads(dest);
     return { reads, writes };
@@ -119,7 +164,7 @@ function analyzeInsn(mnemonic: string, opStr: string): RegEffects {
     // `xor reg, reg` / `sub reg, reg` are zeroing idioms: they clobber the
     // register without reading anything meaningful out of it.
     const zeroingIdiom =
-      (mn === 'xor' || mn === 'sub') &&
+      (mn === "xor" || mn === "sub") &&
       parts.length === 2 &&
       destInfo !== null &&
       regInfo(parts[1])?.canon === destInfo.canon;
@@ -175,28 +220,28 @@ function inferSignature64(funcInsns: Instruction[]): FunctionSignature {
   }
 
   const paramCount = Math.max(maxParam, extraStackParams);
-  return { convention: 'fastcall', paramCount };
+  return { convention: "fastcall", paramCount };
 }
 
 function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
   const last = funcInsns[funcInsns.length - 1];
-  let convention = 'cdecl';
+  let convention = "cdecl";
   let paramCount = 0;
 
   // Check for ret N -> stdcall
-  if (last && (last.mnemonic === 'ret' || last.mnemonic === 'retn')) {
+  if (last && (last.mnemonic === "ret" || last.mnemonic === "retn")) {
     const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
     if (!m) {
       // Also check simple decimal
       const d = parseInt(last.opStr, 10);
       if (!Number.isNaN(d) && d > 0) {
-        convention = 'stdcall';
+        convention = "stdcall";
         paramCount = Math.floor(d / 4);
       }
     } else {
       const retBytes = parseInt(m[1], 16);
       if (retBytes > 0) {
-        convention = 'stdcall';
+        convention = "stdcall";
         paramCount = Math.floor(retBytes / 4);
       }
     }
@@ -208,15 +253,15 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
   for (let i = 0; i < scanLimit; i++) {
     const insn = funcInsns[i];
     const { reads, writes } = analyzeInsn(insn.mnemonic, insn.opStr);
-    if (reads.has('rcx')) {
+    if (reads.has("rcx")) {
       ecxRead = true;
       break;
     }
     // ECX defined locally before any read: it is not an incoming `this`.
-    if (writes.has('rcx')) break;
+    if (writes.has("rcx")) break;
   }
-  if (ecxRead && convention !== 'stdcall') {
-    convention = 'thiscall';
+  if (ecxRead && convention !== "stdcall") {
+    convention = "thiscall";
   }
 
   // Count [ebp+0x8+] stack param accesses if not already determined by ret N
@@ -249,7 +294,7 @@ export function inferSignature(
   const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
   if (funcInsns.length === 0) {
-    return { convention: is64 ? 'fastcall' : 'cdecl', paramCount: 0 };
+    return { convention: is64 ? "fastcall" : "cdecl", paramCount: 0 };
   }
 
   return is64 ? inferSignature64(funcInsns) : inferSignature32(funcInsns);

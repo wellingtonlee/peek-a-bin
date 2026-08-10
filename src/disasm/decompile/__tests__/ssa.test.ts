@@ -1,11 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import type { BasicBlock } from '../../cfg';
-import type { IRStmt, } from '../ir';
-import type { IRExpr } from '../ir';
-import { irReg, irConst, irBinary, irDeref, canonReg } from '../ir';
-import { computeRPO, computeDominators, computeDomFrontier, buildSSA } from '../ssa';
-import { ssaOptimize, } from '../ssaopt';
-import { destroySSA } from '../ssadestroy';
+import { describe, it, expect } from "vitest";
+import type { BasicBlock } from "../../cfg";
+import type { IRStmt } from "../ir";
+import type { IRExpr } from "../ir";
+import { irReg, irConst, irBinary, irDeref, canonReg } from "../ir";
+import { computeRPO, computeDominators, computeDomFrontier, buildSSA } from "../ssa";
+import { ssaOptimize } from "../ssaopt";
+import { destroySSA } from "../ssadestroy";
 
 // ── Helpers ──
 
@@ -22,18 +22,14 @@ function makeBlock(id: number, succs: number[], preds: number[]): BasicBlock {
 
 // ── Tests ──
 
-describe('computeRPO', () => {
-  it('computes RPO for linear CFG', () => {
-    const blocks = [
-      makeBlock(0, [1], []),
-      makeBlock(1, [2], [0]),
-      makeBlock(2, [], [1]),
-    ];
+describe("computeRPO", () => {
+  it("computes RPO for linear CFG", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [2], [0]), makeBlock(2, [], [1])];
     const rpo = computeRPO(blocks);
     expect(rpo).toEqual([0, 1, 2]);
   });
 
-  it('computes RPO for diamond CFG', () => {
+  it("computes RPO for diamond CFG", () => {
     const blocks = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),
@@ -46,8 +42,8 @@ describe('computeRPO', () => {
   });
 });
 
-describe('computeDominators', () => {
-  it('computes idom for diamond CFG', () => {
+describe("computeDominators", () => {
+  it("computes idom for diamond CFG", () => {
     const blocks = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),
@@ -62,12 +58,8 @@ describe('computeDominators', () => {
     expect(idom.get(3)).toBe(0); // merge dominated by entry
   });
 
-  it('computes idom for sequential CFG', () => {
-    const blocks = [
-      makeBlock(0, [1], []),
-      makeBlock(1, [2], [0]),
-      makeBlock(2, [], [1]),
-    ];
+  it("computes idom for sequential CFG", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [2], [0]), makeBlock(2, [], [1])];
     const rpo = computeRPO(blocks);
     const idom = computeDominators(blocks, rpo);
     expect(idom.get(1)).toBe(0);
@@ -75,8 +67,8 @@ describe('computeDominators', () => {
   });
 });
 
-describe('computeDomFrontier', () => {
-  it('computes DF for diamond CFG', () => {
+describe("computeDomFrontier", () => {
+  it("computes DF for diamond CFG", () => {
     const blocks = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),
@@ -93,8 +85,8 @@ describe('computeDomFrontier', () => {
   });
 });
 
-describe('buildSSA', () => {
-  it('inserts phi at merge point for diamond CFG', () => {
+describe("buildSSA", () => {
+  it("inserts phi at merge point for diamond CFG", () => {
     const blocks = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),
@@ -105,39 +97,26 @@ describe('buildSSA', () => {
     // Block 0: empty
     liftedBlocks.set(0, []);
     // Block 1: eax = 1
-    liftedBlocks.set(1, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(1) },
-    ]);
+    liftedBlocks.set(1, [{ kind: "assign", dest: irReg("eax"), src: irConst(1) }]);
     // Block 2: eax = 2
-    liftedBlocks.set(2, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(2) },
-    ]);
+    liftedBlocks.set(2, [{ kind: "assign", dest: irReg("eax"), src: irConst(2) }]);
     // Block 3: uses eax (return eax)
-    liftedBlocks.set(3, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(3, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
 
     // Block 3 should have a phi for rax
     const phisAt3 = ctx.phis.get(3) ?? [];
     expect(phisAt3.length).toBe(1);
-    expect(canonReg(phisAt3[0].dest.name)).toBe('rax');
+    expect(canonReg(phisAt3[0].dest.name)).toBe("rax");
     expect(phisAt3[0].operands.length).toBe(2);
   });
 
-  it('does not insert phi when only one definition reaches', () => {
-    const blocks = [
-      makeBlock(0, [1], []),
-      makeBlock(1, [], [0]),
-    ];
+  it("does not insert phi when only one definition reaches", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [], [0])];
     const liftedBlocks = new Map<number, IRStmt[]>();
-    liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(42) },
-    ]);
-    liftedBlocks.set(1, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("eax"), src: irConst(42) }]);
+    liftedBlocks.set(1, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
 
@@ -147,28 +126,24 @@ describe('buildSSA', () => {
 
     // The return in block 1 should reference eax with version 0
     const retStmt = liftedBlocks.get(1)![0];
-    expect(retStmt.kind).toBe('return');
-    if (retStmt.kind === 'return' && retStmt.value?.kind === 'reg') {
+    expect(retStmt.kind).toBe("return");
+    if (retStmt.kind === "return" && retStmt.value?.kind === "reg") {
       expect(retStmt.value.version).toBe(0);
     }
   });
 
-  it('handles loop CFG with phi at header', () => {
+  it("handles loop CFG with phi at header", () => {
     const blocks = [
-      makeBlock(0, [1], []),     // entry → header
+      makeBlock(0, [1], []), // entry → header
       makeBlock(1, [2, 3], [0, 2]), // header (loop header, preds: entry + back-edge)
-      makeBlock(2, [1], [1]),    // body → back to header
-      makeBlock(3, [], [1]),     // exit
+      makeBlock(2, [1], [1]), // body → back to header
+      makeBlock(3, [], [1]), // exit
     ];
     const liftedBlocks = new Map<number, IRStmt[]>();
-    liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('ecx'), src: irConst(0) },
-    ]);
-    liftedBlocks.set(1, [
-      { kind: 'return', value: irReg('ecx') },
-    ]);
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("ecx"), src: irConst(0) }]);
+    liftedBlocks.set(1, [{ kind: "return", value: irReg("ecx") }]);
     liftedBlocks.set(2, [
-      { kind: 'assign', dest: irReg('ecx'), src: irBinary('+', irReg('ecx'), irConst(1)) },
+      { kind: "assign", dest: irReg("ecx"), src: irBinary("+", irReg("ecx"), irConst(1)) },
     ]);
     liftedBlocks.set(3, []);
 
@@ -177,21 +152,19 @@ describe('buildSSA', () => {
     // Block 1 (header) should have a phi for rcx
     const phisAt1 = ctx.phis.get(1) ?? [];
     expect(phisAt1.length).toBeGreaterThanOrEqual(1);
-    const rcxPhi = phisAt1.find(p => canonReg(p.dest.name) === 'rcx');
+    const rcxPhi = phisAt1.find((p) => canonReg(p.dest.name) === "rcx");
     expect(rcxPhi).toBeDefined();
   });
 });
 
-describe('ssaOptimize', () => {
-  it('eliminates dead definitions', () => {
-    const blocks = [
-      makeBlock(0, [], []),
-    ];
+describe("ssaOptimize", () => {
+  it("eliminates dead definitions", () => {
+    const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(1) },
-      { kind: 'assign', dest: irReg('ebx'), src: irConst(2) },
-      { kind: 'return', value: irReg('eax') },
+      { kind: "assign", dest: irReg("eax"), src: irConst(1) },
+      { kind: "assign", dest: irReg("ebx"), src: irConst(2) },
+      { kind: "return", value: irReg("eax") },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
@@ -199,49 +172,42 @@ describe('ssaOptimize', () => {
 
     // ebx assignment should be eliminated (unused)
     const stmts = ctx.liftedBlocks.get(0)!;
-    const ebxAssign = stmts.find(s =>
-      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rbx',
+    const ebxAssign = stmts.find(
+      (s) => s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "rbx",
     );
     expect(ebxAssign).toBeUndefined();
   });
 
-  it('propagates constants through SSA', () => {
-    const blocks = [
-      makeBlock(0, [1], []),
-      makeBlock(1, [], [0]),
-    ];
+  it("propagates constants through SSA", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [], [0])];
     const liftedBlocks = new Map<number, IRStmt[]>();
-    liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(42) },
-    ]);
-    liftedBlocks.set(1, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("eax"), src: irConst(42) }]);
+    liftedBlocks.set(1, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     // The return value should be constant 42 (propagated from block 0)
-    const retStmt = ctx.liftedBlocks.get(1)!.find(s => s.kind === 'return');
+    const retStmt = ctx.liftedBlocks.get(1)!.find((s) => s.kind === "return");
     expect(retStmt).toBeDefined();
-    if (retStmt?.kind === 'return' && retStmt.value) {
-      expect(retStmt.value.kind).toBe('const');
-      if (retStmt.value.kind === 'const') {
+    if (retStmt?.kind === "return" && retStmt.value) {
+      expect(retStmt.value.kind).toBe("const");
+      if (retStmt.value.kind === "const") {
         expect(retStmt.value.value).toBe(42);
       }
     }
   });
 });
 
-describe('globalValueNumbering', () => {
-  it('eliminates redundant expressions (basic CSE)', () => {
+describe("globalValueNumbering", () => {
+  it("eliminates redundant expressions (basic CSE)", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     // a_0 already defined (param), r_1 = a + 1, r_2 = a + 1, return r_2
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irConst(1)) },
-      { kind: 'assign', dest: irReg('ecx'), src: irBinary('+', irReg('ebx'), irConst(1)) },
-      { kind: 'return', value: irReg('ecx') },
+      { kind: "assign", dest: irReg("eax"), src: irBinary("+", irReg("ebx"), irConst(1)) },
+      { kind: "assign", dest: irReg("ecx"), src: irBinary("+", irReg("ebx"), irConst(1)) },
+      { kind: "return", value: irReg("ecx") },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
@@ -249,38 +215,38 @@ describe('globalValueNumbering', () => {
 
     // ecx assignment should be eliminated (CSE + DCE), return should use eax's version
     const stmts = ctx.liftedBlocks.get(0)!;
-    const ecxAssign = stmts.find(s =>
-      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rcx',
+    const ecxAssign = stmts.find(
+      (s) => s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "rcx",
     );
     expect(ecxAssign).toBeUndefined();
   });
 
-  it('normalizes commutative ops (a+b == b+a)', () => {
+  it("normalizes commutative ops (a+b == b+a)", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irReg('ecx')) },
-      { kind: 'assign', dest: irReg('edx'), src: irBinary('+', irReg('ecx'), irReg('ebx')) },
-      { kind: 'return', value: irReg('edx') },
+      { kind: "assign", dest: irReg("eax"), src: irBinary("+", irReg("ebx"), irReg("ecx")) },
+      { kind: "assign", dest: irReg("edx"), src: irBinary("+", irReg("ecx"), irReg("ebx")) },
+      { kind: "return", value: irReg("edx") },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     const stmts = ctx.liftedBlocks.get(0)!;
-    const edxAssign = stmts.find(s =>
-      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rdx',
+    const edxAssign = stmts.find(
+      (s) => s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "rdx",
     );
     expect(edxAssign).toBeUndefined();
   });
 
-  it('preserves non-commutative ops (a-b != b-a)', () => {
+  it("preserves non-commutative ops (a-b != b-a)", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irBinary('-', irReg('ebx'), irReg('ecx')) },
-      { kind: 'assign', dest: irReg('edx'), src: irBinary('-', irReg('ecx'), irReg('ebx')) },
-      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('edx')) },
+      { kind: "assign", dest: irReg("eax"), src: irBinary("-", irReg("ebx"), irReg("ecx")) },
+      { kind: "assign", dest: irReg("edx"), src: irBinary("-", irReg("ecx"), irReg("ebx")) },
+      { kind: "return", value: irBinary("+", irReg("eax"), irReg("edx")) },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
@@ -288,111 +254,106 @@ describe('globalValueNumbering', () => {
 
     // Both assignments should survive
     const stmts = ctx.liftedBlocks.get(0)!;
-    const assigns = stmts.filter(s => s.kind === 'assign');
+    const assigns = stmts.filter((s) => s.kind === "assign");
     expect(assigns.length).toBe(2);
   });
 
-  it('does not CSE calls (side effects)', () => {
+  it("does not CSE calls (side effects)", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
-    const call: IRExpr = { kind: 'call', target: 'foo', args: [] };
+    const call: IRExpr = { kind: "call", target: "foo", args: [] };
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: { ...call } },
-      { kind: 'assign', dest: irReg('ecx'), src: { ...call } },
-      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('ecx')) },
+      { kind: "assign", dest: irReg("eax"), src: { ...call } },
+      { kind: "assign", dest: irReg("ecx"), src: { ...call } },
+      { kind: "return", value: irBinary("+", irReg("eax"), irReg("ecx")) },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     const stmts = ctx.liftedBlocks.get(0)!;
-    const assigns = stmts.filter(s => s.kind === 'assign');
+    const assigns = stmts.filter((s) => s.kind === "assign");
     expect(assigns.length).toBe(2);
   });
 
-  it('does not CSE derefs (memory aliasing)', () => {
+  it("does not CSE derefs (memory aliasing)", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irDeref(irReg('ebx'), 4) },
-      { kind: 'assign', dest: irReg('ecx'), src: irDeref(irReg('ebx'), 4) },
-      { kind: 'return', value: irBinary('+', irReg('eax'), irReg('ecx')) },
+      { kind: "assign", dest: irReg("eax"), src: irDeref(irReg("ebx"), 4) },
+      { kind: "assign", dest: irReg("ecx"), src: irDeref(irReg("ebx"), 4) },
+      { kind: "return", value: irBinary("+", irReg("eax"), irReg("ecx")) },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     const stmts = ctx.liftedBlocks.get(0)!;
-    const assigns = stmts.filter(s => s.kind === 'assign');
+    const assigns = stmts.filter((s) => s.kind === "assign");
     expect(assigns.length).toBe(2);
   });
 
-  it('eliminates nested redundant expressions', () => {
+  it("eliminates nested redundant expressions", () => {
     const blocks = [makeBlock(0, [], [])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     // r1 = (a + b) * c, r2 = (a + b) * c
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irBinary('*', irBinary('+', irReg('ebx'), irReg('ecx')), irReg('edx')) },
-      { kind: 'assign', dest: irReg('esi'), src: irBinary('*', irBinary('+', irReg('ebx'), irReg('ecx')), irReg('edx')) },
-      { kind: 'return', value: irReg('esi') },
+      {
+        kind: "assign",
+        dest: irReg("eax"),
+        src: irBinary("*", irBinary("+", irReg("ebx"), irReg("ecx")), irReg("edx")),
+      },
+      {
+        kind: "assign",
+        dest: irReg("esi"),
+        src: irBinary("*", irBinary("+", irReg("ebx"), irReg("ecx")), irReg("edx")),
+      },
+      { kind: "return", value: irReg("esi") },
     ]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     const stmts = ctx.liftedBlocks.get(0)!;
-    const esiAssign = stmts.find(s =>
-      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rsi',
+    const esiAssign = stmts.find(
+      (s) => s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "rsi",
     );
     expect(esiAssign).toBeUndefined();
   });
 
-  it('CSEs across blocks under same dominator', () => {
+  it("CSEs across blocks under same dominator", () => {
     // Block 0 (entry) → Block 1, Block 2
     // Block 0 defines r1 = a + b
     // Block 1 defines r2 = a + b (same expr, dominated by block 0)
-    const blocks = [
-      makeBlock(0, [1, 2], []),
-      makeBlock(1, [], [0]),
-      makeBlock(2, [], [0]),
-    ];
+    const blocks = [makeBlock(0, [1, 2], []), makeBlock(1, [], [0]), makeBlock(2, [], [0])];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irBinary('+', irReg('ebx'), irConst(5)) },
+      { kind: "assign", dest: irReg("eax"), src: irBinary("+", irReg("ebx"), irConst(5)) },
     ]);
     liftedBlocks.set(1, [
-      { kind: 'assign', dest: irReg('ecx'), src: irBinary('+', irReg('ebx'), irConst(5)) },
-      { kind: 'return', value: irReg('ecx') },
+      { kind: "assign", dest: irReg("ecx"), src: irBinary("+", irReg("ebx"), irConst(5)) },
+      { kind: "return", value: irReg("ecx") },
     ]);
-    liftedBlocks.set(2, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(2, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
 
     // ecx assignment in block 1 should be eliminated
     const stmts1 = ctx.liftedBlocks.get(1)!;
-    const ecxAssign = stmts1.find(s =>
-      s.kind === 'assign' && s.dest.kind === 'reg' && canonReg(s.dest.name) === 'rcx',
+    const ecxAssign = stmts1.find(
+      (s) => s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "rcx",
     );
     expect(ecxAssign).toBeUndefined();
   });
 });
 
-describe('destroySSA', () => {
-  it('strips version numbers', () => {
-    const blocks = [
-      makeBlock(0, [1], []),
-      makeBlock(1, [], [0]),
-    ];
+describe("destroySSA", () => {
+  it("strips version numbers", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [], [0])];
     const liftedBlocks = new Map<number, IRStmt[]>();
-    liftedBlocks.set(0, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(5) },
-    ]);
-    liftedBlocks.set(1, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("eax"), src: irConst(5) }]);
+    liftedBlocks.set(1, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
@@ -401,17 +362,17 @@ describe('destroySSA', () => {
     // All registers should have no version
     for (const [, stmts] of ctx.liftedBlocks) {
       for (const s of stmts) {
-        if (s.kind === 'assign' && s.dest.kind === 'reg') {
+        if (s.kind === "assign" && s.dest.kind === "reg") {
           expect(s.dest.version).toBeUndefined();
         }
-        if (s.kind === 'return' && s.value?.kind === 'reg') {
+        if (s.kind === "return" && s.value?.kind === "reg") {
           expect(s.value.version).toBeUndefined();
         }
       }
     }
   });
 
-  it('round-trips diamond CFG correctly', () => {
+  it("round-trips diamond CFG correctly", () => {
     const blocks = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),
@@ -420,15 +381,9 @@ describe('destroySSA', () => {
     ];
     const liftedBlocks = new Map<number, IRStmt[]>();
     liftedBlocks.set(0, []);
-    liftedBlocks.set(1, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(1) },
-    ]);
-    liftedBlocks.set(2, [
-      { kind: 'assign', dest: irReg('eax'), src: irConst(2) },
-    ]);
-    liftedBlocks.set(3, [
-      { kind: 'return', value: irReg('eax') },
-    ]);
+    liftedBlocks.set(1, [{ kind: "assign", dest: irReg("eax"), src: irConst(1) }]);
+    liftedBlocks.set(2, [{ kind: "assign", dest: irReg("eax"), src: irConst(2) }]);
+    liftedBlocks.set(3, [{ kind: "return", value: irReg("eax") }]);
 
     const ctx = buildSSA(blocks, liftedBlocks);
     ssaOptimize(ctx);
@@ -440,7 +395,7 @@ describe('destroySSA', () => {
     }
 
     // Block 3 should still have a return
-    const retStmt = ctx.liftedBlocks.get(3)!.find(s => s.kind === 'return');
+    const retStmt = ctx.liftedBlocks.get(3)!.find((s) => s.kind === "return");
     expect(retStmt).toBeDefined();
   });
 });

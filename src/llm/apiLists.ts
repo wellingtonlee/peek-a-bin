@@ -27,34 +27,63 @@
  */
 export const DANGEROUS_APIS: ReadonlySet<string> = new Set([
   // Memory
-  "VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualProtectEx",
-  "WriteProcessMemory", "ReadProcessMemory",
-  "NtWriteVirtualMemory", "NtAllocateVirtualMemory",
-  "NtMapViewOfSection", "MapViewOfFile",
+  "VirtualAlloc",
+  "VirtualAllocEx",
+  "VirtualProtect",
+  "VirtualProtectEx",
+  "WriteProcessMemory",
+  "ReadProcessMemory",
+  "NtWriteVirtualMemory",
+  "NtAllocateVirtualMemory",
+  "NtMapViewOfSection",
+  "MapViewOfFile",
   // Process and thread
-  "CreateRemoteThread", "NtCreateThread", "CreateProcess",
-  "OpenProcess", "NtOpenProcess",
+  "CreateRemoteThread",
+  "NtCreateThread",
+  "CreateProcess",
+  "OpenProcess",
+  "NtOpenProcess",
   // Execution
-  "ShellExecute", "WinExec", "LoadLibrary", "GetProcAddress",
+  "ShellExecute",
+  "WinExec",
+  "LoadLibrary",
+  "GetProcAddress",
   "SetWindowsHookEx",
   // Crypto
-  "CryptEncrypt", "CryptDecrypt", "BCryptEncrypt", "BCryptDecrypt",
+  "CryptEncrypt",
+  "CryptDecrypt",
+  "BCryptEncrypt",
+  "BCryptDecrypt",
 ]);
 
 /** Notable but not inherently dangerous: file, registry, network, service and
  *  anti-debug APIs that are worth surfacing in a report for context. */
 const CONTEXTUAL_APIS: readonly string[] = [
   // File
-  "CreateFile", "ReadFile", "WriteFile", "DeleteFile",
+  "CreateFile",
+  "ReadFile",
+  "WriteFile",
+  "DeleteFile",
   // Registry
-  "RegOpenKey", "RegSetValue", "RegCreateKey", "RegDeleteKey",
+  "RegOpenKey",
+  "RegSetValue",
+  "RegCreateKey",
+  "RegDeleteKey",
   // Network
-  "InternetOpen", "HttpOpenRequest", "URLDownloadToFile",
-  "socket", "connect", "send", "recv",
+  "InternetOpen",
+  "HttpOpenRequest",
+  "URLDownloadToFile",
+  "socket",
+  "connect",
+  "send",
+  "recv",
   // Service and persistence
-  "CreateService", "StartService",
+  "CreateService",
+  "StartService",
   // Anti-debug
-  "IsDebuggerPresent", "CheckRemoteDebuggerPresent", "NtQueryInformationProcess",
+  "IsDebuggerPresent",
+  "CheckRemoteDebuggerPresent",
+  "NtQueryInformationProcess",
   // Process control
   "TerminateProcess",
   // Crypto (hashing is contextual; encryption is in DANGEROUS_APIS)
@@ -66,10 +95,7 @@ const CONTEXTUAL_APIS: readonly string[] = [
  * `DANGEROUS_APIS` by construction, so the report can never omit an import the
  * scanner considers dangerous.
  */
-export const NOTABLE_APIS: ReadonlySet<string> = new Set([
-  ...DANGEROUS_APIS,
-  ...CONTEXTUAL_APIS,
-]);
+export const NOTABLE_APIS: ReadonlySet<string> = new Set([...DANGEROUS_APIS, ...CONTEXTUAL_APIS]);
 
 /**
  * Whether an imported symbol is in `set`, ignoring the ANSI/wide suffix.

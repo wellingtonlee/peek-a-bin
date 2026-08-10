@@ -9,7 +9,11 @@ interface ResizeHandleProps {
   onResizeEnd?: () => void;
 }
 
-export function ResizeHandle({ orientation = "horizontal", onResize, onResizeEnd }: ResizeHandleProps) {
+export function ResizeHandle({
+  orientation = "horizontal",
+  onResize,
+  onResizeEnd,
+}: ResizeHandleProps) {
   const prevPosRef = useRef(0);
 
   // The mousemove/mouseup listeners are registered once per drag, so they would
@@ -24,42 +28,48 @@ export function ResizeHandle({ orientation = "horizontal", onResize, onResizeEnd
     onResizeEndRef.current = onResizeEnd;
   });
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const isHorizontal = orientation === "horizontal";
-    prevPosRef.current = isHorizontal ? e.clientX : e.clientY;
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const isHorizontal = orientation === "horizontal";
+      prevPosRef.current = isHorizontal ? e.clientX : e.clientY;
 
-    const onMouseMove = (ev: MouseEvent) => {
-      const currentPos = isHorizontal ? ev.clientX : ev.clientY;
-      const delta = currentPos - prevPosRef.current;
-      prevPosRef.current = currentPos;
-      onResizeRef.current(delta);
-    };
-    const onMouseUp = () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      onResizeEndRef.current?.();
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
-    document.body.style.userSelect = "none";
-  }, [orientation]);
+      const onMouseMove = (ev: MouseEvent) => {
+        const currentPos = isHorizontal ? ev.clientX : ev.clientY;
+        const delta = currentPos - prevPosRef.current;
+        prevPosRef.current = currentPos;
+        onResizeRef.current(delta);
+      };
+      const onMouseUp = () => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        onResizeEndRef.current?.();
+      };
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
+      document.body.style.userSelect = "none";
+    },
+    [orientation],
+  );
 
   // Keyboard resizing. The onResize API is already delta-based, so arrow keys map
   // onto it directly — this gives keyboard users a resize path they previously had
   // no equivalent for, rather than just satisfying the linter.
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const isHorizontal = orientation === "horizontal";
-    const decrease = isHorizontal ? "ArrowLeft" : "ArrowUp";
-    const increase = isHorizontal ? "ArrowRight" : "ArrowDown";
-    if (e.key !== decrease && e.key !== increase) return;
-    e.preventDefault();
-    onResizeRef.current(e.key === decrease ? -KEYBOARD_STEP_PX : KEYBOARD_STEP_PX);
-    onResizeEndRef.current?.();
-  }, [orientation]);
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const isHorizontal = orientation === "horizontal";
+      const decrease = isHorizontal ? "ArrowLeft" : "ArrowUp";
+      const increase = isHorizontal ? "ArrowRight" : "ArrowDown";
+      if (e.key !== decrease && e.key !== increase) return;
+      e.preventDefault();
+      onResizeRef.current(e.key === decrease ? -KEYBOARD_STEP_PX : KEYBOARD_STEP_PX);
+      onResizeEndRef.current?.();
+    },
+    [orientation],
+  );
 
   return (
     <button

@@ -65,7 +65,11 @@ export function InsnContextMenu({
   const hasComment = !!(comments[ctxMenu.insn.address] || ctxMenu.insn.comment);
   const isFuncHead = funcMap.has(ctxMenu.insn.address);
   const menuItem = (label: string, onClick: () => void, hint?: string) => (
-    <button type="button" onClick={onClick} className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between">
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200 flex items-center justify-between"
+    >
       <span>{label}</span>
       {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
     </button>
@@ -92,25 +96,29 @@ export function InsnContextMenu({
       {hasComment && menuItem("Copy comment", actions.ctxCopyComment)}
       {isFuncHead && menuItem("Rename function", actions.ctxRenameFunction, "N")}
       {isFuncHead && sep}
-      {isFuncHead && menuItem("Scan for vulnerabilities", () => {
-        const fn = funcMap.get(ctxMenu.insn.address);
-        if (fn) scanFunction(fn);
-        setCtxMenu(null);
-      })}
-      {selectionRange && (() => {
-        const lo = Math.min(selectionRange.start, selectionRange.end);
-        const hi = Math.max(selectionRange.start, selectionRange.end);
-        const count = hi - lo + 1;
-        return (
-          <>
-            {sep}
-            {menuItem(`Copy selected (${count} rows)`, () => {
-              navigator.clipboard.writeText(formatRangeCopy(selectionRange, rows, pe, renames, comments));
-              setCtxMenu(null);
-            })}
-          </>
-        );
-      })()}
+      {isFuncHead &&
+        menuItem("Scan for vulnerabilities", () => {
+          const fn = funcMap.get(ctxMenu.insn.address);
+          if (fn) scanFunction(fn);
+          setCtxMenu(null);
+        })}
+      {selectionRange &&
+        (() => {
+          const lo = Math.min(selectionRange.start, selectionRange.end);
+          const hi = Math.max(selectionRange.start, selectionRange.end);
+          const count = hi - lo + 1;
+          return (
+            <>
+              {sep}
+              {menuItem(`Copy selected (${count} rows)`, () => {
+                navigator.clipboard.writeText(
+                  formatRangeCopy(selectionRange, rows, pe, renames, comments),
+                );
+                setCtxMenu(null);
+              })}
+            </>
+          );
+        })()}
     </div>
   );
 }

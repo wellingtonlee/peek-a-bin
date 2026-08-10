@@ -52,13 +52,19 @@ export function Breadcrumbs() {
       {fades.left && (
         <div
           className="absolute left-0 top-0 bottom-0 w-8 z-10 pointer-events-none"
-          style={{ background: "linear-gradient(to right, var(--panel-bg, rgb(31 41 55 / 0.6)), transparent)" }}
+          style={{
+            background:
+              "linear-gradient(to right, var(--panel-bg, rgb(31 41 55 / 0.6)), transparent)",
+          }}
         />
       )}
       {fades.right && (
         <div
           className="absolute right-0 top-0 bottom-0 w-8 z-10 pointer-events-none"
-          style={{ background: "linear-gradient(to left, var(--panel-bg, rgb(31 41 55 / 0.6)), transparent)" }}
+          style={{
+            background:
+              "linear-gradient(to left, var(--panel-bg, rgb(31 41 55 / 0.6)), transparent)",
+          }}
         />
       )}
       <div
@@ -69,7 +75,8 @@ export function Breadcrumbs() {
         {/* Section node */}
         {sectionInfo && (
           <span className="flex items-center gap-0.5 shrink-0">
-            <button type="button"
+            <button
+              type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 if (sectionVA !== null) {
@@ -88,7 +95,8 @@ export function Breadcrumbs() {
         {funcName && containingFunc && (
           <span className="flex items-center gap-0.5 shrink-0">
             <span className="text-gray-600 mx-0.5">&rsaquo;</span>
-            <button type="button"
+            <button
+              type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 dispatch({ type: "CLEAR_CALL_STACK" });
@@ -105,7 +113,8 @@ export function Breadcrumbs() {
         {state.callStack.map((entry, i) => (
           <span key={`${entry.address}-${i}`} className="flex items-center gap-0.5 shrink-0">
             <span className="text-gray-600 mx-0.5">&rsaquo;</span>
-            <button type="button"
+            <button
+              type="button"
               className="hover:text-blue-400 hover:underline truncate max-w-[140px]"
               onClick={() => {
                 dispatch({ type: "SET_ADDRESS", address: entry.address });

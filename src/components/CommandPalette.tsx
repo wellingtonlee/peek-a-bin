@@ -91,7 +91,12 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       for (const [addr, str] of pe.strings) {
         if (count >= CAP) break;
         if (fuzzyMatch(query, str)) {
-          items.push({ category: "Strings", label: str.length > 80 ? str.substring(0, 77) + "..." : str, address: addr, tab: "strings" });
+          items.push({
+            category: "Strings",
+            label: str.length > 80 ? str.substring(0, 77) + "..." : str,
+            address: addr,
+            tab: "strings",
+          });
           count++;
         }
       }
@@ -117,30 +122,36 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     setSelectedIdx(0);
   }, [results.length]);
 
-  const handleSelect = useCallback((item: ResultItem) => {
-    if (item.action) {
-      window.dispatchEvent(new CustomEvent(item.action));
+  const handleSelect = useCallback(
+    (item: ResultItem) => {
+      if (item.action) {
+        window.dispatchEvent(new CustomEvent(item.action));
+        onClose();
+        return;
+      }
+      dispatch({ type: "SET_ADDRESS", address: item.address });
+      dispatch({ type: "SET_TAB", tab: item.tab ?? "disassembly" });
       onClose();
-      return;
-    }
-    dispatch({ type: "SET_ADDRESS", address: item.address });
-    dispatch({ type: "SET_TAB", tab: item.tab ?? "disassembly" });
-    onClose();
-  }, [dispatch, onClose]);
+    },
+    [dispatch, onClose],
+  );
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIdx((i) => Math.min(i + 1, results.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIdx((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter" && results.length > 0) {
-      e.preventDefault();
-      handleSelect(results[selectedIdx]);
-    }
-    // Escape is not handled here — it bubbles to Modal, which closes the dialog.
-  }, [results, selectedIdx, handleSelect]);
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.min(i + 1, results.length - 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIdx((i) => Math.max(i - 1, 0));
+      } else if (e.key === "Enter" && results.length > 0) {
+        e.preventDefault();
+        handleSelect(results[selectedIdx]);
+      }
+      // Escape is not handled here — it bubbles to Modal, which closes the dialog.
+    },
+    [results, selectedIdx, handleSelect],
+  );
 
   // Scroll selected into view
   useEffect(() => {
@@ -197,7 +208,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                   {item.category}
                 </div>
               )}
-              <button type="button"
+              <button
+                type="button"
                 data-idx={i}
                 className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs ${
                   i === selectedIdx
@@ -217,9 +229,15 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         })}
       </div>
       <div className="px-4 py-2 border-t border-gray-700 text-[10px] text-gray-500 flex items-center gap-4">
-        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Enter</kbd> navigate</span>
-        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Up/Down</kbd> select</span>
-        <span><kbd className="px-1 py-0.5 bg-gray-700 rounded">Esc</kbd> close</span>
+        <span>
+          <kbd className="px-1 py-0.5 bg-gray-700 rounded">Enter</kbd> navigate
+        </span>
+        <span>
+          <kbd className="px-1 py-0.5 bg-gray-700 rounded">Up/Down</kbd> select
+        </span>
+        <span>
+          <kbd className="px-1 py-0.5 bg-gray-700 rounded">Esc</kbd> close
+        </span>
       </div>
     </Modal>
   );

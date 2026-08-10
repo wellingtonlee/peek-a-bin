@@ -4,10 +4,10 @@
  * These exist because the "which section holds the code?" predicate was written
  * out by hand at seven call sites, none of which referenced the named flag.
  */
-import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from './constants';
-import type { SectionHeader } from './types';
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "./constants";
+import type { SectionHeader } from "./types";
 
-const DATA_SECTION_NAMES = new Set(['.data', '.rdata', '.bss']);
+const DATA_SECTION_NAMES = new Set([".data", ".rdata", ".bss"]);
 
 /**
  * True when a section is either named `.text` or carries IMAGE_SCN_MEM_EXECUTE.
@@ -17,7 +17,7 @@ const DATA_SECTION_NAMES = new Set(['.data', '.rdata', '.bss']);
  * `findCodeSection` for what that means for ordering.
  */
 export function isCodeSection(section: SectionHeader): boolean {
-  return section.name === '.text' || (section.characteristics & IMAGE_SCN_MEM_EXECUTE) !== 0;
+  return section.name === ".text" || (section.characteristics & IMAGE_SCN_MEM_EXECUTE) !== 0;
 }
 
 /**
@@ -46,7 +46,7 @@ export function findCodeSection(sections: readonly SectionHeader[]): SectionHead
  * sites and is not deliberate design.
  */
 export function isDataSection(section: SectionHeader): boolean {
-  const name = section.name.replace(/\0/g, '').trim().toLowerCase();
+  const name = section.name.replace(/\0/g, "").trim().toLowerCase();
   if (DATA_SECTION_NAMES.has(name)) return true;
   return (
     (section.characteristics & IMAGE_SCN_MEM_READ) !== 0 &&
@@ -61,5 +61,5 @@ export function dataSectionRanges(
 ): { va: number; size: number }[] {
   return sections
     .filter(isDataSection)
-    .map(s => ({ va: imageBase + s.virtualAddress, size: s.virtualSize }));
+    .map((s) => ({ va: imageBase + s.virtualAddress, size: s.virtualSize }));
 }

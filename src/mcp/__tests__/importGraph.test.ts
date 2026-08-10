@@ -12,13 +12,13 @@
  * flaky-in-CI. So it is asserted here, statically, against the source text.
  */
 
-import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join, resolve, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { describe, it, expect } from "vitest";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const MCP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SRC_DIR = resolve(MCP_DIR, '..');
+const MCP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const SRC_DIR = resolve(MCP_DIR, "..");
 
 interface ImportRecord {
   /** The specifier as written, e.g. `./session`. */
@@ -29,12 +29,12 @@ interface ImportRecord {
 
 /** Strip comments so a `//`-quoted example import is not mistaken for a real one. */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
 /** Every `import`/`export … from` in a file, in source order. */
 function importsOf(filePath: string): ImportRecord[] {
-  const source = stripComments(readFileSync(filePath, 'utf-8'));
+  const source = stripComments(readFileSync(filePath, "utf-8"));
   const records: ImportRecord[] = [];
 
   // `import [type] … from 'x'` and `export [type] … from 'x'`.
@@ -52,9 +52,9 @@ function importsOf(filePath: string): ImportRecord[] {
 
 /** Resolve a relative specifier to a file on disk, or null for a package import. */
 function resolveLocal(fromFile: string, specifier: string): string | null {
-  if (!specifier.startsWith('.')) return null;
+  if (!specifier.startsWith(".")) return null;
   const base = resolve(dirname(fromFile), specifier);
-  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]) {
+  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, "index.ts")]) {
     if (existsSync(candidate)) return candidate;
   }
   return null;
@@ -78,7 +78,7 @@ function valueClosure(entry: string): { files: Set<string>; packages: Set<string
       if (record.typeOnly) continue;
       const local = resolveLocal(file, record.specifier);
       if (local === null) {
-        if (!record.specifier.startsWith('.')) packages.add(record.specifier);
+        if (!record.specifier.startsWith(".")) packages.add(record.specifier);
         continue;
       }
       queue.push(local);
@@ -89,92 +89,93 @@ function valueClosure(entry: string): { files: Set<string>; packages: Set<string
 
 /** Paths relative to `src/`, for readable failure messages. */
 function rel(files: Iterable<string>): string[] {
-  return [...files].map(f => relative(SRC_DIR, f)).sort();
+  return [...files].map((f) => relative(SRC_DIR, f)).sort();
 }
 
-describe('MCP import graph — session stays type-only', () => {
-  it.each(['tools.ts', 'resources.ts'])(
-    '%s imports ./session for types only, keeping Capstone WASM out of the test graph',
+describe("MCP import graph — session stays type-only", () => {
+  it.each(["tools.ts", "resources.ts"])(
+    "%s imports ./session for types only, keeping Capstone WASM out of the test graph",
     (fileName) => {
-      const valueImports = importsOf(join(MCP_DIR, fileName))
-        .filter(r => !r.typeOnly && /\.\/session$/.test(r.specifier));
+      const valueImports = importsOf(join(MCP_DIR, fileName)).filter(
+        (r) => !r.typeOnly && /\.\/session$/.test(r.specifier),
+      );
 
       expect(
         valueImports,
-        `src/mcp/${fileName} value-imports './session'. That pulls in src/mcp/disasm.ts, which `
-          + `loads Capstone WASM at module scope, into every MCP test that registers handlers. `
-          + `Use "import type { … } from './session'" instead.`,
+        `src/mcp/${fileName} value-imports './session'. That pulls in src/mcp/disasm.ts, which ` +
+          `loads Capstone WASM at module scope, into every MCP test that registers handlers. ` +
+          `Use "import type { … } from './session'" instead.`,
       ).toEqual([]);
     },
   );
 
-  it('does not reach session.ts or disasm.ts from tools.ts or resources.ts', () => {
-    const forbidden = [join(MCP_DIR, 'session.ts'), join(MCP_DIR, 'disasm.ts')];
+  it("does not reach session.ts or disasm.ts from tools.ts or resources.ts", () => {
+    const forbidden = [join(MCP_DIR, "session.ts"), join(MCP_DIR, "disasm.ts")];
 
-    for (const entry of ['tools.ts', 'resources.ts']) {
+    for (const entry of ["tools.ts", "resources.ts"]) {
       const { files } = valueClosure(join(MCP_DIR, entry));
-      const reached = forbidden.filter(f => files.has(f));
+      const reached = forbidden.filter((f) => files.has(f));
 
       expect(
         rel(reached),
-        `src/mcp/${entry} now transitively value-imports ${rel(reached).join(', ')}. `
-          + `Something in its import chain switched from "import type" to a value import.`,
+        `src/mcp/${entry} now transitively value-imports ${rel(reached).join(", ")}. ` +
+          `Something in its import chain switched from "import type" to a value import.`,
       ).toEqual([]);
     }
   });
 
-  it('never reaches capstone-wasm from tools.ts or resources.ts', () => {
-    for (const entry of ['tools.ts', 'resources.ts']) {
+  it("never reaches capstone-wasm from tools.ts or resources.ts", () => {
+    for (const entry of ["tools.ts", "resources.ts"]) {
       const { packages } = valueClosure(join(MCP_DIR, entry));
       expect(
-        [...packages].filter(p => p.includes('capstone')),
+        [...packages].filter((p) => p.includes("capstone")),
         `src/mcp/${entry} now pulls capstone-wasm into the module graph.`,
       ).toEqual([]);
     }
   });
 });
 
-describe('MCP import graph — paths.ts stays dependency-free', () => {
-  it('imports nothing but node builtins', () => {
-    const specifiers = importsOf(join(MCP_DIR, 'paths.ts')).map(r => r.specifier);
-    const nonBuiltin = specifiers.filter(s => !s.startsWith('node:'));
+describe("MCP import graph — paths.ts stays dependency-free", () => {
+  it("imports nothing but node builtins", () => {
+    const specifiers = importsOf(join(MCP_DIR, "paths.ts")).map((r) => r.specifier);
+    const nonBuiltin = specifiers.filter((s) => !s.startsWith("node:"));
 
     expect(
       nonBuiltin,
-      `src/mcp/paths.ts must stay dependency-free so its tests import only path logic; `
-        + `found: ${nonBuiltin.join(', ')}`,
+      `src/mcp/paths.ts must stay dependency-free so its tests import only path logic; ` +
+        `found: ${nonBuiltin.join(", ")}`,
     ).toEqual([]);
   });
 
-  it('has an empty local import closure', () => {
-    const { files } = valueClosure(join(MCP_DIR, 'paths.ts'));
-    expect(rel(files)).toEqual(['mcp/paths.ts']);
+  it("has an empty local import closure", () => {
+    const { files } = valueClosure(join(MCP_DIR, "paths.ts"));
+    expect(rel(files)).toEqual(["mcp/paths.ts"]);
   });
 });
 
-describe('MCP import graph — helper tests call the helpers directly', () => {
-  it.each(['parseAddr.test.ts', 'exportPath.test.ts'])(
-    '%s does not go through the tool-registration harness',
+describe("MCP import graph — helper tests call the helpers directly", () => {
+  it.each(["parseAddr.test.ts", "exportPath.test.ts"])(
+    "%s does not go through the tool-registration harness",
     (fileName) => {
-      const specifiers = importsOf(join(MCP_DIR, '__tests__', fileName)).map(r => r.specifier);
+      const specifiers = importsOf(join(MCP_DIR, "__tests__", fileName)).map((r) => r.specifier);
 
       expect(
-        specifiers.filter(s => s.includes('harness') || s.includes('../tools')),
-        `src/mcp/__tests__/${fileName} is a unit test for src/mcp/paths.ts; it should import `
-          + `the helper directly rather than registering every MCP tool to reach it. `
-          + `Handler-level coverage belongs in tools.test.ts.`,
+        specifiers.filter((s) => s.includes("harness") || s.includes("../tools")),
+        `src/mcp/__tests__/${fileName} is a unit test for src/mcp/paths.ts; it should import ` +
+          `the helper directly rather than registering every MCP tool to reach it. ` +
+          `Handler-level coverage belongs in tools.test.ts.`,
       ).toEqual([]);
     },
   );
 });
 
-describe('import parser — self-check', () => {
-  it('distinguishes type-only from value imports', () => {
-    const records = importsOf(join(MCP_DIR, 'tools.ts'));
-    const bySpecifier = new Map(records.map(r => [r.specifier, r]));
+describe("import parser — self-check", () => {
+  it("distinguishes type-only from value imports", () => {
+    const records = importsOf(join(MCP_DIR, "tools.ts"));
+    const bySpecifier = new Map(records.map((r) => [r.specifier, r]));
 
-    expect(bySpecifier.get('./session')?.typeOnly).toBe(true);
-    expect(bySpecifier.get('./paths')?.typeOnly).toBe(false);
-    expect(bySpecifier.get('node:fs')?.typeOnly).toBe(false);
+    expect(bySpecifier.get("./session")?.typeOnly).toBe(true);
+    expect(bySpecifier.get("./paths")?.typeOnly).toBe(false);
+    expect(bySpecifier.get("node:fs")?.typeOnly).toBe(false);
   });
 });

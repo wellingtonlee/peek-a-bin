@@ -4,8 +4,8 @@ export interface Instruction {
   mnemonic: string;
   opStr: string;
   size: number;
-  comment?: string;  // for string reference annotations
-  source?: 'recursive' | 'gap-fill';
+  comment?: string; // for string reference annotations
+  source?: "recursive" | "gap-fill";
 }
 
 export interface DisasmFunction {
@@ -18,7 +18,7 @@ export interface DisasmFunction {
 
 export interface Xref {
   from: number;
-  type: 'call' | 'jmp' | 'branch' | 'data';
+  type: "call" | "jmp" | "branch" | "data";
 }
 
 export interface StackVar {
@@ -51,8 +51,8 @@ export interface StackFrame {
 export interface DataItem {
   address: number;
   directive: "db" | "dd" | "dq" | "dup";
-  size: number;           // bytes consumed
-  bytes: Uint8Array;      // raw bytes for hex column
+  size: number; // bytes consumed
+  bytes: Uint8Array; // raw bytes for hex column
   stringValue?: string;
   stringType?: "ascii" | "utf16le";
   pointerTarget?: number;
@@ -60,4 +60,3 @@ export interface DataItem {
   dupCount?: number;
   dupByte?: number;
 }
-

@@ -1,6 +1,6 @@
-import type { BasicBlock } from '../cfg';
-import type { IRStmt, IRPhi, IRExpr } from './ir';
-import { irReg, canonReg } from './ir';
+import type { BasicBlock } from "../cfg";
+import type { IRStmt, IRPhi, IRExpr } from "./ir";
+import { irReg, canonReg } from "./ir";
 
 export interface SSAContext {
   blocks: BasicBlock[];
@@ -53,7 +53,8 @@ export function computeDominators(blocks: BasicBlock[], rpo: number[]): Map<numb
   const maxSteps = rpo.length * 2 + 8;
 
   function intersect(b1: number, b2: number): number {
-    let f1 = b1, f2 = b2;
+    let f1 = b1,
+      f2 = b2;
     let steps = 0;
     while (f1 !== f2) {
       let moved = false;
@@ -92,7 +93,10 @@ export function computeDominators(blocks: BasicBlock[], rpo: number[]): Map<numb
 
       let newIdom = -1;
       for (const p of block.preds) {
-        if (idom.has(p)) { newIdom = p; break; }
+        if (idom.has(p)) {
+          newIdom = p;
+          break;
+        }
       }
       if (newIdom === -1) continue;
 
@@ -218,10 +222,10 @@ export function detectNaturalLoops(
 function collectDefs(stmts: IRStmt[]): Set<string> {
   const defs = new Set<string>();
   for (const s of stmts) {
-    if (s.kind === 'assign' && s.dest.kind === 'reg') {
+    if (s.kind === "assign" && s.dest.kind === "reg") {
       defs.add(canonReg(s.dest.name));
     }
-    if (s.kind === 'call_stmt' && s.resultDest?.kind === 'reg') {
+    if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") {
       defs.add(canonReg(s.resultDest.name));
     }
   }
@@ -231,28 +235,60 @@ function collectDefs(stmts: IRStmt[]): Set<string> {
 function stmtUses(s: IRStmt): Set<string> {
   const uses = new Set<string>();
   function walk(e: IRExpr) {
-    if (e.kind === 'reg') { uses.add(canonReg(e.name)); return; }
-    if (e.kind === 'binary') { walk(e.left); walk(e.right); return; }
-    if (e.kind === 'unary') { walk(e.operand); return; }
-    if (e.kind === 'deref') { walk(e.address); return; }
-    if (e.kind === 'call') { e.args.forEach(walk); return; }
-    if (e.kind === 'ternary') { walk(e.condition); walk(e.then); walk(e.else); return; }
-    if (e.kind === 'cast') { walk(e.operand); return; }
-    if (e.kind === 'field_access') { walk(e.base); return; }
-    if (e.kind === 'array_access') { walk(e.base); walk(e.index); return; }
+    if (e.kind === "reg") {
+      uses.add(canonReg(e.name));
+      return;
+    }
+    if (e.kind === "binary") {
+      walk(e.left);
+      walk(e.right);
+      return;
+    }
+    if (e.kind === "unary") {
+      walk(e.operand);
+      return;
+    }
+    if (e.kind === "deref") {
+      walk(e.address);
+      return;
+    }
+    if (e.kind === "call") {
+      e.args.forEach(walk);
+      return;
+    }
+    if (e.kind === "ternary") {
+      walk(e.condition);
+      walk(e.then);
+      walk(e.else);
+      return;
+    }
+    if (e.kind === "cast") {
+      walk(e.operand);
+      return;
+    }
+    if (e.kind === "field_access") {
+      walk(e.base);
+      return;
+    }
+    if (e.kind === "array_access") {
+      walk(e.base);
+      walk(e.index);
+      return;
+    }
   }
   switch (s.kind) {
-    case 'assign':
+    case "assign":
       walk(s.src);
-      if (s.dest.kind === 'deref') walk(s.dest.address);
+      if (s.dest.kind === "deref") walk(s.dest.address);
       break;
-    case 'store':
-      walk(s.address); walk(s.value);
+    case "store":
+      walk(s.address);
+      walk(s.value);
       break;
-    case 'call_stmt':
+    case "call_stmt":
       s.call.args.forEach(walk);
       break;
-    case 'return':
+    case "return":
       if (s.value) walk(s.value);
       break;
   }
@@ -289,8 +325,9 @@ export function insertPhis(
       for (const u of stmtUses(s)) {
         if (!defined.has(u)) liveIn.get(b.id)!.add(u);
       }
-      if (s.kind === 'assign' && s.dest.kind === 'reg') defined.add(canonReg(s.dest.name));
-      if (s.kind === 'call_stmt' && s.resultDest?.kind === 'reg') defined.add(canonReg(s.resultDest.name));
+      if (s.kind === "assign" && s.dest.kind === "reg") defined.add(canonReg(s.dest.name));
+      if (s.kind === "call_stmt" && s.resultDest?.kind === "reg")
+        defined.add(canonReg(s.resultDest.name));
     }
   }
 
@@ -334,9 +371,9 @@ export function insertPhis(
         const block = blockById.get(d);
         if (!block) continue;
         const phi: IRPhi = {
-          kind: 'phi',
+          kind: "phi",
           dest: irReg(reg),
-          operands: block.preds.map(p => ({ blockId: p, value: irReg(reg) })),
+          operands: block.preds.map((p) => ({ blockId: p, value: irReg(reg) })),
         };
         phis.get(d)!.push(phi);
         if (!defBlocks.has(d)) {
@@ -382,29 +419,34 @@ export function renameVariables(
 
   function renameExpr(expr: IRExpr): IRExpr {
     switch (expr.kind) {
-      case 'reg': {
+      case "reg": {
         const ver = currentVersion(expr.name);
         return { ...expr, version: ver >= 0 ? ver : 0 };
       }
-      case 'binary':
+      case "binary":
         return { ...expr, left: renameExpr(expr.left), right: renameExpr(expr.right) };
-      case 'unary':
+      case "unary":
         return { ...expr, operand: renameExpr(expr.operand) };
-      case 'deref':
+      case "deref":
         return { ...expr, address: renameExpr(expr.address) };
-      case 'call':
+      case "call":
         return { ...expr, args: expr.args.map(renameExpr) };
-      case 'ternary':
-        return { ...expr, condition: renameExpr(expr.condition), then: renameExpr(expr.then), else: renameExpr(expr.else) };
-      case 'cast':
+      case "ternary":
+        return {
+          ...expr,
+          condition: renameExpr(expr.condition),
+          then: renameExpr(expr.then),
+          else: renameExpr(expr.else),
+        };
+      case "cast":
         return { ...expr, operand: renameExpr(expr.operand) };
-      case 'field_access':
+      case "field_access":
         return { ...expr, base: renameExpr(expr.base) };
-      case 'array_access':
+      case "array_access":
         return { ...expr, base: renameExpr(expr.base), index: renameExpr(expr.index) };
-      case 'const':
-      case 'var':
-      case 'unknown':
+      case "const":
+      case "var":
+      case "unknown":
         return expr; // leaf kinds — nothing to rename
       default: {
         // Compile error if a new IRExpr kind is added without handling it here.
@@ -443,25 +485,29 @@ export function renameVariables(
 
     function renameStmt(stmt: IRStmt): IRStmt {
       switch (stmt.kind) {
-        case 'assign': {
+        case "assign": {
           const src = renameExpr(stmt.src);
-          if (stmt.dest.kind === 'reg') {
+          if (stmt.dest.kind === "reg") {
             const canon = canonReg(stmt.dest.name);
             const ver = newVersion(canon);
             trackPush(canon);
             return { ...stmt, dest: { ...stmt.dest, version: ver }, src };
           }
-          if (stmt.dest.kind === 'deref') {
-            return { ...stmt, dest: { ...stmt.dest, address: renameExpr(stmt.dest.address) } as IRExpr, src };
+          if (stmt.dest.kind === "deref") {
+            return {
+              ...stmt,
+              dest: { ...stmt.dest, address: renameExpr(stmt.dest.address) } as IRExpr,
+              src,
+            };
           }
           return { ...stmt, src };
         }
-        case 'store':
+        case "store":
           return { ...stmt, address: renameExpr(stmt.address), value: renameExpr(stmt.value) };
-        case 'call_stmt': {
+        case "call_stmt": {
           const call = { ...stmt.call, args: stmt.call.args.map(renameExpr) };
           let resultDest = stmt.resultDest;
-          if (resultDest?.kind === 'reg') {
+          if (resultDest?.kind === "reg") {
             const canon = canonReg(resultDest.name);
             const ver = newVersion(canon);
             trackPush(canon);
@@ -469,23 +515,23 @@ export function renameVariables(
           }
           return { ...stmt, call, resultDest };
         }
-        case 'return':
+        case "return":
           return stmt.value ? { ...stmt, value: renameExpr(stmt.value) } : stmt;
         // Renaming runs before structuring, so these kinds carry no registers to
         // rename here (phi destinations/operands are handled separately above).
-        case 'if':
-        case 'while':
-        case 'do_while':
-        case 'for':
-        case 'switch':
-        case 'goto':
-        case 'label':
-        case 'comment':
-        case 'raw':
-        case 'break':
-        case 'continue':
-        case 'phi':
-        case 'try':
+        case "if":
+        case "while":
+        case "do_while":
+        case "for":
+        case "switch":
+        case "goto":
+        case "label":
+        case "comment":
+        case "raw":
+        case "break":
+        case "continue":
+        case "phi":
+        case "try":
           return stmt;
         default: {
           const _exhaustive: never = stmt;
@@ -502,7 +548,12 @@ export function renameVariables(
         for (const op of phi.operands) {
           if (op.blockId === blockId) {
             const ver = currentVersion(canon);
-            op.value = { kind: 'reg', name: canon, size: phi.dest.size, version: ver >= 0 ? ver : 0 };
+            op.value = {
+              kind: "reg",
+              name: canon,
+              size: phi.dest.size,
+              version: ver >= 0 ? ver : 0,
+            };
           }
         }
       }
@@ -525,10 +576,7 @@ export function renameVariables(
 
 // ── Orchestrator ──
 
-export function buildSSA(
-  blocks: BasicBlock[],
-  liftedBlocks: Map<number, IRStmt[]>,
-): SSAContext {
+export function buildSSA(blocks: BasicBlock[], liftedBlocks: Map<number, IRStmt[]>): SSAContext {
   if (blocks.length === 0) {
     return { blocks, liftedBlocks, phis: new Map(), idom: new Map(), domTree: new Map() };
   }

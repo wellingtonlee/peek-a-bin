@@ -1,5 +1,5 @@
-import type { Instruction, DisasmFunction, StackFrame, StackVar } from './types';
-import { getFuncInsns } from './funcInsns';
+import type { Instruction, DisasmFunction, StackFrame, StackVar } from "./types";
+import { getFuncInsns } from "./funcInsns";
 
 /**
  * Stack-operand patterns, one pair per width. They depend only on `is64`, so
@@ -39,8 +39,8 @@ const ARG_AREA = {
 
 /** `nop`, or a register moved onto itself (MSVC's `mov edi, edi` hot-patch pad). */
 function isProloguePadding(insn: Instruction): boolean {
-  if (insn.mnemonic === 'nop') return true;
-  if (insn.mnemonic !== 'mov') return false;
+  if (insn.mnemonic === "nop") return true;
+  if (insn.mnemonic !== "mov") return false;
   const m = /^(\w+),\s*(\w+)$/.exec(insn.opStr.trim());
   return m !== null && m[1].toLowerCase() === m[2].toLowerCase();
 }
@@ -61,8 +61,8 @@ function isProloguePadding(insn: Instruction): boolean {
  * field of whatever object RBP happens to hold.
  */
 function hasFramePointerPrologue(insns: Instruction[], is64: boolean): boolean {
-  const fp = is64 ? 'rbp' : 'ebp';
-  const sp = is64 ? 'rsp' : 'esp';
+  const fp = is64 ? "rbp" : "ebp";
+  const sp = is64 ? "rsp" : "esp";
 
   let i = 0;
   while (i < insns.length && isProloguePadding(insns[i])) i++;
@@ -70,10 +70,10 @@ function hasFramePointerPrologue(insns: Instruction[], is64: boolean): boolean {
   const push = insns[i];
   const setFp = insns[i + 1];
   if (!push || !setFp) return false;
-  if (push.mnemonic !== 'push' || push.opStr.trim().toLowerCase() !== fp) return false;
-  if (setFp.mnemonic !== 'mov') return false;
+  if (push.mnemonic !== "push" || push.opStr.trim().toLowerCase() !== fp) return false;
+  if (setFp.mnemonic !== "mov") return false;
 
-  const [dst, src] = setFp.opStr.split(',');
+  const [dst, src] = setFp.opStr.split(",");
   return dst?.trim().toLowerCase() === fp && src?.trim().toLowerCase() === sp;
 }
 
@@ -91,7 +91,7 @@ export function analyzeStackFrame(
   // Detect frame size from prologue: sub rsp, N / sub esp, N
   let frameSize = 0;
   for (const insn of funcInsns.slice(0, 10)) {
-    if (insn.mnemonic === 'sub') {
+    if (insn.mnemonic === "sub") {
       const m = is64
         ? insn.opStr.match(/^rsp,\s*0x([0-9a-fA-F]+)$/i)
         : insn.opStr.match(/^esp,\s*0x([0-9a-fA-F]+)$/i);
@@ -100,9 +100,7 @@ export function analyzeStackFrame(
         break;
       }
       // Decimal immediate
-      const md = is64
-        ? insn.opStr.match(/^rsp,\s*(\d+)$/i)
-        : insn.opStr.match(/^esp,\s*(\d+)$/i);
+      const md = is64 ? insn.opStr.match(/^rsp,\s*(\d+)$/i) : insn.opStr.match(/^esp,\s*(\d+)$/i);
       if (md) {
         frameSize = parseInt(md[1], 10);
         break;
@@ -116,16 +114,22 @@ export function analyzeStackFrame(
   // them into one entry with a combined size, a combined access count, and
   // whichever isParam flag happened to be written first.
   interface VarEntry {
-    base: 'bp' | 'sp';
-    offset: number;        // as written in the operand (always positive)
-    signedOffset: number;  // negative for [rbp - N]
+    base: "bp" | "sp";
+    offset: number; // as written in the operand (always positive)
+    signedOffset: number; // negative for [rbp - N]
     size: number;
     accessCount: number;
     isParam: boolean;
   }
   const varMap = new Map<string, VarEntry>();
 
-  function record(base: 'bp' | 'sp', offset: number, signedOffset: number, size: number, isParam: boolean) {
+  function record(
+    base: "bp" | "sp",
+    offset: number,
+    signedOffset: number,
+    size: number,
+    isParam: boolean,
+  ) {
     const key = stackVarKey(base, signedOffset);
     const existing = varMap.get(key);
     if (existing) {
@@ -143,10 +147,10 @@ export function analyzeStackFrame(
 
   // Size heuristic from operand prefix
   function inferSize(opStr: string): number {
-    if (opStr.includes('byte')) return 1;
-    if (opStr.includes('word') && !opStr.includes('dword') && !opStr.includes('qword')) return 2;
-    if (opStr.includes('dword')) return 4;
-    if (opStr.includes('qword')) return 8;
+    if (opStr.includes("byte")) return 1;
+    if (opStr.includes("word") && !opStr.includes("dword") && !opStr.includes("qword")) return 2;
+    if (opStr.includes("dword")) return 4;
+    if (opStr.includes("qword")) return 8;
     // Default based on architecture
     return is64 ? 8 : 4;
   }
@@ -158,14 +162,14 @@ export function analyzeStackFrame(
     const bpLocalMatch = op.match(bpLocalRe);
     if (bpLocalMatch) {
       const offset = parseInt(bpLocalMatch[1], 16);
-      record('bp', offset, -offset, inferSize(op), false);
+      record("bp", offset, -offset, inferSize(op), false);
     }
 
     // [rsp + 0xN] → could be local or param depending on offset vs frameSize
     const spMatch = op.match(spRe);
     if (spMatch) {
       const offset = parseInt(spMatch[1], 16);
-      record('sp', offset, offset, inferSize(op), false);
+      record("sp", offset, offset, inferSize(op), false);
     }
 
     // [rbp + 0xN] → parameter (above saved rbp + return addr)
@@ -178,7 +182,7 @@ export function analyzeStackFrame(
       // that lacks a register. See ARG_AREA.
       const minParamOffset = is64 ? 0x10 : 0x8;
       if (offset >= minParamOffset) {
-        record('bp', offset, offset, inferSize(op), true);
+        record("bp", offset, offset, inferSize(op), true);
       }
     }
   }
@@ -188,8 +192,9 @@ export function analyzeStackFrame(
   // Build sorted variable list. Sorted by the operand offset as before; entries
   // that now stay distinct (same offset, different base) are ordered bp first.
   const vars: StackVar[] = [];
-  const entries = Array.from(varMap.values())
-    .sort((a, b) => a.offset - b.offset || a.base.localeCompare(b.base));
+  const entries = Array.from(varMap.values()).sort(
+    (a, b) => a.offset - b.offset || a.base.localeCompare(b.base),
+  );
 
   // The N in `arg_N` is derived from the slot's offset, never from the order
   // the slots were seen in. A counter over observed slots made N the order the
@@ -223,9 +228,10 @@ export function analyzeStackFrame(
     let name: string;
     if (v.isParam) {
       const delta = v.offset - firstOffset;
-      name = framed && delta % slotSize === 0
-        ? `arg_${delta / slotSize}`
-        : `arg_0x${v.offset.toString(16).toUpperCase()}`;
+      name =
+        framed && delta % slotSize === 0
+          ? `arg_${delta / slotSize}`
+          : `arg_0x${v.offset.toString(16).toUpperCase()}`;
     } else {
       // Two locals can now share an operand offset (e.g. [rbp-0x10] and
       // [rsp+0x10]); suffix the base so their names stay distinct. Names are
@@ -248,6 +254,6 @@ export function analyzeStackFrame(
 }
 
 /** Stable identity for a stack slot: base register + signed operand offset. */
-export function stackVarKey(base: 'bp' | 'sp', signedOffset: number): string {
+export function stackVarKey(base: "bp" | "sp", signedOffset: number): string {
   return `${base}:${signedOffset}`;
 }

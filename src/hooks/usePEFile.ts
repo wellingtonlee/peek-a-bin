@@ -17,8 +17,15 @@ export type ViewTab =
   | "anomalies";
 
 const VIEW_TABS: readonly ViewTab[] = [
-  "disassembly", "headers", "sections", "imports",
-  "exports", "hex", "strings", "resources", "anomalies",
+  "disassembly",
+  "headers",
+  "sections",
+  "imports",
+  "exports",
+  "hex",
+  "strings",
+  "resources",
+  "anomalies",
 ];
 
 /** Narrow an untrusted string (e.g. the `#tab=` URL param) to a ViewTab. */
@@ -39,7 +46,16 @@ export interface AnnotationSnapshot {
   comments: Record<number, string>;
 }
 
-export type AnalysisPhase = "idle" | "parsing" | "detecting-functions" | "recursive-descent" | "gap-filling" | "building-xrefs" | "extracting-strings" | "ready" | "failed";
+export type AnalysisPhase =
+  | "idle"
+  | "parsing"
+  | "detecting-functions"
+  | "recursive-descent"
+  | "gap-filling"
+  | "building-xrefs"
+  | "extracting-strings"
+  | "ready"
+  | "failed";
 
 export interface AppState {
   peFile: PEFile | null;
@@ -58,7 +74,15 @@ export interface AppState {
   hexPatches: Map<number, number>;
   annotationUndoStack: AnnotationSnapshot[];
   annotationRedoStack: AnnotationSnapshot[];
-  callStack: { address: number; name: string; viewSnapshot?: { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number } }[];
+  callStack: {
+    address: number;
+    name: string;
+    viewSnapshot?: {
+      viewMode: "linear" | "graph";
+      graphPan: { x: number; y: number };
+      graphZoom: number;
+    };
+  }[];
   stringXrefs: Map<number, number[]> | null;
   importXrefs: Map<number, number[]> | null;
   dataXrefs: Map<number, number[]> | null;
@@ -139,21 +163,56 @@ export type AppAction =
   | { type: "CLEAR_RENAME"; address: number }
   | { type: "SET_COMMENT"; address: number; text: string }
   | { type: "DELETE_COMMENT"; address: number }
-  | { type: "LOAD_PERSISTED"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string> }
+  | {
+      type: "LOAD_PERSISTED";
+      bookmarks: Bookmark[];
+      renames: Record<number, string>;
+      comments: Record<number, string>;
+    }
   // `source` splits the two very different callers of this action. Omitting it
   // means "user": that direction can only over-record history, never lose it.
-  | { type: "IMPORT_ANNOTATIONS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string>; source?: "user" | "mcp" }
-  | { type: "IMPORT_FULL_ANALYSIS"; bookmarks: Bookmark[]; renames: Record<number, string>; comments: Record<number, string>; hexPatches: Map<number, number> }
+  | {
+      type: "IMPORT_ANNOTATIONS";
+      bookmarks: Bookmark[];
+      renames: Record<number, string>;
+      comments: Record<number, string>;
+      source?: "user" | "mcp";
+    }
+  | {
+      type: "IMPORT_FULL_ANALYSIS";
+      bookmarks: Bookmark[];
+      renames: Record<number, string>;
+      comments: Record<number, string>;
+      hexPatches: Map<number, number>;
+    }
   | { type: "PATCH_BYTE"; offset: number; value: number }
   | { type: "UNDO_PATCH"; offset: number }
   | { type: "CLEAR_PATCHES" }
   | { type: "UNDO_ANNOTATION" }
   | { type: "REDO_ANNOTATION" }
-  | { type: "PUSH_CALL_STACK"; address: number; name: string; viewSnapshot?: { viewMode: "linear" | "graph"; graphPan: { x: number; y: number }; graphZoom: number } }
+  | {
+      type: "PUSH_CALL_STACK";
+      address: number;
+      name: string;
+      viewSnapshot?: {
+        viewMode: "linear" | "graph";
+        graphPan: { x: number; y: number };
+        graphZoom: number;
+      };
+    }
   | { type: "POP_CALL_STACK"; index: number }
   | { type: "CLEAR_CALL_STACK" }
-  | { type: "SET_STRINGS"; strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }
-  | { type: "SET_XREFS"; stringXrefs: Map<number, number[]>; importXrefs: Map<number, number[]>; dataXrefs?: Map<number, number[]> }
+  | {
+      type: "SET_STRINGS";
+      strings: Map<number, string>;
+      stringTypes: Map<number, "ascii" | "utf16le">;
+    }
+  | {
+      type: "SET_XREFS";
+      stringXrefs: Map<number, number[]>;
+      importXrefs: Map<number, number[]>;
+      dataXrefs?: Map<number, number[]>;
+    }
   | { type: "SET_CALL_GRAPH"; callGraph: Map<number, number[]> }
   | { type: "SET_ANOMALIES"; anomalies: Anomaly[] }
   | { type: "SET_ANALYSIS_PHASE"; phase: AnalysisPhase }
@@ -237,7 +296,10 @@ function pushUndo(state: AppState): Pick<AppState, "annotationUndoStack" | "anno
   return { annotationUndoStack: stack, annotationRedoStack: [] };
 }
 
-function pushHistory(state: AppState, address: number): Pick<AppState, "addressHistory" | "historyIndex"> {
+function pushHistory(
+  state: AppState,
+  address: number,
+): Pick<AppState, "addressHistory" | "historyIndex"> {
   // Don't push if same as current
   if (state.addressHistory.length > 0 && state.addressHistory[state.historyIndex] === address) {
     return { addressHistory: state.addressHistory, historyIndex: state.historyIndex };
@@ -258,7 +320,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "SET_LOADING":
       return { ...state, loading: true, error: null };
     case "SET_PE_FILE": {
-      const addr = action.peFile.optionalHeader.addressOfEntryPoint + action.peFile.optionalHeader.imageBase;
+      const addr =
+        action.peFile.optionalHeader.addressOfEntryPoint + action.peFile.optionalHeader.imageBase;
       return {
         ...state,
         peFile: action.peFile,
@@ -330,7 +393,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, ...undo, comments: rest };
     }
     case "LOAD_PERSISTED": {
-      return { ...state, bookmarks: action.bookmarks, renames: action.renames, comments: action.comments };
+      return {
+        ...state,
+        bookmarks: action.bookmarks,
+        renames: action.renames,
+        comments: action.comments,
+      };
     }
     case "IMPORT_ANNOTATIONS": {
       // A user-initiated import is a user edit, so it is undoable — symmetric
@@ -346,7 +414,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ? { annotationUndoStack: state.annotationUndoStack, annotationRedoStack: [] }
           : pushUndo(state);
       const mergedBookmarks = [...state.bookmarks];
-      const existingAddrs = new Set(mergedBookmarks.map(b => b.address));
+      const existingAddrs = new Set(mergedBookmarks.map((b) => b.address));
       for (const b of action.bookmarks) {
         if (!existingAddrs.has(b.address)) mergedBookmarks.push(b);
       }
@@ -361,7 +429,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "IMPORT_FULL_ANALYSIS": {
       const undo = pushUndo(state);
       const mergedBookmarks = [...state.bookmarks];
-      const existingAddrs = new Set(mergedBookmarks.map(b => b.address));
+      const existingAddrs = new Set(mergedBookmarks.map((b) => b.address));
       for (const b of action.bookmarks) {
         if (!existingAddrs.has(b.address)) mergedBookmarks.push(b);
       }
@@ -435,7 +503,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case "SET_XREFS":
-      return { ...state, stringXrefs: action.stringXrefs, importXrefs: action.importXrefs, dataXrefs: action.dataXrefs ?? state.dataXrefs };
+      return {
+        ...state,
+        stringXrefs: action.stringXrefs,
+        importXrefs: action.importXrefs,
+        dataXrefs: action.dataXrefs ?? state.dataXrefs,
+      };
     case "SET_CALL_GRAPH":
       return { ...state, callGraph: action.callGraph };
     case "SET_ANOMALIES":
@@ -454,7 +527,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, irpHandlers: action.handlers };
     // ── Batch Rename ──
     case "BATCH_RENAME_START":
-      return { ...state, batchRename: { status: "decompiling", progress: { done: 0, total: action.total }, results: [], error: null } };
+      return {
+        ...state,
+        batchRename: {
+          status: "decompiling",
+          progress: { done: 0, total: action.total },
+          results: [],
+          error: null,
+        },
+      };
     case "BATCH_RENAME_PROGRESS":
       // Previously `status === "decompiling" ? "decompiling" : "running"`, which
       // pinned the run to "decompiling" forever — the ternary could only ever
@@ -471,12 +552,24 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           }
         : state;
     case "BATCH_RENAME_DONE":
-      return state.batchRename ? { ...state, batchRename: { ...state.batchRename, status: "review", results: action.results, error: null } } : state;
+      return state.batchRename
+        ? {
+            ...state,
+            batchRename: {
+              ...state.batchRename,
+              status: "review",
+              results: action.results,
+              error: null,
+            },
+          }
+        : state;
     case "BATCH_RENAME_ERROR":
-      return state.batchRename ? { ...state, batchRename: { ...state.batchRename, status: "idle", error: action.error } } : state;
+      return state.batchRename
+        ? { ...state, batchRename: { ...state.batchRename, status: "idle", error: action.error } }
+        : state;
     case "BATCH_RENAME_ACCEPT": {
       const undo = pushUndo(state);
-      const accepted = action.results.filter(r => r.accepted);
+      const accepted = action.results.filter((r) => r.accepted);
       const newRenames = { ...state.renames };
       for (const r of accepted) newRenames[r.address] = r.suggestedName;
       return { ...state, ...undo, renames: newRenames, batchRename: null };
@@ -487,11 +580,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "AI_REPORT_START":
       return { ...state, aiReport: { status: "streaming", content: "", error: null } };
     case "AI_REPORT_TOKEN":
-      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, content: action.content } } : state;
+      return state.aiReport
+        ? { ...state, aiReport: { ...state.aiReport, content: action.content } }
+        : state;
     case "AI_REPORT_DONE":
       return state.aiReport ? { ...state, aiReport: { ...state.aiReport, status: "done" } } : state;
     case "AI_REPORT_ERROR":
-      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, status: "error", error: action.error } } : state;
+      return state.aiReport
+        ? { ...state, aiReport: { ...state.aiReport, status: "error", error: action.error } }
+        : state;
     case "AI_REPORT_DISMISS":
       return { ...state, aiReport: null };
     // ── AI Scan ──
@@ -532,7 +629,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "AI_SCAN_CLEAR":
       return { ...state, aiScanResults: [], aiScan: { ...IDLE_SCAN } };
     case "RESET":
-      return { ...initialState, disasmReady: state.disasmReady, callGraph: null, dataXrefs: null, anomalies: [] };
+      return {
+        ...initialState,
+        disasmReady: state.disasmReady,
+        callGraph: null,
+        dataXrefs: null,
+        anomalies: [],
+      };
     default:
       return state;
   }

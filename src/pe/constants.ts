@@ -11,11 +11,11 @@ export const IMAGE_FILE_MACHINE_ARM64 = 0xaa64;
 export const IMAGE_FILE_MACHINE_IA64 = 0x200;
 
 export const MachineTypes: Record<number, string> = {
-  [IMAGE_FILE_MACHINE_I386]: 'x86',
-  [IMAGE_FILE_MACHINE_AMD64]: 'x64',
-  [IMAGE_FILE_MACHINE_ARM]: 'ARM',
-  [IMAGE_FILE_MACHINE_ARM64]: 'ARM64',
-  [IMAGE_FILE_MACHINE_IA64]: 'IA64',
+  [IMAGE_FILE_MACHINE_I386]: "x86",
+  [IMAGE_FILE_MACHINE_AMD64]: "x64",
+  [IMAGE_FILE_MACHINE_ARM]: "ARM",
+  [IMAGE_FILE_MACHINE_ARM64]: "ARM64",
+  [IMAGE_FILE_MACHINE_IA64]: "IA64",
 };
 
 // Section Characteristics
@@ -36,17 +36,17 @@ export const IMAGE_SCN_MEM_WRITE = 0x80000000;
 export function sectionCharacteristicsToString(flags: number): string {
   const parts: string[] = [];
 
-  if (flags & IMAGE_SCN_CNT_CODE) parts.push('CODE');
-  if (flags & IMAGE_SCN_CNT_INITIALIZED_DATA) parts.push('INIT_DATA');
-  if (flags & IMAGE_SCN_CNT_UNINITIALIZED_DATA) parts.push('UNINIT_DATA');
-  if (flags & IMAGE_SCN_MEM_EXECUTE) parts.push('X');
-  if (flags & IMAGE_SCN_MEM_READ) parts.push('R');
-  if (flags & IMAGE_SCN_MEM_WRITE) parts.push('W');
-  if (flags & IMAGE_SCN_MEM_DISCARDABLE) parts.push('DISCARD');
-  if (flags & IMAGE_SCN_MEM_SHARED) parts.push('SHARED');
-  if (flags & IMAGE_SCN_LNK_COMDAT) parts.push('COMDAT');
+  if (flags & IMAGE_SCN_CNT_CODE) parts.push("CODE");
+  if (flags & IMAGE_SCN_CNT_INITIALIZED_DATA) parts.push("INIT_DATA");
+  if (flags & IMAGE_SCN_CNT_UNINITIALIZED_DATA) parts.push("UNINIT_DATA");
+  if (flags & IMAGE_SCN_MEM_EXECUTE) parts.push("X");
+  if (flags & IMAGE_SCN_MEM_READ) parts.push("R");
+  if (flags & IMAGE_SCN_MEM_WRITE) parts.push("W");
+  if (flags & IMAGE_SCN_MEM_DISCARDABLE) parts.push("DISCARD");
+  if (flags & IMAGE_SCN_MEM_SHARED) parts.push("SHARED");
+  if (flags & IMAGE_SCN_LNK_COMDAT) parts.push("COMDAT");
 
-  return parts.join(' | ');
+  return parts.join(" | ");
 }
 
 // Data Directory Indices
@@ -67,21 +67,21 @@ export const IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13;
 export const IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR = 14;
 
 export const DataDirectoryNames: Record<number, string> = {
-  [IMAGE_DIRECTORY_ENTRY_EXPORT]: 'Export Table',
-  [IMAGE_DIRECTORY_ENTRY_IMPORT]: 'Import Table',
-  [IMAGE_DIRECTORY_ENTRY_RESOURCE]: 'Resource Table',
-  [IMAGE_DIRECTORY_ENTRY_EXCEPTION]: 'Exception Table',
-  [IMAGE_DIRECTORY_ENTRY_SECURITY]: 'Certificate Table',
-  [IMAGE_DIRECTORY_ENTRY_BASERELOC]: 'Base Relocation Table',
-  [IMAGE_DIRECTORY_ENTRY_DEBUG]: 'Debug',
-  [IMAGE_DIRECTORY_ENTRY_ARCHITECTURE]: 'Architecture',
-  [IMAGE_DIRECTORY_ENTRY_GLOBALPTR]: 'Global Ptr',
-  [IMAGE_DIRECTORY_ENTRY_TLS]: 'TLS Table',
-  [IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG]: 'Load Config Table',
-  [IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT]: 'Bound Import',
-  [IMAGE_DIRECTORY_ENTRY_IAT]: 'IAT',
-  [IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT]: 'Delay Import Descriptor',
-  [IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]: 'CLR Runtime Header',
+  [IMAGE_DIRECTORY_ENTRY_EXPORT]: "Export Table",
+  [IMAGE_DIRECTORY_ENTRY_IMPORT]: "Import Table",
+  [IMAGE_DIRECTORY_ENTRY_RESOURCE]: "Resource Table",
+  [IMAGE_DIRECTORY_ENTRY_EXCEPTION]: "Exception Table",
+  [IMAGE_DIRECTORY_ENTRY_SECURITY]: "Certificate Table",
+  [IMAGE_DIRECTORY_ENTRY_BASERELOC]: "Base Relocation Table",
+  [IMAGE_DIRECTORY_ENTRY_DEBUG]: "Debug",
+  [IMAGE_DIRECTORY_ENTRY_ARCHITECTURE]: "Architecture",
+  [IMAGE_DIRECTORY_ENTRY_GLOBALPTR]: "Global Ptr",
+  [IMAGE_DIRECTORY_ENTRY_TLS]: "TLS Table",
+  [IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG]: "Load Config Table",
+  [IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT]: "Bound Import",
+  [IMAGE_DIRECTORY_ENTRY_IAT]: "IAT",
+  [IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT]: "Delay Import Descriptor",
+  [IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]: "CLR Runtime Header",
 };
 
 // Subsystem
@@ -96,15 +96,15 @@ export const IMAGE_SUBSYSTEM_EFI_ROM = 13;
 export const IMAGE_SUBSYSTEM_XBOX = 14;
 
 export const SubsystemNames: Record<number, string> = {
-  [IMAGE_SUBSYSTEM_NATIVE]: 'Native',
-  [IMAGE_SUBSYSTEM_WINDOWS_GUI]: 'Windows GUI',
-  [IMAGE_SUBSYSTEM_WINDOWS_CUI]: 'Windows CUI',
-  [IMAGE_SUBSYSTEM_WINDOWS_CE_GUI]: 'Windows CE GUI',
-  [IMAGE_SUBSYSTEM_EFI_APPLICATION]: 'EFI Application',
-  [IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER]: 'EFI Boot Service Driver',
-  [IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER]: 'EFI Runtime Driver',
-  [IMAGE_SUBSYSTEM_EFI_ROM]: 'EFI ROM',
-  [IMAGE_SUBSYSTEM_XBOX]: 'Xbox',
+  [IMAGE_SUBSYSTEM_NATIVE]: "Native",
+  [IMAGE_SUBSYSTEM_WINDOWS_GUI]: "Windows GUI",
+  [IMAGE_SUBSYSTEM_WINDOWS_CUI]: "Windows CUI",
+  [IMAGE_SUBSYSTEM_WINDOWS_CE_GUI]: "Windows CE GUI",
+  [IMAGE_SUBSYSTEM_EFI_APPLICATION]: "EFI Application",
+  [IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER]: "EFI Boot Service Driver",
+  [IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER]: "EFI Runtime Driver",
+  [IMAGE_SUBSYSTEM_EFI_ROM]: "EFI ROM",
+  [IMAGE_SUBSYSTEM_XBOX]: "Xbox",
 };
 
 // Optional Header Magic
@@ -126,12 +126,12 @@ export const IMAGE_REL_BASED_HIGHADJ = 4;
 export const IMAGE_REL_BASED_DIR64 = 10;
 
 export const RelocTypeNames: Record<number, string> = {
-  [IMAGE_REL_BASED_ABSOLUTE]: 'ABSOLUTE',
-  [IMAGE_REL_BASED_HIGH]: 'HIGH',
-  [IMAGE_REL_BASED_LOW]: 'LOW',
-  [IMAGE_REL_BASED_HIGHLOW]: 'HIGHLOW',
-  [IMAGE_REL_BASED_HIGHADJ]: 'HIGHADJ',
-  [IMAGE_REL_BASED_DIR64]: 'DIR64',
+  [IMAGE_REL_BASED_ABSOLUTE]: "ABSOLUTE",
+  [IMAGE_REL_BASED_HIGH]: "HIGH",
+  [IMAGE_REL_BASED_LOW]: "LOW",
+  [IMAGE_REL_BASED_HIGHLOW]: "HIGHLOW",
+  [IMAGE_REL_BASED_HIGHADJ]: "HIGHADJ",
+  [IMAGE_REL_BASED_DIR64]: "DIR64",
 };
 
 // Resource Types
@@ -152,10 +152,21 @@ export const RT_VERSION = 16;
 export const RT_MANIFEST = 24;
 
 export const ResourceTypeNames: Record<number, string> = {
-  1: "Cursor", 2: "Bitmap", 3: "Icon", 4: "Menu", 5: "Dialog",
-  6: "String Table", 7: "Font Directory", 8: "Font", 9: "Accelerator",
-  10: "RC Data", 11: "Message Table", 12: "Group Cursor",
-  14: "Group Icon", 16: "Version Info", 24: "Manifest",
+  1: "Cursor",
+  2: "Bitmap",
+  3: "Icon",
+  4: "Menu",
+  5: "Dialog",
+  6: "String Table",
+  7: "Font Directory",
+  8: "Font",
+  9: "Accelerator",
+  10: "RC Data",
+  11: "Message Table",
+  12: "Group Cursor",
+  14: "Group Icon",
+  16: "Version Info",
+  24: "Manifest",
 };
 
 // Import Flags

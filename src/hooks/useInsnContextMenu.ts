@@ -9,7 +9,13 @@
 // renamingLabel, showXrefPanel) deliberately stays declared in DisassemblyView
 // and is passed in: moving those useState calls would shift them to a different
 // position in the hook sequence.
-import { useCallback, useMemo, type Dispatch, type RefObject, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useMemo,
+  type Dispatch,
+  type RefObject,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { getDisplayName, type AppAction } from "./usePEFile";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import type { PEFile } from "../pe/types";
@@ -71,7 +77,9 @@ export function useInsnContextMenu({
 
   const ctxCopyBytes = useCallback(() => {
     if (!ctxMenu) return;
-    const hex = Array.from(ctxMenu.insn.bytes).map((b) => b.toString(16).padStart(2, "0")).join(" ");
+    const hex = Array.from(ctxMenu.insn.bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ");
     navigator.clipboard.writeText(hex);
     setCtxMenu(null);
   }, [ctxMenu]);
@@ -79,9 +87,7 @@ export function useInsnContextMenu({
   const ctxGoTo = useCallback(() => {
     if (!ctxMenu) return;
     const target = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
-    const addrInput = document.querySelector<HTMLInputElement>(
-      'input[placeholder*="address"]'
-    );
+    const addrInput = document.querySelector<HTMLInputElement>('input[placeholder*="address"]');
     if (addrInput) {
       addrInput.focus();
       const prefill = target !== null ? "0x" + target.toString(16) : ctxMenu.insn.opStr;
@@ -163,12 +169,25 @@ export function useInsnContextMenu({
       const rect = container.getBoundingClientRect();
       const rawX = e.clientX - rect.left;
       const rawY = e.clientY - rect.top;
-      const popW = 180, popH = 300;
+      const popW = 180,
+        popH = 300;
       const maxX = rect.width - popW - 8;
       const maxY = rect.height - popH - 8;
       setCtxMenu({
-        x: Math.max(0, Math.min(rawX + (viewMode === "linear" ? container.scrollLeft : 0), viewMode === "linear" ? maxX + container.scrollLeft : maxX)),
-        y: Math.max(0, Math.min(rawY + (viewMode === "linear" ? container.scrollTop : 0), viewMode === "linear" ? maxY + container.scrollTop : maxY)),
+        x: Math.max(
+          0,
+          Math.min(
+            rawX + (viewMode === "linear" ? container.scrollLeft : 0),
+            viewMode === "linear" ? maxX + container.scrollLeft : maxX,
+          ),
+        ),
+        y: Math.max(
+          0,
+          Math.min(
+            rawY + (viewMode === "linear" ? container.scrollTop : 0),
+            viewMode === "linear" ? maxY + container.scrollTop : maxY,
+          ),
+        ),
         insn,
       });
     },

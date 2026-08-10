@@ -18,7 +18,11 @@ function run(actions: AppAction[], from: AppState = initialState): AppState {
 
 describe("undo/redo — basic round trips", () => {
   it("undo restores the annotations from before the last change", () => {
-    const renamed = appReducer(initialState, { type: "RENAME_FUNCTION", address: 0x1000, name: "main" });
+    const renamed = appReducer(initialState, {
+      type: "RENAME_FUNCTION",
+      address: 0x1000,
+      name: "main",
+    });
     expect(renamed.renames).toEqual({ 0x1000: "main" });
 
     const undone = appReducer(renamed, { type: "UNDO_ANNOTATION" });
@@ -62,21 +66,26 @@ describe("undo/redo — basic round trips", () => {
       { type: "RENAME_FUNCTION", address: 0x2000, name: "b" },
       { type: "RENAME_FUNCTION", address: 0x3000, name: "c" },
     ]);
-    const back3 = run([
-      { type: "UNDO_ANNOTATION" }, { type: "UNDO_ANNOTATION" }, { type: "UNDO_ANNOTATION" },
-    ], state);
+    const back3 = run(
+      [{ type: "UNDO_ANNOTATION" }, { type: "UNDO_ANNOTATION" }, { type: "UNDO_ANNOTATION" }],
+      state,
+    );
     expect(back3.renames).toEqual({});
 
-    const fwd3 = run([
-      { type: "REDO_ANNOTATION" }, { type: "REDO_ANNOTATION" }, { type: "REDO_ANNOTATION" },
-    ], back3);
+    const fwd3 = run(
+      [{ type: "REDO_ANNOTATION" }, { type: "REDO_ANNOTATION" }, { type: "REDO_ANNOTATION" }],
+      back3,
+    );
     expect(fwd3.renames).toEqual({ 0x1000: "a", 0x2000: "b", 0x3000: "c" });
   });
 
   it("every annotating action is undoable", () => {
     const cases: { label: string; action: AppAction }[] = [
       { label: "TOGGLE_BOOKMARK", action: { type: "TOGGLE_BOOKMARK", address: 0x1000 } },
-      { label: "SET_BOOKMARK_LABEL", action: { type: "SET_BOOKMARK_LABEL", address: 0x1000, label: "x" } },
+      {
+        label: "SET_BOOKMARK_LABEL",
+        action: { type: "SET_BOOKMARK_LABEL", address: 0x1000, label: "x" },
+      },
       { label: "RENAME_FUNCTION", action: { type: "RENAME_FUNCTION", address: 0x1000, name: "n" } },
       { label: "CLEAR_RENAME", action: { type: "CLEAR_RENAME", address: 0x1000 } },
       { label: "SET_COMMENT", action: { type: "SET_COMMENT", address: 0x1000, text: "c" } },
@@ -98,7 +107,11 @@ describe("undo/redo — a new action invalidates the redo branch", () => {
     ]);
     expect(undone.annotationRedoStack).toHaveLength(1);
 
-    const branched = appReducer(undone, { type: "RENAME_FUNCTION", address: 0x2000, name: "different" });
+    const branched = appReducer(undone, {
+      type: "RENAME_FUNCTION",
+      address: 0x2000,
+      name: "different",
+    });
     expect(branched.annotationRedoStack).toEqual([]);
 
     // Redo is now a no-op; "original" is gone for good.
@@ -190,12 +203,15 @@ describe("undo/redo — snapshots do not alias live state", () => {
     const snapshotJson = JSON.stringify(snapshot);
 
     // Pile on several more edits of every annotation kind.
-    run([
-      { type: "RENAME_FUNCTION", address: 0x2000, name: "b" },
-      { type: "TOGGLE_BOOKMARK", address: 0x3000 },
-      { type: "SET_COMMENT", address: 0x4000, text: "c" },
-      { type: "CLEAR_RENAME", address: 0x1000 },
-    ], first);
+    run(
+      [
+        { type: "RENAME_FUNCTION", address: 0x2000, name: "b" },
+        { type: "TOGGLE_BOOKMARK", address: 0x3000 },
+        { type: "SET_COMMENT", address: 0x4000, text: "c" },
+        { type: "CLEAR_RENAME", address: 0x1000 },
+      ],
+      first,
+    );
 
     expect(JSON.stringify(snapshot)).toBe(snapshotJson);
   });
@@ -291,13 +307,16 @@ describe("undo/redo — actions that bypass the stack", () => {
     expect(edited.annotationUndoStack).toHaveLength(1);
 
     const synced = run(
-      Array.from({ length: 5 }, (_, i): AppAction => ({
-        type: "IMPORT_ANNOTATIONS",
-        bookmarks: [],
-        renames: { [0x2000 + i]: `remote${i}` },
-        comments: {},
-        source: "mcp",
-      })),
+      Array.from(
+        { length: 5 },
+        (_, i): AppAction => ({
+          type: "IMPORT_ANNOTATIONS",
+          bookmarks: [],
+          renames: { [0x2000 + i]: `remote${i}` },
+          comments: {},
+          source: "mcp",
+        }),
+      ),
       edited,
     );
 
@@ -309,29 +328,26 @@ describe("undo/redo — actions that bypass the stack", () => {
     expect(undone.renames).toEqual({});
   });
 
-  it.each(["user", "mcp"] as const)(
-    "a stale redo entry does not survive a %s import",
-    (source) => {
-      const undone = run([
-        { type: "RENAME_FUNCTION", address: 0x1000, name: "local" },
-        { type: "UNDO_ANNOTATION" },
-      ]);
-      expect(undone.annotationRedoStack).toHaveLength(1);
+  it.each(["user", "mcp"] as const)("a stale redo entry does not survive a %s import", (source) => {
+    const undone = run([
+      { type: "RENAME_FUNCTION", address: 0x1000, name: "local" },
+      { type: "UNDO_ANNOTATION" },
+    ]);
+    expect(undone.annotationRedoStack).toHaveLength(1);
 
-      const imported = appReducer(undone, {
-        type: "IMPORT_ANNOTATIONS",
-        bookmarks: [],
-        renames: { 0x2000: "from-import" },
-        comments: {},
-        source,
-      });
-      expect(imported.renames).toEqual({ 0x2000: "from-import" });
-      expect(imported.annotationRedoStack).toEqual([]);
+    const imported = appReducer(undone, {
+      type: "IMPORT_ANNOTATIONS",
+      bookmarks: [],
+      renames: { 0x2000: "from-import" },
+      comments: {},
+      source,
+    });
+    expect(imported.renames).toEqual({ 0x2000: "from-import" });
+    expect(imported.annotationRedoStack).toEqual([]);
 
-      // Redo is now a no-op, so the imported rename survives it.
-      const redone = appReducer(imported, { type: "REDO_ANNOTATION" });
-      expect(redone).toBe(imported);
-      expect(redone.renames).toEqual({ 0x2000: "from-import" });
-    },
-  );
+    // Redo is now a no-op, so the imported rename survives it.
+    const redone = appReducer(imported, { type: "REDO_ANNOTATION" });
+    expect(redone).toBe(imported);
+    expect(redone.renames).toEqual({ 0x2000: "from-import" });
+  });
 });

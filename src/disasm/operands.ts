@@ -1,6 +1,6 @@
-import type { Instruction } from './types';
-import type { ImportEntry } from '../pe/types';
-import { matchRipOperand } from './ripRelative';
+import type { Instruction } from "./types";
+import type { ImportEntry } from "../pe/types";
+import { matchRipOperand } from "./ripRelative";
 
 export interface OperandTarget {
   address: number;
@@ -15,7 +15,7 @@ export function parseOperandTargets(
   insn: Instruction,
   imageBase: number,
   imageEnd: number,
-  iatMap?: Map<number, { lib: string; func: string }>
+  iatMap?: Map<number, { lib: string; func: string }>,
 ): OperandTarget[] {
   const targets: OperandTarget[] = [];
   const seen = new Set<number>();
@@ -34,7 +34,7 @@ export function parseOperandTargets(
   const op = insn.opStr;
 
   // Case 1: direct branch call/jmp 0xNNNN
-  if (mn === 'call' || mn === 'jmp' || mn.startsWith('j')) {
+  if (mn === "call" || mn === "jmp" || mn.startsWith("j")) {
     const m = op.match(/^0x([0-9a-fA-F]+)$/);
     if (m) {
       const target = parseInt(m[1], 16);
@@ -73,9 +73,7 @@ export function parseOperandTargets(
 /**
  * Build a lookup map from IAT addresses to import names.
  */
-export function buildIATLookup(
-  imports: ImportEntry[]
-): Map<number, { lib: string; func: string }> {
+export function buildIATLookup(imports: ImportEntry[]): Map<number, { lib: string; func: string }> {
   const map = new Map<number, { lib: string; func: string }>();
   for (const imp of imports) {
     for (let i = 0; i < imp.functions.length; i++) {

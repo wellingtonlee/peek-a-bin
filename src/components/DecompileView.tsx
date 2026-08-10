@@ -11,19 +11,44 @@ interface Token {
 }
 
 const KEYWORDS = new Set([
-  "if", "else", "while", "do", "for", "switch", "case", "default",
-  "break", "continue", "return", "goto", "void", "struct",
+  "if",
+  "else",
+  "while",
+  "do",
+  "for",
+  "switch",
+  "case",
+  "default",
+  "break",
+  "continue",
+  "return",
+  "goto",
+  "void",
+  "struct",
 ]);
 
 const TYPES = new Set([
-  "int", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-  "char", "short", "long", "unsigned", "signed", "void", "bool",
+  "int",
+  "int32_t",
+  "int64_t",
+  "uint8_t",
+  "uint16_t",
+  "uint32_t",
+  "uint64_t",
+  "char",
+  "short",
+  "long",
+  "unsigned",
+  "signed",
+  "void",
+  "bool",
 ]);
 
 function tokenizeLine(line: string): Token[] {
   const tokens: Token[] = [];
   // Match: strings, comments, hex numbers, decimal numbers, identifiers, operators, whitespace
-  const re = /("(?:[^"\\]|\\.)*")|('(?:[^'\\]|\\.)*')|(\/\/.*$)|(\/\*[\s\S]*?\*\/)|(\b0x[0-9a-fA-F]+\b)|(\b\d+\b)|(\b[a-zA-Z_]\w*\b)|(\s+)|([^\s\w])/g;
+  const re =
+    /("(?:[^"\\]|\\.)*")|('(?:[^'\\]|\\.)*')|(\/\/.*$)|(\/\*[\s\S]*?\*\/)|(\b0x[0-9a-fA-F]+\b)|(\b\d+\b)|(\b[a-zA-Z_]\w*\b)|(\s+)|([^\s\w])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(line)) !== null) {
     const text = m[0];
@@ -110,11 +135,29 @@ interface DecompileViewProps {
 }
 
 export function DecompileView({
-  code, loading, error, activeTab, onTabChange, highLevelEngine, aiMode,
-  onEnhance, onExplain, onCancelAI, onNavigate, onClose,
-  highlightLines, onLineClick, syncDisabled,
-  scrollSyncEnabled, onScrollSyncToggle,
-  comments, lineMap, editingComment, onEditComment, onCommitComment, onDeleteComment,
+  code,
+  loading,
+  error,
+  activeTab,
+  onTabChange,
+  highLevelEngine,
+  aiMode,
+  onEnhance,
+  onExplain,
+  onCancelAI,
+  onNavigate,
+  onClose,
+  highlightLines,
+  onLineClick,
+  syncDisabled,
+  scrollSyncEnabled,
+  onScrollSyncToggle,
+  comments,
+  lineMap,
+  editingComment,
+  onEditComment,
+  onCommitComment,
+  onDeleteComment,
 }: DecompileViewProps) {
   const preRef = useRef<HTMLPreElement>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
@@ -171,35 +214,41 @@ export function DecompileView({
     dismissIfRefMissing: true,
   });
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, lineNum: number) => {
-    if (syncDisabled || !lineMap) return;
-    const addr = lineMap.get(lineNum);
-    if (addr === undefined) return;
-    e.preventDefault();
-    setCtxMenu({ x: e.clientX, y: e.clientY, lineNum, address: addr });
-  }, [syncDisabled, lineMap]);
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, lineNum: number) => {
+      if (syncDisabled || !lineMap) return;
+      const addr = lineMap.get(lineNum);
+      if (addr === undefined) return;
+      e.preventDefault();
+      setCtxMenu({ x: e.clientX, y: e.clientY, lineNum, address: addr });
+    },
+    [syncDisabled, lineMap],
+  );
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      setCtxMenu(null);
-      return;
-    }
-    if (e.key === ";" && !syncDisabled && lineMap && onEditComment && comments) {
-      if (highlightLines) {
-        // Find first highlighted line with an address
-        for (const lineNum of highlightLines) {
-          const addr = lineMap.get(lineNum);
-          if (addr !== undefined) {
-            e.preventDefault();
-            e.stopPropagation();
-            onEditComment({ address: addr, value: comments[addr] ?? "" });
-            return;
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setCtxMenu(null);
+        return;
+      }
+      if (e.key === ";" && !syncDisabled && lineMap && onEditComment && comments) {
+        if (highlightLines) {
+          // Find first highlighted line with an address
+          for (const lineNum of highlightLines) {
+            const addr = lineMap.get(lineNum);
+            if (addr !== undefined) {
+              e.preventDefault();
+              e.stopPropagation();
+              onEditComment({ address: addr, value: comments[addr] ?? "" });
+              return;
+            }
           }
         }
+        // No match → let event bubble to parent (uses currentAddress)
       }
-      // No match → let event bubble to parent (uses currentAddress)
-    }
-  }, [syncDisabled, lineMap, highlightLines, onEditComment, comments]);
+    },
+    [syncDisabled, lineMap, highlightLines, onEditComment, comments],
+  );
 
   // Format inline comment display
   const formatComment = (text: string): string => {
@@ -211,9 +260,14 @@ export function DecompileView({
   const isStreaming = activeTab === "ai" && loading && aiMode != null;
 
   // High level engine indicator
-  const highIndicator = activeTab === "high" && highLevelEngine
-    ? highLevelEngine === "none" ? "(not available)" : highLevelEngine === "retdec" ? "(retdec fallback)" : null
-    : null;
+  const highIndicator =
+    activeTab === "high" && highLevelEngine
+      ? highLevelEngine === "none"
+        ? "(not available)"
+        : highLevelEngine === "retdec"
+          ? "(retdec fallback)"
+          : null
+      : null;
 
   return (
     <div className="flex flex-col h-full border-l border-theme panel-bg">
@@ -222,13 +276,12 @@ export function DecompileView({
         {/* Pill tab group */}
         <div className="flex bg-gray-900 rounded-md p-0.5">
           {TAB_LABELS.map(({ key, label }) => (
-            <button type="button"
+            <button
+              type="button"
               key={key}
               onClick={() => onTabChange(key)}
               className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                activeTab === key
-                  ? "bg-gray-600 text-white"
-                  : "text-gray-500 hover:text-gray-300"
+                activeTab === key ? "bg-gray-600 text-white" : "text-gray-500 hover:text-gray-300"
               }`}
             >
               {label}
@@ -236,13 +289,9 @@ export function DecompileView({
           ))}
         </div>
 
-        {highIndicator && (
-          <span className="text-gray-500 text-[10px] italic">{highIndicator}</span>
-        )}
+        {highIndicator && <span className="text-gray-500 text-[10px] italic">{highIndicator}</span>}
 
-        {syncDisabled && (
-          <span className="text-gray-500 text-[10px] italic">(sync disabled)</span>
-        )}
+        {syncDisabled && <span className="text-gray-500 text-[10px] italic">(sync disabled)</span>}
 
         <div className="flex-1" />
 
@@ -250,7 +299,8 @@ export function DecompileView({
         {activeTab === "ai" && !loading && (
           <>
             {onExplain && (
-              <button type="button"
+              <button
+                type="button"
                 onClick={onExplain}
                 className="px-1.5 py-0.5 rounded text-[10px] bg-blue-800/60 text-blue-300 hover:bg-blue-700/60"
                 title="Explain with AI"
@@ -259,7 +309,8 @@ export function DecompileView({
               </button>
             )}
             {onEnhance && (
-              <button type="button"
+              <button
+                type="button"
                 onClick={onEnhance}
                 className="px-1.5 py-0.5 rounded text-[10px] bg-purple-800/60 text-purple-300 hover:bg-purple-700/60"
                 title="Enhance with AI"
@@ -272,40 +323,60 @@ export function DecompileView({
 
         {/* Cancel button during AI streaming */}
         {isStreaming && onCancelAI && (
-          <button type="button"
+          <button
+            type="button"
             onClick={onCancelAI}
             className="px-1.5 py-0.5 rounded text-[10px] bg-yellow-800/60 text-yellow-300 hover:bg-yellow-700/60 flex items-center gap-1"
             title="Cancel AI"
           >
             <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
             Cancel
           </button>
         )}
 
         {onScrollSyncToggle && (
-          <button type="button"
+          <button
+            type="button"
             onClick={onScrollSyncToggle}
             className={`px-1.5 py-0.5 rounded text-[10px] ${
               scrollSyncEnabled
                 ? "bg-blue-600 text-white"
                 : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
             }`}
-            title={scrollSyncEnabled ? "Scroll sync on — click to disable" : "Scroll sync off — click to enable"}
+            title={
+              scrollSyncEnabled
+                ? "Scroll sync on — click to disable"
+                : "Scroll sync off — click to enable"
+            }
           >
             Sync
           </button>
         )}
-        <button type="button"
+        <button
+          type="button"
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Copy to clipboard"
         >
           Copy
         </button>
-        <button type="button"
+        <button
+          type="button"
           onClick={onClose}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Close (D)"
@@ -325,21 +396,39 @@ export function DecompileView({
       {loading && !code ? (
         <div className="flex items-center justify-center flex-1 text-gray-500 text-sm gap-2">
           <svg aria-hidden="true" className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+              fill="none"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+            />
           </svg>
           {activeTab === "ai" ? "Generating..." : "Decompiling..."}
         </div>
       ) : !code && activeTab === "ai" && !loading ? (
         <div className="flex flex-col items-center justify-center flex-1 text-gray-500 text-sm gap-2 px-4 text-center">
-          <p>Choose <span className="text-blue-400">Explain</span> or <span className="text-purple-400">Enhance</span> above to generate AI-powered pseudocode.</p>
-          <p className="text-[10px] text-gray-600">Uses the best available decompilation as source.</p>
+          <p>
+            Choose <span className="text-blue-400">Explain</span> or{" "}
+            <span className="text-purple-400">Enhance</span> above to generate AI-powered
+            pseudocode.
+          </p>
+          <p className="text-[10px] text-gray-600">
+            Uses the best available decompilation as source.
+          </p>
         </div>
       ) : (
         <pre
           ref={preRef}
           className="flex-1 overflow-auto px-3 py-2 leading-5 font-mono text-gray-200 select-text relative"
-          style={{ fontSize: 'var(--mono-font-size)' }}
+          style={{ fontSize: "var(--mono-font-size)" }}
           onClick={handleClick}
           // tabIndex={-1}: still focusable by click (which is how the ";" comment
           // shortcut is reached) but kept out of the tab order.
@@ -367,13 +456,18 @@ export function DecompileView({
                   <span className="flex-1">
                     {line.tokens.map((tok, i) =>
                       tok.cls ? (
-                        <span key={i} className={tok.cls}>{tok.text}</span>
+                        <span key={i} className={tok.cls}>
+                          {tok.text}
+                        </span>
                       ) : (
                         <span key={i}>{tok.text}</span>
                       ),
                     )}
                     {commentText && !isEditing && (
-                      <span className="disasm-user-comment ml-4 select-none">{'// '}{formatComment(commentText)}</span>
+                      <span className="disasm-user-comment ml-4 select-none">
+                        {"// "}
+                        {formatComment(commentText)}
+                      </span>
                     )}
                   </span>
                 </button>
@@ -384,7 +478,9 @@ export function DecompileView({
                       className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-green-300 font-mono resize-none focus:outline-none focus:border-blue-500"
                       rows={Math.max(2, (editingComment.value.match(/\n/g)?.length ?? 0) + 1)}
                       value={editingComment.value}
-                      onChange={(e) => onEditComment({ address: editingComment.address, value: e.target.value })}
+                      onChange={(e) =>
+                        onEditComment({ address: editingComment.address, value: e.target.value })
+                      }
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
@@ -414,7 +510,8 @@ export function DecompileView({
           className="fixed z-50 backdrop-blur-sm bg-gray-900/95 border border-gray-700 rounded-lg shadow-xl py-1 text-xs min-w-[180px]"
           style={{ left: ctxMenu.x, top: ctxMenu.y }}
         >
-          <button type="button"
+          <button
+            type="button"
             onClick={() => {
               const existing = comments[ctxMenu.address];
               onEditComment({ address: ctxMenu.address, value: existing ?? "" });
@@ -425,7 +522,8 @@ export function DecompileView({
             <span>{comments[ctxMenu.address] ? "Edit comment" : "Add comment"}</span>
             <span className="text-gray-500 text-[9px] ml-4">;</span>
           </button>
-          <button type="button"
+          <button
+            type="button"
             onClick={() => {
               const hex = ctxMenu.address.toString(16).toUpperCase();
               navigator.clipboard.writeText(hex);

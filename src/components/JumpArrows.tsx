@@ -129,7 +129,8 @@ export function JumpArrows({
   const svgWidth = Math.min((maxLane + 1) * 8 + 8, 40);
 
   return (
-    <svg aria-hidden="true"
+    <svg
+      aria-hidden="true"
       className="absolute left-0 top-0 pointer-events-none"
       style={{
         width: `${svgWidth}px`,

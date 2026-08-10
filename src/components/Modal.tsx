@@ -131,7 +131,11 @@ export function Modal({
       // `isConnected` guards the case where the trigger was itself unmounted
       // while the dialog was open — focusing a detached node silently sends
       // focus to <body>, which is worse than leaving it where it is.
-      if (restoreTo instanceof HTMLElement && restoreTo !== document.body && restoreTo.isConnected) {
+      if (
+        restoreTo instanceof HTMLElement &&
+        restoreTo !== document.body &&
+        restoreTo.isConnected
+      ) {
         restoreTo.focus();
       }
     };

@@ -99,7 +99,12 @@ export function useDecompileTabs({
         funcEntries.push([fn.address, { name: getDisplayName(fn, renames), address: fn.address }]);
       }
       const result = await disasmWorker.decompileFunction(
-        currentFunc, instructions, xrefMap, sf, sig, pe.is64,
+        currentFunc,
+        instructions,
+        xrefMap,
+        sf,
+        sig,
+        pe.is64,
         new Map(funcEntries),
         pe.runtimeFunctions,
       );
@@ -122,7 +127,13 @@ export function useDecompileTabs({
 
     const cached = readHighCache(highCache.current, addr, serverKey);
     if (cached) {
-      dispatch({ type: "LOAD_OK", tab: "high", code: cached.code, lineMap: cached.lineMap, engine: cached.engine });
+      dispatch({
+        type: "LOAD_OK",
+        tab: "high",
+        code: cached.code,
+        lineMap: cached.lineMap,
+        engine: cached.engine,
+      });
       return;
     }
 
@@ -130,7 +141,10 @@ export function useDecompileTabs({
 
     if (serverSettings.enabled) {
       try {
-        const client = new GhidraClient(serverSettings.ghidraUrl, serverSettings.apiKey || undefined);
+        const client = new GhidraClient(
+          serverSettings.ghidraUrl,
+          serverSettings.apiKey || undefined,
+        );
 
         // The project lives on one specific server, so a URL/key change makes
         // the old project id meaningless — re-upload against the new one.
@@ -147,10 +161,19 @@ export function useDecompileTabs({
 
         const result = await client.decompileFunction(ghidraProjectRef.current, addr, pe.is64);
         const lineMap = new Map(result.lineMap);
-        writeHighCache(highCache.current, addr, { code: result.code, lineMap, engine: "ghidra", serverKey });
+        writeHighCache(highCache.current, addr, {
+          code: result.code,
+          lineMap,
+          engine: "ghidra",
+          serverKey,
+        });
         dispatch({ type: "LOAD_OK", tab: "high", code: result.code, lineMap, engine: "ghidra" });
       } catch (err: any) {
-        dispatch({ type: "LOAD_ERR", tab: "high", error: `Ghidra: ${err?.message ?? String(err)}` });
+        dispatch({
+          type: "LOAD_ERR",
+          tab: "high",
+          error: `Ghidra: ${err?.message ?? String(err)}`,
+        });
       }
     } else {
       // No high-level engine configured. There is no client-side one, so show the
@@ -159,61 +182,86 @@ export function useDecompileTabs({
       // placeholder is the absence of a result, and caching it is what used to
       // make the tab stay "(not available)" after Ghidra was enabled.
       const lineMap = new Map<number, number>();
-      writeHighCache(highCache.current, addr, { code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none", serverKey });
-      dispatch({ type: "LOAD_OK", tab: "high", code: HIGH_LEVEL_UNAVAILABLE, lineMap, engine: "none" });
+      writeHighCache(highCache.current, addr, {
+        code: HIGH_LEVEL_UNAVAILABLE,
+        lineMap,
+        engine: "none",
+        serverKey,
+      });
+      dispatch({
+        type: "LOAD_OK",
+        tab: "high",
+        code: HIGH_LEVEL_UNAVAILABLE,
+        lineMap,
+        engine: "none",
+      });
     }
   }, [currentFunc, pe]);
 
-  const triggerAI = useCallback((mode: "enhance" | "explain") => {
-    if (!hasApiKey()) {
-      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-      return;
-    }
+  const triggerAI = useCallback(
+    (mode: "enhance" | "explain") => {
+      if (!hasApiKey()) {
+        window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+        return;
+      }
 
-    // Use best available source: high-level if ready, else low-level
-    const source = tabsState.high.ready ? tabsState.high.code : tabsState.low.code;
-    if (!source) return;
+      // Use best available source: high-level if ready, else low-level
+      const source = tabsState.high.ready ? tabsState.high.code : tabsState.low.code;
+      if (!source) return;
 
-    abortRef.current?.abort();
-    dispatch({ type: "AI_MODE", mode });
-    dispatch({ type: "SET_TAB", tab: "ai" });
-    dispatch({ type: "BEGIN_LOAD", tab: "ai" });
+      abortRef.current?.abort();
+      dispatch({ type: "AI_MODE", mode });
+      dispatch({ type: "SET_TAB", tab: "ai" });
+      dispatch({ type: "BEGIN_LOAD", tab: "ai" });
 
-    const config = loadSettings();
-    const controller = new AbortController();
-    abortRef.current = controller;
+      const config = loadSettings();
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-    const input = mode === "enhance" && config.enhanceSource === "assembly"
-      ? buildFunctionAsm()
-      : source;
+      const input =
+        mode === "enhance" && config.enhanceSource === "assembly" ? buildFunctionAsm() : source;
 
-    const systemPrompt = mode === "explain" ? SYSTEM_PROMPT_EXPLAIN : undefined;
+      const systemPrompt = mode === "explain" ? SYSTEM_PROMPT_EXPLAIN : undefined;
 
-    aiAccumulatedRef.current = "";
+      aiAccumulatedRef.current = "";
 
-    streamEnhance(input, config, controller.signal, {
-      onToken: (accumulated) => {
-        if (mode === "explain") {
-          const commented = accumulated.split("\n").map((l) => `// ${l}`).join("\n");
-          const full = commented + "\n\n" + source;
-          aiAccumulatedRef.current = full;
-          dispatch({ type: "AI_TOKEN", accumulated: full });
-        } else {
-          aiAccumulatedRef.current = accumulated;
-          dispatch({ type: "AI_TOKEN", accumulated });
-        }
-      },
-      onDone: () => {
-        if (currentFunc && aiAccumulatedRef.current) {
-          aiCache.current.set(currentFunc.address, { code: aiAccumulatedRef.current, lineMap: new Map() });
-        }
-        dispatch({ type: "AI_DONE" });
-      },
-      onError: (error) => {
-        dispatch({ type: "LOAD_ERR", tab: "ai", error });
-      },
-    }, systemPrompt);
-  }, [tabsState.high.ready, tabsState.high.code, tabsState.low.code, buildFunctionAsm]);
+      streamEnhance(
+        input,
+        config,
+        controller.signal,
+        {
+          onToken: (accumulated) => {
+            if (mode === "explain") {
+              const commented = accumulated
+                .split("\n")
+                .map((l) => `// ${l}`)
+                .join("\n");
+              const full = commented + "\n\n" + source;
+              aiAccumulatedRef.current = full;
+              dispatch({ type: "AI_TOKEN", accumulated: full });
+            } else {
+              aiAccumulatedRef.current = accumulated;
+              dispatch({ type: "AI_TOKEN", accumulated });
+            }
+          },
+          onDone: () => {
+            if (currentFunc && aiAccumulatedRef.current) {
+              aiCache.current.set(currentFunc.address, {
+                code: aiAccumulatedRef.current,
+                lineMap: new Map(),
+              });
+            }
+            dispatch({ type: "AI_DONE" });
+          },
+          onError: (error) => {
+            dispatch({ type: "LOAD_ERR", tab: "ai", error });
+          },
+        },
+        systemPrompt,
+      );
+    },
+    [tabsState.high.ready, tabsState.high.code, tabsState.low.code, buildFunctionAsm],
+  );
 
   const cancelAI = useCallback(() => {
     abortRef.current?.abort();
@@ -225,22 +273,28 @@ export function useDecompileTabs({
     }
   }, [tabsState.ai.code]);
 
-  const setActiveTab = useCallback((tab: DecompileTab) => {
-    dispatch({ type: "SET_TAB", tab });
-    if (tab === "ai" && !tabsState.ai.code && currentFunc) {
-      const cached = aiCache.current.get(currentFunc.address);
-      if (cached) {
-        dispatch({ type: "LOAD_OK", tab: "ai", code: cached.code, lineMap: cached.lineMap });
+  const setActiveTab = useCallback(
+    (tab: DecompileTab) => {
+      dispatch({ type: "SET_TAB", tab });
+      if (tab === "ai" && !tabsState.ai.code && currentFunc) {
+        const cached = aiCache.current.get(currentFunc.address);
+        if (cached) {
+          dispatch({ type: "LOAD_OK", tab: "ai", code: cached.code, lineMap: cached.lineMap });
+        }
       }
-    }
-  }, [tabsState.ai.code, currentFunc]);
+    },
+    [tabsState.ai.code, currentFunc],
+  );
 
-  const triggerTab = useCallback((tab: DecompileTab) => {
-    dispatch({ type: "SET_TAB", tab });
-    if (tab === "low") decompileLow();
-    else if (tab === "high") decompileHigh();
-    // AI tab doesn't auto-trigger — user picks enhance/explain
-  }, [decompileLow, decompileHigh]);
+  const triggerTab = useCallback(
+    (tab: DecompileTab) => {
+      dispatch({ type: "SET_TAB", tab });
+      if (tab === "low") decompileLow();
+      else if (tab === "high") decompileHigh();
+      // AI tab doesn't auto-trigger — user picks enhance/explain
+    },
+    [decompileLow, decompileHigh],
+  );
 
   const resetForNewFunc = useCallback(() => {
     abortRef.current?.abort();

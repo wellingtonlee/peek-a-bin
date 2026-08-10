@@ -50,7 +50,9 @@ export function loadProfiles(): LLMProfileStore {
       const store: LLMProfileStore = JSON.parse(raw);
       if (store.profiles?.length) return store;
     }
-  } catch { /* ignore corrupt */ }
+  } catch {
+    /* ignore corrupt */
+  }
 
   // Auto-migrate from legacy single-settings key
   try {
@@ -63,7 +65,9 @@ export function loadProfiles(): LLMProfileStore {
       localStorage.removeItem(STORAGE_KEY);
       return store;
     }
-  } catch { /* ignore corrupt legacy */ }
+  } catch {
+    /* ignore corrupt legacy */
+  }
 
   const profile = makeDefaultProfile();
   return { profiles: [profile], activeId: profile.id };
@@ -75,12 +79,12 @@ export function saveProfiles(store: LLMProfileStore): void {
 
 export function getActiveProfile(store?: LLMProfileStore): LLMProfile {
   const s = store ?? loadProfiles();
-  return s.profiles.find(p => p.id === s.activeId) ?? s.profiles[0] ?? makeDefaultProfile();
+  return s.profiles.find((p) => p.id === s.activeId) ?? s.profiles[0] ?? makeDefaultProfile();
 }
 
 export function setActiveProfileId(id: string): void {
   const store = loadProfiles();
-  if (store.profiles.some(p => p.id === id)) {
+  if (store.profiles.some((p) => p.id === id)) {
     store.activeId = id;
     saveProfiles(store);
   }
@@ -98,7 +102,7 @@ export function loadSettings(): LLMSettings {
 
 export function saveSettings(settings: LLMSettings): void {
   const store = loadProfiles();
-  const idx = store.profiles.findIndex(p => p.id === store.activeId);
+  const idx = store.profiles.findIndex((p) => p.id === store.activeId);
   if (idx >= 0) {
     store.profiles[idx] = { ...store.profiles[idx], ...settings };
     saveProfiles(store);
@@ -132,7 +136,9 @@ export function loadDecompileServer(): DecompileServerSettings {
   try {
     const raw = localStorage.getItem(DECOMPILE_SERVER_KEY);
     if (raw) return { ...DECOMPILE_SERVER_DEFAULTS, ...JSON.parse(raw) };
-  } catch { /* ignore corrupt */ }
+  } catch {
+    /* ignore corrupt */
+  }
   return { ...DECOMPILE_SERVER_DEFAULTS };
 }
 

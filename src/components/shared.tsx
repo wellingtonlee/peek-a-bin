@@ -2,22 +2,114 @@ import { useMemo, useState, useRef, useCallback } from "react";
 
 // --- Register names set ---
 export const REG_NAMES = new Set([
-  "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15",
-  "eax","ebx","ecx","edx","esi","edi","ebp","esp",
-  "ax","bx","cx","dx","si","di","bp","sp",
-  "al","bl","cl","dl","ah","bh","ch","dh","sil","dil","bpl","spl",
-  "r8d","r9d","r10d","r11d","r12d","r13d","r14d","r15d",
-  "r8w","r9w","r10w","r11w","r12w","r13w","r14w","r15w",
-  "r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b",
-  "cs","ds","es","fs","gs","ss",
-  "rip","eip","ip",
-  "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7",
-  "xmm8","xmm9","xmm10","xmm11","xmm12","xmm13","xmm14","xmm15",
-  "ymm0","ymm1","ymm2","ymm3","ymm4","ymm5","ymm6","ymm7",
+  "rax",
+  "rbx",
+  "rcx",
+  "rdx",
+  "rsi",
+  "rdi",
+  "rbp",
+  "rsp",
+  "r8",
+  "r9",
+  "r10",
+  "r11",
+  "r12",
+  "r13",
+  "r14",
+  "r15",
+  "eax",
+  "ebx",
+  "ecx",
+  "edx",
+  "esi",
+  "edi",
+  "ebp",
+  "esp",
+  "ax",
+  "bx",
+  "cx",
+  "dx",
+  "si",
+  "di",
+  "bp",
+  "sp",
+  "al",
+  "bl",
+  "cl",
+  "dl",
+  "ah",
+  "bh",
+  "ch",
+  "dh",
+  "sil",
+  "dil",
+  "bpl",
+  "spl",
+  "r8d",
+  "r9d",
+  "r10d",
+  "r11d",
+  "r12d",
+  "r13d",
+  "r14d",
+  "r15d",
+  "r8w",
+  "r9w",
+  "r10w",
+  "r11w",
+  "r12w",
+  "r13w",
+  "r14w",
+  "r15w",
+  "r8b",
+  "r9b",
+  "r10b",
+  "r11b",
+  "r12b",
+  "r13b",
+  "r14b",
+  "r15b",
+  "cs",
+  "ds",
+  "es",
+  "fs",
+  "gs",
+  "ss",
+  "rip",
+  "eip",
+  "ip",
+  "xmm0",
+  "xmm1",
+  "xmm2",
+  "xmm3",
+  "xmm4",
+  "xmm5",
+  "xmm6",
+  "xmm7",
+  "xmm8",
+  "xmm9",
+  "xmm10",
+  "xmm11",
+  "xmm12",
+  "xmm13",
+  "xmm14",
+  "xmm15",
+  "ymm0",
+  "ymm1",
+  "ymm2",
+  "ymm3",
+  "ymm4",
+  "ymm5",
+  "ymm6",
+  "ymm7",
 ]);
 
 // --- Operand tokenizer ---
-export interface OpToken { text: string; cls: string }
+export interface OpToken {
+  text: string;
+  cls: string;
+}
 
 export function tokenizeOperand(opStr: string): OpToken[] {
   if (!opStr) return [];
@@ -51,7 +143,14 @@ export interface ClickableTarget {
 }
 
 // --- Colored operand component ---
-export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRegClick, tooltipData }: {
+export function ColoredOperand({
+  opStr,
+  targets,
+  onNavigate,
+  highlightRegs,
+  onRegClick,
+  tooltipData,
+}: {
   opStr: string;
   targets?: ClickableTarget[];
   onNavigate?: (addr: number) => void;
@@ -103,7 +202,10 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
                 key={i}
                 className={`inline ${copiedTarget === target.address ? "text-green-400" : "op-target"} underline cursor-pointer hover:opacity-80 relative`}
                 ref={hoveredAddr === target.address ? tooltipRef : undefined}
-                onClick={(e) => { e.stopPropagation(); onNavigate(target.address); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onNavigate(target.address);
+                }}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   const hex = "0x" + target.address.toString(16).toUpperCase();
@@ -113,7 +215,11 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
                 }}
                 onMouseEnter={tooltip ? () => showTooltip(target.address) : undefined}
                 onMouseLeave={tooltip ? hideTooltip : undefined}
-                title={!tooltip ? (target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`) : undefined}
+                title={
+                  !tooltip
+                    ? target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`
+                    : undefined
+                }
               >
                 {t.text}
                 {hoveredAddr === target.address && tooltip && (
@@ -127,7 +233,11 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
         }
         const isReg = REG_NAMES.has(t.text.toLowerCase());
         const isHighlighted = isReg && highlightRegs?.has(t.text.toLowerCase());
-        const cls = isHighlighted ? `${t.cls} reg-highlight cursor-pointer` : isReg && onRegClick ? `${t.cls} cursor-pointer` : t.cls;
+        const cls = isHighlighted
+          ? `${t.cls} reg-highlight cursor-pointer`
+          : isReg && onRegClick
+            ? `${t.cls} cursor-pointer`
+            : t.cls;
         if (isReg && onRegClick) {
           return (
             <button
@@ -135,13 +245,22 @@ export function ColoredOperand({ opStr, targets, onNavigate, highlightRegs, onRe
               tabIndex={-1}
               key={i}
               className={`inline ${cls}`}
-              onClick={(e) => { e.stopPropagation(); onRegClick(t.text); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRegClick(t.text);
+              }}
             >
               {t.text}
             </button>
           );
         }
-        return t.cls ? <span key={i} className={t.cls}>{t.text}</span> : <span key={i}>{t.text}</span>;
+        return t.cls ? (
+          <span key={i} className={t.cls}>
+            {t.text}
+          </span>
+        ) : (
+          <span key={i}>{t.text}</span>
+        );
       })}
     </>
   );
@@ -159,11 +278,7 @@ export function mnemonicClass(m: string): string {
 
 // --- Branch target parser ---
 export function parseBranchTarget(mnemonic: string, opStr: string): number | null {
-  if (
-    mnemonic === "call" ||
-    mnemonic === "jmp" ||
-    mnemonic.startsWith("j")
-  ) {
+  if (mnemonic === "call" || mnemonic === "jmp" || mnemonic.startsWith("j")) {
     const m = opStr.match(/^0x([0-9a-fA-F]+)$/);
     if (m) return parseInt(m[1], 16);
   }

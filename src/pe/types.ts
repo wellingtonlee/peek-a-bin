@@ -197,10 +197,10 @@ export interface RelocationBlock {
 
 export interface RuntimeFunction {
   beginAddress: number; // RVA
-  endAddress: number;   // RVA
+  endAddress: number; // RVA
   unwindInfoAddress: number; // RVA
   handlerAddress?: number; // RVA of exception handler (if UNW_FLAG_EHANDLER/UHANDLER)
-  handlerFlags?: number;   // UNWIND_INFO flags byte
+  handlerFlags?: number; // UNWIND_INFO flags byte
 }
 
 export interface ResourceNode {
@@ -211,7 +211,13 @@ export interface ResourceNode {
 
 export interface ResourceTree {
   root: ResourceNode[];
-  entries: { type: number | string; name: number | string; lang: number; rva: number; size: number }[];
+  entries: {
+    type: number | string;
+    name: number | string;
+    lang: number;
+    rva: number;
+    size: number;
+  }[];
   /**
    * Set when the walk hit its entry budget and stopped early. Only a crafted
    * (or absurdly large) resource directory can reach it.
@@ -236,5 +242,5 @@ export interface PEFile {
   resources?: ResourceTree;
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
-  certificate?: import('./authenticode').CertificateInfo;
+  certificate?: import("./authenticode").CertificateInfo;
 }

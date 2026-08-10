@@ -46,7 +46,9 @@ describe("parseAnnotationMessage — accepts well-formed frames", () => {
 
   it("accepts a frame with no annotations at all", () => {
     expect(parseAnnotationMessage(frame({}), FILE)).toEqual({
-      bookmarks: [], renames: {}, comments: {},
+      bookmarks: [],
+      renames: {},
+      comments: {},
     });
   });
 
@@ -59,7 +61,9 @@ describe("parseAnnotationMessage — accepts well-formed frames", () => {
 describe("parseAnnotationMessage — envelope filtering", () => {
   it("ignores a frame for a different binary", () => {
     const other = JSON.stringify({
-      type: "annotations", fileName: "other.exe", renames: { "1": "a" },
+      type: "annotations",
+      fileName: "other.exe",
+      renames: { "1": "a" },
     });
     expect(parseAnnotationMessage(other, FILE)).toBeNull();
   });

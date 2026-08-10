@@ -1,9 +1,9 @@
-import type { IRExpr, IRStmt, IRFunction, IRCall } from './ir';
-import { irFieldAccess, irArrayAccess, irConst, canonReg } from './ir';
-import type { DecompType } from './typeInfer';
-import { meetTypes } from './typeInfer';
-import type { ApiFuncType } from './apitypes';
-import { API_TYPES } from './apitypes';
+import type { IRExpr, IRStmt, IRFunction, IRCall } from "./ir";
+import { irFieldAccess, irArrayAccess, irConst, canonReg } from "./ir";
+import type { DecompType } from "./typeInfer";
+import { meetTypes } from "./typeInfer";
+import type { ApiFuncType } from "./apitypes";
+import { API_TYPES } from "./apitypes";
 
 /**
  * A parameter position — one function's argument slot, identified by the
@@ -77,9 +77,8 @@ export class StructRegistry {
     // Create new
     const id = `struct_${this.nextId++}`;
     const sortedFields = [...fields].sort((a, b) => a.offset - b.offset);
-    const totalSize = sortedFields.length > 0
-      ? Math.max(...sortedFields.map(f => f.offset + f.size))
-      : 0;
+    const totalSize =
+      sortedFields.length > 0 ? Math.max(...sortedFields.map((f) => f.offset + f.size)) : 0;
     const def: StructDef = { id, fields: sortedFields, totalSize };
     this.structs.set(id, def);
     this.fingerprintIndex.set(fingerprint, id);
@@ -130,7 +129,7 @@ export class StructRegistry {
   mergeFields(id: string, newFields: StructField[]): void {
     const def = this.structs.get(id);
     if (!def) return;
-    const existing = new Map(def.fields.map(f => [f.offset, f]));
+    const existing = new Map(def.fields.map((f) => [f.offset, f]));
     for (const nf of newFields) {
       const ef = existing.get(nf.offset);
       if (!ef) {
@@ -148,9 +147,8 @@ export class StructRegistry {
       }
     }
     def.fields = Array.from(existing.values()).sort((a, b) => a.offset - b.offset);
-    def.totalSize = def.fields.length > 0
-      ? Math.max(...def.fields.map(f => f.offset + f.size))
-      : 0;
+    def.totalSize =
+      def.fields.length > 0 ? Math.max(...def.fields.map((f) => f.offset + f.size)) : 0;
   }
 
   get(id: string): StructDef | undefined {
@@ -204,7 +202,7 @@ function slotKey(funcAddr: number, paramIdx: number): string {
 }
 
 function parseFingerprint(fp: string): Set<string> {
-  return new Set(fp.split(',').filter(Boolean));
+  return new Set(fp.split(",").filter(Boolean));
 }
 
 function isSubset(a: Set<string>, b: Set<string>): boolean {
@@ -233,7 +231,7 @@ const MIN_SUBSET_MERGE_FIELDS = 3;
 
 /** [offset, offset+size) extent of an "offset:size" fingerprint entry. */
 function parseExtent(entry: string): { start: number; end: number } | null {
-  const [o, s] = entry.split(':');
+  const [o, s] = entry.split(":");
   const offset = Number(o);
   const size = Number(s);
   if (!Number.isFinite(offset) || !Number.isFinite(size)) return null;
@@ -289,15 +287,15 @@ export function cloneStructDef(def: StructDef): StructDef {
   return {
     id: def.id,
     totalSize: def.totalSize,
-    fields: def.fields.map(f => ({ ...f })),
+    fields: def.fields.map((f) => ({ ...f })),
   };
 }
 
 export function buildFingerprint(fields: StructField[]): string {
   return [...fields]
     .sort((a, b) => a.offset - b.offset)
-    .map(f => `${f.offset}:${f.size}`)
-    .join(',');
+    .map((f) => `${f.offset}:${f.size}`)
+    .join(",");
 }
 
 // ── Address Decomposition ──
@@ -310,18 +308,18 @@ interface DecomposedAddress {
 }
 
 export function decomposeAddress(addr: IRExpr): DecomposedAddress | null {
-  if (addr.kind === 'reg' || addr.kind === 'var') {
+  if (addr.kind === "reg" || addr.kind === "var") {
     return { base: addr, offset: 0, index: null, scale: 0 };
   }
 
-  if (addr.kind === 'const') {
+  if (addr.kind === "const") {
     return { base: null, offset: addr.value, index: null, scale: 0 };
   }
 
-  if (addr.kind !== 'binary') return null;
+  if (addr.kind !== "binary") return null;
   // `+` chains, plus a top-level `- const` (subtracting a register is not an
   // offset, and treating the whole subtraction as a base only invents noise).
-  if (addr.op !== '+' && !(addr.op === '-' && addr.right.kind === 'const')) return null;
+  if (addr.op !== "+" && !(addr.op === "-" && addr.right.kind === "const")) return null;
 
   // Collect all terms from the addition chain
   const terms: IRExpr[] = [];
@@ -333,7 +331,7 @@ export function decomposeAddress(addr: IRExpr): DecomposedAddress | null {
   let scale = 0;
 
   for (const term of terms) {
-    if (term.kind === 'const') {
+    if (term.kind === "const") {
       offset += term.value;
     } else if (isScaledIndex(term)) {
       const si = extractScaledIndex(term);
@@ -359,14 +357,14 @@ export function decomposeAddress(addr: IRExpr): DecomposedAddress | null {
 }
 
 function collectAddTerms(expr: IRExpr, terms: IRExpr[]): void {
-  if (expr.kind === 'binary' && expr.op === '+') {
+  if (expr.kind === "binary" && expr.op === "+") {
     collectAddTerms(expr.left, terms);
     collectAddTerms(expr.right, terms);
     return;
   }
   // `base - 8` is the same access as `base + (-8)`. Only a constant subtrahend
   // folds — subtracting a register is not a field offset.
-  if (expr.kind === 'binary' && expr.op === '-' && expr.right.kind === 'const') {
+  if (expr.kind === "binary" && expr.op === "-" && expr.right.kind === "const") {
     collectAddTerms(expr.left, terms);
     terms.push(irConst(-expr.right.value, expr.right.size));
     return;
@@ -375,18 +373,18 @@ function collectAddTerms(expr: IRExpr, terms: IRExpr[]): void {
 }
 
 function isScaledIndex(expr: IRExpr): boolean {
-  if (expr.kind !== 'binary') return false;
-  if (expr.op === '*' && expr.right.kind === 'const') return true;
-  if (expr.op === '<<' && expr.right.kind === 'const') return true;
+  if (expr.kind !== "binary") return false;
+  if (expr.op === "*" && expr.right.kind === "const") return true;
+  if (expr.op === "<<" && expr.right.kind === "const") return true;
   return false;
 }
 
 function extractScaledIndex(expr: IRExpr): { index: IRExpr; scale: number } | null {
-  if (expr.kind !== 'binary') return null;
-  if (expr.op === '*' && expr.right.kind === 'const') {
+  if (expr.kind !== "binary") return null;
+  if (expr.op === "*" && expr.right.kind === "const") {
     return { index: expr.left, scale: expr.right.value };
   }
-  if (expr.op === '<<' && expr.right.kind === 'const') {
+  if (expr.op === "<<" && expr.right.kind === "const") {
     return { index: expr.left, scale: 1 << expr.right.value };
   }
   return null;
@@ -396,10 +394,14 @@ function extractScaledIndex(expr: IRExpr): { index: IRExpr; scale: number } | nu
 
 function exprKey(expr: IRExpr): string {
   switch (expr.kind) {
-    case 'reg': return `reg:${canonReg(expr.name)}`;
-    case 'var': return `var:${expr.name}`;
-    case 'const': return `const:${expr.value}`;
-    default: return `?:${JSON.stringify(expr)}`;
+    case "reg":
+      return `reg:${canonReg(expr.name)}`;
+    case "var":
+      return `var:${expr.name}`;
+    case "const":
+      return `const:${expr.value}`;
+    default:
+      return `?:${JSON.stringify(expr)}`;
   }
 }
 
@@ -419,45 +421,45 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
   function walkStmts(stmts: IRStmt[]): void {
     for (const s of stmts) {
       switch (s.kind) {
-        case 'assign':
+        case "assign":
           walkExprs(s.src);
           // walkExprs handles a deref dest and also reaches accesses nested in a
           // field_access / array_access / binary dest, which the old
           // deref-only check dropped.
           walkExprs(s.dest);
           break;
-        case 'store':
-          walkDeref({ kind: 'deref', address: s.address, size: s.size });
+        case "store":
+          walkDeref({ kind: "deref", address: s.address, size: s.size });
           walkExprs(s.value);
           break;
-        case 'call_stmt':
+        case "call_stmt":
           for (const a of s.call.args) walkExprs(a);
           break;
-        case 'return':
+        case "return":
           if (s.value) walkExprs(s.value);
           break;
-        case 'if':
+        case "if":
           walkExprs(s.condition);
           walkStmts(s.thenBody);
           if (s.elseBody) walkStmts(s.elseBody);
           break;
-        case 'while':
-        case 'do_while':
+        case "while":
+        case "do_while":
           walkExprs(s.condition);
           walkStmts(s.body);
           break;
-        case 'for':
+        case "for":
           walkStmts([s.init]);
           walkExprs(s.condition);
           walkStmts([s.update]);
           walkStmts(s.body);
           break;
-        case 'switch':
+        case "switch":
           walkExprs(s.expr);
           for (const c of s.cases) walkStmts(c.body);
           if (s.defaultBody) walkStmts(s.defaultBody);
           break;
-        case 'try':
+        case "try":
           walkStmts(s.body);
           walkStmts(s.handler);
           if (s.filterExpr) walkExprs(s.filterExpr);
@@ -468,38 +470,38 @@ function collectAccessPatterns(body: IRStmt[]): AccessPattern[] {
 
   function walkExprs(expr: IRExpr): void {
     switch (expr.kind) {
-      case 'deref':
+      case "deref":
         walkDeref(expr);
         break;
-      case 'binary':
+      case "binary":
         walkExprs(expr.left);
         walkExprs(expr.right);
         break;
-      case 'unary':
+      case "unary":
         walkExprs(expr.operand);
         break;
-      case 'call':
+      case "call":
         for (const a of expr.args) walkExprs(a);
         break;
-      case 'cast':
+      case "cast":
         walkExprs(expr.operand);
         break;
-      case 'ternary':
+      case "ternary":
         walkExprs(expr.condition);
         walkExprs(expr.then);
         walkExprs(expr.else);
         break;
-      case 'field_access':
+      case "field_access":
         walkExprs(expr.base);
         break;
-      case 'array_access':
+      case "array_access":
         walkExprs(expr.base);
         walkExprs(expr.index);
         break;
     }
   }
 
-  function walkDeref(deref: { kind: 'deref'; address: IRExpr; size: number }): void {
+  function walkDeref(deref: { kind: "deref"; address: IRExpr; size: number }): void {
     walkExprs(deref.address);
     const decomp = decomposeAddress(deref.address);
     if (!decomp?.base) return;
@@ -529,11 +531,12 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
 
   function scan(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'assign' && (s.dest.kind === 'reg' || s.dest.kind === 'var')) {
-        const destKey = s.dest.kind === 'reg' ? `reg:${canonReg(s.dest.name)}` : `var:${s.dest.name}`;
-        if (s.src.kind === 'reg' || s.src.kind === 'var') {
+      if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
+        const destKey =
+          s.dest.kind === "reg" ? `reg:${canonReg(s.dest.name)}` : `var:${s.dest.name}`;
+        if (s.src.kind === "reg" || s.src.kind === "var") {
           // Direct copy, no arithmetic
-          const srcKey = s.src.kind === 'reg' ? `reg:${canonReg(s.src.name)}` : `var:${s.src.name}`;
+          const srcKey = s.src.kind === "reg" ? `reg:${canonReg(s.src.name)}` : `var:${s.src.name}`;
           const prev = aliases.get(destKey);
           if (prev !== undefined && prev !== srcKey) ambiguous.add(destKey);
           else aliases.set(destKey, srcKey);
@@ -544,17 +547,17 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
         }
       }
       // Recurse into compound statements
-      if (s.kind === 'if') {
+      if (s.kind === "if") {
         scan(s.thenBody);
         if (s.elseBody) scan(s.elseBody);
       }
-      if (s.kind === 'while' || s.kind === 'do_while') scan(s.body);
-      if (s.kind === 'for') scan(s.body);
-      if (s.kind === 'switch') {
+      if (s.kind === "while" || s.kind === "do_while") scan(s.body);
+      if (s.kind === "for") scan(s.body);
+      if (s.kind === "switch") {
         for (const c of s.cases) scan(c.body);
         if (s.defaultBody) scan(s.defaultBody);
       }
-      if (s.kind === 'try') {
+      if (s.kind === "try") {
         scan(s.body);
         scan(s.handler);
       }
@@ -583,7 +586,7 @@ function buildAliasMap(body: IRStmt[]): Map<string, string> {
 
 function inferFieldType(size: number): DecompType {
   // Default: unsigned int of access size
-  return { kind: 'int', size, signed: false };
+  return { kind: "int", size, signed: false };
 }
 
 /** Index scales that denote an array element rather than an arbitrary product. */
@@ -603,7 +606,7 @@ function offsetLabel(offset: number): string {
 // ── Parameter Provenance ──
 
 /** Integer argument registers of the x64 calling convention, in argument order. */
-const X64_ARG_REGS = ['rcx', 'rdx', 'r8', 'r9'];
+const X64_ARG_REGS = ["rcx", "rdx", "r8", "r9"];
 
 /**
  * A stack parameter whose name carries a known argument index. stack.ts names a
@@ -662,7 +665,7 @@ const STACK_PARAM_RE = /^arg_(\d+)$/;
  * last write to a slot wins. One base per index, so neither can happen.
  */
 function paramIndexByBase(func: IRFunction): Map<string, number> {
-  const names = new Set(func.params.map(p => p.name));
+  const names = new Set(func.params.map((p) => p.name));
   const byBase = new Map<string, number>();
   const claimedBy = new Map<number, string>();
 
@@ -722,28 +725,28 @@ function collectCallArgSlots(
 
   function walk(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'call_stmt') {
+      if (s.kind === "call_stmt") {
         const funcAddr = parseCallTargetAddr(s.call.target);
         if (funcAddr !== null) {
           for (let i = 0; i < s.call.args.length; i++) {
             const arg = s.call.args[i];
-            if (arg.kind === 'reg' || arg.kind === 'var') {
+            if (arg.kind === "reg" || arg.kind === "var") {
               record(canonBase(arg), { funcAddr, paramIdx: i });
             }
           }
         }
       }
-      if (s.kind === 'if') {
+      if (s.kind === "if") {
         walk(s.thenBody);
         if (s.elseBody) walk(s.elseBody);
       }
-      if (s.kind === 'while' || s.kind === 'do_while') walk(s.body);
-      if (s.kind === 'for') walk(s.body);
-      if (s.kind === 'switch') {
+      if (s.kind === "while" || s.kind === "do_while") walk(s.body);
+      if (s.kind === "for") walk(s.body);
+      if (s.kind === "switch") {
         for (const c of s.cases) walk(c.body);
         if (s.defaultBody) walk(s.defaultBody);
       }
-      if (s.kind === 'try') {
+      if (s.kind === "try") {
         walk(s.body);
         walk(s.handler);
       }
@@ -755,10 +758,7 @@ function collectCallArgSlots(
 
 // ── Struct Synthesis Pass ──
 
-export function synthesizeStructs(
-  func: IRFunction,
-  registry: StructRegistry,
-): IRFunction {
+export function synthesizeStructs(func: IRFunction, registry: StructRegistry): IRFunction {
   // 4a. Collect access patterns
   const patterns = collectAccessPatterns(func.body);
   if (patterns.length === 0) return func;
@@ -787,7 +787,7 @@ export function synthesizeStructs(
   // Filter: only groups with 2+ distinct offsets → struct candidates
   const candidates = new Map<string, { base: IRExpr; accesses: AccessPattern[] }>();
   for (const [key, group] of groups) {
-    const distinctOffsets = new Set(group.accesses.map(a => a.offset));
+    const distinctOffsets = new Set(group.accesses.map((a) => a.offset));
     if (distinctOffsets.size >= 2) {
       candidates.set(key, group);
     }
@@ -797,7 +797,7 @@ export function synthesizeStructs(
     // No struct candidate, but an indexed access still rewrites to array
     // syntax. This used to return early, which made array-access rewriting
     // reachable only for functions that happened to have a struct elsewhere.
-    const hasIndexedAccess = patterns.some(p => p.index !== null && ARRAY_SCALES.has(p.scale));
+    const hasIndexedAccess = patterns.some((p) => p.index !== null && ARRAY_SCALES.has(p.scale));
     if (!hasIndexedAccess) return func;
     return { ...func, body: rewriteStmts(func.body, new Map(), canonBase) };
   }
@@ -828,7 +828,7 @@ export function synthesizeStructs(
 
     const fields: StructField[] = [];
     for (const [offset, info] of fieldMap) {
-      const name = `${info.isArray ? 'array' : 'field'}_${offsetLabel(offset)}`;
+      const name = `${info.isArray ? "array" : "field"}_${offsetLabel(offset)}`;
       fields.push({
         offset,
         size: info.size,
@@ -857,9 +857,10 @@ export function synthesizeStructs(
       if (view) linked.push(view);
     }
 
-    const def = linked.length > 0
-      ? registry.findOrCreateLinked(linked, fingerprint, fields)
-      : registry.findOrCreate(fingerprint, fields);
+    const def =
+      linked.length > 0
+        ? registry.findOrCreateLinked(linked, fingerprint, fields)
+        : registry.findOrCreate(fingerprint, fields);
     baseToStruct.set(key, def);
 
     // Publish this base's identity so the functions on the other side of those
@@ -906,7 +907,7 @@ export function synthesizeStructs(
   // this function's already-returned declarations after the fact.
   const typedefs = registry
     .getAll()
-    .filter(d => usedStructIds.has(d.id))
+    .filter((d) => usedStructIds.has(d.id))
     .map(cloneStructDef);
 
   return {
@@ -919,7 +920,7 @@ export function synthesizeStructs(
 // ── Field Type Inference from Usage Context ──
 
 /** The guess two heuristics below fall back on when nothing better is known. */
-const GUESSED_POINTER: DecompType = { kind: 'ptr', pointee: { kind: 'unknown' } };
+const GUESSED_POINTER: DecompType = { kind: "ptr", pointee: { kind: "unknown" } };
 
 /**
  * Merge new evidence into a field's type instead of replacing it.
@@ -940,7 +941,11 @@ function refineFieldType(field: StructField, evidence: DecompType): void {
   // The lattice itself is right for its other callers — a ptr genuinely does
   // beat a bare int — so the correction belongs here, on the field, and not in
   // meetTypes.
-  if (field.type.kind === 'struct' && evidence.kind === 'ptr' && evidence.pointee.kind === 'unknown') {
+  if (
+    field.type.kind === "struct" &&
+    evidence.kind === "ptr" &&
+    evidence.pointee.kind === "unknown"
+  ) {
     return;
   }
   field.type = meetTypes(field.type, evidence);
@@ -957,7 +962,7 @@ function refineFieldType(field: StructField, evidence: DecompType): void {
  * guess it is not.
  */
 function isUnrefinedFieldType(t: DecompType): boolean {
-  return t.kind === 'unknown' || (t.kind === 'int' && !t.signed);
+  return t.kind === "unknown" || (t.kind === "int" && !t.signed);
 }
 
 /**
@@ -967,7 +972,7 @@ function isUnrefinedFieldType(t: DecompType): boolean {
  * is `lib!Func`, and the bare target is already the function name.
  */
 function apiParamTypes(call: IRCall): DecompType[] | null {
-  const name = call.display?.split('!').pop() ?? call.target;
+  const name = call.display?.split("!").pop() ?? call.target;
   // The index type says this is always an ApiFuncType, but the object is
   // indexed with a name lifted out of a binary: `toString` and `constructor`
   // are inherited from Object and would otherwise look like hits. Checking the
@@ -988,21 +993,21 @@ function inferFieldTypesFromUsage(
     if (!decomp?.base) return null;
     const def = baseToStruct.get(canonBase(decomp.base));
     if (!def) return null;
-    return def.fields.find(f => f.offset === decomp.offset) ?? null;
+    return def.fields.find((f) => f.offset === decomp.offset) ?? null;
   }
 
   // Walk all expressions, looking for deref patterns that match struct fields
   // and infer types from how the loaded value is used
   function walkStmts(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'assign') {
+      if (s.kind === "assign") {
         // Check if src is a struct field deref, and dest is used in type-revealing context
         checkDerefUsage(s.src, stmts);
       }
-      if (s.kind === 'store') {
+      if (s.kind === "store") {
         // Store value type can refine field type.
         const field = fieldAt(s.address);
-        if (field && s.value.kind === 'deref') {
+        if (field && s.value.kind === "deref") {
           const source = fieldAt(s.value.address);
           if (source) {
             // A field-to-field copy carries the source field's type across. It
@@ -1018,7 +1023,7 @@ function inferFieldTypesFromUsage(
           }
         }
       }
-      if (s.kind === 'call_stmt') {
+      if (s.kind === "call_stmt") {
         // An argument that is a struct field load types that field: from the
         // callee's real signature where there is one, and otherwise from the
         // much weaker guess that a machine-word passed to a function is an
@@ -1026,7 +1031,7 @@ function inferFieldTypesFromUsage(
         const params = apiParamTypes(s.call);
         for (let i = 0; i < s.call.args.length; i++) {
           const arg = s.call.args[i];
-          if (arg.kind !== 'deref') continue;
+          if (arg.kind !== "deref") continue;
           const field = fieldAt(arg.address);
           if (!field) continue;
           const declared = params?.[i];
@@ -1040,17 +1045,17 @@ function inferFieldTypesFromUsage(
         }
       }
       // Recurse
-      if (s.kind === 'if') {
+      if (s.kind === "if") {
         walkStmts(s.thenBody);
         if (s.elseBody) walkStmts(s.elseBody);
       }
-      if (s.kind === 'while' || s.kind === 'do_while') walkStmts(s.body);
-      if (s.kind === 'for') walkStmts(s.body);
-      if (s.kind === 'switch') {
+      if (s.kind === "while" || s.kind === "do_while") walkStmts(s.body);
+      if (s.kind === "for") walkStmts(s.body);
+      if (s.kind === "switch") {
         for (const c of s.cases) walkStmts(c.body);
         if (s.defaultBody) walkStmts(s.defaultBody);
       }
-      if (s.kind === 'try') {
+      if (s.kind === "try") {
         walkStmts(s.body);
         walkStmts(s.handler);
       }
@@ -1058,14 +1063,14 @@ function inferFieldTypesFromUsage(
   }
 
   function checkDerefUsage(expr: IRExpr, _context: IRStmt[]): void {
-    if (expr.kind !== 'deref') return;
+    if (expr.kind !== "deref") return;
     const field = fieldAt(expr.address);
     if (!field) return;
     // XMM-sized access → float. Assigned, not merged: the access width is a
     // direct measurement rather than a guess, and meetTypes would hand the
     // seeded int the win (int and float are unordered, so it returns the left).
     if (expr.size === 16) {
-      field.type = { kind: 'float', size: 4 };
+      field.type = { kind: "float", size: 4 };
     }
   }
 
@@ -1074,20 +1079,20 @@ function inferFieldTypesFromUsage(
   // Second pass: detect signed fields from comparison context
   function walkForSigned(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'if' || s.kind === 'while' || s.kind === 'do_while' || s.kind === 'for') {
+      if (s.kind === "if" || s.kind === "while" || s.kind === "do_while" || s.kind === "for") {
         checkSignedCondition(s.condition);
       }
-      if (s.kind === 'if') {
+      if (s.kind === "if") {
         walkForSigned(s.thenBody);
         if (s.elseBody) walkForSigned(s.elseBody);
       }
-      if (s.kind === 'while' || s.kind === 'do_while') walkForSigned(s.body);
-      if (s.kind === 'for') walkForSigned(s.body);
-      if (s.kind === 'switch') {
+      if (s.kind === "while" || s.kind === "do_while") walkForSigned(s.body);
+      if (s.kind === "for") walkForSigned(s.body);
+      if (s.kind === "switch") {
         for (const c of s.cases) walkForSigned(c.body);
         if (s.defaultBody) walkForSigned(s.defaultBody);
       }
-      if (s.kind === 'try') {
+      if (s.kind === "try") {
         walkForSigned(s.body);
         walkForSigned(s.handler);
       }
@@ -1095,8 +1100,8 @@ function inferFieldTypesFromUsage(
   }
 
   function checkSignedCondition(cond: IRExpr): void {
-    if (cond.kind !== 'binary') return;
-    const signedOps = new Set(['<', '<=', '>', '>=']);
+    if (cond.kind !== "binary") return;
+    const signedOps = new Set(["<", "<=", ">", ">="]);
     if (!signedOps.has(cond.op)) return;
     markFieldSigned(cond.left, baseToStruct, canonBase);
     markFieldSigned(cond.right, baseToStruct, canonBase);
@@ -1110,14 +1115,14 @@ function markFieldSigned(
   baseToStruct: Map<string, StructDef>,
   canonBase: (e: IRExpr) => string,
 ): void {
-  if (expr.kind !== 'deref') return;
+  if (expr.kind !== "deref") return;
   const decomp = decomposeAddress(expr.address);
   if (!decomp?.base) return;
   const key = canonBase(decomp.base);
   const def = baseToStruct.get(key);
   if (!def) return;
-  const field = def.fields.find(f => f.offset === decomp.offset);
-  if (field && field.type.kind === 'int') {
+  const field = def.fields.find((f) => f.offset === decomp.offset);
+  if (field && field.type.kind === "int") {
     field.type = { ...field.type, signed: true };
   }
 }
@@ -1140,9 +1145,9 @@ const MIN_POINTER_FIELD_SIZE = 4;
  * behind a pointer, or as an array element.
  */
 function referencedStructId(t: DecompType): string | null {
-  if (t.kind === 'struct') return t.id;
-  if (t.kind === 'ptr') return referencedStructId(t.pointee);
-  if (t.kind === 'array') return referencedStructId(t.element);
+  if (t.kind === "struct") return t.id;
+  if (t.kind === "ptr") return referencedStructId(t.pointee);
+  if (t.kind === "array") return referencedStructId(t.element);
   return null;
 }
 
@@ -1161,7 +1166,7 @@ function fieldAtAddress(
   if (!decomp?.base || decomp.index) return null;
   const def = baseToStruct.get(canonBase(decomp.base));
   if (!def) return null;
-  const field = def.fields.find(f => f.offset === decomp.offset);
+  const field = def.fields.find((f) => f.offset === decomp.offset);
   return field ? { def, field } : null;
 }
 
@@ -1171,7 +1176,7 @@ function isNestableFieldType(t: DecompType): boolean {
   // "some address, contents unknown" this pass exists to fill in. Anything
   // else (handle, ntstatus, float, a signed int, an already-resolved nesting)
   // came from a real observation and outranks a structural inference.
-  if (t.kind === 'ptr' && t.pointee.kind === 'unknown') return true;
+  if (t.kind === "ptr" && t.pointee.kind === "unknown") return true;
   return isUnrefinedFieldType(t);
 }
 
@@ -1225,36 +1230,38 @@ function linkNestedStructFields(
 
   function walk(stmts: IRStmt[]): void {
     for (const s of stmts) {
-      if (s.kind === 'assign' && (s.dest.kind === 'reg' || s.dest.kind === 'var')) {
+      if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
         const key = canonBase(s.dest);
         // A copy buildAliasMap already folded into this key restates the value
         // rather than redefining it, so it is not a second write.
-        const foldedCopy = (s.src.kind === 'reg' || s.src.kind === 'var') && canonBase(s.src) === key;
+        const foldedCopy =
+          (s.src.kind === "reg" || s.src.kind === "var") && canonBase(s.src) === key;
         if (!foldedCopy) {
           // Anything that is not a plain load — a call result, arithmetic, a
           // cast-wrapped load — is a value this pass cannot attribute to a
           // field, and records as ambiguous rather than as nothing.
-          record(key, s.src.kind === 'deref'
-            ? fieldAtAddress(s.src.address, baseToStruct, canonBase)
-            : null);
+          record(
+            key,
+            s.src.kind === "deref" ? fieldAtAddress(s.src.address, baseToStruct, canonBase) : null,
+          );
         }
       }
-      if (s.kind === 'if') {
+      if (s.kind === "if") {
         walk(s.thenBody);
         if (s.elseBody) walk(s.elseBody);
       }
-      if (s.kind === 'while' || s.kind === 'do_while') walk(s.body);
-      if (s.kind === 'for') {
+      if (s.kind === "while" || s.kind === "do_while") walk(s.body);
+      if (s.kind === "for") {
         // init and update are statements too, and an assignment hidden in one
         // of them is exactly the second write that makes a base ambiguous.
         walk([s.init, s.update]);
         walk(s.body);
       }
-      if (s.kind === 'switch') {
+      if (s.kind === "switch") {
         for (const c of s.cases) walk(c.body);
         if (s.defaultBody) walk(s.defaultBody);
       }
-      if (s.kind === 'try') {
+      if (s.kind === "try") {
         walk(s.body);
         walk(s.handler);
       }
@@ -1278,7 +1285,7 @@ function linkNestedStructFields(
     // reading to want; it is also what a fingerprint collision between two
     // unrelated same-shaped bases produces, in which case the conflation had
     // already happened in findOrCreate and this only makes it legible.
-    field.type = { kind: 'struct', id: inner.id };
+    field.type = { kind: "struct", id: inner.id };
   }
 }
 
@@ -1289,7 +1296,7 @@ function rewriteStmts(
   baseToStruct: Map<string, StructDef>,
   canonBase: (e: IRExpr) => string,
 ): IRStmt[] {
-  return stmts.map(s => rewriteStmt(s, baseToStruct, canonBase));
+  return stmts.map((s) => rewriteStmt(s, baseToStruct, canonBase));
 }
 
 function rewriteStmt(
@@ -1298,24 +1305,24 @@ function rewriteStmt(
   canonBase: (e: IRExpr) => string,
 ): IRStmt {
   switch (stmt.kind) {
-    case 'assign': {
+    case "assign": {
       const src = rewriteExpr(stmt.src, baseToStruct, canonBase);
       const dest = rewriteExpr(stmt.dest, baseToStruct, canonBase);
       return { ...stmt, dest, src };
     }
-    case 'store': {
+    case "store": {
       // Check if this store matches a struct field
       const decomp = decomposeAddress(stmt.address);
       if (decomp?.base && !decomp.index) {
         const key = canonBase(decomp.base);
         const def = baseToStruct.get(key);
         if (def) {
-          const field = def.fields.find(f => f.offset === decomp.offset);
+          const field = def.fields.find((f) => f.offset === decomp.offset);
           if (field) {
             const base = rewriteExpr(decomp.base, baseToStruct, canonBase);
             const value = rewriteExpr(stmt.value, baseToStruct, canonBase);
             const fa = irFieldAccess(base, def.id, field.offset, field.name, field.size);
-            return { kind: 'assign', dest: fa, src: value, addr: stmt.addr };
+            return { kind: "assign", dest: fa, src: value, addr: stmt.addr };
           }
         }
       }
@@ -1325,34 +1332,34 @@ function rewriteStmt(
         value: rewriteExpr(stmt.value, baseToStruct, canonBase),
       };
     }
-    case 'call_stmt': {
+    case "call_stmt": {
       const rewrittenCall = rewriteExpr(stmt.call, baseToStruct, canonBase);
-      return { ...stmt, call: rewrittenCall as IRExpr & { kind: 'call' } };
+      return { ...stmt, call: rewrittenCall as IRExpr & { kind: "call" } };
     }
-    case 'return':
+    case "return":
       return stmt.value
         ? { ...stmt, value: rewriteExpr(stmt.value, baseToStruct, canonBase) }
         : stmt;
-    case 'if':
+    case "if":
       return {
         ...stmt,
         condition: rewriteExpr(stmt.condition, baseToStruct, canonBase),
         thenBody: rewriteStmts(stmt.thenBody, baseToStruct, canonBase),
         elseBody: stmt.elseBody ? rewriteStmts(stmt.elseBody, baseToStruct, canonBase) : undefined,
       };
-    case 'while':
+    case "while":
       return {
         ...stmt,
         condition: rewriteExpr(stmt.condition, baseToStruct, canonBase),
         body: rewriteStmts(stmt.body, baseToStruct, canonBase),
       };
-    case 'do_while':
+    case "do_while":
       return {
         ...stmt,
         condition: rewriteExpr(stmt.condition, baseToStruct, canonBase),
         body: rewriteStmts(stmt.body, baseToStruct, canonBase),
       };
-    case 'for':
+    case "for":
       return {
         ...stmt,
         init: rewriteStmt(stmt.init, baseToStruct, canonBase),
@@ -1360,22 +1367,26 @@ function rewriteStmt(
         update: rewriteStmt(stmt.update, baseToStruct, canonBase),
         body: rewriteStmts(stmt.body, baseToStruct, canonBase),
       };
-    case 'switch':
+    case "switch":
       return {
         ...stmt,
         expr: rewriteExpr(stmt.expr, baseToStruct, canonBase),
-        cases: stmt.cases.map(c => ({
+        cases: stmt.cases.map((c) => ({
           ...c,
           body: rewriteStmts(c.body, baseToStruct, canonBase),
         })),
-        defaultBody: stmt.defaultBody ? rewriteStmts(stmt.defaultBody, baseToStruct, canonBase) : undefined,
+        defaultBody: stmt.defaultBody
+          ? rewriteStmts(stmt.defaultBody, baseToStruct, canonBase)
+          : undefined,
       };
-    case 'try':
+    case "try":
       return {
         ...stmt,
         body: rewriteStmts(stmt.body, baseToStruct, canonBase),
         handler: rewriteStmts(stmt.handler, baseToStruct, canonBase),
-        filterExpr: stmt.filterExpr ? rewriteExpr(stmt.filterExpr, baseToStruct, canonBase) : undefined,
+        filterExpr: stmt.filterExpr
+          ? rewriteExpr(stmt.filterExpr, baseToStruct, canonBase)
+          : undefined,
       };
     default:
       return stmt;
@@ -1388,14 +1399,14 @@ function rewriteExpr(
   canonBase: (e: IRExpr) => string,
 ): IRExpr {
   switch (expr.kind) {
-    case 'deref': {
+    case "deref": {
       // Check if this deref matches a struct field
       const decomp = decomposeAddress(expr.address);
       if (decomp?.base && !decomp.index) {
         const key = canonBase(decomp.base);
         const def = baseToStruct.get(key);
         if (def) {
-          const field = def.fields.find(f => f.offset === decomp.offset);
+          const field = def.fields.find((f) => f.offset === decomp.offset);
           if (field) {
             const base = rewriteExpr(decomp.base, baseToStruct, canonBase);
             return irFieldAccess(base, def.id, field.offset, field.name, field.size);
@@ -1410,31 +1421,34 @@ function rewriteExpr(
       }
       return { ...expr, address: rewriteExpr(expr.address, baseToStruct, canonBase) };
     }
-    case 'binary':
+    case "binary":
       return {
         ...expr,
         left: rewriteExpr(expr.left, baseToStruct, canonBase),
         right: rewriteExpr(expr.right, baseToStruct, canonBase),
       };
-    case 'unary':
+    case "unary":
       return { ...expr, operand: rewriteExpr(expr.operand, baseToStruct, canonBase) };
-    case 'call':
-      return { ...expr, args: expr.args.map(a => rewriteExpr(a, baseToStruct, canonBase)) };
-    case 'cast':
+    case "call":
+      return { ...expr, args: expr.args.map((a) => rewriteExpr(a, baseToStruct, canonBase)) };
+    case "cast":
       return { ...expr, operand: rewriteExpr(expr.operand, baseToStruct, canonBase) };
-    case 'ternary':
+    case "ternary":
       return {
         ...expr,
         condition: rewriteExpr(expr.condition, baseToStruct, canonBase),
         then: rewriteExpr(expr.then, baseToStruct, canonBase),
         else: rewriteExpr(expr.else, baseToStruct, canonBase),
       };
-    case 'field_access':
+    case "field_access":
       return { ...expr, base: rewriteExpr(expr.base, baseToStruct, canonBase) };
-    case 'array_access':
-      return { ...expr, base: rewriteExpr(expr.base, baseToStruct, canonBase), index: rewriteExpr(expr.index, baseToStruct, canonBase) };
+    case "array_access":
+      return {
+        ...expr,
+        base: rewriteExpr(expr.base, baseToStruct, canonBase),
+        index: rewriteExpr(expr.index, baseToStruct, canonBase),
+      };
     default:
       return expr;
   }
 }
-

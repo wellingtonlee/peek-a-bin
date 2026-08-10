@@ -1,27 +1,27 @@
-import { describe, it, expect } from 'vitest';
-import { detectNaturalLoops, computeRPO, computeDominators, computeDomTree } from '../ssa';
-import type { BasicBlock } from '../../cfg';
+import { describe, it, expect } from "vitest";
+import { detectNaturalLoops, computeRPO, computeDominators, computeDomTree } from "../ssa";
+import type { BasicBlock } from "../../cfg";
 
 function makeBlock(id: number, succs: number[], preds: number[]): BasicBlock {
   return {
     id,
     startAddr: id * 0x10,
-    endAddr: id * 0x10 + 0x0F,
+    endAddr: id * 0x10 + 0x0f,
     insns: [],
     succs,
     preds,
   };
 }
 
-describe('Natural Loop Detection', () => {
-  it('should detect a simple while loop', () => {
+describe("Natural Loop Detection", () => {
+  it("should detect a simple while loop", () => {
     // Block 0 → Block 1 (header) → Block 2 (body) → Block 1 (back edge)
     //                             → Block 3 (exit)
     const blocks: BasicBlock[] = [
-      makeBlock(0, [1], []),        // entry
+      makeBlock(0, [1], []), // entry
       makeBlock(1, [2, 3], [0, 2]), // loop header
-      makeBlock(2, [1], [1]),       // loop body (back edge to 1)
-      makeBlock(3, [], [1]),        // exit
+      makeBlock(2, [1], [1]), // loop body (back edge to 1)
+      makeBlock(3, [], [1]), // exit
     ];
 
     const rpo = computeRPO(blocks);
@@ -38,7 +38,7 @@ describe('Natural Loop Detection', () => {
     expect(body.has(3)).toBe(false); // exit not in loop
   });
 
-  it('should detect nested loops', () => {
+  it("should detect nested loops", () => {
     // 0 → 1 (outer header) → 2 (inner header) → 3 (inner body) → 2
     //                                          → 4 → 1 (outer back edge)
     //     1 → 5 (exit)
@@ -61,7 +61,7 @@ describe('Natural Loop Detection', () => {
     expect(loops.has(2)).toBe(true); // inner
   });
 
-  it('should return empty for acyclic CFG', () => {
+  it("should return empty for acyclic CFG", () => {
     const blocks: BasicBlock[] = [
       makeBlock(0, [1, 2], []),
       makeBlock(1, [3], [0]),

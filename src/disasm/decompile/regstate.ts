@@ -1,8 +1,8 @@
-import type { IRExpr, BinaryOp } from './ir';
-import { irBinary, irConst, irUnary, irReg, canonReg } from './ir';
+import type { IRExpr, BinaryOp } from "./ir";
+import { irBinary, irConst, irUnary, irReg, canonReg } from "./ir";
 
 /** Volatile registers under the Windows x64 ABI (a superset of the x86 ones). */
-const CALLER_SAVED = new Set(['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11']);
+const CALLER_SAVED = new Set(["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"]);
 
 /**
  * Tracks last-written expression per register and flag state within a basic block.
@@ -14,7 +14,7 @@ export class RegState {
   // Flag state from last cmp/test
   flagLeft: IRExpr | null = null;
   flagRight: IRExpr | null = null;
-  flagOp: 'cmp' | 'test' | null = null;
+  flagOp: "cmp" | "test" | null = null;
 
   set(reg: string, expr: IRExpr): void {
     this.defs.set(reg.toLowerCase(), expr);
@@ -28,7 +28,7 @@ export class RegState {
     return this.defs.get(reg.toLowerCase()) ?? irReg(reg, size);
   }
 
-  setFlags(op: 'cmp' | 'test', left: IRExpr, right: IRExpr): void {
+  setFlags(op: "cmp" | "test", left: IRExpr, right: IRExpr): void {
     this.flagOp = op;
     this.flagLeft = left;
     this.flagRight = right;
@@ -40,73 +40,94 @@ export class RegState {
     const right = this.flagRight;
 
     if (!left || !right) {
-      return { kind: 'unknown', text: jcc };
+      return { kind: "unknown", text: jcc };
     }
 
     // test reg, reg → flags set based on AND result
     // test + je → result == 0 → left == 0
     // test + jne → result != 0 → left != 0
-    if (this.flagOp === 'test') {
+    if (this.flagOp === "test") {
       // test X, X is a common idiom for checking zero
       const isTestSelf = exprEq(left, right);
-      const testTarget = isTestSelf ? left : irBinary('&', left, right);
+      const testTarget = isTestSelf ? left : irBinary("&", left, right);
       const zero = irConst(0, 4);
 
       switch (jcc) {
-        case 'je': case 'jz':
-          return isTestSelf ? irBinary('==', left, zero) : irBinary('==', testTarget, zero);
-        case 'jne': case 'jnz':
-          return isTestSelf ? irBinary('!=', left, zero) : irBinary('!=', testTarget, zero);
-        case 'js':
-          return irBinary('<', testTarget, zero);
-        case 'jns':
-          return irBinary('>=', testTarget, zero);
+        case "je":
+        case "jz":
+          return isTestSelf ? irBinary("==", left, zero) : irBinary("==", testTarget, zero);
+        case "jne":
+        case "jnz":
+          return isTestSelf ? irBinary("!=", left, zero) : irBinary("!=", testTarget, zero);
+        case "js":
+          return irBinary("<", testTarget, zero);
+        case "jns":
+          return irBinary(">=", testTarget, zero);
         default:
-          return { kind: 'unknown', text: `${jcc} after test` };
+          return { kind: "unknown", text: `${jcc} after test` };
       }
     }
 
     // cmp left, right → flags based on left - right
     const condMap: Record<string, BinaryOp> = {
-      'je': '==', 'jz': '==',
-      'jne': '!=', 'jnz': '!=',
-      'jg': '>', 'jnle': '>',
-      'jge': '>=', 'jnl': '>=',
-      'jl': '<', 'jnge': '<',
-      'jle': '<=', 'jng': '<=',
-      'ja': 'u>', 'jnbe': 'u>',
-      'jae': 'u>=', 'jnb': 'u>=', 'jnc': 'u>=',
-      'jb': 'u<', 'jnae': 'u<', 'jc': 'u<',
-      'jbe': 'u<=', 'jna': 'u<=',
+      je: "==",
+      jz: "==",
+      jne: "!=",
+      jnz: "!=",
+      jg: ">",
+      jnle: ">",
+      jge: ">=",
+      jnl: ">=",
+      jl: "<",
+      jnge: "<",
+      jle: "<=",
+      jng: "<=",
+      ja: "u>",
+      jnbe: "u>",
+      jae: "u>=",
+      jnb: "u>=",
+      jnc: "u>=",
+      jb: "u<",
+      jnae: "u<",
+      jc: "u<",
+      jbe: "u<=",
+      jna: "u<=",
     };
 
     const op = condMap[jcc];
     if (op) return irBinary(op, left, right);
 
     // Overflow / sign / parity
-    if (jcc === 'js') return irBinary('<', irBinary('-', left, right), irConst(0));
-    if (jcc === 'jns') return irBinary('>=', irBinary('-', left, right), irConst(0));
+    if (jcc === "js") return irBinary("<", irBinary("-", left, right), irConst(0));
+    if (jcc === "jns") return irBinary(">=", irBinary("-", left, right), irConst(0));
 
-    return { kind: 'unknown', text: `${jcc}(${left}, ${right})` };
+    return { kind: "unknown", text: `${jcc}(${left}, ${right})` };
   }
 
   /** Negate a condition (for structuring: if-not-taken path). */
   static negate(cond: IRExpr): IRExpr {
-    if (cond.kind === 'binary') {
+    if (cond.kind === "binary") {
       const neg: Partial<Record<BinaryOp, BinaryOp>> = {
-        '==': '!=', '!=': '==',
-        '<': '>=', '>=': '<',
-        '>': '<=', '<=': '>',
-        'u<': 'u>=', 'u>=': 'u<',
-        'u>': 'u<=', 'u<=': 'u>',
+        "==": "!=",
+        "!=": "==",
+        "<": ">=",
+        ">=": "<",
+        ">": "<=",
+        "<=": ">",
+        "u<": "u>=",
+        "u>=": "u<",
+        "u>": "u<=",
+        "u<=": "u>",
       };
       const flipped = neg[cond.op];
       if (flipped) return irBinary(flipped, cond.left, cond.right);
       // De Morgan: !(a && b) → !a || !b, !(a || b) → !a && !b
-      if (cond.op === '&&') return irBinary('||', RegState.negate(cond.left), RegState.negate(cond.right));
-      if (cond.op === '||') return irBinary('&&', RegState.negate(cond.left), RegState.negate(cond.right));
+      if (cond.op === "&&")
+        return irBinary("||", RegState.negate(cond.left), RegState.negate(cond.right));
+      if (cond.op === "||")
+        return irBinary("&&", RegState.negate(cond.left), RegState.negate(cond.right));
     }
-    return irUnary('!', cond);
+    return irUnary("!", cond);
   }
 
   /** Invalidate caller-saved registers after a call (x64 Windows ABI). */
@@ -135,7 +156,7 @@ export class RegState {
 
 function exprEq(a: IRExpr, b: IRExpr): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === 'reg' && b.kind === 'reg') return a.name.toLowerCase() === b.name.toLowerCase();
-  if (a.kind === 'const' && b.kind === 'const') return a.value === b.value;
+  if (a.kind === "reg" && b.kind === "reg") return a.name.toLowerCase() === b.name.toLowerCase();
+  if (a.kind === "const" && b.kind === "const") return a.value === b.value;
   return false;
 }

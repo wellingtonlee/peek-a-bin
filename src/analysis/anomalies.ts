@@ -1,10 +1,6 @@
 import type { PEFile } from "../pe/types";
 import { validateChecksum, detectOverlay } from "../pe/metadata";
-import {
-  IMAGE_SCN_CNT_CODE,
-  IMAGE_SCN_MEM_EXECUTE,
-  IMAGE_SCN_MEM_WRITE,
-} from "../pe/constants";
+import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 
 export interface Anomaly {
   severity: "info" | "warning" | "critical";
@@ -20,9 +16,22 @@ const IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE = 0x0040;
 const IMAGE_DLLCHARACTERISTICS_NX_COMPAT = 0x0100;
 
 const SUSPICIOUS_SECTION_NAMES = new Set([
-  "UPX0", "UPX1", "UPX2", ".upx", ".packed", ".aspack",
-  ".adata", ".nsp0", ".nsp1", ".nsp2", ".perplex",
-  ".themida", ".vmp0", ".vmp1", ".enigma1", ".enigma2",
+  "UPX0",
+  "UPX1",
+  "UPX2",
+  ".upx",
+  ".packed",
+  ".aspack",
+  ".adata",
+  ".nsp0",
+  ".nsp1",
+  ".nsp2",
+  ".perplex",
+  ".themida",
+  ".vmp0",
+  ".vmp1",
+  ".enigma1",
+  ".enigma2",
 ]);
 
 function computeSectionEntropy(buffer: ArrayBuffer, offset: number, size: number): number {
@@ -74,9 +83,7 @@ export function detectAnomalies(pe: PEFile): Anomaly[] {
   }
 
   // Warning: Entry point not in first code section
-  const firstCodeSection = pe.sections.find(
-    (s) => (s.characteristics & IMAGE_SCN_CNT_CODE) !== 0,
-  );
+  const firstCodeSection = pe.sections.find((s) => (s.characteristics & IMAGE_SCN_CNT_CODE) !== 0);
   if (
     firstCodeSection &&
     entrySection &&
@@ -139,7 +146,8 @@ export function detectAnomalies(pe: PEFile): Anomaly[] {
     anomalies.push({
       severity: "info",
       title: "ASLR disabled",
-      detail: "DYNAMIC_BASE is not set. The binary does not support Address Space Layout Randomization.",
+      detail:
+        "DYNAMIC_BASE is not set. The binary does not support Address Space Layout Randomization.",
     });
   }
 

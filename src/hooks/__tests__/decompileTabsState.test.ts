@@ -9,10 +9,22 @@ import {
   type HighCacheEntry,
 } from "../decompileTabsState";
 
-const DISABLED: DecompileServerConfig = { enabled: false, ghidraUrl: "http://localhost:8765", apiKey: "" };
-const ENABLED: DecompileServerConfig = { enabled: true, ghidraUrl: "http://localhost:8765", apiKey: "" };
+const DISABLED: DecompileServerConfig = {
+  enabled: false,
+  ghidraUrl: "http://localhost:8765",
+  apiKey: "",
+};
+const ENABLED: DecompileServerConfig = {
+  enabled: true,
+  ghidraUrl: "http://localhost:8765",
+  apiKey: "",
+};
 
-function entry(code: string, serverKey: string, engine: HighCacheEntry["engine"] = "ghidra"): HighCacheEntry {
+function entry(
+  code: string,
+  serverKey: string,
+  engine: HighCacheEntry["engine"] = "ghidra",
+): HighCacheEntry {
   return { code, lineMap: new Map(), engine, serverKey };
 }
 
@@ -21,7 +33,9 @@ const PLACEHOLDER = "// Client-side decompiler not yet available.";
 describe("decompileServerKey", () => {
   it("collapses every disabled configuration to one key", () => {
     expect(decompileServerKey(DISABLED)).toBe("none");
-    expect(decompileServerKey({ ...DISABLED, ghidraUrl: "http://other:1234", apiKey: "k" })).toBe("none");
+    expect(decompileServerKey({ ...DISABLED, ghidraUrl: "http://other:1234", apiKey: "k" })).toBe(
+      "none",
+    );
   });
 
   it("distinguishes enabled from disabled", () => {
@@ -29,13 +43,21 @@ describe("decompileServerKey", () => {
   });
 
   it("distinguishes servers by url and by api key", () => {
-    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://other:1234" })).not.toBe(decompileServerKey(ENABLED));
-    expect(decompileServerKey({ ...ENABLED, apiKey: "secret" })).not.toBe(decompileServerKey(ENABLED));
+    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://other:1234" })).not.toBe(
+      decompileServerKey(ENABLED),
+    );
+    expect(decompileServerKey({ ...ENABLED, apiKey: "secret" })).not.toBe(
+      decompileServerKey(ENABLED),
+    );
   });
 
   it("treats a trailing slash as the same server (GhidraClient strips it)", () => {
-    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://localhost:8765/" })).toBe(decompileServerKey(ENABLED));
-    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://localhost:8765///" })).toBe(decompileServerKey(ENABLED));
+    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://localhost:8765/" })).toBe(
+      decompileServerKey(ENABLED),
+    );
+    expect(decompileServerKey({ ...ENABLED, ghidraUrl: "http://localhost:8765///" })).toBe(
+      decompileServerKey(ENABLED),
+    );
   });
 });
 
@@ -107,12 +129,20 @@ describe("high-level cache: results are scoped to the backend that produced them
 describe("tabsReducer engine tracking", () => {
   it("carries the engine onto the high tab so the '(not available)' hint is accurate", () => {
     const withPlaceholder = tabsReducer(initialTabsState(), {
-      type: "LOAD_OK", tab: "high", code: PLACEHOLDER, lineMap: new Map(), engine: "none",
+      type: "LOAD_OK",
+      tab: "high",
+      code: PLACEHOLDER,
+      lineMap: new Map(),
+      engine: "none",
     });
     expect(withPlaceholder.high.engine).toBe("none");
 
     const withGhidra = tabsReducer(withPlaceholder, {
-      type: "LOAD_OK", tab: "high", code: "int main() {}", lineMap: new Map(), engine: "ghidra",
+      type: "LOAD_OK",
+      tab: "high",
+      code: "int main() {}",
+      lineMap: new Map(),
+      engine: "ghidra",
     });
     expect(withGhidra.high.engine).toBe("ghidra");
     expect(withGhidra.high.code).toBe("int main() {}");
@@ -120,7 +150,11 @@ describe("tabsReducer engine tracking", () => {
 
   it("RESET_FUNC drops the stale engine label with the code", () => {
     const loaded = tabsReducer(initialTabsState(), {
-      type: "LOAD_OK", tab: "high", code: "x", lineMap: new Map(), engine: "ghidra",
+      type: "LOAD_OK",
+      tab: "high",
+      code: "x",
+      lineMap: new Map(),
+      engine: "ghidra",
     });
     const reset = tabsReducer(loaded, { type: "RESET_FUNC" });
     expect(reset.high.engine).toBeUndefined();

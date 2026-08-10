@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from "vitest";
 
 /**
  * disasmClient.ts instantiates its worker singleton at module scope, so a fake
@@ -26,21 +26,24 @@ class FakeWorker {
 }
 
 async function loadClient() {
-  vi.stubGlobal('Worker', FakeWorker);
+  vi.stubGlobal("Worker", FakeWorker);
   vi.resetModules();
-  const mod = await import('../disasmClient');
+  const mod = await import("../disasmClient");
   return { client: mod.disasmWorker, worker: FakeWorker.last! };
 }
 
-describe('DisasmWorkerClient — a wedged worker cannot hang callers forever', () => {
+describe("DisasmWorkerClient — a wedged worker cannot hang callers forever", () => {
   // Fake timers are switched on only after the dynamic import resolves.
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-  it('rejects a request that never gets a reply', async () => {
+  it("rejects a request that never gets a reply", async () => {
     const { client } = await loadClient();
     // Fake only the watchdog's timers — faking microtask scheduling would
     // stall the awaits in this test.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const pending = client.init();
     // Assert before advancing so an eager rejection would still be caught.
     const assertion = expect(pending).rejects.toThrow(/timed out/);
@@ -48,11 +51,11 @@ describe('DisasmWorkerClient — a wedged worker cannot hang callers forever', (
     await assertion;
   });
 
-  it('does not time out a request that gets a reply', async () => {
+  it("does not time out a request that gets a reply", async () => {
     const { client, worker } = await loadClient();
     // Fake only the watchdog's timers — faking microtask scheduling would
     // stall the awaits in this test.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const pending = client.init();
     const { id } = worker.posted[0];
     worker.reply(id, true);
@@ -63,9 +66,9 @@ describe('DisasmWorkerClient — a wedged worker cannot hang callers forever', (
     await vi.advanceTimersByTimeAsync(10 * 60_000);
   });
 
-  it('rejects everything outstanding when a reply fails structured clone', async () => {
+  it("rejects everything outstanding when a reply fails structured clone", async () => {
     const { client, worker } = await loadClient();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const first = client.init();
     const second = client.resetStructRegistry();
 
@@ -75,11 +78,11 @@ describe('DisasmWorkerClient — a wedged worker cannot hang callers forever', (
     await expect(second).rejects.toThrow(/deserialized/);
   });
 
-  it('rejects everything outstanding on a worker error', async () => {
+  it("rejects everything outstanding on a worker error", async () => {
     const { client, worker } = await loadClient();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const pending = client.init();
-    worker.onerror?.({ message: 'load failed' });
+    worker.onerror?.({ message: "load failed" });
     await expect(pending).rejects.toThrow(/load failed/);
   });
 });

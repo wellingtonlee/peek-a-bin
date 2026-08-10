@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig } from "vitest/config";
 
 // NOTE: this config fully shadows vite.config.ts for test runs (no mergeConfig),
 // so tests execute without the React/Tailwind/PWA plugins. That is fine for the
@@ -6,10 +6,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov'],
-      include: ['src/**/*.ts'],
-      exclude: ['src/**/__tests__/**', 'src/**/*.d.ts'],
+      provider: "v8",
+      reporter: ["text", "html", "lcov"],
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/__tests__/**", "src/**/*.d.ts"],
     },
   },
 });

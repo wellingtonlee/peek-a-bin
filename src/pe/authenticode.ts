@@ -4,7 +4,7 @@
  * to extract signer information from PKCS#7 SignedData.
  */
 
-import type { DataDirectory } from './types';
+import type { DataDirectory } from "./types";
 
 export interface CertificateInfo {
   signed: boolean;
@@ -21,12 +21,12 @@ export interface CertificateInfo {
 const TAG_SEQUENCE = 0x30;
 const TAG_SET = 0x31;
 const TAG_OID = 0x06;
-const TAG_UTF8_STRING = 0x0C;
+const TAG_UTF8_STRING = 0x0c;
 const TAG_PRINTABLE_STRING = 0x13;
 const TAG_IA5_STRING = 0x16;
 const TAG_UTC_TIME = 0x17;
 const TAG_GENERALIZED_TIME = 0x18;
-const TAG_CONTEXT_0 = 0xA0;
+const TAG_CONTEXT_0 = 0xa0;
 
 interface DERElement {
   tag: number;
@@ -54,7 +54,7 @@ function readDERElement(data: Uint8Array, offset: number): DERElement | null {
     // Indefinite length — not supported, skip
     return null;
   } else {
-    const numBytes = lenByte & 0x7F;
+    const numBytes = lenByte & 0x7f;
     if (numBytes > 4 || pos + numBytes > data.length) return null;
     for (let i = 0; i < numBytes; i++) {
       // `*` rather than `<<`: JS bitwise shifts are signed-32, so a 4-byte length
@@ -122,7 +122,11 @@ function extractCN(data: Uint8Array, nameElement: DERElement): string | null {
       if (parts.length < 2) continue;
       if (parts[0].tag === TAG_OID && oidEquals(data, parts[0], OID_CN)) {
         const valTag = parts[1].tag;
-        if (valTag === TAG_UTF8_STRING || valTag === TAG_PRINTABLE_STRING || valTag === TAG_IA5_STRING) {
+        if (
+          valTag === TAG_UTF8_STRING ||
+          valTag === TAG_PRINTABLE_STRING ||
+          valTag === TAG_IA5_STRING
+        ) {
           return readDERString(data, parts[1]);
         }
       }
@@ -186,14 +190,30 @@ export function parseSecurityDirectory(
   const wCertificateType = view.getUint16(fileOffset + 6, true);
 
   if (dwLength < 8 || fileOffset + dwLength > buffer.byteLength) {
-    return { signed: true, revision: wRevision, certificateType: wCertificateType,
-             subject: null, issuer: null, notBefore: null, notAfter: null, signatureSize: dwLength };
+    return {
+      signed: true,
+      revision: wRevision,
+      certificateType: wCertificateType,
+      subject: null,
+      issuer: null,
+      notBefore: null,
+      notAfter: null,
+      signatureSize: dwLength,
+    };
   }
 
   // Only parse PKCS_SIGNED_DATA (type 0x0002)
   if (wCertificateType !== 0x0002) {
-    return { signed: true, revision: wRevision, certificateType: wCertificateType,
-             subject: null, issuer: null, notBefore: null, notAfter: null, signatureSize: dwLength };
+    return {
+      signed: true,
+      revision: wRevision,
+      certificateType: wCertificateType,
+      subject: null,
+      issuer: null,
+      notBefore: null,
+      notAfter: null,
+      signatureSize: dwLength,
+    };
   }
 
   // bCertificate starts at offset + 8
@@ -202,8 +222,16 @@ export function parseSecurityDirectory(
   try {
     return parsePKCS7(certData, wRevision, wCertificateType, dwLength);
   } catch {
-    return { signed: true, revision: wRevision, certificateType: wCertificateType,
-             subject: null, issuer: null, notBefore: null, notAfter: null, signatureSize: dwLength };
+    return {
+      signed: true,
+      revision: wRevision,
+      certificateType: wCertificateType,
+      subject: null,
+      issuer: null,
+      notBefore: null,
+      notAfter: null,
+      signatureSize: dwLength,
+    };
   }
 }
 
@@ -214,15 +242,25 @@ function parsePKCS7(
   signatureSize: number,
 ): CertificateInfo {
   const base: CertificateInfo = {
-    signed: true, revision, certificateType: certType,
-    subject: null, issuer: null, notBefore: null, notAfter: null, signatureSize,
+    signed: true,
+    revision,
+    certificateType: certType,
+    subject: null,
+    issuer: null,
+    notBefore: null,
+    notAfter: null,
+    signatureSize,
   };
 
   // PKCS#7 ContentInfo: SEQUENCE { OID, [0] content }
   const contentInfo = readDERElement(data, 0);
   if (!contentInfo || contentInfo.tag !== TAG_SEQUENCE) return base;
 
-  const contentInfoChildren = readDERChildren(data, contentInfo.contentOffset, contentInfo.contentLen);
+  const contentInfoChildren = readDERChildren(
+    data,
+    contentInfo.contentOffset,
+    contentInfo.contentLen,
+  );
   if (contentInfoChildren.length < 2) return base;
 
   // content is [0] EXPLICIT

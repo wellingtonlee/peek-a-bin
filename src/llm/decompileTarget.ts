@@ -6,8 +6,8 @@
  * therefore cannot be imported under vitest. Keep this file free of heavy
  * imports so the arithmetic below stays testable.
  */
-import type { DisasmFunction } from '../disasm/types';
-import type { SectionHeader } from '../pe/types';
+import type { DisasmFunction } from "../disasm/types";
+import type { SectionHeader } from "../pe/types";
 
 /**
  * Byte range of `fn` within `section`'s raw data, or `null` when the function
@@ -35,5 +35,5 @@ export function functionByteRange(
  */
 export function truncateCode(code: string, maxLines?: number): string {
   if (maxLines === undefined) return code;
-  return code.split('\n').slice(0, maxLines).join('\n');
+  return code.split("\n").slice(0, maxLines).join("\n");
 }

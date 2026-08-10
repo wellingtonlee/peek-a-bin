@@ -6,9 +6,9 @@
  * and the breadth blowup that the depth limit alone does not bound.
  */
 
-import { describe, it, expect } from 'vitest';
-import { parseResourceDirectory, parseVersionInfo, reconstructIcon } from '../resources';
-import type { SectionHeader } from '../types';
+import { describe, it, expect } from "vitest";
+import { parseResourceDirectory, parseVersionInfo, reconstructIcon } from "../resources";
+import type { SectionHeader } from "../types";
 
 const TIMEOUT = 5000;
 const RSRC_RVA = 0x1000;
@@ -17,7 +17,7 @@ const RSRC_RVA = 0x1000;
 function rsrcSections(size: number): SectionHeader[] {
   return [
     {
-      name: '.rsrc',
+      name: ".rsrc",
       virtualSize: size,
       virtualAddress: RSRC_RVA,
       sizeOfRawData: size,
@@ -32,7 +32,11 @@ function rsrcSections(size: number): SectionHeader[] {
 }
 
 function parseRsrc(buf: ArrayBuffer) {
-  return parseResourceDirectory(buf, { virtualAddress: RSRC_RVA, size: buf.byteLength }, rsrcSections(buf.byteLength));
+  return parseResourceDirectory(
+    buf,
+    { virtualAddress: RSRC_RVA, size: buf.byteLength },
+    rsrcSections(buf.byteLength),
+  );
 }
 
 /** Minimal builder for IMAGE_RESOURCE_DIRECTORY structures at fixed offsets. */
@@ -84,8 +88,8 @@ class RsrcBuilder {
   }
 }
 
-describe('parseResourceDirectory', () => {
-  it('walks a three-level tree and flattens the leaves', () => {
+describe("parseResourceDirectory", () => {
+  it("walks a three-level tree and flattens the leaves", () => {
     const b = new RsrcBuilder();
     // root -> type 3 (ICON) -> name 1 -> lang 1033 -> data
     b.dir(0, 0, 1).entry(0, 0, 3, 0x100, true);
@@ -102,31 +106,33 @@ describe('parseResourceDirectory', () => {
       size: 0x40,
       codePage: 1252,
     });
-    expect(tree.entries).toEqual([
-      { type: 3, name: 1, lang: 1033, rva: 0x5000, size: 0x40 },
-    ]);
+    expect(tree.entries).toEqual([{ type: 3, name: 1, lang: 1033, rva: 0x5000, size: 0x40 }]);
     expect(tree.truncated).toBeUndefined();
   });
 
-  it('decodes string-named entries', () => {
+  it("decodes string-named entries", () => {
     const b = new RsrcBuilder();
-    b.nameString(0x400, 'MYDATA');
+    b.nameString(0x400, "MYDATA");
     b.dir(0, 1, 0).entry(0, 0, 0x80000000 | 0x400, 0x100, true);
     b.dir(0x100, 0, 1).entry(0x100, 0, 1, 0x300, false);
     b.data(0x300, 0x5000, 8);
 
     const tree = parseRsrc(b.buf);
-    expect(tree.root[0].id).toBe('MYDATA');
-    expect(tree.entries[0].type).toBe('MYDATA');
+    expect(tree.root[0].id).toBe("MYDATA");
+    expect(tree.entries[0].type).toBe("MYDATA");
   });
 
-  it('returns an empty tree when the directory RVA is unmapped', () => {
+  it("returns an empty tree when the directory RVA is unmapped", () => {
     const buf = new ArrayBuffer(0x100);
-    const tree = parseResourceDirectory(buf, { virtualAddress: 0x99999999, size: 0x100 }, rsrcSections(0x100));
+    const tree = parseResourceDirectory(
+      buf,
+      { virtualAddress: 0x99999999, size: 0x100 },
+      rsrcSections(0x100),
+    );
     expect(tree).toEqual({ root: [], entries: [] });
   });
 
-  it('ignores a leaf whose data entry runs past the end of the buffer', () => {
+  it("ignores a leaf whose data entry runs past the end of the buffer", () => {
     const b = new RsrcBuilder(0x40);
     b.dir(0, 0, 1).entry(0, 0, 1, 0x38, false); // data entry needs 16 bytes, only 8 remain
 
@@ -136,15 +142,15 @@ describe('parseResourceDirectory', () => {
     expect(tree.entries).toEqual([]);
   });
 
-  it('yields an empty name when the name string lies past the end', () => {
+  it("yields an empty name when the name string lies past the end", () => {
     const b = new RsrcBuilder(0x40);
     b.dir(0, 1, 0).entry(0, 0, 0x80000000 | 0x3f0, 0x20, false);
     const tree = parseRsrc(b.buf);
-    expect(tree.root[0].id).toBe('');
+    expect(tree.root[0].id).toBe("");
   });
 
-  describe('hostile trees', () => {
-    it('terminates on a self-referential directory', { timeout: TIMEOUT }, () => {
+  describe("hostile trees", () => {
+    it("terminates on a self-referential directory", { timeout: TIMEOUT }, () => {
       const b = new RsrcBuilder();
       b.dir(0, 0, 1).entry(0, 0, 1, 0, true); // points at itself
 
@@ -154,7 +160,7 @@ describe('parseResourceDirectory', () => {
       expect(tree.root[0].children).toEqual([]);
     });
 
-    it('terminates on a two-directory cycle', { timeout: TIMEOUT }, () => {
+    it("terminates on a two-directory cycle", { timeout: TIMEOUT }, () => {
       const b = new RsrcBuilder();
       b.dir(0, 0, 1).entry(0, 0, 1, 0x100, true);
       b.dir(0x100, 0, 1).entry(0x100, 0, 2, 0, true); // back to the root
@@ -165,7 +171,7 @@ describe('parseResourceDirectory', () => {
       expect(tree.root[0].children?.[0].children).toEqual([]);
     });
 
-    it('stops at the depth limit', { timeout: TIMEOUT }, () => {
+    it("stops at the depth limit", { timeout: TIMEOUT }, () => {
       // Six levels of directories, each a distinct offset so `visited` does not
       // short-circuit the walk before the depth limit does.
       const b = new RsrcBuilder();
@@ -184,7 +190,7 @@ describe('parseResourceDirectory', () => {
       expect(depth).toBe(4); // MAX_DEPTH
     });
 
-    it('bounds a directory that claims 131070 entries', { timeout: TIMEOUT }, () => {
+    it("bounds a directory that claims 131070 entries", { timeout: TIMEOUT }, () => {
       const b = new RsrcBuilder(0x400);
       b.dir(0, 0xffff, 0xffff);
 
@@ -195,7 +201,7 @@ describe('parseResourceDirectory', () => {
       expect(tree.root.length).toBeLessThanOrEqual(0x400 / 8);
     });
 
-    it('bounds the breadth blowup that the depth limit does not', { timeout: TIMEOUT }, () => {
+    it("bounds the breadth blowup that the depth limit does not", { timeout: TIMEOUT }, () => {
       // Every 16-byte window reads as a directory claiming 131070 children, and
       // the root hands each of its 65535 entries a DISTINCT subdirectory offset
       // so the `visited` set cannot collapse them. Before the entry budget this
@@ -215,12 +221,16 @@ describe('parseResourceDirectory', () => {
       }
 
       const started = Date.now();
-      const tree = parseResourceDirectory(buf, { virtualAddress: RSRC_RVA, size }, rsrcSections(size));
+      const tree = parseResourceDirectory(
+        buf,
+        { virtualAddress: RSRC_RVA, size },
+        rsrcSections(size),
+      );
       expect(Date.now() - started).toBeLessThan(TIMEOUT);
       expect(tree.truncated).toBe(true);
     });
 
-    it('caps an absurdly long resource name string', { timeout: TIMEOUT }, () => {
+    it("caps an absurdly long resource name string", { timeout: TIMEOUT }, () => {
       const size = 0x40000;
       const buf = new ArrayBuffer(size);
       const dv = new DataView(buf);
@@ -231,8 +241,12 @@ describe('parseResourceDirectory', () => {
       dv.setUint32(20, 0x2000, true); // leaf
       dv.setUint16(0x1000, 0xffff, true); // claims 65535 chars
 
-      const tree = parseResourceDirectory(buf, { virtualAddress: RSRC_RVA, size }, rsrcSections(size));
-      expect(typeof tree.root[0].id).toBe('string');
+      const tree = parseResourceDirectory(
+        buf,
+        { virtualAddress: RSRC_RVA, size },
+        rsrcSections(size),
+      );
+      expect(typeof tree.root[0].id).toBe("string");
       expect((tree.root[0].id as string).length).toBeLessThanOrEqual(4096);
     });
   });
@@ -294,12 +308,10 @@ function fixedFileInfo(): Uint8Array {
 }
 
 function buildVersionInfo(strings: Record<string, string>): Uint8Array {
-  const stringEntries = Object.entries(strings).map(([k, v]) =>
-    viNode(k, utf16(v), []),
-  );
-  const stringTable = viNode('040904B0', new Uint8Array(0), stringEntries, 0);
-  const stringFileInfo = viNode('StringFileInfo', new Uint8Array(0), [stringTable], 0);
-  return viNode('VS_VERSION_INFO', fixedFileInfo(), [stringFileInfo], 0);
+  const stringEntries = Object.entries(strings).map(([k, v]) => viNode(k, utf16(v), []));
+  const stringTable = viNode("040904B0", new Uint8Array(0), stringEntries, 0);
+  const stringFileInfo = viNode("StringFileInfo", new Uint8Array(0), [stringTable], 0);
+  return viNode("VS_VERSION_INFO", fixedFileInfo(), [stringFileInfo], 0);
 }
 
 /** Place a version-info blob at RVA 0x1000 and parse it. */
@@ -309,40 +321,40 @@ function parseVI(blob: Uint8Array, sizeOverride?: number) {
   return parseVersionInfo(buf, RSRC_RVA, sizeOverride ?? blob.length, rsrcSections(buf.byteLength));
 }
 
-describe('parseVersionInfo', () => {
-  it('extracts fixed file info and string table values', () => {
+describe("parseVersionInfo", () => {
+  it("extracts fixed file info and string table values", () => {
     const info = parseVI(
-      buildVersionInfo({ CompanyName: 'Acme Corp', FileDescription: 'Test Binary' }),
+      buildVersionInfo({ CompanyName: "Acme Corp", FileDescription: "Test Binary" }),
     );
-    expect(info.FileVersion).toBe('6.2.8738.1');
-    expect(info.ProductVersion).toBe('10.0.1234.0');
-    expect(info.CompanyName).toBe('Acme Corp');
-    expect(info.FileDescription).toBe('Test Binary');
+    expect(info.FileVersion).toBe("6.2.8738.1");
+    expect(info.ProductVersion).toBe("10.0.1234.0");
+    expect(info.CompanyName).toBe("Acme Corp");
+    expect(info.FileDescription).toBe("Test Binary");
   });
 
-  it('returns nothing when the key is not VS_VERSION_INFO', () => {
-    const blob = buildVersionInfo({ CompanyName: 'Acme' });
+  it("returns nothing when the key is not VS_VERSION_INFO", () => {
+    const blob = buildVersionInfo({ CompanyName: "Acme" });
     // Corrupt the first character of the key.
     new DataView(blob.buffer).setUint16(6, 0x58, true);
     expect(parseVI(blob)).toEqual({});
   });
 
-  it('returns nothing for a zero size or an unmapped RVA', () => {
-    expect(parseVI(buildVersionInfo({ A: 'b' }), 0)).toEqual({});
+  it("returns nothing for a zero size or an unmapped RVA", () => {
+    expect(parseVI(buildVersionInfo({ A: "b" }), 0)).toEqual({});
     expect(
       parseVersionInfo(new ArrayBuffer(0x200), 0x99999999, 0x100, rsrcSections(0x200)),
     ).toEqual({});
   });
 
-  it('survives truncation at every prefix length', { timeout: 20000 }, () => {
-    const full = buildVersionInfo({ CompanyName: 'Acme Corp', ProductName: 'Widget' });
+  it("survives truncation at every prefix length", { timeout: 20000 }, () => {
+    const full = buildVersionInfo({ CompanyName: "Acme Corp", ProductName: "Widget" });
     for (let len = 0; len <= full.length; len++) {
       expect(() => parseVI(full.subarray(0, len), len), `truncated to ${len}`).not.toThrow();
     }
   });
 
-  it('does not loop forever on zero-length child structures', { timeout: TIMEOUT }, () => {
-    const blob = buildVersionInfo({ CompanyName: 'Acme' });
+  it("does not loop forever on zero-length child structures", { timeout: TIMEOUT }, () => {
+    const blob = buildVersionInfo({ CompanyName: "Acme" });
     // Zero every wLength field after the header: each walk must break, not spin.
     const dv = new DataView(blob.buffer);
     for (let at = 0x40; at + 2 <= blob.length; at += 2) dv.setUint16(at, 0, true);
@@ -352,8 +364,8 @@ describe('parseVersionInfo', () => {
     expect(Date.now() - started).toBeLessThan(TIMEOUT);
   });
 
-  it('does not spin when child lengths point backwards', { timeout: TIMEOUT }, () => {
-    const blob = buildVersionInfo({ CompanyName: 'Acme' });
+  it("does not spin when child lengths point backwards", { timeout: TIMEOUT }, () => {
+    const blob = buildVersionInfo({ CompanyName: "Acme" });
     const dv = new DataView(blob.buffer);
     dv.setUint16(0, 0xffff, true); // outer length far beyond the blob
     for (let at = 0x40; at + 2 <= blob.length; at += 2) dv.setUint16(at, 1, true);
@@ -363,7 +375,7 @@ describe('parseVersionInfo', () => {
     expect(Date.now() - started).toBeLessThan(TIMEOUT);
   });
 
-  it('caps an unterminated value string', { timeout: TIMEOUT }, () => {
+  it("caps an unterminated value string", { timeout: TIMEOUT }, () => {
     // A String entry whose value has no NUL runs to the end of the resource:
     // every remaining UTF-16 unit was collected and then spread into
     // String.fromCharCode as ~32k arguments, which is at the argument limit of
@@ -380,19 +392,19 @@ describe('parseVersionInfo', () => {
 
     dv.setUint16(0, 0xffff, true); // wLength — the whole resource
     dv.setUint16(2, 52, true); // wValueLength — VS_FIXEDFILEINFO
-    let at = putKey(6, 'VS_VERSION_INFO'); // -> 40
+    let at = putKey(6, "VS_VERSION_INFO"); // -> 40
     dv.setUint32(at, 0xfeef04bd, true); // fixed file info signature
     at = pad4(at + 52); // -> 92
 
     dv.setUint16(at, 0xff00, true); // StringFileInfo wLength
-    at = putKey(at + 6, 'StringFileInfo'); // -> 128
+    at = putKey(at + 6, "StringFileInfo"); // -> 128
 
     dv.setUint16(at, 0xfe00, true); // StringTable wLength
-    at = putKey(at + 6, '040904B0'); // -> 152
+    at = putKey(at + 6, "040904B0"); // -> 152
 
     dv.setUint16(at, 0xfd00, true); // String wLength
     dv.setUint16(at + 2, 1, true); // wValueLength — non-zero
-    at = putKey(at + 6, 'Key');
+    at = putKey(at + 6, "Key");
 
     // Value: UTF-16 'A's with no terminator, to the end of the resource.
     for (let p = at; p + 2 <= size; p += 2) dv.setUint16(p, 0x41, true);
@@ -423,7 +435,7 @@ function groupIcon(ids: number[], opts: { type?: number; count?: number } = {}):
   return buf;
 }
 
-describe('reconstructIcon', () => {
+describe("reconstructIcon", () => {
   const iconRVA = 0x2000;
 
   function fileWithIcons(count: number, size: number) {
@@ -432,7 +444,7 @@ describe('reconstructIcon', () => {
     return buf;
   }
 
-  it('assembles an .ico from a group and its icon entries', () => {
+  it("assembles an .ico from a group and its icon entries", () => {
     const buffer = fileWithIcons(2, 0x100);
     const entries = new Map([
       [1, { rva: iconRVA, size: 0x100 }],
@@ -451,14 +463,14 @@ describe('reconstructIcon', () => {
     expect(ico!.length).toBe(38 + 0x200);
   });
 
-  it('skips icon ids that are not present', () => {
+  it("skips icon ids that are not present", () => {
     const buffer = fileWithIcons(1, 0x100);
     const entries = new Map([[1, { rva: iconRVA, size: 0x100 }]]);
     const ico = reconstructIcon(buffer, groupIcon([1, 99]), entries, rsrcSections(0x4000));
     expect(new DataView(ico!.buffer).getUint16(4, true)).toBe(1);
   });
 
-  it('returns null for group data that is not an icon group', () => {
+  it("returns null for group data that is not an icon group", () => {
     const sections = rsrcSections(0x4000);
     const buffer = fileWithIcons(1, 0x100);
     const entries = new Map([[1, { rva: iconRVA, size: 0x100 }]]);
@@ -468,7 +480,7 @@ describe('reconstructIcon', () => {
     expect(reconstructIcon(buffer, groupIcon([], { count: 0 }), entries, sections)).toBeNull();
   });
 
-  it('returns null when the declared count exceeds the group data', () => {
+  it("returns null when the declared count exceeds the group data", () => {
     const buffer = fileWithIcons(1, 0x100);
     const entries = new Map([[1, { rva: iconRVA, size: 0x100 }]]);
     expect(
@@ -476,7 +488,7 @@ describe('reconstructIcon', () => {
     ).toBeNull();
   });
 
-  it('skips entries whose icon data runs past the end of the file', () => {
+  it("skips entries whose icon data runs past the end of the file", () => {
     const buffer = fileWithIcons(1, 0x100);
     const entries = new Map([
       [1, { rva: iconRVA, size: 0x100 }],
@@ -487,7 +499,7 @@ describe('reconstructIcon', () => {
     expect(new DataView(ico!.buffer).getUint16(4, true)).toBe(1);
   });
 
-  it('returns null rather than throwing on random group data', () => {
+  it("returns null rather than throwing on random group data", () => {
     const buffer = fileWithIcons(1, 0x100);
     const entries = new Map([[1, { rva: iconRVA, size: 0x100 }]]);
     for (let seed = 0; seed < 200; seed++) {

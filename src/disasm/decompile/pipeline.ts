@@ -1,24 +1,24 @@
-import type { Instruction, DisasmFunction, Xref, StackFrame } from '../types';
-import type { RuntimeFunction } from '../../pe/types';
-import type { FunctionSignature } from '../signatures';
-import { buildCFG, detectLoops } from '../cfg';
-import { liftBlock } from './lifter';
-import { foldBlock } from './fold';
-import { buildSSA, detectNaturalLoops } from './ssa';
-import { ssaOptimize } from './ssaopt';
-import { destroySSA } from './ssadestroy';
-import { structureCFG } from './structure';
-import { promoteVars } from './promote';
-import { emitFunction } from './emit';
-import { inferTypes } from './typeInfer';
-import { RegState } from './regstate';
-import { synthesizeStructs, type StructRegistry } from './structs';
-import { cleanupStructured } from './cleanup';
-import type { IRStmt, IRTry, } from './ir';
+import type { Instruction, DisasmFunction, Xref, StackFrame } from "../types";
+import type { RuntimeFunction } from "../../pe/types";
+import type { FunctionSignature } from "../signatures";
+import { buildCFG, detectLoops } from "../cfg";
+import { liftBlock } from "./lifter";
+import { foldBlock } from "./fold";
+import { buildSSA, detectNaturalLoops } from "./ssa";
+import { ssaOptimize } from "./ssaopt";
+import { destroySSA } from "./ssadestroy";
+import { structureCFG } from "./structure";
+import { promoteVars } from "./promote";
+import { emitFunction } from "./emit";
+import { inferTypes } from "./typeInfer";
+import { RegState } from "./regstate";
+import { synthesizeStructs, type StructRegistry } from "./structs";
+import { cleanupStructured } from "./cleanup";
+import type { IRStmt, IRTry } from "./ir";
 
 export interface DecompileResult {
   code: string;
-  lineMap: [number, number][];  // serializable for worker transfer
+  lineMap: [number, number][]; // serializable for worker transfer
 }
 
 /**
@@ -50,7 +50,7 @@ export function decompileFunction(
     const loops = detectLoops(blocks);
 
     // 2. Lift each block (fresh RegState per block — SSA handles cross-block)
-    const liftedBlocks = new Map<number, import('./ir').IRStmt[]>();
+    const liftedBlocks = new Map<number, import("./ir").IRStmt[]>();
 
     for (const block of blocks) {
       const regState = new RegState();
@@ -84,7 +84,15 @@ export function decompileFunction(
     const typeCtx = inferTypes(cleaned, iatMap);
 
     // 7. Wrap in IRFunction with variable promotion
-    let irFunc = promoteVars(func.name, func.address, cleaned, stackFrame, signature, is64, typeCtx);
+    let irFunc = promoteVars(
+      func.name,
+      func.address,
+      cleaned,
+      stackFrame,
+      signature,
+      is64,
+      typeCtx,
+    );
 
     // 8. Struct synthesis (if registry provided)
     if (registry) {
@@ -117,9 +125,10 @@ function wrapExceptionRegions(
   // Find RuntimeFunctions with handlers that overlap this function's address range
   const funcRVA = func.address;
   const matching = runtimeFunctions.filter(
-    rf => rf.handlerAddress !== undefined &&
-          rf.beginAddress === funcRVA &&
-          (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
+    (rf) =>
+      rf.handlerAddress !== undefined &&
+      rf.beginAddress === funcRVA &&
+      (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
   );
 
   if (matching.length === 0) return body;
@@ -129,10 +138,10 @@ function wrapExceptionRegions(
   const rf = matching[0];
   const handlerAddr = rf.handlerAddress!;
   const tryStmt: IRTry = {
-    kind: 'try',
+    kind: "try",
     body,
     handler: [
-      { kind: 'comment', text: `Exception handler at 0x${handlerAddr.toString(16).toUpperCase()}` },
+      { kind: "comment", text: `Exception handler at 0x${handlerAddr.toString(16).toUpperCase()}` },
     ],
   };
 

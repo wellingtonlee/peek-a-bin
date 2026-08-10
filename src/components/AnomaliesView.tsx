@@ -19,12 +19,12 @@ const IRP_NAMES: Record<number, string> = {
   0x07: "IRP_MJ_QUERY_EA",
   0x08: "IRP_MJ_SET_EA",
   0x09: "IRP_MJ_FLUSH_BUFFERS",
-  0x0A: "IRP_MJ_QUERY_VOLUME_INFORMATION",
-  0x0B: "IRP_MJ_SET_VOLUME_INFORMATION",
-  0x0C: "IRP_MJ_DIRECTORY_CONTROL",
-  0x0D: "IRP_MJ_FILE_SYSTEM_CONTROL",
-  0x0E: "IRP_MJ_DEVICE_CONTROL",
-  0x0F: "IRP_MJ_INTERNAL_DEVICE_CONTROL",
+  0x0a: "IRP_MJ_QUERY_VOLUME_INFORMATION",
+  0x0b: "IRP_MJ_SET_VOLUME_INFORMATION",
+  0x0c: "IRP_MJ_DIRECTORY_CONTROL",
+  0x0d: "IRP_MJ_FILE_SYSTEM_CONTROL",
+  0x0e: "IRP_MJ_DEVICE_CONTROL",
+  0x0f: "IRP_MJ_INTERNAL_DEVICE_CONTROL",
   0x10: "IRP_MJ_SHUTDOWN",
   0x11: "IRP_MJ_LOCK_CONTROL",
   0x12: "IRP_MJ_CLEANUP",
@@ -35,15 +35,15 @@ const IRP_NAMES: Record<number, string> = {
   0x17: "IRP_MJ_SYSTEM_CONTROL",
   0x18: "IRP_MJ_DEVICE_CHANGE",
   0x19: "IRP_MJ_QUERY_QUOTA",
-  0x1A: "IRP_MJ_SET_QUOTA",
-  0x1B: "IRP_MJ_PNP",
+  0x1a: "IRP_MJ_SET_QUOTA",
+  0x1b: "IRP_MJ_PNP",
 };
 
 export function AnomaliesView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const anomalies = [...state.anomalies].sort(
-    (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9)
+    (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
   );
   const driverInfo = state.driverInfo;
   const irpHandlers = state.irpHandlers;
@@ -69,7 +69,9 @@ export function AnomaliesView() {
               return (
                 <tr key={i} className={`${sc.bg} border-b border-gray-800/50`}>
                   <td className="py-1.5 px-2">
-                    <span className={`${sc.badge} text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase`}>
+                    <span
+                      className={`${sc.badge} text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase`}
+                    >
                       {a.severity}
                     </span>
                   </td>
@@ -95,7 +97,8 @@ export function AnomaliesView() {
               aria-live="polite"
               className="mb-3 px-3 py-2 rounded border border-blue-800 bg-blue-900/20 text-xs text-blue-200"
             >
-              Scanning… {state.aiScan.scanned + state.aiScan.failed} of {state.aiScan.total} functions
+              Scanning… {state.aiScan.scanned + state.aiScan.failed} of {state.aiScan.total}{" "}
+              functions
             </div>
           )}
 
@@ -104,14 +107,18 @@ export function AnomaliesView() {
               role="alert"
               className="mb-3 px-3 py-2 rounded border border-red-700 bg-red-900/30 text-xs text-red-200"
             >
-              <p className="font-semibold text-red-300">Scan failed — this is not a clean result.</p>
+              <p className="font-semibold text-red-300">
+                Scan failed — this is not a clean result.
+              </p>
               <p className="mt-1">
                 No functions could be analysed
-                {state.aiScan.total > 0 ? ` (0 of ${state.aiScan.total})` : ""}. An empty findings list here means the
-                scan produced nothing, not that the binary is free of issues.
+                {state.aiScan.total > 0 ? ` (0 of ${state.aiScan.total})` : ""}. An empty findings
+                list here means the scan produced nothing, not that the binary is free of issues.
               </p>
               {state.aiScan.error && (
-                <p className="mt-1 font-mono text-[10px] text-red-300/80 break-words">{state.aiScan.error}</p>
+                <p className="mt-1 font-mono text-[10px] text-red-300/80 break-words">
+                  {state.aiScan.error}
+                </p>
               )}
             </div>
           )}
@@ -125,11 +132,14 @@ export function AnomaliesView() {
                 Partial results — the scan did not cover the whole binary.
               </p>
               <p className="mt-1">
-                {state.aiScan.scanned} of {state.aiScan.total} functions analysed, {state.aiScan.failed} failed. Nothing
-                in the functions that failed is represented below.
+                {state.aiScan.scanned} of {state.aiScan.total} functions analysed,{" "}
+                {state.aiScan.failed} failed. Nothing in the functions that failed is represented
+                below.
               </p>
               {state.aiScan.error && (
-                <p className="mt-1 font-mono text-[10px] text-amber-300/80 break-words">{state.aiScan.error}</p>
+                <p className="mt-1 font-mono text-[10px] text-amber-300/80 break-words">
+                  {state.aiScan.error}
+                </p>
               )}
             </div>
           )}
@@ -146,56 +156,67 @@ export function AnomaliesView() {
             )}
 
           {state.aiScanResults.length > 0 && (
-          <table className="w-full text-xs mb-6">
-            <thead>
-              <tr className="text-gray-500 text-left border-b border-gray-700">
-                <th className="py-1.5 px-2 w-20">Severity</th>
-                <th className="py-1.5 px-2 w-40">Title</th>
-                <th className="py-1.5 px-2 w-36">Function</th>
-                <th className="py-1.5 px-2">Description</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.aiScanResults.map((finding, i) => {
-                const sevColor =
-                  finding.severity === "critical" || finding.severity === "high"
-                    ? { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" }
-                    : finding.severity === "medium"
-                    ? { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" }
-                    : { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" };
-                return (
-                  <tr key={i} className={`${sevColor.bg} border-b border-gray-800/50`}>
-                    <td className="py-1.5 px-2">
-                      <span className={`${sevColor.badge} text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase`}>
-                        {finding.severity}
-                      </span>
-                    </td>
-                    <td className={`py-1.5 px-2 ${sevColor.text} font-medium`}>{finding.title}</td>
-                    <td className="py-1.5 px-2">
-                      <button type="button"
-                        className="text-blue-400 hover:underline font-mono text-[10px]"
-                        onClick={() => {
-                          dispatch({ type: "SET_ADDRESS", address: finding.functionAddress });
-                          dispatch({ type: "SET_TAB", tab: "disassembly" });
-                        }}
-                      >
-                        {finding.functionName}
-                      </button>
-                    </td>
-                    <td className="py-1.5 px-2 text-gray-400">
-                      <details>
-                        <summary className="cursor-pointer">{finding.description.substring(0, 100)}{finding.description.length > 100 ? "..." : ""}</summary>
-                        <div className="mt-1 text-gray-400">{finding.description}</div>
-                        {finding.remediation && (
-                          <div className="mt-1 text-green-400/70"><span className="font-medium">Remediation:</span> {finding.remediation}</div>
-                        )}
-                      </details>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+            <table className="w-full text-xs mb-6">
+              <thead>
+                <tr className="text-gray-500 text-left border-b border-gray-700">
+                  <th className="py-1.5 px-2 w-20">Severity</th>
+                  <th className="py-1.5 px-2 w-40">Title</th>
+                  <th className="py-1.5 px-2 w-36">Function</th>
+                  <th className="py-1.5 px-2">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.aiScanResults.map((finding, i) => {
+                  const sevColor =
+                    finding.severity === "critical" || finding.severity === "high"
+                      ? { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" }
+                      : finding.severity === "medium"
+                        ? { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" }
+                        : { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" };
+                  return (
+                    <tr key={i} className={`${sevColor.bg} border-b border-gray-800/50`}>
+                      <td className="py-1.5 px-2">
+                        <span
+                          className={`${sevColor.badge} text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase`}
+                        >
+                          {finding.severity}
+                        </span>
+                      </td>
+                      <td className={`py-1.5 px-2 ${sevColor.text} font-medium`}>
+                        {finding.title}
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <button
+                          type="button"
+                          className="text-blue-400 hover:underline font-mono text-[10px]"
+                          onClick={() => {
+                            dispatch({ type: "SET_ADDRESS", address: finding.functionAddress });
+                            dispatch({ type: "SET_TAB", tab: "disassembly" });
+                          }}
+                        >
+                          {finding.functionName}
+                        </button>
+                      </td>
+                      <td className="py-1.5 px-2 text-gray-400">
+                        <details>
+                          <summary className="cursor-pointer">
+                            {finding.description.substring(0, 100)}
+                            {finding.description.length > 100 ? "..." : ""}
+                          </summary>
+                          <div className="mt-1 text-gray-400">{finding.description}</div>
+                          {finding.remediation && (
+                            <div className="mt-1 text-green-400/70">
+                              <span className="font-medium">Remediation:</span>{" "}
+                              {finding.remediation}
+                            </div>
+                          )}
+                        </details>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
         </>
       )}
@@ -235,7 +256,8 @@ export function AnomaliesView() {
                       </td>
                       <td className="py-1.5 px-2">
                         {handler.handlerAddress > 0 ? (
-                          <button type="button"
+                          <button
+                            type="button"
                             className="text-blue-400 hover:underline font-mono"
                             onClick={() => {
                               dispatch({ type: "SET_ADDRESS", address: handler.handlerAddress });
@@ -249,7 +271,8 @@ export function AnomaliesView() {
                         )}
                       </td>
                       <td className="py-1.5 px-2">
-                        <button type="button"
+                        <button
+                          type="button"
                           className="text-blue-400 hover:underline font-mono"
                           onClick={() => {
                             dispatch({ type: "SET_ADDRESS", address: handler.instructionAddress });

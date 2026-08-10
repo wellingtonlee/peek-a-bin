@@ -72,9 +72,7 @@ export function ExportsView() {
   return (
     <div className="p-4 text-xs h-full flex flex-col">
       <div className="flex items-center gap-4 mb-3">
-        <h2 className="text-sm font-semibold text-gray-200">
-          Exports ({pe.exports.length})
-        </h2>
+        <h2 className="text-sm font-semibold text-gray-200">Exports ({pe.exports.length})</h2>
         <input
           type="text"
           value={filterInput}
@@ -149,9 +147,7 @@ export function ExportsView() {
                       className={`flex-1 truncate ${exp.byOrdinal ? "text-gray-400 italic" : "text-gray-200"}`}
                     >
                       {exp.name}
-                      {exp.forwarder && (
-                        <span className="text-purple-400"> → {exp.forwarder}</span>
-                      )}
+                      {exp.forwarder && <span className="text-purple-400"> → {exp.forwarder}</span>}
                     </div>
                     <div className="w-32 shrink-0">
                       {exp.forwarder ? (
@@ -159,7 +155,8 @@ export function ExportsView() {
                         // directory's string blob, not code — nothing to jump to.
                         <span className="text-gray-500">forwarded</span>
                       ) : (
-                        <button type="button"
+                        <button
+                          type="button"
                           onClick={() => handleNavigate(exp.address)}
                           className="text-blue-400 hover:text-blue-300 hover:underline cursor-pointer"
                         >

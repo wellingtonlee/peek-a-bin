@@ -15,12 +15,12 @@
  * validation.
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { AnalyzedFile, FileSession } from '../session';
-import { registerTools } from '../tools';
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnalyzedFile, FileSession } from "../session";
+import { registerTools } from "../tools";
 
 export type ToolResult = {
-  content: { type: 'text'; text: string }[];
+  content: { type: "text"; text: string }[];
   isError?: boolean;
 };
 
@@ -60,8 +60,8 @@ export function stubSession(overrides: Partial<AnalyzedFile> = {}): {
   calls: SessionCalls;
 } {
   const file = {
-    id: 'sample',
-    fileName: 'sample.exe',
+    id: "sample",
+    fileName: "sample.exe",
     functions: [],
     instructions: [],
     xrefMap: new Map(),
@@ -85,13 +85,33 @@ export function stubSession(overrides: Partial<AnalyzedFile> = {}): {
   const session = {
     getFile: (id: string) => (id === file.id ? file : undefined),
     listFiles: () => [{ id: file.id, fileName: file.fileName }],
-    setComment: (f: string, a: number, t: string) => { calls.setComment.push([f, a, t]); return true; },
-    deleteComment: (f: string, a: number) => { calls.deleteComment.push([f, a]); return true; },
-    setRename: (f: string, a: number, n: string) => { calls.setRename.push([f, a, n]); return true; },
-    deleteRename: (f: string, a: number) => { calls.deleteRename.push([f, a]); return true; },
-    addBookmark: (f: string, a: number, l: string) => { calls.addBookmark.push([f, a, l]); return true; },
-    removeBookmark: (f: string, a: number) => { calls.removeBookmark.push([f, a]); return true; },
-    onAnnotationChange: (f: string) => { calls.annotationChanges.push(f); },
+    setComment: (f: string, a: number, t: string) => {
+      calls.setComment.push([f, a, t]);
+      return true;
+    },
+    deleteComment: (f: string, a: number) => {
+      calls.deleteComment.push([f, a]);
+      return true;
+    },
+    setRename: (f: string, a: number, n: string) => {
+      calls.setRename.push([f, a, n]);
+      return true;
+    },
+    deleteRename: (f: string, a: number) => {
+      calls.deleteRename.push([f, a]);
+      return true;
+    },
+    addBookmark: (f: string, a: number, l: string) => {
+      calls.addBookmark.push([f, a, l]);
+      return true;
+    },
+    removeBookmark: (f: string, a: number) => {
+      calls.removeBookmark.push([f, a]);
+      return true;
+    },
+    onAnnotationChange: (f: string) => {
+      calls.annotationChanges.push(f);
+    },
   } as unknown as FileSession;
 
   return { session, file, calls };
@@ -99,5 +119,5 @@ export function stubSession(overrides: Partial<AnalyzedFile> = {}): {
 
 /** The single text payload of a tool result. */
 export function textOf(result: ToolResult): string {
-  return result.content.map(c => c.text).join('\n');
+  return result.content.map((c) => c.text).join("\n");
 }

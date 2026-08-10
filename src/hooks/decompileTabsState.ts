@@ -24,7 +24,13 @@ export interface DecompileTabsState {
 export type TabAction =
   | { type: "SET_TAB"; tab: DecompileTab }
   | { type: "BEGIN_LOAD"; tab: DecompileTab }
-  | { type: "LOAD_OK"; tab: DecompileTab; code: string; lineMap: Map<number, number>; engine?: HighLevelEngine }
+  | {
+      type: "LOAD_OK";
+      tab: DecompileTab;
+      code: string;
+      lineMap: Map<number, number>;
+      engine?: HighLevelEngine;
+    }
   | { type: "LOAD_ERR"; tab: DecompileTab; error: string }
   | { type: "AI_TOKEN"; accumulated: string }
   | { type: "AI_DONE" }

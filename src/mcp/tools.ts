@@ -2,28 +2,28 @@
  * MCP tool registrations for Peek-a-Bin.
  */
 
-import { z } from 'zod';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { AnalyzedFile, FileSession } from './session';
-import { parseAddr, resolveExportPath } from './paths';
-import { analyzeStackFrame } from '../disasm/stack';
-import { inferSignature } from '../disasm/signatures';
-import { decompileFunction } from '../disasm/decompile/pipeline';
-import { validateImport, type ExportSchemaV1 } from '../utils/exportSchema';
+import { z } from "zod";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnalyzedFile, FileSession } from "./session";
+import { parseAddr, resolveExportPath } from "./paths";
+import { analyzeStackFrame } from "../disasm/stack";
+import { inferSignature } from "../disasm/signatures";
+import { decompileFunction } from "../disasm/decompile/pipeline";
+import { validateImport, type ExportSchemaV1 } from "../utils/exportSchema";
 
 /** Upper bound on files accepted by `load_pe`, guarding against accidental huge reads. */
 const MAX_PE_FILE_BYTES = 256 * 1024 * 1024;
 
 type ToolResult = {
-  content: { type: 'text'; text: string }[];
+  content: { type: "text"; text: string }[];
   isError?: boolean;
 };
 
 /** Standard success payload. */
 function ok(text: string): ToolResult {
-  return { content: [{ type: 'text' as const, text }] };
+  return { content: [{ type: "text" as const, text }] };
 }
 
 /** Standard success payload for structured data. */
@@ -33,7 +33,7 @@ function json(value: unknown): ToolResult {
 
 /** Standard error payload — every failure path in this file uses this shape. */
 function err(message: string): ToolResult {
-  return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+  return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
 }
 
 /** Format an address the way every tool response does. */
@@ -55,11 +55,14 @@ async function withFile(
 export function registerTools(server: McpServer, session: FileSession): void {
   // ── load_pe ──
   server.tool(
-    'load_pe',
-    'Load and auto-analyze a PE file from disk',
+    "load_pe",
+    "Load and auto-analyze a PE file from disk",
     {
-      filePath: z.string().describe('Absolute path to the PE file'),
-      id: z.string().optional().describe('Identifier for the loaded file (auto-generated from filename if omitted)'),
+      filePath: z.string().describe("Absolute path to the PE file"),
+      id: z
+        .string()
+        .optional()
+        .describe("Identifier for the loaded file (auto-generated from filename if omitted)"),
     },
     async ({ filePath, id }) => {
       const resolved = resolve(filePath);
@@ -73,21 +76,24 @@ export function registerTools(server: McpServer, session: FileSession): void {
         }
         const buffer = readFileSync(resolved);
         // Only copy when the Buffer is a view into a shared pool (small files).
-        ab = buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength
-          ? (buffer.buffer as ArrayBuffer)
-          : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        ab =
+          buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength
+            ? (buffer.buffer as ArrayBuffer)
+            : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
       } catch (e) {
         return err(`failed to read "${resolved}": ${e instanceof Error ? e.message : String(e)}`);
       }
 
       const fileName = basename(resolved) || resolved;
-      const fileId = id ?? fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fileId = id ?? fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
 
       let analyzed: AnalyzedFile;
       try {
         analyzed = await session.loadFile(fileId, fileName, ab);
       } catch (e) {
-        return err(`failed to analyze "${resolved}": ${e instanceof Error ? e.message : String(e)}`);
+        return err(
+          `failed to analyze "${resolved}": ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       const pe = analyzed.pe;
 
@@ -110,355 +116,411 @@ export function registerTools(server: McpServer, session: FileSession): void {
   );
 
   // ── list_files ──
-  server.tool(
-    'list_files',
-    'List all loaded PE files',
-    {},
-    async () => {
-      const files = session.listFiles().map(f => {
-        const af = session.getFile(f.id)!;
-        return {
-          id: f.id,
-          fileName: f.fileName,
-          is64: af.pe.is64,
-          sectionCount: af.pe.sections.length,
-          functionCount: af.functions.length,
-        };
-      });
-      return json(files);
-    },
-  );
+  server.tool("list_files", "List all loaded PE files", {}, async () => {
+    const files = session.listFiles().map((f) => {
+      const af = session.getFile(f.id)!;
+      return {
+        id: f.id,
+        fileName: f.fileName,
+        is64: af.pe.is64,
+        sectionCount: af.pe.sections.length,
+        functionCount: af.functions.length,
+      };
+    });
+    return json(files);
+  });
 
   // ── list_functions ──
   server.tool(
-    'list_functions',
-    'List detected functions in a loaded PE file',
+    "list_functions",
+    "List detected functions in a loaded PE file",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      filter: z.string().optional().describe('Filter function names (substring match)'),
-      offset: z.number().int().nonnegative().optional().describe('Pagination offset (default 0)'),
-      limit: z.number().int().positive().optional().describe('Max results to return (default 100)'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      filter: z.string().optional().describe("Filter function names (substring match)"),
+      offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)"),
+      limit: z.number().int().positive().optional().describe("Max results to return (default 100)"),
     },
-    async ({ fileId, filter, offset: off, limit: lim }) => withFile(session, fileId, (af) => {
-      let fns = af.functions;
-      if (filter) {
-        const lower = filter.toLowerCase();
-        fns = fns.filter(f => f.name.toLowerCase().includes(lower));
-      }
-      const start = off ?? 0;
-      const count = lim ?? 100;
-      const page = fns.slice(start, start + count);
+    async ({ fileId, filter, offset: off, limit: lim }) =>
+      withFile(session, fileId, (af) => {
+        let fns = af.functions;
+        if (filter) {
+          const lower = filter.toLowerCase();
+          fns = fns.filter((f) => f.name.toLowerCase().includes(lower));
+        }
+        const start = off ?? 0;
+        const count = lim ?? 100;
+        const page = fns.slice(start, start + count);
 
-      return json({
-        total: fns.length,
-        offset: start,
-        count: page.length,
-        functions: page.map(f => ({
-          name: f.name,
-          address: hex(f.address),
-          size: f.size,
-          isThunk: f.isThunk ?? false,
-          tailCallTarget: f.tailCallTarget !== undefined ? hex(f.tailCallTarget) : undefined,
-        })),
-      });
-    }),
+        return json({
+          total: fns.length,
+          offset: start,
+          count: page.length,
+          functions: page.map((f) => ({
+            name: f.name,
+            address: hex(f.address),
+            size: f.size,
+            isThunk: f.isThunk ?? false,
+            tailCallTarget: f.tailCallTarget !== undefined ? hex(f.tailCallTarget) : undefined,
+          })),
+        });
+      }),
   );
 
   // ── decompile_function ──
   server.tool(
-    'decompile_function',
-    'Decompile a function to C-like pseudocode',
+    "decompile_function",
+    "Decompile a function to C-like pseudocode",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Function address (hex string like "0x1234" or number)'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z
+        .union([z.number(), z.string()])
+        .describe('Function address (hex string like "0x1234" or number)'),
     },
-    async ({ fileId, address }) => withFile(session, fileId, (af) => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address }) =>
+      withFile(session, fileId, (af) => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      const func = af.functions.find(f => f.address === addr);
-      if (!func) return err(`no function at address ${hex(addr)}`);
+        const func = af.functions.find((f) => f.address === addr);
+        if (!func) return err(`no function at address ${hex(addr)}`);
 
-      // Get function instructions
-      const endAddr = func.address + func.size;
-      const funcInsns = af.instructions.filter(i => i.address >= func.address && i.address < endAddr);
+        // Get function instructions
+        const endAddr = func.address + func.size;
+        const funcInsns = af.instructions.filter(
+          (i) => i.address >= func.address && i.address < endAddr,
+        );
 
-      const stackFrame = analyzeStackFrame(func, af.instructions, af.pe.is64);
-      const signature = inferSignature(func, af.instructions, af.pe.is64);
+        const stackFrame = analyzeStackFrame(func, af.instructions, af.pe.is64);
+        const signature = inferSignature(func, af.instructions, af.pe.is64);
 
-      const funcMap = new Map(af.functions.map(f => [
-        f.address,
-        { name: af.renames[String(f.address)] ?? f.name, address: f.address },
-      ]));
+        const funcMap = new Map(
+          af.functions.map((f) => [
+            f.address,
+            { name: af.renames[String(f.address)] ?? f.name, address: f.address },
+          ]),
+        );
 
-      const result = decompileFunction(
-        func,
-        funcInsns,
-        af.xrefMap,
-        stackFrame,
-        signature,
-        af.pe.is64,
-        af.jumpTables,
-        af.iatMap,
-        af.stringMap,
-        funcMap,
-        af.structRegistry,
-        af.pe.runtimeFunctions,
-      );
+        const result = decompileFunction(
+          func,
+          funcInsns,
+          af.xrefMap,
+          stackFrame,
+          signature,
+          af.pe.is64,
+          af.jumpTables,
+          af.iatMap,
+          af.stringMap,
+          funcMap,
+          af.structRegistry,
+          af.pe.runtimeFunctions,
+        );
 
-      return json({
-        functionName: af.renames[String(func.address)] ?? func.name,
-        address: hex(func.address),
-        code: result.code,
-        lineMap: result.lineMap.map(([line, addr2]) => ({ line, address: hex(addr2) })),
-      });
-    }),
+        return json({
+          functionName: af.renames[String(func.address)] ?? func.name,
+          address: hex(func.address),
+          code: result.code,
+          lineMap: result.lineMap.map(([line, addr2]) => ({ line, address: hex(addr2) })),
+        });
+      }),
   );
 
   // ── disassemble_function ──
   server.tool(
-    'disassemble_function',
-    'Get raw disassembly for a function',
+    "disassemble_function",
+    "Get raw disassembly for a function",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Function address (hex string like "0x1234" or number)'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z
+        .union([z.number(), z.string()])
+        .describe('Function address (hex string like "0x1234" or number)'),
     },
-    async ({ fileId, address }) => withFile(session, fileId, (af) => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address }) =>
+      withFile(session, fileId, (af) => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      const func = af.functions.find(f => f.address === addr);
-      if (!func) return err(`no function at address ${hex(addr)}`);
+        const func = af.functions.find((f) => f.address === addr);
+        if (!func) return err(`no function at address ${hex(addr)}`);
 
-      const endAddr = func.address + func.size;
-      const funcInsns = af.instructions.filter(i => i.address >= func.address && i.address < endAddr);
+        const endAddr = func.address + func.size;
+        const funcInsns = af.instructions.filter(
+          (i) => i.address >= func.address && i.address < endAddr,
+        );
 
-      const lines = funcInsns.map(insn => {
-        const addrHex = insn.address.toString(16).toUpperCase().padStart(af.pe.is64 ? 16 : 8, '0');
-        const bytesHex = Array.from(insn.bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
-        const line = `${addrHex}  ${bytesHex.padEnd(24)}  ${insn.mnemonic.padEnd(8)} ${insn.opStr}`;
-        return insn.comment ? `${line}  ; ${insn.comment}` : line;
-      });
+        const lines = funcInsns.map((insn) => {
+          const addrHex = insn.address
+            .toString(16)
+            .toUpperCase()
+            .padStart(af.pe.is64 ? 16 : 8, "0");
+          const bytesHex = Array.from(insn.bytes)
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(" ");
+          const line = `${addrHex}  ${bytesHex.padEnd(24)}  ${insn.mnemonic.padEnd(8)} ${insn.opStr}`;
+          return insn.comment ? `${line}  ; ${insn.comment}` : line;
+        });
 
-      return ok(`; ${func.name} (${hex(func.address)}, ${func.size} bytes)\n${lines.join('\n')}`);
-    }),
+        return ok(`; ${func.name} (${hex(func.address)}, ${func.size} bytes)\n${lines.join("\n")}`);
+      }),
   );
 
   // ── get_xrefs ──
   server.tool(
-    'get_xrefs',
-    'Get cross-references to/from an address',
+    "get_xrefs",
+    "Get cross-references to/from an address",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Target address'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z.union([z.number(), z.string()]).describe("Target address"),
     },
-    async ({ fileId, address }) => withFile(session, fileId, (af) => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address }) =>
+      withFile(session, fileId, (af) => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      const xrefs = af.xrefMap.get(addr) ?? [];
+        const xrefs = af.xrefMap.get(addr) ?? [];
 
-      return json({
-        address: hex(addr),
-        xrefCount: xrefs.length,
-        xrefs: xrefs.map(x => ({
-          from: hex(x.from),
-          type: x.type,
-        })),
-      });
-    }),
+        return json({
+          address: hex(addr),
+          xrefCount: xrefs.length,
+          xrefs: xrefs.map((x) => ({
+            from: hex(x.from),
+            type: x.type,
+          })),
+        });
+      }),
   );
 
   // ── detect_anomalies ──
   server.tool(
-    'detect_anomalies',
-    'Get security anomalies for a loaded PE file',
+    "detect_anomalies",
+    "Get security anomalies for a loaded PE file",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
+      fileId: z.string().describe("ID of the loaded PE file"),
     },
-    async ({ fileId }) => withFile(session, fileId, (af) => json({
-      fileId,
-      anomalyCount: af.anomalies.length,
-      anomalies: af.anomalies.map(a => ({
-        severity: a.severity,
-        title: a.title,
-        detail: a.detail,
-      })),
-    })),
+    async ({ fileId }) =>
+      withFile(session, fileId, (af) =>
+        json({
+          fileId,
+          anomalyCount: af.anomalies.length,
+          anomalies: af.anomalies.map((a) => ({
+            severity: a.severity,
+            title: a.title,
+            detail: a.detail,
+          })),
+        }),
+      ),
   );
 
   // ── add_comment ──
   server.tool(
-    'add_comment',
-    'Add or remove a comment at an address',
+    "add_comment",
+    "Add or remove a comment at an address",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Address to comment'),
-      text: z.string().describe('Comment text (empty string to remove)'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z.union([z.number(), z.string()]).describe("Address to comment"),
+      text: z.string().describe("Comment text (empty string to remove)"),
     },
-    async ({ fileId, address, text }) => withFile(session, fileId, () => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address, text }) =>
+      withFile(session, fileId, () => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      if (text === '') {
-        session.deleteComment(fileId, addr);
-      } else {
-        session.setComment(fileId, addr, text);
-      }
+        if (text === "") {
+          session.deleteComment(fileId, addr);
+        } else {
+          session.setComment(fileId, addr, text);
+        }
 
-      return json({ fileId, address: hex(addr), text });
-    }),
+        return json({ fileId, address: hex(addr), text });
+      }),
   );
 
   // ── rename_function ──
   server.tool(
-    'rename_function',
-    'Rename a function at an address',
+    "rename_function",
+    "Rename a function at an address",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Function address'),
-      name: z.string().describe('New name (empty string to remove rename)'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z.union([z.number(), z.string()]).describe("Function address"),
+      name: z.string().describe("New name (empty string to remove rename)"),
     },
-    async ({ fileId, address, name }) => withFile(session, fileId, () => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address, name }) =>
+      withFile(session, fileId, () => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      if (name === '') {
-        session.deleteRename(fileId, addr);
-      } else {
-        session.setRename(fileId, addr, name);
-      }
+        if (name === "") {
+          session.deleteRename(fileId, addr);
+        } else {
+          session.setRename(fileId, addr, name);
+        }
 
-      return json({ fileId, address: hex(addr), name });
-    }),
+        return json({ fileId, address: hex(addr), name });
+      }),
   );
 
   // ── add_bookmark ──
   server.tool(
-    'add_bookmark',
-    'Toggle a bookmark at an address',
+    "add_bookmark",
+    "Toggle a bookmark at an address",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      address: z.union([z.number(), z.string()]).describe('Address to bookmark'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z.union([z.number(), z.string()]).describe("Address to bookmark"),
       label: z.string().optional().describe('Bookmark label (default "")'),
     },
-    async ({ fileId, address, label }) => withFile(session, fileId, (af) => {
-      const addr = parseAddr(address);
-      if (addr === null) return err(`invalid address "${address}" — expected a hex string like "0x1234" or a number`);
+    async ({ fileId, address, label }) =>
+      withFile(session, fileId, (af) => {
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
 
-      const existing = af.bookmarks.find(b => b.address === addr);
-      let action: 'added' | 'removed';
-      if (existing) {
-        session.removeBookmark(fileId, addr);
-        action = 'removed';
-      } else {
-        session.addBookmark(fileId, addr, label ?? '');
-        action = 'added';
-      }
+        const existing = af.bookmarks.find((b) => b.address === addr);
+        let action: "added" | "removed";
+        if (existing) {
+          session.removeBookmark(fileId, addr);
+          action = "removed";
+        } else {
+          session.addBookmark(fileId, addr, label ?? "");
+          action = "added";
+        }
 
-      return json({ fileId, address: hex(addr), action });
-    }),
+        return json({ fileId, address: hex(addr), action });
+      }),
   );
 
   // ── list_comments ──
   server.tool(
-    'list_comments',
-    'List all annotations (comments, renames, bookmarks) for a file',
+    "list_comments",
+    "List all annotations (comments, renames, bookmarks) for a file",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
+      fileId: z.string().describe("ID of the loaded PE file"),
     },
-    async ({ fileId }) => withFile(session, fileId, (af) => json({
-      comments: Object.entries(af.comments).map(([address, text]) => ({ address: hex(Number(address)), text })),
-      renames: Object.entries(af.renames).map(([address, name]) => ({ address: hex(Number(address)), name })),
-      bookmarks: af.bookmarks.map(b => ({ address: hex(b.address), label: b.label })),
-    })),
+    async ({ fileId }) =>
+      withFile(session, fileId, (af) =>
+        json({
+          comments: Object.entries(af.comments).map(([address, text]) => ({
+            address: hex(Number(address)),
+            text,
+          })),
+          renames: Object.entries(af.renames).map(([address, name]) => ({
+            address: hex(Number(address)),
+            name,
+          })),
+          bookmarks: af.bookmarks.map((b) => ({ address: hex(b.address), label: b.label })),
+        }),
+      ),
   );
 
   // ── export_analysis ──
   server.tool(
-    'export_analysis',
-    'Export analysis annotations as ExportSchemaV1 JSON. When outputPath is given it must '
-      + 'be a .json path inside the export directory (PEEK_A_BIN_EXPORT_DIR, default: cwd).',
+    "export_analysis",
+    "Export analysis annotations as ExportSchemaV1 JSON. When outputPath is given it must " +
+      "be a .json path inside the export directory (PEEK_A_BIN_EXPORT_DIR, default: cwd).",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      outputPath: z.string().optional().describe(
-        'Optional .json file path to write to. Relative paths resolve against the export directory '
-        + '(PEEK_A_BIN_EXPORT_DIR, default: the server working directory); paths outside it are rejected.',
-      ),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      outputPath: z
+        .string()
+        .optional()
+        .describe(
+          "Optional .json file path to write to. Relative paths resolve against the export directory " +
+            "(PEEK_A_BIN_EXPORT_DIR, default: the server working directory); paths outside it are rejected.",
+        ),
     },
-    async ({ fileId, outputPath }) => withFile(session, fileId, (af) => {
-      const exported: ExportSchemaV1 = {
-        version: 1,
-        fileName: af.fileName,
-        exportedAt: new Date().toISOString(),
-        bookmarks: af.bookmarks,
-        renames: af.renames,
-        comments: af.comments,
-        hexPatches: [],
-        functions: af.functions.map(f => ({
-          address: f.address,
-          name: af.renames[String(f.address)] ?? f.name,
-          size: f.size,
-        })),
-      };
+    async ({ fileId, outputPath }) =>
+      withFile(session, fileId, (af) => {
+        const exported: ExportSchemaV1 = {
+          version: 1,
+          fileName: af.fileName,
+          exportedAt: new Date().toISOString(),
+          bookmarks: af.bookmarks,
+          renames: af.renames,
+          comments: af.comments,
+          hexPatches: [],
+          functions: af.functions.map((f) => ({
+            address: f.address,
+            name: af.renames[String(f.address)] ?? f.name,
+            size: f.size,
+          })),
+        };
 
-      const data = JSON.stringify(exported, null, 2);
-      if (outputPath) {
-        const target = resolveExportPath(outputPath);
-        if ('error' in target) return err(target.error);
-        try {
-          writeFileSync(target.path, data, 'utf-8');
-        } catch (e) {
-          return err(`failed to write "${target.path}": ${e instanceof Error ? e.message : String(e)}`);
+        const data = JSON.stringify(exported, null, 2);
+        if (outputPath) {
+          const target = resolveExportPath(outputPath);
+          if ("error" in target) return err(target.error);
+          try {
+            writeFileSync(target.path, data, "utf-8");
+          } catch (e) {
+            return err(
+              `failed to write "${target.path}": ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
         }
-      }
 
-      return ok(data);
-    }),
+        return ok(data);
+      }),
   );
 
   // ── import_analysis ──
   server.tool(
-    'import_analysis',
-    'Import analysis annotations from an ExportSchemaV1 JSON file',
+    "import_analysis",
+    "Import analysis annotations from an ExportSchemaV1 JSON file",
     {
-      fileId: z.string().describe('ID of the loaded PE file'),
-      inputPath: z.string().describe('Path to ExportSchemaV1 JSON file'),
+      fileId: z.string().describe("ID of the loaded PE file"),
+      inputPath: z.string().describe("Path to ExportSchemaV1 JSON file"),
     },
-    async ({ fileId, inputPath }) => withFile(session, fileId, (af) => {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(readFileSync(inputPath, 'utf-8'));
-      } catch (e) {
-        return err(`failed to read/parse "${inputPath}": ${e instanceof Error ? e.message : String(e)}`);
-      }
-
-      const data = validateImport(raw);
-      if (!data) return err('invalid ExportSchemaV1 format');
-
-      // Merge renames and comments (new overrides old)
-      Object.assign(af.renames, data.renames);
-      Object.assign(af.comments, data.comments);
-
-      // Dedup bookmarks by address
-      const existingAddrs = new Set(af.bookmarks.map(b => b.address));
-      for (const b of data.bookmarks) {
-        if (!existingAddrs.has(b.address)) {
-          af.bookmarks.push(b);
-          existingAddrs.add(b.address);
+    async ({ fileId, inputPath }) =>
+      withFile(session, fileId, (af) => {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(readFileSync(inputPath, "utf-8"));
+        } catch (e) {
+          return err(
+            `failed to read/parse "${inputPath}": ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
-      }
 
-      session.onAnnotationChange?.(fileId, af);
+        const data = validateImport(raw);
+        if (!data) return err("invalid ExportSchemaV1 format");
 
-      return json({
-        fileId,
-        imported: {
-          comments: Object.keys(data.comments).length,
-          renames: Object.keys(data.renames).length,
-          bookmarks: data.bookmarks.length,
-        },
-      });
-    }),
+        // Merge renames and comments (new overrides old)
+        Object.assign(af.renames, data.renames);
+        Object.assign(af.comments, data.comments);
+
+        // Dedup bookmarks by address
+        const existingAddrs = new Set(af.bookmarks.map((b) => b.address));
+        for (const b of data.bookmarks) {
+          if (!existingAddrs.has(b.address)) {
+            af.bookmarks.push(b);
+            existingAddrs.add(b.address);
+          }
+        }
+
+        session.onAnnotationChange?.(fileId, af);
+
+        return json({
+          fileId,
+          imported: {
+            comments: Object.keys(data.comments).length,
+            renames: Object.keys(data.renames).length,
+            bookmarks: data.bookmarks.length,
+          },
+        });
+      }),
   );
 }

@@ -129,4 +129,3 @@ Severity guide:
 - medium: Unsafe patterns that could be exploited in context
 - low: Code quality issues, minor info leaks
 - info: Interesting patterns worth noting, anti-debug, obfuscation`;
-

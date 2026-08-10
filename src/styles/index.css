@@ -1,8 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas",
-    monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
 
   /* Layout density */
   --row-height: 20px;
@@ -25,38 +24,52 @@ body {
 }
 
 /* ── Theme utility classes ── */
-.app-bg { background: var(--t-bg); color: var(--t-text); }
-.panel-bg { background: var(--t-bg-secondary); }
-.toolbar-bg { background: var(--t-bg-tertiary); }
-.border-theme { border-color: var(--t-border); }
-.border-subtle { border-color: var(--t-border-subtle); }
-.text-theme-secondary { color: var(--t-text-secondary); }
-.text-theme-muted { color: var(--t-text-muted); }
+.app-bg {
+  background: var(--t-bg);
+  color: var(--t-text);
+}
+.panel-bg {
+  background: var(--t-bg-secondary);
+}
+.toolbar-bg {
+  background: var(--t-bg-tertiary);
+}
+.border-theme {
+  border-color: var(--t-border);
+}
+.border-subtle {
+  border-color: var(--t-border-subtle);
+}
+.text-theme-secondary {
+  color: var(--t-text-secondary);
+}
+.text-theme-muted {
+  color: var(--t-text-muted);
+}
 
 /* Disassembly grid layout */
 .disasm-grid {
   display: grid;
-  grid-template-columns:
-    var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) var(--col-mnemonic, 8ch) 1fr auto;
+  grid-template-columns: var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) var(
+      --col-mnemonic,
+      8ch
+    ) 1fr auto;
   align-items: baseline;
 }
 
 .disasm-grid.hide-bytes {
-  grid-template-columns:
-    var(--col-badge, 2.5ch) var(--col-addr) var(--col-mnemonic, 8ch) 1fr auto;
+  grid-template-columns: var(--col-badge, 2.5ch) var(--col-addr) var(--col-mnemonic, 8ch) 1fr auto;
 }
 
 .disasm-grid-data {
   display: grid;
-  grid-template-columns:
-    var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) 8ch 1fr auto;
+  grid-template-columns: var(--col-badge, 2.5ch) var(--col-addr) var(--col-bytes, 28ch) 8ch 1fr auto;
   align-items: baseline;
 }
 
 .disasm-grid-data.hide-bytes {
   display: grid;
-  grid-template-columns:
-    var(--col-badge, 2.5ch) var(--col-addr) 8ch 1fr auto;
+  grid-template-columns: var(--col-badge, 2.5ch) var(--col-addr) 8ch 1fr auto;
   align-items: baseline;
 }
 
@@ -95,27 +108,57 @@ body {
 }
 
 /* ── Mnemonic theme classes ── */
-.mn-call { color: var(--t-mn-call, #4ade80); }
-.mn-ret { color: var(--t-mn-ret, #f87171); }
-.mn-jump { color: var(--t-mn-jump, #fb923c); }
-.mn-nop { color: var(--t-mn-nop, #4b5563); }
-.mn-stack { color: var(--t-mn-stack, #93c5fd); }
+.mn-call {
+  color: var(--t-mn-call, #4ade80);
+}
+.mn-ret {
+  color: var(--t-mn-ret, #f87171);
+}
+.mn-jump {
+  color: var(--t-mn-jump, #fb923c);
+}
+.mn-nop {
+  color: var(--t-mn-nop, #4b5563);
+}
+.mn-stack {
+  color: var(--t-mn-stack, #93c5fd);
+}
 
 /* ── Operand theme classes ── */
-.op-register { color: var(--t-op-register, #22d3ee); }
-.op-immediate { color: var(--t-op-immediate, #fde047); }
-.op-memory { color: var(--t-op-memory, #c084fc); }
-.op-target { color: var(--t-op-target, #60a5fa); }
+.op-register {
+  color: var(--t-op-register, #22d3ee);
+}
+.op-immediate {
+  color: var(--t-op-immediate, #fde047);
+}
+.op-memory {
+  color: var(--t-op-memory, #c084fc);
+}
+.op-target {
+  color: var(--t-op-target, #60a5fa);
+}
 
 /* ── Decompiler theme classes ── */
-.dc-string { color: var(--t-string, #4ade80); }
-.dc-number { color: var(--t-number, #fde047); }
-.dc-keyword { color: var(--t-keyword, #c084fc); }
-.dc-type { color: var(--t-type-name, #60a5fa); }
-.dc-comment { color: var(--t-decomp-comment, #6b7280); }
+.dc-string {
+  color: var(--t-string, #4ade80);
+}
+.dc-number {
+  color: var(--t-number, #fde047);
+}
+.dc-keyword {
+  color: var(--t-keyword, #c084fc);
+}
+.dc-type {
+  color: var(--t-type-name, #60a5fa);
+}
+.dc-comment {
+  color: var(--t-decomp-comment, #6b7280);
+}
 
 /* ── Function label ── */
-.func-label { color: var(--t-func-label, #facc15); }
+.func-label {
+  color: var(--t-func-label, #facc15);
+}
 
 /* Hex view */
 .hex-byte {
@@ -173,8 +216,12 @@ body {
 }
 
 @keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 /* Panel resize handles */
@@ -221,9 +268,16 @@ body {
   padding-bottom: 0.3em;
 }
 
-.markdown-content h1 { font-size: 1.3em; }
-.markdown-content h2 { font-size: 1.15em; }
-.markdown-content h3 { font-size: 1.05em; border-bottom: none; }
+.markdown-content h1 {
+  font-size: 1.3em;
+}
+.markdown-content h2 {
+  font-size: 1.15em;
+}
+.markdown-content h3 {
+  font-size: 1.05em;
+  border-bottom: none;
+}
 
 .markdown-content p {
   margin: 0.5em 0;

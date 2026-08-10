@@ -1,6 +1,12 @@
 import { useState, useMemo, useCallback } from "react";
 import { useAppState } from "../hooks/usePEFile";
-import { ResourceTypeNames, RT_VERSION, RT_ICON, RT_GROUP_ICON, RT_MANIFEST } from "../pe/constants";
+import {
+  ResourceTypeNames,
+  RT_VERSION,
+  RT_ICON,
+  RT_GROUP_ICON,
+  RT_MANIFEST,
+} from "../pe/constants";
 import { parseVersionInfo, reconstructIcon } from "../pe/resources";
 import { rvaToFileOffset } from "../pe/parser";
 import type { ResourceTree } from "../pe/types";
@@ -31,7 +37,8 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
   if (numType === RT_VERSION) {
     const info = parseVersionInfo(buffer, rva, size, sections);
     const keys = Object.keys(info);
-    if (keys.length === 0) return <div className="text-gray-500 ml-8 py-1">No version strings found</div>;
+    if (keys.length === 0)
+      return <div className="text-gray-500 ml-8 py-1">No version strings found</div>;
     return (
       <table className="ml-8 my-1 text-[11px]">
         <tbody>
@@ -68,7 +75,11 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
     const url = URL.createObjectURL(blob);
     return (
       <div className="ml-8 my-1">
-        <img src={url} alt="Icon" className="max-w-[64px] max-h-[64px] bg-gray-700 border border-gray-600 rounded" />
+        <img
+          src={url}
+          alt="Icon"
+          className="max-w-[64px] max-h-[64px] bg-gray-700 border border-gray-600 rounded"
+        />
       </div>
     );
   }
@@ -88,7 +99,13 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
   return null;
 }
 
-function downloadResource(buffer: ArrayBuffer, rva: number, size: number, sections: import("../pe/types").SectionHeader[], name: string) {
+function downloadResource(
+  buffer: ArrayBuffer,
+  rva: number,
+  size: number,
+  sections: import("../pe/types").SectionHeader[],
+  name: string,
+) {
   const fileOff = rvaToFileOffset(rva, sections);
   if (fileOff < 0) return;
   const bytes = new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff));
@@ -134,7 +151,7 @@ export function ResourcesView() {
 
   // Grouped before the early return below so hook order stays stable.
   const grouped = useMemo(() => {
-    const map = new Map<string, ResourceTree['entries']>();
+    const map = new Map<string, ResourceTree["entries"]>();
     for (const entry of pe?.resources?.entries ?? []) {
       const key = String(entry.type);
       if (!map.has(key)) map.set(key, []);
@@ -144,11 +161,7 @@ export function ResourcesView() {
   }, [pe?.resources]);
 
   if (!pe?.resources || pe.resources.entries.length === 0) {
-    return (
-      <div className="p-4 text-xs text-gray-500">
-        No resources found in this PE file.
-      </div>
-    );
+    return <div className="p-4 text-xs text-gray-500">No resources found in this PE file.</div>;
   }
 
   const { resources } = pe;
@@ -169,7 +182,8 @@ export function ResourcesView() {
 
           return (
             <div key={typeKey}>
-              <button type="button"
+              <button
+                type="button"
                 onClick={() => toggleCollapse(typeKey)}
                 className="flex items-center gap-1.5 text-yellow-400 font-semibold hover:text-yellow-300 py-0.5"
               >
@@ -177,9 +191,7 @@ export function ResourcesView() {
                   {isCollapsed ? "\u25B6" : "\u25BC"}
                 </span>
                 {typeName}
-                <span className="text-gray-500 font-normal text-[10px]">
-                  ({entries.length})
-                </span>
+                <span className="text-gray-500 font-normal text-[10px]">({entries.length})</span>
               </button>
               {!isCollapsed && (
                 <div className="ml-6">
@@ -197,13 +209,15 @@ export function ResourcesView() {
                       {entries.map((entry, idx) => {
                         const leafKey = `${typeKey}-${entry.name}-${entry.lang}-${idx}`;
                         const isExpanded = expanded.has(leafKey);
-                        const nameDisplay = typeof entry.name === "string" ? entry.name : `#${entry.name}`;
+                        const nameDisplay =
+                          typeof entry.name === "string" ? entry.name : `#${entry.name}`;
 
                         return (
                           <>
                             <tr key={leafKey} className="text-gray-300 hover:bg-gray-800/50">
                               <td className="py-0.5 pr-4">
-                                <button type="button"
+                                <button
+                                  type="button"
                                   onClick={() => toggleExpand(leafKey)}
                                   className="hover:text-blue-400"
                                 >
@@ -219,11 +233,17 @@ export function ResourcesView() {
                                 0x{entry.rva.toString(16).toUpperCase()}
                               </td>
                               <td className="py-0.5">
-                                <button type="button"
-                                  onClick={() => downloadResource(
-                                    pe.buffer, entry.rva, entry.size, pe.sections,
-                                    `resource_${typeName}_${nameDisplay}_${entry.lang}.bin`,
-                                  )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    downloadResource(
+                                      pe.buffer,
+                                      entry.rva,
+                                      entry.size,
+                                      pe.sections,
+                                      `resource_${typeName}_${nameDisplay}_${entry.lang}.bin`,
+                                    )
+                                  }
                                   className="text-gray-500 hover:text-blue-400 text-[10px]"
                                 >
                                   Download

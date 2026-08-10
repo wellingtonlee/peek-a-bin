@@ -1,7 +1,7 @@
-import type { BasicBlock } from '../cfg';
-import type { IRExpr, IRStmt } from './ir';
-import { irBinary, irConst } from './ir';
-import { RegState } from './regstate';
+import type { BasicBlock } from "../cfg";
+import type { IRExpr, IRStmt } from "./ir";
+import { irBinary, irConst } from "./ir";
+import { RegState } from "./regstate";
 
 /**
  * Detect short-circuit && / || pattern:
@@ -23,7 +23,7 @@ export function detectShortCircuit(
   extractCondition: (block: BasicBlock) => IRExpr,
   identifyBranches: (block: BasicBlock) => [number | null, number | null],
 ): {
-  kind: '&&' | '||';
+  kind: "&&" | "||";
   condition: IRExpr;
   trueTarget: number;
   falseTarget: number;
@@ -48,25 +48,26 @@ export function detectShortCircuit(
 
   // Pattern A (&&): both branch to same FAIL target
   if (branchA === branchB) {
-    let combined = irBinary('&&', RegState.negate(condA), RegState.negate(condB));
+    let combined = irBinary("&&", RegState.negate(condA), RegState.negate(condB));
     const consumed = [fallA];
 
     // Chained &&: keep extending if next block also branches to same FAIL
     let currentFall = fallB;
-    for (let depth = 0; depth < 6; depth++) { // cap total at 8 blocks
+    for (let depth = 0; depth < 6; depth++) {
+      // cap total at 8 blocks
       const nextBlock = blockById.get(currentFall);
       if (nextBlock?.succs.length !== 2 || nextBlock.preds.length !== 1) break;
       const [nextBranch, nextFall] = identifyBranches(nextBlock);
       if (nextBranch === null || nextFall === null) break;
       if (nextBranch !== branchA) break; // not same fail target
       const nextCond = extractCondition(nextBlock);
-      combined = irBinary('&&', combined, RegState.negate(nextCond));
+      combined = irBinary("&&", combined, RegState.negate(nextCond));
       consumed.push(currentFall);
       currentFall = nextFall;
     }
 
     return {
-      kind: '&&',
+      kind: "&&",
       condition: combined,
       trueTarget: currentFall,
       falseTarget: branchA,
@@ -119,28 +120,28 @@ export function detectForLoop(
     const stmts = liftedBlocks.get(bid);
     if (!stmts || stmts.length === 0) continue;
     const last = stmts[stmts.length - 1];
-    if (last.kind !== 'assign') continue;
-    if (last.src.kind !== 'binary') continue;
-    if (last.src.op !== '+' && last.src.op !== '-') continue;
-    if (last.src.right.kind !== 'const') continue;
+    if (last.kind !== "assign") continue;
+    if (last.src.kind !== "binary") continue;
+    if (last.src.op !== "+" && last.src.op !== "-") continue;
+    if (last.src.right.kind !== "const") continue;
     const d = last.dest;
     const sl = last.src.left;
     const isInc =
-      (d.kind === 'reg' && sl.kind === 'reg' && d.name.toLowerCase() === sl.name.toLowerCase()) ||
-      (d.kind === 'var' && sl.kind === 'var' && d.name === sl.name);
+      (d.kind === "reg" && sl.kind === "reg" && d.name.toLowerCase() === sl.name.toLowerCase()) ||
+      (d.kind === "var" && sl.kind === "var" && d.name === sl.name);
     if (isInc) {
       updateStmt = last;
       updateBlockId = bid;
       break;
     }
   }
-  if (!updateStmt || updateBlockId === null || updateStmt.kind !== 'assign') return null;
+  if (!updateStmt || updateBlockId === null || updateStmt.kind !== "assign") return null;
   const lastStmt = updateStmt;
   const dest = lastStmt.dest;
 
   // Look for init: assignment to the same variable before the loop
   // Check the header's predecessors (not back-edges) for an init
-  const initPreds = header.preds.filter(p => {
+  const initPreds = header.preds.filter((p) => {
     // Not a back-edge: predecessor should come before header in block order
     return p < header.id;
   });
@@ -152,11 +153,13 @@ export function detectForLoop(
     // Find last assignment to our loop variable
     for (let i = predStmts.length - 1; i >= 0; i--) {
       const s = predStmts[i];
-      if (s.kind === 'assign') {
+      if (s.kind === "assign") {
         const sDest = s.dest;
         const matches =
-          (sDest.kind === 'reg' && dest.kind === 'reg' && sDest.name.toLowerCase() === dest.name.toLowerCase()) ||
-          (sDest.kind === 'var' && dest.kind === 'var' && sDest.name === dest.name);
+          (sDest.kind === "reg" &&
+            dest.kind === "reg" &&
+            sDest.name.toLowerCase() === dest.name.toLowerCase()) ||
+          (sDest.kind === "var" && dest.kind === "var" && sDest.name === dest.name);
         if (matches) {
           initStmt = s;
           break;
@@ -228,10 +231,7 @@ export function detectMultiExitLoop(
  * Block ending with conditional → then body, else is another conditional block
  * → emit: if {} else if {} else if {} else {}
  */
-export function detectIfElseIfChain(
-  blockId: number,
-  blockById: Map<number, BasicBlock>,
-): boolean {
+export function detectIfElseIfChain(blockId: number, blockById: Map<number, BasicBlock>): boolean {
   const block = blockById.get(blockId);
   if (block?.succs.length !== 2) return false;
 
@@ -251,7 +251,7 @@ export function detectIfElseIfChain(
     const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
     if (!m) break;
     const branchAddr = parseInt(m[1], 16);
-    const fallId = b.succs.find(s => {
+    const fallId = b.succs.find((s) => {
       const sb = blockById.get(s);
       return sb && sb.startAddr !== branchAddr;
     });

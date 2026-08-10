@@ -83,7 +83,10 @@ export function shouldRetry(err: unknown): boolean {
  * Returns null when the header is absent or unparseable, so the caller falls back
  * to exponential backoff. Never returns a negative delay.
  */
-export function parseRetryAfter(value: string | null | undefined, now: number = Date.now()): number | null {
+export function parseRetryAfter(
+  value: string | null | undefined,
+  now: number = Date.now(),
+): number | null {
   if (value == null) return null;
   const raw = value.trim();
   if (!raw) return null;

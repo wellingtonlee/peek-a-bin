@@ -32,7 +32,7 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
   let idx = 0;
 
   // Check for legacy prefixes (66, 67, F0, F2, F3, 2E, 3E, 26, 36, 64, 65)
-  const prefixes = new Set([0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65]);
+  const prefixes = new Set([0x66, 0x67, 0xf0, 0xf2, 0xf3, 0x2e, 0x3e, 0x26, 0x36, 0x64, 0x65]);
   while (idx < bytes.length && prefixes.has(bytes[idx])) {
     segments.push({
       bytes: bytes[idx].toString(16).padStart(2, "0"),
@@ -43,7 +43,7 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
   }
 
   // REX prefix (0x40-0x4F) for 64-bit
-  if (idx < bytes.length && bytes[idx] >= 0x40 && bytes[idx] <= 0x4F) {
+  if (idx < bytes.length && bytes[idx] >= 0x40 && bytes[idx] <= 0x4f) {
     segments.push({
       bytes: bytes[idx].toString(16).padStart(2, "0"),
       label: "REX",
@@ -53,11 +53,11 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
   }
 
   // VEX prefix (C4/C5)
-  if (idx < bytes.length && (bytes[idx] === 0xC4 || bytes[idx] === 0xC5)) {
-    const vexLen = bytes[idx] === 0xC4 ? 3 : 2;
+  if (idx < bytes.length && (bytes[idx] === 0xc4 || bytes[idx] === 0xc5)) {
+    const vexLen = bytes[idx] === 0xc4 ? 3 : 2;
     const vexBytes = bytes.slice(idx, idx + vexLen);
     segments.push({
-      bytes: vexBytes.map(b => b.toString(16).padStart(2, "0")).join(" "),
+      bytes: vexBytes.map((b) => b.toString(16).padStart(2, "0")).join(" "),
       label: "VEX",
       cls: "text-gray-400",
     });
@@ -66,15 +66,18 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
 
   // Opcode: 0F escape = 2-byte, 0F 38/3A = 3-byte, else 1-byte
   let opcodeLen = 1;
-  if (idx < bytes.length && bytes[idx] === 0x0F) {
+  if (idx < bytes.length && bytes[idx] === 0x0f) {
     opcodeLen = 2;
-    if (idx + 1 < bytes.length && (bytes[idx + 1] === 0x38 || bytes[idx + 1] === 0x3A)) {
+    if (idx + 1 < bytes.length && (bytes[idx + 1] === 0x38 || bytes[idx + 1] === 0x3a)) {
       opcodeLen = 3;
     }
   }
   if (idx + opcodeLen <= bytes.length) {
     segments.push({
-      bytes: bytes.slice(idx, idx + opcodeLen).map(b => b.toString(16).padStart(2, "0")).join(" "),
+      bytes: bytes
+        .slice(idx, idx + opcodeLen)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(" "),
       label: "opcode",
       cls: "text-white font-semibold",
     });
@@ -98,29 +101,38 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
   if (idx < bytes.length) {
     const remaining = bytes.slice(idx);
     const mn = insn.mnemonic;
-    const hasImm = mn === "mov" || mn === "add" || mn === "sub" || mn === "cmp" ||
-                   mn === "and" || mn === "or" || mn === "xor" || mn === "test" ||
-                   mn === "push" || mn.startsWith("j") || mn === "call";
+    const hasImm =
+      mn === "mov" ||
+      mn === "add" ||
+      mn === "sub" ||
+      mn === "cmp" ||
+      mn === "and" ||
+      mn === "or" ||
+      mn === "xor" ||
+      mn === "test" ||
+      mn === "push" ||
+      mn.startsWith("j") ||
+      mn === "call";
 
     if (remaining.length > 4 && hasImm) {
       const dispBytes = remaining.slice(0, remaining.length - 4);
       const immBytes = remaining.slice(remaining.length - 4);
       if (dispBytes.length > 0) {
         segments.push({
-          bytes: dispBytes.map(b => b.toString(16).padStart(2, "0")).join(" "),
+          bytes: dispBytes.map((b) => b.toString(16).padStart(2, "0")).join(" "),
           label: "disp",
           cls: "text-yellow-300",
         });
       }
       segments.push({
-        bytes: immBytes.map(b => b.toString(16).padStart(2, "0")).join(" "),
+        bytes: immBytes.map((b) => b.toString(16).padStart(2, "0")).join(" "),
         label: "imm",
         cls: "text-green-400",
       });
     } else if (remaining.length > 0) {
       const label = hasImm ? "imm" : "disp";
       segments.push({
-        bytes: remaining.map(b => b.toString(16).padStart(2, "0")).join(" "),
+        bytes: remaining.map((b) => b.toString(16).padStart(2, "0")).join(" "),
         label,
         cls: hasImm ? "text-green-400" : "text-yellow-300",
       });
@@ -146,8 +158,9 @@ const TYPE_LABELS: Record<string, string> = {
 
 function parseStackOffset(opStr: string): number | null {
   // Match [rbp - 0xN] or [rsp + 0xN] or [rbp - N]
-  const m = opStr.match(/\[(?:rbp|ebp)\s*-\s*0x([0-9a-fA-F]+)\]/i) ||
-            opStr.match(/\[(?:rsp|esp)\s*\+\s*0x([0-9a-fA-F]+)\]/i);
+  const m =
+    opStr.match(/\[(?:rbp|ebp)\s*-\s*0x([0-9a-fA-F]+)\]/i) ||
+    opStr.match(/\[(?:rsp|esp)\s*\+\s*0x([0-9a-fA-F]+)\]/i);
   if (m) return parseInt(m[1], 16);
   return null;
 }
@@ -178,7 +191,7 @@ export function InstructionDetail({
   // Xrefs FROM: parse branch/call target
   const xrefFrom = useMemo(() => {
     const mn = insn.mnemonic;
-    let type: Xref['type'] | null = null;
+    let type: Xref["type"] | null = null;
     if (mn === "call") type = "call";
     else if (mn === "jmp") type = "jmp";
     else if (mn.startsWith("j")) type = "branch";
@@ -207,7 +220,7 @@ export function InstructionDetail({
         return {
           address: target,
           name: iat ? `${iat.lib}!${iat.func}` : null,
-          type: type ?? "data" as Xref['type'],
+          type: type ?? ("data" as Xref["type"]),
         };
       }
     }
@@ -219,30 +232,29 @@ export function InstructionDetail({
   return (
     <div className="h-full flex flex-col text-xs">
       <div className="flex items-center px-3 py-1 border-b border-gray-700 text-gray-400">
-        <span className="font-semibold text-gray-300">
-          Instruction Detail
-        </span>
+        <span className="font-semibold text-gray-300">Instruction Detail</span>
         {containingFunc && (
           <span className="ml-2 text-gray-500">
             in {getDisplayName(containingFunc, renames)}
-            {signature ? ` | ${signature.convention}, ${signature.paramCount} param${signature.paramCount !== 1 ? "s" : ""}` : ""}
+            {signature
+              ? ` | ${signature.convention}, ${signature.paramCount} param${signature.paramCount !== 1 ? "s" : ""}`
+              : ""}
           </span>
         )}
         <span className="ml-2 text-gray-600 font-mono">
           0x{insn.address.toString(16).toUpperCase()}
         </span>
         <div className="flex-1" />
-        <button type="button"
-          onClick={onClose}
-          className="text-gray-500 hover:text-white px-1"
-        >
+        <button type="button" onClick={onClose} className="text-gray-500 hover:text-white px-1">
           ✕
         </button>
       </div>
       <div className="flex flex-1 overflow-hidden">
         {/* Encoding */}
         <div className="flex-1 border-r border-gray-700 overflow-auto p-2">
-          <div className="text-gray-500 mb-1 font-semibold">Encoding ({insn.bytes.length} bytes)</div>
+          <div className="text-gray-500 mb-1 font-semibold">
+            Encoding ({insn.bytes.length} bytes)
+          </div>
           <div className="font-mono flex flex-wrap gap-x-2 gap-y-1">
             {encoding.map((seg, i) => (
               <span key={i} title={seg.label}>
@@ -258,24 +270,23 @@ export function InstructionDetail({
 
         {/* Xrefs To */}
         <div className="flex-1 border-r border-gray-700 overflow-auto p-2">
-          <div className="text-gray-500 mb-1 font-semibold">
-            Xrefs To ({xrefsTo.length})
-          </div>
+          <div className="text-gray-500 mb-1 font-semibold">Xrefs To ({xrefsTo.length})</div>
           {xrefsTo.length === 0 ? (
             <div className="text-gray-600 italic">None</div>
           ) : (
             xrefsTo.slice(0, 50).map((xref, i) => (
-              <button type="button"
+              <button
+                type="button"
                 key={`${xref.from}-${i}`}
                 onClick={() => onNavigate(xref.from)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate font-mono flex items-center gap-1"
               >
-                <span className={`${TYPE_COLORS[xref.type] ?? "text-gray-400"} text-[10px] font-semibold w-3`}>
+                <span
+                  className={`${TYPE_COLORS[xref.type] ?? "text-gray-400"} text-[10px] font-semibold w-3`}
+                >
                   {TYPE_LABELS[xref.type] ?? "?"}
                 </span>
-                <span className="text-blue-400">
-                  0x{xref.from.toString(16).toUpperCase()}
-                </span>
+                <span className="text-blue-400">0x{xref.from.toString(16).toUpperCase()}</span>
               </button>
             ))
           )}
@@ -285,19 +296,20 @@ export function InstructionDetail({
         <div className={`flex-1 overflow-auto p-2 ${stackFrame ? "border-r border-gray-700" : ""}`}>
           <div className="text-gray-500 mb-1 font-semibold">Xrefs From</div>
           {xrefFrom ? (
-            <button type="button"
+            <button
+              type="button"
               onClick={() => onNavigate(xrefFrom.address)}
               className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"
             >
-              <span className={`${TYPE_COLORS[xrefFrom.type] ?? "text-gray-400"} text-[10px] font-semibold mr-1`}>
+              <span
+                className={`${TYPE_COLORS[xrefFrom.type] ?? "text-gray-400"} text-[10px] font-semibold mr-1`}
+              >
                 {TYPE_LABELS[xrefFrom.type] ?? "?"}
               </span>
               <span className="text-blue-400 font-mono">
                 0x{xrefFrom.address.toString(16).toUpperCase()}
               </span>
-              {xrefFrom.name && (
-                <span className="text-gray-400 ml-1">{xrefFrom.name}</span>
-              )}
+              {xrefFrom.name && <span className="text-gray-400 ml-1">{xrefFrom.name}</span>}
             </button>
           ) : (
             <div className="text-gray-600 italic">None</div>
@@ -308,7 +320,8 @@ export function InstructionDetail({
         {stackFrame && (
           <div className="flex-1 overflow-auto p-2">
             <div className="text-gray-500 mb-1 font-semibold">
-              Stack Frame ({stackFrame.frameSize > 0 ? `0x${stackFrame.frameSize.toString(16)}` : "?"} bytes)
+              Stack Frame (
+              {stackFrame.frameSize > 0 ? `0x${stackFrame.frameSize.toString(16)}` : "?"} bytes)
             </div>
             {stackFrame.vars.length === 0 ? (
               <div className="text-gray-600 italic">No variables detected</div>
@@ -318,7 +331,9 @@ export function InstructionDetail({
                   <div
                     key={v.offset}
                     className={`flex items-center gap-2 px-1 py-0.5 rounded font-mono ${
-                      currentStackOffset === v.offset ? "bg-blue-900/30 text-blue-300" : "text-gray-400"
+                      currentStackOffset === v.offset
+                        ? "bg-blue-900/30 text-blue-300"
+                        : "text-gray-400"
                     }`}
                   >
                     {/* Sign comes from signedOffset: this list holds locals

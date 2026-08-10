@@ -1,4 +1,4 @@
-import type { Instruction, DisasmFunction } from './types';
+import type { Instruction, DisasmFunction } from "./types";
 
 /**
  * "Collect the instructions belonging to a function" — previously duplicated
@@ -36,9 +36,11 @@ interface AddrIndex {
 const indexCache = new WeakMap<Instruction[], AddrIndex>();
 
 function isStale(cached: AddrIndex, instructions: Instruction[]): boolean {
-  return cached.length !== instructions.length
-    || cached.first !== instructions[0]
-    || cached.last !== instructions[instructions.length - 1];
+  return (
+    cached.length !== instructions.length ||
+    cached.first !== instructions[0] ||
+    cached.last !== instructions[instructions.length - 1]
+  );
 }
 
 function getAddrIndex(instructions: Instruction[]): AddrIndex {

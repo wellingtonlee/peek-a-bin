@@ -16,9 +16,9 @@ import type {
   RelocationBlock,
   RelocationEntry,
   PEFile,
-} from './types';
-import { normalizeOptionalHeader } from './types';
-import { findCodeSection } from './sections';
+} from "./types";
+import { normalizeOptionalHeader } from "./types";
+import { findCodeSection } from "./sections";
 import {
   IMAGE_DOS_SIGNATURE,
   IMAGE_NT_SIGNATURE,
@@ -32,10 +32,10 @@ import {
   IMAGE_DIRECTORY_ENTRY_EXCEPTION,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
-} from './constants';
-import { parsePdata } from './pdata';
-import { parseResourceDirectory } from './resources';
-import { parseSecurityDirectory } from './authenticode';
+} from "./constants";
+import { parsePdata } from "./pdata";
+import { parseResourceDirectory } from "./resources";
+import { parseSecurityDirectory } from "./authenticode";
 
 const textDecoder = new TextDecoder();
 
@@ -308,11 +308,7 @@ function parseOptionalHeader64(view: DataView, offset: number): OptionalHeader64
 /**
  * Read Data Directories
  */
-function parseDataDirectories(
-  view: DataView,
-  offset: number,
-  count: number
-): DataDirectory[] {
+function parseDataDirectories(view: DataView, offset: number, count: number): DataDirectory[] {
   const directories: DataDirectory[] = [];
 
   // numberOfRvaAndSizes is attacker-controlled. The PE spec caps it at 16, and
@@ -334,11 +330,7 @@ function parseDataDirectories(
 /**
  * Read Section Headers
  */
-function parseSectionHeaders(
-  view: DataView,
-  offset: number,
-  count: number
-): SectionHeader[] {
+function parseSectionHeaders(view: DataView, offset: number, count: number): SectionHeader[] {
   const sections: SectionHeader[] = [];
 
   // numberOfSections is a uint16 (up to 65535) read straight off the file. Each
@@ -382,7 +374,7 @@ function parseImports(
   importDir: DataDirectory,
   sectionIndex: SectionIndex,
   is64: boolean,
-  imageBase: number
+  imageBase: number,
 ): ImportEntry[] {
   if (!importDir.virtualAddress || !importDir.size) {
     return [];
@@ -452,7 +444,7 @@ function parseImports(
         // Check if import by ordinal
         const ordinalFlag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
         if (thunkValue & ordinalFlag) {
-          const ordinal = Number(thunkValue & 0xFFFFn);
+          const ordinal = Number(thunkValue & 0xffffn);
           functions.push(`Ordinal_${ordinal}`);
         } else {
           // Import by name
@@ -484,7 +476,7 @@ function parseImports(
 function parseExports(
   view: DataView,
   exportDir: DataDirectory,
-  sectionIndex: SectionIndex
+  sectionIndex: SectionIndex,
 ): ExportEntry[] {
   if (!exportDir.virtualAddress || !exportDir.size) {
     return [];
@@ -623,10 +615,7 @@ function extractASCIIStrings(
 
   const start = section.pointerToRawData;
   const scanLimit = 1024 * 1024;
-  const end = Math.min(
-    start + Math.min(section.sizeOfRawData, scanLimit),
-    view.byteLength,
-  );
+  const end = Math.min(start + Math.min(section.sizeOfRawData, scanLimit), view.byteLength);
 
   const buf = new Uint8Array(view.buffer, view.byteOffset);
   let i = start;
@@ -634,9 +623,9 @@ function extractASCIIStrings(
     const byte = buf[i];
 
     // Skip leading whitespace/control chars before printable ASCII
-    if (byte === 0x09 || byte === 0x0A || byte === 0x0D) {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) {
       let skip = i;
-      while (skip < end && (buf[skip] === 0x09 || buf[skip] === 0x0A || buf[skip] === 0x0D)) skip++;
+      while (skip < end && (buf[skip] === 0x09 || buf[skip] === 0x0a || buf[skip] === 0x0d)) skip++;
       if (skip < end && buf[skip] >= 0x20 && buf[skip] <= 0x7e) {
         i = skip;
         continue;
@@ -658,7 +647,7 @@ function extractASCIIStrings(
         strings.set(imageBase + rva, str);
         // Also map preceding whitespace addresses to this string
         let ws = strStart - 1;
-        while (ws >= start && (buf[ws] === 0x09 || buf[ws] === 0x0A || buf[ws] === 0x0D)) {
+        while (ws >= start && (buf[ws] === 0x09 || buf[ws] === 0x0a || buf[ws] === 0x0d)) {
           const wsRva = section.virtualAddress + (ws - section.pointerToRawData);
           strings.set(imageBase + wsRva, str);
           ws--;
@@ -685,10 +674,7 @@ function extractUTF16Strings(
 
   const start = section.pointerToRawData;
   const scanLimit = 1024 * 1024;
-  const end = Math.min(
-    start + Math.min(section.sizeOfRawData, scanLimit),
-    view.byteLength,
-  );
+  const end = Math.min(start + Math.min(section.sizeOfRawData, scanLimit), view.byteLength);
 
   const utf16Decoder = new TextDecoder("utf-16le");
   const buf = new Uint8Array(view.buffer, view.byteOffset);
@@ -698,9 +684,14 @@ function extractUTF16Strings(
     const hi = buf[i + 1];
 
     // Skip leading whitespace/control char pairs before printable UTF-16LE
-    if (hi === 0 && (lo === 0x09 || lo === 0x0A || lo === 0x0D)) {
+    if (hi === 0 && (lo === 0x09 || lo === 0x0a || lo === 0x0d)) {
       let skip = i;
-      while (skip + 1 < end && buf[skip + 1] === 0 && (buf[skip] === 0x09 || buf[skip] === 0x0A || buf[skip] === 0x0D)) skip += 2;
+      while (
+        skip + 1 < end &&
+        buf[skip + 1] === 0 &&
+        (buf[skip] === 0x09 || buf[skip] === 0x0a || buf[skip] === 0x0d)
+      )
+        skip += 2;
       if (skip + 1 < end && buf[skip + 1] === 0 && buf[skip] >= 0x20 && buf[skip] <= 0x7e) {
         i = skip;
         continue;
@@ -729,8 +720,12 @@ function extractUTF16Strings(
         strings.set(imageBase + rva, str);
         // Also map preceding whitespace UTF-16 pairs to this string
         let ws = strStart - 2;
-        while (ws >= start && ws + 1 < end && buf[ws + 1] === 0 &&
-               (buf[ws] === 0x09 || buf[ws] === 0x0A || buf[ws] === 0x0D)) {
+        while (
+          ws >= start &&
+          ws + 1 < end &&
+          buf[ws + 1] === 0 &&
+          (buf[ws] === 0x09 || buf[ws] === 0x0a || buf[ws] === 0x0d)
+        ) {
           const wsRva = section.virtualAddress + (ws - section.pointerToRawData);
           strings.set(imageBase + wsRva, str);
           ws -= 2;
@@ -752,7 +747,7 @@ function parseTLSDirectory(
   tlsDir: DataDirectory,
   sectionIndex: SectionIndex,
   is64: boolean,
-  imageBase: number
+  imageBase: number,
 ): TLSDirectory | undefined {
   if (!tlsDir.virtualAddress || !tlsDir.size) return undefined;
 
@@ -780,7 +775,8 @@ function parseTLSDirectory(
     const cbOffset = rvaToFileOffsetIndexed(cbRVA, sectionIndex);
     if (cbOffset >= 0) {
       let pos = cbOffset;
-      for (let i = 0; i < 256; i++) { // safety limit
+      for (let i = 0; i < 256; i++) {
+        // safety limit
         if (pos + ptrSize > view.byteLength) break;
         const cbAddr = readPtr(pos);
         if (cbAddr === 0) break;
@@ -807,7 +803,7 @@ function parseTLSDirectory(
 function parseBaseRelocations(
   view: DataView,
   relocDir: DataDirectory,
-  sectionIndex: SectionIndex
+  sectionIndex: SectionIndex,
 ): RelocationBlock[] | undefined {
   if (!relocDir.virtualAddress || !relocDir.size) return undefined;
 
@@ -831,8 +827,8 @@ function parseBaseRelocations(
       const entryPos = pos + 8 + i * 2;
       if (entryPos + 2 > view.byteLength) break;
       const value = view.getUint16(entryPos, true);
-      const type = (value >> 12) & 0xF;
-      const entryOffset = value & 0xFFF;
+      const type = (value >> 12) & 0xf;
+      const entryOffset = value & 0xfff;
       entries.push({ type, offset: entryOffset });
     }
 
@@ -855,20 +851,18 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   // 2. Validate PE Signature
   const peOffset = dosHeader.e_lfanew;
   if (peOffset + 4 > view.byteLength) {
-    throw new Error('Invalid PE offset');
+    throw new Error("Invalid PE offset");
   }
 
   const peSignature = view.getUint32(peOffset, true);
   if (peSignature !== IMAGE_NT_SIGNATURE) {
-    throw new Error(
-      `Invalid PE signature: 0x${peSignature.toString(16)} (expected 0x4550)`
-    );
+    throw new Error(`Invalid PE signature: 0x${peSignature.toString(16)} (expected 0x4550)`);
   }
 
   // 3. Parse COFF Header (20 bytes) followed by the optional header magic (2).
   const coffOffset = peOffset + 4;
   if (coffOffset + 22 > view.byteLength) {
-    throw new Error('Truncated PE: COFF header runs past end of file');
+    throw new Error("Truncated PE: COFF header runs past end of file");
   }
   const coffHeader = parseCOFFHeader(view, coffOffset);
 
@@ -894,17 +888,12 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   const dataDirectories = parseDataDirectories(
     view,
     dataDirectoriesOffset,
-    optionalHeader.numberOfRvaAndSizes
+    optionalHeader.numberOfRvaAndSizes,
   );
 
   // 6. Parse Section Headers
-  const sectionHeadersOffset =
-    optionalHeaderOffset + coffHeader.sizeOfOptionalHeader;
-  const sections = parseSectionHeaders(
-    view,
-    sectionHeadersOffset,
-    coffHeader.numberOfSections
-  );
+  const sectionHeadersOffset = optionalHeaderOffset + coffHeader.sizeOfOptionalHeader;
+  const sections = parseSectionHeaders(view, sectionHeadersOffset, coffHeader.numberOfSections);
 
   // Every directory below resolves RVAs against the section table — import
   // thunks and .pdata entries in the hundreds of thousands on a large image.
@@ -912,23 +901,24 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   const sectionIndex = buildSectionIndex(sections);
 
   // 7. Parse Imports
-  const imageBase = typeof optionalHeader.imageBase === "bigint"
-    ? Number(optionalHeader.imageBase)
-    : optionalHeader.imageBase;
+  const imageBase =
+    typeof optionalHeader.imageBase === "bigint"
+      ? Number(optionalHeader.imageBase)
+      : optionalHeader.imageBase;
 
   const imports = parseImports(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_IMPORT] || { virtualAddress: 0, size: 0 },
     sectionIndex,
     is64,
-    imageBase
+    imageBase,
   );
 
   // 8. Parse Exports
   const exports = parseExports(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_EXPORT] || { virtualAddress: 0, size: 0 },
-    sectionIndex
+    sectionIndex,
   );
 
   // 9. Parse TLS Directory
@@ -937,18 +927,18 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     dataDirectories[IMAGE_DIRECTORY_ENTRY_TLS] || { virtualAddress: 0, size: 0 },
     sectionIndex,
     is64,
-    imageBase
+    imageBase,
   );
 
   // 10. Parse Base Relocations
   const relocations = parseBaseRelocations(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_BASERELOC] || { virtualAddress: 0, size: 0 },
-    sectionIndex
+    sectionIndex,
   );
 
   // 11. Parse Resource Directory
-  let resources: import('./types').ResourceTree | undefined;
+  let resources: import("./types").ResourceTree | undefined;
   const resourceDir = dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE];
   if (resourceDir && resourceDir.virtualAddress > 0 && resourceDir.size > 0) {
     try {
@@ -969,7 +959,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     : undefined;
 
   // 13. Parse Authenticode / Security Directory
-  let certificate: import('./authenticode').CertificateInfo | undefined;
+  let certificate: import("./authenticode").CertificateInfo | undefined;
   try {
     certificate = parseSecurityDirectory(buffer, dataDirectories) ?? undefined;
   } catch {
@@ -1014,7 +1004,10 @@ export function extractStrings(
   for (const sec of sections) {
     if (dataSectionNames.has(sec.name)) {
       const asciiStrings = extractASCIIStrings(view, sec, imageBase, 4);
-      asciiStrings.forEach((v, k) => { strings.set(k, v); stringTypes.set(k, "ascii"); });
+      asciiStrings.forEach((v, k) => {
+        strings.set(k, v);
+        stringTypes.set(k, "ascii");
+      });
     }
   }
 
@@ -1022,7 +1015,10 @@ export function extractStrings(
   if (textSection) {
     const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
     textAscii.forEach((v, k) => {
-      if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "ascii"); }
+      if (!strings.has(k)) {
+        strings.set(k, v);
+        stringTypes.set(k, "ascii");
+      }
     });
   }
 
@@ -1030,14 +1026,17 @@ export function extractStrings(
     if (dataSectionNames.has(sec.name)) {
       const utf16Strings = extractUTF16Strings(view, sec, imageBase, 4);
       utf16Strings.forEach((v, k) => {
-        if (!strings.has(k)) { strings.set(k, v); stringTypes.set(k, "utf16le"); }
+        if (!strings.has(k)) {
+          strings.set(k, v);
+          stringTypes.set(k, "utf16le");
+        }
       });
     }
   }
 
   // Pointer indirection pass: scan .rdata/.data for pointers to known string VAs
   const ptrSize = is64 ? 8 : 4;
-  const imageEnd = imageBase + Math.max(...sections.map(s => s.virtualAddress + s.virtualSize));
+  const imageEnd = imageBase + Math.max(...sections.map((s) => s.virtualAddress + s.virtualSize));
 
   for (const sec of sections) {
     if (!dataSectionNames.has(sec.name)) continue;

@@ -78,13 +78,12 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
       {/* Format toggle */}
       <div className="flex gap-1 mb-3">
         {(["va", "rva", "file"] as AddrMode[]).map((m) => (
-          <button type="button"
+          <button
+            type="button"
             key={m}
             onClick={() => setMode(m)}
             className={`px-3 py-1 rounded text-xs font-semibold ${
-              mode === m
-                ? "bg-blue-600 text-white"
-                : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+              mode === m ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400 hover:bg-gray-600"
             }`}
           >
             {m === "va" ? "VA" : m === "rva" ? "RVA" : "File Offset"}
@@ -127,13 +126,15 @@ export function GoToAddressModal({ open, onClose }: GoToAddressModalProps) {
 
       {/* Actions */}
       <div className="flex justify-end gap-2">
-        <button type="button"
+        <button
+          type="button"
           onClick={onClose}
           className="px-3 py-1.5 rounded text-xs bg-gray-700 text-gray-300 hover:bg-gray-600"
         >
           Cancel
         </button>
-        <button type="button"
+        <button
+          type="button"
           onClick={handleGo}
           disabled={resolvedVA === null}
           className="px-3 py-1.5 rounded text-xs bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default"

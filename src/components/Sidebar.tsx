@@ -47,18 +47,39 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
-  const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(null);
-  const [bmCtxMenu, setBmCtxMenu] = useState<{ x: number; y: number; address: number; label: string } | null>(null);
-  const [fnCtxMenu, setFnCtxMenu] = useState<{ x: number; y: number; fn: DisasmFunction } | null>(null);
+  const [editingBookmark, setEditingBookmark] = useState<{ address: number; value: string } | null>(
+    null,
+  );
+  const [bmCtxMenu, setBmCtxMenu] = useState<{
+    x: number;
+    y: number;
+    address: number;
+    label: string;
+  } | null>(null);
+  const [fnCtxMenu, setFnCtxMenu] = useState<{ x: number; y: number; fn: DisasmFunction } | null>(
+    null,
+  );
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
   const [sectionsOpen, setSectionsOpen] = useState(() => {
-    try { return localStorage.getItem("peek-a-bin:sections-open") !== "false"; } catch { return true; }
+    try {
+      return localStorage.getItem("peek-a-bin:sections-open") !== "false";
+    } catch {
+      return true;
+    }
   });
   const [callersOpen, setCallersOpen] = useState(() => {
-    try { return localStorage.getItem("peek-a-bin:callers-open") !== "false"; } catch { return true; }
+    try {
+      return localStorage.getItem("peek-a-bin:callers-open") !== "false";
+    } catch {
+      return true;
+    }
   });
   const [graphOverviewOpen, setGraphOverviewOpen] = useState(() => {
-    try { return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false"; } catch { return true; }
+    try {
+      return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false";
+    } catch {
+      return true;
+    }
   });
   const graphOverview = useGraphOverview();
   const bmCtxMenuRef = useRef<HTMLDivElement>(null);
@@ -101,39 +122,48 @@ export function Sidebar() {
 
   // Persist sections/graph overview toggle
   useEffect(() => {
-    try { localStorage.setItem("peek-a-bin:sections-open", String(sectionsOpen)); } catch {}
+    try {
+      localStorage.setItem("peek-a-bin:sections-open", String(sectionsOpen));
+    } catch {}
   }, [sectionsOpen]);
   useEffect(() => {
-    try { localStorage.setItem("peek-a-bin:callers-open", String(callersOpen)); } catch {}
+    try {
+      localStorage.setItem("peek-a-bin:callers-open", String(callersOpen));
+    } catch {}
   }, [callersOpen]);
   useEffect(() => {
-    try { localStorage.setItem("peek-a-bin:graph-overview-open", String(graphOverviewOpen)); } catch {}
+    try {
+      localStorage.setItem("peek-a-bin:graph-overview-open", String(graphOverviewOpen));
+    } catch {}
   }, [graphOverviewOpen]);
 
   // Drag resize logic
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setDragging(true);
-    const startX = e.clientX;
-    const startWidth = width;
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setDragging(true);
+      const startX = e.clientX;
+      const startWidth = width;
 
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - startX;
-      setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidth + delta)));
-    };
-    const onMouseUp = () => {
-      setDragging(false);
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
+      const onMouseMove = (ev: MouseEvent) => {
+        const delta = ev.clientX - startX;
+        setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidth + delta)));
+      };
+      const onMouseUp = () => {
+        setDragging(false);
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
 
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }, [width]);
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [width],
+  );
 
   // Keyboard equivalent for the drag handle — left/right arrows nudge the width
   // within the same bounds the drag path enforces.
@@ -176,13 +206,12 @@ export function Sidebar() {
     let fns = state.functions;
     if (filter) {
       const q = filter.toLowerCase();
-      fns = fns.filter(
-        (fn) => {
-          const display = getDisplayName(fn, state.renames);
-          return display.toLowerCase().includes(q) ||
-            fn.address.toString(16).toLowerCase().includes(q);
-        },
-      );
+      fns = fns.filter((fn) => {
+        const display = getDisplayName(fn, state.renames);
+        return (
+          display.toLowerCase().includes(q) || fn.address.toString(16).toLowerCase().includes(q)
+        );
+      });
     }
     if (sort === "alpha") {
       fns = [...fns].sort((a, b) => {
@@ -200,9 +229,8 @@ export function Sidebar() {
     const rows = state.functions.map((fn: DisasmFunction) => {
       const name = getDisplayName(fn, state.renames);
       // Escape CSV: wrap in quotes if contains comma or quote
-      const escapedName = name.includes(",") || name.includes('"')
-        ? `"${name.replace(/"/g, '""')}"`
-        : name;
+      const escapedName =
+        name.includes(",") || name.includes('"') ? `"${name.replace(/"/g, '""')}"` : name;
       return `0x${fn.address.toString(16).toUpperCase()},${escapedName},${fn.size}`;
     });
     const csv = [header, ...rows].join("\n");
@@ -251,7 +279,8 @@ export function Sidebar() {
   if (collapsed) {
     return (
       <aside className="w-10 panel-bg border-r border-theme flex flex-col items-center py-2 shrink-0">
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setCollapsed(false)}
           className="text-gray-400 hover:text-white text-sm"
           title="Expand sidebar"
@@ -278,7 +307,8 @@ export function Sidebar() {
 
       {/* Sections */}
       <div className="p-2 border-b border-gray-700">
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setSectionsOpen(!sectionsOpen)}
           className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
         >
@@ -289,7 +319,8 @@ export function Sidebar() {
           <ul className="mt-1.5 space-y-0.5">
             {pe.sections.map((sec, i) => (
               <li key={i}>
-                <button type="button"
+                <button
+                  type="button"
                   onClick={() => {
                     dispatch({
                       type: "SET_ADDRESS",
@@ -300,9 +331,7 @@ export function Sidebar() {
                   className="w-full text-left px-2 py-1 rounded hover:bg-gray-800 transition-colors flex justify-between"
                 >
                   <span className="text-gray-200">{sec.name}</span>
-                  <span className="text-gray-500">
-                    {(sec.virtualSize >>> 0).toString(16)}
-                  </span>
+                  <span className="text-gray-500">{(sec.virtualSize >>> 0).toString(16)}</span>
                 </button>
               </li>
             ))}
@@ -313,7 +342,8 @@ export function Sidebar() {
       {/* Bookmarks panel (only show if bookmarks exist) */}
       {state.bookmarks.length > 0 && (
         <div className="relative p-2 border-b border-gray-700">
-          <button type="button"
+          <button
+            type="button"
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
@@ -329,11 +359,19 @@ export function Sidebar() {
                   onContextMenu={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    const rect = (e.currentTarget.closest('.relative') as HTMLElement).getBoundingClientRect();
-                    setBmCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, address: bm.address, label: bm.label });
+                    const rect = (
+                      e.currentTarget.closest(".relative") as HTMLElement
+                    ).getBoundingClientRect();
+                    setBmCtxMenu({
+                      x: e.clientX - rect.left,
+                      y: e.clientY - rect.top,
+                      address: bm.address,
+                      label: bm.label,
+                    });
                   }}
                 >
-                  <button type="button"
+                  <button
+                    type="button"
                     onClick={() => {
                       dispatch({ type: "SET_ADDRESS", address: bm.address });
                       dispatch({ type: "SET_TAB", tab: "disassembly" });
@@ -353,17 +391,27 @@ export function Sidebar() {
                         className="bg-gray-800 border border-blue-500 rounded px-1 text-gray-200 text-[11px] outline-none w-24"
                         value={editingBookmark.value}
                         onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setEditingBookmark({ ...editingBookmark, value: e.target.value })}
+                        onChange={(e) =>
+                          setEditingBookmark({ ...editingBookmark, value: e.target.value })
+                        }
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
-                            dispatch({ type: "SET_BOOKMARK_LABEL", address: bm.address, label: editingBookmark.value });
+                            dispatch({
+                              type: "SET_BOOKMARK_LABEL",
+                              address: bm.address,
+                              label: editingBookmark.value,
+                            });
                             setEditingBookmark(null);
                           }
                           if (e.key === "Escape") setEditingBookmark(null);
                           e.stopPropagation();
                         }}
                         onBlur={() => {
-                          dispatch({ type: "SET_BOOKMARK_LABEL", address: bm.address, label: editingBookmark.value });
+                          dispatch({
+                            type: "SET_BOOKMARK_LABEL",
+                            address: bm.address,
+                            label: editingBookmark.value,
+                          });
                           setEditingBookmark(null);
                         }}
                       />
@@ -373,7 +421,8 @@ export function Sidebar() {
                       </span>
                     )}
                   </button>
-                  <button type="button"
+                  <button
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       dispatch({ type: "TOGGLE_BOOKMARK", address: bm.address });
@@ -393,7 +442,8 @@ export function Sidebar() {
               className="absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
               style={{ left: bmCtxMenu.x, top: bmCtxMenu.y }}
             >
-              <button type="button"
+              <button
+                type="button"
                 className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
                 onClick={() => {
                   setEditingBookmark({ address: bmCtxMenu.address, value: bmCtxMenu.label });
@@ -402,7 +452,8 @@ export function Sidebar() {
               >
                 Rename
               </button>
-              <button type="button"
+              <button
+                type="button"
                 className="w-full text-left px-3 py-1 hover:bg-gray-700 text-red-400"
                 onClick={() => {
                   dispatch({ type: "TOGGLE_BOOKMARK", address: bmCtxMenu.address });
@@ -419,7 +470,8 @@ export function Sidebar() {
       {/* Callers/Callees panel */}
       {state.callGraph && activeFuncAddr !== null && (callers.length > 0 || callees.length > 0) && (
         <div className="p-2 border-b border-gray-700">
-          <button type="button"
+          <button
+            type="button"
             onClick={() => setCallersOpen(!callersOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
@@ -434,9 +486,17 @@ export function Sidebar() {
                   <ul className="space-y-0.5">
                     {callers.map((fn) => (
                       <li key={fn.address}>
-                        <button type="button"
+                        <button
+                          type="button"
                           onClick={() => {
-                            dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
+                            dispatch({
+                              type: "PUSH_CALL_STACK",
+                              address: state.currentAddress,
+                              name: getDisplayName(
+                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
+                                state.renames,
+                              ),
+                            });
                             dispatch({ type: "SET_ADDRESS", address: fn.address });
                             dispatch({ type: "SET_TAB", tab: "disassembly" });
                           }}
@@ -456,9 +516,17 @@ export function Sidebar() {
                   <ul className="space-y-0.5">
                     {callees.map((fn) => (
                       <li key={fn.address}>
-                        <button type="button"
+                        <button
+                          type="button"
                           onClick={() => {
-                            dispatch({ type: "PUSH_CALL_STACK", address: state.currentAddress, name: getDisplayName(containingFunc ?? { name: "unknown", address: 0, size: 0 }, state.renames) });
+                            dispatch({
+                              type: "PUSH_CALL_STACK",
+                              address: state.currentAddress,
+                              name: getDisplayName(
+                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
+                                state.renames,
+                              ),
+                            });
                             dispatch({ type: "SET_ADDRESS", address: fn.address });
                             dispatch({ type: "SET_TAB", tab: "disassembly" });
                           }}
@@ -484,10 +552,12 @@ export function Sidebar() {
             Functions ({filteredFunctions.length}
             {filterInput && filteredFunctions.length !== state.functions.length
               ? `/${state.functions.length}`
-              : ""})
+              : ""}
+            )
           </h3>
           <div className="flex items-center gap-1">
-            <button type="button"
+            <button
+              type="button"
               onClick={handleExportCSV}
               disabled={state.functions.length === 0}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
@@ -495,7 +565,8 @@ export function Sidebar() {
             >
               CSV
             </button>
-            <button type="button"
+            <button
+              type="button"
               onClick={handleExportReport}
               disabled={!state.peFile}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1 disabled:opacity-30 disabled:cursor-default"
@@ -503,7 +574,8 @@ export function Sidebar() {
             >
               Report
             </button>
-            <button type="button"
+            <button
+              type="button"
               onClick={() => setSort(sort === "address" ? "alpha" : "address")}
               className="text-[10px] text-gray-500 hover:text-gray-300 px-1"
               title={sort === "address" ? "Sort: by address" : "Sort: alphabetical"}
@@ -522,12 +594,18 @@ export function Sidebar() {
       </div>
 
       {/* Virtualized functions list */}
-      {state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" && state.analysisPhase !== "failed" ? (
+      {state.functions.length === 0 &&
+      state.analysisPhase !== "idle" &&
+      state.analysisPhase !== "ready" &&
+      state.analysisPhase !== "failed" ? (
         <div className="flex-1 overflow-hidden">
           <SkeletonRows count={20} />
         </div>
       ) : null}
-      <div ref={listRef} className={`flex-1 overflow-auto${state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" && state.analysisPhase !== "failed" ? " hidden" : ""}`}>
+      <div
+        ref={listRef}
+        className={`flex-1 overflow-auto${state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" && state.analysisPhase !== "failed" ? " hidden" : ""}`}
+      >
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -579,7 +657,8 @@ export function Sidebar() {
             }
 
             return (
-              <button type="button"
+              <button
+                type="button"
                 key={vItem.index}
                 onClick={() => {
                   dispatch({ type: "SET_ADDRESS", address: fn.address });
@@ -595,9 +674,7 @@ export function Sidebar() {
                   setFnCtxMenu({ x: e.clientX, y: e.clientY, fn });
                 }}
                 className={`absolute left-0 w-full text-left px-2 rounded hover:bg-gray-800 transition-colors truncate ${
-                  fn.address === activeFuncAddr
-                    ? "bg-blue-900/30 border-l-2 border-blue-400"
-                    : ""
+                  fn.address === activeFuncAddr ? "bg-blue-900/30 border-l-2 border-blue-400" : ""
                 } ${
                   isExport
                     ? "text-yellow-300 font-semibold"
@@ -623,16 +700,15 @@ export function Sidebar() {
       {/* Graph Overview */}
       {graphOverview && (
         <div className="p-2 border-t border-gray-700">
-          <button type="button"
+          <button
+            type="button"
             onClick={() => setGraphOverviewOpen(!graphOverviewOpen)}
             className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
           >
             <span className="text-[8px]">{graphOverviewOpen ? "▼" : "▶"}</span>
             Graph Overview
           </button>
-          {graphOverviewOpen && (
-            <GraphOverviewCanvas data={graphOverview} />
-          )}
+          {graphOverviewOpen && <GraphOverviewCanvas data={graphOverview} />}
         </div>
       )}
 
@@ -643,7 +719,8 @@ export function Sidebar() {
           className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
           style={{ left: fnCtxMenu.x, top: fnCtxMenu.y }}
         >
-          <button type="button"
+          <button
+            type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
@@ -653,16 +730,21 @@ export function Sidebar() {
           >
             Jump to
           </button>
-          <button type="button"
+          <button
+            type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
-              setRenamingFn({ address: fnCtxMenu.fn.address, value: getDisplayName(fnCtxMenu.fn, state.renames) });
+              setRenamingFn({
+                address: fnCtxMenu.fn.address,
+                value: getDisplayName(fnCtxMenu.fn, state.renames),
+              });
               setFnCtxMenu(null);
             }}
           >
             Rename
           </button>
-          <button type="button"
+          <button
+            type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               navigator.clipboard.writeText("0x" + fnCtxMenu.fn.address.toString(16).toUpperCase());
@@ -671,7 +753,8 @@ export function Sidebar() {
           >
             Copy address
           </button>
-          <button type="button"
+          <button
+            type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "TOGGLE_BOOKMARK", address: fnCtxMenu.fn.address });
@@ -681,12 +764,17 @@ export function Sidebar() {
             Toggle bookmark
           </button>
           <div className="border-t border-gray-700 my-0.5" />
-          <button type="button"
+          <button
+            type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
               dispatch({ type: "SET_ADDRESS", address: fnCtxMenu.fn.address });
               dispatch({ type: "SET_TAB", tab: "disassembly" });
-              window.dispatchEvent(new CustomEvent("peek-a-bin:show-xrefs", { detail: { address: fnCtxMenu.fn.address } }));
+              window.dispatchEvent(
+                new CustomEvent("peek-a-bin:show-xrefs", {
+                  detail: { address: fnCtxMenu.fn.address },
+                }),
+              );
               setFnCtxMenu(null);
             }}
           >
@@ -702,7 +790,8 @@ export function Sidebar() {
           <div>{pe.sections.length} sections</div>
           <div>{pe.imports.length} imports</div>
         </div>
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setCollapsed(true)}
           className="text-gray-500 hover:text-white text-sm px-1"
           title="Collapse sidebar"
@@ -736,10 +825,10 @@ function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
   // Graph bounds + scale computation (shared by draw + click)
   const layout = useMemo(() => {
     if (data.blocks.length === 0) return null;
-    const minX = Math.min(...data.blocks.map(b => b.x));
-    const maxX = Math.max(...data.blocks.map(b => b.x + b.w));
-    const minY = Math.min(...data.blocks.map(b => b.y));
-    const maxY = Math.max(...data.blocks.map(b => b.y + b.h));
+    const minX = Math.min(...data.blocks.map((b) => b.x));
+    const maxX = Math.max(...data.blocks.map((b) => b.x + b.w));
+    const minY = Math.min(...data.blocks.map((b) => b.y));
+    const maxY = Math.max(...data.blocks.map((b) => b.y + b.h));
     return { minX, maxX, minY, maxY, graphW: maxX - minX, graphH: maxY - minY };
   }, [data.blocks]);
 
@@ -769,8 +858,8 @@ function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
     ctx.strokeStyle = "rgba(107, 114, 128, 0.3)";
     ctx.lineWidth = 0.5;
     for (const edge of data.edges) {
-      const fromBlock = data.blocks.find(b => b.id === edge.from);
-      const toBlock = data.blocks.find(b => b.id === edge.to);
+      const fromBlock = data.blocks.find((b) => b.id === edge.from);
+      const toBlock = data.blocks.find((b) => b.id === edge.to);
       if (!fromBlock || !toBlock) continue;
       const fx = offsetX + (fromBlock.x + fromBlock.w / 2 - layout.minX) * scale;
       const fy = offsetY + (fromBlock.y + fromBlock.h - layout.minY) * scale;
@@ -789,9 +878,8 @@ function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
       const bw = Math.max(2, block.w * scale);
       const bh = Math.max(1, block.h * scale);
 
-      ctx.fillStyle = block.id === currentBlockId
-        ? "rgba(59, 130, 246, 0.7)"
-        : "rgba(107, 114, 128, 0.5)";
+      ctx.fillStyle =
+        block.id === currentBlockId ? "rgba(59, 130, 246, 0.7)" : "rgba(107, 114, 128, 0.5)";
       ctx.fillRect(bx, by, bw, bh);
     }
 
@@ -811,7 +899,9 @@ function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
     ctx.strokeRect(vx + 0.5, vy + 0.5, vw, vh);
   }, [data, layout, currentBlockId]);
 
-  useEffect(() => { draw(); }, [draw]);
+  useEffect(() => {
+    draw();
+  }, [draw]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -821,47 +911,56 @@ function GraphOverviewCanvas({ data }: { data: GraphOverviewData }) {
     return () => observer.disconnect();
   }, [draw]);
 
-  const canvasToGraph = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!layout || layout.graphW === 0 || layout.graphH === 0) return null;
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
+  const canvasToGraph = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!layout || layout.graphW === 0 || layout.graphH === 0) return null;
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
 
-    const canvasW = canvas.width;
-    const canvasH = 120;
-    const padding = 4;
-    const scaleX = (canvasW - padding * 2) / layout.graphW;
-    const scaleY = (canvasH - padding * 2) / layout.graphH;
-    const scale = Math.min(scaleX, scaleY);
-    const offsetX = padding + (canvasW - padding * 2 - layout.graphW * scale) / 2;
-    const offsetY = padding + (canvasH - padding * 2 - layout.graphH * scale) / 2;
+      const canvasW = canvas.width;
+      const canvasH = 120;
+      const padding = 4;
+      const scaleX = (canvasW - padding * 2) / layout.graphW;
+      const scaleY = (canvasH - padding * 2) / layout.graphH;
+      const scale = Math.min(scaleX, scaleY);
+      const offsetX = padding + (canvasW - padding * 2 - layout.graphW * scale) / 2;
+      const offsetY = padding + (canvasH - padding * 2 - layout.graphH * scale) / 2;
 
-    const graphX = (clickX - offsetX) / scale + layout.minX;
-    const graphY = (clickY - offsetY) / scale + layout.minY;
-    return { graphX, graphY };
-  }, [layout]);
+      const graphX = (clickX - offsetX) / scale + layout.minX;
+      const graphY = (clickY - offsetY) / scale + layout.minY;
+      return { graphX, graphY };
+    },
+    [layout],
+  );
 
-  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const pt = canvasToGraph(e);
-    if (!pt) return;
-    draggingRef.current = true;
-    data.onPanTo({
-      x: data.viewport.width / 2 - pt.graphX * data.zoom,
-      y: data.viewport.height / 2 - pt.graphY * data.zoom,
-    });
-  }, [canvasToGraph, data]);
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const pt = canvasToGraph(e);
+      if (!pt) return;
+      draggingRef.current = true;
+      data.onPanTo({
+        x: data.viewport.width / 2 - pt.graphX * data.zoom,
+        y: data.viewport.height / 2 - pt.graphY * data.zoom,
+      });
+    },
+    [canvasToGraph, data],
+  );
 
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!draggingRef.current) return;
-    const pt = canvasToGraph(e);
-    if (!pt) return;
-    data.onPanTo({
-      x: data.viewport.width / 2 - pt.graphX * data.zoom,
-      y: data.viewport.height / 2 - pt.graphY * data.zoom,
-    });
-  }, [canvasToGraph, data]);
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!draggingRef.current) return;
+      const pt = canvasToGraph(e);
+      if (!pt) return;
+      data.onPanTo({
+        x: data.viewport.width / 2 - pt.graphX * data.zoom,
+        y: data.viewport.height / 2 - pt.graphY * data.zoom,
+      });
+    },
+    [canvasToGraph, data],
+  );
 
   const handleMouseUp = useCallback(() => {
     draggingRef.current = false;

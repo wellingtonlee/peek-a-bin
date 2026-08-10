@@ -1,5 +1,5 @@
-import type { SectionHeader, ResourceTree, ResourceNode } from './types';
-import { rvaToFileOffset } from './parser';
+import type { SectionHeader, ResourceTree, ResourceNode } from "./types";
+import { rvaToFileOffset } from "./parser";
 
 const MAX_DEPTH = 4;
 
@@ -23,7 +23,7 @@ const MAX_RESOURCE_STRING = 4096;
  * Format: uint16 length (in chars), then length * uint16 chars.
  */
 function readResourceString(view: DataView, offset: number): string {
-  if (offset + 2 > view.byteLength) return '';
+  if (offset + 2 > view.byteLength) return "";
   const len = Math.min(view.getUint16(offset, true), MAX_RESOURCE_STRING);
   const chars: number[] = [];
   for (let i = 0; i < len; i++) {
@@ -45,7 +45,7 @@ function walkDirectory(
   dirOffset: number,
   depth: number,
   visited: Set<number>,
-  entries: ResourceTree['entries'],
+  entries: ResourceTree["entries"],
   parentPath: (number | string)[],
   budget: { remaining: number },
 ): ResourceNode[] {
@@ -78,7 +78,7 @@ function walkDirectory(
     let id: number | string;
     if (nameOrId & 0x80000000) {
       // Name string: lower 31 bits = offset from section base
-      const nameOffset = nameOrId & 0x7FFFFFFF;
+      const nameOffset = nameOrId & 0x7fffffff;
       id = readResourceString(view, sectionBase + nameOffset);
     } else {
       id = nameOrId;
@@ -89,9 +89,16 @@ function walkDirectory(
 
     if (offsetToData & 0x80000000) {
       // Subdirectory: lower 31 bits = offset from section base
-      const subDirOffset = offsetToData & 0x7FFFFFFF;
+      const subDirOffset = offsetToData & 0x7fffffff;
       node.children = walkDirectory(
-        view, sectionBase, subDirOffset, depth + 1, visited, entries, currentPath, budget,
+        view,
+        sectionBase,
+        subDirOffset,
+        depth + 1,
+        visited,
+        entries,
+        currentPath,
+        budget,
       );
     } else {
       // Leaf: IMAGE_RESOURCE_DATA_ENTRY (16 bytes)
@@ -106,7 +113,7 @@ function walkDirectory(
         entries.push({
           type: currentPath[0] ?? 0,
           name: currentPath[1] ?? 0,
-          lang: typeof currentPath[2] === 'number' ? currentPath[2] : 0,
+          lang: typeof currentPath[2] === "number" ? currentPath[2] : 0,
           rva: dataRva,
           size,
         });
@@ -131,7 +138,7 @@ export function parseResourceDirectory(
   if (fileOffset < 0) return { root: [], entries: [] };
 
   const view = new DataView(buffer);
-  const entries: ResourceTree['entries'] = [];
+  const entries: ResourceTree["entries"] = [];
   const visited = new Set<number>();
   const budget = { remaining: MAX_TOTAL_ENTRIES };
 
@@ -187,23 +194,23 @@ export function parseVersionInfo(
 
     // szKey: "VS_VERSION_INFO\0"
     const keyResult = readWString(offset + 6);
-    if (keyResult.str !== 'VS_VERSION_INFO') return result;
+    if (keyResult.str !== "VS_VERSION_INFO") return result;
 
     let pos = align4(keyResult.end);
 
     // VS_FIXEDFILEINFO (52 bytes) if viValueLength > 0
     if (viValueLength >= 52 && pos + 52 <= viEnd) {
       const sig = view.getUint32(pos, true);
-      if (sig === 0xFEEF04BD) {
+      if (sig === 0xfeef04bd) {
         // Extract FileVersion from dwFileVersionMS / dwFileVersionLS
         const fileVerMS = view.getUint32(pos + 8, true);
         const fileVerLS = view.getUint32(pos + 12, true);
-        result.FileVersion = `${(fileVerMS >>> 16) & 0xFFFF}.${fileVerMS & 0xFFFF}.${(fileVerLS >>> 16) & 0xFFFF}.${fileVerLS & 0xFFFF}`;
+        result.FileVersion = `${(fileVerMS >>> 16) & 0xffff}.${fileVerMS & 0xffff}.${(fileVerLS >>> 16) & 0xffff}.${fileVerLS & 0xffff}`;
 
         // Extract ProductVersion from dwProductVersionMS / dwProductVersionLS
         const prodVerMS = view.getUint32(pos + 16, true);
         const prodVerLS = view.getUint32(pos + 20, true);
-        result.ProductVersion = `${(prodVerMS >>> 16) & 0xFFFF}.${prodVerMS & 0xFFFF}.${(prodVerLS >>> 16) & 0xFFFF}.${prodVerLS & 0xFFFF}`;
+        result.ProductVersion = `${(prodVerMS >>> 16) & 0xffff}.${prodVerMS & 0xffff}.${(prodVerLS >>> 16) & 0xffff}.${prodVerLS & 0xffff}`;
       }
       pos += viValueLength;
     }
@@ -218,7 +225,7 @@ export function parseVersionInfo(
       // skip wValueLength, wType
       const childKey = readWString(pos + 6);
 
-      if (childKey.str === 'StringFileInfo') {
+      if (childKey.str === "StringFileInfo") {
         // Walk StringTable children
         let stPos = align4(childKey.end);
         while (stPos + 6 < childEnd) {

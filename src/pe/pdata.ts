@@ -1,5 +1,5 @@
-import type { DataDirectory, SectionHeader, RuntimeFunction } from './types';
-import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from './parser';
+import type { DataDirectory, SectionHeader, RuntimeFunction } from "./types";
+import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
 
 /**
  * Parse .pdata (Exception Directory) for x64 PE files.
@@ -43,7 +43,7 @@ export function parsePdata(
     const unwindOffset = rvaToFileOffsetIndexed(unwindInfoAddress, sectionIndex);
     if (unwindOffset >= 0 && unwindOffset + 4 <= view.byteLength) {
       const versionFlags = view.getUint8(unwindOffset);
-      const flags = (versionFlags >> 3) & 0x1F;
+      const flags = (versionFlags >> 3) & 0x1f;
       rf.handlerFlags = flags;
 
       // UNW_FLAG_EHANDLER (0x1) or UNW_FLAG_UHANDLER (0x2)
@@ -51,7 +51,8 @@ export function parsePdata(
         const countOfCodes = view.getUint8(unwindOffset + 2);
         // Handler RVA follows after the unwind codes (each 2 bytes), aligned to 4 bytes
         const codesSize = countOfCodes * 2;
-        const handlerOffset = unwindOffset + 4 + codesSize + (codesSize % 4 ? (4 - codesSize % 4) : 0);
+        const handlerOffset =
+          unwindOffset + 4 + codesSize + (codesSize % 4 ? 4 - (codesSize % 4) : 0);
         if (handlerOffset + 4 <= view.byteLength) {
           rf.handlerAddress = view.getUint32(handlerOffset, true);
         }

@@ -1,13 +1,18 @@
-import type { Instruction } from '../types';
-import type { BasicBlock } from '../cfg';
-import type {
-  IRExpr, IRStmt, IRCall, BinaryOp,
-} from './ir';
+import type { Instruction } from "../types";
+import type { BasicBlock } from "../cfg";
+import type { IRExpr, IRStmt, IRCall, BinaryOp } from "./ir";
 import {
-  irConst, irReg, irBinary, irUnary, irDeref, irUnknown, regSize, isKnownRegister,
-} from './ir';
-import type { RegState } from './regstate';
-import { resolveRipMemExpr, resolveRipTarget } from '../ripRelative';
+  irConst,
+  irReg,
+  irBinary,
+  irUnary,
+  irDeref,
+  irUnknown,
+  regSize,
+  isKnownRegister,
+} from "./ir";
+import type { RegState } from "./regstate";
+import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 
 // ── Operand Parsing ──
 
@@ -21,10 +26,14 @@ function memPrefixSize(s: string): number {
   const m = s.match(MEM_PATTERN);
   if (!m) return 0;
   switch (m[1].toLowerCase()) {
-    case 'byte': return 1;
-    case 'word': return 2;
-    case 'dword': return 4;
-    case 'qword': return 8;
+    case "byte":
+      return 1;
+    case "word":
+      return 2;
+    case "dword":
+      return 4;
+    case "qword":
+      return 8;
   }
   return 0;
 }
@@ -40,7 +49,7 @@ function parseImm(s: string): number | null {
   const hexM = trimmed.match(HEX_PATTERN);
   if (hexM) {
     const v = parseInt(hexM[1], 16);
-    return trimmed.startsWith('-') ? -v : v;
+    return trimmed.startsWith("-") ? -v : v;
   }
   if (DEC_PATTERN.test(trimmed)) return parseInt(trimmed, 10);
   return null;
@@ -57,15 +66,15 @@ function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr 
 
   // Tokenize: split on + and - while preserving sign
   const tokens: { sign: number; text: string }[] = [];
-  let buf = '';
+  let buf = "";
   let sign = 1;
   for (let i = 0; i <= inside.length; i++) {
     const ch = inside[i];
-    if (i === inside.length || ch === '+' || ch === '-') {
+    if (i === inside.length || ch === "+" || ch === "-") {
       const t = buf.trim();
       if (t) tokens.push({ sign, text: t });
-      sign = ch === '-' ? -1 : 1;
-      buf = '';
+      sign = ch === "-" ? -1 : 1;
+      buf = "";
     } else {
       buf += ch;
     }
@@ -74,9 +83,9 @@ function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr 
   let result: IRExpr | null = null;
   const addExpr = (expr: IRExpr, s: number) => {
     if (!result) {
-      result = s === -1 ? irUnary('-', expr) : expr;
+      result = s === -1 ? irUnary("-", expr) : expr;
     } else {
-      result = s === -1 ? irBinary('-', result, expr) : irBinary('+', result, expr);
+      result = s === -1 ? irBinary("-", result, expr) : irBinary("+", result, expr);
     }
   };
 
@@ -86,7 +95,7 @@ function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr 
     if (scaleMatch && isRegister(scaleMatch[1])) {
       const reg = scaleMatch[1];
       const scale = parseInt(scaleMatch[2], 10);
-      addExpr(irBinary('*', irReg(reg), irConst(scale)), tok.sign);
+      addExpr(irBinary("*", irReg(reg), irConst(scale)), tok.sign);
       continue;
     }
     // register
@@ -110,9 +119,14 @@ function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr 
 /**
  * Parse a single Capstone operand string into an IR expression.
  */
-export function parseOperand(op: string, insn: Instruction, is64: boolean, regState: RegState): IRExpr {
+export function parseOperand(
+  op: string,
+  insn: Instruction,
+  is64: boolean,
+  regState: RegState,
+): IRExpr {
   const trimmed = op.trim();
-  if (!trimmed) return irUnknown('');
+  if (!trimmed) return irUnknown("");
 
   // Memory operand: e.g. `dword ptr [rbp - 0x10]` or `[rax]`
   const prefixSize = memPrefixSize(trimmed);
@@ -143,7 +157,7 @@ export function parseOperand(op: string, insn: Instruction, is64: boolean, regSt
  */
 function parseDestOperand(op: string, insn: Instruction, is64: boolean): IRExpr {
   const trimmed = op.trim();
-  if (!trimmed) return irUnknown('');
+  if (!trimmed) return irUnknown("");
 
   const prefixSize = memPrefixSize(trimmed);
   const bracketM = trimmed.match(BRACKET_PATTERN);
@@ -166,13 +180,13 @@ function splitOperands(opStr: string): string[] {
   // Split on comma, respecting brackets
   const parts: string[] = [];
   let depth = 0;
-  let buf = '';
+  let buf = "";
   for (const ch of opStr) {
-    if (ch === '[') depth++;
-    if (ch === ']') depth--;
-    if (ch === ',' && depth === 0) {
+    if (ch === "[") depth++;
+    if (ch === "]") depth--;
+    if (ch === "," && depth === 0) {
       parts.push(buf.trim());
-      buf = '';
+      buf = "";
     } else {
       buf += ch;
     }
@@ -184,36 +198,68 @@ function splitOperands(opStr: string): string[] {
 // ── Core Lifter ──
 
 const ARITH_OPS: Record<string, BinaryOp> = {
-  add: '+', sub: '-', and: '&', or: '|', xor: '^',
-  shl: '<<', sal: '<<', shr: '>>>', sar: '>>',
+  add: "+",
+  sub: "-",
+  and: "&",
+  or: "|",
+  xor: "^",
+  shl: "<<",
+  sal: "<<",
+  shr: ">>>",
+  sar: ">>",
 };
 
 const COND_SET: Record<string, string> = {
-  sete: 'je', setne: 'jne', setz: 'jz', setnz: 'jnz',
-  setg: 'jg', setge: 'jge', setl: 'jl', setle: 'jle',
-  seta: 'ja', setae: 'jae', setb: 'jb', setbe: 'jbe',
-  sets: 'js', setns: 'jns',
+  sete: "je",
+  setne: "jne",
+  setz: "jz",
+  setnz: "jnz",
+  setg: "jg",
+  setge: "jge",
+  setl: "jl",
+  setle: "jle",
+  seta: "ja",
+  setae: "jae",
+  setb: "jb",
+  setbe: "jbe",
+  sets: "js",
+  setns: "jns",
 };
 
 const CMOV_PATTERN = /^cmov(\w+)$/;
 
-const FASTCALL_REGS_64 = ['rcx', 'rdx', 'r8', 'r9'];
+const FASTCALL_REGS_64 = ["rcx", "rdx", "r8", "r9"];
 
 const FPU_ARITH = new Map<string, BinaryOp>([
-  ['fadd', '+'], ['faddp', '+'], ['fiadd', '+'],
-  ['fsub', '-'], ['fsubp', '-'], ['fisub', '-'],
-  ['fmul', '*'], ['fmulp', '*'], ['fimul', '*'],
-  ['fdiv', '/'], ['fdivp', '/'], ['fidiv', '/'],
+  ["fadd", "+"],
+  ["faddp", "+"],
+  ["fiadd", "+"],
+  ["fsub", "-"],
+  ["fsubp", "-"],
+  ["fisub", "-"],
+  ["fmul", "*"],
+  ["fmulp", "*"],
+  ["fimul", "*"],
+  ["fdiv", "/"],
+  ["fdivp", "/"],
+  ["fidiv", "/"],
 ]);
 
 const SSE_SCALAR = new Map<string, BinaryOp | null>([
-  ['movss', null], ['movsd', null],
-  ['addss', '+'], ['addsd', '+'],
-  ['subss', '-'], ['subsd', '-'],
-  ['mulss', '*'], ['mulsd', '*'],
-  ['divss', '/'], ['divsd', '/'],
-  ['comiss', null], ['comisd', null],
-  ['ucomiss', null], ['ucomisd', null],
+  ["movss", null],
+  ["movsd", null],
+  ["addss", "+"],
+  ["addsd", "+"],
+  ["subss", "-"],
+  ["subsd", "-"],
+  ["mulss", "*"],
+  ["mulsd", "*"],
+  ["divss", "/"],
+  ["divsd", "/"],
+  ["comiss", null],
+  ["comisd", null],
+  ["ucomiss", null],
+  ["ucomisd", null],
 ]);
 
 /**
@@ -234,49 +280,78 @@ export function liftBlock(
     const parts = splitOperands(insn.opStr);
 
     // ── nop / int3 / ud2 ──
-    if (mn === 'nop' || mn === 'int3' || mn === 'ud2') continue;
+    if (mn === "nop" || mn === "int3" || mn === "ud2") continue;
 
     // ── push / pop: handled implicitly, but we still track for x86 call args ──
-    if (mn === 'push' || mn === 'pop') continue;
+    if (mn === "push" || mn === "pop") continue;
 
     // ── mov ──
-    if (mn === 'mov') {
-      if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+    if (mn === "mov") {
+      if (parts.length < 2) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       const src = parseOperand(parts[1], insn, is64, regState);
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: src,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, src);
+        stmts.push({ kind: "assign", dest, src, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, src);
       }
       continue;
     }
 
     // ── movzx / movsx / movsxd → emit IRCast with type annotation ──
-    if (mn === 'movzx' || mn === 'movsx' || mn === 'movsxd') {
-      if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+    if (mn === "movzx" || mn === "movsx" || mn === "movsxd") {
+      if (parts.length < 2) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       const srcRaw = parseOperand(parts[1], insn, is64, regState);
       // Determine source width from prefix or register size
-      const srcSize = memPrefixSize(parts[1]) || (srcRaw.kind === 'reg' ? regSize(srcRaw.name) : (srcRaw.kind === 'deref' ? srcRaw.size : 4));
-      const signed = mn === 'movsx' || mn === 'movsxd';
+      const srcSize =
+        memPrefixSize(parts[1]) ||
+        (srcRaw.kind === "reg" ? regSize(srcRaw.name) : srcRaw.kind === "deref" ? srcRaw.size : 4);
+      const signed = mn === "movsx" || mn === "movsxd";
       const castType = signed
-        ? (srcSize === 1 ? 'int8_t' : srcSize === 2 ? 'int16_t' : 'int32_t')
-        : (srcSize === 1 ? 'uint8_t' : 'uint16_t');
-      const src: IRExpr = { kind: 'cast', type: castType, operand: srcRaw };
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
+        ? srcSize === 1
+          ? "int8_t"
+          : srcSize === 2
+            ? "int16_t"
+            : "int32_t"
+        : srcSize === 1
+          ? "uint8_t"
+          : "uint16_t";
+      const src: IRExpr = { kind: "cast", type: castType, operand: srcRaw };
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: src,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, src);
+        stmts.push({ kind: "assign", dest, src, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, src);
       }
       continue;
     }
 
     // ── lea ──
-    if (mn === 'lea') {
-      if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+    if (mn === "lea") {
+      if (parts.length < 2) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       // For lea, the bracket content is the address expression (no deref)
       const bracketM = parts[1].match(BRACKET_PATTERN);
@@ -286,19 +361,19 @@ export function liftBlock(
       } else {
         src = parseOperand(parts[1], insn, is64, regState);
       }
-      stmts.push({ kind: 'assign', dest, src, addr: insn.address });
-      if (dest.kind === 'reg') regState.set(dest.name, src);
+      stmts.push({ kind: "assign", dest, src, addr: insn.address });
+      if (dest.kind === "reg") regState.set(dest.name, src);
       continue;
     }
 
     // ── xor reg, reg → zero idiom ──
-    if (mn === 'xor' && parts.length >= 2) {
+    if (mn === "xor" && parts.length >= 2) {
       const d = parts[0].trim().toLowerCase();
       const s = parts[1].trim().toLowerCase();
       if (d === s && isRegister(d)) {
         const dest = irReg(d);
         const zero = irConst(0, regSize(d));
-        stmts.push({ kind: 'assign', dest, src: zero, addr: insn.address });
+        stmts.push({ kind: "assign", dest, src: zero, addr: insn.address });
         regState.set(d, zero);
         continue;
       }
@@ -306,83 +381,110 @@ export function liftBlock(
 
     // ── Arithmetic: add/sub/and/or/xor/shl/shr/sar ──
     if (mn in ARITH_OPS) {
-      if (parts.length < 2) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+      if (parts.length < 2) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       const destVal = parseOperand(parts[0], insn, is64, regState);
       const src = parseOperand(parts[1], insn, is64, regState);
       const op = ARITH_OPS[mn];
       const result = irBinary(op, destVal, src);
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: result, size: dest.size, addr: insn.address });
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: result,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
       continue;
     }
 
     // ── imul ──
-    if (mn === 'imul') {
+    if (mn === "imul") {
       if (parts.length === 2) {
         const dest = parseDestOperand(parts[0], insn, is64);
         const destVal = parseOperand(parts[0], insn, is64, regState);
         const src = parseOperand(parts[1], insn, is64, regState);
-        const result = irBinary('*', destVal, src);
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        const result = irBinary("*", destVal, src);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       } else if (parts.length >= 3) {
         const dest = parseDestOperand(parts[0], insn, is64);
         const a = parseOperand(parts[1], insn, is64, regState);
         const b = parseOperand(parts[2], insn, is64, regState);
-        const result = irBinary('*', a, b);
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        const result = irBinary("*", a, b);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       } else {
-        stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
       }
       continue;
     }
 
     // ── inc / dec ──
-    if (mn === 'inc' || mn === 'dec') {
-      if (parts.length < 1) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+    if (mn === "inc" || mn === "dec") {
+      if (parts.length < 1) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       const destVal = parseOperand(parts[0], insn, is64, regState);
-      const op: BinaryOp = mn === 'inc' ? '+' : '-';
+      const op: BinaryOp = mn === "inc" ? "+" : "-";
       const result = irBinary(op, destVal, irConst(1));
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: result, size: dest.size, addr: insn.address });
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: result,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
       continue;
     }
 
     // ── not / neg ──
-    if (mn === 'not' || mn === 'neg') {
-      if (parts.length < 1) { stmts.push({ kind: 'raw', text: `${mn} ${insn.opStr}`, addr: insn.address }); continue; }
+    if (mn === "not" || mn === "neg") {
+      if (parts.length < 1) {
+        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const dest = parseDestOperand(parts[0], insn, is64);
       const destVal = parseOperand(parts[0], insn, is64, regState);
-      const result = irUnary(mn === 'not' ? '~' : '-', destVal);
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: result, size: dest.size, addr: insn.address });
+      const result = irUnary(mn === "not" ? "~" : "-", destVal);
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: result,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
       continue;
     }
 
     // ── cmp / test → flag state + eflags IR assignment ──
-    if (mn === 'cmp' || mn === 'test') {
+    if (mn === "cmp" || mn === "test") {
       if (parts.length >= 2) {
         const left = parseOperand(parts[0], insn, is64, regState);
         const right = parseOperand(parts[1], insn, is64, regState);
-        regState.setFlags(mn as 'cmp' | 'test', left, right);
+        regState.setFlags(mn as "cmp" | "test", left, right);
         // Emit eflags definition for SSA cross-block propagation
-        const flagExpr = mn === 'cmp' ? irBinary('-', left, right) : irBinary('&', left, right);
-        stmts.push({ kind: 'assign', dest: irReg('eflags', 4), src: flagExpr, addr: insn.address });
+        const flagExpr = mn === "cmp" ? irBinary("-", left, right) : irBinary("&", left, right);
+        stmts.push({ kind: "assign", dest: irReg("eflags", 4), src: flagExpr, addr: insn.address });
       }
       continue;
     }
@@ -392,8 +494,8 @@ export function liftBlock(
       if (parts.length >= 1) {
         const dest = parseDestOperand(parts[0], insn, is64);
         const cond = regState.getCondition(COND_SET[mn]);
-        stmts.push({ kind: 'assign', dest, src: cond, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, cond);
+        stmts.push({ kind: "assign", dest, src: cond, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, cond);
       }
       continue;
     }
@@ -405,201 +507,217 @@ export function liftBlock(
         const dest = parseDestOperand(parts[0], insn, is64);
         const destVal = parseOperand(parts[0], insn, is64, regState);
         const src = parseOperand(parts[1], insn, is64, regState);
-        const jcc = 'j' + cmovM[1];
+        const jcc = "j" + cmovM[1];
         const cond = regState.getCondition(jcc);
-        const result: IRExpr = { kind: 'ternary', condition: cond, then: src, else: destVal };
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        const result: IRExpr = { kind: "ternary", condition: cond, then: src, else: destVal };
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
       continue;
     }
 
     // ── call ──
-    if (mn === 'call') {
+    if (mn === "call") {
       const target = resolveCallTarget(insn, is64, iatMap, funcMap);
-      const args = is64
-        ? collectArgs64(regState)
-        : collectArgs32(block, insn, is64, regState);
+      const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64, regState);
       const call: IRCall = {
-        kind: 'call',
+        kind: "call",
         target: target.name,
         args,
         display: target.display,
       };
-      const retReg = is64 ? 'rax' : 'eax';
-      stmts.push({ kind: 'call_stmt', call, resultDest: irReg(retReg), addr: insn.address });
+      const retReg = is64 ? "rax" : "eax";
+      stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
       regState.invalidateCallerSaved();
       regState.set(retReg, call);
       continue;
     }
 
     // ── ret / retn ──
-    if (mn === 'ret' || mn === 'retn') {
-      const retReg = is64 ? 'rax' : 'eax';
+    if (mn === "ret" || mn === "retn") {
+      const retReg = is64 ? "rax" : "eax";
       const val = regState.get(retReg);
-      stmts.push({ kind: 'return', value: val ?? irReg(retReg), addr: insn.address });
+      stmts.push({ kind: "return", value: val ?? irReg(retReg), addr: insn.address });
       continue;
     }
 
     // ── Conditional / unconditional jumps: handled at structure level ──
-    if (mn === 'jmp' || mn.startsWith('j')) {
+    if (mn === "jmp" || mn.startsWith("j")) {
       continue;
     }
 
     // ── Sign-extend idioms ──
-    if (mn === 'cdq') {
+    if (mn === "cdq") {
       // edx = eax >> 31 (sign-extend eax into edx:eax)
-      const eaxVal = regState.getOrReg('eax', 4);
-      const result = irBinary('>>', eaxVal, irConst(31));
-      stmts.push({ kind: 'assign', dest: irReg('edx'), src: result, addr: insn.address });
-      regState.set('edx', result);
+      const eaxVal = regState.getOrReg("eax", 4);
+      const result = irBinary(">>", eaxVal, irConst(31));
+      stmts.push({ kind: "assign", dest: irReg("edx"), src: result, addr: insn.address });
+      regState.set("edx", result);
       continue;
     }
-    if (mn === 'cqo') {
+    if (mn === "cqo") {
       // rdx = rax >> 63
-      const raxVal = regState.getOrReg('rax', 8);
-      const result = irBinary('>>', raxVal, irConst(63));
-      stmts.push({ kind: 'assign', dest: irReg('rdx'), src: result, addr: insn.address });
-      regState.set('rdx', result);
+      const raxVal = regState.getOrReg("rax", 8);
+      const result = irBinary(">>", raxVal, irConst(63));
+      stmts.push({ kind: "assign", dest: irReg("rdx"), src: result, addr: insn.address });
+      regState.set("rdx", result);
       continue;
     }
-    if (mn === 'cdqe') {
+    if (mn === "cdqe") {
       // rax = (int32_t)eax
-      const eaxVal = regState.getOrReg('eax', 4);
-      const result: IRExpr = { kind: 'cast', type: 'int32_t', operand: eaxVal };
-      stmts.push({ kind: 'assign', dest: irReg('rax'), src: result, addr: insn.address });
-      regState.set('rax', result);
+      const eaxVal = regState.getOrReg("eax", 4);
+      const result: IRExpr = { kind: "cast", type: "int32_t", operand: eaxVal };
+      stmts.push({ kind: "assign", dest: irReg("rax"), src: result, addr: insn.address });
+      regState.set("rax", result);
       continue;
     }
-    if (mn === 'cwde') {
+    if (mn === "cwde") {
       // eax = (int16_t)ax
-      const axVal = regState.getOrReg('ax', 2);
-      const result: IRExpr = { kind: 'cast', type: 'int16_t', operand: axVal };
-      stmts.push({ kind: 'assign', dest: irReg('eax'), src: result, addr: insn.address });
-      regState.set('eax', result);
+      const axVal = regState.getOrReg("ax", 2);
+      const result: IRExpr = { kind: "cast", type: "int16_t", operand: axVal };
+      stmts.push({ kind: "assign", dest: irReg("eax"), src: result, addr: insn.address });
+      regState.set("eax", result);
       continue;
     }
-    if (mn === 'cbw') {
+    if (mn === "cbw") {
       // ax = (int8_t)al
-      const alVal = regState.getOrReg('al', 1);
-      const result: IRExpr = { kind: 'cast', type: 'int8_t', operand: alVal };
-      stmts.push({ kind: 'assign', dest: irReg('ax'), src: result, addr: insn.address });
-      regState.set('ax', result);
+      const alVal = regState.getOrReg("al", 1);
+      const result: IRExpr = { kind: "cast", type: "int8_t", operand: alVal };
+      stmts.push({ kind: "assign", dest: irReg("ax"), src: result, addr: insn.address });
+      regState.set("ax", result);
       continue;
     }
-    if (mn === 'cwd') {
+    if (mn === "cwd") {
       // dx = ax >> 15
-      const axVal = regState.getOrReg('ax', 2);
-      const result = irBinary('>>', axVal, irConst(15));
-      stmts.push({ kind: 'assign', dest: irReg('dx'), src: result, addr: insn.address });
-      regState.set('dx', result);
+      const axVal = regState.getOrReg("ax", 2);
+      const result = irBinary(">>", axVal, irConst(15));
+      stmts.push({ kind: "assign", dest: irReg("dx"), src: result, addr: insn.address });
+      regState.set("dx", result);
       continue;
     }
 
     // ── div / idiv ──
-    if (mn === 'div' || mn === 'idiv') {
+    if (mn === "div" || mn === "idiv") {
       if (parts.length >= 1) {
         const divisor = parseOperand(parts[0], insn, is64, regState);
-        const srcSize = divisor.kind === 'reg' ? regSize(divisor.name) : (divisor.kind === 'deref' ? divisor.size : 4);
-        const dividendHi = srcSize === 8 ? 'rdx' : srcSize === 2 ? 'dx' : 'edx';
-        const dividendLo = srcSize === 8 ? 'rax' : srcSize === 2 ? 'ax' : 'eax';
+        const srcSize =
+          divisor.kind === "reg"
+            ? regSize(divisor.name)
+            : divisor.kind === "deref"
+              ? divisor.size
+              : 4;
+        const dividendHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
+        const dividendLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
         const loVal = regState.getOrReg(dividendLo, regSize(dividendLo));
-        const quotient = irBinary('/', loVal, divisor);
-        const remainder = irBinary('%', loVal, divisor);
-        stmts.push({ kind: 'assign', dest: irReg(dividendLo), src: quotient, addr: insn.address });
-        stmts.push({ kind: 'assign', dest: irReg(dividendHi), src: remainder, addr: insn.address });
+        const quotient = irBinary("/", loVal, divisor);
+        const remainder = irBinary("%", loVal, divisor);
+        stmts.push({ kind: "assign", dest: irReg(dividendLo), src: quotient, addr: insn.address });
+        stmts.push({ kind: "assign", dest: irReg(dividendHi), src: remainder, addr: insn.address });
         regState.set(dividendLo, quotient);
         regState.set(dividendHi, remainder);
       } else {
-        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
 
     // ── mul (single-operand) ──
-    if (mn === 'mul') {
+    if (mn === "mul") {
       if (parts.length >= 1) {
         const src = parseOperand(parts[0], insn, is64, regState);
-        const srcSize = src.kind === 'reg' ? regSize(src.name) : (src.kind === 'deref' ? src.size : 4);
-        const accLo = srcSize === 8 ? 'rax' : srcSize === 2 ? 'ax' : 'eax';
-        const accHi = srcSize === 8 ? 'rdx' : srcSize === 2 ? 'dx' : 'edx';
+        const srcSize =
+          src.kind === "reg" ? regSize(src.name) : src.kind === "deref" ? src.size : 4;
+        const accLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
+        const accHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
         const loVal = regState.getOrReg(accLo, regSize(accLo));
-        const result = irBinary('*', loVal, src);
-        stmts.push({ kind: 'assign', dest: irReg(accLo), src: result, addr: insn.address });
+        const result = irBinary("*", loVal, src);
+        stmts.push({ kind: "assign", dest: irReg(accLo), src: result, addr: insn.address });
         regState.set(accLo, result);
         // High part — SSA DCE will eliminate if unused
-        stmts.push({ kind: 'assign', dest: irReg(accHi), src: irBinary('>>', result, irConst(srcSize * 8)), addr: insn.address });
-        regState.set(accHi, irBinary('>>', result, irConst(srcSize * 8)));
+        stmts.push({
+          kind: "assign",
+          dest: irReg(accHi),
+          src: irBinary(">>", result, irConst(srcSize * 8)),
+          addr: insn.address,
+        });
+        regState.set(accHi, irBinary(">>", result, irConst(srcSize * 8)));
       } else {
-        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
 
     // ── xchg ──
-    if (mn === 'xchg' && parts.length >= 2) {
+    if (mn === "xchg" && parts.length >= 2) {
       const a = parseDestOperand(parts[0], insn, is64);
       const b = parseDestOperand(parts[1], insn, is64);
       const aVal = parseOperand(parts[0], insn, is64, regState);
       const bVal = parseOperand(parts[1], insn, is64, regState);
       // tmp = a; a = b; b = tmp — SSA versions correctly
-      if (a.kind === 'reg' && b.kind === 'reg') {
-        stmts.push({ kind: 'assign', dest: a, src: bVal, addr: insn.address });
-        stmts.push({ kind: 'assign', dest: b, src: aVal, addr: insn.address });
+      if (a.kind === "reg" && b.kind === "reg") {
+        stmts.push({ kind: "assign", dest: a, src: bVal, addr: insn.address });
+        stmts.push({ kind: "assign", dest: b, src: aVal, addr: insn.address });
         regState.set(a.name, bVal);
         regState.set(b.name, aVal);
       } else {
-        stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
 
     // ── String ops: rep movsb → memcpy, rep stosb → memset ──
-    if (mn === 'rep' || insn.opStr.toLowerCase().startsWith('rep ')) {
-      const innerMn = mn === 'rep' ? insn.opStr.toLowerCase().replace(/^rep\s+/, '') : insn.opStr.toLowerCase();
+    if (mn === "rep" || insn.opStr.toLowerCase().startsWith("rep ")) {
+      const innerMn =
+        mn === "rep" ? insn.opStr.toLowerCase().replace(/^rep\s+/, "") : insn.opStr.toLowerCase();
 
-      if (innerMn.startsWith('movs')) {
-        const rdi = regState.getOrReg(is64 ? 'rdi' : 'edi', is64 ? 8 : 4);
-        const rsi = regState.getOrReg(is64 ? 'rsi' : 'esi', is64 ? 8 : 4);
-        const rcx = regState.getOrReg(is64 ? 'rcx' : 'ecx', is64 ? 8 : 4);
-        const call: IRCall = { kind: 'call', target: 'memcpy', args: [rdi, rsi, rcx] };
-        stmts.push({ kind: 'call_stmt', call, addr: insn.address });
+      if (innerMn.startsWith("movs")) {
+        const rdi = regState.getOrReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
+        const rsi = regState.getOrReg(is64 ? "rsi" : "esi", is64 ? 8 : 4);
+        const rcx = regState.getOrReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
+        const call: IRCall = { kind: "call", target: "memcpy", args: [rdi, rsi, rcx] };
+        stmts.push({ kind: "call_stmt", call, addr: insn.address });
         continue;
       }
-      if (innerMn.startsWith('stos')) {
-        const rdi = regState.getOrReg(is64 ? 'rdi' : 'edi', is64 ? 8 : 4);
-        const al = regState.getOrReg('al', 1);
-        const rcx = regState.getOrReg(is64 ? 'rcx' : 'ecx', is64 ? 8 : 4);
-        const call: IRCall = { kind: 'call', target: 'memset', args: [rdi, al, rcx] };
-        stmts.push({ kind: 'call_stmt', call, addr: insn.address });
+      if (innerMn.startsWith("stos")) {
+        const rdi = regState.getOrReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
+        const al = regState.getOrReg("al", 1);
+        const rcx = regState.getOrReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
+        const call: IRCall = { kind: "call", target: "memset", args: [rdi, al, rcx] };
+        stmts.push({ kind: "call_stmt", call, addr: insn.address });
         continue;
       }
     }
 
     // ── Basic FPU: fld/fst/fstp/fadd/fsub/fmul/fdiv ──
-    if (mn === 'fld' && parts.length >= 1) {
+    if (mn === "fld" && parts.length >= 1) {
       const src = parseOperand(parts[0], insn, is64, regState);
-      stmts.push({ kind: 'assign', dest: irReg('st0'), src, addr: insn.address });
-      regState.set('st0', src);
+      stmts.push({ kind: "assign", dest: irReg("st0"), src, addr: insn.address });
+      regState.set("st0", src);
       continue;
     }
-    if ((mn === 'fst' || mn === 'fstp') && parts.length >= 1) {
+    if ((mn === "fst" || mn === "fstp") && parts.length >= 1) {
       const dest = parseDestOperand(parts[0], insn, is64);
-      const st0 = regState.getOrReg('st0', 10);
-      if (dest.kind === 'deref') {
-        stmts.push({ kind: 'store', address: dest.address, value: st0, size: dest.size, addr: insn.address });
+      const st0 = regState.getOrReg("st0", 10);
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: st0,
+          size: dest.size,
+          addr: insn.address,
+        });
       } else {
-        stmts.push({ kind: 'assign', dest, src: st0, addr: insn.address });
+        stmts.push({ kind: "assign", dest, src: st0, addr: insn.address });
       }
       continue;
     }
     if (FPU_ARITH.has(mn) && parts.length >= 1) {
       const src = parseOperand(parts[0], insn, is64, regState);
-      const st0 = regState.getOrReg('st0', 10);
+      const st0 = regState.getOrReg("st0", 10);
       const op = FPU_ARITH.get(mn)!;
       const result = irBinary(op, st0, src);
-      stmts.push({ kind: 'assign', dest: irReg('st0'), src: result, addr: insn.address });
-      regState.set('st0', result);
+      stmts.push({ kind: "assign", dest: irReg("st0"), src: result, addr: insn.address });
+      regState.set("st0", result);
       continue;
     }
 
@@ -607,30 +725,41 @@ export function liftBlock(
     if (SSE_SCALAR.has(mn) && parts.length >= 2) {
       const dest = parseDestOperand(parts[0], insn, is64);
       const src = parseOperand(parts[1], insn, is64, regState);
-      if (mn === 'movss' || mn === 'movsd') {
-        if (dest.kind === 'deref') {
-          stmts.push({ kind: 'store', address: dest.address, value: src, size: dest.size, addr: insn.address });
+      if (mn === "movss" || mn === "movsd") {
+        if (dest.kind === "deref") {
+          stmts.push({
+            kind: "store",
+            address: dest.address,
+            value: src,
+            size: dest.size,
+            addr: insn.address,
+          });
         } else {
-          stmts.push({ kind: 'assign', dest, src, addr: insn.address });
-          if (dest.kind === 'reg') regState.set(dest.name, src);
+          stmts.push({ kind: "assign", dest, src, addr: insn.address });
+          if (dest.kind === "reg") regState.set(dest.name, src);
         }
-      } else if (mn === 'comiss' || mn === 'comisd' || mn === 'ucomiss' || mn === 'ucomisd') {
+      } else if (mn === "comiss" || mn === "comisd" || mn === "ucomiss" || mn === "ucomisd") {
         // Comparison — sets eflags
-        regState.setFlags('cmp', parseOperand(parts[0], insn, is64, regState), src);
-        stmts.push({ kind: 'assign', dest: irReg('eflags', 4), src: irBinary('-', parseOperand(parts[0], insn, is64, regState), src), addr: insn.address });
+        regState.setFlags("cmp", parseOperand(parts[0], insn, is64, regState), src);
+        stmts.push({
+          kind: "assign",
+          dest: irReg("eflags", 4),
+          src: irBinary("-", parseOperand(parts[0], insn, is64, regState), src),
+          addr: insn.address,
+        });
       } else {
         // Arithmetic: addss/subss/mulss/divss
         const op = SSE_SCALAR.get(mn)!;
         const destVal = parseOperand(parts[0], insn, is64, regState);
         const result = irBinary(op, destVal, src);
-        stmts.push({ kind: 'assign', dest, src: result, addr: insn.address });
-        if (dest.kind === 'reg') regState.set(dest.name, result);
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
       continue;
     }
 
     // ── Everything else: AVX, etc. → raw asm ──
-    stmts.push({ kind: 'raw', text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+    stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
   }
 
   return stmts;
@@ -711,14 +840,17 @@ function collectArgs32(
   const insns = block.insns;
   let callIdx = -1;
   for (let i = insns.length - 1; i >= 0; i--) {
-    if (insns[i].address === callInsn.address) { callIdx = i; break; }
+    if (insns[i].address === callInsn.address) {
+      callIdx = i;
+      break;
+    }
   }
   if (callIdx < 0) return args;
 
   // Walking backwards from the call already yields argument order: cdecl
   // pushes the last argument first, so the push nearest the call is argument 1.
   for (let i = callIdx - 1; i >= 0 && args.length < 8; i--) {
-    if (insns[i].mnemonic !== 'push') break;
+    if (insns[i].mnemonic !== "push") break;
     const op = insns[i].opStr.trim();
     args.push(parseOperand(op, insns[i], is64, regState));
   }

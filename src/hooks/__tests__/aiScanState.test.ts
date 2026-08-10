@@ -128,7 +128,7 @@ describe("AI scan state — partial runs", () => {
       { type: "AI_SCAN_ADD", findings: [finding("B"), finding("C")] },
       { type: "AI_SCAN_COMPLETE" },
     ]);
-    expect(state.aiScanResults.map(f => f.title)).toEqual(["A", "B", "C"]);
+    expect(state.aiScanResults.map((f) => f.title)).toEqual(["A", "B", "C"]);
     expect(state.aiScan.scanned).toBe(2);
   });
 

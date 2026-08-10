@@ -1,4 +1,13 @@
-import { useReducer, useCallback, useEffect, useRef, useState, useMemo, lazy, Suspense } from "react";
+import {
+  useReducer,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  lazy,
+  Suspense,
+} from "react";
 import {
   appReducer,
   initialState,
@@ -20,8 +29,10 @@ import { FileLoader } from "./components/FileLoader";
 import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
-const DisassemblyView = lazy(() => import("./components/DisassemblyView").then(m => ({ default: m.DisassemblyView })));
-const HexView = lazy(() => import("./components/HexView").then(m => ({ default: m.HexView })));
+const DisassemblyView = lazy(() =>
+  import("./components/DisassemblyView").then((m) => ({ default: m.DisassemblyView })),
+);
+const HexView = lazy(() => import("./components/HexView").then((m) => ({ default: m.HexView })));
 import { ImportsView } from "./components/ImportsView";
 import { ExportsView } from "./components/ExportsView";
 import { StringsView } from "./components/StringsView";
@@ -41,7 +52,6 @@ import { AIReportPanel } from "./components/AIReportPanel";
 import { useAIReport } from "./hooks/useAIReport";
 import { useBatchRename } from "./hooks/useBatchRename";
 import { useVulnScanner } from "./hooks/useVulnScanner";
-
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
@@ -131,9 +141,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    disasmWorker.init()
+    disasmWorker
+      .init()
       .then(() => dispatch({ type: "SET_DISASM_READY" }))
-      .catch((e) => dispatch({ type: "SET_ERROR", error: e instanceof Error ? e.message : "Failed to load disassembly engine" }));
+      .catch((e) =>
+        dispatch({
+          type: "SET_ERROR",
+          error: e instanceof Error ? e.message : "Failed to load disassembly engine",
+        }),
+      );
   }, []);
 
   // Set document title when file is loaded
@@ -165,7 +181,9 @@ export default function App() {
           console.warn("[peek-a-bin] ignoring malformed persisted annotations");
         }
       }
-    } catch { /* ignore corrupt data */ }
+    } catch {
+      /* ignore corrupt data */
+    }
   }, [state.fileName]);
 
   // Persist bookmarks + renames to localStorage
@@ -174,9 +192,15 @@ export default function App() {
     try {
       localStorage.setItem(
         `peek-a-bin:${state.fileName}`,
-        JSON.stringify({ bookmarks: state.bookmarks, renames: state.renames, comments: state.comments }),
+        JSON.stringify({
+          bookmarks: state.bookmarks,
+          renames: state.renames,
+          comments: state.comments,
+        }),
       );
-    } catch { /* quota exceeded */ }
+    } catch {
+      /* quota exceeded */
+    }
   }, [state.fileName, state.bookmarks, state.renames, state.comments]);
 
   // Run function detection when both PE file and disasm engine are ready
@@ -205,49 +229,62 @@ export default function App() {
     // Configure worker with maps once, then detect functions off-thread
     const iatLookup = buildIATLookup(pe.imports);
     dispatch({ type: "SET_IAT_MAP", iatMap: iatLookup });
-    const pdataFunctions = pe.runtimeFunctions?.map(rf => ({
+    const pdataFunctions = pe.runtimeFunctions?.map((rf) => ({
       beginAddress: pe.optionalHeader.imageBase + rf.beginAddress,
       endAddress: pe.optionalHeader.imageBase + rf.endAddress,
     }));
-    const handlerAddresses = pe.runtimeFunctions
-      ?.filter(rf => rf.handlerAddress !== undefined)
-      .map(rf => pe.optionalHeader.imageBase + rf.handlerAddress!) ?? [];
+    const handlerAddresses =
+      pe.runtimeFunctions
+        ?.filter((rf) => rf.handlerAddress !== undefined)
+        .map((rf) => pe.optionalHeader.imageBase + rf.handlerAddress!) ?? [];
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
-    disasmWorker.configure(pe.strings, iatLookup, { driverMode: driverInfo.isDriver })
-      .then(() => disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
-        exports: pe.exports
-          .filter((e) => {
-            const va = pe.optionalHeader.imageBase + e.address;
-            return va >= baseAddr && va < baseAddr + textSection.sizeOfRawData;
-          })
-          .map((e) => ({ name: e.name, address: pe.optionalHeader.imageBase + e.address })),
-        entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
-        pdataFunctions,
-        handlerAddresses,
-      }))
+    disasmWorker
+      .configure(pe.strings, iatLookup, { driverMode: driverInfo.isDriver })
+      .then(() =>
+        disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
+          exports: pe.exports
+            .filter((e) => {
+              const va = pe.optionalHeader.imageBase + e.address;
+              return va >= baseAddr && va < baseAddr + textSection.sizeOfRawData;
+            })
+            .map((e) => ({ name: e.name, address: pe.optionalHeader.imageBase + e.address })),
+          entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
+          pdataFunctions,
+          handlerAddresses,
+        }),
+      )
       .then(async (funcs) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });
         // Pre-send func map + jump tables to worker for decompilation
         const funcEntryMap = new Map<number, { name: string; address: number }>();
-        for (const fn of funcs) funcEntryMap.set(fn.address, { name: fn.name, address: fn.address });
+        for (const fn of funcs)
+          funcEntryMap.set(fn.address, { name: fn.name, address: fn.address });
         disasmWorker.configureDecompileMaps(funcEntryMap);
 
         // IRP dispatch detection for drivers
         if (driverInfo.isDriver && funcs.length > 0) {
           const entryVA = pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint;
-          const entryFunc = funcs.find(f => f.address === entryVA);
+          const entryFunc = funcs.find((f) => f.address === entryVA);
           if (entryFunc) {
             const entryOffset = entryFunc.address - baseAddr;
             const entrySize = Math.min(entryFunc.size, sectionBytes.length - entryOffset);
             if (entryOffset >= 0 && entrySize > 0) {
               const entryBytes = sectionBytes.subarray(entryOffset, entryOffset + entrySize);
-              const entryInsns = await disasmWorker.disassemble(entryBytes, entryFunc.address, pe.is64);
+              const entryInsns = await disasmWorker.disassemble(
+                entryBytes,
+                entryFunc.address,
+                pe.is64,
+              );
               const irpHandlers = await disasmWorker.detectIRPDispatches(entryInsns, pe.is64);
               if (irpHandlers.length > 0) {
                 dispatch({ type: "SET_IRP_HANDLERS", handlers: irpHandlers });
                 for (const handler of irpHandlers) {
                   if (handler.handlerAddress > 0) {
-                    dispatch({ type: "RENAME_FUNCTION", address: handler.handlerAddress, name: `${handler.irpName}_handler` });
+                    dispatch({
+                      type: "RENAME_FUNCTION",
+                      address: handler.handlerAddress,
+                      name: `${handler.irpName}_handler`,
+                    });
                   }
                 }
               }
@@ -262,12 +299,21 @@ export default function App() {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
         }
         // Derive func entries for call graph
-        const funcEntries: [number, number][] = funcs.map(f => [f.address, f.size]);
+        const funcEntries: [number, number][] = funcs.map((f) => [f.address, f.size]);
         // Derive data section ranges for data xrefs
         const dataSections = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
 
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "building-xrefs" });
-        return disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries, dataSections)
+        return disasmWorker
+          .buildAllXrefs(
+            sectionBytes,
+            baseAddr,
+            pe.is64,
+            stringAddrs,
+            iatAddrs,
+            funcEntries,
+            dataSections,
+          )
           .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
             dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
             dispatch({ type: "SET_CALL_GRAPH", callGraph });
@@ -279,7 +325,10 @@ export default function App() {
       .catch((err) => {
         console.error("[peek-a-bin] analysis failed", err);
         dispatch({ type: "SET_ANALYSIS_PHASE", phase: "failed" });
-        dispatch({ type: "SET_ERROR", error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}` });
+        dispatch({
+          type: "SET_ERROR",
+          error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
       });
   }, [state.peFile, state.disasmReady]);
 
@@ -287,7 +336,10 @@ export default function App() {
   const stringsConfiguredRef = useRef(false);
   useEffect(() => {
     if (!state.peFile || !state.disasmReady) return;
-    if (state.peFile.strings.size === 0) { stringsConfiguredRef.current = false; return; }
+    if (state.peFile.strings.size === 0) {
+      stringsConfiguredRef.current = false;
+      return;
+    }
     if (stringsConfiguredRef.current) return;
     stringsConfiguredRef.current = true;
     const pe = state.peFile;
@@ -299,17 +351,30 @@ export default function App() {
     if (buffer && state.functions.length > 0) {
       const textSection = findCodeSection(pe.sections);
       if (textSection) {
-        const sectionBytes = new Uint8Array(buffer, textSection.pointerToRawData, textSection.sizeOfRawData);
+        const sectionBytes = new Uint8Array(
+          buffer,
+          textSection.pointerToRawData,
+          textSection.sizeOfRawData,
+        );
         const baseAddr = pe.optionalHeader.imageBase + textSection.virtualAddress;
         const stringAddrs = Array.from(pe.strings.keys());
         const iatAddrs: number[] = [];
         for (const imp of pe.imports) {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
         }
-        const funcEntries2: [number, number][] = state.functions.map(f => [f.address, f.size]);
+        const funcEntries2: [number, number][] = state.functions.map((f) => [f.address, f.size]);
         const dataSections2 = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
         if (stringAddrs.length > 0 || iatAddrs.length > 0) {
-          disasmWorker.buildAllXrefs(sectionBytes, baseAddr, pe.is64, stringAddrs, iatAddrs, funcEntries2, dataSections2)
+          disasmWorker
+            .buildAllXrefs(
+              sectionBytes,
+              baseAddr,
+              pe.is64,
+              stringAddrs,
+              iatAddrs,
+              funcEntries2,
+              dataSections2,
+            )
             .then(({ stringXrefs, importXrefs, callGraph, dataXrefs }) => {
               dispatch({ type: "SET_XREFS", stringXrefs, importXrefs, dataXrefs });
               dispatch({ type: "SET_CALL_GRAPH", callGraph });
@@ -320,12 +385,21 @@ export default function App() {
         }
       }
     }
-  }, [state.peFile, state.peFile?.strings.size, state.disasmReady, state.functions.length, dispatch]);
+  }, [
+    state.peFile,
+    state.peFile?.strings.size,
+    state.disasmReady,
+    state.functions.length,
+    dispatch,
+  ]);
 
   // Parse hash on file load — apply saved address/tab from URL
   const hashAppliedRef = useRef(false);
   useEffect(() => {
-    if (!state.peFile) { hashAppliedRef.current = false; return; }
+    if (!state.peFile) {
+      hashAppliedRef.current = false;
+      return;
+    }
     if (hashAppliedRef.current) return;
     hashAppliedRef.current = true;
     const hash = window.location.hash.replace(/^#/, "");
@@ -377,41 +451,40 @@ export default function App() {
     return () => window.removeEventListener("popstate", handler);
   }, [state.peFile, state.currentAddress, state.activeTab, dispatch]);
 
-  const handleFile = useCallback(
-    (buffer: ArrayBuffer, fileName: string) => {
-      dispatch({ type: "RESET" });
-      stringsConfiguredRef.current = false;
-      setDriverBannerDismissed(false);
-      dispatch({ type: "SET_LOADING" });
-      dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
-      try {
-        bufferRef.current = buffer;
-        const pe = parsePE(buffer);
-        dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
-        // Run anomaly detection synchronously (fast)
-        const anomalies = detectAnomalies(pe);
-        if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
-        // Save to IndexedDB for recent files
-        void saveRecentFile(fileName, buffer)
-          .catch((err) => console.error("[peek-a-bin] failed to save recent file", err));
-        // Extract strings off the main thread via worker
-        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
-        disasmWorker.extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)
-          .then(({ strings, stringTypes }) => {
-            dispatch({ type: "SET_STRINGS", strings, stringTypes });
-          })
-          // Non-fatal: the PE is loaded and browsable without extracted strings.
-          .catch((err) => console.error("[peek-a-bin] string extraction failed", err));
-      } catch (e) {
-        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "idle" });
-        dispatch({
-          type: "SET_ERROR",
-          error: e instanceof Error ? e.message : "Failed to parse PE file",
-        });
-      }
-    },
-    [],
-  );
+  const handleFile = useCallback((buffer: ArrayBuffer, fileName: string) => {
+    dispatch({ type: "RESET" });
+    stringsConfiguredRef.current = false;
+    setDriverBannerDismissed(false);
+    dispatch({ type: "SET_LOADING" });
+    dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
+    try {
+      bufferRef.current = buffer;
+      const pe = parsePE(buffer);
+      dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
+      // Run anomaly detection synchronously (fast)
+      const anomalies = detectAnomalies(pe);
+      if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+      // Save to IndexedDB for recent files
+      void saveRecentFile(fileName, buffer).catch((err) =>
+        console.error("[peek-a-bin] failed to save recent file", err),
+      );
+      // Extract strings off the main thread via worker
+      dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
+      disasmWorker
+        .extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)
+        .then(({ strings, stringTypes }) => {
+          dispatch({ type: "SET_STRINGS", strings, stringTypes });
+        })
+        // Non-fatal: the PE is loaded and browsable without extracted strings.
+        .catch((err) => console.error("[peek-a-bin] string extraction failed", err));
+    } catch (e) {
+      dispatch({ type: "SET_ANALYSIS_PHASE", phase: "idle" });
+      dispatch({
+        type: "SET_ERROR",
+        error: e instanceof Error ? e.message : "Failed to parse PE file",
+      });
+    }
+  }, []);
 
   const mountedTabs = useRef(new Set<string>());
   if (state.peFile) mountedTabs.current.add(state.activeTab);
@@ -432,7 +505,10 @@ export default function App() {
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeGoTo = useCallback(() => setGoToOpen(false), []);
-  const fontStyle = useMemo(() => ({ '--mono-font-size': `${fontSize}px` } as React.CSSProperties), [fontSize]);
+  const fontStyle = useMemo(
+    () => ({ "--mono-font-size": `${fontSize}px` }) as React.CSSProperties,
+    [fontSize],
+  );
 
   const renderMainView = () => {
     if (!state.peFile) return null;
@@ -440,7 +516,13 @@ export default function App() {
       mountedTabs.current.has(key) ? (
         <div key={key} className={state.activeTab === key ? "h-full" : "hidden"}>
           {isLazy ? (
-            <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500 text-sm">Loading...</div>}>
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center h-full text-gray-500 text-sm">
+                  Loading...
+                </div>
+              }
+            >
               <Component />
             </Suspense>
           ) : (
@@ -455,7 +537,13 @@ export default function App() {
     <AppStateContext.Provider value={state}>
       <AppDispatchContext.Provider value={dispatch}>
         {!state.peFile ? (
-          <FileLoader onFile={handleFile} loading={state.loading} error={state.error} analysisPhase={state.analysisPhase} fileName={state.fileName} />
+          <FileLoader
+            onFile={handleFile}
+            loading={state.loading}
+            error={state.error}
+            analysisPhase={state.analysisPhase}
+            fileName={state.fileName}
+          />
         ) : (
           <div className="flex flex-col h-screen app-bg" style={fontStyle}>
             <AddressBar />
@@ -463,18 +551,22 @@ export default function App() {
               <div className="bg-amber-900/40 border-b border-amber-700/50 px-4 py-1.5 flex items-center gap-3 text-xs shrink-0">
                 <span className="font-bold text-amber-400 tracking-wide">KERNEL DRIVER</span>
                 <span className="text-amber-300/80">
-                  Subsystem: NATIVE{state.driverInfo.isWDM && ' | WDM'}
+                  Subsystem: NATIVE{state.driverInfo.isWDM && " | WDM"}
                 </span>
                 <span className="text-amber-300/60">
-                  {state.driverInfo.kernelImportCount} kernel APIs from {state.driverInfo.kernelModules.length} module{state.driverInfo.kernelModules.length !== 1 ? 's' : ''}
+                  {state.driverInfo.kernelImportCount} kernel APIs from{" "}
+                  {state.driverInfo.kernelModules.length} module
+                  {state.driverInfo.kernelModules.length !== 1 ? "s" : ""}
                 </span>
                 {state.irpHandlers.length > 0 && (
                   <span className="text-amber-300/60">
-                    | {state.irpHandlers.length} IRP handler{state.irpHandlers.length !== 1 ? 's' : ''}
+                    | {state.irpHandlers.length} IRP handler
+                    {state.irpHandlers.length !== 1 ? "s" : ""}
                   </span>
                 )}
                 <div className="flex-1" />
-                <button type="button"
+                <button
+                  type="button"
                   onClick={() => setDriverBannerDismissed(true)}
                   className="text-amber-500 hover:text-amber-300 text-sm leading-none"
                   title="Dismiss"
@@ -484,12 +576,12 @@ export default function App() {
               </div>
             )}
             <GraphOverviewContext.Provider value={graphOverviewState}>
-            <div className="flex flex-1 overflow-hidden">
-              <Sidebar />
-              <main className="flex-1 overflow-auto">
-                <ErrorBoundary>{renderMainView()}</ErrorBoundary>
-              </main>
-            </div>
+              <div className="flex flex-1 overflow-hidden">
+                <Sidebar />
+                <main className="flex-1 overflow-auto">
+                  <ErrorBoundary>{renderMainView()}</ErrorBoundary>
+                </main>
+              </div>
             </GraphOverviewContext.Provider>
             <StatusBar mcpStatus={mcpStatus} />
           </div>

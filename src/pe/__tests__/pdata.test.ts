@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { parsePdata } from '../pdata';
-import type { DataDirectory, SectionHeader } from '../types';
+import { describe, it, expect } from "vitest";
+import { parsePdata } from "../pdata";
+import type { DataDirectory, SectionHeader } from "../types";
 
 /**
  * Helper: build an ArrayBuffer containing pdata entries at a given file offset,
@@ -27,7 +27,7 @@ function buildPdataBuffer(
 
   const sections: SectionHeader[] = [
     {
-      name: '.pdata',
+      name: ".pdata",
       virtualSize: dataSize,
       virtualAddress: sectionVA,
       sizeOfRawData: dataSize + 64,
@@ -48,8 +48,8 @@ function buildPdataBuffer(
   return { buffer, sections, dir };
 }
 
-describe('parsePdata', () => {
-  it('parses entries with correct begin/end/unwind addresses', () => {
+describe("parsePdata", () => {
+  it("parses entries with correct begin/end/unwind addresses", () => {
     const { buffer, sections, dir } = buildPdataBuffer([
       { begin: 0x1000, end: 0x1050, unwind: 0x4000 },
       { begin: 0x1050, end: 0x1100, unwind: 0x4010 },
@@ -69,7 +69,7 @@ describe('parsePdata', () => {
     });
   });
 
-  it('filters out entries where beginAddress >= endAddress', () => {
+  it("filters out entries where beginAddress >= endAddress", () => {
     const { buffer, sections, dir } = buildPdataBuffer([
       { begin: 0x1000, end: 0x1050, unwind: 0x4000 },
       { begin: 0x2000, end: 0x2000, unwind: 0x4010 }, // begin == end
@@ -83,24 +83,24 @@ describe('parsePdata', () => {
     expect(results[1].beginAddress).toBe(0x1050);
   });
 
-  it('returns empty array for zero virtualAddress', () => {
+  it("returns empty array for zero virtualAddress", () => {
     const dir: DataDirectory = { virtualAddress: 0, size: 0 };
     const results = parsePdata(new ArrayBuffer(64), dir, []);
     expect(results).toEqual([]);
   });
 
-  it('returns empty array for zero size', () => {
+  it("returns empty array for zero size", () => {
     const dir: DataDirectory = { virtualAddress: 0x3000, size: 0 };
     const results = parsePdata(new ArrayBuffer(64), dir, []);
     expect(results).toEqual([]);
   });
 
-  it('returns empty array when rvaToFileOffset cannot resolve the directory', () => {
+  it("returns empty array when rvaToFileOffset cannot resolve the directory", () => {
     const dir: DataDirectory = { virtualAddress: 0x9000, size: 24 };
     // No sections that contain 0x9000
     const sections: SectionHeader[] = [
       {
-        name: '.text',
+        name: ".text",
         virtualSize: 0x1000,
         virtualAddress: 0x1000,
         sizeOfRawData: 0x200,

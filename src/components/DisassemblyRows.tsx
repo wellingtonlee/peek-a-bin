@@ -14,7 +14,11 @@ import type { FunctionSignature } from "../disasm/signatures";
 import type { PEFile } from "../pe/types";
 import { ColoredOperand, mnemonicClass } from "./shared";
 
-export function SeparatorRow({ index, start, height }: {
+export function SeparatorRow({
+  index,
+  start,
+  height,
+}: {
   index: number;
   start: number;
   height: number;
@@ -64,7 +68,9 @@ export function DataRow({
   onRowClick: (address: number) => void;
 }) {
   const addrHex = item.address.toString(16).toUpperCase().padStart(addrWidth, "0");
-  const bytesHex = Array.from(item.bytes.slice(0, 8)).map(b => b.toString(16).padStart(2, "0")).join(" ");
+  const bytesHex = Array.from(item.bytes.slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join(" ");
   const isCurrentAddr = item.address === currentAddress;
   const isBookmarked = bookmarkSet.has(item.address);
 
@@ -72,27 +78,45 @@ export function DataRow({
   let commentStr: React.ReactNode = null;
 
   if (item.directive === "dup") {
-    directiveStr = <span className="text-gray-500">{item.dupCount} dup({item.dupByte === 0 ? "0" : `0x${item.dupByte!.toString(16)}`})</span>;
+    directiveStr = (
+      <span className="text-gray-500">
+        {item.dupCount} dup({item.dupByte === 0 ? "0" : `0x${item.dupByte!.toString(16)}`})
+      </span>
+    );
   } else if (item.directive === "db" && item.stringValue != null) {
-    const escaped = item.stringValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    const escaped = item.stringValue
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\r/g, "\\r")
+      .replace(/\t/g, "\\t");
     directiveStr = <span className="text-green-400">"{escaped}", 0</span>;
-    if (item.stringType) commentStr = <span className="text-gray-500 ml-4">; {item.stringType}</span>;
+    if (item.stringType)
+      commentStr = <span className="text-gray-500 ml-4">; {item.stringType}</span>;
   } else if ((item.directive === "dd" || item.directive === "dq") && item.pointerTarget != null) {
     directiveStr = (
       <button
         type="button"
         tabIndex={-1}
         className="inline text-blue-400 cursor-pointer hover:underline"
-        onClick={(e) => { e.stopPropagation(); onAddressClick(item.pointerTarget!); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          onAddressClick(item.pointerTarget!);
+        }}
       >
         0x{item.pointerTarget.toString(16).toUpperCase()}
       </button>
     );
-    if (item.pointerLabel) commentStr = <span className="text-gray-500 ml-4">; {item.pointerLabel}</span>;
+    if (item.pointerLabel)
+      commentStr = <span className="text-gray-500 ml-4">; {item.pointerLabel}</span>;
   } else {
-    const hexStr = Array.from(item.bytes).map(b => b.toString(16).toUpperCase().padStart(2, "0") + "h").join(", ");
+    const hexStr = Array.from(item.bytes)
+      .map((b) => b.toString(16).toUpperCase().padStart(2, "0") + "h")
+      .join(", ");
     directiveStr = <span>{hexStr}</span>;
-    const ascii = Array.from(item.bytes).map(b => b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".").join("");
+    const ascii = Array.from(item.bytes)
+      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
+      .join("");
     commentStr = <span className="text-gray-500 ml-4">; {ascii}</span>;
   }
 
@@ -126,7 +150,9 @@ export function DataRow({
       <span>{directiveStr}</span>
       <span className="truncate flex items-center gap-1">
         {commentStr}
-        {userComment && <span className="disasm-user-comment truncate max-w-xs">; {userComment}</span>}
+        {userComment && (
+          <span className="disasm-user-comment truncate max-w-xs">; {userComment}</span>
+        )}
       </span>
     </div>
   );
@@ -228,35 +254,42 @@ export function LabelRow({
       onDoubleClick={() => setRenamingLabel({ address: fn.address, value: displayName })}
     >
       {isBookmarked && <span className="text-yellow-300 mr-1">★</span>}
-      <span>; ──── {displayName}{(() => {
-        const sig = getSigForFunc(fn);
-        return sig ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})` : "";
-      })()} ────</span>
-      {xrefCount > 0 && (() => {
-        const counts: Record<string, number> = {};
-        for (const x of xrefs!) {
-          counts[x.type] = (counts[x.type] ?? 0) + 1;
-        }
-        const parts: string[] = [];
-        if (counts.call) parts.push(`${counts.call} call${counts.call > 1 ? "s" : ""}`);
-        if (counts.jmp) parts.push(`${counts.jmp} jmp`);
-        if (counts.branch) parts.push(`${counts.branch} branch`);
-        if (counts.data) parts.push(`${counts.data} data`);
-        const label = parts.length > 0 ? parts.join(", ") : `${xrefCount} xref${xrefCount !== 1 ? "s" : ""}`;
-        return (
-          <button
-            type="button"
-            tabIndex={-1}
-            className="inline ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
-            onClick={(e) => {
-              e.stopPropagation();
-              onShowXrefs(fn.address);
-            }}
-          >
-            ({label})
-          </button>
-        );
-      })()}
+      <span>
+        ; ──── {displayName}
+        {(() => {
+          const sig = getSigForFunc(fn);
+          return sig
+            ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})`
+            : "";
+        })()} ────
+      </span>
+      {xrefCount > 0 &&
+        (() => {
+          const counts: Record<string, number> = {};
+          for (const x of xrefs!) {
+            counts[x.type] = (counts[x.type] ?? 0) + 1;
+          }
+          const parts: string[] = [];
+          if (counts.call) parts.push(`${counts.call} call${counts.call > 1 ? "s" : ""}`);
+          if (counts.jmp) parts.push(`${counts.jmp} jmp`);
+          if (counts.branch) parts.push(`${counts.branch} branch`);
+          if (counts.data) parts.push(`${counts.data} data`);
+          const label =
+            parts.length > 0 ? parts.join(", ") : `${xrefCount} xref${xrefCount !== 1 ? "s" : ""}`;
+          return (
+            <button
+              type="button"
+              tabIndex={-1}
+              className="inline ml-2 text-gray-500 hover:text-blue-400 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                onShowXrefs(fn.address);
+              }}
+            >
+              ({label})
+            </button>
+          );
+        })()}
     </div>
   );
 }
@@ -353,19 +386,19 @@ export function InsnRow({
   const bodyDepth = loopBodyMap.get(insn.address);
   const isCurrentAddr = insn.address === currentAddress;
   const isSearchMatch =
-    searchMatches.length > 0 &&
-    searchMatchIdx >= 0 &&
-    searchMatches[searchMatchIdx] === index;
+    searchMatches.length > 0 && searchMatchIdx >= 0 && searchMatches[searchMatchIdx] === index;
   const rowSelected = isSelected(index);
   const isDimmed = insnFilter !== "all" && !matchesFilter(row);
-  const isGapFill = insn.source === 'gap-fill';
+  const isGapFill = insn.source === "gap-fill";
 
-  const operandTargets = pe ? parseOperandTargets(
-    insn,
-    pe.optionalHeader.imageBase,
-    pe.optionalHeader.imageBase + pe.optionalHeader.sizeOfImage,
-    iatMap,
-  ) : [];
+  const operandTargets = pe
+    ? parseOperandTargets(
+        insn,
+        pe.optionalHeader.imageBase,
+        pe.optionalHeader.imageBase + pe.optionalHeader.sizeOfImage,
+        iatMap,
+      )
+    : [];
 
   // Build tooltip data for operand addresses
   let tooltipData: Map<number, string> | undefined;
@@ -388,7 +421,7 @@ export function InsnRow({
         continue;
       }
       // Check functions
-      const fn = functions.find(f => f.address === addr);
+      const fn = functions.find((f) => f.address === addr);
       if (fn) {
         if (!tooltipData) tooltipData = new Map();
         tooltipData.set(addr, `Function: ${getDisplayName(fn, renames)}`);
@@ -413,8 +446,10 @@ export function InsnRow({
   if (isLoopHeader) {
     borderStyle = "2px solid #eab308"; // gold
   } else if (bodyDepth !== undefined) {
-    if (bodyDepth >= 3) borderStyle = "2px solid rgba(239, 68, 68, 0.3)"; // red-500/30
-    else if (bodyDepth === 2) borderStyle = "2px solid rgba(249, 115, 22, 0.3)"; // orange-500/30
+    if (bodyDepth >= 3)
+      borderStyle = "2px solid rgba(239, 68, 68, 0.3)"; // red-500/30
+    else if (bodyDepth === 2)
+      borderStyle = "2px solid rgba(249, 115, 22, 0.3)"; // orange-500/30
     else borderStyle = "2px solid rgba(234, 179, 8, 0.3)"; // yellow-500/30
   }
 
@@ -446,7 +481,13 @@ export function InsnRow({
         borderLeft: borderStyle,
         padding: `0 var(--row-px)`,
       }}
-      title={isLoopHeader ? `Loop header (depth ${loopDepth})` : bodyDepth !== undefined ? `Loop body (depth ${bodyDepth})` : undefined}
+      title={
+        isLoopHeader
+          ? `Loop header (depth ${loopDepth})`
+          : bodyDepth !== undefined
+            ? `Loop body (depth ${bodyDepth})`
+            : undefined
+      }
       onContextMenu={(e) => onContextMenu(e, insn)}
       onClick={(e) => {
         if (e.shiftKey) {
@@ -489,16 +530,9 @@ export function InsnRow({
         onClick={() => onAddressClick(insn.address)}
         onDoubleClick={() => onDoubleClickAddr(insn.address)}
       >
-        {insn.address
-          .toString(16)
-          .toUpperCase()
-          .padStart(addrWidth, "0")}
+        {insn.address.toString(16).toUpperCase().padStart(addrWidth, "0")}
       </button>
-      {showBytes && (
-        <span className="disasm-bytes truncate">
-          {bytesHex}
-        </span>
-      )}
+      {showBytes && <span className="disasm-bytes truncate">{bytesHex}</span>}
       <button
         type="button"
         tabIndex={-1}
@@ -533,19 +567,22 @@ export function InsnRow({
           >
             ; {insn.comment}
           </span>
-        ) : insn.mnemonic === 'jmp' && (() => {
-          for (const t of operandTargets) {
-            const targetFn = funcMap.get(t.address);
-            if (targetFn && targetFn.address !== currentFunc?.address) {
-              return (
-                <span className="disasm-comment truncate max-w-xs">
-                  ; tail call → {getDisplayName(targetFn, renames)}
-                </span>
-              );
+        ) : (
+          insn.mnemonic === "jmp" &&
+          (() => {
+            for (const t of operandTargets) {
+              const targetFn = funcMap.get(t.address);
+              if (targetFn && targetFn.address !== currentFunc?.address) {
+                return (
+                  <span className="disasm-comment truncate max-w-xs">
+                    ; tail call → {getDisplayName(targetFn, renames)}
+                  </span>
+                );
+              }
             }
-          }
-          return null;
-        })()}
+            return null;
+          })()
+        )}
         {editingComment && editingComment.address === insn.address ? (
           <span className="shrink-0">
             <textarea
@@ -573,11 +610,11 @@ export function InsnRow({
             />
           </span>
         ) : comments[insn.address] ? (
-          <span
-            className="disasm-user-comment truncate max-w-xs"
-            title={comments[insn.address]}
-          >
-            ; {comments[insn.address].includes("\n") ? comments[insn.address].split("\n")[0] + " [...]" : comments[insn.address]}
+          <span className="disasm-user-comment truncate max-w-xs" title={comments[insn.address]}>
+            ;{" "}
+            {comments[insn.address].includes("\n")
+              ? comments[insn.address].split("\n")[0] + " [...]"
+              : comments[insn.address]}
           </span>
         ) : isCurrentAddr && !insn.comment ? (
           <span className="text-gray-600 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity select-none">

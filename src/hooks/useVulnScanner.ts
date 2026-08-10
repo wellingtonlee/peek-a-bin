@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
 import type { AppAction, AppState } from "./usePEFile";
-import type { DisasmFunction, } from "../disasm/types";
+import type { DisasmFunction } from "../disasm/types";
 import { streamChat } from "../llm/client";
 import { parseScanResponse, toScanFinding } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
@@ -34,79 +34,84 @@ export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
    * the surrounding loop owns the AI_SCAN_START/COMPLETE bracket so this call must
    * not open one of its own.
    */
-  const scanFunction = useCallback(async (
-    fn: DisasmFunction,
-    bulkSignal?: AbortSignal,
-  ): Promise<void> => {
-    if (!hasApiKey()) {
-      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-      return;
-    }
+  const scanFunction = useCallback(
+    async (fn: DisasmFunction, bulkSignal?: AbortSignal): Promise<void> => {
+      if (!hasApiKey()) {
+        window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+        return;
+      }
 
-    const pe = state.peFile;
-    if (!pe) return;
+      const pe = state.peFile;
+      if (!pe) return;
 
-    const standalone = bulkSignal === undefined;
-    const signal = bulkSignal ?? beginRequest().signal;
-    if (standalone) dispatch({ type: "AI_SCAN_START", total: 1 });
+      const standalone = bulkSignal === undefined;
+      const signal = bulkSignal ?? beginRequest().signal;
+      if (standalone) dispatch({ type: "AI_SCAN_START", total: 1 });
 
-    // No line cap: a truncated body can hide the sink the scan is looking for.
-    const code = await decompileForLLM(fn, pe, state.functions, state.renames);
-    if (signal.aborted) return;
-    if (!code) {
-      // Not a model failure, but still not a clean result — the user must not
-      // read "we could not decompile this" as "no vulnerabilities here".
-      dispatch({ type: "AI_SCAN_FAILED", error: `${getDisplayName(fn, state.renames)}: could not be decompiled` });
-      if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
-      return;
-    }
-
-    const funcName = getDisplayName(fn, state.renames);
-    const prompt = `Function: ${funcName} at 0x${fn.address.toString(16).toUpperCase()}\n\n${code}`;
-    const config = loadSettings();
-
-    let result: string;
-    try {
-      result = await new Promise<string>((resolve, reject) => {
-        let acc = "";
-        streamChat(
-          [{ role: "user", content: prompt }],
-          SYSTEM_PROMPT_VULN_SCAN,
-          config,
-          signal,
-          {
-            onToken: (accumulated) => { acc = accumulated; },
-            onDone: () => resolve(acc),
-            onError: (err) => reject(new Error(err)),
-          },
-          "vuln-scan",
-        );
-      });
-    } catch (err) {
+      // No line cap: a truncated body can hide the sink the scan is looking for.
+      const code = await decompileForLLM(fn, pe, state.functions, state.renames);
       if (signal.aborted) return;
-      dispatch({
-        type: "AI_SCAN_FAILED",
-        error: `${funcName}: ${err instanceof Error ? err.message : "scan request failed"}`,
-      });
+      if (!code) {
+        // Not a model failure, but still not a clean result — the user must not
+        // read "we could not decompile this" as "no vulnerabilities here".
+        dispatch({
+          type: "AI_SCAN_FAILED",
+          error: `${getDisplayName(fn, state.renames)}: could not be decompiled`,
+        });
+        if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
+        return;
+      }
+
+      const funcName = getDisplayName(fn, state.renames);
+      const prompt = `Function: ${funcName} at 0x${fn.address.toString(16).toUpperCase()}\n\n${code}`;
+      const config = loadSettings();
+
+      let result: string;
+      try {
+        result = await new Promise<string>((resolve, reject) => {
+          let acc = "";
+          streamChat(
+            [{ role: "user", content: prompt }],
+            SYSTEM_PROMPT_VULN_SCAN,
+            config,
+            signal,
+            {
+              onToken: (accumulated) => {
+                acc = accumulated;
+              },
+              onDone: () => resolve(acc),
+              onError: (err) => reject(new Error(err)),
+            },
+            "vuln-scan",
+          );
+        });
+      } catch (err) {
+        if (signal.aborted) return;
+        dispatch({
+          type: "AI_SCAN_FAILED",
+          error: `${funcName}: ${err instanceof Error ? err.message : "scan request failed"}`,
+        });
+        if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
+        return;
+      }
+
+      if (signal.aborted) return;
+
+      const parsed = parseScanResponse(result);
+      if (!parsed.ok) {
+        dispatch({ type: "AI_SCAN_FAILED", error: `${funcName}: ${parsed.error}` });
+        if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
+        return;
+      }
+
+      // Dispatched even when the model found nothing, so a clean function counts as
+      // scanned rather than looking like a function that was never reached.
+      const findings = parsed.value.map((item) => toScanFinding(item, fn.address, funcName));
+      dispatch({ type: "AI_SCAN_ADD", findings });
       if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
-      return;
-    }
-
-    if (signal.aborted) return;
-
-    const parsed = parseScanResponse(result);
-    if (!parsed.ok) {
-      dispatch({ type: "AI_SCAN_FAILED", error: `${funcName}: ${parsed.error}` });
-      if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
-      return;
-    }
-
-    // Dispatched even when the model found nothing, so a clean function counts as
-    // scanned rather than looking like a function that was never reached.
-    const findings = parsed.value.map(item => toScanFinding(item, fn.address, funcName));
-    dispatch({ type: "AI_SCAN_ADD", findings });
-    if (standalone) dispatch({ type: "AI_SCAN_COMPLETE" });
-  }, [state.peFile, state.functions, state.renames, dispatch, beginRequest]);
+    },
+    [state.peFile, state.functions, state.renames, dispatch, beginRequest],
+  );
 
   const scanSuspicious = useCallback(async () => {
     if (!hasApiKey()) {
@@ -147,7 +152,7 @@ export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {
       }
     }
 
-    const targets = state.functions.filter(f => suspiciousFuncs.has(f.address)).slice(0, 20);
+    const targets = state.functions.filter((f) => suspiciousFuncs.has(f.address)).slice(0, 20);
 
     // Opens the run: clears findings and any error left over from a previous scan.
     dispatch({ type: "AI_SCAN_START", total: targets.length });

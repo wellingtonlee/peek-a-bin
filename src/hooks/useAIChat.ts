@@ -4,11 +4,7 @@ import { streamChat } from "../llm/client";
 import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
 import type { PEFile } from "../pe/types";
-import {
-  IMAGE_SCN_MEM_EXECUTE,
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_MEM_WRITE,
-} from "../pe/constants";
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 
 interface ChatState {
   messages: ChatMessage[];
@@ -28,9 +24,18 @@ type ChatAction =
 function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "ADD_USER":
-      return { ...state, messages: [...state.messages, { role: "user", content: action.content }], error: null };
+      return {
+        ...state,
+        messages: [...state.messages, { role: "user", content: action.content }],
+        error: null,
+      };
     case "BEGIN_STREAM":
-      return { ...state, messages: [...state.messages, { role: "assistant", content: "" }], streaming: true, error: null };
+      return {
+        ...state,
+        messages: [...state.messages, { role: "assistant", content: "" }],
+        streaming: true,
+        error: null,
+      };
     case "STREAM_TOKEN": {
       const msgs = [...state.messages];
       if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
@@ -53,20 +58,26 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
 const MAX_MESSAGES = 50;
 
-function buildSystemPrompt(pe: PEFile | null, fileName: string | null, currentCode: string | null): string {
+function buildSystemPrompt(
+  pe: PEFile | null,
+  fileName: string | null,
+  currentCode: string | null,
+): string {
   let prompt = SYSTEM_PROMPT_CHAT;
 
   if (pe && fileName) {
     const arch = pe.is64 ? "x86-64" : "x86";
     const entry = `0x${(pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint).toString(16).toUpperCase()}`;
-    const sections = pe.sections.map(s => {
-      const name = s.name.replace(/\0/g, "").trim();
-      const flags: string[] = [];
-      if (s.characteristics & IMAGE_SCN_MEM_EXECUTE) flags.push("X");
-      if (s.characteristics & IMAGE_SCN_MEM_READ) flags.push("R");
-      if (s.characteristics & IMAGE_SCN_MEM_WRITE) flags.push("W");
-      return `${name} (${flags.join("")}, 0x${s.virtualSize.toString(16)})`;
-    }).join(", ");
+    const sections = pe.sections
+      .map((s) => {
+        const name = s.name.replace(/\0/g, "").trim();
+        const flags: string[] = [];
+        if (s.characteristics & IMAGE_SCN_MEM_EXECUTE) flags.push("X");
+        if (s.characteristics & IMAGE_SCN_MEM_READ) flags.push("R");
+        if (s.characteristics & IMAGE_SCN_MEM_WRITE) flags.push("W");
+        return `${name} (${flags.join("")}, 0x${s.virtualSize.toString(16)})`;
+      })
+      .join(", ");
 
     prompt += `\n\n## Binary Context
 File: ${fileName}
@@ -100,7 +111,11 @@ export function useAIChat(
   fileName: string | null,
   currentCode: string | null,
 ): UseAIChatResult {
-  const [state, dispatch] = useReducer(chatReducer, { messages: [], streaming: false, error: null });
+  const [state, dispatch] = useReducer(chatReducer, {
+    messages: [],
+    streaming: false,
+    error: null,
+  });
   const abortRef = useRef<AbortController | null>(null);
   const accRef = useRef("");
   const loadedFileRef = useRef<string | null>(null);
@@ -116,62 +131,76 @@ export function useAIChat(
         const msgs: ChatMessage[] = JSON.parse(raw);
         if (Array.isArray(msgs)) dispatch({ type: "LOAD", messages: msgs.slice(-MAX_MESSAGES) });
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [fileName]);
 
   // Persist messages
   useEffect(() => {
     if (!fileName || state.streaming) return;
     if (state.messages.length === 0) {
-      try { localStorage.removeItem(`peek-a-bin:chat:${fileName}`); } catch {}
+      try {
+        localStorage.removeItem(`peek-a-bin:chat:${fileName}`);
+      } catch {}
       return;
     }
     try {
-      localStorage.setItem(`peek-a-bin:chat:${fileName}`, JSON.stringify(state.messages.slice(-MAX_MESSAGES)));
-    } catch { /* quota */ }
+      localStorage.setItem(
+        `peek-a-bin:chat:${fileName}`,
+        JSON.stringify(state.messages.slice(-MAX_MESSAGES)),
+      );
+    } catch {
+      /* quota */
+    }
   }, [fileName, state.messages, state.streaming]);
 
-  const sendMessage = useCallback((content: string) => {
-    if (!content.trim() || state.streaming) return;
-    if (!hasApiKey()) {
-      window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-      return;
-    }
+  const sendMessage = useCallback(
+    (content: string) => {
+      if (!content.trim() || state.streaming) return;
+      if (!hasApiKey()) {
+        window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+        return;
+      }
 
-    const userMsg: ChatMessage = { role: "user", content: content.trim() };
-    dispatch({ type: "ADD_USER", content: userMsg.content });
-    dispatch({ type: "BEGIN_STREAM" });
+      const userMsg: ChatMessage = { role: "user", content: content.trim() };
+      dispatch({ type: "ADD_USER", content: userMsg.content });
+      dispatch({ type: "BEGIN_STREAM" });
 
-    const config = loadSettings();
-    // `state.streaming` normally prevents overlap, but abort the previous
-    // controller anyway so the ref can never be overwritten while live.
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    accRef.current = "";
+      const config = loadSettings();
+      // `state.streaming` normally prevents overlap, but abort the previous
+      // controller anyway so the ref can never be overwritten while live.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      accRef.current = "";
 
-    const allMessages = [...state.messages, userMsg];
-    const systemPrompt = buildSystemPrompt(pe, fileName, currentCode);
+      const allMessages = [...state.messages, userMsg];
+      const systemPrompt = buildSystemPrompt(pe, fileName, currentCode);
 
-    streamChat(allMessages, systemPrompt, config, controller.signal, {
-      onToken: (accumulated) => {
-        accRef.current = accumulated;
-        dispatch({ type: "STREAM_TOKEN", content: accumulated });
-      },
-      onDone: () => {
-        dispatch({ type: "STREAM_DONE" });
-      },
-      onError: (error) => {
-        dispatch({ type: "STREAM_ERROR", error });
-      },
-    });
-  }, [state.messages, state.streaming, pe, fileName, currentCode]);
+      streamChat(allMessages, systemPrompt, config, controller.signal, {
+        onToken: (accumulated) => {
+          accRef.current = accumulated;
+          dispatch({ type: "STREAM_TOKEN", content: accumulated });
+        },
+        onDone: () => {
+          dispatch({ type: "STREAM_DONE" });
+        },
+        onError: (error) => {
+          dispatch({ type: "STREAM_ERROR", error });
+        },
+      });
+    },
+    [state.messages, state.streaming, pe, fileName, currentCode],
+  );
 
   const clearChat = useCallback(() => {
     abortRef.current?.abort();
     dispatch({ type: "CLEAR" });
     if (fileName) {
-      try { localStorage.removeItem(`peek-a-bin:chat:${fileName}`); } catch {}
+      try {
+        localStorage.removeItem(`peek-a-bin:chat:${fileName}`);
+      } catch {}
     }
   }, [fileName]);
 

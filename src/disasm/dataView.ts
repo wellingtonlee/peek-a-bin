@@ -58,11 +58,24 @@ export function buildDataItems(
     if (offset + ptrSize <= bytes.length) {
       let val: number;
       if (is64) {
-        const lo = bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
-        const hi = bytes[offset + 4] | (bytes[offset + 5] << 8) | (bytes[offset + 6] << 16) | (bytes[offset + 7] << 24);
+        const lo =
+          bytes[offset] |
+          (bytes[offset + 1] << 8) |
+          (bytes[offset + 2] << 16) |
+          (bytes[offset + 3] << 24);
+        const hi =
+          bytes[offset + 4] |
+          (bytes[offset + 5] << 8) |
+          (bytes[offset + 6] << 16) |
+          (bytes[offset + 7] << 24);
         val = (hi >>> 0) * 0x100000000 + (lo >>> 0);
       } else {
-        val = (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+        val =
+          (bytes[offset] |
+            (bytes[offset + 1] << 8) |
+            (bytes[offset + 2] << 16) |
+            (bytes[offset + 3] << 24)) >>>
+          0;
       }
 
       let isPtr = false;

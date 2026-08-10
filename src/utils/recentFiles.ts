@@ -63,19 +63,21 @@ export async function saveRecentFile(name: string, buffer: ArrayBuffer): Promise
 export async function getRecentFiles(): Promise<RecentFileEntry[]> {
   try {
     const db = await openDB();
-    const all = await new Promise<{ name: string; size: number; lastOpened: number }[]>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readonly");
-      const req = tx.objectStore(STORE_NAME).getAll();
-      req.onsuccess = () =>
-        resolve(
-          req.result.map((e: any) => ({
-            name: e.name,
-            size: e.size,
-            lastOpened: e.lastOpened,
-          })),
-        );
-      req.onerror = () => reject(req.error);
-    });
+    const all = await new Promise<{ name: string; size: number; lastOpened: number }[]>(
+      (resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const req = tx.objectStore(STORE_NAME).getAll();
+        req.onsuccess = () =>
+          resolve(
+            req.result.map((e: any) => ({
+              name: e.name,
+              size: e.size,
+              lastOpened: e.lastOpened,
+            })),
+          );
+        req.onerror = () => reject(req.error);
+      },
+    );
     all.sort((a, b) => b.lastOpened - a.lastOpened);
     return all.slice(0, MAX_ENTRIES);
   } catch {

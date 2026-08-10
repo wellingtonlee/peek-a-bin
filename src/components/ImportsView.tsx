@@ -45,31 +45,25 @@ export function ImportsView() {
     return pe.imports
       .map((imp) => ({
         ...imp,
-        functions: imp.functions.map((fn, idx) => ({ name: fn, iatAddr: imp.iatAddresses[idx] ?? 0 })).filter((f) =>
-          f.name.toLowerCase().includes(filter.toLowerCase()),
-        ),
+        functions: imp.functions
+          .map((fn, idx) => ({ name: fn, iatAddr: imp.iatAddresses[idx] ?? 0 }))
+          .filter((f) => f.name.toLowerCase().includes(filter.toLowerCase())),
       }))
       .filter(
         (imp) =>
-          imp.functions.length > 0 ||
-          imp.libraryName.toLowerCase().includes(filter.toLowerCase()),
+          imp.functions.length > 0 || imp.libraryName.toLowerCase().includes(filter.toLowerCase()),
       );
   }, [pe, filter]);
 
   const totalFunctions = useMemo(() => {
     if (!pe) return 0;
-    return pe.imports.reduce(
-      (sum, imp) => sum + imp.functions.length,
-      0,
-    );
+    return pe.imports.reduce((sum, imp) => sum + imp.functions.length, 0);
   }, [pe]);
 
-  const filteredFuncCount = useMemo(() =>
-    filtered.reduce(
-      (sum, imp) => sum + imp.functions.length,
-      0,
-    ),
-  [filtered]);
+  const filteredFuncCount = useMemo(
+    () => filtered.reduce((sum, imp) => sum + imp.functions.length, 0),
+    [filtered],
+  );
 
   if (!pe) return null;
 
@@ -97,16 +91,28 @@ export function ImportsView() {
         />
         {filter && (
           <span className="text-gray-500 text-[11px]">
-            {filteredFuncCount} match{filteredFuncCount !== 1 ? "es" : ""} in{" "}
-            {filtered.length} librar{filtered.length !== 1 ? "ies" : "y"}
+            {filteredFuncCount} match{filteredFuncCount !== 1 ? "es" : ""} in {filtered.length}{" "}
+            librar{filtered.length !== 1 ? "ies" : "y"}
           </span>
         )}
         <div className="flex-1" />
         {!importXrefs ? (
           <span className="text-[10px] text-gray-500 flex items-center gap-1">
             <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
             Xrefs loading...
           </span>
@@ -120,7 +126,8 @@ export function ImportsView() {
           const isCollapsed = collapsed.has(imp.libraryName);
           return (
             <div key={i}>
-              <button type="button"
+              <button
+                type="button"
                 onClick={() => toggleCollapse(imp.libraryName)}
                 className="flex items-center gap-1.5 text-yellow-400 font-semibold hover:text-yellow-300 py-0.5"
               >
@@ -139,15 +146,18 @@ export function ImportsView() {
                     return (
                       <li key={j} className="text-gray-300 flex items-center gap-2">
                         <span>{fn.name}</span>
-                        {state.driverInfo?.isDriver && (() => {
-                          const risk = getApiRiskTag(fn.name);
-                          if (!risk) return null;
-                          return (
-                            <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${risk.colorClass}`}>
-                              {risk.category}
-                            </span>
-                          );
-                        })()}
+                        {state.driverInfo?.isDriver &&
+                          (() => {
+                            const risk = getApiRiskTag(fn.name);
+                            if (!risk) return null;
+                            return (
+                              <span
+                                className={`px-1 py-0.5 rounded text-[9px] font-medium ${risk.colorClass}`}
+                              >
+                                {risk.category}
+                              </span>
+                            );
+                          })()}
                         {importXrefs && xrefCount > 0 && (
                           <button
                             type="button"
@@ -191,7 +201,8 @@ export function ImportsView() {
             Xrefs to {xrefPopup.funcName}
           </div>
           {xrefPopup.sources.map((src, i) => (
-            <button type="button"
+            <button
+              type="button"
               key={i}
               className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
               onClick={() => {

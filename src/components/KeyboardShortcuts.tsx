@@ -122,10 +122,7 @@ export function KeyboardShortcuts({ open, onClose }: Props) {
               {group.category}
             </div>
             {group.shortcuts.map((shortcut) => (
-              <div
-                key={shortcut.key}
-                className="flex items-center justify-between py-1 text-xs"
-              >
+              <div key={shortcut.key} className="flex items-center justify-between py-1 text-xs">
                 <span className="text-gray-300">{shortcut.action}</span>
                 <span className="flex items-center gap-1">
                   {shortcut.key.split(" / ").map((k, i) => (

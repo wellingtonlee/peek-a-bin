@@ -11,7 +11,10 @@ export function DataInspector({ offset, bytes, baseAddress }: DataInspectorProps
     const remaining = bytes.length - offset;
     if (remaining <= 0) return null;
 
-    const buf = bytes.buffer.slice(bytes.byteOffset + offset, bytes.byteOffset + offset + Math.min(remaining, 64));
+    const buf = bytes.buffer.slice(
+      bytes.byteOffset + offset,
+      bytes.byteOffset + offset + Math.min(remaining, 64),
+    );
     const view = new DataView(buf);
     const rows: { label: string; value: string }[] = [];
 
@@ -20,12 +23,18 @@ export function DataInspector({ offset, bytes, baseAddress }: DataInspectorProps
 
     // Int16 LE
     if (remaining >= 2) {
-      rows.push({ label: "Int16 LE", value: `${view.getInt16(0, true)} (u: ${view.getUint16(0, true)})` });
+      rows.push({
+        label: "Int16 LE",
+        value: `${view.getInt16(0, true)} (u: ${view.getUint16(0, true)})`,
+      });
     }
 
     // Int32 LE
     if (remaining >= 4) {
-      rows.push({ label: "Int32 LE", value: `${view.getInt32(0, true)} (u: ${view.getUint32(0, true)})` });
+      rows.push({
+        label: "Int32 LE",
+        value: `${view.getInt32(0, true)} (u: ${view.getUint32(0, true)})`,
+      });
     }
 
     // Float32 LE

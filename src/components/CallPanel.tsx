@@ -80,31 +80,25 @@ export function CallPanel({
           Call Graph: {getDisplayName(func, renames)}
         </span>
         <div className="flex-1" />
-        <button type="button"
-          onClick={onClose}
-          className="text-gray-500 hover:text-white px-1"
-        >
+        <button type="button" onClick={onClose} className="text-gray-500 hover:text-white px-1">
           ✕
         </button>
       </div>
       <div className="flex flex-1 overflow-hidden">
         {/* Callers */}
         <div className="flex-1 border-r border-gray-700 overflow-auto p-2">
-          <div className="text-gray-500 mb-1 font-semibold">
-            Called by ({callers.length})
-          </div>
+          <div className="text-gray-500 mb-1 font-semibold">Called by ({callers.length})</div>
           {callers.length === 0 ? (
             <div className="text-gray-600 italic">No callers found</div>
           ) : (
             callers.map((c) => (
-              <button type="button"
+              <button
+                type="button"
                 key={c.fn.address}
                 onClick={() => onNavigate(c.sourceAddr)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"
               >
-                <span className="text-blue-400">
-                  {getDisplayName(c.fn, renames)}
-                </span>
+                <span className="text-blue-400">{getDisplayName(c.fn, renames)}</span>
                 <span className="text-gray-600 ml-1">
                   0x{c.fn.address.toString(16).toUpperCase()}
                 </span>
@@ -114,14 +108,13 @@ export function CallPanel({
         </div>
         {/* Callees */}
         <div className="flex-1 overflow-auto p-2">
-          <div className="text-gray-500 mb-1 font-semibold">
-            Calls ({callees.length})
-          </div>
+          <div className="text-gray-500 mb-1 font-semibold">Calls ({callees.length})</div>
           {callees.length === 0 ? (
             <div className="text-gray-600 italic">No calls found</div>
           ) : (
             callees.map((c) => (
-              <button type="button"
+              <button
+                type="button"
                 key={c.targetAddr}
                 onClick={() => onNavigate(c.targetAddr)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"

@@ -50,7 +50,9 @@ export function XrefPanel({
     filterTimerRef.current = setTimeout(() => setFilter(value), 250);
   }, []);
 
-  const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(new Set(["call", "jmp", "branch", "data"]));
+  const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(
+    new Set(["call", "jmp", "branch", "data"]),
+  );
   const [sortKey, setSortKey] = useState<SortKey>("from");
   const [sortAsc, setSortAsc] = useState(true);
   const [scopeMode, setScopeMode] = useState<ScopeMode>(scopeAddress != null ? "address" : "all");
@@ -76,7 +78,10 @@ export function XrefPanel({
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortAsc((v) => !v);
-    else { setSortKey(key); setSortAsc(true); }
+    else {
+      setSortKey(key);
+      setSortAsc(true);
+    }
   };
 
   // Flatten xref map into sorted, resolved entries
@@ -133,7 +138,19 @@ export function XrefPanel({
       return sortAsc ? cmp : -cmp;
     });
     return items;
-  }, [allXrefs, typeFilter, filter, sortKey, sortAsc, scopeMode, scopeAddress, currentFuncAddr, currentFuncEnd, currentInsnAddr, direction]);
+  }, [
+    allXrefs,
+    typeFilter,
+    filter,
+    sortKey,
+    sortAsc,
+    scopeMode,
+    scopeAddress,
+    currentFuncAddr,
+    currentFuncEnd,
+    currentInsnAddr,
+    direction,
+  ]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -149,13 +166,13 @@ export function XrefPanel({
     data: "text-purple-400",
   };
 
-  const sortIndicator = (key: SortKey) =>
-    sortKey === key ? (sortAsc ? " ▲" : " ▼") : "";
+  const sortIndicator = (key: SortKey) => (sortKey === key ? (sortAsc ? " ▲" : " ▼") : "");
 
   const scopeBtn = (mode: ScopeMode, label: string, show: boolean) => {
     if (!show) return null;
     return (
-      <button type="button"
+      <button
+        type="button"
         key={mode}
         onClick={() => setScopeMode(mode)}
         className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
@@ -178,15 +195,19 @@ export function XrefPanel({
         </span>
         <div className="flex items-center gap-1 ml-2">
           {(["call", "jmp", "branch", "data"] as XrefType[]).map((t) => (
-            <button type="button"
+            <button
+              type="button"
               key={t}
               onClick={() => toggleType(t)}
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
                 typeFilter.has(t)
-                  ? t === "call" ? "bg-green-800 text-green-300"
-                    : t === "jmp" ? "bg-red-800 text-red-300"
-                    : t === "branch" ? "bg-orange-800 text-orange-300"
-                    : "bg-purple-800 text-purple-300"
+                  ? t === "call"
+                    ? "bg-green-800 text-green-300"
+                    : t === "jmp"
+                      ? "bg-red-800 text-red-300"
+                      : t === "branch"
+                        ? "bg-orange-800 text-orange-300"
+                        : "bg-purple-800 text-purple-300"
                   : "bg-gray-800 text-gray-600"
               }`}
             >
@@ -200,8 +221,9 @@ export function XrefPanel({
           {scopeBtn("function", "Func", currentFuncAddr != null)}
           {scopeBtn("instruction", "Insn", currentInsnAddr != null)}
           {scopeMode === "instruction" && (
-            <button type="button"
-              onClick={() => setDirection((d) => d === "to" ? "from" : "to")}
+            <button
+              type="button"
+              onClick={() => setDirection((d) => (d === "to" ? "from" : "to"))}
               className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-700 text-gray-300 hover:bg-gray-600"
             >
               {direction === "to" ? "To" : "From"}
@@ -216,10 +238,7 @@ export function XrefPanel({
           className="ml-2 px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-[10px] w-40"
         />
         <div className="flex-1" />
-        <button type="button"
-          onClick={onClose}
-          className="text-gray-500 hover:text-white px-1"
-        >
+        <button type="button" onClick={onClose} className="text-gray-500 hover:text-white px-1">
           ✕
         </button>
       </div>
@@ -255,7 +274,9 @@ export function XrefPanel({
       <div ref={parentRef} className="flex-1 overflow-auto">
         {filtered.length === 0 ? (
           <div className="p-3 text-gray-500 text-center">
-            {allXrefs.length === 0 ? "No cross-references found." : "No xrefs match the current filters."}
+            {allXrefs.length === 0
+              ? "No cross-references found."
+              : "No xrefs match the current filters."}
           </div>
         ) : (
           <div
@@ -280,7 +301,9 @@ export function XrefPanel({
                   }}
                   onClick={() => onNavigate(x.fromAddr)}
                 >
-                  <div className={`w-12 shrink-0 font-semibold text-[10px] ${typeColors[x.type] ?? "text-gray-400"}`}>
+                  <div
+                    className={`w-12 shrink-0 font-semibold text-[10px] ${typeColors[x.type] ?? "text-gray-400"}`}
+                  >
                     {x.type}
                   </div>
                   <div className="w-32 shrink-0 font-mono text-blue-400">

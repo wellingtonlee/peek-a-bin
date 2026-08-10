@@ -58,8 +58,7 @@ export function StringsView() {
       const q = filter.toLowerCase();
       result = result.filter(
         (s) =>
-          s.value.toLowerCase().includes(q) ||
-          s.address.toString(16).toLowerCase().includes(q),
+          s.value.toLowerCase().includes(q) || s.address.toString(16).toLowerCase().includes(q),
       );
     }
     if (sortKey === "length") {
@@ -97,13 +96,28 @@ export function StringsView() {
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-4 py-1.5 bg-gray-800/50 border-b border-gray-700 text-xs text-gray-400 shrink-0">
         <span className="font-semibold text-gray-300">Strings</span>
-        <span>{filtered.length.toLocaleString()}{filterInput ? ` / ${allStrings.length.toLocaleString()}` : ""} strings</span>
+        <span>
+          {filtered.length.toLocaleString()}
+          {filterInput ? ` / ${allStrings.length.toLocaleString()}` : ""} strings
+        </span>
         <div className="flex-1" />
         {!stringXrefs ? (
           <span className="text-[10px] text-gray-500 flex items-center gap-1">
             <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
             Xrefs loading...
           </span>
@@ -111,7 +125,8 @@ export function StringsView() {
           <span className="text-[10px] text-green-400">Xrefs loaded</span>
         )}
         {(["all", "ascii", "utf16le"] as EncodingFilter[]).map((enc) => (
-          <button type="button"
+          <button
+            type="button"
             key={enc}
             onClick={() => setEncodingFilter(enc)}
             className={`px-1.5 py-0.5 rounded text-[10px] ${
@@ -123,7 +138,8 @@ export function StringsView() {
             {enc === "all" ? "All" : enc === "ascii" ? "ASCII" : "UTF-16"}
           </button>
         ))}
-        <button type="button"
+        <button
+          type="button"
           onClick={() => setSortKey(sortKey === "address" ? "length" : "address")}
           className="text-gray-500 hover:text-gray-300 px-1"
           title={sortKey === "address" ? "Sort: by address" : "Sort: by length"}
@@ -198,7 +214,8 @@ export function StringsView() {
                           const container = parentRef.current;
                           if (!container) return;
                           const cRect = container.getBoundingClientRect();
-                          const popW = 220, popH = 240;
+                          const popW = 220,
+                            popH = 240;
                           const rawX = rect.left - cRect.left + container.scrollLeft;
                           const rawY = rect.bottom - cRect.top + container.scrollTop;
                           const maxX = container.scrollLeft + cRect.width - popW - 8;
@@ -242,7 +259,8 @@ export function StringsView() {
               Xrefs to 0x{xrefPopup.address.toString(16).toUpperCase()}
             </div>
             {xrefPopup.sources.map((src, i) => (
-              <button type="button"
+              <button
+                type="button"
                 key={i}
                 className="w-full text-left px-3 py-1.5 hover:bg-gray-700 text-blue-400 font-mono"
                 onClick={() => {

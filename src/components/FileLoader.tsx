@@ -28,17 +28,30 @@ interface RecentFile {
 const ANALYSIS_STEPS = [
   { label: "Parsing PE", phases: ["parsing"] },
   { label: "Extracting strings", phases: ["extracting-strings"] },
-  { label: "Detecting functions", phases: ["detecting-functions", "recursive-descent", "gap-filling"] },
+  {
+    label: "Detecting functions",
+    phases: ["detecting-functions", "recursive-descent", "gap-filling"],
+  },
   { label: "Building xrefs", phases: ["building-xrefs"] },
 ] as const;
 
-const KNOWN_LS_KEYS = new Set(["sidebar-width", "sections-open", "graph-overview-open", "callers-open"]);
+const KNOWN_LS_KEYS = new Set([
+  "sidebar-width",
+  "sections-open",
+  "graph-overview-open",
+  "callers-open",
+]);
 
-function getStepStatus(stepIndex: number, analysisPhase: AnalysisPhase): "done" | "active" | "pending" {
+function getStepStatus(
+  stepIndex: number,
+  analysisPhase: AnalysisPhase,
+): "done" | "active" | "pending" {
   const step = ANALYSIS_STEPS[stepIndex];
   if ((step.phases as readonly string[]).includes(analysisPhase)) return "active";
 
-  const activeStepIndex = ANALYSIS_STEPS.findIndex(s => (s.phases as readonly string[]).includes(analysisPhase));
+  const activeStepIndex = ANALYSIS_STEPS.findIndex((s) =>
+    (s.phases as readonly string[]).includes(analysisPhase),
+  );
   if (analysisPhase === "ready") return "done";
   // Analysis aborted — stop every remaining step showing as pending-forever.
   if (analysisPhase === "failed") return "pending";
@@ -46,7 +59,11 @@ function getStepStatus(stepIndex: number, analysisPhase: AnalysisPhase): "done" 
   return stepIndex < activeStepIndex ? "done" : "pending";
 }
 
-function getLocalStorageAnnotations(name: string): { bookmarks: number; renames: number; comments: number } {
+function getLocalStorageAnnotations(name: string): {
+  bookmarks: number;
+  renames: number;
+  comments: number;
+} {
   try {
     const raw = localStorage.getItem(`peek-a-bin:${name}`);
     if (!raw) return { bookmarks: 0, renames: 0, comments: 0 };
@@ -120,10 +137,16 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
         combined.push({ ...f, hasBuffer: false, ...ann });
       }
       // Sort by lastOpened (most recent first), then by annotation count for ls-only
-      combined.sort((a, b) => b.lastOpened - a.lastOpened || (b.bookmarks + b.renames + b.comments) - (a.bookmarks + a.renames + a.comments));
+      combined.sort(
+        (a, b) =>
+          b.lastOpened - a.lastOpened ||
+          b.bookmarks + b.renames + b.comments - (a.bookmarks + a.renames + a.comments),
+      );
       setRecentFiles(combined.slice(0, 5));
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadExample = useCallback(async () => {
@@ -140,22 +163,27 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
     }
   }, [onFile]);
 
-  const handleRecentClick = useCallback(async (name: string) => {
-    setLoadingRecent(name);
-    try {
-      const buffer = await loadRecentFile(name);
-      if (buffer) {
-        onFile(buffer, name);
+  const handleRecentClick = useCallback(
+    async (name: string) => {
+      setLoadingRecent(name);
+      try {
+        const buffer = await loadRecentFile(name);
+        if (buffer) {
+          onFile(buffer, name);
+        }
+      } finally {
+        setLoadingRecent(null);
       }
-    } finally {
-      setLoadingRecent(null);
-    }
-  }, [onFile]);
+    },
+    [onFile],
+  );
 
   const handleRemoveRecent = useCallback(async (e: React.MouseEvent, name: string) => {
     e.stopPropagation();
     await deleteRecentFile(name);
-    try { localStorage.removeItem(`peek-a-bin:${name}`); } catch {}
+    try {
+      localStorage.removeItem(`peek-a-bin:${name}`);
+    } catch {}
     setRecentFiles((prev) => prev.filter((f) => f.name !== name));
   }, []);
 
@@ -217,11 +245,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
         disabled={isAnalyzing}
         className={`flex flex-col items-center justify-center w-[600px] h-[350px] border-2 border-dashed rounded-xl transition-colors ${
           isAnalyzing ? "" : "cursor-pointer"
-        } ${
-          dragging
-            ? "border-blue-400 bg-blue-400/10"
-            : "border-gray-600 hover:border-gray-400"
-        }`}
+        } ${dragging ? "border-blue-400 bg-blue-400/10" : "border-gray-600 hover:border-gray-400"}`}
         onDrop={isAnalyzing ? undefined : onDrop}
         onDragOver={isAnalyzing ? undefined : onDragOver}
         onDragLeave={isAnalyzing ? undefined : onDragLeave}
@@ -240,20 +264,22 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
                 const status = getStepStatus(i, analysisPhase);
                 return (
                   <div key={step.label} className="flex items-center gap-3">
-                    {status === "done" && (
-                      <span className="text-green-400 w-5 text-center">✓</span>
-                    )}
+                    {status === "done" && <span className="text-green-400 w-5 text-center">✓</span>}
                     {status === "active" && (
                       <span className="text-yellow-400 w-5 text-center animate-pulse">●</span>
                     )}
                     {status === "pending" && (
                       <span className="text-gray-600 w-5 text-center">○</span>
                     )}
-                    <span className={
-                      status === "done" ? "text-gray-400" :
-                      status === "active" ? "text-gray-200" :
-                      "text-gray-600"
-                    }>
+                    <span
+                      className={
+                        status === "done"
+                          ? "text-gray-400"
+                          : status === "active"
+                            ? "text-gray-200"
+                            : "text-gray-600"
+                      }
+                    >
                       {step.label}
                     </span>
                   </div>
@@ -264,7 +290,8 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
         ) : (
           /* Normal drop zone content */
           <>
-            <svg aria-hidden="true"
+            <svg
+              aria-hidden="true"
               className="w-16 h-16 mb-4 text-gray-500"
               fill="none"
               stroke="currentColor"
@@ -278,14 +305,8 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               />
             </svg>
             <p className="text-xl text-gray-300 mb-2">Drop a PE file here</p>
-            <p className="text-sm text-gray-500">
-              or click to browse (.exe, .dll)
-            </p>
-            {error && (
-              <p className="mt-4 text-sm text-red-400 max-w-md text-center">
-                {error}
-              </p>
-            )}
+            <p className="text-sm text-gray-500">or click to browse (.exe, .dll)</p>
+            {error && <p className="mt-4 text-sm text-red-400 max-w-md text-center">{error}</p>}
 
             {/* Divider + Try example */}
             <div className="flex items-center gap-3 mt-5 w-48">
@@ -293,7 +314,8 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
               <span className="text-xs text-gray-600">or</span>
               <hr className="flex-1 border-gray-700" />
             </div>
-            <button type="button"
+            <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 loadExample();
@@ -325,7 +347,8 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
           <div className="flex flex-col gap-1">
             {recentFiles.map((f) => {
               const parts: string[] = [];
-              if (f.bookmarks > 0) parts.push(`${f.bookmarks} bookmark${f.bookmarks !== 1 ? "s" : ""}`);
+              if (f.bookmarks > 0)
+                parts.push(`${f.bookmarks} bookmark${f.bookmarks !== 1 ? "s" : ""}`);
               if (f.renames > 0) parts.push(`${f.renames} rename${f.renames !== 1 ? "s" : ""}`);
               if (f.comments > 0) parts.push(`${f.comments} comment${f.comments !== 1 ? "s" : ""}`);
               const isLoading = loadingRecent === f.name;
@@ -336,9 +359,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
                 <div
                   key={f.name}
                   className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded group ${
-                    f.hasBuffer
-                      ? "cursor-pointer hover:bg-gray-800/60 transition-colors"
-                      : ""
+                    f.hasBuffer ? "cursor-pointer hover:bg-gray-800/60 transition-colors" : ""
                   }`}
                 >
                   <button
@@ -348,24 +369,33 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
                     onClick={() => handleRecentClick(f.name)}
                   >
                     <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <span className={`font-mono text-xs truncate ${f.hasBuffer ? "text-blue-400" : "text-gray-400"}`}>
+                      <span
+                        className={`font-mono text-xs truncate ${f.hasBuffer ? "text-blue-400" : "text-gray-400"}`}
+                      >
                         {f.name}
                       </span>
-                      {isLoading && <span className="text-yellow-400 text-[10px] animate-pulse">loading...</span>}
+                      {isLoading && (
+                        <span className="text-yellow-400 text-[10px] animate-pulse">
+                          loading...
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {f.size > 0 && (
                         <span className="text-gray-600 text-[10px]">{formatFileSize(f.size)}</span>
                       )}
                       {f.lastOpened > 0 && (
-                        <span className="text-gray-600 text-[10px]">{formatRelativeTime(f.lastOpened)}</span>
+                        <span className="text-gray-600 text-[10px]">
+                          {formatRelativeTime(f.lastOpened)}
+                        </span>
                       )}
                       {parts.length > 0 && (
                         <span className="text-gray-600 text-[10px]">{parts.join(", ")}</span>
                       )}
                     </div>
                   </button>
-                  <button type="button"
+                  <button
+                    type="button"
                     onClick={(e) => handleRemoveRecent(e, f.name)}
                     className="shrink-0 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1"
                     title="Remove from recent"

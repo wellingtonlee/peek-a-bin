@@ -20,7 +20,7 @@ import {
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
-} from '../constants';
+} from "../constants";
 
 export interface SectionDef {
   name: string;
@@ -117,9 +117,9 @@ function writeString(view: DataView, offset: number, str: string, maxLen: number
 }
 
 function defaultTextSection(_fileOffset: number): SectionDef {
-  const code = new Uint8Array([0xCC, 0xCC, 0xCC, 0xCC]); // int3 x4
+  const code = new Uint8Array([0xcc, 0xcc, 0xcc, 0xcc]); // int3 x4
   return {
-    name: '.text',
+    name: ".text",
     virtualAddress: 0x1000,
     virtualSize: code.length,
     data: code,
@@ -149,7 +149,7 @@ function buildDirectorySection(
     pos = Math.ceil(pos / align) * align;
     const at = pos;
     pos += n;
-    if (pos > DIRECTORY_BLOB_SIZE) throw new Error('fixture directory section overflow');
+    if (pos > DIRECTORY_BLOB_SIZE) throw new Error("fixture directory section overflow");
     return at;
   };
   /** RVA of a byte offset within this section. */
@@ -176,7 +176,7 @@ function buildDirectorySection(
           const flag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
           return flag | BigInt(fn.ordinal);
         }
-        const name = fn.name ?? '';
+        const name = fn.name ?? "";
         const hintName = alloc(2 + name.length + 1, 2);
         dv.setUint16(hintName, fn.hint ?? 0, true);
         for (let j = 0; j < name.length; j++) backing[hintName + 2 + j] = name.charCodeAt(j);
@@ -192,9 +192,9 @@ function buildDirectorySection(
       });
 
       const d = descriptorTable + i * 20;
-      dv.setUint32(d, rvaOf(intOff), true);       // OriginalFirstThunk
+      dv.setUint32(d, rvaOf(intOff), true); // OriginalFirstThunk
       dv.setUint32(d + 12, rvaOf(nameOff), true); // Name
-      dv.setUint32(d + 16, rvaOf(iatOff), true);  // FirstThunk
+      dv.setUint32(d + 16, rvaOf(iatOff), true); // FirstThunk
     });
     dirs.set(IMAGE_DIRECTORY_ENTRY_IMPORT, {
       virtualAddress: rvaOf(descriptorTable),
@@ -213,7 +213,7 @@ function buildDirectorySection(
       // A forwarder's "value" is the RVA of a string that must land inside the
       // directory's declared range — that containment is what marks it as a
       // forwarder, so the string is allocated here, before the size is computed.
-      const value = typeof a === 'number' ? a : rvaOf(putString(a.forwarder));
+      const value = typeof a === "number" ? a : rvaOf(putString(a.forwarder));
       dv.setUint32(addrTable + i * 4, value, true);
     });
 
@@ -224,10 +224,10 @@ function buildDirectorySection(
     const ordinalTable = alloc(e.names.length * 2, 2);
     e.names.forEach((n, i) => dv.setUint16(ordinalTable + i * 2, n.addressIndex, true));
 
-    dv.setUint32(dirOff + 12, rvaOf(dllNameOff), true);   // Name
-    dv.setUint32(dirOff + 16, e.ordinalBase ?? 1, true);  // Base
-    dv.setUint32(dirOff + 20, e.addresses.length, true);  // NumberOfFunctions
-    dv.setUint32(dirOff + 24, e.names.length, true);      // NumberOfNames
+    dv.setUint32(dirOff + 12, rvaOf(dllNameOff), true); // Name
+    dv.setUint32(dirOff + 16, e.ordinalBase ?? 1, true); // Base
+    dv.setUint32(dirOff + 20, e.addresses.length, true); // NumberOfFunctions
+    dv.setUint32(dirOff + 24, e.names.length, true); // NumberOfNames
     dv.setUint32(dirOff + 28, rvaOf(addrTable), true);
     dv.setUint32(dirOff + 32, rvaOf(namePtrTable), true);
     dv.setUint32(dirOff + 36, rvaOf(ordinalTable), true);
@@ -306,7 +306,7 @@ function resolveLayout(
     const rva = opts.directoryRVA ?? 0x2000;
     const built = buildDirectorySection(opts.directories, { is64, imageBase, rva });
     sections.push({
-      name: opts.directorySectionName ?? '.rdata',
+      name: opts.directorySectionName ?? ".rdata",
       virtualAddress: rva,
       virtualSize: built.data.length,
       data: built.data,
@@ -368,7 +368,7 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
 
   // --- DOS Header ---
   view.setUint16(0, IMAGE_DOS_SIGNATURE, true); // e_magic = "MZ"
-  view.setUint32(0x3C, peOffset, true);          // e_lfanew
+  view.setUint32(0x3c, peOffset, true); // e_lfanew
 
   // --- PE Signature ---
   view.setUint32(peOffset, IMAGE_NT_SIGNATURE, true); // "PE\0\0"
@@ -376,8 +376,8 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   // --- COFF Header ---
   view.setUint16(coffOffset, machine, true);
   view.setUint16(coffOffset + 2, numSections, true);
-  view.setUint32(coffOffset + 4, 0, true);  // timeDateStamp
-  view.setUint32(coffOffset + 8, 0, true);  // pointerToSymbolTable
+  view.setUint32(coffOffset + 4, 0, true); // timeDateStamp
+  view.setUint32(coffOffset + 8, 0, true); // pointerToSymbolTable
   view.setUint32(coffOffset + 12, 0, true); // numberOfSymbols
   view.setUint16(coffOffset + 16, optionalHeaderSize, true);
   view.setUint16(coffOffset + 18, peCharacteristics, true);
@@ -385,14 +385,14 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   // --- Optional Header (PE32) ---
   const o = optionalHeaderOffset;
   view.setUint16(o, IMAGE_NT_OPTIONAL_HDR32_MAGIC, true); // magic
-  view.setUint8(o + 2, 14);   // majorLinkerVersion
-  view.setUint8(o + 3, 0);    // minorLinkerVersion
-  view.setUint32(o + 4, 0, true);   // sizeOfCode
-  view.setUint32(o + 8, 0, true);   // sizeOfInitializedData
-  view.setUint32(o + 12, 0, true);  // sizeOfUninitializedData
+  view.setUint8(o + 2, 14); // majorLinkerVersion
+  view.setUint8(o + 3, 0); // minorLinkerVersion
+  view.setUint32(o + 4, 0, true); // sizeOfCode
+  view.setUint32(o + 8, 0, true); // sizeOfInitializedData
+  view.setUint32(o + 12, 0, true); // sizeOfUninitializedData
   view.setUint32(o + 16, entryPoint, true); // addressOfEntryPoint
   view.setUint32(o + 20, 0x1000, true); // baseOfCode
-  view.setUint32(o + 24, 0, true);      // baseOfData
+  view.setUint32(o + 24, 0, true); // baseOfData
   view.setUint32(o + 28, imageBase, true); // imageBase
   view.setUint32(o + 32, 0x1000, true); // sectionAlignment
   view.setUint32(o + 36, fileAlignment, true); // fileAlignment
@@ -474,7 +474,7 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
 
   // --- DOS Header ---
   view.setUint16(0, IMAGE_DOS_SIGNATURE, true);
-  view.setUint32(0x3C, peOffset, true);
+  view.setUint32(0x3c, peOffset, true);
 
   // --- PE Signature ---
   view.setUint32(peOffset, IMAGE_NT_SIGNATURE, true);

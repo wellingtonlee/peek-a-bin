@@ -9,13 +9,9 @@ import { decompileForLLM } from "../llm/decompileForLLM";
 import { getDisplayName } from "./usePEFile";
 import type { PEFile } from "../pe/types";
 import { findCodeSection } from "../pe/sections";
-import {
-  IMAGE_SCN_MEM_EXECUTE,
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_MEM_WRITE,
-} from "../pe/constants";
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 import type { Anomaly } from "../analysis/anomalies";
-import type { DisasmFunction, } from "../disasm/types";
+import type { DisasmFunction } from "../disasm/types";
 
 /** Report context is whole-binary, so each function gets a generous but bounded slice. */
 const MAX_REPORT_LINES_PER_FUNC = 200;
@@ -32,7 +28,14 @@ function buildReportContext(
   const arch = pe.is64 ? "x86-64" : "x86";
   const entry = `0x${(pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint).toString(16).toUpperCase()}`;
   const subsystem = pe.optionalHeader.subsystem;
-  const subsystemName = subsystem === 1 ? "NATIVE" : subsystem === 2 ? "WINDOWS_GUI" : subsystem === 3 ? "WINDOWS_CUI" : `${subsystem}`;
+  const subsystemName =
+    subsystem === 1
+      ? "NATIVE"
+      : subsystem === 2
+        ? "WINDOWS_GUI"
+        : subsystem === 3
+          ? "WINDOWS_CUI"
+          : `${subsystem}`;
 
   let ctx = `# Binary: ${fileName}
 Architecture: ${arch}
@@ -114,11 +117,21 @@ Sections: ${pe.sections.length}
     for (const [, str] of pe.strings) {
       if (interesting.length >= 30) break;
       const lower = str.toLowerCase();
-      if (lower.includes("http") || lower.includes("://") || lower.includes("\\\\") ||
-          lower.includes("hkey_") || lower.includes("cmd") || lower.includes(".exe") ||
-          lower.includes(".dll") || lower.includes("password") || lower.includes("mutex") ||
-          lower.includes("pipe") || lower.includes("temp") || lower.includes("appdata") ||
-          (str.length > 10 && /[A-Z].*[a-z]|[a-z].*[A-Z]/.test(str))) {
+      if (
+        lower.includes("http") ||
+        lower.includes("://") ||
+        lower.includes("\\\\") ||
+        lower.includes("hkey_") ||
+        lower.includes("cmd") ||
+        lower.includes(".exe") ||
+        lower.includes(".dll") ||
+        lower.includes("password") ||
+        lower.includes("mutex") ||
+        lower.includes("pipe") ||
+        lower.includes("temp") ||
+        lower.includes("appdata") ||
+        (str.length > 10 && /[A-Z].*[a-z]|[a-z].*[A-Z]/.test(str))
+      ) {
         interesting.push(str.length > 100 ? str.substring(0, 97) + "..." : str);
       }
     }
@@ -170,13 +183,13 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
 
       // Key functions: entry point, first few exports, highest-xref, largest
       const candidates: DisasmFunction[] = [];
-      const entryFunc = state.functions.find(f => f.address === entryVA);
+      const entryFunc = state.functions.find((f) => f.address === entryVA);
       if (entryFunc) candidates.push(entryFunc);
 
       // Exports (up to 3)
       for (const exp of pe.exports.slice(0, 3)) {
         const addr = pe.optionalHeader.imageBase + exp.address;
-        const fn = state.functions.find(f => f.address === addr);
+        const fn = state.functions.find((f) => f.address === addr);
         if (fn && !candidates.includes(fn)) candidates.push(fn);
       }
 
@@ -200,8 +213,13 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
     }
 
     const context = buildReportContext(
-      pe, state.fileName, state.functions, state.renames,
-      state.anomalies, state.driverInfo, decompiled,
+      pe,
+      state.fileName,
+      state.functions,
+      state.renames,
+      state.anomalies,
+      state.driverInfo,
+      decompiled,
     );
 
     const config = loadSettings();
@@ -232,11 +250,21 @@ export function useAIReport(state: AppState, dispatch: Dispatch<AppAction>) {
       },
       "report",
     );
-  }, [state.peFile, state.fileName, state.functions, state.renames, state.anomalies, state.driverInfo, dispatch]);
+  }, [
+    state.peFile,
+    state.fileName,
+    state.functions,
+    state.renames,
+    state.anomalies,
+    state.driverInfo,
+    dispatch,
+  ]);
 
   const regenerateReport = useCallback(() => {
     if (state.fileName) {
-      try { localStorage.removeItem(`peek-a-bin:report:${state.fileName}`); } catch {}
+      try {
+        localStorage.removeItem(`peek-a-bin:report:${state.fileName}`);
+      } catch {}
     }
     generateReport();
   }, [state.fileName, generateReport]);

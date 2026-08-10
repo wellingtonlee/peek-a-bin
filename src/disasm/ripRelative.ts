@@ -36,7 +36,7 @@ export interface RipDisplacement {
 function matchDisplacement(re: RegExp, text: string): RipDisplacement | null {
   const m = text.match(re);
   if (!m) return null;
-  const sign = m[1] === '+' ? 1 : -1;
+  const sign = m[1] === "+" ? 1 : -1;
   return {
     disp: sign * parseInt(m[2], 16),
     index: m.index ?? 0,

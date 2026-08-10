@@ -1,7 +1,7 @@
-import type { BasicBlock, Loop } from '../cfg';
-import type { IRStmt, IRExpr } from './ir';
-import { RegState } from './regstate';
-import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from './cfgpatterns';
+import type { BasicBlock, Loop } from "../cfg";
+import type { IRStmt, IRExpr } from "./ir";
+import { RegState } from "./regstate";
+import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from "./cfgpatterns";
 
 /**
  * Structure a CFG into high-level control flow (if/while/do-while/switch).
@@ -38,48 +38,48 @@ export function structureCFG(
   /** Get the condition from the last instruction(s) of a block. */
   function extractCondition(block: BasicBlock): IRExpr {
     const insns = block.insns;
-    if (insns.length === 0) return { kind: 'unknown', text: 'empty block' };
+    if (insns.length === 0) return { kind: "unknown", text: "empty block" };
 
     const last = insns[insns.length - 1];
     const mn = last.mnemonic.toLowerCase();
 
     // Conditional jump → build condition from cmp/test before it
-    if (mn.startsWith('j') && mn !== 'jmp') {
+    if (mn.startsWith("j") && mn !== "jmp") {
       // Find the cmp/test before this jump
       const regState = new RegState();
       for (let i = 0; i < insns.length - 1; i++) {
         const insnMn = insns[i].mnemonic.toLowerCase();
-        if (insnMn === 'cmp' || insnMn === 'test') {
-          const parts = insns[i].opStr.split(',').map(s => s.trim());
+        if (insnMn === "cmp" || insnMn === "test") {
+          const parts = insns[i].opStr.split(",").map((s) => s.trim());
           if (parts.length >= 2) {
             // Simple operand parsing for condition extraction
             const left = parseSimpleOperand(parts[0]);
             const right = parseSimpleOperand(parts[1]);
-            regState.setFlags(insnMn as 'cmp' | 'test', left, right);
+            regState.setFlags(insnMn as "cmp" | "test", left, right);
           }
         }
       }
       return regState.getCondition(mn);
     }
 
-    return { kind: 'unknown', text: `end: ${mn}` };
+    return { kind: "unknown", text: `end: ${mn}` };
   }
 
   /** Simple operand parse for condition extraction (register or constant). */
   function parseSimpleOperand(op: string): IRExpr {
-    const trimmed = op.trim().replace(/^(byte|word|dword|qword)\s+ptr\s+/i, '');
+    const trimmed = op.trim().replace(/^(byte|word|dword|qword)\s+ptr\s+/i, "");
     // Hex immediate
     const hexM = trimmed.match(/^0x([0-9a-fA-F]+)$/);
-    if (hexM) return { kind: 'const', value: parseInt(hexM[1], 16), size: 4 };
+    if (hexM) return { kind: "const", value: parseInt(hexM[1], 16), size: 4 };
     // Decimal
-    if (/^\d+$/.test(trimmed)) return { kind: 'const', value: parseInt(trimmed, 10), size: 4 };
+    if (/^\d+$/.test(trimmed)) return { kind: "const", value: parseInt(trimmed, 10), size: 4 };
     // Memory
     const bracketM = trimmed.match(/\[([^\]]+)\]/);
     if (bracketM) {
-      return { kind: 'deref', address: parseSimpleOperand(bracketM[1]), size: 4 };
+      return { kind: "deref", address: parseSimpleOperand(bracketM[1]), size: 4 };
     }
     // Register
-    return { kind: 'reg', name: trimmed, size: 4 };
+    return { kind: "reg", name: trimmed, size: 4 };
   }
 
   /**
@@ -104,7 +104,12 @@ export function structureCFG(
           // Don't leave loop body
           if (loopBody) {
             const succBlock = blockById.get(succ);
-            if (succBlock && !loopBody.has(succBlock.startAddr) && !loopBody.has(succBlock.insns[0]?.address)) continue;
+            if (
+              succBlock &&
+              !loopBody.has(succBlock.startAddr) &&
+              !loopBody.has(succBlock.insns[0]?.address)
+            )
+              continue;
           }
           queueA.push(succ);
         }
@@ -123,7 +128,12 @@ export function structureCFG(
         if (!reachableB.has(succ)) {
           if (loopBody) {
             const succBlock = blockById.get(succ);
-            if (succBlock && !loopBody.has(succBlock.startAddr) && !loopBody.has(succBlock.insns[0]?.address)) continue;
+            if (
+              succBlock &&
+              !loopBody.has(succBlock.startAddr) &&
+              !loopBody.has(succBlock.insns[0]?.address)
+            )
+              continue;
           }
           queueB.push(succ);
         }
@@ -142,7 +152,7 @@ export function structureCFG(
   function endsWithJmp(block: BasicBlock): boolean {
     const insns = block.insns;
     if (insns.length === 0) return false;
-    return insns[insns.length - 1].mnemonic.toLowerCase() === 'jmp';
+    return insns[insns.length - 1].mnemonic.toLowerCase() === "jmp";
   }
 
   /** Check if a block ends with a conditional jump. */
@@ -150,7 +160,7 @@ export function structureCFG(
     const insns = block.insns;
     if (insns.length === 0) return false;
     const mn = insns[insns.length - 1].mnemonic.toLowerCase();
-    return mn.startsWith('j') && mn !== 'jmp';
+    return mn.startsWith("j") && mn !== "jmp";
   }
 
   /** Check if a block ends with ret. */
@@ -158,7 +168,7 @@ export function structureCFG(
     const insns = block.insns;
     if (insns.length === 0) return false;
     const mn = insns[insns.length - 1].mnemonic.toLowerCase();
-    return mn === 'ret' || mn === 'retn';
+    return mn === "ret" || mn === "retn";
   }
 
   /** Collect block IDs in a region between start and end (exclusive). */
@@ -187,10 +197,15 @@ export function structureCFG(
         // The exit is a successor of a loop body block that's outside the loop
         let exitId: number | null = null;
         for (const bid of blocks) {
-          if (!loop.bodyAddrs.has(bid.startAddr) && !loop.bodyAddrs.has(bid.insns[0]?.address)) continue;
+          if (!loop.bodyAddrs.has(bid.startAddr) && !loop.bodyAddrs.has(bid.insns[0]?.address))
+            continue;
           for (const succ of bid.succs) {
             const succBlock = blockById.get(succ);
-            if (succBlock && !loop.bodyAddrs.has(succBlock.startAddr) && !loop.bodyAddrs.has(succBlock.insns[0]?.address)) {
+            if (
+              succBlock &&
+              !loop.bodyAddrs.has(succBlock.startAddr) &&
+              !loop.bodyAddrs.has(succBlock.insns[0]?.address)
+            ) {
               if (!visited.has(succ)) exitId = succ;
             }
           }
@@ -223,7 +238,7 @@ export function structureCFG(
           // blocks and the default block when searching for the exit point
           const caseBlockIds = new Set<number>(block.succs);
           // Also include the default block if present
-          if (switchResult.kind === 'switch' && switchResult.defaultBody) {
+          if (switchResult.kind === "switch" && switchResult.defaultBody) {
             for (const predId of block.preds) {
               const pred = blockById.get(predId);
               if (!pred) continue;
@@ -248,7 +263,10 @@ export function structureCFG(
           }
           current = null;
           for (const cand of exitCandidates) {
-            if (!visited.has(cand)) { current = cand; break; }
+            if (!visited.has(cand)) {
+              current = cand;
+              break;
+            }
           }
           continue;
         }
@@ -262,7 +280,10 @@ export function structureCFG(
           if (!stopAt.has(nextId)) {
             const targetBlock = blockById.get(nextId);
             if (targetBlock) {
-              result.push({ kind: 'goto', label: `loc_${targetBlock.startAddr.toString(16).toUpperCase()}` });
+              result.push({
+                kind: "goto",
+                label: `loc_${targetBlock.startAddr.toString(16).toUpperCase()}`,
+              });
             }
           }
           current = null;
@@ -303,11 +324,11 @@ export function structureCFG(
           const scCond = sc.condition;
 
           if (thenBody.length > 0 && elseBody.length > 0) {
-            result.push({ kind: 'if', condition: scCond, thenBody, elseBody });
+            result.push({ kind: "if", condition: scCond, thenBody, elseBody });
           } else if (thenBody.length > 0) {
-            result.push({ kind: 'if', condition: scCond, thenBody });
+            result.push({ kind: "if", condition: scCond, thenBody });
           } else if (elseBody.length > 0) {
-            result.push({ kind: 'if', condition: RegState.negate(scCond), thenBody: elseBody });
+            result.push({ kind: "if", condition: RegState.negate(scCond), thenBody: elseBody });
           }
 
           current = scConvergence >= 0 ? scConvergence : null;
@@ -322,16 +343,20 @@ export function structureCFG(
         if (branchBlock && endsWithRet(branchBlock) && branchBlock.succs.length === 0) {
           // if (cond) { ... return; } — the branch target runs when the jcc is taken
           const thenBody = structureFrom(branchTarget, convergenceSet, loopBody);
-          result.push({ kind: 'if', condition, thenBody });
+          result.push({ kind: "if", condition, thenBody });
           // Continue with fallthrough
           current = fallthrough;
           continue;
         }
 
-        if (fallthroughBlock && endsWithRet(fallthroughBlock) && fallthroughBlock.succs.length === 0) {
+        if (
+          fallthroughBlock &&
+          endsWithRet(fallthroughBlock) &&
+          fallthroughBlock.succs.length === 0
+        ) {
           // if (!cond) { ... return; } — the fallthrough runs when the jcc is *not* taken
           const thenBody = structureFrom(fallthrough, convergenceSet, loopBody);
-          result.push({ kind: 'if', condition: RegState.negate(condition), thenBody });
+          result.push({ kind: "if", condition: RegState.negate(condition), thenBody });
           // Continue with branch target
           current = branchTarget;
           continue;
@@ -349,11 +374,11 @@ export function structureCFG(
           const elseBody = structureFrom(fallthrough, convergenceSet, loopBody);
 
           if (thenBody.length > 0 && elseBody.length > 0) {
-            result.push({ kind: 'if', condition, thenBody, elseBody });
+            result.push({ kind: "if", condition, thenBody, elseBody });
           } else if (thenBody.length > 0) {
-            result.push({ kind: 'if', condition, thenBody });
+            result.push({ kind: "if", condition, thenBody });
           } else if (elseBody.length > 0) {
-            result.push({ kind: 'if', condition: RegState.negate(condition), thenBody: elseBody });
+            result.push({ kind: "if", condition: RegState.negate(condition), thenBody: elseBody });
           }
 
           current = convergence;
@@ -362,7 +387,12 @@ export function structureCFG(
           const thenBody = structureFrom(branchTarget, stopAt, loopBody);
           const elseBody = structureFrom(fallthrough, stopAt, loopBody);
           if (thenBody.length > 0 || elseBody.length > 0) {
-            result.push({ kind: 'if', condition, thenBody, elseBody: elseBody.length > 0 ? elseBody : undefined });
+            result.push({
+              kind: "if",
+              condition,
+              thenBody,
+              elseBody: elseBody.length > 0 ? elseBody : undefined,
+            });
           }
           current = null;
         }
@@ -387,7 +417,7 @@ export function structureCFG(
     const last = insns[insns.length - 1];
     const mn = last.mnemonic.toLowerCase();
 
-    if (!mn.startsWith('j') || mn === 'jmp') return [null, null];
+    if (!mn.startsWith("j") || mn === "jmp") return [null, null];
 
     // Branch target from operand
     const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
@@ -438,7 +468,9 @@ export function structureCFG(
         if (succId === null) continue;
         const succBlock = blockById.get(succId);
         if (!succBlock) continue;
-        const inLoop = loop.bodyAddrs.has(succBlock.startAddr) || loop.bodyAddrs.has(succBlock.insns[0]?.address);
+        const inLoop =
+          loop.bodyAddrs.has(succBlock.startAddr) ||
+          loop.bodyAddrs.has(succBlock.insns[0]?.address);
         if (inLoop) {
           bodyStart = succId;
         } else {
@@ -462,7 +494,8 @@ export function structureCFG(
         const bodyWithContinue = insertContinueStmts(body, header, loop);
 
         // Include header statements if any (before the condition check)
-        const fullBody = headerStmts.length > 0 ? [...headerStmts, ...bodyWithContinue] : bodyWithContinue;
+        const fullBody =
+          headerStmts.length > 0 ? [...headerStmts, ...bodyWithContinue] : bodyWithContinue;
 
         // The condition for while: we continue looping when condition takes us to body
         // If branch goes to body (exit is fallthrough): while(condition)
@@ -475,10 +508,21 @@ export function structureCFG(
         }
 
         // Better loop classification: if body starts with if (cond) break; → while(!cond)
-        if (whileCondition.kind === 'const' && whileCondition.value === 1 && fullBody.length > 0) {
+        if (whileCondition.kind === "const" && whileCondition.value === 1 && fullBody.length > 0) {
           const first = fullBody[0];
-          if (first.kind === 'if' && first.thenBody.length === 1 && first.thenBody[0].kind === 'break' && !first.elseBody) {
-            return [{ kind: 'while', condition: RegState.negate(first.condition), body: fullBody.slice(1) }];
+          if (
+            first.kind === "if" &&
+            first.thenBody.length === 1 &&
+            first.thenBody[0].kind === "break" &&
+            !first.elseBody
+          ) {
+            return [
+              {
+                kind: "while",
+                condition: RegState.negate(first.condition),
+                body: fullBody.slice(1),
+              },
+            ];
           }
         }
 
@@ -489,10 +533,18 @@ export function structureCFG(
           // detectForLoop returns `condition: irConst(1)` as a placeholder and
           // documents that the caller fills it in — the header condition is
           // only available here. Always override it.
-          return [{ kind: 'for', init: forLoop.init, condition: whileCondition, update: forLoop.update, body: forLoop.bodyStmts }];
+          return [
+            {
+              kind: "for",
+              init: forLoop.init,
+              condition: whileCondition,
+              update: forLoop.update,
+              body: forLoop.bodyStmts,
+            },
+          ];
         }
 
-        return [{ kind: 'while', condition: whileCondition, body: fullBody }];
+        return [{ kind: "while", condition: whileCondition, body: fullBody }];
       }
     }
 
@@ -515,19 +567,30 @@ export function structureCFG(
     }
 
     // Find back-edge block for condition
-    const backEdgeBlock = blocks.find(b => b.endAddr === loop.backEdgeFromAddr || b.insns.some(i => i.address === loop.backEdgeFromAddr));
-    let loopCondition: IRExpr = { kind: 'const', value: 1, size: 4 }; // true = infinite loop
+    const backEdgeBlock = blocks.find(
+      (b) =>
+        b.endAddr === loop.backEdgeFromAddr ||
+        b.insns.some((i) => i.address === loop.backEdgeFromAddr),
+    );
+    let loopCondition: IRExpr = { kind: "const", value: 1, size: 4 }; // true = infinite loop
     if (backEdgeBlock && endsWithCondJmp(backEdgeBlock)) {
       loopCondition = extractCondition(backEdgeBlock);
     }
 
     // do-while with leading break → while
-    if (body.length > 0 && body[0].kind === 'if' &&
-        body[0].thenBody.length === 1 && body[0].thenBody[0].kind === 'break' && !body[0].elseBody) {
-      return [{ kind: 'while', condition: RegState.negate(body[0].condition), body: body.slice(1) }];
+    if (
+      body.length > 0 &&
+      body[0].kind === "if" &&
+      body[0].thenBody.length === 1 &&
+      body[0].thenBody[0].kind === "break" &&
+      !body[0].elseBody
+    ) {
+      return [
+        { kind: "while", condition: RegState.negate(body[0].condition), body: body.slice(1) },
+      ];
     }
 
-    return [{ kind: 'do_while', condition: loopCondition, body }];
+    return [{ kind: "do_while", condition: loopCondition, body }];
   }
 
   /** Collect block IDs that are part of a loop body. */
@@ -545,18 +608,22 @@ export function structureCFG(
   /** Insert continue statements for conditional branches back to loop header. */
   function insertContinueStmts(body: IRStmt[], header: BasicBlock, _loop: Loop): IRStmt[] {
     const headerLabel = `loc_${header.startAddr.toString(16).toUpperCase()}`;
-    return body.map(stmt => {
+    return body.map((stmt) => {
       // Replace goto to header with continue
-      if (stmt.kind === 'goto' && stmt.label === headerLabel) {
-        return { kind: 'continue' as const };
+      if (stmt.kind === "goto" && stmt.label === headerLabel) {
+        return { kind: "continue" as const };
       }
       // Check if-goto-header patterns: if (cond) { goto header; } → if (cond) { continue; }
-      if (stmt.kind === 'if') {
-        const newThen = stmt.thenBody.map(s =>
-          s.kind === 'goto' && s.label === headerLabel ? { kind: 'continue' as const } as IRStmt : s
+      if (stmt.kind === "if") {
+        const newThen = stmt.thenBody.map((s) =>
+          s.kind === "goto" && s.label === headerLabel
+            ? ({ kind: "continue" as const } as IRStmt)
+            : s,
         );
-        const newElse = stmt.elseBody?.map(s =>
-          s.kind === 'goto' && s.label === headerLabel ? { kind: 'continue' as const } as IRStmt : s
+        const newElse = stmt.elseBody?.map((s) =>
+          s.kind === "goto" && s.label === headerLabel
+            ? ({ kind: "continue" as const } as IRStmt)
+            : s,
         );
         return { ...stmt, thenBody: newThen, elseBody: newElse };
       }
@@ -568,7 +635,7 @@ export function structureCFG(
   function structureSwitch(block: BasicBlock, targets: number[]): IRStmt {
     // Try to find the switch expression and default target from the predecessor
     // block that performs the bounds check (cmp reg, N / ja default).
-    let switchExpr: IRExpr = { kind: 'unknown', text: 'switch_expr' };
+    let switchExpr: IRExpr = { kind: "unknown", text: "switch_expr" };
     let defaultAddr: number | null = null;
 
     // Walk predecessors looking for the bounds-check block (ends with ja/jae)
@@ -577,11 +644,11 @@ export function structureCFG(
       if (!pred || pred.insns.length === 0) continue;
       const lastInsn = pred.insns[pred.insns.length - 1];
       const lastMn = lastInsn.mnemonic.toLowerCase();
-      if (lastMn === 'ja' || lastMn === 'jae') {
+      if (lastMn === "ja" || lastMn === "jae") {
         // Extract switch expression from cmp in this predecessor
         for (const insn of pred.insns) {
-          if (insn.mnemonic.toLowerCase() === 'cmp') {
-            const parts = insn.opStr.split(',').map(s => s.trim());
+          if (insn.mnemonic.toLowerCase() === "cmp") {
+            const parts = insn.opStr.split(",").map((s) => s.trim());
             if (parts.length >= 1) {
               switchExpr = parseSimpleOperand(parts[0]);
             }
@@ -596,10 +663,10 @@ export function structureCFG(
     }
 
     // Fallback: scan current block for cmp (original behavior)
-    if (switchExpr.kind === 'unknown') {
+    if (switchExpr.kind === "unknown") {
       for (const insn of block.insns) {
-        if (insn.mnemonic.toLowerCase() === 'cmp') {
-          const parts = insn.opStr.split(',').map(s => s.trim());
+        if (insn.mnemonic.toLowerCase() === "cmp") {
+          const parts = insn.opStr.split(",").map((s) => s.trim());
           if (parts.length >= 1) {
             switchExpr = parseSimpleOperand(parts[0]);
             break;
@@ -628,9 +695,9 @@ export function structureCFG(
       if (targetBlock && !visited.has(targetBlock.id)) {
         visited.add(targetBlock.id);
         const body = liftedBlocks.get(targetBlock.id) ?? [];
-        cases.push({ values, body: [...body, { kind: 'break' as const }] });
+        cases.push({ values, body: [...body, { kind: "break" as const }] });
       } else {
-        cases.push({ values, body: [{ kind: 'break' as const }] });
+        cases.push({ values, body: [{ kind: "break" as const }] });
       }
     }
 
@@ -641,13 +708,13 @@ export function structureCFG(
       if (defaultBlock && !visited.has(defaultBlock.id)) {
         visited.add(defaultBlock.id);
         const body = liftedBlocks.get(defaultBlock.id) ?? [];
-        defaultBody = [...body, { kind: 'break' as const }];
+        defaultBody = [...body, { kind: "break" as const }];
       } else {
-        defaultBody = [{ kind: 'break' as const }];
+        defaultBody = [{ kind: "break" as const }];
       }
     }
 
-    return { kind: 'switch', expr: switchExpr, cases, defaultBody };
+    return { kind: "switch", expr: switchExpr, cases, defaultBody };
   }
 
   // Start structuring from the entry block (id 0)

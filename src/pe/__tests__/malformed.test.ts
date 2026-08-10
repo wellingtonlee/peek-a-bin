@@ -6,15 +6,11 @@
  * an explicit timeout: a regression must surface as a failure, not as a hung suite.
  */
 
-import { describe, it, expect } from 'vitest';
-import { parsePE } from '../parser';
-import { parseSecurityDirectory } from '../authenticode';
-import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from './fixtures';
-import {
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_CNT_CODE,
-  IMAGE_SCN_MEM_EXECUTE,
-} from '../constants';
+import { describe, it, expect } from "vitest";
+import { parsePE } from "../parser";
+import { parseSecurityDirectory } from "../authenticode";
+import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
+import { IMAGE_SCN_MEM_READ, IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE } from "../constants";
 
 const TIMEOUT = 5000;
 
@@ -33,16 +29,16 @@ function dataSection(name: string, rva: number, data: Uint8Array): SectionDef {
   };
 }
 
-describe('malformed PE handling', () => {
-  describe('truncated input', () => {
-    it('rejects a file shorter than the DOS header with a clear error', () => {
+describe("malformed PE handling", () => {
+  describe("truncated input", () => {
+    it("rejects a file shorter than the DOS header with a clear error", () => {
       const tiny = new ArrayBuffer(16);
       new DataView(tiny).setUint16(0, 0x5a4d, true); // valid MZ, nothing else
       // Must be a useful parse error, not a bare RangeError from getUint32(60).
       expect(() => parsePE(tiny)).toThrow(/too small/i);
     });
 
-    it('rejects a PE whose COFF header runs past EOF', () => {
+    it("rejects a PE whose COFF header runs past EOF", () => {
       const buf = new ArrayBuffer(80);
       const v = new DataView(buf);
       v.setUint16(0, 0x5a4d, true);
@@ -52,8 +48,8 @@ describe('malformed PE handling', () => {
     });
   });
 
-  describe('unbounded header counts', () => {
-    it('clamps a bogus numberOfSections instead of throwing', { timeout: TIMEOUT }, () => {
+  describe("unbounded header counts", () => {
+    it("clamps a bogus numberOfSections instead of throwing", { timeout: TIMEOUT }, () => {
       const buf = buildMinimalPE32();
       // 65535 sections claimed, but the buffer holds room for a handful.
       new DataView(buf).setUint16(coffOffsetOf(buf) + 2, 0xffff, true);
@@ -64,7 +60,7 @@ describe('malformed PE handling', () => {
       expect(pe.sections.length).toBeLessThanOrEqual(Math.ceil(buf.byteLength / 40));
     });
 
-    it('clamps numberOfRvaAndSizes to the 16-entry spec maximum', { timeout: TIMEOUT }, () => {
+    it("clamps numberOfRvaAndSizes to the 16-entry spec maximum", { timeout: TIMEOUT }, () => {
       const buf = buildMinimalPE32();
       const optionalHeaderOffset = coffOffsetOf(buf) + 20;
       new DataView(buf).setUint32(optionalHeaderOffset + 92, 0xffffffff, true);
@@ -73,7 +69,7 @@ describe('malformed PE handling', () => {
       expect(pe.dataDirectories.length).toBeLessThanOrEqual(16);
     });
 
-    it('clamps numberOfRvaAndSizes on PE32+ too', { timeout: TIMEOUT }, () => {
+    it("clamps numberOfRvaAndSizes on PE32+ too", { timeout: TIMEOUT }, () => {
       const buf = buildMinimalPE64();
       const optionalHeaderOffset = coffOffsetOf(buf) + 20;
       new DataView(buf).setUint32(optionalHeaderOffset + 108, 0xffffffff, true);
@@ -83,8 +79,8 @@ describe('malformed PE handling', () => {
     });
   });
 
-  describe('import table', () => {
-    it('survives a thunk RVA that resolves outside every section', { timeout: TIMEOUT }, () => {
+  describe("import table", () => {
+    it("survives a thunk RVA that resolves outside every section", { timeout: TIMEOUT }, () => {
       // One import descriptor whose OriginalFirstThunk/FirstThunk point far
       // outside any section, so rvaToFileOffset returns -1. Reading a thunk at a
       // negative offset used to throw an uncaught RangeError and fail the load.
@@ -97,51 +93,55 @@ describe('malformed PE handling', () => {
       dv.setUint32(12, rva + 0x40, true); // Name — valid, inside this section
       dv.setUint32(16, 0x99999999, true); // FirstThunk — unmapped
       // descriptor[1] is left zeroed, terminating the walk
-      for (const [i, ch] of [...'BOGUS.DLL'].entries()) {
+      for (const [i, ch] of [..."BOGUS.DLL"].entries()) {
         data[0x40 + i] = ch.charCodeAt(0);
       }
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[1, { virtualAddress: rva, size: 40 }]]),
       });
 
       expect(() => parsePE(buf)).not.toThrow();
     });
 
-    it('stops at the declared directory size when no null descriptor follows', { timeout: TIMEOUT }, () => {
+    it("stops at the declared directory size when no null descriptor follows", {
+      timeout: TIMEOUT,
+    }, () => {
       // Two real libraries, but the directory claims to hold only one
       // descriptor. The walk must trust the declared extent rather than reading
       // whatever bytes follow as further descriptors.
       const buf = buildMinimalPE32({
         directories: {
           imports: [
-            { libraryName: 'FIRST.dll', functions: [{ name: 'a' }] },
-            { libraryName: 'SECOND.dll', functions: [{ name: 'b' }] },
+            { libraryName: "FIRST.dll", functions: [{ name: "a" }] },
+            { libraryName: "SECOND.dll", functions: [{ name: "b" }] },
           ],
         },
         dataDirectories: new Map([[1, { virtualAddress: 0x2000, size: 20 }]]),
       });
 
       const pe = parsePE(buf);
-      expect(pe.imports.map(l => l.libraryName)).toEqual(['FIRST.dll']);
+      expect(pe.imports.map((l) => l.libraryName)).toEqual(["FIRST.dll"]);
     });
 
-    it('does not read past the buffer when the directory size is 0xFFFFFFFF', { timeout: TIMEOUT }, () => {
+    it("does not read past the buffer when the directory size is 0xFFFFFFFF", {
+      timeout: TIMEOUT,
+    }, () => {
       const buf = buildMinimalPE32({
-        directories: { imports: [{ libraryName: 'ONE.dll', functions: [{ name: 'a' }] }] },
+        directories: { imports: [{ libraryName: "ONE.dll", functions: [{ name: "a" }] }] },
         dataDirectories: new Map([[1, { virtualAddress: 0x2000, size: 0xffffffff }]]),
       });
 
       const started = Date.now();
       const pe = parsePE(buf);
       expect(Date.now() - started).toBeLessThan(TIMEOUT);
-      expect(pe.imports.map(l => l.libraryName)).toEqual(['ONE.dll']);
+      expect(pe.imports.map((l) => l.libraryName)).toEqual(["ONE.dll"]);
     });
   });
 
-  describe('export table', () => {
-    it('does not spin on a 0xFFFFFFFF numberOfNames', { timeout: TIMEOUT }, () => {
+  describe("export table", () => {
+    it("does not spin on a 0xFFFFFFFF numberOfNames", { timeout: TIMEOUT }, () => {
       // The name-pointer walk is bounded only by numberOfNames, read straight off
       // the file. Previously this looped ~4.3 billion times on `continue`,
       // freezing the main thread.
@@ -154,7 +154,7 @@ describe('malformed PE handling', () => {
       dv.setUint32(36, rva + 0xc0, true); // ordinalTableRVA   — mapped
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva, size: 40 }]]),
       });
 
@@ -165,7 +165,7 @@ describe('malformed PE handling', () => {
       expect(pe.exports.length).toBeLessThan(buf.byteLength);
     });
 
-    it('does not spin on a 0xFFFFFFFF numberOfFunctions', { timeout: TIMEOUT }, () => {
+    it("does not spin on a 0xFFFFFFFF numberOfFunctions", { timeout: TIMEOUT }, () => {
       // The address-table walk covers ordinal-only exports, so it is driven by
       // numberOfFunctions — equally attacker-controlled and equally clamped.
       const rva = 0x1000;
@@ -180,7 +180,7 @@ describe('malformed PE handling', () => {
       dv.setUint32(0x84, 0x1600, true);
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva, size: 40 }]]),
       });
 
@@ -188,13 +188,13 @@ describe('malformed PE handling', () => {
       const pe = parsePE(buf);
       expect(Date.now() - started).toBeLessThan(TIMEOUT);
       expect(pe.exports.length).toBeLessThan(buf.byteLength);
-      expect(pe.exports.slice(0, 2).map(e => [e.ordinal, e.address])).toEqual([
+      expect(pe.exports.slice(0, 2).map((e) => [e.ordinal, e.address])).toEqual([
         [1, 0x1500],
         [2, 0x1600],
       ]);
     });
 
-    it('survives a truncated export directory header', { timeout: TIMEOUT }, () => {
+    it("survives a truncated export directory header", { timeout: TIMEOUT }, () => {
       // The directory RVA maps, but fewer than the 40 header bytes remain in the
       // file — reading Base/NumberOfFunctions there must not throw.
       // The section fills its file alignment exactly, so a directory 0x10 bytes
@@ -202,18 +202,20 @@ describe('malformed PE handling', () => {
       const rva = 0x1000;
       const data = new Uint8Array(0x200);
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva + 0x1f0, size: 40 }]]),
       });
       const dirFileOffset = buf.byteLength - 0x10;
       expect(dirFileOffset + 40).toBeGreaterThan(buf.byteLength);
 
       let pe!: ReturnType<typeof parsePE>;
-      expect(() => { pe = parsePE(buf); }).not.toThrow();
+      expect(() => {
+        pe = parsePE(buf);
+      }).not.toThrow();
       expect(pe.exports).toEqual([]);
     });
 
-    it('ignores a forwarder RVA that resolves outside every section', { timeout: TIMEOUT }, () => {
+    it("ignores a forwarder RVA that resolves outside every section", { timeout: TIMEOUT }, () => {
       // A directory size of 0xFFFFFFFF makes every address look like a forwarder;
       // the string RVA itself is unmapped, so no target can be read.
       const rva = 0x1000;
@@ -225,7 +227,7 @@ describe('malformed PE handling', () => {
       dv.setUint32(0x80, 0x99999999, true); // address — unmapped, "inside" the range
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva, size: 0xffffffff }]]),
       });
 
@@ -235,7 +237,7 @@ describe('malformed PE handling', () => {
       expect(pe.exports[0].address).toBe(0x99999999);
     });
 
-    it('bounds an unterminated forwarder string', { timeout: TIMEOUT }, () => {
+    it("bounds an unterminated forwarder string", { timeout: TIMEOUT }, () => {
       // The forwarder string runs to the end of the section with no NUL. It must
       // be clipped to the buffer, not read past it.
       const rva = 0x1000;
@@ -248,7 +250,7 @@ describe('malformed PE handling', () => {
       data.fill(0x41, 0xc0, data.length); // 'A' with no terminator
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva, size: 0x200 }]]),
       });
 
@@ -258,7 +260,9 @@ describe('malformed PE handling', () => {
       expect(pe.exports[0].forwarder!.length).toBeLessThanOrEqual(buf.byteLength);
     });
 
-    it('survives an unmapped name-pointer table but keeps ordinal exports', { timeout: TIMEOUT }, () => {
+    it("survives an unmapped name-pointer table but keeps ordinal exports", {
+      timeout: TIMEOUT,
+    }, () => {
       const rva = 0x1000;
       const data = new Uint8Array(0x200);
       const dv = new DataView(data.buffer);
@@ -272,20 +276,20 @@ describe('malformed PE handling', () => {
       dv.setUint32(0x84, 0x1600, true);
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[0, { virtualAddress: rva, size: 40 }]]),
       });
 
       const pe = parsePE(buf);
-      expect(pe.exports.map(e => [e.name, e.ordinal])).toEqual([
-        ['Ordinal#1', 1],
-        ['Ordinal#2', 2],
+      expect(pe.exports.map((e) => [e.name, e.ordinal])).toEqual([
+        ["Ordinal#1", 1],
+        ["Ordinal#2", 2],
       ]);
     });
   });
 
-  describe('base relocations', () => {
-    it('bounds the entry walk when SizeOfBlock is 0xFFFFFFFF', { timeout: TIMEOUT }, () => {
+  describe("base relocations", () => {
+    it("bounds the entry walk when SizeOfBlock is 0xFFFFFFFF", { timeout: TIMEOUT }, () => {
       // entryCount is derived from SizeOfBlock, so a hostile value asks for ~2
       // billion iterations. The walk must stop at the end of the buffer instead.
       const rva = 0x1000;
@@ -295,7 +299,7 @@ describe('malformed PE handling', () => {
       dv.setUint32(4, 0xffffffff, true); // SizeOfBlock
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.reloc', rva, data)],
+        sections: [dataSection(".reloc", rva, data)],
         dataDirectories: new Map([[5, { virtualAddress: rva, size: 0x200 }]]),
       });
 
@@ -305,7 +309,7 @@ describe('malformed PE handling', () => {
       expect(pe.relocations?.[0].entries.length).toBeLessThan(buf.byteLength);
     });
 
-    it('bounds the block walk when the directory size is 0xFFFFFFFF', { timeout: TIMEOUT }, () => {
+    it("bounds the block walk when the directory size is 0xFFFFFFFF", { timeout: TIMEOUT }, () => {
       // endPos is baseOffset + the declared directory size, so an oversized
       // directory leaves the buffer length as the only backstop.
       const rva = 0x1000;
@@ -317,7 +321,7 @@ describe('malformed PE handling', () => {
       }
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.reloc', rva, data)],
+        sections: [dataSection(".reloc", rva, data)],
         dataDirectories: new Map([[5, { virtualAddress: rva, size: 0xffffffff }]]),
       });
 
@@ -328,8 +332,8 @@ describe('malformed PE handling', () => {
     });
   });
 
-  describe('TLS callbacks', () => {
-    it('caps the callback walk on an array of non-zero pointers', { timeout: TIMEOUT }, () => {
+  describe("TLS callbacks", () => {
+    it("caps the callback walk on an array of non-zero pointers", { timeout: TIMEOUT }, () => {
       // The array is null-terminated, so a section full of non-zero pointers has
       // no terminator; only the hard iteration cap ends the walk.
       const rva = 0x1000;
@@ -339,7 +343,7 @@ describe('malformed PE handling', () => {
       dv.setUint32(0x100 + 12, 0x00400000 + rva, true); // AddressOfCallBacks -> offset 0
 
       const buf = buildMinimalPE32({
-        sections: [dataSection('.rdata', rva, data)],
+        sections: [dataSection(".rdata", rva, data)],
         dataDirectories: new Map([[9, { virtualAddress: rva + 0x100, size: 24 }]]),
       });
 
@@ -350,8 +354,8 @@ describe('malformed PE handling', () => {
     });
   });
 
-  describe('authenticode DER', () => {
-    it('rejects a 4-byte DER length with the high bit set', { timeout: TIMEOUT }, () => {
+  describe("authenticode DER", () => {
+    it("rejects a 4-byte DER length with the high bit set", { timeout: TIMEOUT }, () => {
       // `contentLen = (contentLen << 8) | byte` is signed-32 in JS, so 0xFF...
       // produced a NEGATIVE length. readDERChildren then walked backwards and
       // never terminated. This must return promptly instead.

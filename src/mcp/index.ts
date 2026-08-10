@@ -10,23 +10,23 @@
 // CLI routing guard — handle the `setup` subcommand and exit before the server starts.
 // Note: this does NOT avoid loading the imports below — ESM static imports are hoisted
 // and fully evaluated before any top-level statement runs. It only skips main().
-if (process.argv[2] === 'setup') {
-  const { runSetup } = await import('./cli.js');
+if (process.argv[2] === "setup") {
+  const { runSetup } = await import("./cli.js");
   await runSetup(process.argv.slice(3));
   process.exit(0);
 }
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { WebSocket, WebSocketServer } from 'ws';
-import { initCapstone } from './disasm.js';
-import { FileSession } from './session.js';
-import { registerTools } from './tools.js';
-import { registerResources } from './resources.js';
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebSocket, WebSocketServer } from "ws";
+import { initCapstone } from "./disasm.js";
+import { FileSession } from "./session.js";
+import { registerTools } from "./tools.js";
+import { registerResources } from "./resources.js";
 
 const server = new McpServer({
-  name: 'peek-a-bin',
-  version: '0.1.0',
+  name: "peek-a-bin",
+  version: "0.1.0",
 });
 
 const session = new FileSession();
@@ -43,29 +43,31 @@ async function main() {
   // PEEK_A_BIN_WS_HOST can opt into a wider bind (e.g. 0.0.0.0) for users who
   // deliberately want remote access and provide their own network controls.
   const WS_PORT = Number(process.env.PEEK_A_BIN_WS_PORT) || 19283;
-  const WS_HOST = process.env.PEEK_A_BIN_WS_HOST || '127.0.0.1';
+  const WS_HOST = process.env.PEEK_A_BIN_WS_HOST || "127.0.0.1";
   const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
   const clients = new Set<WebSocket>();
-  wss.on('connection', (ws) => {
+  wss.on("connection", (ws) => {
     clients.add(ws);
-    ws.on('close', () => clients.delete(ws));
+    ws.on("close", () => clients.delete(ws));
     // Without an 'error' listener, ws re-emits socket errors as uncaught exceptions.
-    ws.on('error', () => clients.delete(ws));
+    ws.on("error", () => clients.delete(ws));
   });
 
-  wss.on('listening', () => {
+  wss.on("listening", () => {
     process.stderr.write(`[peek-a-bin] WS sync on ${WS_HOST}:${WS_PORT}\n`);
   });
 
   // EADDRINUSE (and friends) arrive as an 'error' event; unhandled, it kills the process.
   // Live sync is optional, so degrade instead of taking the MCP server down.
-  wss.on('error', (err) => {
-    process.stderr.write(`[peek-a-bin] WS sync disabled: ${err instanceof Error ? err.message : String(err)}\n`);
+  wss.on("error", (err) => {
+    process.stderr.write(
+      `[peek-a-bin] WS sync disabled: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
   });
 
   session.onAnnotationChange = (_fileId, af) => {
     const msg = JSON.stringify({
-      type: 'annotations',
+      type: "annotations",
       fileName: af.fileName,
       comments: af.comments,
       renames: af.renames,
@@ -88,6 +90,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Fatal:', err);
+  console.error("Fatal:", err);
   process.exit(1);
 });

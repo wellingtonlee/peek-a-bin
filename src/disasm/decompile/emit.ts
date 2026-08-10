@@ -1,85 +1,120 @@
-import type { IRExpr, IRStmt, IRFunction, BinaryOp } from './ir';
-import { canonReg } from './ir';
-import { isPlausibleIOCTL, formatIOCTL } from '../../analysis/driver';
-import type { TypeContext, DecompType } from './typeInfer';
-import { typeToString } from './typeInfer';
+import type { IRExpr, IRStmt, IRFunction, BinaryOp } from "./ir";
+import { canonReg } from "./ir";
+import { isPlausibleIOCTL, formatIOCTL } from "../../analysis/driver";
+import type { TypeContext, DecompType } from "./typeInfer";
+import { typeToString } from "./typeInfer";
 
 // ── Expression Emission ──
 
 const PREC: Record<string, number> = {
-  '||': 1, '&&': 2,
-  '|': 3, '^': 4, '&': 5,
-  '==': 6, '!=': 6,
-  '<': 7, '<=': 7, '>': 7, '>=': 7,
-  'u<': 7, 'u<=': 7, 'u>': 7, 'u>=': 7,
-  '<<': 8, '>>': 8, '>>>': 8,
-  '+': 9, '-': 9,
-  '*': 10, '/': 10, '%': 10,
+  "||": 1,
+  "&&": 2,
+  "|": 3,
+  "^": 4,
+  "&": 5,
+  "==": 6,
+  "!=": 6,
+  "<": 7,
+  "<=": 7,
+  ">": 7,
+  ">=": 7,
+  "u<": 7,
+  "u<=": 7,
+  "u>": 7,
+  "u>=": 7,
+  "<<": 8,
+  ">>": 8,
+  ">>>": 8,
+  "+": 9,
+  "-": 9,
+  "*": 10,
+  "/": 10,
+  "%": 10,
 };
 
 function opStr(op: BinaryOp): string {
   switch (op) {
-    case 'u<': return '<';
-    case 'u<=': return '<=';
-    case 'u>': return '>';
-    case 'u>=': return '>=';
-    case '&&': return '&&';
-    case '||': return '||';
-    default: return op;
+    case "u<":
+      return "<";
+    case "u<=":
+      return "<=";
+    case "u>":
+      return ">";
+    case "u>=":
+      return ">=";
+    case "&&":
+      return "&&";
+    case "||":
+      return "||";
+    default:
+      return op;
   }
 }
 
 function sizeToType(size: number): string {
   switch (size) {
-    case 1: return 'uint8_t';
-    case 2: return 'uint16_t';
-    case 4: return 'int32_t';
-    case 8: return 'int64_t';
-    default: return 'int32_t';
+    case 1:
+      return "uint8_t";
+    case 2:
+      return "uint16_t";
+    case 4:
+      return "int32_t";
+    case 8:
+      return "int64_t";
+    default:
+      return "int32_t";
   }
 }
 
 function formatHex(value: number): string {
   if (value >= 0 && value <= 9) return String(value);
-  if (value < 0) return '-' + formatHex(-value);
-  return '0x' + value.toString(16).toUpperCase();
+  if (value < 0) return "-" + formatHex(-value);
+  return "0x" + value.toString(16).toUpperCase();
 }
 
-const COMPOUND_OPS = new Set<string>(['+', '-', '*', '/', '%', '&', '|', '^', '<<', '>>', '>>>']);
+const COMPOUND_OPS = new Set<string>(["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>"]);
 
 let _typeCtx: TypeContext | undefined;
 let _stringMap: Map<number, string> | undefined;
 
 function getExprType(expr: IRExpr): DecompType | undefined {
   if (!_typeCtx) return undefined;
-  if (expr.kind === 'reg') return _typeCtx.types.get(canonReg(expr.name));
-  if (expr.kind === 'var') return _typeCtx.types.get(expr.name);
+  if (expr.kind === "reg") return _typeCtx.types.get(canonReg(expr.name));
+  if (expr.kind === "var") return _typeCtx.types.get(expr.name);
   return undefined;
 }
 
-function emitTypeIdiom(expr: IRExpr & { kind: 'binary' }): string | null {
+function emitTypeIdiom(expr: IRExpr & { kind: "binary" }): string | null {
   const leftType = getExprType(expr.left);
 
   // HANDLE: x == 0xFFFFFFFF → x == INVALID_HANDLE_VALUE
-  if (leftType?.kind === 'handle' && expr.op === '==' &&
-      expr.right.kind === 'const' && (expr.right.value === 0xFFFFFFFF || expr.right.value === -1)) {
+  if (
+    leftType?.kind === "handle" &&
+    expr.op === "==" &&
+    expr.right.kind === "const" &&
+    (expr.right.value === 0xffffffff || expr.right.value === -1)
+  ) {
     return `${emitExpr(expr.left, 0)} == INVALID_HANDLE_VALUE`;
   }
-  if (leftType?.kind === 'handle' && expr.op === '!=' &&
-      expr.right.kind === 'const' && (expr.right.value === 0xFFFFFFFF || expr.right.value === -1)) {
+  if (
+    leftType?.kind === "handle" &&
+    expr.op === "!=" &&
+    expr.right.kind === "const" &&
+    (expr.right.value === 0xffffffff || expr.right.value === -1)
+  ) {
     return `${emitExpr(expr.left, 0)} != INVALID_HANDLE_VALUE`;
   }
 
   // NTSTATUS: x >= 0 → NT_SUCCESS(x), x < 0 → !NT_SUCCESS(x)
-  if (leftType?.kind === 'ntstatus' && expr.right.kind === 'const' && expr.right.value === 0) {
-    if (expr.op === '>=' || expr.op === 'u>=') return `NT_SUCCESS(${emitExpr(expr.left, 0)})`;
-    if (expr.op === '<') return `!NT_SUCCESS(${emitExpr(expr.left, 0)})`;
+  if (leftType?.kind === "ntstatus" && expr.right.kind === "const" && expr.right.value === 0) {
+    if (expr.op === ">=" || expr.op === "u>=") return `NT_SUCCESS(${emitExpr(expr.left, 0)})`;
+    if (expr.op === "<") return `!NT_SUCCESS(${emitExpr(expr.left, 0)})`;
   }
 
   // HRESULT: x >= 0 → SUCCEEDED(x), x < 0 → FAILED(x)
-  if (leftType?.kind === 'hresult' && expr.right.kind === 'const' && expr.right.value === 0) {
-    if (expr.op === '>=' || expr.op === 'u>=') return `SUCCEEDED(${emitExpr(expr.left, 0)})`;
-    if (expr.op === '<') return `FAILED(${emitExpr(expr.left, 0)})`;
+  if (leftType?.kind === "hresult" && expr.right.kind === "const" && expr.right.value === 0) {
+    if (expr.op === ">=" || expr.op === "u>=") return `SUCCEEDED(${emitExpr(expr.left, 0)})`;
+    if (expr.op === "<") return `FAILED(${emitExpr(expr.left, 0)})`;
   }
 
   return null;
@@ -87,12 +122,12 @@ function emitTypeIdiom(expr: IRExpr & { kind: 'binary' }): string | null {
 
 function emitExpr(expr: IRExpr, parentPrec = 0): string {
   switch (expr.kind) {
-    case 'const': {
+    case "const": {
       // String literal lookup
       if (_stringMap) {
         const str = _stringMap.get(expr.value);
         if (str) {
-          const display = str.length > 40 ? str.substring(0, 37) + '...' : str;
+          const display = str.length > 40 ? str.substring(0, 37) + "..." : str;
           return `"${display.replace(/"/g, '\\"')}"`;
         }
       }
@@ -104,7 +139,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
       // Enum member lookup
       if (_typeCtx) {
         for (const [, t] of _typeCtx.types) {
-          if (t.kind === 'enum') {
+          if (t.kind === "enum") {
             const memberName = t.members.get(expr.value);
             if (memberName) return memberName;
           }
@@ -113,13 +148,13 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
       return hex;
     }
 
-    case 'reg':
+    case "reg":
       return expr.name;
 
-    case 'var':
+    case "var":
       return expr.name;
 
-    case 'binary': {
+    case "binary": {
       // Type-aware idioms
       if (_typeCtx) {
         const idiom = emitTypeIdiom(expr);
@@ -132,43 +167,43 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
       return prec < parentPrec ? `(${result})` : result;
     }
 
-    case 'unary': {
+    case "unary": {
       const operand = emitExpr(expr.operand, 99);
       return `${expr.op}${operand}`;
     }
 
-    case 'deref': {
+    case "deref": {
       const type = sizeToType(expr.size);
       const addr = emitExpr(expr.address, 0);
       return `*(${type}*)(${addr})`;
     }
 
-    case 'field_access':
+    case "field_access":
       return `${emitExpr(expr.base)}->${expr.fieldName}`;
 
-    case 'array_access': {
+    case "array_access": {
       const type = sizeToType(expr.elementSize);
       const base = emitExpr(expr.base, 0);
       const index = emitExpr(expr.index, 0);
       // If base is a field_access, use -> syntax: base->field[index]
-      if (expr.base.kind === 'field_access') {
+      if (expr.base.kind === "field_access") {
         return `${emitExpr(expr.base)}[${index}]`;
       }
       return `((${type}*)${base})[${index}]`;
     }
 
-    case 'call': {
-      const name = expr.display?.split('!')?.pop() ?? expr.target;
-      const args = expr.args.map(a => emitExpr(a, 0)).join(', ');
+    case "call": {
+      const name = expr.display?.split("!")?.pop() ?? expr.target;
+      const args = expr.args.map((a) => emitExpr(a, 0)).join(", ");
       return `${name}(${args})`;
     }
 
-    case 'cast': {
+    case "cast": {
       // Redundant cast suppression: skip cast when operand's known type matches
-      if (_typeCtx && (expr.operand.kind === 'reg' || expr.operand.kind === 'var')) {
-        const name = expr.operand.kind === 'reg' ? expr.operand.name : expr.operand.name;
+      if (_typeCtx && (expr.operand.kind === "reg" || expr.operand.kind === "var")) {
+        const name = expr.operand.kind === "reg" ? expr.operand.name : expr.operand.name;
         const known = _typeCtx.types.get(name);
-        if (known && known.kind !== 'unknown') {
+        if (known && known.kind !== "unknown") {
           const knownStr = typeToString(known);
           if (knownStr === expr.type) return emitExpr(expr.operand, parentPrec);
         }
@@ -176,7 +211,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
       return `(${expr.type})${emitExpr(expr.operand, 99)}`;
     }
 
-    case 'ternary': {
+    case "ternary": {
       const cond = emitExpr(expr.condition, 0);
       const then = emitExpr(expr.then, 0);
       const els = emitExpr(expr.else, 0);
@@ -184,7 +219,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
       return parentPrec > 0 ? `(${result})` : result;
     }
 
-    case 'unknown':
+    case "unknown":
       return `/* ${expr.text} */`;
 
     default: {
@@ -198,19 +233,26 @@ function emitExpr(expr: IRExpr, parentPrec = 0): string {
 // ── Statement Emission ──
 
 function indent(level: number): string {
-  return '    '.repeat(level);
+  return "    ".repeat(level);
 }
 
 /** Get the instruction address from a statement, if present */
 function stmtAddr(stmt: IRStmt): number | undefined {
   switch (stmt.kind) {
-    case 'assign': return stmt.addr;
-    case 'store': return stmt.addr;
-    case 'call_stmt': return stmt.addr;
-    case 'return': return stmt.addr;
-    case 'raw': return stmt.addr;
-    case 'phi': return stmt.addr;
-    default: return undefined;
+    case "assign":
+      return stmt.addr;
+    case "store":
+      return stmt.addr;
+    case "call_stmt":
+      return stmt.addr;
+    case "return":
+      return stmt.addr;
+    case "raw":
+      return stmt.addr;
+    case "phi":
+      return stmt.addr;
+    default:
+      return undefined;
   }
 }
 
@@ -231,18 +273,24 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
   }
 
   switch (stmt.kind) {
-    case 'assign': {
+    case "assign": {
       const dest = emitExpr(stmt.dest, 0);
       const src = emitExpr(stmt.src, 0);
       // Compound assignment: dest = dest OP rhs → dest OP= rhs
-      if (stmt.src.kind === 'binary' && COMPOUND_OPS.has(stmt.src.op)) {
+      if (stmt.src.kind === "binary" && COMPOUND_OPS.has(stmt.src.op)) {
         const lhs = emitExpr(stmt.src.left, 0);
         if (lhs === dest) {
           const rhs = emitExpr(stmt.src.right, 0);
           // Increment/decrement: x += 1 → x++, x -= 1 → x--
-          if (stmt.src.right.kind === 'const' && stmt.src.right.value === 1) {
-            if (stmt.src.op === '+') { push(`${pad}${dest}++;`, addr); break; }
-            if (stmt.src.op === '-') { push(`${pad}${dest}--;`, addr); break; }
+          if (stmt.src.right.kind === "const" && stmt.src.right.value === 1) {
+            if (stmt.src.op === "+") {
+              push(`${pad}${dest}++;`, addr);
+              break;
+            }
+            if (stmt.src.op === "-") {
+              push(`${pad}${dest}--;`, addr);
+              break;
+            }
           }
           push(`${pad}${dest} ${opStr(stmt.src.op)}= ${rhs};`, addr);
           break;
@@ -252,12 +300,12 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'store': {
+    case "store": {
       const type = sizeToType(stmt.size);
       const addrStr = emitExpr(stmt.address, 0);
       const storeTarget = `*(${type}*)(${addrStr})`;
       // Compound assignment for regular stores
-      if (stmt.value.kind === 'binary' && COMPOUND_OPS.has(stmt.value.op)) {
+      if (stmt.value.kind === "binary" && COMPOUND_OPS.has(stmt.value.op)) {
         const lhs = emitExpr(stmt.value.left, 0);
         if (lhs === storeTarget) {
           const rhs = emitExpr(stmt.value.right, 0);
@@ -270,13 +318,13 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'call_stmt': {
+    case "call_stmt": {
       const call = emitExpr(stmt.call, 0);
       push(`${pad}${call};`, addr);
       break;
     }
 
-    case 'return': {
+    case "return": {
       if (stmt.value) {
         const val = emitExpr(stmt.value, 0);
         push(`${pad}return ${val};`, addr);
@@ -286,7 +334,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'if': {
+    case "if": {
       const cond = emitExpr(stmt.condition, 0);
       push(`${pad}if (${cond}) {`);
       for (const s of stmt.thenBody) {
@@ -296,7 +344,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       }
       if (stmt.elseBody && stmt.elseBody.length > 0) {
         // Check for else-if chain
-        if (stmt.elseBody.length === 1 && stmt.elseBody[0].kind === 'if') {
+        if (stmt.elseBody.length === 1 && stmt.elseBody[0].kind === "if") {
           const elseIf = stmt.elseBody[0];
           push(`${pad}} else `);
           // Remove last line's newline context and append if
@@ -323,7 +371,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'while': {
+    case "while": {
       const cond = emitExpr(stmt.condition, 0);
       push(`${pad}while (${cond}) {`);
       for (const s of stmt.body) {
@@ -335,7 +383,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'do_while': {
+    case "do_while": {
       push(`${pad}do {`);
       for (const s of stmt.body) {
         const r = emitStmt(s, level + 1);
@@ -347,18 +395,18 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'switch': {
+    case "switch": {
       const expr = emitExpr(stmt.expr, 0);
       push(`${pad}switch (${expr}) {`);
       // Check if switch expression has enum type
       let enumType: DecompType | undefined;
       if (_typeCtx) {
-        if (stmt.expr.kind === 'reg') enumType = _typeCtx.types.get(canonReg(stmt.expr.name));
-        else if (stmt.expr.kind === 'var') enumType = _typeCtx.types.get(stmt.expr.name);
+        if (stmt.expr.kind === "reg") enumType = _typeCtx.types.get(canonReg(stmt.expr.name));
+        else if (stmt.expr.kind === "var") enumType = _typeCtx.types.get(stmt.expr.name);
       }
       for (const c of stmt.cases) {
         for (const v of c.values) {
-          if (enumType?.kind === 'enum') {
+          if (enumType?.kind === "enum") {
             const memberName = enumType.members.get(v);
             push(`${pad}case ${memberName ?? formatHex(v)}:`);
           } else {
@@ -383,27 +431,27 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'goto':
+    case "goto":
       push(`${pad}goto ${stmt.label};`);
       break;
 
-    case 'label':
+    case "label":
       push(`${stmt.name}:`);
       break;
 
-    case 'comment':
+    case "comment":
       push(`${pad}// ${stmt.text}`);
       break;
 
-    case 'raw':
+    case "raw":
       push(`${pad}${stmt.text};`, addr);
       break;
 
-    case 'for': {
+    case "for": {
       const initR = emitStmt(stmt.init, 0);
-      const initStr = initR.lines[0]?.trim().replace(/;$/, '') ?? '';
+      const initStr = initR.lines[0]?.trim().replace(/;$/, "") ?? "";
       const updateR = emitStmt(stmt.update, 0);
-      const updateStr = updateR.lines[0]?.trim().replace(/;$/, '') ?? '';
+      const updateStr = updateR.lines[0]?.trim().replace(/;$/, "") ?? "";
       const cond = emitExpr(stmt.condition, 0);
       push(`${pad}for (${initStr}; ${cond}; ${updateStr}) {`);
       for (const s of stmt.body) {
@@ -415,22 +463,22 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'break':
+    case "break":
       push(`${pad}break;`);
       break;
 
-    case 'continue':
+    case "continue":
       push(`${pad}continue;`);
       break;
 
-    case 'try': {
+    case "try": {
       push(`${pad}__try {`);
       for (const s of stmt.body) {
         const r = emitStmt(s, level + 1);
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
-      const filter = stmt.filterExpr ? emitExpr(stmt.filterExpr, 0) : 'EXCEPTION_EXECUTE_HANDLER';
+      const filter = stmt.filterExpr ? emitExpr(stmt.filterExpr, 0) : "EXCEPTION_EXECUTE_HANDLER";
       push(`${pad}} __except(${filter}) {`);
       for (const s of stmt.handler) {
         const r = emitStmt(s, level + 1);
@@ -441,14 +489,17 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       break;
     }
 
-    case 'phi': {
+    case "phi": {
       // destroySSA converts every phi to copies, so one reaching the emitter
       // means SSA destruction was incomplete. Emit it as a comment rather than
       // silently dropping the statement (which used to produce no line at all).
       const ops = stmt.operands
-        .map(o => `${o.value.name}${o.value.version !== undefined ? `_${o.value.version}` : ''}@B${o.blockId}`)
-        .join(', ');
-      const dest = `${stmt.dest.name}${stmt.dest.version !== undefined ? `_${stmt.dest.version}` : ''}`;
+        .map(
+          (o) =>
+            `${o.value.name}${o.value.version !== undefined ? `_${o.value.version}` : ""}@B${o.blockId}`,
+        )
+        .join(", ");
+      const dest = `${stmt.dest.name}${stmt.dest.version !== undefined ? `_${stmt.dest.version}` : ""}`;
       push(`${pad}/* unresolved phi: ${dest} = phi(${ops}) */`, addr);
       break;
     }
@@ -466,16 +517,20 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
 // ── Function Emission ──
 
-function fieldTypeString(field: import('./structs').StructField): string {
+function fieldTypeString(field: import("./structs").StructField): string {
   return typeToString(field.type);
 }
 
 export interface EmitFunctionResult {
   code: string;
-  lineMap: Map<number, number>;  // line number (0-based) → instruction address
+  lineMap: Map<number, number>; // line number (0-based) → instruction address
 }
 
-export function emitFunction(func: IRFunction, typeCtx?: TypeContext, stringMap?: Map<number, string>): EmitFunctionResult {
+export function emitFunction(
+  func: IRFunction,
+  typeCtx?: TypeContext,
+  stringMap?: Map<number, string>,
+): EmitFunctionResult {
   // emitStmt/emitExpr are mutually recursive and unbounded, so deeply nested IR
   // can throw (e.g. RangeError) part-way through, and pipeline.ts swallows the
   // exception. The unwind used to skip the reset at the bottom of this function
@@ -515,13 +570,13 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
       }
       lines.push(`} ${def.id};`);
       lineAddrs.push(undefined);
-      lines.push('');
+      lines.push("");
       lineAddrs.push(undefined);
     }
   }
 
   // Function header
-  const params = func.params.map(p => `${p.type} ${p.name}`).join(', ');
+  const params = func.params.map((p) => `${p.type} ${p.name}`).join(", ");
   lines.push(`${func.returnType} ${func.name}(${params}) {`);
   lineAddrs.push(undefined);
 
@@ -531,7 +586,7 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
       lines.push(`    ${local.type} ${local.name};`);
       lineAddrs.push(undefined);
     }
-    lines.push('');
+    lines.push("");
     lineAddrs.push(undefined);
   }
 
@@ -542,7 +597,7 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
     lineAddrs.push(...result.addrs);
   }
 
-  lines.push('}');
+  lines.push("}");
   lineAddrs.push(undefined);
 
   // Build lineMap
@@ -553,5 +608,5 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
     }
   }
 
-  return { code: lines.join('\n'), lineMap };
+  return { code: lines.join("\n"), lineMap };
 }

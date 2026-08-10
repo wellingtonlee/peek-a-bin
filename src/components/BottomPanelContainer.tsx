@@ -55,7 +55,9 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   }, []);
 
   const handleResizeEnd = useCallback(() => {
-    try { localStorage.setItem("peek-a-bin:bottom-panel-height", String(height)); } catch {}
+    try {
+      localStorage.setItem("peek-a-bin:bottom-panel-height", String(height));
+    } catch {}
   }, [height]);
 
   const handlePopOut = useCallback((id: string) => {
@@ -90,7 +92,11 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
       {/* Tabbed container */}
       {tabbedPanels.length > 0 && (
         <div className="shrink-0 flex flex-col panel-bg border-t border-theme" style={{ height }}>
-          <ResizeHandle orientation="vertical" onResize={handleResize} onResizeEnd={handleResizeEnd} />
+          <ResizeHandle
+            orientation="vertical"
+            onResize={handleResize}
+            onResizeEnd={handleResizeEnd}
+          />
           {/* Tab header */}
           <div className="flex items-center gap-0.5 px-2 py-0.5 border-b border-gray-700 shrink-0">
             {/* Pop-out and close are siblings of the tab button, not children:
@@ -178,7 +184,14 @@ interface FloatingPanelProps {
   onResizeFloat: (w: number, h: number) => void;
 }
 
-function FloatingPanel({ panel, state, onDock, onClose, onMove, onResizeFloat }: FloatingPanelProps) {
+function FloatingPanel({
+  panel,
+  state,
+  onDock,
+  onClose,
+  onMove,
+  onResizeFloat,
+}: FloatingPanelProps) {
   const headerRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
 
@@ -252,14 +265,16 @@ function FloatingPanel({ panel, state, onDock, onClose, onMove, onResizeFloat }:
       >
         <span className="text-gray-300 text-[10px] font-semibold">{panel.label}</span>
         <div className="flex-1" />
-        <button type="button"
+        <button
+          type="button"
           onClick={onDock}
           className="text-gray-500 hover:text-white text-[10px] px-1"
           title="Re-dock"
         >
           ↙
         </button>
-        <button type="button"
+        <button
+          type="button"
           onClick={onClose}
           className="text-gray-500 hover:text-red-400 text-[10px] px-1"
           title="Close"
@@ -268,14 +283,14 @@ function FloatingPanel({ panel, state, onDock, onClose, onMove, onResizeFloat }:
         </button>
       </div>
       {/* Content */}
-      <div className="flex-1 overflow-auto">
-        {panel.content}
-      </div>
+      <div className="flex-1 overflow-auto">{panel.content}</div>
       {/* Resize corner */}
       <div
         ref={resizeRef}
         className="absolute bottom-0 right-0 w-3 h-3 cursor-nwse-resize"
-        style={{ background: "linear-gradient(135deg, transparent 50%, rgba(107,114,128,0.5) 50%)" }}
+        style={{
+          background: "linear-gradient(135deg, transparent 50%, rgba(107,114,128,0.5) 50%)",
+        }}
       />
     </div>
   );

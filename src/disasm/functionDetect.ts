@@ -4,9 +4,9 @@
  * can reuse the same algorithms.
  */
 
-import type { Instruction, DisasmFunction, Xref } from './types';
-import { isPlausibleIOCTL, formatIOCTL } from '../analysis/driver';
-import { resolveRipTarget } from './ripRelative';
+import type { Instruction, DisasmFunction, Xref } from "./types";
+import { isPlausibleIOCTL, formatIOCTL } from "../analysis/driver";
+import { resolveRipTarget } from "./ripRelative";
 
 /** Context maps passed in instead of module-level state */
 export interface DisasmContext {
@@ -37,7 +37,7 @@ export function mapInsn(
     const ripTarget = resolveRipTarget(insn);
     if (ripTarget !== null && stringMap.has(ripTarget)) {
       const str = stringMap.get(ripTarget)!;
-      instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
+      instruction.comment = str.length > 60 ? str.substring(0, 57) + "..." : str;
     }
     if (!instruction.comment) {
       const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
@@ -46,7 +46,7 @@ export function mapInsn(
           const addr = parseInt(addrStr, 16);
           if (stringMap.has(addr)) {
             const str = stringMap.get(addr)!;
-            instruction.comment = str.length > 60 ? str.substring(0, 57) + '...' : str;
+            instruction.comment = str.length > 60 ? str.substring(0, 57) + "..." : str;
             break;
           }
         }
@@ -66,7 +66,10 @@ export function mapInsn(
         for (const addrStr of addrMatches) {
           const addr = parseInt(addrStr, 16);
           const iat = iatMap.get(addr);
-          if (iat) { instruction.comment = `${iat.lib}!${iat.func}`; break; }
+          if (iat) {
+            instruction.comment = `${iat.lib}!${iat.func}`;
+            break;
+          }
         }
       }
     }
@@ -80,7 +83,10 @@ export function mapInsn(
         const val = parseInt(hexStr, 16);
         if (isPlausibleIOCTL(val)) {
           const decoded = formatIOCTL(val);
-          if (decoded) { instruction.comment = decoded; break; }
+          if (decoded) {
+            instruction.comment = decoded;
+            break;
+          }
         }
       }
     }
@@ -111,7 +117,7 @@ export function disassemble(
         offset += 1;
       } else {
         const lastInsn = insns[insns.length - 1];
-        const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
+        const decoded = lastInsn.address - (baseAddress + offset) + lastInsn.size;
         offset += decoded;
       }
     } catch {
@@ -169,7 +175,7 @@ export function detectFunctions(
     const ep = options.entryPoint;
     if (ep >= baseAddress && ep < endAddress) {
       addrSet.add(ep);
-      nameMap.set(ep, 'entry_point');
+      nameMap.set(ep, "entry_point");
     }
   }
 
@@ -186,61 +192,143 @@ export function detectFunctions(
   for (let i = 0; i < len; i++) {
     let isFunctionStart = false;
     if (is64) {
-      if (i + 3 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x48 && bytes[i + 2] === 0x89 && bytes[i + 3] === 0xE5) {
+      if (
+        i + 3 < len &&
+        bytes[i] === 0x55 &&
+        bytes[i + 1] === 0x48 &&
+        bytes[i + 2] === 0x89 &&
+        bytes[i + 3] === 0xe5
+      ) {
         isFunctionStart = true;
-      } else if (i + 3 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x83 && bytes[i + 2] === 0xEC) {
+      } else if (
+        i + 3 < len &&
+        bytes[i] === 0x48 &&
+        bytes[i + 1] === 0x83 &&
+        bytes[i + 2] === 0xec
+      ) {
         isFunctionStart = true;
-      } else if (i + 6 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x81 && bytes[i + 2] === 0xEC) {
+      } else if (
+        i + 6 < len &&
+        bytes[i] === 0x48 &&
+        bytes[i + 1] === 0x81 &&
+        bytes[i + 2] === 0xec
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 3 < len && bytes[i] === 0x53 && bytes[i + 1] === 0x48 && bytes[i + 2] === 0x83 && bytes[i + 3] === 0xEC) {
+      } else if (
+        i + 3 < len &&
+        bytes[i] === 0x53 &&
+        bytes[i + 1] === 0x48 &&
+        bytes[i + 2] === 0x83 &&
+        bytes[i + 3] === 0xec
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 4 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x4C && bytes[i + 3] === 0x24 && bytes[i + 4] === 0x08) {
+      } else if (
+        i + 4 < len &&
+        bytes[i] === 0x48 &&
+        bytes[i + 1] === 0x89 &&
+        bytes[i + 2] === 0x4c &&
+        bytes[i + 3] === 0x24 &&
+        bytes[i + 4] === 0x08
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 4 < len && bytes[i] === 0x57 && bytes[i + 1] === 0x56 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+      } else if (
+        i + 4 < len &&
+        bytes[i] === 0x57 &&
+        bytes[i + 1] === 0x56 &&
+        bytes[i + 2] === 0x48 &&
+        bytes[i + 3] === 0x83 &&
+        bytes[i + 4] === 0xec
+      ) {
         isFunctionStart = true;
       }
       // NOTE: a `48 83 EC` (sub rsp, imm8) preceded by CC/90 padding is already
       // matched by the unqualified `48 83 EC` branch above — no separate case needed.
-      else if (i + 4 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x53 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+      else if (
+        i + 4 < len &&
+        bytes[i] === 0x40 &&
+        bytes[i + 1] === 0x53 &&
+        bytes[i + 2] === 0x48 &&
+        bytes[i + 3] === 0x83 &&
+        bytes[i + 4] === 0xec
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 5 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x55 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x8D && bytes[i + 4] === 0x6C && bytes[i + 5] === 0x24) {
+      } else if (
+        i + 5 < len &&
+        bytes[i] === 0x40 &&
+        bytes[i + 1] === 0x55 &&
+        bytes[i + 2] === 0x48 &&
+        bytes[i + 3] === 0x8d &&
+        bytes[i + 4] === 0x6c &&
+        bytes[i + 5] === 0x24
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 4 < len && bytes[i] === 0x40 && bytes[i + 1] === 0x57 && bytes[i + 2] === 0x48 && bytes[i + 3] === 0x83 && bytes[i + 4] === 0xEC) {
+      } else if (
+        i + 4 < len &&
+        bytes[i] === 0x40 &&
+        bytes[i + 1] === 0x57 &&
+        bytes[i + 2] === 0x48 &&
+        bytes[i + 3] === 0x83 &&
+        bytes[i + 4] === 0xec
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 3 < len && (
-        (bytes[i] === 0x48 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x5C && bytes[i + 3] === 0x24) ||
-        (bytes[i] === 0x4C && bytes[i + 1] === 0x89 && bytes[i + 2] === 0x44 && bytes[i + 3] === 0x24)
-      )) {
-        const atBoundary = i === 0
-          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
-          || ((baseAddress + i) % 16 === 0);
+      } else if (
+        i + 3 < len &&
+        ((bytes[i] === 0x48 &&
+          bytes[i + 1] === 0x89 &&
+          bytes[i + 2] === 0x5c &&
+          bytes[i + 3] === 0x24) ||
+          (bytes[i] === 0x4c &&
+            bytes[i + 1] === 0x89 &&
+            bytes[i + 2] === 0x44 &&
+            bytes[i + 3] === 0x24))
+      ) {
+        const atBoundary =
+          i === 0 ||
+          bytes[i - 1] === 0xcc ||
+          bytes[i - 1] === 0xc3 ||
+          bytes[i - 1] === 0x90 ||
+          (baseAddress + i) % 16 === 0;
         if (atBoundary) isFunctionStart = true;
-      }
-      else if (i + 2 < len && bytes[i] === 0x48 && bytes[i + 1] === 0x8B && bytes[i + 2] === 0xC4) {
-        const atBoundary = i === 0
-          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
-          || ((baseAddress + i) % 16 === 0);
+      } else if (
+        i + 2 < len &&
+        bytes[i] === 0x48 &&
+        bytes[i + 1] === 0x8b &&
+        bytes[i + 2] === 0xc4
+      ) {
+        const atBoundary =
+          i === 0 ||
+          bytes[i - 1] === 0xcc ||
+          bytes[i - 1] === 0xc3 ||
+          bytes[i - 1] === 0x90 ||
+          (baseAddress + i) % 16 === 0;
         if (atBoundary) isFunctionStart = true;
       }
     } else {
-      if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x8B && bytes[i + 2] === 0xEC) {
+      if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x8b && bytes[i + 2] === 0xec) {
         isFunctionStart = true;
-      } else if (i + 2 < len && bytes[i] === 0x55 && bytes[i + 1] === 0x89 && bytes[i + 2] === 0xE5) {
+      } else if (
+        i + 2 < len &&
+        bytes[i] === 0x55 &&
+        bytes[i + 1] === 0x89 &&
+        bytes[i + 2] === 0xe5
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 4 < len && bytes[i] === 0x8B && bytes[i + 1] === 0xFF && bytes[i + 2] === 0x55 && bytes[i + 3] === 0x8B && bytes[i + 4] === 0xEC) {
+      } else if (
+        i + 4 < len &&
+        bytes[i] === 0x8b &&
+        bytes[i + 1] === 0xff &&
+        bytes[i + 2] === 0x55 &&
+        bytes[i + 3] === 0x8b &&
+        bytes[i + 4] === 0xec
+      ) {
         isFunctionStart = true;
-      }
-      else if (i + 2 < len && bytes[i] === 0x6A && bytes[i + 2] === 0x68) {
-        const atBoundary = i === 0
-          || bytes[i - 1] === 0xCC || bytes[i - 1] === 0xC3 || bytes[i - 1] === 0x90
-          || ((baseAddress + i) % 16 === 0);
+      } else if (i + 2 < len && bytes[i] === 0x6a && bytes[i + 2] === 0x68) {
+        const atBoundary =
+          i === 0 ||
+          bytes[i - 1] === 0xcc ||
+          bytes[i - 1] === 0xc3 ||
+          bytes[i - 1] === 0x90 ||
+          (baseAddress + i) % 16 === 0;
         if (atBoundary) isFunctionStart = true;
       }
     }
@@ -249,19 +337,23 @@ export function detectFunctions(
 
   // Alignment padding heuristic
   for (let i = 0; i < len; i++) {
-    if (bytes[i] === 0xCC || bytes[i] === 0x90) {
+    if (bytes[i] === 0xcc || bytes[i] === 0x90) {
       let padEnd = i + 1;
-      let hasCC = bytes[i] === 0xCC;
-      while (padEnd < len && (bytes[padEnd] === 0xCC || bytes[padEnd] === 0x90)) {
-        if (bytes[padEnd] === 0xCC) hasCC = true;
+      let hasCC = bytes[i] === 0xcc;
+      while (padEnd < len && (bytes[padEnd] === 0xcc || bytes[padEnd] === 0x90)) {
+        if (bytes[padEnd] === 0xcc) hasCC = true;
         padEnd++;
       }
       const padLen = padEnd - i;
       const minLen = hasCC ? 2 : 3;
-      if (padLen >= minLen && padEnd < len
-          && bytes[padEnd] !== 0xCC && bytes[padEnd] !== 0x90
-          && bytes[padEnd] !== 0x00
-          && ((baseAddress + padEnd) % 4 === 0)) {
+      if (
+        padLen >= minLen &&
+        padEnd < len &&
+        bytes[padEnd] !== 0xcc &&
+        bytes[padEnd] !== 0x90 &&
+        bytes[padEnd] !== 0x00 &&
+        (baseAddress + padEnd) % 4 === 0
+      ) {
         addrSet.add(baseAddress + padEnd);
       }
       i = padEnd - 1;
@@ -283,7 +375,7 @@ export function detectFunctions(
       try {
         const insns = cs.disasm(chunk, { address: baseAddress + offset });
         for (const insn of insns) {
-          if (insn.mnemonic === 'call') {
+          if (insn.mnemonic === "call") {
             const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
             if (m) {
               const target = parseInt(m[1], 16);
@@ -298,11 +390,11 @@ export function detectFunctions(
           }
 
           // Jump table detection
-          if (insn.mnemonic === 'jmp' && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
+          if (insn.mnemonic === "jmp" && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
             let maxCases = 0;
             for (let ri = recentInsns.length - 1; ri >= 0; ri--) {
               const prev = recentInsns[ri];
-              if (prev.mnemonic === 'cmp') {
+              if (prev.mnemonic === "cmp") {
                 const immMatch = prev.opStr.match(/,\s*0x([0-9a-fA-F]+)$/);
                 if (immMatch) {
                   maxCases = parseInt(immMatch[1], 16) + 1;
@@ -337,14 +429,23 @@ export function detectFunctions(
                     if (entryOffset + ptrSize > len) break;
                     let target: number;
                     if (ptrSize === 8) {
-                      const lo = bytes[entryOffset] | (bytes[entryOffset + 1] << 8) |
-                                 (bytes[entryOffset + 2] << 16) | ((bytes[entryOffset + 3]) << 24);
-                      const hi = bytes[entryOffset + 4] | (bytes[entryOffset + 5] << 8) |
-                                 (bytes[entryOffset + 6] << 16) | ((bytes[entryOffset + 7]) << 24);
-                      target = (hi * 0x100000000) + (lo >>> 0);
+                      const lo =
+                        bytes[entryOffset] |
+                        (bytes[entryOffset + 1] << 8) |
+                        (bytes[entryOffset + 2] << 16) |
+                        (bytes[entryOffset + 3] << 24);
+                      const hi =
+                        bytes[entryOffset + 4] |
+                        (bytes[entryOffset + 5] << 8) |
+                        (bytes[entryOffset + 6] << 16) |
+                        (bytes[entryOffset + 7] << 24);
+                      target = hi * 0x100000000 + (lo >>> 0);
                     } else {
-                      target = bytes[entryOffset] | (bytes[entryOffset + 1] << 8) |
-                               (bytes[entryOffset + 2] << 16) | ((bytes[entryOffset + 3]) << 24);
+                      target =
+                        bytes[entryOffset] |
+                        (bytes[entryOffset + 1] << 8) |
+                        (bytes[entryOffset + 2] << 16) |
+                        (bytes[entryOffset + 3] << 24);
                       target = target >>> 0;
                     }
                     if (target >= baseAddress && target < endAddress) {
@@ -363,8 +464,13 @@ export function detectFunctions(
           }
 
           const mn = insn.mnemonic;
-          prevWasUnconditional = mn === 'ret' || mn === 'retn' || mn === 'jmp';
-          recentInsns.push({ address: insn.address, mnemonic: insn.mnemonic, opStr: insn.opStr, size: insn.size });
+          prevWasUnconditional = mn === "ret" || mn === "retn" || mn === "jmp";
+          recentInsns.push({
+            address: insn.address,
+            mnemonic: insn.mnemonic,
+            opStr: insn.opStr,
+            size: insn.size,
+          });
           if (recentInsns.length > MAX_RECENT) recentInsns.shift();
         }
         if (insns.length === 0) {
@@ -372,7 +478,7 @@ export function detectFunctions(
           prevWasUnconditional = false;
         } else {
           const lastInsn = insns[insns.length - 1];
-          const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
+          const decoded = lastInsn.address - (baseAddress + offset) + lastInsn.size;
           offset += decoded;
         }
       } catch {
@@ -410,12 +516,13 @@ export function detectFunctions(
       const fnBytes = bytes.subarray(fnOffset, fnOffset + fn.size);
       try {
         const insns = cs.disasm(fnBytes, { address: fn.address });
-        let jmpInsn: { address: number; mnemonic: string; opStr: string; size: number } | null = null;
+        let jmpInsn: { address: number; mnemonic: string; opStr: string; size: number } | null =
+          null;
         let meaningfulCount = 0;
         for (const insn of insns) {
-          if (insn.mnemonic === 'nop' || insn.mnemonic === 'int3') continue;
+          if (insn.mnemonic === "nop" || insn.mnemonic === "int3") continue;
           meaningfulCount++;
-          if (insn.mnemonic === 'jmp' && meaningfulCount === 1) jmpInsn = insn;
+          if (insn.mnemonic === "jmp" && meaningfulCount === 1) jmpInsn = insn;
         }
         if (jmpInsn && meaningfulCount === 1) {
           let resolvedAddr: number | null = null;
@@ -433,7 +540,9 @@ export function detectFunctions(
             }
           }
         }
-      } catch { /* skip */ }
+      } catch {
+        /* skip */
+      }
     }
   }
 
@@ -453,12 +562,12 @@ export function detectFunctions(
         const insns = cs.disasm(tailBytes, { address: fn.address + fn.size - tailLen });
         let lastReal: { mnemonic: string; opStr: string } | null = null;
         for (let i = insns.length - 1; i >= 0; i--) {
-          if (insns[i].mnemonic !== 'nop' && insns[i].mnemonic !== 'int3') {
+          if (insns[i].mnemonic !== "nop" && insns[i].mnemonic !== "int3") {
             lastReal = insns[i];
             break;
           }
         }
-        if (lastReal && lastReal.mnemonic === 'jmp') {
+        if (lastReal && lastReal.mnemonic === "jmp") {
           const m = lastReal.opStr.match(/^0x([0-9a-fA-F]+)$/);
           if (m) {
             const target = parseInt(m[1], 16);
@@ -472,7 +581,9 @@ export function detectFunctions(
             }
           }
         }
-      } catch { /* skip */ }
+      } catch {
+        /* skip */
+      }
     }
   }
 
@@ -495,11 +606,29 @@ export function hybridDisassemble(
   const instructionMap = new Map<number, Instruction>();
   const endAddress = baseAddress + bytes.length;
 
-  const terminators = new Set(['ret', 'retn', 'int3', 'ud2']);
+  const terminators = new Set(["ret", "retn", "int3", "ud2"]);
   const conditionalJumps = new Set([
-    'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
-    'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns',
-    'jp', 'jnp', 'jcxz', 'jecxz', 'jrcxz',
+    "je",
+    "jne",
+    "jz",
+    "jnz",
+    "jg",
+    "jge",
+    "jl",
+    "jle",
+    "ja",
+    "jae",
+    "jb",
+    "jbe",
+    "jo",
+    "jno",
+    "js",
+    "jns",
+    "jp",
+    "jnp",
+    "jcxz",
+    "jecxz",
+    "jrcxz",
   ]);
 
   // Performance optimization: bulk-decode .pdata ranges with known boundaries
@@ -515,7 +644,7 @@ export function hybridDisassemble(
         const insns = cs.disasm(rangeBytes, { address: range.beginAddress });
         for (const insn of insns) {
           const mapped = mapInsn(insn, ctx.stringMap, ctx.iatMap, ctx.driverMode);
-          mapped.source = 'recursive';
+          mapped.source = "recursive";
           instructionMap.set(insn.address, mapped);
           visited.add(insn.address);
         }
@@ -547,14 +676,14 @@ export function hybridDisassemble(
 
     const insn = insns[0];
     const mapped = mapInsn(insn, ctx.stringMap, ctx.iatMap, ctx.driverMode);
-    mapped.source = 'recursive';
+    mapped.source = "recursive";
     instructionMap.set(addr, mapped);
 
     const mn = insn.mnemonic;
 
     if (terminators.has(mn)) continue;
 
-    if (mn === 'jmp') {
+    if (mn === "jmp") {
       const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
       if (m) {
         const target = parseInt(m[1], 16);
@@ -565,7 +694,7 @@ export function hybridDisassemble(
       continue;
     }
 
-    if (conditionalJumps.has(mn) || (mn.startsWith('j') && mn !== 'jmp')) {
+    if (conditionalJumps.has(mn) || (mn.startsWith("j") && mn !== "jmp")) {
       const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
       if (m) {
         const target = parseInt(m[1], 16);
@@ -577,7 +706,7 @@ export function hybridDisassemble(
       continue;
     }
 
-    if (mn === 'call') {
+    if (mn === "call") {
       const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
       if (m) {
         const target = parseInt(m[1], 16);
@@ -613,7 +742,7 @@ export function hybridDisassemble(
       if (gapLen >= 2) {
         let allPadding = true;
         for (let j = gapStart; j < gapEnd; j++) {
-          if (bytes[j] !== 0xCC && bytes[j] !== 0x90) {
+          if (bytes[j] !== 0xcc && bytes[j] !== 0x90) {
             allPadding = false;
             break;
           }
@@ -625,7 +754,7 @@ export function hybridDisassemble(
           const gapInsns = disassemble(gapBytes, gapBaseAddr, is64, ctx);
           for (const gi of gapInsns) {
             if (!instructionMap.has(gi.address)) {
-              gi.source = 'gap-fill';
+              gi.source = "gap-fill";
               instructionMap.set(gi.address, gi);
             }
           }
@@ -644,9 +773,27 @@ export function hybridDisassemble(
 export function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]][] {
   const xrefs = new Map<number, Xref[]>();
   const conditionalJumps = new Set([
-    'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
-    'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns',
-    'jp', 'jnp', 'jcxz', 'jecxz', 'jrcxz',
+    "je",
+    "jne",
+    "jz",
+    "jnz",
+    "jg",
+    "jge",
+    "jl",
+    "jle",
+    "ja",
+    "jae",
+    "jb",
+    "jbe",
+    "jo",
+    "jno",
+    "js",
+    "jns",
+    "jp",
+    "jnp",
+    "jcxz",
+    "jecxz",
+    "jrcxz",
   ]);
 
   for (const insn of instructions) {
@@ -655,40 +802,49 @@ export function buildTypedXrefMap(instructions: Instruction[]): [number, Xref[]]
     const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
     if (directMatch) {
       const target = parseInt(directMatch[1], 16);
-      let type: Xref['type'];
-      if (mn === 'call') type = 'call';
-      else if (mn === 'jmp') type = 'jmp';
-      else if (conditionalJumps.has(mn) || mn.startsWith('j')) type = 'branch';
+      let type: Xref["type"];
+      if (mn === "call") type = "call";
+      else if (mn === "jmp") type = "jmp";
+      else if (conditionalJumps.has(mn) || mn.startsWith("j")) type = "branch";
       else continue;
 
       let arr = xrefs.get(target);
-      if (!arr) { arr = []; xrefs.set(target, arr); }
+      if (!arr) {
+        arr = [];
+        xrefs.set(target, arr);
+      }
       arr.push({ from: insn.address, type });
       continue;
     }
 
     const target = resolveRipTarget(insn);
     if (target !== null) {
-      let type: Xref['type'];
-      if (mn === 'call') type = 'call';
-      else if (mn === 'jmp') type = 'jmp';
-      else type = 'data';
+      let type: Xref["type"];
+      if (mn === "call") type = "call";
+      else if (mn === "jmp") type = "jmp";
+      else type = "data";
 
       let arr = xrefs.get(target);
-      if (!arr) { arr = []; xrefs.set(target, arr); }
+      if (!arr) {
+        arr = [];
+        xrefs.set(target, arr);
+      }
       arr.push({ from: insn.address, type });
       continue;
     }
 
-    if (mn !== 'call' && mn !== 'jmp' && !mn.startsWith('j')) {
+    if (mn !== "call" && mn !== "jmp" && !mn.startsWith("j")) {
       const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
       if (addrMatches) {
         for (const addrStr of addrMatches) {
           const addr = parseInt(addrStr, 16);
           if (addr > 0x10000) {
             let arr = xrefs.get(addr);
-            if (!arr) { arr = []; xrefs.set(addr, arr); }
-            arr.push({ from: insn.address, type: 'data' });
+            if (!arr) {
+              arr = [];
+              xrefs.set(addr, arr);
+            }
+            arr.push({ from: insn.address, type: "data" });
           }
         }
       }
@@ -740,7 +896,8 @@ export function buildAllXrefs(
 
   const findContainingFunc = (addr: number): number => {
     if (funcBounds.length === 0) return -1;
-    let lo = 0, hi = funcBounds.length - 1;
+    let lo = 0,
+      hi = funcBounds.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >>> 1;
       if (addr < funcBounds[mid][0]) hi = mid - 1;
@@ -765,12 +922,18 @@ export function buildAllXrefs(
           resolvedTargets.push(target);
           if (stringSet.has(target)) {
             let arr = strXrefs.get(target);
-            if (!arr) { arr = []; strXrefs.set(target, arr); }
+            if (!arr) {
+              arr = [];
+              strXrefs.set(target, arr);
+            }
             arr.push(insn.address);
           }
           if (iatSet.has(target)) {
             let arr = impXrefs.get(target);
-            if (!arr) { arr = []; impXrefs.set(target, arr); }
+            if (!arr) {
+              arr = [];
+              impXrefs.set(target, arr);
+            }
             arr.push(insn.address);
           }
         }
@@ -781,18 +944,24 @@ export function buildAllXrefs(
             resolvedTargets.push(addr);
             if (stringSet.has(addr)) {
               let arr = strXrefs.get(addr);
-              if (!arr) { arr = []; strXrefs.set(addr, arr); }
+              if (!arr) {
+                arr = [];
+                strXrefs.set(addr, arr);
+              }
               arr.push(insn.address);
             }
             if (iatSet.has(addr)) {
               let arr = impXrefs.get(addr);
-              if (!arr) { arr = []; impXrefs.set(addr, arr); }
+              if (!arr) {
+                arr = [];
+                impXrefs.set(addr, arr);
+              }
               arr.push(insn.address);
             }
           }
         }
 
-        if (insn.mnemonic === 'call' && funcBounds.length > 0) {
+        if (insn.mnemonic === "call" && funcBounds.length > 0) {
           const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
           if (directMatch) {
             const callTarget = parseInt(directMatch[1], 16);
@@ -800,7 +969,10 @@ export function buildAllXrefs(
               const callerFunc = findContainingFunc(insn.address);
               if (callerFunc >= 0) {
                 let callees = callGraphMap.get(callerFunc);
-                if (!callees) { callees = new Set(); callGraphMap.set(callerFunc, callees); }
+                if (!callees) {
+                  callees = new Set();
+                  callGraphMap.set(callerFunc, callees);
+                }
                 callees.add(callTarget);
               }
             }
@@ -811,7 +983,10 @@ export function buildAllXrefs(
           for (const target of resolvedTargets) {
             if (!stringSet.has(target) && !iatSet.has(target) && isInDataSection(target)) {
               let arr = dataXrefs.get(target);
-              if (!arr) { arr = []; dataXrefs.set(target, arr); }
+              if (!arr) {
+                arr = [];
+                dataXrefs.set(target, arr);
+              }
               arr.push(insn.address);
             }
           }
@@ -821,7 +996,7 @@ export function buildAllXrefs(
         offset += 1;
       } else {
         const lastInsn = insns[insns.length - 1];
-        const decoded = (lastInsn.address - (baseAddress + offset)) + lastInsn.size;
+        const decoded = lastInsn.address - (baseAddress + offset) + lastInsn.size;
         offset += decoded;
       }
     } catch {

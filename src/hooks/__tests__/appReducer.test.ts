@@ -64,7 +64,9 @@ describe("appReducer — loading and file lifecycle", () => {
 
   it("SET_PE_FILE without a name nulls fileName rather than leaving the previous one", () => {
     const withName = appReducer(initialState, {
-      type: "SET_PE_FILE", peFile: peFile(), fileName: "first.exe",
+      type: "SET_PE_FILE",
+      peFile: peFile(),
+      fileName: "first.exe",
     });
     const without = appReducer(withName, { type: "SET_PE_FILE", peFile: peFile() });
     expect(without.fileName).toBeNull();
@@ -195,7 +197,7 @@ describe("appReducer — bookmarks", () => {
       { type: "TOGGLE_BOOKMARK", address: 0x3000 },
       { type: "TOGGLE_BOOKMARK", address: 0x2000 },
     ]);
-    expect(state.bookmarks.map(b => b.address)).toEqual([0x1000, 0x3000]);
+    expect(state.bookmarks.map((b) => b.address)).toEqual([0x1000, 0x3000]);
   });
 
   it("SET_BOOKMARK_LABEL updates only the matching bookmark", () => {
@@ -221,7 +223,11 @@ describe("appReducer — bookmarks", () => {
 
 describe("appReducer — renames and comments", () => {
   it("RENAME_FUNCTION and CLEAR_RENAME round-trip", () => {
-    const named = appReducer(initialState, { type: "RENAME_FUNCTION", address: 0x1000, name: "main" });
+    const named = appReducer(initialState, {
+      type: "RENAME_FUNCTION",
+      address: 0x1000,
+      name: "main",
+    });
     expect(named.renames).toEqual({ 0x1000: "main" });
 
     const cleared = appReducer(named, { type: "CLEAR_RENAME", address: 0x1000 });
@@ -251,7 +257,11 @@ describe("appReducer — renames and comments", () => {
   });
 
   it("SET_COMMENT and DELETE_COMMENT round-trip", () => {
-    const commented = appReducer(initialState, { type: "SET_COMMENT", address: 0x1000, text: "loop head" });
+    const commented = appReducer(initialState, {
+      type: "SET_COMMENT",
+      address: 0x1000,
+      text: "loop head",
+    });
     expect(commented.comments).toEqual({ 0x1000: "loop head" });
 
     const deleted = appReducer(commented, { type: "DELETE_COMMENT", address: 0x1000 });
@@ -298,7 +308,10 @@ describe("appReducer — annotation import and persistence", () => {
     ]);
     const merged = appReducer(existing, {
       type: "IMPORT_ANNOTATIONS",
-      bookmarks: [{ address: 0x1000, label: "dupe" }, { address: 0x2000, label: "new" }],
+      bookmarks: [
+        { address: 0x1000, label: "dupe" },
+        { address: 0x2000, label: "new" },
+      ],
       renames: { 0x1000: "imported", 0x2000: "other" },
       comments: { 0x2000: "hi" },
     });
@@ -322,14 +335,19 @@ describe("appReducer — annotation import and persistence", () => {
       comments: {},
       hexPatches: new Map([[0x20, 0xcc]]),
     });
-    expect([...merged.hexPatches.entries()].sort()).toEqual([[0x10, 0x90], [0x20, 0xcc]]);
+    expect([...merged.hexPatches.entries()].sort()).toEqual([
+      [0x10, 0x90],
+      [0x20, 0xcc],
+    ]);
   });
 
   it("IMPORT_FULL_ANALYSIS lets the imported patch win on a colliding offset", () => {
     const existing = run([{ type: "PATCH_BYTE", offset: 0x10, value: 0x90 }]);
     const merged = appReducer(existing, {
       type: "IMPORT_FULL_ANALYSIS",
-      bookmarks: [], renames: {}, comments: {},
+      bookmarks: [],
+      renames: {},
+      comments: {},
       hexPatches: new Map([[0x10, 0xcc]]),
     });
     expect(merged.hexPatches.get(0x10)).toBe(0xcc);
@@ -405,8 +423,9 @@ describe("appReducer — call stack", () => {
       { type: "PUSH_CALL_STACK", address: 0x2000, name: "b" },
       { type: "PUSH_CALL_STACK", address: 0x3000, name: "c" },
     ]);
-    expect(appReducer(three, { type: "POP_CALL_STACK", index: 1 }).callStack.map(f => f.name))
-      .toEqual(["a"]);
+    expect(
+      appReducer(three, { type: "POP_CALL_STACK", index: 1 }).callStack.map((f) => f.name),
+    ).toEqual(["a"]);
     expect(appReducer(three, { type: "POP_CALL_STACK", index: 0 }).callStack).toEqual([]);
   });
 
@@ -418,14 +437,19 @@ describe("appReducer — call stack", () => {
 
 describe("appReducer — analysis results", () => {
   it("SET_FUNCTIONS, SET_ANOMALIES and SET_IRP_HANDLERS replace wholesale", () => {
-    const withFuncs = appReducer(initialState, { type: "SET_FUNCTIONS", functions: [fn(0x1000), fn(0x2000)] });
+    const withFuncs = appReducer(initialState, {
+      type: "SET_FUNCTIONS",
+      functions: [fn(0x1000), fn(0x2000)],
+    });
     expect(withFuncs.functions).toHaveLength(2);
     expect(appReducer(withFuncs, { type: "SET_FUNCTIONS", functions: [] }).functions).toEqual([]);
   });
 
   it("SET_STRINGS is ignored when no file is loaded", () => {
     const next = appReducer(initialState, {
-      type: "SET_STRINGS", strings: new Map([[1, "a"]]), stringTypes: new Map(),
+      type: "SET_STRINGS",
+      strings: new Map([[1, "a"]]),
+      stringTypes: new Map(),
     });
     expect(next).toBe(initialState);
   });
@@ -450,7 +474,9 @@ describe("appReducer — analysis results", () => {
       dataXrefs: new Map([[3, [4]]]),
     });
     const second = appReducer(first, {
-      type: "SET_XREFS", stringXrefs: new Map(), importXrefs: new Map(),
+      type: "SET_XREFS",
+      stringXrefs: new Map(),
+      importXrefs: new Map(),
     });
     expect(second.dataXrefs).toBe(first.dataXrefs);
     expect(second.stringXrefs?.size).toBe(0);
@@ -467,10 +493,13 @@ describe("appReducer — analysis results", () => {
       { type: "SET_CURRENT_BLOCK", block: { startAddr: 0x1000, endAddr: 0x1010 } },
     ]);
     expect(set.currentInstruction).not.toBeNull();
-    const cleared = run([
-      { type: "SET_CURRENT_INSTRUCTION", instruction: null },
-      { type: "SET_CURRENT_BLOCK", block: null },
-    ], set);
+    const cleared = run(
+      [
+        { type: "SET_CURRENT_INSTRUCTION", instruction: null },
+        { type: "SET_CURRENT_BLOCK", block: null },
+      ],
+      set,
+    );
     expect(cleared.currentInstruction).toBeNull();
     expect(cleared.currentBlock).toBeNull();
   });
@@ -536,9 +565,19 @@ describe("appReducer — batch rename", () => {
     const state = run([
       { type: "BATCH_RENAME_START", total: 1 },
       { type: "BATCH_RENAME_ERROR", error: "transient" },
-      { type: "BATCH_RENAME_DONE", results: [
-        { address: 0x1000, currentName: "sub_1000", suggestedName: "main", confidence: 0.9, reasoning: "", accepted: null },
-      ] },
+      {
+        type: "BATCH_RENAME_DONE",
+        results: [
+          {
+            address: 0x1000,
+            currentName: "sub_1000",
+            suggestedName: "main",
+            confidence: 0.9,
+            reasoning: "",
+            accepted: null,
+          },
+        ],
+      },
     ]);
     expect(state.batchRename?.status).toBe("review");
     expect(state.batchRename?.error).toBeNull();
@@ -550,9 +589,30 @@ describe("appReducer — batch rename", () => {
     const next = appReducer(started, {
       type: "BATCH_RENAME_ACCEPT",
       results: [
-        { address: 0x1000, currentName: "sub_1000", suggestedName: "yes", confidence: 1, reasoning: "", accepted: true },
-        { address: 0x2000, currentName: "sub_2000", suggestedName: "no", confidence: 1, reasoning: "", accepted: false },
-        { address: 0x3000, currentName: "sub_3000", suggestedName: "undecided", confidence: 1, reasoning: "", accepted: null },
+        {
+          address: 0x1000,
+          currentName: "sub_1000",
+          suggestedName: "yes",
+          confidence: 1,
+          reasoning: "",
+          accepted: true,
+        },
+        {
+          address: 0x2000,
+          currentName: "sub_2000",
+          suggestedName: "no",
+          confidence: 1,
+          reasoning: "",
+          accepted: false,
+        },
+        {
+          address: 0x3000,
+          currentName: "sub_3000",
+          suggestedName: "undecided",
+          confidence: 1,
+          reasoning: "",
+          accepted: null,
+        },
       ],
     });
     expect(next.renames).toEqual({ 0x1000: "yes" });
@@ -563,7 +623,16 @@ describe("appReducer — batch rename", () => {
     const started = appReducer(initialState, { type: "BATCH_RENAME_START", total: 1 });
     const accepted = appReducer(started, {
       type: "BATCH_RENAME_ACCEPT",
-      results: [{ address: 0x1000, currentName: "sub_1000", suggestedName: "main", confidence: 1, reasoning: "", accepted: true }],
+      results: [
+        {
+          address: 0x1000,
+          currentName: "sub_1000",
+          suggestedName: "main",
+          confidence: 1,
+          reasoning: "",
+          accepted: true,
+        },
+      ],
     });
     expect(accepted.annotationUndoStack).toHaveLength(1);
     expect(appReducer(accepted, { type: "UNDO_ANNOTATION" }).renames).toEqual({});
@@ -654,8 +723,19 @@ describe("appReducer — no branch mutates its input", () => {
     { type: "SET_COMMENT", address: 0x404000, text: "c" },
     { type: "DELETE_COMMENT", address: 0x401000 },
     { type: "LOAD_PERSISTED", bookmarks: [], renames: {}, comments: {} },
-    { type: "IMPORT_ANNOTATIONS", bookmarks: [{ address: 9, label: "" }], renames: { 9: "n" }, comments: {} },
-    { type: "IMPORT_FULL_ANALYSIS", bookmarks: [], renames: {}, comments: {}, hexPatches: new Map([[1, 2]]) },
+    {
+      type: "IMPORT_ANNOTATIONS",
+      bookmarks: [{ address: 9, label: "" }],
+      renames: { 9: "n" },
+      comments: {},
+    },
+    {
+      type: "IMPORT_FULL_ANALYSIS",
+      bookmarks: [],
+      renames: {},
+      comments: {},
+      hexPatches: new Map([[1, 2]]),
+    },
     { type: "PATCH_BYTE", offset: 1, value: 1 },
     { type: "UNDO_PATCH", offset: 0 },
     { type: "CLEAR_PATCHES" },

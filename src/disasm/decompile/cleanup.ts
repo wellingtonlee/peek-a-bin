@@ -1,5 +1,5 @@
-import type { IRStmt } from './ir';
-import { RegState } from './regstate';
+import type { IRStmt } from "./ir";
+import { RegState } from "./regstate";
 
 /**
  * Post-structuring cleanup pass.
@@ -27,15 +27,15 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
     const stmt = stmts[i];
 
     // Redundant goto elimination: goto L; L: → remove goto
-    if (stmt.kind === 'goto' && i + 1 < stmts.length) {
+    if (stmt.kind === "goto" && i + 1 < stmts.length) {
       const next = stmts[i + 1];
-      if (next.kind === 'label' && next.name === stmt.label) {
+      if (next.kind === "label" && next.name === stmt.label) {
         continue; // skip the goto
       }
     }
 
     // Process if statements
-    if (stmt.kind === 'if') {
+    if (stmt.kind === "if") {
       const cleaned = cleanupIf(stmt, stmts.slice(i + 1));
       if (cleaned) {
         result.push(...cleaned.stmts);
@@ -52,7 +52,7 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
 }
 
 function cleanupIf(
-  stmt: IRStmt & { kind: 'if' },
+  stmt: IRStmt & { kind: "if" },
   _trailing: IRStmt[],
 ): { stmts: IRStmt[]; consumed: number } | null {
   const thenBody = cleanupPass(stmt.thenBody);
@@ -63,7 +63,7 @@ function cleanupIf(
     if (elseBody && elseBody.length > 0) {
       // if (cond) {} else { body } → if (!cond) { body }
       return {
-        stmts: [{ kind: 'if', condition: RegState.negate(stmt.condition), thenBody: elseBody }],
+        stmts: [{ kind: "if", condition: RegState.negate(stmt.condition), thenBody: elseBody }],
         consumed: 0,
       };
     }
@@ -75,7 +75,7 @@ function cleanupIf(
   if (elseBody && elseBody.length > 0 && endsWithTerminator(thenBody)) {
     // Recursively clean the flattened result to handle nested guards
     const flatResult = cleanupPass([
-      { kind: 'if', condition: stmt.condition, thenBody },
+      { kind: "if", condition: stmt.condition, thenBody },
       ...elseBody,
     ]);
     return {
@@ -94,30 +94,35 @@ function cleanupIf(
 function endsWithTerminator(stmts: IRStmt[]): boolean {
   if (stmts.length === 0) return false;
   const last = stmts[stmts.length - 1];
-  return last.kind === 'return' || last.kind === 'break' || last.kind === 'continue' || last.kind === 'goto';
+  return (
+    last.kind === "return" ||
+    last.kind === "break" ||
+    last.kind === "continue" ||
+    last.kind === "goto"
+  );
 }
 
 function cleanupStmt(stmt: IRStmt): IRStmt {
   switch (stmt.kind) {
-    case 'if':
+    case "if":
       return {
         ...stmt,
         thenBody: cleanupPass(stmt.thenBody),
         elseBody: stmt.elseBody ? cleanupPass(stmt.elseBody) : undefined,
       };
-    case 'while':
+    case "while":
       return { ...stmt, body: cleanupPass(stmt.body) };
-    case 'do_while':
+    case "do_while":
       return { ...stmt, body: cleanupPass(stmt.body) };
-    case 'for':
+    case "for":
       return { ...stmt, body: cleanupPass(stmt.body) };
-    case 'switch':
+    case "switch":
       return {
         ...stmt,
-        cases: stmt.cases.map(c => ({ ...c, body: cleanupPass(c.body) })),
+        cases: stmt.cases.map((c) => ({ ...c, body: cleanupPass(c.body) })),
         defaultBody: stmt.defaultBody ? cleanupPass(stmt.defaultBody) : undefined,
       };
-    case 'try':
+    case "try":
       return { ...stmt, body: cleanupPass(stmt.body), handler: cleanupPass(stmt.handler) };
     default:
       return stmt;

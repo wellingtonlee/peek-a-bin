@@ -10,14 +10,21 @@ import { binarySearchFunc } from "../useDerivedState";
 import type { DisasmFunction, Instruction } from "../../disasm/types";
 
 function insn(address: number, blockIdx = 0): DisplayRow {
-  return { kind: "insn", insn: { address, mnemonic: "nop", opStr: "", size: 1 } as Instruction, blockIdx };
+  return {
+    kind: "insn",
+    insn: { address, mnemonic: "nop", opStr: "", size: 1 } as Instruction,
+    blockIdx,
+  };
 }
 function label(address: number): DisplayRow {
   return { kind: "label", fn: { address, size: 0x10, name: "f" } as DisasmFunction };
 }
 function data(address: number): DisplayRow {
   // Only `address` is read by rowAddress.
-  return { kind: "data", item: { address } as DisplayRow extends { kind: "data"; item: infer I } ? I : never };
+  return {
+    kind: "data",
+    item: { address } as DisplayRow extends { kind: "data"; item: infer I } ? I : never,
+  };
 }
 const separator: DisplayRow = { kind: "separator" };
 
@@ -195,7 +202,7 @@ describe("binarySearchFunc", () => {
     for (let i = 0; i < 200; i++) many.push(fn(0x400000 + i * 0x30, 0x20)); // 0x10 gap
 
     const linear = (target: number) =>
-      many.find(f => target >= f.address && target < f.address + f.size) ?? null;
+      many.find((f) => target >= f.address && target < f.address + f.size) ?? null;
 
     for (let target = 0x3fffff; target < 0x400000 + 200 * 0x30 + 0x40; target += 7) {
       const expected = linear(target);

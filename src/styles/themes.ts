@@ -269,7 +269,7 @@ export function getCustomThemes(): Theme[] {
 }
 
 export function saveCustomTheme(theme: Theme): void {
-  const themes = getCustomThemes().filter(t => t.id !== theme.id);
+  const themes = getCustomThemes().filter((t) => t.id !== theme.id);
   themes.push(theme);
   try {
     localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
@@ -277,7 +277,7 @@ export function saveCustomTheme(theme: Theme): void {
 }
 
 export function deleteCustomTheme(id: string): void {
-  const themes = getCustomThemes().filter(t => t.id !== id);
+  const themes = getCustomThemes().filter((t) => t.id !== id);
   try {
     localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
   } catch {}
@@ -290,7 +290,7 @@ export function getAllThemes(): Theme[] {
 export function loadTheme(): Theme {
   const id = loadThemeId();
   const all = getAllThemes();
-  return all.find(t => t.id === id) ?? BUILTIN_THEMES[0];
+  return all.find((t) => t.id === id) ?? BUILTIN_THEMES[0];
 }
 
 export function exportTheme(theme: Theme): string {
@@ -322,5 +322,5 @@ export function applyTheme(theme: Theme): void {
 }
 
 function camelToKebab(str: string): string {
-  return str.replace(/[A-Z]/g, m => `-${m.toLowerCase()}`);
+  return str.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
 }

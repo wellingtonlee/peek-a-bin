@@ -8,40 +8,40 @@
  *   peek-a-bin-mcp setup <client> --dry-run  # preview without writing
  */
 
-import { existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { clients } from './clients.js';
+import { existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { clients } from "./clients.js";
 
 function findProjectDir(): string {
   const __filename = fileURLToPath(import.meta.url);
   let dir = dirname(__filename);
   // Walk up until we find package.json
   while (dir !== dirname(dir)) {
-    if (existsSync(resolve(dir, 'package.json'))) return dir;
+    if (existsSync(resolve(dir, "package.json"))) return dir;
     dir = dirname(dir);
   }
   // Fallback: two levels up from src/mcp/
-  return resolve(dirname(__filename), '..', '..');
+  return resolve(dirname(__filename), "..", "..");
 }
 
 function listClients(): void {
-  process.stdout.write('\nAvailable clients:\n\n');
+  process.stdout.write("\nAvailable clients:\n\n");
   for (const [slug, client] of clients) {
     process.stdout.write(`  ${slug.padEnd(14)} ${client.name} — ${client.description}\n`);
   }
-  process.stdout.write('\nUsage: peek-a-bin-mcp setup <client> [--dry-run]\n\n');
+  process.stdout.write("\nUsage: peek-a-bin-mcp setup <client> [--dry-run]\n\n");
 }
 
 export async function runSetup(args: string[]): Promise<void> {
   // No args or --list → show available clients
-  if (args.length === 0 || args[0] === '--list') {
+  if (args.length === 0 || args[0] === "--list") {
     listClients();
     return;
   }
 
   const slug = args[0];
-  const dryRun = args.includes('--dry-run');
+  const dryRun = args.includes("--dry-run");
 
   const client = clients.get(slug);
   if (!client) {

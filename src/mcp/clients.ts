@@ -3,9 +3,9 @@
  * Each entry knows how to generate and write its config for a specific AI client.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 
 export interface ClientSetup {
   name: string;
@@ -21,7 +21,7 @@ export interface ClientSetup {
 
 function readJsonFile(path: string): Record<string, unknown> {
   try {
-    return JSON.parse(readFileSync(path, 'utf-8'));
+    return JSON.parse(readFileSync(path, "utf-8"));
   } catch {
     return {};
   }
@@ -29,26 +29,26 @@ function readJsonFile(path: string): Record<string, unknown> {
 
 function writeJsonFile(path: string, data: Record<string, unknown>): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
 export const clients: Map<string, ClientSetup> = new Map();
 
 // --- Claude Code ---
-clients.set('claude-code', {
-  name: 'Claude Code',
-  slug: 'claude-code',
-  description: 'Writes MCP server config to ~/.claude.json (global Claude Code settings)',
+clients.set("claude-code", {
+  name: "Claude Code",
+  slug: "claude-code",
+  description: "Writes MCP server config to ~/.claude.json (global Claude Code settings)",
 
   generateConfig(projectDir: string) {
-    const configPath = resolve(homedir(), '.claude.json');
+    const configPath = resolve(homedir(), ".claude.json");
     const entry = {
-      command: 'npx',
-      args: ['tsx', resolve(projectDir, 'src/mcp/index.ts')],
+      command: "npx",
+      args: ["tsx", resolve(projectDir, "src/mcp/index.ts")],
     };
     const config = readJsonFile(configPath);
     const servers = (config.mcpServers as Record<string, unknown>) ?? {};
-    servers['peek-a-bin'] = entry;
+    servers["peek-a-bin"] = entry;
     config.mcpServers = servers;
     return {
       path: configPath,
@@ -62,9 +62,9 @@ clients.set('claude-code', {
     const configPath = path!;
     const config = readJsonFile(configPath);
     const servers = (config.mcpServers as Record<string, unknown>) ?? {};
-    servers['peek-a-bin'] = {
-      command: 'npx',
-      args: ['tsx', resolve(projectDir, 'src/mcp/index.ts')],
+    servers["peek-a-bin"] = {
+      command: "npx",
+      args: ["tsx", resolve(projectDir, "src/mcp/index.ts")],
     };
     config.mcpServers = servers;
     writeJsonFile(configPath, config);
@@ -73,21 +73,21 @@ clients.set('claude-code', {
 });
 
 // --- OpenCode ---
-clients.set('opencode', {
-  name: 'OpenCode',
-  slug: 'opencode',
-  description: 'Writes MCP server config to ~/.config/opencode/config.json',
+clients.set("opencode", {
+  name: "OpenCode",
+  slug: "opencode",
+  description: "Writes MCP server config to ~/.config/opencode/config.json",
 
   generateConfig(projectDir: string) {
-    const configPath = resolve(homedir(), '.config', 'opencode', 'config.json');
+    const configPath = resolve(homedir(), ".config", "opencode", "config.json");
     const entry = {
-      type: 'local',
-      command: ['npx', 'tsx', resolve(projectDir, 'src/mcp/index.ts')],
+      type: "local",
+      command: ["npx", "tsx", resolve(projectDir, "src/mcp/index.ts")],
       enabled: true,
     };
     const config = readJsonFile(configPath);
     const mcp = (config.mcp as Record<string, unknown>) ?? {};
-    mcp['peek-a-bin'] = entry;
+    mcp["peek-a-bin"] = entry;
     config.mcp = mcp;
     return {
       path: configPath,
@@ -101,9 +101,9 @@ clients.set('opencode', {
     const configPath = path!;
     const config = readJsonFile(configPath);
     const mcp = (config.mcp as Record<string, unknown>) ?? {};
-    mcp['peek-a-bin'] = {
-      type: 'local',
-      command: ['npx', 'tsx', resolve(projectDir, 'src/mcp/index.ts')],
+    mcp["peek-a-bin"] = {
+      type: "local",
+      command: ["npx", "tsx", resolve(projectDir, "src/mcp/index.ts")],
       enabled: true,
     };
     config.mcp = mcp;
@@ -113,31 +113,31 @@ clients.set('opencode', {
 });
 
 // --- Continue.dev ---
-clients.set('continue', {
-  name: 'Continue.dev',
-  slug: 'continue',
-  description: 'Prints YAML snippet for ~/.continue/config.yaml (paste manually)',
+clients.set("continue", {
+  name: "Continue.dev",
+  slug: "continue",
+  description: "Prints YAML snippet for ~/.continue/config.yaml (paste manually)",
 
   generateConfig(projectDir: string) {
-    const absPath = resolve(projectDir, 'src/mcp/index.ts');
+    const absPath = resolve(projectDir, "src/mcp/index.ts");
     const yaml = [
-      'mcpServers:',
-      '  - name: peek-a-bin',
-      '    command: npx',
-      '    args:',
-      '      - tsx',
+      "mcpServers:",
+      "  - name: peek-a-bin",
+      "    command: npx",
+      "    args:",
+      "      - tsx",
       `      - ${absPath}`,
-    ].join('\n');
+    ].join("\n");
     return {
       path: null,
       content: yaml,
-      action: 'Add the following to your ~/.continue/config.yaml:',
+      action: "Add the following to your ~/.continue/config.yaml:",
     };
   },
 
   apply(projectDir: string) {
     const { content, action } = this.generateConfig(projectDir);
     process.stdout.write(`\n${action}\n\n${content}\n\n`);
-    return 'Printed YAML snippet to stdout';
+    return "Printed YAML snippet to stdout";
   },
 });

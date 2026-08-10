@@ -21,7 +21,13 @@ function parseRenameActions(content: string): { address: number; name: string }[
   return results;
 }
 
-function MessageBubble({ msg, onRename }: { msg: ChatMessage; onRename?: (address: number, name: string) => void }) {
+function MessageBubble({
+  msg,
+  onRename,
+}: {
+  msg: ChatMessage;
+  onRename?: (address: number, name: string) => void;
+}) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end mb-3">
@@ -43,7 +49,8 @@ function MessageBubble({ msg, onRename }: { msg: ChatMessage; onRename?: (addres
         {renames.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {renames.map((r, i) => (
-              <button type="button"
+              <button
+                type="button"
                 key={i}
                 onClick={() => onRename?.(r.address, r.name)}
                 className="px-2 py-1 text-[10px] bg-green-800/40 border border-green-600/40 rounded text-green-300 hover:bg-green-700/50 transition-colors"
@@ -76,12 +83,15 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [input, chat]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  }, [handleSend]);
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    },
+    [handleSend],
+  );
 
   // Auto-resize textarea
   const handleInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -97,14 +107,16 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
       <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/50 border-b border-gray-700 text-xs shrink-0">
         <span className="text-gray-300 font-medium">AI Chat</span>
         <div className="flex-1" />
-        <button type="button"
+        <button
+          type="button"
           onClick={chat.clearChat}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Clear conversation"
         >
           Clear
         </button>
-        <button type="button"
+        <button
+          type="button"
           onClick={onClose}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
           title="Close chat"
@@ -118,23 +130,40 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
         {chat.messages.length === 0 && !chat.streaming && (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 text-xs text-center gap-2 px-4">
             <p className="text-gray-400">Ask about the current binary or function.</p>
-            <p className="text-[10px] text-gray-600">The active function's pseudocode and PE metadata are automatically included as context.</p>
+            <p className="text-[10px] text-gray-600">
+              The active function's pseudocode and PE metadata are automatically included as
+              context.
+            </p>
           </div>
         )}
         {chat.messages.map((msg, i) => (
           <MessageBubble key={i} msg={msg} onRename={onRename} />
         ))}
-        {chat.streaming && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].content === "" && (
-          <div className="flex justify-start mb-3">
-            <div className="flex items-center gap-1.5 text-gray-500 text-xs">
-              <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Thinking...
+        {chat.streaming &&
+          chat.messages.length > 0 &&
+          chat.messages[chat.messages.length - 1].content === "" && (
+            <div className="flex justify-start mb-3">
+              <div className="flex items-center gap-1.5 text-gray-500 text-xs">
+                <svg aria-hidden="true" className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+                Thinking...
+              </div>
             </div>
-          </div>
-        )}
+          )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -160,14 +189,16 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
             disabled={chat.streaming}
           />
           {chat.streaming ? (
-            <button type="button"
+            <button
+              type="button"
               onClick={chat.cancelStream}
               className="px-2.5 py-1.5 bg-yellow-700 text-yellow-200 rounded text-xs hover:bg-yellow-600 shrink-0"
             >
               Stop
             </button>
           ) : (
-            <button type="button"
+            <button
+              type="button"
               onClick={handleSend}
               disabled={!input.trim()}
               className="px-2.5 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-500 disabled:opacity-30 disabled:cursor-default shrink-0"

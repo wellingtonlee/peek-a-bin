@@ -3,8 +3,8 @@
  * Used by the MCP server for direct disassembly.
  */
 
-import { Const, Capstone, loadCapstone } from 'capstone-wasm';
-import type { Instruction, Xref } from '../disasm/types';
+import { Const, Capstone, loadCapstone } from "capstone-wasm";
+import type { Instruction, Xref } from "../disasm/types";
 import {
   type DisasmContext,
   disassemble,
@@ -12,7 +12,7 @@ import {
   hybridDisassemble,
   buildTypedXrefMap,
   buildAllXrefs,
-} from '../disasm/functionDetect';
+} from "../disasm/functionDetect";
 
 let cs32: any;
 let cs64: any;
@@ -72,7 +72,14 @@ export function hybridDisassembleBytes(
   driverMode: boolean,
   pdataRanges?: { beginAddress: number; endAddress: number }[],
 ): Instruction[] {
-  return hybridDisassemble(bytes, baseAddress, is64, seeds, makeCtx(stringMap, iatMap, driverMode), pdataRanges);
+  return hybridDisassemble(
+    bytes,
+    baseAddress,
+    is64,
+    seeds,
+    makeCtx(stringMap, iatMap, driverMode),
+    pdataRanges,
+  );
 }
 
 export function buildXrefMap(instructions: Instruction[]): [number, Xref[]][] {
@@ -89,7 +96,16 @@ export function buildXrefs(
   dataSections?: { va: number; size: number }[],
 ) {
   const cs = is64 ? cs64 : cs32;
-  return buildAllXrefs(bytes, baseAddress, is64, stringAddrs, iatAddrs, cs, funcEntries, dataSections);
+  return buildAllXrefs(
+    bytes,
+    baseAddress,
+    is64,
+    stringAddrs,
+    iatAddrs,
+    cs,
+    funcEntries,
+    dataSections,
+  );
 }
 
 export { cs32, cs64 };
