@@ -563,6 +563,24 @@ export function DisassemblyView() {
   const graphSearchMatchSet = useMemo(() => new Set(graphSearchMatches), [graphSearchMatches]);
   const graphSearchCurrentMatch = graphSearchMatches[graphSearchIdx] ?? undefined;
 
+  /**
+   * Always the current `handleDecompileToggle`.
+   *
+   * That callback is declared ~340 lines below this point and depends on
+   * `showDecompile`, `instructions`, `decompile` and `viewMode`, none of which
+   * are in handleKeyDown's dependency array. Closing over it directly meant D
+   * kept re-running the OPEN branch: pressing it set showDecompile true, but
+   * handleKeyDown's deps were unchanged, so it held the stale closure where
+   * showDecompile was still false and the panel could not be closed.
+   *
+   * Adding the callback to handleKeyDown's deps is not possible — it is a
+   * `const` declared later, so the dependency array would hit its temporal dead
+   * zone — and hoisting it would drag `useDecompileTabs` and its own
+   * dependencies above this point, reordering hooks in a component with no test
+   * coverage. A ref keeps the indirection local.
+   */
+  const decompileToggleRef = useRef<() => void>(() => {});
+
   // Keyboard navigation
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -657,7 +675,7 @@ export function DisassemblyView() {
 
       if (e.key === "d" || e.key === "D") {
         e.preventDefault();
-        handleDecompileToggle();
+        decompileToggleRef.current();
         return;
       }
 
@@ -917,6 +935,11 @@ export function DisassemblyView() {
       requestAnimationFrame(() => setReCenterTrigger((c) => c + 1));
     }
   }, [showDecompile, currentFunc, pe, instructions, decompile, viewMode]);
+
+  // Keep the D-key handler pointing at the current toggle. Assigned during
+  // render rather than in an effect: a keypress can be handled before effects
+  // flush, and a stale ref there would reintroduce exactly the bug this fixes.
+  decompileToggleRef.current = handleDecompileToggle;
 
   // Re-decompile when function changes while panel is open
   const prevDecompFuncRef = useRef<number | null>(null);
