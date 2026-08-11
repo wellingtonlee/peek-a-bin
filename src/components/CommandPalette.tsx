@@ -3,6 +3,7 @@ import { Modal } from "./Modal";
 import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
+import { activeDescendantId, optionId } from "./listboxIds";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -18,6 +19,13 @@ interface ResultItem {
 }
 
 const CAP = 15;
+
+/**
+ * Only one palette is ever mounted, so a module constant is enough and keeps
+ * the id stable across renders — `aria-activedescendant` points at it by value,
+ * and an id that changed per render would leave a dangling reference.
+ */
+const LISTBOX_ID = "command-palette-results";
 
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const state = useAppState();
@@ -179,9 +187,19 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       className="w-[600px] shadow-2xl overflow-hidden"
     >
       <div className="p-3 border-b border-gray-700">
+        {/* A combobox owning a listbox, not a text field next to buttons.
+            Focus stays here while the arrow keys move selectedIdx, and
+            aria-activedescendant is what tells a screen reader which row is
+            selected — previously the highlight was purely visual and was
+            never announced. */}
         <input
           ref={inputRef}
           type="text"
+          role="combobox"
+          aria-expanded={results.length > 0}
+          aria-controls={LISTBOX_ID}
+          aria-activedescendant={activeDescendantId(LISTBOX_ID, selectedIdx, results.length)}
+          aria-autocomplete="list"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -189,7 +207,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />
       </div>
-      <div ref={listRef} className="max-h-[400px] overflow-auto">
+      <div
+        ref={listRef}
+        id={LISTBOX_ID}
+        role="listbox"
+        aria-label="Search results"
+        className="max-h-[400px] overflow-auto"
+      >
         {query && results.length === 0 && (
           <div className="px-4 py-8 text-center text-gray-500 text-sm">No results</div>
         )}
@@ -202,16 +226,32 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           const showHeader = item.category !== currentCategory;
           currentCategory = item.category;
           return (
-            <div key={`${item.category}-${item.address}-${i}`}>
+            <div key={`${item.category}-${item.address}-${i}`} role="presentation">
               {showHeader && (
-                <div className="px-4 py-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider bg-gray-800/80 sticky top-0">
+                <div
+                  role="presentation"
+                  className="px-4 py-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider bg-gray-800/80 sticky top-0"
+                >
                   {item.category}
                 </div>
               )}
-              <button
-                type="button"
+              {/* An option, not a button. As a button every one of these (up to
+                  60) sat in the tab order, so Tab from the search field walked
+                  the whole result list and the modal focus trap cycled through
+                  all of it. Keyboard activation lives on the input, which is
+                  where focus actually is. */}
+              {/* biome-ignore lint/a11y/useKeyWithClickEvents: arrow keys and Enter are handled by the combobox input that owns this listbox via aria-activedescendant; focus never reaches the option itself. */}
+              <div
+                id={optionId(LISTBOX_ID, i)}
+                role="option"
+                aria-selected={i === selectedIdx}
+                // -1, not absent: programmatically focusable so the rule that
+                // an interactive role must be reachable is satisfied honestly,
+                // while staying out of the sequential tab order, which is the
+                // whole point of the aria-activedescendant pattern.
+                tabIndex={-1}
                 data-idx={i}
-                className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs ${
+                className={`w-full text-left px-4 py-1.5 flex items-center gap-3 text-xs cursor-pointer ${
                   i === selectedIdx
                     ? "bg-blue-600/30 text-white"
                     : "text-gray-300 hover:bg-gray-700/50"
@@ -223,7 +263,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                   0x{item.address.toString(16).toUpperCase()}
                 </span>
                 <span className="truncate">{item.label}</span>
-              </button>
+              </div>
             </div>
           );
         })}
