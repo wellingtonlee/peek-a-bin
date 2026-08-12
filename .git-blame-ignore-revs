@@ -12,3 +12,6 @@
 # wrapped at 100 columns). Deferred through the hardening effort so bug-fix
 # diffs stayed reviewable.
 3458c406a0ab3dd25d930d1425fef37d68042485
+
+# Repo-wide import sort so `npm run check` passes (2026-08-12)
+f8bc466e00d1a9401f7b3210decef4026283f95d
