@@ -19,19 +19,41 @@ npm test               # vitest run (PE parsing + disasm + decompiler + MCP + ut
 npm run typecheck      # tsc --noEmit (faster than full build)
 npm run lint           # biome lint src
 npm run format         # biome format --write
-npm run check          # biome check — RED, and always has been; see below
+npm run check          # biome check — GREEN as of 2026-08-12, and now a CI gate; see below
 npm run test:coverage  # vitest run --coverage — RED, @vitest/coverage-v8 is not installed
 ```
 
-**`npm run check` does not pass and never has.** `biome check` also runs
-`assist/source/organizeImports`, which reports **164 errors across 9 files** — `src/App.tsx`,
-`analysis/anomalies.ts` and `analysis/driver.ts` with both their tests, and
-`workers/disasmClient.ts`, `workers/disasm.worker.ts`, `workers/dispatch.ts` and
-`workers/__tests__/xrefImageBounds.test.ts`. This is not a regression from any current work — `src/analysis/anomalies.ts` is
-untouched on this branch and fails, and `src/workers/dispatch.ts` fails identically at
-`3bab534`. CI runs `lint`, not `check`, so nothing gates it. Do not burn a session making it
-green: the two ways out are one `biome check --write` formatting commit added to
-`.git-blame-ignore-revs`, or turning the assist off (`peek-a-bin-e2a1`).
+**`npm run check` passes as of 2026-08-12, and CI now gates on it instead of `lint`.** It had
+been red for the project's entire history, so treat any older note saying otherwise as stale.
+`biome check` is a superset of `biome lint src`: same rules, plus the formatter and
+`assist/source/organizeImports`, over the whole repo rather than just `src/`. It reported **164
+errors across 9 files**; `f8bc466` sorted imports repo-wide and cleared all but one, and the
+survivor was `vite.config.ts` — that commit only walked `src/`, and `check` also covers the root
+config files. `.git-blame-ignore-revs` carries `f8bc466` so the sort does not pollute blame.
+
+Current state: **0 errors, 71 warnings, 3 infos over 238 files, exit 0.** Warnings and infos do
+not fail it. Two of the infos are `useNodejsImportProtocol` on `vite.config.ts`'s `"path"`/`"fs"`
+imports — Biome classes those fixes as *unsafe* so `--write` skips them; they are deliberately
+left. The third is a `biome.json` deprecation notice (`linter.rules.recommended` → `preset`),
+fixable with `biome migrate` whenever someone wants it.
+
+Because `check` is now the gate, an unsorted import or an unformatted file fails CI where it
+previously did not. `npm run lint` is still there and is strictly implied by `check`; use it when
+you want the faster, `src/`-only signal.
+
+**Reading a Biome result is itself a trap, and it will tell you a red tree is green.** Biome's
+default `--max-diagnostics` truncates the output *before* the `Found N errors.` summary line, so
+`npm run check | tail` routinely ends on `Found 71 warnings.` with the error count scrolled away.
+Piping makes it worse: `npm run check 2>&1 | tail; echo $?` reports **`tail`'s** status, not
+npm's, so it prints 0 for a failing run. Do not check the gate that way. Either
+
+```sh
+npm run check > /tmp/check.txt 2>&1; echo "exit=$?"     # no pipe, so $? is Biome's
+npx biome check --diagnostic-level=error --max-diagnostics=300   # errors only, untruncated
+```
+
+Warnings and infos never fail the run — only error-severity findings do, so the second form is
+the one that answers "will CI pass".
 
 **Biome** (`biome.json`) is the linter/formatter. All seven configured `a11y` rules,
 `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` are at **`error`** —

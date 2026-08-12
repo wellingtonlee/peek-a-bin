@@ -16,7 +16,13 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run lint
+      # `check` is a superset of `lint`: same rules, plus the formatter and
+      # assist/source/organizeImports, and over the whole repo rather than
+      # just src/. It was red for the project's entire history — 164 import-sort
+      # errors across 9 src/ files, plus vite.config.ts, which the repo-wide
+      # sort missed because it only covered src/. Both are fixed, so gate on it
+      # rather than on `lint` alone; `lint` is now strictly implied.
+      - run: npm run check
       - run: npm run typecheck
       - run: npm test
       # The build was previously only exercised on release tags, so a Vite/PWA
