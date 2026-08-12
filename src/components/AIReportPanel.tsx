@@ -1,8 +1,8 @@
 import { useCallback } from "react";
-import { Modal } from "./Modal";
-import { accidentalDismissAllowed } from "./modalScaffold";
 import { useAppState } from "../hooks/usePEFile";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { Modal } from "./Modal";
+import { accidentalDismissAllowed } from "./modalScaffold";
 
 interface AIReportPanelProps {
   onClose: () => void;

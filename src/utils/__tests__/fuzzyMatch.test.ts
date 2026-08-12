@@ -5,7 +5,7 @@
  * order, case-insensitively — not whether `q` is a substring.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { fuzzyMatch } from "../fuzzyMatch";
 
 describe("fuzzyMatch — matches", () => {

@@ -1,20 +1,20 @@
-import type { Instruction, DisasmFunction, Xref, StackFrame } from "../types";
 import type { RuntimeFunction } from "../../pe/types";
-import type { FunctionSignature } from "../signatures";
 import { buildCFG, detectLoops } from "../cfg";
-import { liftBlock } from "./lifter";
-import { foldBlock } from "./fold";
-import { buildSSA, detectNaturalLoops } from "./ssa";
-import { ssaOptimize } from "./ssaopt";
-import { destroySSA } from "./ssadestroy";
-import { structureCFG } from "./structure";
-import { promoteVars } from "./promote";
-import { emitFunction } from "./emit";
-import { inferTypes } from "./typeInfer";
-import { RegState } from "./regstate";
-import { synthesizeStructs, type StructRegistry } from "./structs";
+import type { FunctionSignature } from "../signatures";
+import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
+import { emitFunction } from "./emit";
+import { foldBlock } from "./fold";
 import type { IRStmt, IRTry } from "./ir";
+import { liftBlock } from "./lifter";
+import { promoteVars } from "./promote";
+import { RegState } from "./regstate";
+import { buildSSA, detectNaturalLoops } from "./ssa";
+import { destroySSA } from "./ssadestroy";
+import { ssaOptimize } from "./ssaopt";
+import { type StructRegistry, synthesizeStructs } from "./structs";
+import { structureCFG } from "./structure";
+import { inferTypes } from "./typeInfer";
 
 export interface DecompileResult {
   code: string;

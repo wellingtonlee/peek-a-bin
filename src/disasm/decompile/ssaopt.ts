@@ -1,10 +1,10 @@
-import type { SSAContext } from "./ssa";
-import type { IRStmt, IRExpr, IRReg, IRPhi } from "./ir";
-import { canonReg } from "./ir";
 // One definition, shared with foldBlock. Keeping a second copy here is how the
 // two drifted: this one classified `(int64_t)f()` as pure, so an unused
 // cast-of-call def was deleted along with the call.
 import { hasSideEffects } from "./fold";
+import type { IRExpr, IRPhi, IRReg, IRStmt } from "./ir";
+import { canonReg } from "./ir";
+import type { SSAContext } from "./ssa";
 
 function sameReg(a: IRReg, b: IRReg): boolean {
   return canonReg(a.name) === canonReg(b.name) && a.version === b.version;
@@ -454,7 +454,8 @@ export function globalValueNumbering(ctx: SSAContext): boolean {
     stack.push({ blockId, exit: true });
     const children = ctx.domTree.get(blockId) ?? [];
     // Push children in reverse so leftmost is processed first
-    for (let i = children.length - 1; i >= 0; i--) stack.push({ blockId: children[i], exit: false });
+    for (let i = children.length - 1; i >= 0; i--)
+      stack.push({ blockId: children[i], exit: false });
 
     const stmts = ctx.liftedBlocks.get(blockId);
     if (!stmts) continue;

@@ -6,10 +6,10 @@
  * process.env.HOME on POSIX, and both are resolved at call time.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { clients } from "../clients";
 
 const PROJECT = "/home/example/peek-a-bin";

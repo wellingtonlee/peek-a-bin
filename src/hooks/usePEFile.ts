@@ -1,9 +1,9 @@
-import { createContext, useContext, useReducer, type Dispatch } from "react";
-import type { PEFile } from "../pe/types";
-import type { DisasmFunction } from "../disasm/types";
-import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
+import { createContext, type Dispatch, useContext, useReducer } from "react";
 import type { Anomaly } from "../analysis/anomalies";
-import type { BatchRenameResult, AIScanFinding } from "../llm/types";
+import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
+import type { DisasmFunction } from "../disasm/types";
+import type { AIScanFinding, BatchRenameResult } from "../llm/types";
+import type { PEFile } from "../pe/types";
 
 export type ViewTab =
   | "disassembly"

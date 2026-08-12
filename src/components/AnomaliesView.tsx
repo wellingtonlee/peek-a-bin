@@ -1,5 +1,5 @@
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 import type { Anomaly } from "../analysis/anomalies";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 const SEVERITY_COLORS: Record<string, { bg: string; text: string; badge: string }> = {

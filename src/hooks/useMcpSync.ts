@@ -1,6 +1,6 @@
-import { useEffect, useState, type Dispatch } from "react";
+import { type Dispatch, useEffect, useState } from "react";
+import { type AnnotationPayload, validateAnnotations } from "../utils/exportSchema";
 import type { AppAction } from "./usePEFile";
-import { validateAnnotations, type AnnotationPayload } from "../utils/exportSchema";
 
 const WS_URL = `ws://localhost:${19283}`;
 const RECONNECT_DELAY = 3000;

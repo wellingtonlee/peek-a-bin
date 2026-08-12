@@ -1,18 +1,18 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  backoffDelay,
   DEFAULT_RETRY_POLICY,
+  isRetryableStatus,
   LLMAbortError,
   LLMCommittedError,
   LLMHttpError,
   LLMNetworkError,
-  RequestLimiter,
-  backoffDelay,
-  isRetryableStatus,
   parseRetryAfter,
+  RequestLimiter,
+  type RetryPolicy,
   runWithRetry,
   shouldRetry,
   sleep,
-  type RetryPolicy,
 } from "../retry";
 
 /** Records the delays it is asked to wait for, without actually waiting. */

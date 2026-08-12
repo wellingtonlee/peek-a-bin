@@ -10,9 +10,9 @@
 // sit ~370 lines above these callbacks, so moving them into this hook would
 // shift them to a different position in the hook sequence. Same reasoning, and
 // the same trade-off, as useInsnContextMenu.
-import { useCallback, useMemo, type Dispatch } from "react";
-import type { AppAction } from "./usePEFile";
+import { type Dispatch, useCallback, useMemo } from "react";
 import type { Instruction } from "../disasm/types";
+import type { AppAction } from "./usePEFile";
 
 export interface UseGraphSearchArgs {
   instructions: Instruction[];

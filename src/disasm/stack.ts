@@ -1,5 +1,5 @@
-import type { Instruction, DisasmFunction, StackFrame, StackVar } from "./types";
 import { getFuncInsns } from "./funcInsns";
+import type { DisasmFunction, Instruction, StackFrame, StackVar } from "./types";
 
 /**
  * Stack-operand patterns, one pair per width. They depend only on `is64`, so

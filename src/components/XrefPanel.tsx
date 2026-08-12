@@ -1,8 +1,8 @@
-import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { Xref, DisasmFunction } from "../disasm/types";
-import type { PEFile } from "../pe/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DisasmFunction, Xref } from "../disasm/types";
 import { binarySearchFunc } from "../hooks/useDerivedState";
+import type { PEFile } from "../pe/types";
 
 type XrefType = "call" | "jmp" | "branch" | "data";
 type SortKey = "from" | "to" | "type";

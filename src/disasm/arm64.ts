@@ -17,9 +17,9 @@
  * `unsupportedOnArch` in ./arch.ts.
  */
 
-import type { DisasmFunction, Instruction } from "./types";
-import { type DetectPass, type DetectResult, mapInsn } from "./functionDetect";
 import { createScan, requireCapstone } from "./capstoneWindow";
+import { type DetectPass, type DetectResult, mapInsn } from "./functionDetect";
+import type { DisasmFunction, Instruction } from "./types";
 
 /** Every A64 instruction is exactly four bytes, always 4-byte aligned. */
 export const ARM64_INSN_SIZE = 4;
@@ -281,7 +281,10 @@ const ARM64_MAX_RECENT = 16;
  */
 function a64Reg(text: string | undefined): string | null {
   if (text === undefined) return null;
-  const m = text.trim().toLowerCase().match(/^[wx](\d{1,2}|zr)$/);
+  const m = text
+    .trim()
+    .toLowerCase()
+    .match(/^[wx](\d{1,2}|zr)$/);
   if (!m) return null;
   if (m[1] === "zr") return "zr";
   const n = Number(m[1]);
@@ -326,7 +329,10 @@ function parseTableAdd(
   const dest = a64Reg(parts[0]);
   const base = a64Reg(parts[1]);
   const offset = a64Reg(parts[2]);
-  const sh = parts[3].trim().toLowerCase().match(/^lsl\s+#(\d+)$/);
+  const sh = parts[3]
+    .trim()
+    .toLowerCase()
+    .match(/^lsl\s+#(\d+)$/);
   // The shift is required, not defaulted to zero: it is the statement of what
   // unit the table's entries are in, and a table whose entry scale cannot be
   // established yields no targets rather than a plausible set.
@@ -360,7 +366,9 @@ function parseTableLoad(
 ): { dest: string; table: string; index: string; width: number; signed: boolean } | null {
   const kind = A64_TABLE_LOADS.get(mnemonic.toLowerCase());
   if (!kind) return null;
-  const m = opStr.match(/^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*,\s*([wx]\w+)\s*(?:,\s*(?:uxtw|sxtw|lsl)(?:\s+#(\d+))?\s*)?\]\s*$/i);
+  const m = opStr.match(
+    /^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*,\s*([wx]\w+)\s*(?:,\s*(?:uxtw|sxtw|lsl)(?:\s+#(\d+))?\s*)?\]\s*$/i,
+  );
   if (!m) return null;
   const dest = a64Reg(m[1]);
   const table = a64Reg(m[2]);
@@ -548,7 +556,9 @@ function parsePointerLoad(
   // The acquire loads are what a guarded-import or delay-load thunk uses; the
   // plain ones are here because the same shape appears without the barrier.
   if (mn !== "ldar" && mn !== "ldapr" && mn !== "ldr" && mn !== "ldur") return null;
-  const m = opStr.match(/^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*(?:,\s*#?(-?(?:0x[0-9a-fA-F]+|\d+))\s*)?\]\s*$/i);
+  const m = opStr.match(
+    /^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*(?:,\s*#?(-?(?:0x[0-9a-fA-F]+|\d+))\s*)?\]\s*$/i,
+  );
   if (!m) return null;
   const dest = a64Reg(m[1]);
   const addr = a64Reg(m[2]);
@@ -663,11 +673,7 @@ export function classifyArm64Br(brOpStr: string, recent: Instruction[]): Arm64Br
  * The read stops at the first entry that fails either test, so a table shorter
  * than its bounds check claims yields its real cases and nothing after them.
  */
-function readArm64Table(
-  d: Arm64Dispatch,
-  bytes: Uint8Array,
-  baseAddress: number,
-): number[] {
+function readArm64Table(d: Arm64Dispatch, bytes: Uint8Array, baseAddress: number): number[] {
   const endAddress = baseAddress + bytes.length;
   const targets: number[] = [];
   for (let c = 0; c < d.count; c++) {

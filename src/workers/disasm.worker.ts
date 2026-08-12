@@ -1,8 +1,9 @@
-import { Const, Capstone, loadCapstone as _loadCapstone } from "capstone-wasm";
+import { loadCapstone as _loadCapstone, Capstone, Const } from "capstone-wasm";
 
 // Runtime accepts an options object with instantiateWasm hook, but the
 // published types omit the parameter under bundler module resolution.
 const loadCapstone = _loadCapstone as (args?: Record<string, any>) => Promise<void>;
+
 import { createWorkerState, dispatch, type WorkerRequest } from "./dispatch";
 
 // --- IndexedDB WASM module cache ---

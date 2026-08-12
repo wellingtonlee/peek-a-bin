@@ -15,10 +15,10 @@
  * (0 -> 27428 instructions, 419/419 .pdata starts decoded).
  */
 
-import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 import type { ImageArch } from "../../disasm/arch";
 import type { AnalyzedFile } from "../session";
 

@@ -1,4 +1,4 @@
-import type { Instruction, DisasmFunction } from "./types";
+import type { DisasmFunction, Instruction } from "./types";
 
 /**
  * "Collect the instructions belonging to a function" — previously duplicated

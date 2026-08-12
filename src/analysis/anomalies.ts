@@ -1,6 +1,6 @@
-import type { PEFile } from "../pe/types";
-import { type ChecksumResult, validateChecksum, detectOverlay } from "../pe/metadata";
 import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import { type ChecksumResult, detectOverlay, validateChecksum } from "../pe/metadata";
+import type { PEFile } from "../pe/types";
 import { computeSectionEntropies } from "../utils/entropy";
 import { sectionRanges } from "../workers/metricsDispatch";
 

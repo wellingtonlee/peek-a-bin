@@ -10,8 +10,8 @@
  * The IndexedDB double lives in `./fakeIndexedDB`.
  */
 
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { saveRecentFile, getRecentFiles, loadRecentFile, deleteRecentFile } from "../recentFiles";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { deleteRecentFile, getRecentFiles, loadRecentFile, saveRecentFile } from "../recentFiles";
 import { createFakeIDB, type FakeIDB, type FakeIDBOptions } from "./fakeIndexedDB";
 
 const MAX_ENTRIES = 5;

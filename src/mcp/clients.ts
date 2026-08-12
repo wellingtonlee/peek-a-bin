@@ -3,9 +3,9 @@
  * Each entry knows how to generate and write its config for a specific AI client.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 
 export interface ClientSetup {
   name: string;

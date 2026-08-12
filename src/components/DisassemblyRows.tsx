@@ -3,15 +3,15 @@
 // components — deliberately no hooks and no React.memo, so each one re-renders
 // exactly when the inline JSX used to.
 import type { Dispatch } from "react";
-import { focusOnMount } from "./focusOnMount";
-import { getDisplayName } from "../hooks/usePEFile";
-import type { AppAction } from "../hooks/usePEFile";
-import type { DisplayRow } from "../hooks/useDisassemblyRows";
-import type { Instruction, DisasmFunction, Xref, DataItem } from "../disasm/types";
-import { parseOperandTargets } from "../disasm/operands";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
+import { parseOperandTargets } from "../disasm/operands";
 import type { FunctionSignature } from "../disasm/signatures";
+import type { DataItem, DisasmFunction, Instruction, Xref } from "../disasm/types";
+import type { DisplayRow } from "../hooks/useDisassemblyRows";
+import type { AppAction } from "../hooks/usePEFile";
+import { getDisplayName } from "../hooks/usePEFile";
 import type { PEFile } from "../pe/types";
+import { focusOnMount } from "./focusOnMount";
 import { ColoredOperand, mnemonicClass } from "./shared";
 
 export function SeparatorRow({

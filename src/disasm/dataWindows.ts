@@ -48,8 +48,8 @@
  * rebuilds the views on the far side with `subarray` (no second copy).
  */
 
-import { isDataSection } from "../pe/sections";
 import { IMAGE_SCN_MEM_DISCARDABLE } from "../pe/constants";
+import { isDataSection } from "../pe/sections";
 import type { SectionHeader } from "../pe/types";
 import type { DataWindow } from "./functionDetect";
 

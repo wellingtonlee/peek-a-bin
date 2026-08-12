@@ -1,13 +1,13 @@
-import { useMemo, useRef, useCallback, useEffect } from "react";
-import { focusOnMount } from "./focusOnMount";
-import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
-import type { PEFile } from "../pe/types";
-import { buildCFG, layoutCFG, getCfgLayout, type LayoutBlock, type CFGEdge } from "../disasm/cfg";
-import { loadFontSize } from "../llm/settings";
-import { parseOperandTargets } from "../disasm/operands";
-import { ColoredOperand, mnemonicClass } from "./shared";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { buildCFG, type CFGEdge, getCfgLayout, type LayoutBlock, layoutCFG } from "../disasm/cfg";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { parseOperandTargets } from "../disasm/operands";
+import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { loadFontSize } from "../llm/settings";
+import type { PEFile } from "../pe/types";
+import { focusOnMount } from "./focusOnMount";
+import { ColoredOperand, mnemonicClass } from "./shared";
 
 /**
  * Props here are deliberately limited to things DisassemblyView genuinely owns.

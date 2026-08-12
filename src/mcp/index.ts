@@ -20,9 +20,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { initCapstone } from "./disasm.js";
+import { registerResources } from "./resources.js";
 import { FileSession } from "./session.js";
 import { registerTools } from "./tools.js";
-import { registerResources } from "./resources.js";
 
 const server = new McpServer({
   name: "peek-a-bin",

@@ -1,11 +1,11 @@
 // Section header bar, view-toggle buttons, filter select, export menu and the
 // four search banners, moved verbatim out of DisassemblyView's return. Pure
 // JSX — this component deliberately declares no hooks of its own.
-import type { RefObject, Dispatch } from "react";
-import type { Instruction, DisasmFunction } from "../disasm/types";
-import type { SectionHeader } from "../pe/types";
+import type { Dispatch, RefObject } from "react";
+import type { DisasmFunction, Instruction } from "../disasm/types";
+import type { CrossSectionResult, UseDisassemblySearchResult } from "../hooks/useDisassemblySearch";
 import type { AppAction } from "../hooks/usePEFile";
-import type { UseDisassemblySearchResult, CrossSectionResult } from "../hooks/useDisassemblySearch";
+import type { SectionHeader } from "../pe/types";
 
 export type InsnFilter = "all" | "calls" | "jumps" | "stringrefs" | "suspicious";
 

@@ -1,18 +1,18 @@
-import type { Instruction } from "../types";
 import type { BasicBlock } from "../cfg";
-import type { IRExpr, IRStmt, IRCall, BinaryOp } from "./ir";
+import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
+import type { Instruction } from "../types";
+import type { BinaryOp, IRCall, IRExpr, IRStmt } from "./ir";
 import {
-  irConst,
-  irReg,
   irBinary,
-  irUnary,
+  irConst,
   irDeref,
+  irReg,
+  irUnary,
   irUnknown,
-  regSize,
   isKnownRegister,
+  regSize,
 } from "./ir";
 import type { RegState } from "./regstate";
-import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 
 // ── Operand Parsing ──
 

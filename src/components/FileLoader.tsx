@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnalysisPhase } from "../hooks/usePEFile";
 import {
+  deleteRecentFile,
   getRecentFiles as getRecentFilesFromIDB,
   loadRecentFile,
-  deleteRecentFile,
   type RecentFileEntry,
 } from "../utils/recentFiles";
 

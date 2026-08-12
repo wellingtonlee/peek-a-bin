@@ -13,13 +13,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../../pe/constants";
 import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
+import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../../pe/constants";
+import { validateChecksum } from "../../pe/metadata";
 import { parsePE } from "../../pe/parser";
 import type { PEFile } from "../../pe/types";
 import { computeSectionEntropies } from "../../utils/entropy";
 import { sectionRanges } from "../../workers/metricsDispatch";
-import { validateChecksum } from "../../pe/metadata";
 import { detectAnomalies } from "../anomalies";
 
 const CODE = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;

@@ -3,39 +3,39 @@
  * Parses Windows Portable Executable files from ArrayBuffer
  */
 
-import type {
-  DOSHeader,
-  COFFHeader,
-  OptionalHeader32,
-  OptionalHeader64,
-  DataDirectory,
-  SectionHeader,
-  ImportEntry,
-  ExportEntry,
-  TLSDirectory,
-  RelocationBlock,
-  RelocationEntry,
-  PEFile,
-} from "./types";
-import { normalizeOptionalHeader } from "./types";
-import { findCodeSection } from "./sections";
+import { parseSecurityDirectory } from "./authenticode";
 import {
+  IMAGE_DIRECTORY_ENTRY_BASERELOC,
+  IMAGE_DIRECTORY_ENTRY_EXCEPTION,
+  IMAGE_DIRECTORY_ENTRY_EXPORT,
+  IMAGE_DIRECTORY_ENTRY_IMPORT,
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
+  IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DOS_SIGNATURE,
-  IMAGE_NT_SIGNATURE,
   IMAGE_NT_OPTIONAL_HDR32_MAGIC,
   IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+  IMAGE_NT_SIGNATURE,
   IMAGE_ORDINAL_FLAG32,
   IMAGE_ORDINAL_FLAG64,
-  IMAGE_DIRECTORY_ENTRY_IMPORT,
-  IMAGE_DIRECTORY_ENTRY_EXPORT,
-  IMAGE_DIRECTORY_ENTRY_RESOURCE,
-  IMAGE_DIRECTORY_ENTRY_EXCEPTION,
-  IMAGE_DIRECTORY_ENTRY_TLS,
-  IMAGE_DIRECTORY_ENTRY_BASERELOC,
 } from "./constants";
 import { parsePdata } from "./pdata";
 import { parseResourceDirectory } from "./resources";
-import { parseSecurityDirectory } from "./authenticode";
+import { findCodeSection } from "./sections";
+import type {
+  COFFHeader,
+  DataDirectory,
+  DOSHeader,
+  ExportEntry,
+  ImportEntry,
+  OptionalHeader32,
+  OptionalHeader64,
+  PEFile,
+  RelocationBlock,
+  RelocationEntry,
+  SectionHeader,
+  TLSDirectory,
+} from "./types";
+import { normalizeOptionalHeader } from "./types";
 
 const textDecoder = new TextDecoder();
 

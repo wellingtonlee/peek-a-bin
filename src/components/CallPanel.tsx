@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { DisasmFunction, Instruction } from "../disasm/types";
-import { getDisplayName } from "../hooks/usePEFile";
 import { binarySearchFunc } from "../hooks/useDerivedState";
+import { getDisplayName } from "../hooks/usePEFile";
 
 interface CallPanelProps {
   func: DisasmFunction;

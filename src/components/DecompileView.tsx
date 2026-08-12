@@ -1,7 +1,7 @@
-import { useMemo, useRef, useCallback, useEffect, useState } from "react";
-import { focusOnMount } from "./focusOnMount";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { focusOnMount } from "./focusOnMount";
 
 // ── Syntax Highlighting ──
 

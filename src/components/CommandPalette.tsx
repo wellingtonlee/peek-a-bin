@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { Modal } from "./Modal";
-import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSortedFuncs } from "../hooks/useDerivedState";
+import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 import { activeDescendantId, optionId } from "./listboxIds";
+import { Modal } from "./Modal";
 
 interface CommandPaletteProps {
   open: boolean;

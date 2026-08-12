@@ -1,5 +1,5 @@
-import type { Instruction, DisasmFunction } from "./types";
 import { getFuncInsns } from "./funcInsns";
+import type { DisasmFunction, Instruction } from "./types";
 
 export interface FunctionSignature {
   convention: string;

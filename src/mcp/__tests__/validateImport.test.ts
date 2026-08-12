@@ -10,11 +10,11 @@
  * src/utils/__tests__/exportSchema.test.ts — not duplicated here.)
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { validateImport, type ExportSchemaV1 } from "../../utils/exportSchema";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type ExportSchemaV1, validateImport } from "../../utils/exportSchema";
 import { captureTools, stubSession, textOf } from "./harness";
 
 const valid: ExportSchemaV1 = {

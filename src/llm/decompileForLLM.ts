@@ -6,13 +6,14 @@
  * The only genuine divergence was the line cap, which is per-caller because the
  * three features have different token budgets; it stays a parameter.
  */
-import type { DisasmFunction } from "../disasm/types";
-import type { PEFile, SectionHeader } from "../pe/types";
-import { findCodeSection } from "../pe/sections";
-import { disasmWorker } from "../workers/disasmClient";
-import { analyzeStackFrame } from "../disasm/stack";
+
 import { inferSignature } from "../disasm/signatures";
+import { analyzeStackFrame } from "../disasm/stack";
+import type { DisasmFunction } from "../disasm/types";
 import { getDisplayName } from "../hooks/usePEFile";
+import { findCodeSection } from "../pe/sections";
+import type { PEFile, SectionHeader } from "../pe/types";
+import { disasmWorker } from "../workers/disasmClient";
 import { functionByteRange, truncateCode } from "./decompileTarget";
 
 export interface DecompileForLLMOptions {

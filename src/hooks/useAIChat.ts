@@ -1,10 +1,10 @@
-import { useReducer, useRef, useCallback, useEffect } from "react";
-import type { ChatMessage } from "../llm/types";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import { streamChat } from "../llm/client";
-import { hasApiKey, loadSettings } from "../llm/settings";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
-import type { PEFile } from "../pe/types";
+import { hasApiKey, loadSettings } from "../llm/settings";
+import type { ChatMessage } from "../llm/types";
 import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import type { PEFile } from "../pe/types";
 
 interface ChatState {
   messages: ChatMessage[];

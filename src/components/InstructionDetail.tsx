@@ -1,8 +1,8 @@
 import { useMemo } from "react";
-import type { Instruction, DisasmFunction, Xref, StackFrame } from "../disasm/types";
 import type { FunctionSignature } from "../disasm/signatures";
-import { getDisplayName } from "../hooks/usePEFile";
+import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import { binarySearchFunc } from "../hooks/useDerivedState";
+import { getDisplayName } from "../hooks/usePEFile";
 
 interface InstructionDetailProps {
   insn: Instruction;

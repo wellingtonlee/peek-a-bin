@@ -4,7 +4,7 @@
  * pushed off-screen must land at the corner, never at a negative coordinate.
  */
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clampPopup } from "../clampPopup";
 
 /** Install a viewport of the given size (no jsdom in this suite). */

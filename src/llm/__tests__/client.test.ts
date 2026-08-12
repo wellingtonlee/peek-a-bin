@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { streamChat, type StreamCallbacks } from "../client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type StreamCallbacks, streamChat } from "../client";
+import { type RetryPolicy, sleep } from "../retry";
 import type { LLMSettings } from "../settings";
-import { sleep, type RetryPolicy } from "../retry";
 
 const ANTHROPIC: LLMSettings = {
   provider: "anthropic",

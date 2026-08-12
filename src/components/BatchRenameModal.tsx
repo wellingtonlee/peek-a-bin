@@ -1,8 +1,8 @@
-import { useState, useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import type { BatchRenameResult } from "../llm/types";
 import { Modal } from "./Modal";
 import { accidentalDismissAllowed } from "./modalScaffold";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import type { BatchRenameResult } from "../llm/types";
 
 export function BatchRenameModal() {
   const state = useAppState();

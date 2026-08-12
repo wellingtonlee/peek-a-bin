@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { useAppState } from "./usePEFile";
 import type { DisasmFunction } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
+import { useAppState } from "./usePEFile";
 
 export function useSortedFuncs(): DisasmFunction[] {
   const state = useAppState();

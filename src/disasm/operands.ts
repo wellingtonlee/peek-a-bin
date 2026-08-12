@@ -1,6 +1,6 @@
-import type { Instruction } from "./types";
 import type { ImportEntry } from "../pe/types";
 import { matchRipOperand } from "./ripRelative";
+import type { Instruction } from "./types";
 
 export interface OperandTarget {
   address: number;

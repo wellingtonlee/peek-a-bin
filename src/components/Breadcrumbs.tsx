@@ -1,6 +1,6 @@
-import { useRef, useState, useEffect, useCallback } from "react";
-import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
+import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
 
 export function Breadcrumbs() {
   const state = useAppState();

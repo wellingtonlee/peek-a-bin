@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { Modal } from "./Modal";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
 
 type AddrMode = "va" | "rva" | "file";
 

@@ -14,11 +14,11 @@
  * `padded()`. Anything asserting on the *answer* does not have to care.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../constants";
 import { buildSectionIndex, parsePE, rvaToFileOffset, rvaToFileOffsetIndexed } from "../parser";
 import type { SectionHeader } from "../types";
 import { buildMinimalPE32 } from "./fixtures";
-import { IMAGE_SCN_MEM_READ, IMAGE_SCN_CNT_INITIALIZED_DATA } from "../constants";
 
 function sec(
   name: string,

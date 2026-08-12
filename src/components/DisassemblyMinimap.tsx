@@ -1,6 +1,5 @@
-import { useRef, useEffect, useCallback, useState, useMemo } from "react";
-import type { Loop } from "../disasm/cfg";
-import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CFGEdge, LayoutBlock, Loop } from "../disasm/cfg";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
 
 interface DisassemblyMinimapProps {

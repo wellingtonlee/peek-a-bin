@@ -3,23 +3,23 @@
  * Manages loaded PE files and their analysis results.
  */
 
-import { parsePE, extractStrings } from "../pe/parser";
+import { type Anomaly, detectAnomalies } from "../analysis/anomalies";
+import { type DriverInfo, detectDriver } from "../analysis/driver";
+import { archForMachine, type ImageArch } from "../disasm/arch";
+import { buildDataWindows } from "../disasm/dataWindows";
+import { StructRegistry } from "../disasm/decompile/structs";
+import { buildIATLookup } from "../disasm/operands";
+import { jumpTableTargets } from "../disasm/seeds";
+import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
+import { extractStrings, parsePE } from "../pe/parser";
 import { dataSectionRanges, findCodeSection } from "../pe/sections";
 import type { PEFile } from "../pe/types";
-import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
-import { buildIATLookup } from "../disasm/operands";
-import { detectAnomalies, type Anomaly } from "../analysis/anomalies";
-import { detectDriver, type DriverInfo } from "../analysis/driver";
-import { StructRegistry } from "../disasm/decompile/structs";
-import { jumpTableTargets } from "../disasm/seeds";
-import { buildDataWindows } from "../disasm/dataWindows";
-import { type ImageArch, archForMachine } from "../disasm/arch";
 import {
-  initCapstone,
-  detectFunctionsFromBytes,
-  hybridDisassembleBytes,
   buildXrefMap,
   buildXrefs,
+  detectFunctionsFromBytes,
+  hybridDisassembleBytes,
+  initCapstone,
 } from "./disasm";
 
 export interface AnalyzedFile {

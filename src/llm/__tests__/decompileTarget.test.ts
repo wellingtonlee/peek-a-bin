@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { functionByteRange, truncateCode } from "../decompileTarget";
+import { describe, expect, it } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
 import type { SectionHeader } from "../../pe/types";
+import { functionByteRange, truncateCode } from "../decompileTarget";
 
 const section: SectionHeader = {
   name: ".text",

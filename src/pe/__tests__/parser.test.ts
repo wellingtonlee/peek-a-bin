@@ -1,14 +1,14 @@
-import { describe, it, expect } from "vitest";
-import { parsePE, rvaToFileOffset } from "../parser";
-import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
+import { describe, expect, it } from "vitest";
 import {
-  IMAGE_FILE_MACHINE_I386,
   IMAGE_FILE_MACHINE_AMD64,
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_FILE_MACHINE_I386,
   IMAGE_SCN_CNT_CODE,
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_READ,
 } from "../constants";
+import { parsePE, rvaToFileOffset } from "../parser";
 import type { SectionHeader } from "../types";
+import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
 
 describe("parsePE", () => {
   it("returns is64=false for PE32", () => {

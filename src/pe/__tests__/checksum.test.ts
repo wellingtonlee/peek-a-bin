@@ -8,7 +8,7 @@
  * is pinned here differentially rather than argued in a comment.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { validateChecksum } from "../metadata";
 import type { PEFile } from "../types";
 

@@ -7,20 +7,20 @@
  * and padding boundaries where hand-rolled implementations classically break.
  */
 
-import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../constants";
 import {
-  md5,
   computeImphash,
-  parseRichHeader,
-  parseDebugDirectory,
-  validateChecksum,
   detectOverlay,
+  md5,
+  parseDebugDirectory,
+  parseRichHeader,
+  validateChecksum,
 } from "../metadata";
 import { ORDINAL_TABLES } from "../ordinalTables";
 import { parsePE } from "../parser";
 import { buildMinimalPE32, type SectionDef } from "./fixtures";
-import { IMAGE_SCN_MEM_READ, IMAGE_SCN_CNT_INITIALIZED_DATA } from "../constants";
 
 const ascii = (s: string) => new TextEncoder().encode(s);
 const nodeMD5 = (data: Uint8Array) => createHash("md5").update(data).digest("hex");

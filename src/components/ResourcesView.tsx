@@ -1,14 +1,14 @@
-import { useState, useMemo, useCallback } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useAppState } from "../hooks/usePEFile";
 import {
   ResourceTypeNames,
-  RT_VERSION,
-  RT_ICON,
   RT_GROUP_ICON,
+  RT_ICON,
   RT_MANIFEST,
+  RT_VERSION,
 } from "../pe/constants";
-import { parseVersionInfo, reconstructIcon } from "../pe/resources";
 import { rvaToFileOffset } from "../pe/parser";
+import { parseVersionInfo, reconstructIcon } from "../pe/resources";
 import type { ResourceTree } from "../pe/types";
 
 function getTypeName(id: number | string): string {

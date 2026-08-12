@@ -6,11 +6,11 @@
  * an explicit timeout: a regression must surface as a failure, not as a hung suite.
  */
 
-import { describe, it, expect } from "vitest";
-import { parsePE } from "../parser";
+import { describe, expect, it } from "vitest";
 import { parseSecurityDirectory } from "../authenticode";
+import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../constants";
+import { parsePE } from "../parser";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
-import { IMAGE_SCN_MEM_READ, IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE } from "../constants";
 
 const TIMEOUT = 5000;
 

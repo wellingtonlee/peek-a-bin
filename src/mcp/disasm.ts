@@ -3,22 +3,22 @@
  * Used by the MCP server for direct disassembly.
  */
 
-import { Const, Capstone, loadCapstone } from "capstone-wasm";
-import type { Instruction, Xref } from "../disasm/types";
+import { Capstone, Const, loadCapstone } from "capstone-wasm";
 import { type ImageArch, unsupportedArchMessage } from "../disasm/arch";
-import type { DataWindow } from "../disasm/dataWindows";
 import { type Arm64Context, detectArm64Functions, disassembleArm64 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
+import type { DataWindow } from "../disasm/dataWindows";
 import {
+  buildAllXrefs,
+  buildTypedXrefMap,
   type DetectResult,
   type DisasmContext,
-  type ImageBounds,
-  disassemble,
   detectFunctions,
+  disassemble,
   hybridDisassemble,
-  buildTypedXrefMap,
-  buildAllXrefs,
+  type ImageBounds,
 } from "../disasm/functionDetect";
+import type { Instruction, Xref } from "../disasm/types";
 
 let cs32: any;
 let cs64: any;

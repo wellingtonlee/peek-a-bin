@@ -3,8 +3,8 @@
  * Detection, suspicious API flagging, IOCTL decoding, IRP dispatch detection
  */
 
-import type { PEFile } from "../pe/types";
 import type { Instruction } from "../disasm/types";
+import type { PEFile } from "../pe/types";
 
 // ── Driver Detection ──
 

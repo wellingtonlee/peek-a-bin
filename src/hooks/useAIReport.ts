@@ -1,17 +1,17 @@
-import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
-import type { AppAction, AppState } from "./usePEFile";
-import { streamChat } from "../llm/client";
-import { hasApiKey, loadSettings } from "../llm/settings";
-import { SYSTEM_PROMPT_REPORT } from "../llm/prompt";
-import { NOTABLE_APIS, matchesApi } from "../llm/apiLists";
-import { decompileForLLM } from "../llm/decompileForLLM";
-import { getDisplayName } from "./usePEFile";
-import type { PEFile } from "../pe/types";
-import { findCodeSection } from "../pe/sections";
-import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import { useCallback, useRef } from "react";
 import type { Anomaly } from "../analysis/anomalies";
 import type { DisasmFunction } from "../disasm/types";
+import { matchesApi, NOTABLE_APIS } from "../llm/apiLists";
+import { streamChat } from "../llm/client";
+import { decompileForLLM } from "../llm/decompileForLLM";
+import { SYSTEM_PROMPT_REPORT } from "../llm/prompt";
+import { hasApiKey, loadSettings } from "../llm/settings";
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import { findCodeSection } from "../pe/sections";
+import type { PEFile } from "../pe/types";
+import type { AppAction, AppState } from "./usePEFile";
+import { getDisplayName } from "./usePEFile";
 
 /** Report context is whole-binary, so each function gets a generous but bounded slice. */
 const MAX_REPORT_LINES_PER_FUNC = 200;

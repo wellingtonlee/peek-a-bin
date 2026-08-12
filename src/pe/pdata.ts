@@ -1,6 +1,6 @@
-import type { DataDirectory, SectionHeader, RuntimeFunction } from "./types";
-import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
 import { IMAGE_FILE_MACHINE_ARM64 } from "./constants";
+import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
+import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
 
 /**
  * ARM64 variants that describe their unwind data with the ARM64 schema below:

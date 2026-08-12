@@ -1,12 +1,12 @@
-import { useEffect, useRef, useMemo, useState } from "react";
-import { useAppState } from "./usePEFile";
-import { useSectionInfo } from "./useDerivedState";
-import { disasmWorker } from "../workers/disasmClient";
-import type { Instruction, DisasmFunction, Xref, DataItem } from "../disasm/types";
-import { buildCFG, detectLoops } from "../disasm/cfg";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Loop } from "../disasm/cfg";
+import { buildCFG, detectLoops } from "../disasm/cfg";
 import { buildDataItems } from "../disasm/dataView";
+import type { DataItem, DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { IMAGE_SCN_MEM_EXECUTE } from "../pe/constants";
+import { disasmWorker } from "../workers/disasmClient";
+import { useSectionInfo } from "./useDerivedState";
+import { useAppState } from "./usePEFile";
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }

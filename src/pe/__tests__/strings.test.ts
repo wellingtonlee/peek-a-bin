@@ -4,15 +4,15 @@
  * the section table a fixture produced.
  */
 
-import { describe, it, expect } from "vitest";
-import { parsePE, extractStrings } from "../parser";
-import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
+import { describe, expect, it } from "vitest";
 import {
-  IMAGE_SCN_MEM_READ,
-  IMAGE_SCN_MEM_EXECUTE,
   IMAGE_SCN_CNT_CODE,
   IMAGE_SCN_CNT_INITIALIZED_DATA,
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_READ,
 } from "../constants";
+import { extractStrings, parsePE } from "../parser";
+import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
 const PE32_BASE = 0x00400000;
 const PE64_BASE = 0x140000000;

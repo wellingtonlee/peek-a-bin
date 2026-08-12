@@ -17,10 +17,10 @@
  * starts).
  */
 
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 import { jumpTableTargets } from "../../disasm/seeds";
 
 const SESSION = resolve(dirname(fileURLToPath(import.meta.url)), "..", "session.ts");

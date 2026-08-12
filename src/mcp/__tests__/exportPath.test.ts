@@ -8,10 +8,10 @@
  * outside the export root.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveExportPath } from "../paths";
 
 let root: string;

@@ -6,7 +6,7 @@
  * and the breadth blowup that the depth limit alone does not bound.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseResourceDirectory, parseVersionInfo, reconstructIcon } from "../resources";
 import type { SectionHeader } from "../types";
 

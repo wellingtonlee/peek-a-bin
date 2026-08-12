@@ -1,7 +1,7 @@
-import type { IRStmt, BinaryOp } from "./ir";
-import { walkStmts, canonReg } from "./ir";
-import { API_TYPES } from "./apitypes";
 import { importsKernelModule } from "../../analysis/driver";
+import { API_TYPES } from "./apitypes";
+import type { BinaryOp, IRStmt } from "./ir";
+import { canonReg, walkStmts } from "./ir";
 
 // ── Type Lattice ──
 

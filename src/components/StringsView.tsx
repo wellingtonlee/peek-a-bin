@@ -1,7 +1,7 @@
-import { useState, useMemo, useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 
 type SortKey = "address" | "length";
 type EncodingFilter = "all" | "ascii" | "utf16le";

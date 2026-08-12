@@ -2,19 +2,19 @@
  * Kernel driver detection, IOCTL decoding and IRP dispatch-table recovery.
  */
 
-import { describe, it, expect } from "vitest";
-import {
-  detectDriver,
-  getApiRiskTag,
-  decodeIOCTL,
-  isPlausibleIOCTL,
-  formatIOCTL,
-  ioctlCodeArgIndex,
-  detectIRPDispatches,
-  IRP_MAJOR_FUNCTIONS,
-} from "../driver";
-import type { PEFile, ImportEntry } from "../../pe/types";
+import { describe, expect, it } from "vitest";
 import type { Instruction } from "../../disasm/types";
+import type { ImportEntry, PEFile } from "../../pe/types";
+import {
+  decodeIOCTL,
+  detectDriver,
+  detectIRPDispatches,
+  formatIOCTL,
+  getApiRiskTag,
+  IRP_MAJOR_FUNCTIONS,
+  ioctlCodeArgIndex,
+  isPlausibleIOCTL,
+} from "../driver";
 
 /** Just enough of a PEFile for detectDriver, which reads three fields. */
 function fakePE(opts: {

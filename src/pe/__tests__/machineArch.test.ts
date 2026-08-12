@@ -16,15 +16,15 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
-import { parsePE } from "../parser";
 import {
+  archForMachine,
   IMAGE_FILE_MACHINE_AMD64,
   IMAGE_FILE_MACHINE_ARM64,
   IMAGE_FILE_MACHINE_I386,
-  archForMachine,
   isKnownMachine,
 } from "../../disasm/arch";
+import { parsePE } from "../parser";
+import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
 
 /** IMAGE_FILE_MACHINE_ARMNT — ARM Thumb-2, the machine Windows on ARM32 used. */
 const IMAGE_FILE_MACHINE_ARMNT = 0x01c4;

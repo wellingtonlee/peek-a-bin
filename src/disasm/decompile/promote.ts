@@ -1,7 +1,7 @@
-import type { StackFrame } from "../types";
-import { stackVarKey } from "../stack";
 import type { FunctionSignature } from "../signatures";
-import type { IRExpr, IRStmt, IRFunction, IRLocal, IRParam, IRCall } from "./ir";
+import { stackVarKey } from "../stack";
+import type { StackFrame } from "../types";
+import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir";
 import { irVar, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";

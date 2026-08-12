@@ -1,5 +1,5 @@
-import type { IRExpr, IRStmt, BinaryOp } from "./ir";
-import { irConst, canonReg } from "./ir";
+import type { BinaryOp, IRExpr, IRStmt } from "./ir";
+import { canonReg, irConst } from "./ir";
 
 /** Shallow structural equality for simple expressions (reg, const, var). */
 function exprEq(a: IRExpr, b: IRExpr): boolean {
@@ -134,8 +134,7 @@ function foldExpr(expr: IRExpr): IRExpr {
       // condition is the one thing that is not a guess: int32 arithmetic is
       // only demonstrably wrong when an operand does not survive the coercion
       // to int32, or when a shift count is one JavaScript would wrap to 5 bits.
-      const needs64 =
-        !fitsInt32(l) || !fitsInt32(r) || (isShift && (r >= 32 || r < 0));
+      const needs64 = !fitsInt32(l) || !fitsInt32(r) || (isShift && (r >= 32 || r < 0));
       if (width >= 8 && needs64 && WIDTH_SENSITIVE.has(expr.op)) {
         const wide = fold64(expr.op, l, r);
         // Falling through to the 32-bit spelling when the 64-bit one declined

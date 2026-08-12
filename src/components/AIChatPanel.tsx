@@ -1,7 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { UseAIChatResult } from "../hooks/useAIChat";
 import type { ChatMessage } from "../llm/types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import type { UseAIChatResult } from "../hooks/useAIChat";
 
 interface AIChatPanelProps {
   chat: UseAIChatResult;

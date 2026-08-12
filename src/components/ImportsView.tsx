@@ -1,8 +1,8 @@
-import { useState, useCallback, useRef, useMemo } from "react";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
-import { clampPopup } from "../utils/clampPopup";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { getApiRiskTag } from "../analysis/driver";
+import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { clampPopup } from "../utils/clampPopup";
 
 interface XrefPopupState {
   x: number;

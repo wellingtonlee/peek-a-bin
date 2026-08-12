@@ -1,40 +1,40 @@
-import { useState, useEffect, useRef } from "react";
-import { Modal } from "./Modal";
-import {
-  loadSettings,
-  loadFontSize,
-  saveFontSize,
-  loadDecompileServer,
-  saveDecompileServer,
-  loadProfiles,
-  saveProfiles,
-  getActiveProfile,
-  canAddProfile,
-  type LLMSettings,
-  type LLMProfile,
-  type LLMProfileStore,
-  type DecompileServerSettings,
-} from "../llm/settings";
-import {
-  getAllThemes,
-  loadThemeId,
-  saveThemeId,
-  saveCustomTheme,
-  deleteCustomTheme,
-  exportTheme,
-  importTheme,
-  BUILTIN_THEMES,
-  type Theme,
-} from "../styles/themes";
+import { useEffect, useRef, useState } from "react";
 import { GhidraClient } from "../ghidra/client";
 import {
-  PROVIDER_DEFAULTS,
-  ANTHROPIC_DEFAULT_MODEL,
   ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_DEFAULT_MODEL,
   ANTHROPIC_MODELS,
-  OPENAI_MODELS,
   isDefaultModel,
+  OPENAI_MODELS,
+  PROVIDER_DEFAULTS,
 } from "../llm/models";
+import {
+  canAddProfile,
+  type DecompileServerSettings,
+  getActiveProfile,
+  type LLMProfile,
+  type LLMProfileStore,
+  type LLMSettings,
+  loadDecompileServer,
+  loadFontSize,
+  loadProfiles,
+  loadSettings,
+  saveDecompileServer,
+  saveFontSize,
+  saveProfiles,
+} from "../llm/settings";
+import {
+  BUILTIN_THEMES,
+  deleteCustomTheme,
+  exportTheme,
+  getAllThemes,
+  importTheme,
+  loadThemeId,
+  saveCustomTheme,
+  saveThemeId,
+  type Theme,
+} from "../styles/themes";
+import { Modal } from "./Modal";
 
 interface Props {
   open: boolean;

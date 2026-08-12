@@ -1,16 +1,16 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { focusOnMount } from "./focusOnMount";
-import {
-  useAppState,
-  useAppDispatch,
-  getDisplayName,
-  type ViewTab,
-  type Bookmark,
-} from "../hooks/usePEFile";
-import { serializeState, validateImport } from "../utils/exportSchema";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSortedFuncs } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import {
+  type Bookmark,
+  getDisplayName,
+  useAppDispatch,
+  useAppState,
+  type ViewTab,
+} from "../hooks/usePEFile";
+import { serializeState, validateImport } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
+import { focusOnMount } from "./focusOnMount";
 
 const TABS: { id: ViewTab; label: string }[] = [
   { id: "disassembly", label: "Disassembly" },

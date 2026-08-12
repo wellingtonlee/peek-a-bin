@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { DANGEROUS_APIS, NOTABLE_APIS, matchesApi } from "../apiLists";
+import { describe, expect, it } from "vitest";
+import { DANGEROUS_APIS, matchesApi, NOTABLE_APIS } from "../apiLists";
 
 describe("API lists", () => {
   // The defect that motivated extracting these: the scanner's list and the

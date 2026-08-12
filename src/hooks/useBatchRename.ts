@@ -1,15 +1,15 @@
-import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
-import type { AppAction, AppState } from "./usePEFile";
-import type { BatchRenameResult } from "../llm/types";
+import { useCallback, useRef } from "react";
 import type { DisasmFunction } from "../disasm/types";
 import { streamChat } from "../llm/client";
+import { decompileForLLM } from "../llm/decompileForLLM";
+import { SYSTEM_PROMPT_BATCH_RENAME } from "../llm/prompt";
 import { parseBatchRenameResponse, toBatchRenameResult } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
-import { SYSTEM_PROMPT_BATCH_RENAME } from "../llm/prompt";
-import { decompileForLLM } from "../llm/decompileForLLM";
-import { getDisplayName } from "./usePEFile";
+import type { BatchRenameResult } from "../llm/types";
 import { findCodeSection } from "../pe/sections";
+import type { AppAction, AppState } from "./usePEFile";
+import { getDisplayName } from "./usePEFile";
 
 const BATCH_SIZE = 6;
 const MAX_LINES_PER_FUNC = 100;

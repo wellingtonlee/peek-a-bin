@@ -16,22 +16,23 @@
 // DisassemblyView and is passed in: those useState calls sit hundreds of lines
 // above this point, so moving them here would shift them to a different
 // position in the hook sequence. Same reasoning as useInsnContextMenu.
+
+import type { Virtualizer } from "@tanstack/react-virtual";
+import type { RefObject } from "react";
 import {
-  useCallback,
-  useRef,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useRef,
 } from "react";
-import type { RefObject } from "react";
-import type { Virtualizer } from "@tanstack/react-virtual";
-import { getDisplayName, type AppAction, type AppState } from "./usePEFile";
-import { rowAddress, type DisplayRow } from "./useDisassemblyRows";
+import { parseBranchTarget } from "../components/shared";
+import type { BasicBlock } from "../disasm/cfg";
+import type { DisasmFunction, Instruction } from "../disasm/types";
+import type { PEFile } from "../pe/types";
+import { type DisplayRow, rowAddress } from "./useDisassemblyRows";
 import type { UseDisassemblySearchResult } from "./useDisassemblySearch";
 import type { ContextMenuState } from "./useInsnContextMenu";
-import type { Instruction, DisasmFunction } from "../disasm/types";
-import type { BasicBlock } from "../disasm/cfg";
-import type { PEFile } from "../pe/types";
-import { parseBranchTarget } from "../components/shared";
+import { type AppAction, type AppState, getDisplayName } from "./usePEFile";
 
 export interface UseDisassemblyKeyboardArgs {
   search: UseDisassemblySearchResult;

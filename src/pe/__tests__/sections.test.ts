@@ -1,8 +1,4 @@
-import { describe, it, expect } from "vitest";
-import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
-import { parsePE } from "../parser";
-import type { SectionHeader } from "../types";
-import { findCodeSection, isCodeSection, isDataSection, dataSectionRanges } from "../sections";
+import { describe, expect, it } from "vitest";
 import {
   IMAGE_SCN_CNT_CODE,
   IMAGE_SCN_CNT_INITIALIZED_DATA,
@@ -10,6 +6,10 @@ import {
   IMAGE_SCN_MEM_READ,
   IMAGE_SCN_MEM_WRITE,
 } from "../constants";
+import { parsePE } from "../parser";
+import { dataSectionRanges, findCodeSection, isCodeSection, isDataSection } from "../sections";
+import type { SectionHeader } from "../types";
+import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
 const CODE_FLAGS = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
 const DATA_FLAGS = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;

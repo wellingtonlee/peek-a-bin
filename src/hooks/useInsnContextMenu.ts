@@ -10,17 +10,17 @@
 // and is passed in: moving those useState calls would shift them to a different
 // position in the hook sequence.
 import {
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
   useCallback,
   useMemo,
-  type Dispatch,
-  type RefObject,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
-import { getDisplayName, type AppAction } from "./usePEFile";
-import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
-import type { PEFile } from "../pe/types";
-import { rvaToFileOffset } from "../pe/parser";
 import { parseBranchTarget } from "../components/shared";
+import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
+import { rvaToFileOffset } from "../pe/parser";
+import type { PEFile } from "../pe/types";
+import { type AppAction, getDisplayName } from "./usePEFile";
 
 export interface ContextMenuState {
   x: number;

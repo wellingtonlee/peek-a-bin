@@ -1,14 +1,13 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { focusOnMount } from "./focusOnMount";
-
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
-import { generateMarkdownReport } from "../utils/exportSchema";
-import { useContainingFunc } from "../hooks/useDerivedState";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DisasmFunction } from "../disasm/types";
-import { SkeletonRows } from "./Skeleton";
-import { useGraphOverview } from "../hooks/useGraphOverview";
+import { useContainingFunc } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { useGraphOverview } from "../hooks/useGraphOverview";
+import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { generateMarkdownReport } from "../utils/exportSchema";
+import { focusOnMount } from "./focusOnMount";
+import { SkeletonRows } from "./Skeleton";
 
 type SortMode = "address" | "alpha";
 

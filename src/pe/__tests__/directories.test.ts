@@ -6,14 +6,14 @@
  * `parseBaseRelocations` only ever ran their "nothing here" early return.
  */
 
-import { describe, it, expect } from "vitest";
-import { parsePE } from "../parser";
-import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
+import { describe, expect, it } from "vitest";
 import {
   IMAGE_REL_BASED_ABSOLUTE,
-  IMAGE_REL_BASED_HIGHLOW,
   IMAGE_REL_BASED_DIR64,
+  IMAGE_REL_BASED_HIGHLOW,
 } from "../constants";
+import { parsePE } from "../parser";
+import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
 
 const PE32_BASE = 0x00400000;
 const PE64_BASE = 0x140000000;

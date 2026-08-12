@@ -1,5 +1,5 @@
-import type { SectionHeader, ResourceTree, ResourceNode } from "./types";
 import { rvaToFileOffset } from "./parser";
+import type { ResourceNode, ResourceTree, SectionHeader } from "./types";
 
 const MAX_DEPTH = 4;
 

@@ -7,7 +7,7 @@
  * they run against the real tool handlers.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseAddr } from "../paths";
 
 describe("parseAddr — accepted forms", () => {

@@ -1,13 +1,13 @@
-import { useCallback, useRef } from "react";
 import type { Dispatch } from "react";
-import type { AppAction, AppState } from "./usePEFile";
+import { useCallback, useRef } from "react";
 import type { DisasmFunction } from "../disasm/types";
+import { DANGEROUS_APIS, matchesApi } from "../llm/apiLists";
 import { streamChat } from "../llm/client";
+import { decompileForLLM } from "../llm/decompileForLLM";
+import { SYSTEM_PROMPT_VULN_SCAN } from "../llm/prompt";
 import { parseScanResponse, toScanFinding } from "../llm/responseSchema";
 import { hasApiKey, loadSettings } from "../llm/settings";
-import { SYSTEM_PROMPT_VULN_SCAN } from "../llm/prompt";
-import { DANGEROUS_APIS, matchesApi } from "../llm/apiLists";
-import { decompileForLLM } from "../llm/decompileForLLM";
+import type { AppAction, AppState } from "./usePEFile";
 import { getDisplayName } from "./usePEFile";
 
 export function useVulnScanner(state: AppState, dispatch: Dispatch<AppAction>) {

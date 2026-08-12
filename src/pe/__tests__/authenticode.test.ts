@@ -8,7 +8,7 @@
  * back as "signed, details unknown".
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseSecurityDirectory } from "../authenticode";
 import type { DataDirectory } from "../types";
 

@@ -12,10 +12,10 @@
  * flaky-in-CI. So it is asserted here, statically, against the source text.
  */
 
-import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 
 const MCP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC_DIR = resolve(MCP_DIR, "..");

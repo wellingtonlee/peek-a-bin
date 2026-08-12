@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useRef } from "react";
 import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { ModalBackdrop } from "./ModalBackdrop";
 import {
   FOCUS_CONTAINER,
   focusableWithin,
   lockBodyScroll,
+  type ModalPlacement,
   modalDialogClass,
   modalNameAttrs,
   modalWrapperClass,
   nextTrapIndex,
-  unlockBodyScroll,
-  UNLOCKED,
-  type ModalPlacement,
   type ScrollLockState,
+  UNLOCKED,
+  unlockBodyScroll,
 } from "./modalScaffold";
 
 /**

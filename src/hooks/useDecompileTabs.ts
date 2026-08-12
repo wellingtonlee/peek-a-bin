@@ -1,22 +1,22 @@
-import { useReducer, useRef, useCallback, useEffect } from "react";
-import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
-import {
-  tabsReducer,
-  initialTabsState,
-  decompileServerKey,
-  readHighCache,
-  writeHighCache,
-} from "./decompileTabsState";
-import { disasmWorker } from "../workers/disasmClient";
+import { useCallback, useEffect, useReducer, useRef } from "react";
+import { inferSignature } from "../disasm/signatures";
+import { analyzeStackFrame } from "../disasm/stack";
+import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { GhidraClient } from "../ghidra/client";
-import { hasApiKey, loadSettings, loadDecompileServer } from "../llm/settings";
 import { streamEnhance } from "../llm/client";
 import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
-import { analyzeStackFrame } from "../disasm/stack";
-import { inferSignature } from "../disasm/signatures";
-import { getDisplayName } from "./usePEFile";
-import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
+import { hasApiKey, loadDecompileServer, loadSettings } from "../llm/settings";
 import type { PEFile } from "../pe/types";
+import { disasmWorker } from "../workers/disasmClient";
+import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
+import {
+  decompileServerKey,
+  initialTabsState,
+  readHighCache,
+  tabsReducer,
+  writeHighCache,
+} from "./decompileTabsState";
+import { getDisplayName } from "./usePEFile";
 
 /** Body of the High Level tab when no decompile server is configured. */
 const HIGH_LEVEL_UNAVAILABLE =

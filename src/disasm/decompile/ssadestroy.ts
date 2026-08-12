@@ -1,7 +1,7 @@
+import type { IRExpr, IRReg, IRStmt } from "./ir";
+import { canonReg, isKnownRegister, regAtSize, regSize, walkStmts } from "./ir";
 import type { SSAContext } from "./ssa";
 import { clobberedByCall, clobberedName, versionKey as ssaVersionKey } from "./ssa";
-import type { IRStmt, IRExpr, IRReg } from "./ir";
-import { canonReg, isKnownRegister, regAtSize, regSize, walkStmts } from "./ir";
 
 /**
  * Destroy SSA form: convert phi nodes to copy assignments at predecessors,
@@ -363,8 +363,7 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): voi
     // could see across blocks — a copy at the top of the *reading* block, and
     // only where an earlier statement in that same block is what overwrote the
     // register. Anything else is left to bind to the register, as it did before.
-    const site =
-      defSite.get(key) ?? (s.inBlockRedef ? { block: s.block, index: -1 } : null);
+    const site = defSite.get(key) ?? (s.inBlockRedef ? { block: s.block, index: -1 } : null);
     if (!site) continue;
     const ok = site.block === s.block ? site.index < s.index : dominates(site.block, s.block);
     if (!ok) continue;

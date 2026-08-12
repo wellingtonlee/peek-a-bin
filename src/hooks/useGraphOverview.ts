@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, useMemo } from "react";
-import type { LayoutBlock, CFGEdge } from "../disasm/cfg";
+import { createContext, useContext, useMemo, useState } from "react";
+import type { CFGEdge, LayoutBlock } from "../disasm/cfg";
 
 export interface GraphOverviewData {
   blocks: LayoutBlock[];
