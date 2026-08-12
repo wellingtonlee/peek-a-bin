@@ -1,5 +1,5 @@
 import type { IRExpr, IRStmt, IRFunction, BinaryOp } from "./ir";
-import { canonReg, isKnownRegister, regSize, walkStmts } from "./ir";
+import { canonReg, isKnownRegister, regSize, walkExpr, walkStmts } from "./ir";
 import { isPlausibleIOCTL, formatIOCTL, ioctlCodeArgIndex } from "../../analysis/driver";
 import type { TypeContext, DecompType } from "./typeInfer";
 import { typeToString } from "./typeInfer";
@@ -308,6 +308,8 @@ let _enumTypesNeeded: Set<string> = new Set();
 let _declaredVarTypes: Map<string, string> = new Map();
 /** Register names the function assigns, lowercased — see `registerText`. */
 let _assignedRegs: Set<string> = new Set();
+/** Call statements whose result register is read — see `collectCapturedCalls`. */
+let _capturedCalls: ReadonlySet<IRStmt> = new Set();
 
 type EnumType = DecompType & { kind: "enum" };
 
@@ -742,45 +744,354 @@ function registerText(expr: IRExpr & { kind: "reg" }, signed: boolean): string {
   return `(${spelling})${alias}`;
 }
 
+// ── Call results ──
+
+/**
+ * A call whose result register is read gets that assignment printed; one whose
+ * result is dead stays a bare statement.
+ *
+ * `liftBlock` gives every `call_stmt` a `resultDest` of RAX/EAX — the machine's
+ * integer return register — and SSA versions it like any other definition, so a
+ * later read of the accumulator binds to the call. The emitter used to print
+ * only the call, which threw that away: `GetProcAddress(rbx, "…")` followed by
+ * `if (rax == 0)` is C in which nothing ever assigns `rax`, so the test reads a
+ * value the emitted function never produced. Measured across t32/t64/w64 it was
+ * the single largest source of reads-of-nothing in the output (peek-a-bin-oro).
+ *
+ * The judgement is which calls warrant one, and the rule is liveness: the
+ * assignment is printed exactly when the result register is live out of the
+ * call — when some path from it reaches a read before anything overwrites it.
+ * A call whose result nothing consumes gets no assignment, because a line
+ * assigning a name that is never read afterwards is noise, and this output is
+ * read by people. Anything weaker than liveness (say, "the register is read
+ * somewhere in the function") prints an assignment for a call whose result the
+ * very next line overwrites.
+ *
+ * This is the other half of the call clobber in `ssa.ts`, not a second story
+ * about the same thing: `clobberedByCall` deliberately leaves the result
+ * register out of the set it destroys ("RAX needs nothing here"), and gives
+ * each *argument* register the call consumed a fresh version that no statement
+ * defines, which `ssadestroy.ts` then names `clobbered_rcx_2` — a variable
+ * nothing assigns, because the value is not recoverable. The two mechanisms
+ * cover disjoint registers by construction. After a call, every register the
+ * decompiler says the call changed is now either assigned (the result, when it
+ * is read) or renamed to a name that visibly has no definition (the arguments).
+ *
+ * The returned set is the calls in `body` that qualify; `liveInStmt` below is
+ * the analysis. `walkStmts` supplies the fallback live set a `goto` uses. It
+ * also visits assignment destinations, so a register the body only ever writes
+ * is in that set — an over-approximation that applies only at a `goto`, where
+ * nothing better is available.
+ */
+function collectCapturedCalls(body: readonly IRStmt[]): Set<IRStmt> {
+  const all = new Set<string>();
+  walkStmts(body as IRStmt[], (e) => {
+    if (e.kind === "reg") all.add(canonReg(e.name));
+  });
+  const ctx: LiveCtx = {
+    brk: new Set<string>(),
+    cont: new Set<string>(),
+    all,
+    captured: new Set<IRStmt>(),
+  };
+  // Nothing is live when the function returns: the accumulator a `ret` leaves
+  // behind is read by the `return` statement the lifter emits for it.
+  liveInList(body, new Set<string>(), ctx);
+  return ctx.captured;
+}
+
+/** Canonical registers an expression reads. */
+function addReadRegs(expr: IRExpr | undefined, out: Set<string>): void {
+  if (!expr) return;
+  walkExpr(expr, (e) => {
+    if (e.kind === "reg") out.add(canonReg(e.name));
+  });
+}
+
+/**
+ * The canonical register a write to `dest` ends the live range of, if any.
+ *
+ * A write to a sub-register leaves the rest of the parent in place — AL is one
+ * byte of RAX — so it does not end the parent's live range. A 32-bit write does
+ * under either reading: EAX is the whole register in x86 code, and writing it
+ * zero-extends into RAX in x64. `isKnownRegister` guards the width test because
+ * `regSize` answers 4 for anything it does not recognise (see `decompile/ir.ts`);
+ * an unrecognised name still kills itself, since a read of it canonicalises the
+ * same way.
+ */
+function killedReg(dest: IRExpr): string | null {
+  if (dest.kind !== "reg") return null;
+  const lower = dest.name.toLowerCase();
+  if (isKnownRegister(lower) && regSize(lower) < 4) return null;
+  return canonReg(lower);
+}
+
+interface LiveCtx {
+  /** Live where a `break` lands, and where a `continue` lands. */
+  brk: ReadonlySet<string>;
+  cont: ReadonlySet<string>;
+  /** Every register named anywhere in the body — the answer at a `goto`. */
+  all: ReadonlySet<string>;
+  /** Calls found to have a live result. Filled in as the walk runs. */
+  captured: Set<IRStmt>;
+}
+
+/**
+ * Rounds a loop's live set is allowed to grow for.
+ *
+ * The sets are canonical register names, so the universe is about twenty
+ * elements and the iteration is monotone — two rounds is the normal cost of
+ * confirming a fixpoint. The cap bounds the cost of deeply nested loops, whose
+ * bodies are re-walked once per round of every enclosing loop. Stopping early
+ * under-approximates, which loses an assignment rather than inventing one.
+ */
+const LIVE_ROUNDS = 4;
+
+function union(a: ReadonlySet<string>, b: ReadonlySet<string>): Set<string> {
+  const out = new Set(a);
+  for (const x of b) out.add(x);
+  return out;
+}
+
+function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+/** Iterate `step` from `seed` until it stops growing, or `LIVE_ROUNDS` times. */
+function liveFixpoint(
+  step: (live: ReadonlySet<string>) => Set<string>,
+  seed: Set<string>,
+): Set<string> {
+  let live = seed;
+  for (let round = 0; round < LIVE_ROUNDS; round++) {
+    const next = step(live);
+    if (sameSet(next, live)) break;
+    live = next;
+  }
+  return live;
+}
+
+/** The registers live before `stmts`, given those live after them. */
+function liveInList(
+  stmts: readonly IRStmt[],
+  liveOut: ReadonlySet<string>,
+  ctx: LiveCtx,
+): Set<string> {
+  let live = new Set(liveOut);
+  for (let i = stmts.length - 1; i >= 0; i--) live = liveInStmt(stmts[i], live, ctx);
+  return live;
+}
+
+/**
+ * Backward liveness over the *structured* body, which is what emission walks.
+ *
+ * Doing it here rather than on the CFG is what makes the answer match the
+ * output: the statement the reader sees after a call is the one this asks about.
+ * The price is `goto`, which the tree does not model — see the case below.
+ */
+function liveInStmt(stmt: IRStmt, liveOut: ReadonlySet<string>, ctx: LiveCtx): Set<string> {
+  switch (stmt.kind) {
+    case "assign": {
+      const live = new Set(liveOut);
+      const kill = killedReg(stmt.dest);
+      if (kill) live.delete(kill);
+      // A destination that is not a register is an address computation, and
+      // every register in it is read.
+      if (stmt.dest.kind !== "reg") addReadRegs(stmt.dest, live);
+      addReadRegs(stmt.src, live);
+      return live;
+    }
+
+    case "store": {
+      const live = new Set(liveOut);
+      addReadRegs(stmt.address, live);
+      addReadRegs(stmt.value, live);
+      return live;
+    }
+
+    case "call_stmt": {
+      const live = new Set(liveOut);
+      if (stmt.resultDest?.kind === "reg") {
+        const canon = canonReg(stmt.resultDest.name);
+        if (live.has(canon)) ctx.captured.add(stmt);
+        live.delete(canon);
+      }
+      // The argument registers a call destroys are not killed here: the reads
+      // that would be affected have already been renamed away from the register
+      // by `ssadestroy.ts`, and a read of a volatile register the call was *not*
+      // given still binds to the definition before it.
+      addReadRegs(stmt.call, live);
+      return live;
+    }
+
+    case "return": {
+      // Nothing after a `return` is reachable, so only what it returns is live.
+      const live = new Set<string>();
+      addReadRegs(stmt.value, live);
+      return live;
+    }
+
+    case "if": {
+      const live = liveInList(stmt.thenBody, liveOut, ctx);
+      const other = stmt.elseBody ? liveInList(stmt.elseBody, liveOut, ctx) : liveOut;
+      for (const r of other) live.add(r);
+      addReadRegs(stmt.condition, live);
+      return live;
+    }
+
+    case "while": {
+      // The header is reached both from before the loop and from the end of the
+      // body, so what is live there is the fixpoint of both.
+      const seed = new Set(liveOut);
+      addReadRegs(stmt.condition, seed);
+      return liveFixpoint(
+        (head) => union(seed, liveInList(stmt.body, head, { ...ctx, brk: liveOut, cont: head })),
+        seed,
+      );
+    }
+
+    case "do_while": {
+      // The body runs before the test, and the back edge returns to the body's
+      // first statement rather than to the condition.
+      const exit = new Set(liveOut);
+      addReadRegs(stmt.condition, exit);
+      return liveFixpoint((entry) => {
+        const test = union(exit, entry);
+        return liveInList(stmt.body, test, { ...ctx, brk: liveOut, cont: test });
+      }, new Set<string>());
+    }
+
+    case "for": {
+      const seed = new Set(liveOut);
+      addReadRegs(stmt.condition, seed);
+      const head = liveFixpoint((h) => {
+        // `continue` runs the update, so it lands where the update begins.
+        const update = liveInStmt(stmt.update, h, ctx);
+        return union(seed, liveInList(stmt.body, update, { ...ctx, brk: liveOut, cont: update }));
+      }, seed);
+      return liveInStmt(stmt.init, head, ctx);
+    }
+
+    case "switch": {
+      const inner = { ...ctx, brk: liveOut };
+      // Emission puts `default:` last, so the final case falls into it, and a
+      // case without a `break` falls into the next one. Walking the cases in
+      // reverse carries that through.
+      const live = stmt.defaultBody
+        ? liveInList(stmt.defaultBody, liveOut, inner)
+        : new Set(liveOut);
+      let fall: Set<string> = new Set(live);
+      for (let i = stmt.cases.length - 1; i >= 0; i--) {
+        fall = liveInList(stmt.cases[i].body, fall, inner);
+        for (const r of fall) live.add(r);
+      }
+      addReadRegs(stmt.expr, live);
+      return live;
+    }
+
+    case "try": {
+      // The handler runs on a fault anywhere in the guarded body, so what it
+      // reads is live throughout — including values the body would have killed.
+      const handler = liveInList(stmt.handler, liveOut, ctx);
+      const live = union(liveInList(stmt.body, union(liveOut, handler), ctx), handler);
+      addReadRegs(stmt.filterExpr, live);
+      return live;
+    }
+
+    case "phi": {
+      // A phi that reaches emission is printed as a comment, so it assigns
+      // nothing and cannot end a live range; its operands still had to come
+      // from somewhere.
+      const live = new Set(liveOut);
+      for (const op of stmt.operands) addReadRegs(op.value, live);
+      return live;
+    }
+
+    case "break":
+      return new Set(ctx.brk);
+
+    case "continue":
+      return new Set(ctx.cont);
+
+    case "goto": {
+      // The label is elsewhere in the tree and this walk has no live set for it,
+      // so the answer is every register the body names. That keeps the result of
+      // a call whose only reader is past a jump, at the cost of keeping some
+      // whose reader is not — the direction that states where a value came from
+      // rather than dropping it.
+      return new Set(ctx.all);
+    }
+
+    case "raw":
+      // An unlifted instruction is emitted as a comment. It reads nothing in the
+      // C, and the emitted function is self-consistent either way: no assignment
+      // appears, and no read of it does either.
+      return new Set(liveOut);
+
+    case "label":
+    case "comment":
+      return new Set(liveOut);
+
+    default: {
+      // Compile error if a new IRStmt kind is added without a liveness rule.
+      const _exhaustive: never = stmt;
+      void _exhaustive;
+      return new Set(liveOut);
+    }
+  }
+}
+
 /**
  * Every register name the function assigns, so `registerText` can tell a read
  * that names storage the body writes from one that does not.
+ *
+ * A call's result register counts only when the call is one whose result is
+ * emitted (`captured`). The two have to agree: this set is what licenses
+ * respelling a read of `al` as `(uint8_t)rax`, and that spelling is a lie about
+ * a function whose only write of RAX is a call result that was never printed.
  *
  * The `never` binding at the bottom is load-bearing: a new `IRStmt` kind that
  * can assign a register would otherwise be missed silently, and the symptom
  * would be a read spelled as an alias of a register that is no longer written.
  */
-function collectAssignedRegs(stmts: readonly IRStmt[], out: Set<string>): void {
+function collectAssignedRegs(
+  stmts: readonly IRStmt[],
+  out: Set<string>,
+  captured: ReadonlySet<IRStmt>,
+): void {
   for (const stmt of stmts) {
     switch (stmt.kind) {
       case "assign":
         if (stmt.dest.kind === "reg") out.add(stmt.dest.name.toLowerCase());
         break;
       case "call_stmt":
-        if (stmt.resultDest?.kind === "reg") out.add(stmt.resultDest.name.toLowerCase());
+        if (stmt.resultDest?.kind === "reg" && captured.has(stmt))
+          out.add(stmt.resultDest.name.toLowerCase());
         break;
       case "phi":
         out.add(stmt.dest.name.toLowerCase());
         break;
       case "if":
-        collectAssignedRegs(stmt.thenBody, out);
-        if (stmt.elseBody) collectAssignedRegs(stmt.elseBody, out);
+        collectAssignedRegs(stmt.thenBody, out, captured);
+        if (stmt.elseBody) collectAssignedRegs(stmt.elseBody, out, captured);
         break;
       case "while":
       case "do_while":
-        collectAssignedRegs(stmt.body, out);
+        collectAssignedRegs(stmt.body, out, captured);
         break;
       case "for":
-        collectAssignedRegs([stmt.init, stmt.update], out);
-        collectAssignedRegs(stmt.body, out);
+        collectAssignedRegs([stmt.init, stmt.update], out, captured);
+        collectAssignedRegs(stmt.body, out, captured);
         break;
       case "switch":
-        for (const c of stmt.cases) collectAssignedRegs(c.body, out);
-        if (stmt.defaultBody) collectAssignedRegs(stmt.defaultBody, out);
+        for (const c of stmt.cases) collectAssignedRegs(c.body, out, captured);
+        if (stmt.defaultBody) collectAssignedRegs(stmt.defaultBody, out, captured);
         break;
       case "try":
-        collectAssignedRegs(stmt.body, out);
-        collectAssignedRegs(stmt.handler, out);
+        collectAssignedRegs(stmt.body, out, captured);
+        collectAssignedRegs(stmt.handler, out, captured);
         break;
       case "store":
       case "return":
@@ -1025,7 +1336,13 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
     case "call_stmt": {
       const call = emitExpr(stmt.call, 0);
-      push(`${pad}${call};`, addr);
+      // The result register, when the body reads it — see `collectCapturedCalls`.
+      // Its own name, not `registerText`'s: the result is RAX or EAX, which that
+      // never respells anyway, and an assignment target is the one position
+      // where a narrowing cast would not be an lvalue.
+      const dest =
+        stmt.resultDest?.kind === "reg" && _capturedCalls.has(stmt) ? stmt.resultDest.name : null;
+      push(`${pad}${dest === null ? "" : `${dest} = `}${call};`, addr);
       break;
     }
 
@@ -1722,6 +2039,7 @@ export function emitFunction(
   const prevEnumTypesNeeded = _enumTypesNeeded;
   const prevDeclaredVarTypes = _declaredVarTypes;
   const prevAssignedRegs = _assignedRegs;
+  const prevCapturedCalls = _capturedCalls;
   _typeCtx = typeCtx;
   _stringMap = stringMap;
   _unrecovered = [];
@@ -1736,8 +2054,12 @@ export function emitFunction(
   // Computed before the body for the same reason the layouts are: a register
   // read has to know, at the point it is emitted, whether the function assigns
   // that name anywhere at all.
+  // Which calls print their result has to be settled before both of the sets
+  // below: it decides what the body says, and `_assignedRegs` has to agree with
+  // what the body says.
+  _capturedCalls = collectCapturedCalls(func.body);
   _assignedRegs = new Set();
-  collectAssignedRegs(func.body, _assignedRegs);
+  collectAssignedRegs(func.body, _assignedRegs, _capturedCalls);
   for (const d of [...func.params, ...func.locals]) {
     _declaredVarTypes.set(d.name, d.type);
     const id = declaredStructPointer(d.type);
@@ -1763,6 +2085,7 @@ export function emitFunction(
     _enumTypesNeeded = prevEnumTypesNeeded;
     _declaredVarTypes = prevDeclaredVarTypes;
     _assignedRegs = prevAssignedRegs;
+    _capturedCalls = prevCapturedCalls;
   }
 }
 

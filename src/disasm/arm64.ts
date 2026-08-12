@@ -18,7 +18,7 @@
  */
 
 import type { DisasmFunction, Instruction } from "./types";
-import { type DetectResult, mapInsn } from "./functionDetect";
+import { type DetectPass, type DetectResult, mapInsn } from "./functionDetect";
 import { createScan, requireCapstone } from "./capstoneWindow";
 
 /** Every A64 instruction is exactly four bytes, always 4-byte aligned. */
@@ -43,6 +43,72 @@ export const ARM64_INSN_SIZE = 4;
  * 4 KiB.
  */
 export const ARM64_DECODE_WINDOW = 0x1000;
+
+/**
+ * How much of a section must decode as A64 before this sweep will call its
+ * output a disassembly.
+ *
+ * Measured with the shipped `capstone.wasm`, sweeping each image's code section
+ * at 4-byte alignment with a `CS_ARCH_ARM64` handle:
+ *
+ * | image                | machine | words | decoded as A64 |
+ * |----------------------|---------|-------|----------------|
+ * | t64-arm.exe          | 0xAA64  | 28160 | 27428 (97.4%)  |
+ * | w64-arm.exe          | 0xAA64  | 24960 | 24393 (97.7%)  |
+ * | t64.exe              | 0x8664  | 15360 |  4209 (27.4%)  |
+ * | w64.exe              | 0x8664  | 13824 |  3858 (27.9%)  |
+ * | gcc-amd64-mingw-exec | 0x8664  |  6784 |  1804 (26.6%)  |
+ * | t32.exe              | 0x014C  | 13824 |  3016 (21.8%)  |
+ *
+ * A64's encoding space is dense enough that a quarter of arbitrary x86 bytes
+ * decode to *something*, which is exactly why the failure this guards against is
+ * silent. The two bands are 3.5x apart and this sits between them: 1.8x above
+ * everything that is not ARM64 and 1.95x below everything that is.
+ */
+export const ARM64_MIN_DECODE_FRACTION = 0.5;
+
+/**
+ * Words below which the decode rate is not evidence about anything.
+ *
+ * A section of a few dozen thunks can miss the fraction by chance, and every
+ * synthetic fixture in the tests is smaller than this.
+ */
+export const ARM64_MIN_MEASURED_WORDS = 256;
+
+/**
+ * The bytes are not A64, whatever the COFF header says.
+ *
+ * Thrown by {@link disassembleArm64} rather than returning the ~27% of words
+ * that happened to decode, because that list is the failure mode this whole
+ * module exists to avoid: plausible-looking instructions that are not what the
+ * file contains (peek-a-bin-2t1).
+ *
+ * The likely cause is **ARM64EC or ARM64X**. Both carry machine 0xAA64, the same
+ * value pure ARM64 does, and both hold x86-64 code — all of it for EC, some of
+ * it for X. Telling the three apart properly needs the CHPE metadata pointer out
+ * of the load-config data directory, which `src/pe/parser.ts` does not read; this
+ * is the evidence available without it, and it is evidence about the bytes
+ * rather than a guess about the header. An ARM64X image is the case this may
+ * *not* catch: half its section is genuine A64, which can land above the floor.
+ */
+export class Arm64DecodeRateError extends Error {
+  constructor(
+    readonly decoded: number,
+    readonly words: number,
+  ) {
+    super(
+      `Only ${((100 * decoded) / words).toFixed(1)}% of this section decoded as ` +
+        `ARM64 instructions (${decoded} of ${words} words); a real ARM64 image ` +
+        `decodes over 97%. The COFF machine type says ARM64, but ARM64EC and ` +
+        `ARM64X images carry that same 0xAA64 and hold x86-64 code, which is what ` +
+        `a rate this low looks like. Disassembling it as ARM64 anyway would ` +
+        `produce a screenful of instructions the file does not contain, so this ` +
+        `stops instead. Distinguishing the three needs the CHPE metadata pointer ` +
+        `from the load-config directory, which is not parsed.`,
+    );
+    this.name = "Arm64DecodeRateError";
+  }
+}
 
 /** What ARM64 disassembly needs from the session — one Capstone handle, opened
  *  `CS_ARCH_ARM64`, plus the annotation maps `mapInsn` reads. */
@@ -151,6 +217,13 @@ export function disassembleArm64(
     offset = next > offset ? next : offset + ARM64_INSN_SIZE;
   }
 
+  // Everything above assumes the section holds A64. Nothing before this point
+  // checks that assumption, and it is checkable: see {@link Arm64DecodeRateError}.
+  const words = len / ARM64_INSN_SIZE;
+  if (words >= ARM64_MIN_MEASURED_WORDS && out.length < words * ARM64_MIN_DECODE_FRACTION) {
+    throw new Arm64DecodeRateError(out.length, words);
+  }
+
   return out;
 }
 
@@ -186,7 +259,12 @@ const BL_TARGET = /^#?(0x[0-9a-fA-F]+)$/;
 // Not every `br` is a switch. The other two shapes in a real image are
 // `adrp`/`add`/`ldar xN, [x8]` — a function pointer loaded from `.data` at run
 // time, which has no static target at all — and sweep artefacts in padding.
-// Both fail the walk and contribute nothing, which is the point.
+// Both contribute nothing, which is the point, and {@link classifyArm64Br} is
+// where the difference between "nothing to find" and "found nothing" is stated.
+//
+// The index is not always bounded by a `cmp`, either: a block loop's remainder
+// is bounded by the `subs`/`add` pair around it, which is the only statement of
+// length `memcmp`'s tail dispatch has. See {@link loopResidueBound}.
 
 /** Entries read from one A64 table. Same ceiling, and same reason, as the x86 reader. */
 const MAX_ARM64_JUMP_TABLE_CASES = 512;
@@ -302,8 +380,74 @@ function parseCmpImmediate(mnemonic: string, opStr: string, reg: string): number
   return m ? Number(m[1]) : null;
 }
 
+/** `add x2, x2, #8` / `subs x2, x2, #8` on one register, or null. */
+function parseSelfImm(
+  mnemonic: string,
+  opStr: string,
+  want: "add" | "subs",
+): { reg: string; imm: number } | null {
+  if (mnemonic.toLowerCase() !== want) return null;
+  const parts = opStr.split(",");
+  if (parts.length !== 3) return null;
+  const dest = a64Reg(parts[0]);
+  const src = a64Reg(parts[1]);
+  if (dest === null || dest !== src) return null;
+  const m = parts[2].trim().match(/^#?(0x[0-9a-fA-F]+|\d+)$/);
+  return m ? { reg: dest, imm: Number(m[1]) } : null;
+}
+
+/**
+ * The bound a *decrement loop* puts on an index, where there is no `cmp`.
+ *
+ * A block-at-a-time loop leaves its remainder in the counter and then dispatches
+ * on it. `memcmp` in the ARM64 CRT is the observed case, at `0x140001db0` in
+ * both t64-arm.exe and w64-arm.exe (peek-a-bin-mxw):
+ *
+ * ```text
+ *   subs x2, x2, #8          ; consume one 8-byte block
+ *   b.gt <loop>              ; still more than a block left
+ *   b.eq <exact>             ; landed exactly on the end
+ *   add  x2, x2, #8          ; x2 is now the 1..7 byte remainder
+ *   adr  x3, #TABLE
+ *   ldrb w8, [x3, x2]
+ * ```
+ *
+ * `findArm64JumpTables` requires a compare because a compare is normally the
+ * only statement of a table's length, and this shape has none — the walk hit the
+ * `add` writing the index and gave up. But the pair *is* a statement of the
+ * range, and a tight one: control only reaches a `subs` with the counter above
+ * zero (that is what the loop's own back-edge tests), so the residue is in
+ * `[1-K, 0]` and the `add` puts the index in `[1, K]`. `K` entries are read.
+ *
+ * That is deliberately the *low* reading of two. Where the exact-zero residue is
+ * branched away — the `b.eq` above, present in both real images — the reachable
+ * indices are `1..K-1` and `K` entries cover every one of them. Where it is not,
+ * index `K` exists and its case is missed: one edge short, never one invented,
+ * which is the direction this file errs in everywhere else. Index 0 is listed
+ * although the residue cannot reach it; it is a real entry of a real table, and
+ * on the observed images it is the same case body the *other* dispatch through
+ * that same table reaches with index 0.
+ *
+ * `at` is where the walk found the `add`. The `subs` must be the next write of
+ * the same register going back, must carry the same immediate, and must be
+ * followed by a conditional branch — the loop test that makes the residue
+ * bounded in the first place.
+ */
+function loopResidueBound(reg: string, recent: Instruction[], at: number): number {
+  const add = parseSelfImm(recent[at].mnemonic, recent[at].opStr, "add");
+  if (!add || add.reg !== reg || add.imm <= 0) return 0;
+  for (let i = at - 1; i >= 0; i--) {
+    if (a64Dest(recent[i].mnemonic, recent[i].opStr) !== reg) continue;
+    const subs = parseSelfImm(recent[i].mnemonic, recent[i].opStr, "subs");
+    if (!subs || subs.imm !== add.imm) return 0;
+    if (!recent[i + 1]?.mnemonic.toLowerCase().startsWith("b.")) return 0;
+    return add.imm;
+  }
+  return 0;
+}
+
 /** The chain a `br` was reached through, or null when any link is missing. */
-interface Arm64Dispatch {
+export interface Arm64Dispatch {
   /** Address of the table's first entry. */
   table: number;
   /** Address case offsets are measured from. */
@@ -361,10 +505,15 @@ function recoverArm64Dispatch(brOpStr: string, recent: Instruction[]): Arm64Disp
   const tableAdr = parseAdr(recent[iTable].mnemonic, recent[iTable].opStr);
   if (!tableAdr) return null;
 
-  // The bounds check is the only statement of how long the table is, so without
-  // one there is no table. It has to be about the index the load used, and it
-  // has to come before the load — anything writing that index in between means
-  // the compare was about a different value.
+  // Something has to state how long the table is, so without a statement there
+  // is no table. It has to be about the index the load used, and it has to come
+  // before the load — anything writing that index in between means the compare
+  // was about a different value.
+  //
+  // Two things can state it. A `cmp` is the usual one. The other is the write
+  // itself: a `subs`/`add` pair around a decrement loop bounds the index just as
+  // tightly, and is the only bound the `memcmp` dispatch has — see
+  // {@link loopResidueBound}. Any *other* write to the index still ends the walk.
   let count = 0;
   for (let i = iLoad - 1; i >= 0; i--) {
     const imm = parseCmpImmediate(recent[i].mnemonic, recent[i].opStr, load.index);
@@ -372,7 +521,10 @@ function recoverArm64Dispatch(brOpStr: string, recent: Instruction[]): Arm64Disp
       count = imm + 1;
       break;
     }
-    if (a64Dest(recent[i].mnemonic, recent[i].opStr) === load.index) return null;
+    if (a64Dest(recent[i].mnemonic, recent[i].opStr) === load.index) {
+      count = loopResidueBound(load.index, recent, i);
+      break;
+    }
   }
   if (count <= 0 || count > MAX_ARM64_JUMP_TABLE_CASES) return null;
 
@@ -385,6 +537,121 @@ function recoverArm64Dispatch(brOpStr: string, recent: Instruction[]): Arm64Disp
     sign: add.sign,
     count,
   };
+}
+
+/** `ldar x9, [x8]` / `ldr x8, [x8, #0x2c0]` → the register held and the byte offset. */
+function parsePointerLoad(
+  mnemonic: string,
+  opStr: string,
+): { dest: string; addr: string; offset: number } | null {
+  const mn = mnemonic.toLowerCase();
+  // The acquire loads are what a guarded-import or delay-load thunk uses; the
+  // plain ones are here because the same shape appears without the barrier.
+  if (mn !== "ldar" && mn !== "ldapr" && mn !== "ldr" && mn !== "ldur") return null;
+  const m = opStr.match(/^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*(?:,\s*#?(-?(?:0x[0-9a-fA-F]+|\d+))\s*)?\]\s*$/i);
+  if (!m) return null;
+  const dest = a64Reg(m[1]);
+  const addr = a64Reg(m[2]);
+  if (!dest || !addr) return null;
+  return { dest, addr, offset: m[3] === undefined ? 0 : Number(m[3]) };
+}
+
+/** `adrp x8, #0x14001d000` → `{ reg: "8", target: 0x14001d000 }`. Same shape as `adr`. */
+function parseAdrp(mnemonic: string, opStr: string): { reg: string; target: number } | null {
+  if (mnemonic.toLowerCase() !== "adrp") return null;
+  const parts = opStr.split(",");
+  const reg = a64Reg(parts[0]);
+  const m = parts[1]?.trim().match(/^#?(0x[0-9a-fA-F]+|\d+)$/);
+  if (!reg || !m) return null;
+  return { reg, target: Number(m[1]) };
+}
+
+/** `add x9, x11, #0x148` — the page-offset half of an `adrp`/`add` address. */
+function parseAddImm(
+  mnemonic: string,
+  opStr: string,
+): { dest: string; base: string; imm: number } | null {
+  if (mnemonic.toLowerCase() !== "add") return null;
+  const parts = opStr.split(",");
+  if (parts.length !== 3) return null;
+  const dest = a64Reg(parts[0]);
+  const base = a64Reg(parts[1]);
+  const m = parts[2].trim().match(/^#?(0x[0-9a-fA-F]+|\d+)$/);
+  if (!dest || !base || !m) return null;
+  return { dest, base, imm: Number(m[1]) };
+}
+
+/**
+ * What a `br` dispatches through.
+ *
+ * `br` is not one construct, and the three shapes that reach one in a real image
+ * mean three different things by "no table". Collapsing them into a null made
+ * the commonest of them — a run-time function pointer, which has no static
+ * target *at all* — indistinguishable from a chain this reader simply cannot
+ * follow. peek-a-bin-mxw: 11 of t64-arm.exe's 13 remaining dead-end `br` blocks
+ * and 11 of w64-arm.exe's are that shape, and for every one of them **no edge is
+ * the correct answer**, not a missing one.
+ */
+export type Arm64BrKind =
+  /** A switch: `adr` / scaled load / `add` / `br`, with a bounded table. */
+  | { kind: "table"; dispatch: Arm64Dispatch }
+  /**
+   * The branch register was loaded from memory — `adrp`/`add` to a `.data`
+   * slot, then `ldar`, then `br`. A guarded-import or delay-load thunk: nothing
+   * in the file says where it goes, because the loader writes that slot at run
+   * time. Recovering it would mean modelling the delay-load descriptor or the
+   * guarded-CF table, not reading further back through registers.
+   *
+   * `slot` is the address read, when the `adrp`/`add` pair resolves.
+   */
+  | { kind: "runtime-pointer"; slot: number | null }
+  /**
+   * Neither. Includes `br` on a register produced by something unmodelled, and
+   * the linear sweep's own artefacts — a `br` decoded out of alignment padding
+   * (e.g. `br x1` at 0x1400040e0 in t64-arm.exe, right after a `nop` and two
+   * words that do not decode) has no chain because the words in front of it are
+   * not instructions.
+   */
+  | { kind: "unrecognised" };
+
+/**
+ * Classify the `br` at the end of `recent`.
+ *
+ * Exported for the tests, alongside {@link findArm64JumpTables} and for the same
+ * reason: the distinction between "no static target exists" and "this reader
+ * could not follow the chain" is the whole point of the type, and asserting it
+ * through a whole synthetic image would restate the walk rather than test it.
+ */
+export function classifyArm64Br(brOpStr: string, recent: Instruction[]): Arm64BrKind {
+  const brReg = a64Reg(brOpStr);
+  if (brReg === null || brReg === "zr") return { kind: "unrecognised" };
+
+  const dispatch = recoverArm64Dispatch(brOpStr, recent);
+  if (dispatch) return { kind: "table", dispatch };
+
+  /** Nearest index below `from` whose instruction writes `reg`, or -1. */
+  const lastWrite = (reg: string, from: number): number => {
+    for (let i = from; i >= 0; i--) {
+      if (a64Dest(recent[i].mnemonic, recent[i].opStr) === reg) return i;
+    }
+    return -1;
+  };
+
+  const iLoad = lastWrite(brReg, recent.length - 1);
+  if (iLoad < 0) return { kind: "unrecognised" };
+  const load = parsePointerLoad(recent[iLoad].mnemonic, recent[iLoad].opStr);
+  if (!load) return { kind: "unrecognised" };
+
+  // The value is from memory, which already settles it: there is no static
+  // target. Resolving the slot is a courtesy, and failing to resolve it does not
+  // change the answer.
+  const iAdd = lastWrite(load.addr, iLoad - 1);
+  const add = iAdd < 0 ? null : parseAddImm(recent[iAdd].mnemonic, recent[iAdd].opStr);
+  if (!add) return { kind: "runtime-pointer", slot: null };
+  const iPage = lastWrite(add.base, iAdd - 1);
+  const page = iPage < 0 ? null : parseAdrp(recent[iPage].mnemonic, recent[iPage].opStr);
+  if (!page) return { kind: "runtime-pointer", slot: null };
+  return { kind: "runtime-pointer", slot: page.target + add.imm + load.offset };
 }
 
 /**
@@ -437,13 +704,17 @@ export function findArm64JumpTables(
     // Only the plain `br`. The pointer-authenticated forms (`braa`, `brab`, …)
     // reach a signed pointer, never a table computed like this.
     if (insn.mnemonic.toLowerCase() === "br") {
-      const chain = recoverArm64Dispatch(insn.opStr, recent);
-      if (chain) {
-        const targets = readArm64Table(chain, bytes, baseAddress);
+      const br = classifyArm64Br(insn.opStr, recent);
+      if (br.kind === "table") {
+        const targets = readArm64Table(br.dispatch, bytes, baseAddress);
         // One target is a jump, not a switch: it says nothing the CFG could not
         // already see, and two is the least a table can distinguish.
         if (targets.length >= 2) tables.set(insn.address, targets);
       }
+      // The other two kinds contribute nothing, and that is the answer rather
+      // than a shortfall: a `runtime-pointer` has no static target for any
+      // reader to find, and an `unrecognised` one is usually the sweep having
+      // decoded padding. See {@link Arm64BrKind}.
     }
     recent.push(insn);
     if (recent.length > ARM64_MAX_RECENT) recent.shift();
@@ -528,18 +799,37 @@ export function detectArm64Functions(
   // The same sweep feeds the switch-dispatch reader, so the section is decoded
   // once for both.
   let jumpTables = new Map<number, number[]>();
+  // Kept, unlike `disassembleArm64` above, because the evidence already in
+  // `addrSet` is the file's own and does not come from the decoder. What it
+  // costs is stated rather than left for the caller to guess (peek-a-bin-4s9):
+  // no `bl` targets, so every leaf function `.pdata` is allowed to omit is
+  // missing, and no dispatch tables. Thunk naming and tail-call detection are
+  // not listed — the ARM64 detector has no such pass to lose.
+  const omitted: DetectPass[] = ctx.cs ? [] : ["call-targets", "jump-tables"];
   if (ctx.cs) {
-    const insidePdata = rangeTest(options?.pdataFunctions);
-    const insns = disassembleArm64(bytes, baseAddress, ctx);
-    for (const insn of insns) {
-      if (insn.mnemonic !== "bl") continue;
-      const m = insn.opStr.match(BL_TARGET);
-      if (!m) continue;
-      const target = Number(m[1]);
-      if (!inSection(target) || insidePdata(target)) continue;
-      addrSet.add(target);
+    try {
+      const insidePdata = rangeTest(options?.pdataFunctions);
+      const insns = disassembleArm64(bytes, baseAddress, ctx);
+      for (const insn of insns) {
+        if (insn.mnemonic !== "bl") continue;
+        const m = insn.opStr.match(BL_TARGET);
+        if (!m) continue;
+        const target = Number(m[1]);
+        if (!inSection(target) || insidePdata(target)) continue;
+        addrSet.add(target);
+      }
+      jumpTables = findArm64JumpTables(insns, bytes, baseAddress);
+    } catch (err) {
+      // The section is not A64 (peek-a-bin-2t1). The *disassembly* declines
+      // loudly, because instructions are all it has; detection does not have to
+      // go with it. `.pdata`, the exports, the entry point and the unwind
+      // handlers are the linker's own record and are still true of an ARM64EC
+      // image — its ARM64 half is real. So the same degradation 4s9 defined for
+      // a missing decoder applies here: answer with what the file states, and
+      // say which passes did not run.
+      if (!(err instanceof Arm64DecodeRateError)) throw err;
+      omitted.push("call-targets", "jump-tables");
     }
-    jumpTables = findArm64JumpTables(insns, bytes, baseAddress);
   }
 
   const sortedAddrs = Array.from(addrSet).sort((a, b) => a - b);
@@ -560,5 +850,5 @@ export function detectArm64Functions(
     }
   }
 
-  return { functions, jumpTables: Array.from(jumpTables.entries()) };
+  return { functions, jumpTables: Array.from(jumpTables.entries()), omitted };
 }

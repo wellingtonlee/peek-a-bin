@@ -38,7 +38,7 @@
         "useSimpleNumberKeys": "off"
       },
       "correctness": {
-        "useExhaustiveDependencies": "warn",
+        "useExhaustiveDependencies": "error",
         "useHookAtTopLevel": "error",
         "noUnusedFunctionParameters": "warn"
       },

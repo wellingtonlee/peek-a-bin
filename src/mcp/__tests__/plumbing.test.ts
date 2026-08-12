@@ -123,7 +123,12 @@ describe("buildXrefs has a caller — the whole-image maps reach the session (pe
       "src/mcp/session.ts must import buildXrefs for value; without a caller the whole-image " +
         "string, import and data xrefs and the call graph are computed nowhere on this side.",
     ).toBe(true);
-    expect(/const allXrefs = buildXrefs\(/.test(session)).toBe(true);
+    // Written as `!decodable ? <four empty maps> : buildXrefs(…)` since
+    // peek-a-bin-x7b: `buildXrefs` throws for an image whose architecture has
+    // no decoder, and an unguarded call would fail the entire load rather than
+    // just the xrefs. What this guards is unchanged — the call is reached from
+    // `loadFile` and its result is what `allXrefs` binds.
+    expect(/const allXrefs = [^;]*\bbuildXrefs\(/.test(session)).toBe(true);
   });
 
   it("hands it the string addresses, the IAT addresses, the functions and the data sections", () => {

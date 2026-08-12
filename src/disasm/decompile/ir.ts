@@ -434,6 +434,35 @@ export function isKnownRegister(name: string): boolean {
   return REG_SIZES[name.toLowerCase()] !== undefined;
 }
 
+/** canonical name → width in bytes → the alias of that register at that width. */
+const REG_ALIASES: Map<string, Map<number, string>> = (() => {
+  const m = new Map<string, Map<number, string>>();
+  for (const [name, size] of Object.entries(REG_SIZES)) {
+    // `ah` is the same width as `al` and names the *other* half of AX, so it is
+    // never the answer for "AX's 1-byte alias".
+    if (/^[abcd]h$/.test(name)) continue;
+    const canon = canonReg(name);
+    const byWidth = m.get(canon) ?? new Map<number, string>();
+    if (!byWidth.has(size)) byWidth.set(size, name);
+    m.set(canon, byWidth);
+  }
+  return m;
+})();
+
+/**
+ * The alias of a register at a given width — the inverse of `canonReg`, which
+ * throws the width away: `regAtSize("rsi", 4)` is `esi`, `regAtSize("r8", 1)` is
+ * `r8b`.
+ *
+ * Anything with no alias at that width is returned as it was given. That covers
+ * both a register with no such alias (`xmm0` at 4) and a name that is not a
+ * register at all, so the result is always *some* name and never a wrong one.
+ */
+export function regAtSize(canon: string, size: number): string {
+  const lower = canon.toLowerCase();
+  return REG_ALIASES.get(canonReg(lower))?.get(size) ?? canon;
+}
+
 // ── Expression / Statement Walkers ──
 
 /** Recursively visit all sub-expressions in an expression tree. */

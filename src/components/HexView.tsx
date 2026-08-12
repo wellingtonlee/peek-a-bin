@@ -3,7 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { useEntropyStrip } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
-import { entropyBlocksForWidth } from "../utils/entropy";
+import {
+  ENTROPY_STRIP_HEIGHT_PX,
+  entropyBlockAtX,
+  entropyBlocksForWidth,
+  entropyStripGeometry,
+} from "../utils/entropy";
 import { DataInspector } from "./DataInspector";
 import { focusOnMount } from "./focusOnMount";
 
@@ -233,21 +238,35 @@ export function HexView() {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // CSS lays the canvas out (`w-full`, a fixed height), so width/height here
+    // size only the backing store: one texel per *device* pixel rather than per
+    // CSS pixel, which is what stops the strip being upscaled and soft on a
+    // HiDPI display. The context is scaled by the same factor, so every
+    // coordinate below is still a CSS pixel — the unit the pointer handlers
+    // use. `Math.max(2, …)` used to sit on blockWidth, and with more blocks
+    // than half the canvas width it walked straight off the right-hand edge: at
+    // 4096 blocks on a 1000 px strip every block past the 500th was drawn
+    // outside the canvas and simply not shown, while the click and hover
+    // handlers mapped x to a block using the unclamped width — so the bar under
+    // the cursor was not the bar being reported. Draw and hit test now share
+    // one mapping (`entropyStripGeometry` / `entropyBlockAtX`); keep it that
+    // way.
     const w = canvas.clientWidth;
-    canvas.width = w;
-    canvas.height = 12;
-    ctx.clearRect(0, 0, w, 12);
-    // `Math.max(2, …)` used to be here, and with more blocks than half the
-    // canvas width it walked straight off the right-hand edge: at 4096 blocks
-    // on a 1000 px strip every block past the 500th was drawn outside the
-    // canvas and simply not shown, while the click and hover handlers below
-    // mapped x to a block using the unclamped width — so the bar under the
-    // cursor was not the bar being reported. The block count now follows the
-    // width, which makes the exact quotient right for both.
-    const blockWidth = w / entropyBlocks.length;
+    const geom = entropyStripGeometry(
+      w,
+      ENTROPY_STRIP_HEIGHT_PX,
+      entropyBlocks.length,
+      window.devicePixelRatio,
+    );
+    canvas.width = geom.deviceWidth;
+    canvas.height = geom.deviceHeight;
+    // Assigning width/height resets the context, transform included, so this
+    // has to come after and cannot accumulate across redraws.
+    ctx.setTransform(geom.scale, 0, 0, geom.scale, 0, 0);
+    ctx.clearRect(0, 0, w, ENTROPY_STRIP_HEIGHT_PX);
     for (let i = 0; i < entropyBlocks.length; i++) {
       ctx.fillStyle = entropyColor(entropyBlocks[i]);
-      ctx.fillRect(i * blockWidth, 0, Math.ceil(blockWidth), 12);
+      ctx.fillRect(i * geom.blockWidth, 0, Math.ceil(geom.blockWidth), ENTROPY_STRIP_HEIGHT_PX);
     }
   }, [showEntropy, entropyBlocks]);
 
@@ -273,9 +292,8 @@ export function HexView() {
       if (!canvasRef.current || entropyBlocks.length === 0 || !sectionBytes) return;
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const blockWidth = rect.width / entropyBlocks.length;
-      const blockIdx = Math.floor(x / blockWidth);
-      if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
+      const blockIdx = entropyBlockAtX(x, rect.width, entropyBlocks.length);
+      if (blockIdx >= 0) {
         const offset = blockIdx * entropyBlockSize;
         const rowIdx = Math.floor(offset / BYTES_PER_ROW);
         virtualizer.scrollToIndex(rowIdx, { align: "center" });
@@ -293,9 +311,8 @@ export function HexView() {
       }
       const rect = canvasRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const blockWidth = rect.width / entropyBlocks.length;
-      const blockIdx = Math.floor(x / blockWidth);
-      if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
+      const blockIdx = entropyBlockAtX(x, rect.width, entropyBlocks.length);
+      if (blockIdx >= 0) {
         const offset = blockIdx * entropyBlockSize;
         const endOffset = Math.min(offset + entropyBlockSize, sectionBytes.length);
         setEntropyTooltip({
@@ -624,10 +641,15 @@ export function HexView() {
           )}
           {entropyBlocks.length > 0 && (
             <>
+              {/*
+                The height comes from the constant the draw sizes the backing
+                store with: a literal here would let the two drift, and the bars
+                would be stretched or squashed rather than merely blurry.
+              */}
               <canvas
                 ref={canvasRef}
                 className="w-full cursor-pointer"
-                style={{ height: "12px" }}
+                style={{ height: `${ENTROPY_STRIP_HEIGHT_PX}px` }}
                 onClick={handleEntropyClick}
                 onMouseMove={handleEntropyMouse}
                 onMouseLeave={() => setEntropyTooltip(null)}

@@ -14,7 +14,11 @@ import { describe, expect, it } from "vitest";
 import {
   ARM64_DECODE_WINDOW,
   ARM64_INSN_SIZE,
+  ARM64_MIN_DECODE_FRACTION,
+  ARM64_MIN_MEASURED_WORDS,
   type Arm64Context,
+  Arm64DecodeRateError,
+  classifyArm64Br,
   detectArm64Functions,
   disassembleArm64,
   findArm64JumpTables,
@@ -27,6 +31,7 @@ import {
   IMAGE_FILE_MACHINE_I386,
   archForMachine,
   isKnownMachine,
+  unsupportedArchMessage,
   unsupportedOnArch,
 } from "../arch";
 import { CS_ARCH_ARM64, CapstoneUnavailableError } from "../capstoneWindow";
@@ -149,7 +154,13 @@ describe("disassembleArm64", () => {
     // and returning 11548 of 27428 instructions.
     const cs = fakeCs(code(1, 400));
 
-    disassembleArm64(new Uint8Array(0x2000), BASE, ctx(cs));
+    // 0x2000 bytes with one decodable word in them is also, correctly, a
+    // section that is not A64 — see Arm64DecodeRateError. That refusal comes
+    // after the sweep, so it says nothing about how the sweep was conducted,
+    // which is what this case is about.
+    expect(() => disassembleArm64(new Uint8Array(0x2000), BASE, ctx(cs))).toThrow(
+      Arm64DecodeRateError,
+    );
 
     const probes = cs.calls.filter((c) => c.address > BASE && c.address < BASE + 400);
     expect(probes.length).toBeGreaterThan(0);
@@ -220,6 +231,69 @@ describe("disassembleArm64", () => {
     const insns = disassembleArm64(new Uint8Array(16), BASE, ctx(stuck));
 
     expect(insns).toHaveLength(4);
+  });
+
+  /**
+   * peek-a-bin-2t1. ARM64EC and ARM64X images carry machine 0xAA64, the same
+   * value pure ARM64 does, and hold x86-64 code. Nothing here can read the CHPE
+   * pointer that tells them apart — it lives in the load-config directory the
+   * PE parser does not parse — but the decode rate is evidence about the bytes
+   * themselves, and it separates cleanly: 97.4% / 97.7% on t64-arm.exe and
+   * w64-arm.exe against 21.8%-27.9% for the x86 and x64 binaries swept as A64.
+   */
+  describe("a section that does not decode as A64 is refused, not reported", () => {
+    const WORDS = ARM64_MIN_MEASURED_WORDS * 2;
+    const BYTES = WORDS * ARM64_INSN_SIZE;
+
+    /** A section where `n` of its `WORDS` words decode. */
+    const partial = (n: number) => {
+      const words = new Map<number, { mnemonic: string; opStr: string }>();
+      // Spread them out, so this is a low rate rather than a short section.
+      for (let i = 0; i < n; i++) {
+        words.set(BASE + i * 2 * ARM64_INSN_SIZE, { mnemonic: "mov", opStr: "x0, x1" });
+      }
+      return words;
+    };
+
+    it("throws below the floor rather than returning the words that decoded", () => {
+      const decoded = Math.floor(WORDS * ARM64_MIN_DECODE_FRACTION) - 1;
+      expect(() =>
+        disassembleArm64(new Uint8Array(BYTES), BASE, ctx(fakeCs(partial(decoded)))),
+      ).toThrow(Arm64DecodeRateError);
+    });
+
+    it("names the rate it measured, so the claim can be checked", () => {
+      const decoded = 10;
+      try {
+        disassembleArm64(new Uint8Array(BYTES), BASE, ctx(fakeCs(partial(decoded))));
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(Arm64DecodeRateError);
+        expect((err as Arm64DecodeRateError).decoded).toBe(decoded);
+        expect((err as Arm64DecodeRateError).words).toBe(WORDS);
+        expect((err as Error).message).toContain("ARM64EC");
+      }
+    });
+
+    it("accepts a section at the floor", () => {
+      const decoded = Math.ceil(WORDS * ARM64_MIN_DECODE_FRACTION);
+      const insns = disassembleArm64(new Uint8Array(BYTES), BASE, ctx(fakeCs(partial(decoded))));
+      expect(insns).toHaveLength(decoded);
+    });
+
+    it("does not judge a section too small to be evidence", () => {
+      // A handful of thunks can miss the fraction by chance. Every other
+      // fixture in this file is under the minimum for exactly that reason.
+      const small = (ARM64_MIN_MEASURED_WORDS - 4) * ARM64_INSN_SIZE;
+      expect(disassembleArm64(new Uint8Array(small), BASE, ctx(fakeCs(new Map())))).toEqual([]);
+    });
+
+    it("leaves the real ARM64 rate a long way clear of the floor", () => {
+      // 97.4% measured on t64-arm.exe. Raising the floor past that band would
+      // start refusing the images this module was written for.
+      expect(ARM64_MIN_DECODE_FRACTION).toBeLessThan(0.9);
+      expect(ARM64_MIN_DECODE_FRACTION).toBeGreaterThan(0.35);
+    });
   });
 });
 
@@ -353,6 +427,62 @@ describe("detectArm64Functions", () => {
 
     expect(functions).toEqual([]);
   });
+
+  // peek-a-bin-4s9. Answering without a decoder is right — `.pdata` is the
+  // evidence this detector is built on and it is not made of instructions —
+  // but the answer is narrower, and until `omitted` existed nothing said so.
+  describe("without a decoder, the answer is narrower and says so", () => {
+    const words = code(8);
+    words.set(BASE + 4, { mnemonic: "bl", opStr: `#0x${(BASE + 32).toString(16)}` });
+
+    it("still reports the starts .pdata records", () => {
+      const { functions, omitted } = detectArm64Functions(new Uint8Array(64), BASE, ctx(null), {
+        pdataFunctions: [pdata[0]],
+      });
+
+      expect(functions.map((f) => f.address - BASE)).toEqual([0]);
+      expect(omitted).toEqual(["call-targets", "jump-tables"]);
+    });
+
+    it("reports nothing omitted with a decoder, and the bl target proves it", () => {
+      const { functions, omitted } = detectArm64Functions(
+        new Uint8Array(64),
+        BASE,
+        ctx(fakeCs(words)),
+        { pdataFunctions: [pdata[0]] },
+      );
+
+      // The same image the decoder-less run above saw only one function in.
+      expect(functions.map((f) => f.address - BASE)).toEqual([0, 32]);
+      expect(omitted).toEqual([]);
+    });
+
+    it("degrades the same way when the section turns out not to be A64", () => {
+      // peek-a-bin-2t1 meeting peek-a-bin-4s9. `disassembleArm64` refuses an
+      // ARM64EC-shaped section outright, because instructions are its whole
+      // output — but `.pdata` is the linker's own record and is still true of
+      // such an image, so detection reports it and says what it could not do.
+      const wide = ARM64_MIN_MEASURED_WORDS * 2 * ARM64_INSN_SIZE;
+      const { functions, omitted } = detectArm64Functions(
+        new Uint8Array(wide),
+        BASE,
+        ctx(fakeCs(new Map())),
+        { pdataFunctions: [pdata[0]], exports: [{ name: "DllMain", address: BASE }] },
+      );
+
+      expect(functions.map((f) => f.name)).toEqual(["DllMain"]);
+      expect(omitted).toEqual(["call-targets", "jump-tables"]);
+    });
+
+    it("does not claim to have lost passes it never had", () => {
+      // Thunk naming and tail-call detection are x86-only by design. Listing
+      // them would report a design decision as a degradation.
+      const { omitted } = detectArm64Functions(new Uint8Array(64), BASE, ctx(null));
+
+      expect(omitted).not.toContain("thunk-names");
+      expect(omitted).not.toContain("tail-calls");
+    });
+  });
 });
 
 /**
@@ -452,11 +582,83 @@ describe("findArm64JumpTables", () => {
     ]);
   });
 
-  it("refuses a dispatch with no bounds check", () => {
-    // The compare is the only statement of how long the table is. t64-arm.exe
-    // has one of these, where the index is bounded by `subs`/`add` instead.
+  it("refuses a dispatch with nothing bounding its index", () => {
+    // Something has to state how long the table is. With the compare removed
+    // and nothing else writing the index, nothing does.
     const rows = byteEntryChain.filter((r) => r[0] !== "cmp");
     expect(find(rows, imageWith([1, 2, 3, 4]))).toEqual(new Map());
+  });
+
+  // peek-a-bin-mxw. The one real table among the 13 dead-end `br` blocks left
+  // on each ARM64 binary: `memcmp`'s tail dispatch at 0x140001db0, identical in
+  // t64-arm.exe and w64-arm.exe, whose index is the residue of a block loop
+  // rather than a compared value.
+  describe("a decrement loop bounds the index just as a compare does", () => {
+    /** The 0x140001db0 shape, verbatim apart from the table address. */
+    const loopChain = (): [string, string][] => [
+      ["subs", "x2, x2, #8"],
+      ["b.gt", `#0x${(BASE - 0x20).toString(16)}`],
+      ["b.eq", `#0x${(BASE + 0x90).toString(16)}`],
+      ["add", "x2, x2, #8"],
+      ["adr", `x3, #0x${TABLE.toString(16)}`],
+      ["ldrb", "w8, [x3, x2]"],
+      ["sub", "x3, x3, x8, lsl #2"],
+      ["br", "x3"],
+    ];
+    const loopBr = BASE + 7 * ARM64_INSN_SIZE;
+
+    it("reads K entries, where K is the loop's stride", () => {
+      // Entries are subtracted, so each is an offset back from the table.
+      const img = imageWith([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(find(loopChain(), img).get(loopBr)).toEqual([
+        TABLE - 4,
+        TABLE - 8,
+        TABLE - 12,
+        TABLE - 16,
+        TABLE - 20,
+        TABLE - 24,
+        TABLE - 28,
+        TABLE - 32,
+      ]);
+    });
+
+    it("does not read past K, even where the next entry would resolve", () => {
+      // The real table at 0x140001df0 continues for 17 entries — it is shared
+      // with a second dispatch — and every one of them decodes to a plausible
+      // address. An unbounded read there invents edges silently.
+      const img = imageWith([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(find(loopChain(), img).get(loopBr)).toHaveLength(8);
+    });
+
+    it("refuses when the `add` and the `subs` disagree on the stride", () => {
+      const rows = loopChain().map((r) =>
+        r[0] === "add" ? (["add", "x2, x2, #4"] as [string, string]) : r,
+      );
+      expect(find(rows, imageWith([1, 2, 3, 4, 5, 6, 7, 8]))).toEqual(new Map());
+    });
+
+    it("refuses when nothing branches on the `subs`, so the residue is unbounded", () => {
+      // Without the loop test, the value at the `subs` is not known to be
+      // positive and the residue is not known to be small.
+      const rows = loopChain().map((r) =>
+        r[0] === "b.gt" ? (["nop", ""] as [string, string]) : r,
+      );
+      expect(find(rows, imageWith([1, 2, 3, 4, 5, 6, 7, 8]))).toEqual(new Map());
+    });
+
+    it("refuses a plain `sub`, which is not a loop test", () => {
+      const rows = loopChain().map((r) =>
+        r[0] === "subs" ? (["sub", "x2, x2, #8"] as [string, string]) : r,
+      );
+      expect(find(rows, imageWith([1, 2, 3, 4, 5, 6, 7, 8]))).toEqual(new Map());
+    });
+
+    it("refuses an `add` that is not the index plus a constant", () => {
+      const rows = loopChain().map((r) =>
+        r[0] === "add" ? (["add", "x2, x5, #8"] as [string, string]) : r,
+      );
+      expect(find(rows, imageWith([1, 2, 3, 4, 5, 6, 7, 8]))).toEqual(new Map());
+    });
   });
 
   it("refuses a bounds check about a different register", () => {
@@ -560,6 +762,93 @@ describe("findArm64JumpTables", () => {
     expect(tables.has(brAddr)).toBe(true);
     expect(tables.has(BASE + 7 * ARM64_INSN_SIZE)).toBe(false);
   });
+
+  /**
+   * peek-a-bin-mxw. `findArm64JumpTables` reports the same nothing for a `br`
+   * with no static target and a `br` whose chain this reader cannot follow, and
+   * those are not the same claim. This is where the difference is stated.
+   */
+  describe("classifyArm64Br says why a `br` has no table", () => {
+    /** Instructions in address order, ending with the `br`, as the walk sees them. */
+    const recent = (rows: [string, string][]) => stream(rows).slice(0, -1);
+
+    it("calls a bounded dispatch chain a table", () => {
+      const br = classifyArm64Br("x8", recent(byteEntryChain));
+      expect(br.kind).toBe("table");
+      if (br.kind === "table") {
+        expect(br.dispatch.table).toBe(TABLE);
+        expect(br.dispatch.count).toBe(4);
+      }
+    });
+
+    it("calls a value loaded from a .data slot a run-time pointer, and names the slot", () => {
+      // 0x14000ffc8 in t64-arm.exe, verbatim. The loader writes that slot; no
+      // edge is the correct answer here, not a missing one.
+      const rows: [string, string][] = [
+        ["adrp", "x8, #0x14001d000"],
+        ["add", "x8, x8, #0x218"],
+        ["ldar", "x9, [x8]"],
+        ["br", "x9"],
+      ];
+      expect(classifyArm64Br("x9", recent(rows))).toEqual({
+        kind: "runtime-pointer",
+        slot: 0x14001d218,
+      });
+    });
+
+    it("adds the load's own displacement to the slot", () => {
+      const rows: [string, string][] = [
+        ["adrp", "x8, #0x14001d000"],
+        ["add", "x8, x8, #0x200"],
+        ["ldr", "x9, [x8, #0x2c0]"],
+        ["br", "x9"],
+      ];
+      expect(classifyArm64Br("x9", recent(rows))).toEqual({
+        kind: "runtime-pointer",
+        slot: 0x14001d4c0,
+      });
+    });
+
+    it("leaves the slot unresolved when the `adrp` half is missing", () => {
+      const rows: [string, string][] = [
+        ["add", "x8, x8, #0x218"],
+        ["ldar", "x9, [x8]"],
+        ["br", "x9"],
+      ];
+      // Still a run-time pointer, which is the part that matters: the value
+      // came from memory, so no static target exists either way.
+      expect(classifyArm64Br("x9", recent(rows))).toEqual({
+        kind: "runtime-pointer",
+        slot: null,
+      });
+    });
+
+    it("still calls it a run-time pointer when the address cannot be resolved", () => {
+      const rows: [string, string][] = [
+        ["ldar", "x9, [x8]"],
+        ["br", "x9"],
+      ];
+      expect(classifyArm64Br("x9", recent(rows))).toEqual({
+        kind: "runtime-pointer",
+        slot: null,
+      });
+    });
+
+    it("calls a `br` with nothing in front of it unrecognised", () => {
+      // The sweep's own artefact: `br x1` at 0x1400040e0 in t64-arm.exe follows
+      // a `nop` and two words that do not decode, so there is no chain because
+      // the bytes before it are not instructions.
+      expect(classifyArm64Br("x1", recent([["nop", ""], ["br", "x1"]]))).toEqual({
+        kind: "unrecognised",
+      });
+    });
+
+    it("calls a branch through the zero register unrecognised", () => {
+      expect(classifyArm64Br("xzr", recent([["nop", ""], ["br", "xzr"]]))).toEqual({
+        kind: "unrecognised",
+      });
+    });
+  });
 });
 
 describe("archForMachine", () => {
@@ -581,10 +870,32 @@ describe("archForMachine", () => {
     expect(archForMachine(undefined)).toBe("x86");
   });
 
-  it("falls back to x86 for a machine type with no disassembler here", () => {
-    expect(archForMachine(0x0200)).toBe("x86"); // IA-64
-    expect(isKnownMachine(0x0200)).toBe(false);
+  /**
+   * peek-a-bin-x7b. These used to answer `"x86"`, which is how an ARM32/Thumb
+   * image came to be decoded as x86 and rendered as a full screen of plausible
+   * instructions that were pure fiction. There is no coverage signal to catch
+   * that by — an x86 linear sweep decodes essentially any byte string, unlike
+   * the A64 decode rate `arm64.ts` refuses on — so the machine type has to be
+   * the answer.
+   */
+  it.each([
+    ["ARM (0x01C0)", 0x01c0],
+    ["ARM Thumb (0x01C2)", 0x01c2],
+    ["ARMNT / Thumb-2 (0x01C4)", 0x01c4],
+    ["IA-64 (0x0200)", 0x0200],
+    ["RISC-V 64 (0x5064)", 0x5064],
+    ["MIPS R4000 (0x0166)", 0x0166],
+  ])("reports %s as unsupported rather than as x86", (_label, machine) => {
+    expect(archForMachine(machine)).toBe("unsupported");
+    expect(isKnownMachine(machine)).toBe(false);
+  });
+
+  it("keeps isKnownMachine's separate answer for the three it knows", () => {
     expect(isKnownMachine(IMAGE_FILE_MACHINE_ARM64)).toBe(true);
+    expect(isKnownMachine(IMAGE_FILE_MACHINE_AMD64)).toBe(true);
+    expect(isKnownMachine(IMAGE_FILE_MACHINE_I386)).toBe(true);
+    // Asked about a machine *value*, not about a caller's state, so `undefined`
+    // is false here while `archForMachine(undefined)` is deliberately "x86".
     expect(isKnownMachine(undefined)).toBe(false);
   });
 
@@ -594,5 +905,28 @@ describe("archForMachine", () => {
     expect(message).toContain("Decompilation");
     expect(message).toContain(ARCH_LABEL.arm64);
     expect(message).toContain("x86");
+  });
+
+  it("builds a refusal for an unnamed architecture that says what is supported", () => {
+    const message = unsupportedArchMessage("Disassembly");
+
+    expect(message).toContain("Disassembly");
+    // Cannot name the architecture — recognising it is exactly what did not
+    // happen — so it names what a user can do something with instead.
+    expect(message).toContain("x86");
+    expect(message).toContain("ARM64");
+    // And says the parse itself is unaffected, because it is.
+    expect(message).toMatch(/imports/);
+  });
+
+  it("routes unsupportedOnArch's third state to that message, so an arch !== 'x86' check covers it", () => {
+    // `src/mcp/tools.ts` refuses to decompile on `af.arch !== "x86"` and passes
+    // `af.arch` straight through. Widening the parameter is what makes that
+    // existing line cover ARM32 without an edit — and stops it claiming to have
+    // recognised an architecture it did not.
+    expect(unsupportedOnArch("Decompilation", "unsupported")).toBe(
+      unsupportedArchMessage("Decompilation"),
+    );
+    expect(unsupportedOnArch("Decompilation", "unsupported")).not.toContain("ARM64 images");
   });
 });

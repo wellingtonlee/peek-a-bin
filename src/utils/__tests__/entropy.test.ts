@@ -13,10 +13,13 @@ import {
   computeEntropyBlocks,
   computeSectionEntropies,
   computeSectionEntropy,
+  ENTROPY_STRIP_BLOCK_PX,
+  ENTROPY_STRIP_HEIGHT_PX,
+  ENTROPY_WIDTH_QUANTUM,
+  entropyBlockAtX,
   entropyBlockSizeFor,
   entropyBlocksForWidth,
-  ENTROPY_STRIP_BLOCK_PX,
-  ENTROPY_WIDTH_QUANTUM,
+  entropyStripGeometry,
   MAX_ENTROPY_BLOCKS,
   MIN_ENTROPY_BLOCKS,
 } from "../entropy";
@@ -342,5 +345,109 @@ describe("entropyBlocksForWidth", () => {
         expect(Math.ceil(len / size)).toBeLessThanOrEqual(budget);
       }
     }
+  });
+});
+
+describe("entropyStripGeometry", () => {
+  it("sizes the backing store in device pixels, not CSS pixels", () => {
+    // The bug (peek-a-bin-fwm): canvas.width was set to canvas.clientWidth, so
+    // a 2x display got one texel per CSS pixel and upscaled the result.
+    const geom = entropyStripGeometry(1000, ENTROPY_STRIP_HEIGHT_PX, 500, 2);
+    expect(geom.deviceWidth).toBe(2000);
+    expect(geom.deviceHeight).toBe(ENTROPY_STRIP_HEIGHT_PX * 2);
+    expect(geom.scale).toBe(2);
+  });
+
+  it("leaves a 1x display exactly as it was", () => {
+    const geom = entropyStripGeometry(1000, ENTROPY_STRIP_HEIGHT_PX, 500, 1);
+    expect(geom.deviceWidth).toBe(1000);
+    expect(geom.deviceHeight).toBe(ENTROPY_STRIP_HEIGHT_PX);
+    expect(geom.scale).toBe(1);
+  });
+
+  it("rounds a fractional ratio to whole device pixels", () => {
+    // 1.5 is what a 150%-scaled Windows display reports, and a fractional
+    // canvas.width is truncated by the DOM rather than rounded.
+    const geom = entropyStripGeometry(1001, ENTROPY_STRIP_HEIGHT_PX, 500, 1.5);
+    expect(Number.isInteger(geom.deviceWidth)).toBe(true);
+    expect(Number.isInteger(geom.deviceHeight)).toBe(true);
+    expect(geom.deviceWidth).toBe(Math.round(1001 * 1.5));
+  });
+
+  it.each([0, -2, Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number])(
+    "falls back to 1x for a ratio of %s",
+    (dpr) => {
+      // window.devicePixelRatio is 0 or undefined in some embedded webviews and
+      // in any non-browser environment; a NaN would reach canvas.width, which
+      // throws, and take the whole hex view down with it.
+      const geom = entropyStripGeometry(800, ENTROPY_STRIP_HEIGHT_PX, 400, dpr);
+      expect(geom.scale).toBe(1);
+      expect(geom.deviceWidth).toBe(800);
+    },
+  );
+
+  it("never produces a zero-sized backing store", () => {
+    // canvas.width = 0 is legal but getContext draws nothing, which would read
+    // as "entropy is broken" rather than "the strip has not been measured yet".
+    for (const width of [0, -5, Number.NaN]) {
+      const geom = entropyStripGeometry(width, ENTROPY_STRIP_HEIGHT_PX, 64, 2);
+      expect(geom.deviceWidth).toBeGreaterThanOrEqual(1);
+      expect(geom.deviceHeight).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("gives a block width independent of the device ratio", () => {
+    // The draw runs under ctx.setTransform(scale, …), so its coordinates stay
+    // in CSS pixels — the same unit the pointer handlers get from
+    // getBoundingClientRect(). If blockWidth tracked dpr the bars would be
+    // drawn at double width on a HiDPI display.
+    for (const dpr of [1, 1.5, 2, 3]) {
+      expect(entropyStripGeometry(1000, ENTROPY_STRIP_HEIGHT_PX, 500, dpr).blockWidth).toBe(2);
+    }
+  });
+
+  it("reports a zero block width rather than Infinity for an empty strip", () => {
+    expect(entropyStripGeometry(1000, ENTROPY_STRIP_HEIGHT_PX, 0, 2).blockWidth).toBe(0);
+  });
+});
+
+describe("entropyBlockAtX", () => {
+  it("inverts the draw for every block, at every ratio", () => {
+    // The regression this pins: the draw clamped each bar to a 2 px minimum
+    // while the hit test divided by the unclamped quotient, so the bar under
+    // the cursor was not the bar reported. Hit-testing the centre of every
+    // drawn bar must return that bar.
+    for (const [width, blocks] of [
+      [1000, 500],
+      [1000, 4096],
+      [317, 64],
+      [1920, 960],
+    ] as const) {
+      const { blockWidth } = entropyStripGeometry(width, ENTROPY_STRIP_HEIGHT_PX, blocks, 2);
+      for (let i = 0; i < blocks; i++) {
+        expect(entropyBlockAtX(i * blockWidth + blockWidth / 2, width, blocks)).toBe(i);
+      }
+    }
+  });
+
+  it("covers the whole strip with no gaps", () => {
+    const width = 640;
+    const blocks = entropyBlocksForWidth(width);
+    for (let x = 0; x < width; x += 0.5) {
+      expect(entropyBlockAtX(x, width, blocks)).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("rejects a position outside the strip", () => {
+    expect(entropyBlockAtX(-1, 1000, 500)).toBe(-1);
+    expect(entropyBlockAtX(1000, 1000, 500)).toBe(-1);
+    expect(entropyBlockAtX(2000, 1000, 500)).toBe(-1);
+    expect(entropyBlockAtX(Number.NaN, 1000, 500)).toBe(-1);
+  });
+
+  it("rejects everything when there are no blocks", () => {
+    // entropyBlocks is empty until the worker answers; x / 0 is Infinity, and
+    // Math.floor(Infinity) would index past the array.
+    expect(entropyBlockAtX(10, 1000, 0)).toBe(-1);
   });
 });

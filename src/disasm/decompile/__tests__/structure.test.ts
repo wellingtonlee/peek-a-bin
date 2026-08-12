@@ -118,7 +118,16 @@ describe("structureCFG — straight-line code", () => {
       bb(0, { succs: [1], code: [["ret", ""]] }),
       bb(1, { preds: [0], code: [["ret", ""]] }),
     ];
-    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([mark(0)]);
+    // The walk stops: block 1's statement is not inlined after block 0's, which
+    // is what falling through a `ret` would look like. It is appended under its
+    // own `loc_` label instead, by the leftover pass — a `ret` ends the path
+    // through a block but does not make the code after it stop existing, and
+    // block 1 is where an exception funclet lands (peek-a-bin-d3z).
+    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([
+      mark(0),
+      loc(1),
+      mark(1),
+    ]);
   });
 
   it("emits a goto for a jump back to an already-visited block, under its label", () => {

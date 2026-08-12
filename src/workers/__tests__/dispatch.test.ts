@@ -682,6 +682,148 @@ describe("dispatch — architecture routing", () => {
     expect(s.cs64.seen).toEqual([0x401000]);
     expect(s.csArm64.seen).toEqual([]);
   });
+
+  /**
+   * peek-a-bin-x7b — the third answer. `archForMachine` used to map every
+   * machine but ARM64 to `"x86"`, so an ARM32/Thumb image went down the x86
+   * routes above and came back a screenful of plausible instructions that were
+   * pure fiction. An x86 linear sweep decodes essentially any byte string, so
+   * unlike ARM64 (which decoded to nothing, loudly) there was no signal at all.
+   *
+   * The split is not uniform, and deliberately: the stages whose *entire* output
+   * is instructions throw, because a short or empty answer from them is the
+   * silent-failure mode peek-a-bin-cen removed; detection answers empty with
+   * `omitted` set, because that field exists to say "this is less than the whole
+   * answer" and a caller can still use everything the parser read.
+   */
+  describe("an image with no decoder at all", () => {
+    const ARMNT_MACHINE = 0x01c4; // IMAGE_FILE_MACHINE_ARMNT — ARM Thumb-2
+
+    async function armntState() {
+      const s = armState();
+      await configureAs(s, ARMNT_MACHINE);
+      return s;
+    }
+
+    it("records the machine type as unsupported rather than as x86", async () => {
+      expect((await armntState()).arch).toBe("unsupported");
+    });
+
+    it.each([
+      ["disassemble", { bytes: new Uint8Array(64), baseAddress: 0x401000, is64: false }],
+      [
+        "hybridDisassemble",
+        { bytes: new Uint8Array(64), baseAddress: 0x401000, is64: false, seeds: [0x401000] },
+      ],
+    ] as [WorkerMethod, Record<string, unknown>][])(
+      "rejects %s instead of returning invented instructions",
+      async (method, args) => {
+        const s = await armntState();
+
+        await expect(dispatch(method, args, s)).rejects.toThrow(
+          /Disassembly is not supported for this image's machine type/,
+        );
+        // And touched no decoder at all on the way out.
+        expect(s.cs32.seen).toEqual([]);
+        expect(s.cs64.seen).toEqual([]);
+        expect(s.csArm64.seen).toEqual([]);
+      },
+    );
+
+    it("rejects buildAllXrefs instead of inventing references from x86 operands", async () => {
+      const s = await armntState();
+
+      await expect(
+        dispatch(
+          "buildAllXrefs",
+          {
+            bytes: new Uint8Array(64),
+            baseAddress: 0x401000,
+            is64: false,
+            stringAddrs: [0x402000],
+            iatAddrs: [0x403000],
+          },
+          s,
+        ),
+      ).rejects.toThrow(/Cross-reference analysis is not supported for this image's machine type/);
+      expect(s.cs32.seen).toEqual([]);
+    });
+
+    it("rejects decompileFunction without naming an architecture it did not recognise", async () => {
+      const s = await armntState();
+
+      await expect(
+        dispatch(
+          "decompileFunction",
+          {
+            func: { name: "sub_401000", address: 0x401000, size: 16 },
+            instructions: [],
+            is64: false,
+          },
+          s,
+        ),
+      ).rejects.toThrow(/Decompilation is not supported for this image's machine type/);
+    });
+
+    it("answers detectFunctions empty, with every pass it could not run named", async () => {
+      const s = await armntState();
+
+      const result = (await dispatch(
+        "detectFunctions",
+        {
+          bytes: new Uint8Array(64),
+          baseAddress: 0x401000,
+          is64: false,
+          options: { entryPoint: 0x401000, exports: [{ name: "DllMain", address: 0x401000 }] },
+        },
+        s,
+      )) as { functions: unknown[]; jumpTables: unknown[]; omitted: string[] };
+
+      expect(result.functions).toEqual([]);
+      expect(result.jumpTables).toEqual([]);
+      // Not `[]`: an empty `omitted` means "this is the whole answer", which
+      // would be the same silent claim the field was added to prevent.
+      expect(result.omitted).toEqual(["call-targets", "jump-tables", "thunk-names", "tail-calls"]);
+      expect(s.cs32.seen).toEqual([]);
+    });
+
+    it("reports no IRP dispatch table, because there are no instructions to match", async () => {
+      const s = await armntState();
+
+      expect(
+        await dispatch(
+          "detectIRPDispatches",
+          { instructions: [insn(0x401000, "push", "{r7, lr}", 2)], is64: false },
+          s,
+        ),
+      ).toEqual([]);
+    });
+
+    it("still answers the methods that never needed a decoder", async () => {
+      // The point of refusing per stage rather than per file: extractStrings
+      // and buildTypedXrefMap read the buffer and the caller's own array, so an
+      // ARM32 image keeps everything it was always entitled to.
+      const s = await armntState();
+
+      expect(
+        await dispatch("buildTypedXrefMap", { instructions: [], imageBounds: undefined }, s),
+      ).toEqual([]);
+      expect(await dispatch("resetStructRegistry", {}, s)).toBe(true);
+    });
+
+    it("goes back to the x86 routes when an x86 image is loaded next", async () => {
+      const s = await armntState();
+      await configureAs(s, AMD64_MACHINE);
+
+      expect(s.arch).toBe("x86");
+      await dispatch(
+        "disassemble",
+        { bytes: new Uint8Array(4), baseAddress: 0x401000, is64: true },
+        s,
+      );
+      expect(s.cs64.seen).toEqual([0x401000]);
+    });
+  });
 });
 
 describe("dispatch — an exhausted decoder reaches the caller as a rejection", () => {

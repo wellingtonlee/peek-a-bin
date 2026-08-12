@@ -1,20 +1,25 @@
 import type { SSAContext } from "./ssa";
 import { clobberedByCall, clobberedName, versionKey as ssaVersionKey } from "./ssa";
 import type { IRStmt, IRExpr, IRReg } from "./ir";
-import { canonReg } from "./ir";
+import { canonReg, isKnownRegister, regAtSize, regSize, walkStmts } from "./ir";
 
 /**
  * Destroy SSA form: convert phi nodes to copy assignments at predecessors,
  * strip all version numbers from registers.
  */
 export function destroySSA(ctx: SSAContext): void {
-  nameClobberedReads(ctx);
+  // Before anything rewrites a read: this reads the register *names* the
+  // function's own statements use, and `nameClobberedReads` replaces some of
+  // them with variables.
+  const spell = registerSpeller(ctx);
+
+  nameClobberedReads(ctx, spell);
 
   // Before the phis go: they are definitions, and the splitter has to see them
   // as such. Converting them to copies first would leave a phi destination
   // version with no definition anywhere, because the copies are written against
   // the *unversioned* register name.
-  splitStaleReads(ctx);
+  splitStaleReads(ctx, spell);
 
   // Insert copies for phi operands at end of predecessor blocks
   for (const [, blockPhis] of ctx.phis) {
@@ -40,16 +45,22 @@ export function destroySSA(ctx: SSAContext): void {
         // join whose other arm leaves rax alone is exactly this shape.)
         if (destCanon === srcCanon && !clobber) continue;
 
+        // Canonical is the *identity* of the register, not its spelling: a phi
+        // is created and renamed under the 64-bit parent whatever the code
+        // said, so emitting that name puts `rdi = rax` inside a 32-bit function
+        // (peek-a-bin-1k4). `spell` gives it back the name the function uses.
+        const destName = spell(destCanon);
+        const srcName = spell(srcCanon);
         const copy: IRStmt = {
           kind: "assign",
-          dest: { kind: "reg", name: destCanon, size: phi.dest.size },
+          dest: { kind: "reg", name: destName, size: regSize(destName) },
           src: clobber
             ? {
                 kind: "var",
-                name: clobberedName(srcCanon, op.value.version as number),
+                name: clobberedName(srcName, op.value.version as number),
                 size: op.value.size,
               }
-            : { kind: "reg", name: srcCanon, size: op.value.size },
+            : { kind: "reg", name: srcName, size: regSize(srcName) },
         };
         predStmts.push(copy);
       }
@@ -62,6 +73,67 @@ export function destroySSA(ctx: SSAContext): void {
   for (const [blockId, stmts] of ctx.liftedBlocks) {
     ctx.liftedBlocks.set(blockId, stmts.map(stripVersionsStmt));
   }
+}
+
+// ── Register spelling ──
+
+/** `ah` names the *other* half of AX from `al`, so it is the worse of the two. */
+const HIGH_BYTE = /^[abcd]h$/;
+
+/**
+ * What this function calls a canonical register.
+ *
+ * `canonReg` is the identity of a register — the 64-bit parent — and every pass
+ * keys on it, but nothing about it is a *name*: `insertPhis` builds every phi
+ * from `collectDefs`, which canonicalises, and `renameVariables` then forces the
+ * destination back to the canonical name. So a phi in a 32-bit function is a phi
+ * over `rdi` at size 8 even though the image has no RDI and every statement in
+ * it says `edi`, and lowering that phi to a copy emitted `rdi = rax` — 77 of
+ * t32.exe's 293 functions named a register their disassembly never mentions
+ * (peek-a-bin-1k4). The same canonical name reached `clobberedName`, which is
+ * where a 32-bit image got `rdx = clobbered_rdx_2` (peek-a-bin-4hg).
+ *
+ * The width cannot be recovered from the phi: `phi.dest.size` is `regSize` of
+ * the canonical name, i.e. 8, for every phi in every 32-bit function measured —
+ * so a `canonReg` inverse taking a width has nothing to invert. What does carry
+ * the width is the code: the widest spelling of the register the function's own
+ * statements contain. A 32-bit function cannot mention RDI, so it can never be
+ * chosen; a 64-bit one that only ever writes EDI is a function where writing EDI
+ * is what the machine does, and naming it is not a loss.
+ *
+ * A register no *surviving* statement mentions still has to be spelled: the phi
+ * was placed against the pre-optimisation IR and `ssaOptimize` can delete the
+ * definition that put it there (t32!sub_4054E0's ESI reaches the emitted code
+ * only through a branch condition, which `structure.ts` builds from `RegState`
+ * and not from a statement). For those the function's own width decides — a
+ * function that mentions no 8-byte register is 32-bit code, because no 32-bit
+ * image can name RSI and every other spelling would have been seen above.
+ */
+function registerSpeller(ctx: SSAContext): (canon: string) => string {
+  const widest = new Map<string, string>();
+  const rank = (name: string) => regSize(name) * 2 - (HIGH_BYTE.test(name) ? 1 : 0);
+  const note = (raw: string) => {
+    const name = raw.toLowerCase();
+    // `regSize` answers 4 for anything at all, so it is not a membership test.
+    if (!isKnownRegister(name)) return;
+    const canon = canonReg(name);
+    const cur = widest.get(canon);
+    if (cur === undefined || rank(name) > rank(cur)) widest.set(canon, name);
+  };
+  for (const [, stmts] of ctx.liftedBlocks) {
+    walkStmts(stmts, (e) => {
+      if (e.kind === "reg") note(e.name);
+    });
+    // `walkStmts` walks a call's arguments but not the register its result
+    // lands in, and in a 32-bit function that register — EAX — is often the
+    // only mention of RAX above the phis.
+    for (const s of stmts)
+      if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") note(s.resultDest.name);
+  }
+  // Only rax..r15 are 8 bytes wide; XMM and x87 are wider still and exist in
+  // both modes, so they say nothing about which one this is.
+  const is64 = [...widest.values()].some((n) => regSize(n) === 8);
+  return (canon) => widest.get(canon) ?? (is64 ? canon : regAtSize(canon, 4));
 }
 
 // ── Call clobbers ──
@@ -77,7 +149,7 @@ export function destroySSA(ctx: SSAContext): void {
  * read becomes a variable that nothing assigns, which is what the machine says:
  * an indeterminate value, the same one at every read of that version.
  */
-function nameClobberedReads(ctx: SSAContext): void {
+function nameClobberedReads(ctx: SSAContext, spell: (canon: string) => string): void {
   if (ctx.clobbered.size === 0) return;
   for (const [blockId, stmts] of ctx.liftedBlocks) {
     ctx.liftedBlocks.set(
@@ -87,7 +159,10 @@ function nameClobberedReads(ctx: SSAContext): void {
           if (reg.version === undefined) return null;
           const canon = canonReg(reg.name);
           if (!ctx.clobbered.has(ssaVersionKey(canon, reg.version))) return null;
-          return { kind: "var", name: clobberedName(canon, reg.version), size: reg.size };
+          // Named from the canonical register, not from this read's own
+          // spelling: two reads of the same clobbered version at different
+          // widths are the same indeterminate value and must not get two names.
+          return { kind: "var", name: clobberedName(spell(canon), reg.version), size: reg.size };
         }),
       ),
     );
@@ -128,7 +203,7 @@ function nameClobberedReads(ctx: SSAContext): void {
  * case the bead was filed for and had to guess at block entry for anything
  * defined elsewhere (peek-a-bin-bld).
  */
-function splitStaleReads(ctx: SSAContext): void {
+function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): void {
   const blockIds = ctx.blocks.map((b) => b.id);
   if (blockIds.length === 0) return;
   const known = new Set(blockIds);
@@ -267,8 +342,8 @@ function splitStaleReads(ctx: SSAContext): void {
   // A version read under one spelling throughout is named with it, so a 32-bit
   // function gets `esi_1` rather than a canonical `rsi_1` naming a register its
   // disassembly never mentions. Disagreement — reads of both `esi` and `si` —
-  // falls back to the canonical name, because either spelling would claim a
-  // width the other read does not have.
+  // falls back to `spell`, i.e. the widest spelling the *function* uses, because
+  // either read's own spelling would claim a width the other one does not have.
   const spellings = new Map<string, string | null>();
   for (const s of stale) {
     const key = versionKey(s.canon, s.version);
@@ -297,7 +372,7 @@ function splitStaleReads(ctx: SSAContext): void {
     const siteKey = `${key}@${site.block}`;
     if (!copied.has(siteKey)) {
       copied.add(siteKey);
-      const spelling = spellings.get(key) ?? s.canon;
+      const spelling = spellings.get(key) ?? spell(s.canon);
       const name = renamed.get(key) ?? staleName(spelling, s.version);
       renamed.set(key, name);
       const byIndex = inserts.get(site.block) ?? new Map<number, IRStmt[]>();

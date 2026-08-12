@@ -346,6 +346,49 @@ describe("decompile_function — architecture refusal (peek-a-bin-9b1)", () => {
     expect(textOf(result)).not.toMatch(/not supported/);
   });
 
+  /**
+   * peek-a-bin-x7b. `decompile_function`'s gate has always been
+   * `af.arch !== "x86"`, so widening `AnalyzedFile.arch` with `"unsupported"`
+   * makes it cover ARM32/Thumb with no edit to `tools.ts` at all. These cases
+   * exist because "for free" is a claim, not a fact, and one that a later
+   * narrowing of that gate to `=== "arm64"` would quietly break.
+   */
+  describe("and on an image with no decoder at all", () => {
+    it("declines for an ARM32/Thumb image through the same gate", async () => {
+      const { session } = stubSession({ ...arm64Function, arch: "unsupported" });
+      const decompile = captureTools(session).get("decompile_function")!;
+
+      const result = await decompile({ fileId: "sample", address: "0x140001018" });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).not.toMatch(/return|__unrecovered|unlifted/);
+    });
+
+    it("does not claim to have recognised the architecture", async () => {
+      // The whole content of "unsupported" is that the machine type is not one
+      // of the three this engine knows, so a message naming ARM64 or x86 as the
+      // image's architecture would be a fresh wrong answer.
+      const { session } = stubSession({ arch: "unsupported" });
+      const decompile = captureTools(session).get("decompile_function")!;
+
+      const result = await decompile({ fileId: "sample", address: "0xdeadbeef" });
+
+      expect(textOf(result)).toBe(`Error: ${unsupportedOnArch("Decompilation", "unsupported")}`);
+      expect(textOf(result)).toMatch(/not supported for this image's machine type/);
+      expect(textOf(result)).not.toMatch(/for ARM64 images|for x86 images/);
+      // Refuses before the address is resolved, exactly as the ARM64 path does.
+      expect(textOf(result)).not.toMatch(/no function at address/);
+    });
+
+    it("reports the third state to a client rather than hiding it as x86", async () => {
+      const { session } = stubSession({ ...arm64ImageStub, arch: "unsupported" });
+      const listFiles = captureTools(session).get("list_files")!;
+
+      const [entry] = JSON.parse(textOf(await listFiles({})));
+      expect(entry.arch).toBe("unsupported");
+    });
+  });
+
   it("still disassembles ARM64 — only the x86 grammars decline", async () => {
     // `disassemble_function` reports what Capstone decoded. That is real on
     // ARM64, so it must NOT be swept up in the refusal.

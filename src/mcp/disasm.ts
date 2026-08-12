@@ -5,11 +5,12 @@
 
 import { Const, Capstone, loadCapstone } from "capstone-wasm";
 import type { Instruction, Xref } from "../disasm/types";
-import type { TargetArch } from "../disasm/arch";
+import { type ImageArch, unsupportedArchMessage } from "../disasm/arch";
 import type { DataWindow } from "../disasm/dataWindows";
 import { type Arm64Context, detectArm64Functions, disassembleArm64 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
 import {
+  type DetectResult,
   type DisasmContext,
   type ImageBounds,
   disassemble,
@@ -55,11 +56,18 @@ export function disassembleBytes(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
-  arch: TargetArch,
+  arch: ImageArch,
   stringMap: Map<number, string>,
   iatMap: Map<number, { lib: string; func: string }>,
   driverMode: boolean,
 ): Instruction[] {
+  // Refuse rather than invent, for the reason `arch.ts` documents: an x86
+  // linear sweep decodes essentially any byte string, so an ARM32/Thumb image
+  // came back as a screenful of plausible instructions that were pure fiction,
+  // with no coverage signal to notice it by. This whole return value is
+  // instructions, so a short or empty answer would be the same silent failure
+  // peek-a-bin-cen removed (peek-a-bin-x7b).
+  if (arch === "unsupported") throw new Error(unsupportedArchMessage("Disassembly"));
   if (arch === "arm64") {
     return disassembleArm64(bytes, baseAddress, makeArm64Ctx(stringMap, iatMap, driverMode));
   }
@@ -70,7 +78,7 @@ export function detectFunctionsFromBytes(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
-  arch: TargetArch,
+  arch: ImageArch,
   stringMap: Map<number, string>,
   iatMap: Map<number, { lib: string; func: string }>,
   driverMode: boolean,
@@ -88,6 +96,21 @@ export function detectFunctionsFromBytes(
     dataWindows?: DataWindow[];
   },
 ) {
+  // Keeps answering rather than throwing, unlike its neighbours — that is the
+  // contract `DetectResult.omitted` states, and the reason is that detection's
+  // evidence is mostly not instructions. Here there is none of it left: every
+  // pass x86 detection has is an x86 pass, and `pdata.ts` reads extents for
+  // ARM64 and x64 only, so an ARMNT image has no `.pdata` function boundaries
+  // either. Empty with all four passes named is the true answer; throwing would
+  // fail `FileSession.loadFile` outright and throw away the headers, imports,
+  // exports and strings this tool *does* read correctly for such an image.
+  if (arch === "unsupported") {
+    return {
+      functions: [],
+      jumpTables: [],
+      omitted: ["call-targets", "jump-tables", "thunk-names", "tail-calls"],
+    } satisfies DetectResult;
+  }
   if (arch === "arm64") {
     return detectArm64Functions(
       bytes,
@@ -103,13 +126,14 @@ export function hybridDisassembleBytes(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
-  arch: TargetArch,
+  arch: ImageArch,
   seeds: number[],
   stringMap: Map<number, string>,
   iatMap: Map<number, { lib: string; func: string }>,
   driverMode: boolean,
   pdataRanges?: { beginAddress: number; endAddress: number }[],
 ): Instruction[] {
+  if (arch === "unsupported") throw new Error(unsupportedArchMessage("Disassembly"));
   if (arch === "arm64") {
     // No seeds: recursive descent is what resolves a variable-length encoding's
     // ambiguous boundaries, and A64 has none. See disassembleArm64.
@@ -152,7 +176,7 @@ export function buildXrefs(
   bytes: Uint8Array,
   baseAddress: number,
   is64: boolean,
-  arch: TargetArch,
+  arch: ImageArch,
   stringAddrs: number[],
   iatAddrs: number[],
   funcEntries?: [number, number][],
@@ -169,6 +193,10 @@ export function buildXrefs(
    */
   instructions?: Instruction[],
 ) {
+  // Every xref here is read out of a decoded instruction, so with no decoder
+  // there is nothing to read — and the x86 grammar over non-x86 bytes does not
+  // fail, it reports references that are not there.
+  if (arch === "unsupported") throw new Error(unsupportedArchMessage("Cross-reference analysis"));
   if (arch === "arm64") {
     // buildAllXrefs is an x86 operand grammar end to end — `[rip ± 0x..]`,
     // `mov reg, imm`, `call 0x…`. Run over ARM64 bytes it would not fail, it

@@ -174,6 +174,100 @@ describe("decompileFunction — conditionals reach the output with the right sen
   });
 });
 
+/**
+ * A condition is built from the `cmp`/`test` operands by `extractCondition`,
+ * not by the lifter, so for the project's history it went through a private
+ * parser that hardcoded a width of 4 and did not know about RIP (peek-a-bin-w6f).
+ * Both symptoms are only visible in the emitted text: the IR the buggy parser
+ * produced was internally consistent, so every stage-level test agreed with it.
+ */
+describe("decompileFunction — a condition reads the width the compare wrote", () => {
+  it("compares a byte at byte width, not as a 32-bit load", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "byte ptr [rcx], dl"],
+        ["jne", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const guard = code.split("\n").find((l) => l.includes("if"));
+    expect(guard).toBeDefined();
+    // `cmp byte ptr [rcx], dl` reads one byte. Reading four says the program
+    // examines three bytes it never looks at.
+    expect(guard).toContain("*(uint8_t*)(rcx)");
+    expect(guard).not.toContain("int32_t");
+  });
+
+  it("compares a word at word width", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "word ptr [rcx], 0x5a4d"],
+        ["jne", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const guard = code.split("\n").find((l) => l.includes("if"));
+    expect(guard).toBeDefined();
+    expect(guard).toContain("*(uint16_t*)(rcx)");
+    expect(guard).not.toContain("int32_t");
+  });
+
+  it("resolves a RIP-relative compare to the address it names", () => {
+    // RIP holds the address of the NEXT instruction, so `[rip + 0x100]` at
+    // 0x401000 (4 bytes long) is 0x401104. Leaving the text `rip + 0x100` in
+    // the output is not an address at all — and `mov eax, dword ptr [rip + …]`
+    // in the same function has always resolved, because that goes through the
+    // lifter.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "dword ptr [rip + 0x100], 2"],
+        ["jne", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const guard = code.split("\n").find((l) => l.includes("if"));
+    expect(guard).toBeDefined();
+    expect(guard).toContain("0x401104");
+    expect(guard).not.toContain("rip");
+  });
+
+  it("resolves a RIP-relative byte compare at byte width", () => {
+    // Both halves of peek-a-bin-w6f at once, which is how the bead met it:
+    // `cmp byte ptr [rip + 0x13358], 0`.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "byte ptr [rip + 0x100], 0"],
+        ["jne", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const guard = code.split("\n").find((l) => l.includes("if"));
+    expect(guard).toBeDefined();
+    expect(guard).toContain("*(uint8_t*)(0x401104)");
+    expect(guard).not.toContain("rip");
+  });
+});
+
 describe("decompileFunction — output shape", () => {
   it("produces a function signature and a balanced body", () => {
     const code = run(seq(0x401000, [["mov", "eax, 1"], ["ret"]]));
@@ -820,6 +914,120 @@ describe("decompileFunction — indirect calls", () => {
     expect(code).toMatch(
       /\(\(intptr_t \(\*\)\(\)\)__unrecovered_\d+ \/\* dword ptr \[ebp \+ 8\] \*\/\)/,
     );
+  });
+});
+
+/**
+ * A test the machine makes that the output does not state at all.
+ *
+ * This is the class the polarity audit is blind to (peek-a-bin-lbz): a guard
+ * that states one of two tests and drops the other passes every polarity check,
+ * because the operator it does state matches its own jcc. The way it happens in
+ * practice is a `jcc` whose target lies past the end of the detected function —
+ * `buildCFG` draws no edge for it, so the block has one successor and reads as
+ * unconditional. `t32!sub_4031A4` loses four that way, two of them inside a
+ * loop, and emitted `do { …; LeaveCriticalSection(…); } while (1)`: an
+ * unconditional call inside a loop the reader is told never ends.
+ *
+ * The transfer cannot be spelled — there is no label in this function to `goto`
+ * and no function to call — so the arm is a comment. The test itself is what
+ * matters: without it the decision is not in the output in any form.
+ */
+describe("decompileFunction — a branch out of the function is still a decision", () => {
+  it("states the test of a conditional jump whose target is outside the function", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "esi, 0x40"], // 0x401000
+        ["jge", "0x409000"], // 0x401004 — far past the end of this function
+        ["mov", "eax, 1"], // 0x401008
+        ["ret"], // 0x40100c
+      ]),
+    );
+
+    const guard = code.split("\n").find((l) => l.includes("if ("));
+    expect(guard).toBeDefined();
+    // `jge` is taken when esi >= 0x40, and the taken side is what leaves.
+    expect(guard).toContain(">= 0x40");
+    expect(code).toContain("0x409000");
+  });
+
+  it("says nothing extra when the CFG does have the edge", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "esi, 0x40"],
+        ["jge", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"], // 0x401010 — a real block, so a real edge
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("outside this function");
+  });
+});
+
+/**
+ * Code no CFG edge reaches is still code.
+ *
+ * An MSVC exception funclet — an `__except`/`__finally` continuation on x64, a
+ * 32-bit SEH scope handler — is entered by the unwinder, so it has no
+ * predecessor and sits past a `ret`. `structureCFG`'s leftover pass used to
+ * require reachability from the entry, on the grounds that anything else is
+ * alignment padding; what it actually excluded was 1160 blocks of real code
+ * across the corpus, taking 59 `call` sites with it (peek-a-bin-d3z).
+ * `t64!sub_140004104` is 95 instructions with 20 calls, and exactly the two in
+ * its funclet went missing.
+ *
+ * Padding is still excluded, by the test that was already there: a block that
+ * lifts to no statements is not resurrected.
+ */
+describe("decompileFunction — an unreachable block still reaches the output", () => {
+  it("names a call only an exception funclet makes", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"], // 0x401000
+        ["ret"], // 0x401004
+        ["call", "0x401200"], // 0x401008 — no edge reaches this
+        ["ret"], // 0x40100c
+      ]),
+    );
+
+    expect(code).toContain("sub_401100()");
+    // A reader of the old output concluded the program never calls this.
+    expect(code).toContain("sub_401200()");
+  });
+
+  it("introduces it by its own label, rather than falling into it past the ret", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"],
+        ["ret"],
+        ["call", "0x401200"],
+        ["ret"],
+      ]),
+    );
+
+    const lines = code.split("\n").map((l) => l.trim());
+    const label = lines.indexOf("loc_401008:");
+    expect(label).toBeGreaterThan(-1);
+    // The label comes after the first block's `ret`, so nothing suggests
+    // control falls through into it.
+    expect(lines.slice(0, label).some((l) => l.startsWith("return"))).toBe(true);
+    expect(lines.slice(label).some((l) => l.includes("sub_401200()"))).toBe(true);
+  });
+
+  it("leaves a block that lifts to nothing alone", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"], // 0x401000
+        ["ret"], // 0x401004
+        ["nop"], // 0x401008 — padding, unreachable and empty
+        ["nop"], // 0x40100c
+      ]),
+    );
+
+    expect(code).not.toContain("loc_401008");
   });
 });
 
@@ -3549,6 +3757,112 @@ describe("decompileFunction — a register a call was passed does not survive it
 });
 
 /**
+ * A function is never told about a register its image cannot have.
+ *
+ * `canonReg` maps every alias to the 64-bit parent because that is the register's
+ * *identity*, and SSA keys on identity: `insertPhis` builds every phi from the
+ * canonical name and `renameVariables` forces the destination back to it. So a
+ * phi in a 32-bit function is a phi over `rdi` at size 8 — `phi.dest.size` is
+ * `regSize("rdi")`, not the width of anything the code did — and lowering it to a
+ * copy emitted `rdi = rax` inside a function whose every other line says `edi`.
+ * 77 of t32.exe's 293 functions named a register the image has no encoding for
+ * (peek-a-bin-1k4), and the same canonical name reached `clobberedName`, so a
+ * 32-bit call produced `clobbered_rcx_2` (peek-a-bin-4hg).
+ *
+ * The width is not recoverable from the phi, so it is taken from the code:
+ * `destroySSA` spells a canonical register with the widest spelling the
+ * function's own statements use. That can never invent RDI in a 32-bit image,
+ * and in a 64-bit one it prefers the 64-bit name wherever the code uses it.
+ */
+describe("decompileFunction — register names belong to the image's width", () => {
+  /**
+   * `mov edi, eax` in one arm of a diamond inside a loop: copy propagation
+   * rewrites the phi operand for EDI to EAX, so the phi's two sides have
+   * different canonical registers and the copy is emitted rather than skipped
+   * as a self-copy. This is t32!sub_4010D4's shape.
+   */
+  const phiCopy = (regs: [string, string, string, string]): Instruction[] => {
+    const [di, ax, cx, dx] = regs;
+    return seq(0x401000, [
+      ["mov", `${di}, 0`], // 401000
+      ["mov", `${ax}, ${cx}`], // 401004 — loop top
+      ["test", `${ax}, ${ax}`], // 401008
+      ["je", "0x401024"], // 40100c — exit
+      ["cmp", `${dx}, ${ax}`], // 401010
+      ["jne", "0x40101c"], // 401014 — skip the assignment
+      ["mov", `${di}, ${ax}`], // 401018
+      ["add", `${cx}, 1`], // 40101c — the join
+      ["jmp", "0x401004"], // 401020 — back edge
+      ["mov", `${ax}, ${di}`], // 401024
+      ["ret"], // 401028
+    ]);
+  };
+
+  /** Registers x86-32 has no encoding for, as whole identifiers. */
+  const REG64_ONLY =
+    /\b(?:clobbered_)?(?:r(?:ax|bx|cx|dx|si|di|bp|sp)|r(?:8|9|1[0-5])[bwd]?)(?:_\d+)?\b/;
+
+  it("lowers a phi to a copy at the width the 32-bit code wrote", () => {
+    const code = run(phiCopy(["edi", "eax", "ecx", "edx"]));
+
+    // Before: `rdi = rcx;`.
+    expect(code).toContain("edi = ecx;");
+    expect(code).not.toMatch(REG64_ONLY);
+  });
+
+  it("still uses the 64-bit name for the same shape in 64-bit code", () => {
+    // The narrowing must be driven by what the code says, not applied blindly:
+    // here every statement names the 64-bit register, so the copy must too.
+    const code = run(phiCopy(["rdi", "rax", "rcx", "rdx"]), true);
+
+    expect(code).toContain("rdi = rcx;");
+  });
+
+  it("names a clobbered 32-bit argument register after the register that exists", () => {
+    // `push ecx` makes ECX argument 1 by `collectArgs32`, which is what
+    // `clobberedByCall` reads as "the call was given this register", so the read
+    // after the call is of an indeterminate value and needs a name of its own.
+    // Before: `clobbered_rcx_2`.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 1"],
+        ["push", "ecx"],
+        ["call", "0x403b24"],
+        ["mov", "dword ptr [esi], ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/clobbered_ecx_\d+/);
+    expect(code).not.toMatch(REG64_ONLY);
+  });
+
+  it("uses the 32-bit alias in 64-bit code when that is all the function wrote", () => {
+    // t64!sub_140001564: R14's only definition is `xor r14d, r14d`, and a
+    // 32-bit write zero-extends, so R14 *is* R14D here. Saying `r13 = r14d`
+    // rather than `r13 = r14` is the narrower and more faithful claim.
+    const code = run(
+      seq(0x401000, [
+        ["xor", "r14d, r14d"], // 401000
+        ["test", "rax, rax"], // 401004
+        ["je", "0x401014"], // 401008
+        ["mov", "r13, r14"], // 40100c
+        ["jmp", "0x401018"], // 401010
+        ["mov", "r13, rbx"], // 401014
+        ["mov", "rax, r13"], // 401018
+        ["ret"], // 40101c
+      ]),
+      true,
+    );
+
+    expect(code).toContain("r14d = 0;");
+    // Before: `r13 = r14;`, naming storage the function never writes.
+    expect(code).toContain("r13 = r14d;");
+    expect(code).not.toContain("r13 = r14;");
+  });
+});
+
+/**
  * Constant folding at the width the operands say they are.
  *
  * The folder evaluated every constant binary op with plain JavaScript
@@ -3825,5 +4139,101 @@ describe("decompileFunction — a value read after another block redefined its r
     const named = /\b(e?[a-z]{2}\d*)\b/.exec(guard!.replace(/if \(|\)/g, ""));
     expect(named).not.toBeNull();
     expect(code).toMatch(new RegExp(`^\\s*${named![1]} =`, "m"));
+  });
+});
+
+/**
+ * A call's result.
+ *
+ * `liftBlock` gives every `call_stmt` a `resultDest` of RAX/EAX, and SSA binds
+ * a later read of the accumulator to it — but the emitter printed the call and
+ * dropped the assignment, so the value the call produced was invisible in the
+ * output. Across t32/t64/w64 that left ~1500 register reads naming something
+ * the emitted function never assigns, `return rax` after a call being the
+ * common shape (peek-a-bin-oro).
+ *
+ * Which calls get one is a liveness question, and these pin both answers: the
+ * assignment appears when the result is read, and does not when the next thing
+ * to touch the register is another definition of it.
+ */
+describe("decompileFunction — a call's result", () => {
+  it("assigns the register the call returned in, when the body reads it", () => {
+    const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
+
+    // Before: `sub_408000(); return eax;` — C in which nothing assigns eax.
+    expect(code).toMatch(/eax = sub_408000\(\);/);
+    expect(code).toContain("return eax;");
+  });
+
+  it("leaves a call whose result the next call overwrites as a bare statement", () => {
+    const code = run(seq(0x401000, [["call", "0x408000"], ["call", "0x408004"], ["ret"]]));
+
+    // Only the second call's result reaches the `ret`; the first one's is dead,
+    // and an assignment nobody reads is noise in output written for people.
+    expect(code).toMatch(/^\s*sub_408000\(\);$/m);
+    expect(code).not.toMatch(/= sub_408000\(/);
+    expect(code).toMatch(/eax = sub_408004\(\);/);
+  });
+
+  it("says where the value a guard tests came from, and spells both the same way", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"], // 0x401000
+        ["test", "al, al"], // 0x401004
+        ["je", "0x401014"], // 0x401008
+        ["mov", "eax, 1"], // 0x40100c
+        ["ret"], // 0x401010
+        ["ret"], // 0x401014
+      ]),
+      true,
+    );
+
+    // `registerText` respells the read of AL as a narrowing of RAX because the
+    // function assigns RAX. That was already true of the call's `resultDest`
+    // before the assignment was ever printed, so the emitted guard tested
+    // `(uint8_t)rax` in a function whose body assigned no `rax` at all.
+    //
+    // The `je` targets the final `ret` on purpose. It used to target one past
+    // it, over a `mov eax, 2` nothing reached; that block is now emitted like
+    // any other unreachable one (peek-a-bin-d3z), and its `eax = 2` is a second
+    // spelling of the same storage, which is the one thing this test cannot
+    // have in the function.
+    expect(code).toContain("(uint8_t)rax");
+    expect(code).toMatch(/rax = sub_401100\(\);/);
+  });
+
+  /**
+   * The call clobber (`clobberedByCall` in `ssa.ts`) and this are two halves of
+   * one account of what a call does, and they cover disjoint registers: the
+   * result is assigned because the call produced it, and an argument register
+   * the call consumed becomes a variable nothing assigns because its value is
+   * gone. Both have to be visible in the same function for either to be read
+   * correctly.
+   */
+  it("assigns the result while an argument register the call destroyed stays unassigned", () => {
+    const code = run(
+      seq(0x401000, [["mov", "rcx, 1"], ["call", "0x401100"], ["add", "rax, rcx"], ["ret"]]),
+      true,
+    );
+
+    expect(code).toMatch(/rax = sub_401100\(1\);/);
+    const clobbered = /\bclobbered_rcx_\d+\b/.exec(code);
+    expect(clobbered).not.toBeNull();
+    // The clobbered name is read and never assigned — that is what it is for.
+    expect(code).not.toMatch(new RegExp(`${clobbered![0]}\\s*=[^=]`));
+  });
+
+  /**
+   * A pin on the rule rather than a regression test: the emitted text for this
+   * one is the same before and after, because a bare call is what both a dead
+   * result and no analysis at all produce. It is here because the obvious
+   * cheaper rule — "the register is read somewhere in the function" — passes
+   * every other test in this block and fails this one.
+   */
+  it("does not assign a result the very next statement overwrites", () => {
+    const code = run(seq(0x401000, [["call", "0x408000"], ["mov", "eax, 5"], ["ret"]]));
+
+    expect(code).toMatch(/^\s*sub_408000\(\);$/m);
+    expect(code).not.toMatch(/= sub_408000\(/);
   });
 });

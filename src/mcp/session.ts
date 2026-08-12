@@ -13,7 +13,7 @@ import { detectDriver, type DriverInfo } from "../analysis/driver";
 import { StructRegistry } from "../disasm/decompile/structs";
 import { jumpTableTargets } from "../disasm/seeds";
 import { buildDataWindows } from "../disasm/dataWindows";
-import { type TargetArch, archForMachine } from "../disasm/arch";
+import { type ImageArch, archForMachine } from "../disasm/arch";
 import {
   initCapstone,
   detectFunctionsFromBytes,
@@ -57,8 +57,14 @@ export interface AnalyzedFile {
    * the decompiler, the stack-frame analyser, operand parsing — must check this
    * and decline for anything but `"x86"`, because those stages produce
    * confident nonsense rather than an error when handed ARM64 instructions.
+   *
+   * `"unsupported"` — ARM32/Thumb, IA-64, RISC-V, MIPS — is the third answer,
+   * and it is not a decoder but the absence of one: `instructions` and
+   * `functions` are empty for such an image and the xref maps hold nothing,
+   * while everything the PE parser produces is as complete as ever. A check
+   * that already reads `arch !== "x86"` covers it without change.
    */
-  arch: TargetArch;
+  arch: ImageArch;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
   structRegistry: StructRegistry;
@@ -161,17 +167,31 @@ export class FileSession {
     // adding a target here starts a decode at the right address without
     // claiming it is a function.
     const seeds = [...functions.map((f) => f.address), ...jumpTableTargets(jumpTables)];
-    const instructions = hybridDisassembleBytes(
-      textBytes,
-      textBase,
-      is64,
-      arch,
-      seeds,
-      stringMap,
-      iatMap,
-      driverMode,
-      pdataFunctions,
-    );
+    // Not called at all for an image this engine has no decoder for.
+    //
+    // `hybridDisassembleBytes` and `buildXrefs` *throw* for such an image, and
+    // deliberately: their entire output is instructions, so a short or empty
+    // return is the silent-failure mode peek-a-bin-cen removed. But a throw
+    // here would fail the whole load, and everything above this point is
+    // correct for an ARM32 image — headers, sections, imports, exports,
+    // resources, the entropy and driver analysis, and the strings. Losing all
+    // of that to say "no disassembler" is a worse answer than saying it while
+    // keeping it. `arch` on the returned file is how a consumer tells this
+    // apart from an image that genuinely has no code (peek-a-bin-x7b).
+    const decodable = arch !== "unsupported";
+    const instructions = decodable
+      ? hybridDisassembleBytes(
+          textBytes,
+          textBase,
+          is64,
+          arch,
+          seeds,
+          stringMap,
+          iatMap,
+          driverMode,
+          pdataFunctions,
+        )
+      : [];
 
     // 8. Build xref map
     //
@@ -203,21 +223,26 @@ export class FileSession {
     for (const imp of pe.imports) {
       for (const addr of imp.iatAddresses) iatAddrs.push(addr);
     }
-    const allXrefs = buildXrefs(
-      textBytes,
-      textBase,
-      is64,
-      arch,
-      Array.from(stringMap.keys()),
-      iatAddrs,
-      functions.map((f) => [f.address, f.size] as [number, number]),
-      dataSectionRanges(pe.sections, imageBase),
-      // ARM64 only, and the reason that arch is the cheap one here: the sweep
-      // this would otherwise redo is the one step 7 just did over the same bytes
-      // at the same base. Handing the array over costs nothing without a worker
-      // boundary in the way.
-      instructions,
-    );
+    const allXrefs = !decodable
+      ? // Same reasoning as step 7: `buildXrefs` throws rather than report four
+        // empty maps, so it is not called. These four *are* empty, and honestly
+        // so — there are no instructions to read a reference out of.
+        { stringXrefs: [], importXrefs: [], dataXrefs: [], callGraph: [] }
+      : buildXrefs(
+          textBytes,
+          textBase,
+          is64,
+          arch,
+          Array.from(stringMap.keys()),
+          iatAddrs,
+          functions.map((f) => [f.address, f.size] as [number, number]),
+          dataSectionRanges(pe.sections, imageBase),
+          // ARM64 only, and the reason that arch is the cheap one here: the sweep
+          // this would otherwise redo is the one step 7 just did over the same bytes
+          // at the same base. Handing the array over costs nothing without a worker
+          // boundary in the way.
+          instructions,
+        );
 
     // 9. Detect anomalies
     const anomalies = detectAnomalies(pe);

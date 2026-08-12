@@ -45,6 +45,7 @@ function readI32(b: Uint8Array, i: number): number {
 const hex = (n: number) => `0x${(n >>> 0).toString(16)}`;
 const R64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
 const R32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+const R8 = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
 /** Capstone's spelling of a signed displacement inside a memory operand. */
 const sdisp = (v: number) => (v < 0 ? `- 0x${(-v).toString(16)}` : `+ 0x${v.toString(16)}`);
 
@@ -62,7 +63,11 @@ function memOperand(b: Uint8Array, i: number): { text: string; size: number } | 
   const base = R64[sib & 7];
   const disp = mod === 2 ? readI32(b, i + 2) : 0;
   const tail = mod === 2 ? ` ${sdisp(disp)}` : "";
-  return { text: `[${base} + ${index}*${scale}${tail}]`, size: mod === 2 ? 6 : 2 };
+  // Capstone leaves a scale of 1 out — `42 0f b6 84 09 00 10 00 00` prints as
+  // `byte ptr [rcx + r9 + 0x1000]`, verified against the shipped capstone.wasm.
+  // A fake that wrote `*1` would be testing a spelling no decoder produces.
+  const scaleText = scale === 1 ? "" : `*${scale}`;
+  return { text: `[${base} + ${index}${scaleText}${tail}]`, size: mod === 2 ? 6 : 2 };
 }
 
 interface FakeInsn {
@@ -152,6 +157,13 @@ function fakeCs() {
           const mem = memOperand(bytes, i + 1);
           if (mem && i + mem.size < bytes.length) {
             emit("mov", `${R32[(bytes[i + 1] >> 3) & 7]}, dword ptr ${mem.text}`, 1 + mem.size);
+            continue;
+          }
+        }
+        if (b === 0x8a) {
+          const mem = memOperand(bytes, i + 1);
+          if (mem && i + mem.size < bytes.length) {
+            emit("mov", `${R8[(bytes[i + 1] >> 3) & 7]}, byte ptr ${mem.text}`, 1 + mem.size);
             continue;
           }
         }
@@ -766,12 +778,20 @@ const movScaledDisp = (dst: number, base: number, idx: number, disp: number) => 
   0x80 | (idx << 3) | base,
   ...le32(disp),
 ];
-/** `movzx <r32>, byte ptr [<base> + <idx>*1]` — 4 bytes. */
-const movzxByte = (dst: number, base: number, idx: number) => [
+/** `movzx <r32>, byte ptr [<base> + <idx>*<scale> + disp32]` — 8 bytes. */
+const movzxByteDisp = (dst: number, base: number, idx: number, disp: number, scale = 1) => [
   0x0f,
   0xb6,
-  0x04 | (dst << 3),
+  0x84 | (dst << 3),
+  (Math.log2(scale) << 6) | (idx << 3) | base,
+  ...le32(disp),
+];
+/** `mov <r32>, byte ptr [<base> + <idx> + disp32]` — 7 bytes. Not the dense idiom. */
+const movByteDisp = (dst: number, base: number, idx: number, disp: number) => [
+  0x8a,
+  0x84 | (dst << 3),
   (idx << 3) | base,
+  ...le32(disp),
 ];
 const addReg = (dst: number, src: number) => [0x48, 0x01, 0xc0 | (src << 3) | dst];
 const movReg = (dst: number, src: number) => [0x48, 0x89, 0xc0 | (src << 3) | dst];
@@ -998,24 +1018,115 @@ describe("detectFunctions — x86-64 RVA jump tables", () => {
     expect(detect64(img).jumpTables).toEqual([]);
   });
 
-  it("refuses the dense two-table form rather than guess its case values", () => {
-    // MSVC's byte-index variant: a byte table selects the entry, so entry `i`
-    // is not case `i`. Reporting the wide table's targets in order would put
-    // real code behind wrong case labels — worse than reporting no switch.
-    const img = image(0x80, {
-      0x00: cmpImm8(RCX, 3),
-      0x03: jaTo(0x03, 0x60),
-      0x05: leaRip(0x05, RDX, BASE + 0x20),
-      0x0c: movzxByte(RAX, RDX, RCX),
-      0x10: movScaledDisp(RCX, RDX, RAX, 0),
-      0x17: addReg(RCX, RDX),
-      0x1a: jmpReg(RCX),
-      0x20: [...le32(0x20), ...le32(0x28)],
-      0x40: body,
-      0x48: body,
-      0x60: [0xc3],
+  /**
+   * peek-a-bin-div. MSVC's *dense* switch: a byte per case naming a row, and a
+   * dword per distinct body. This was detected and deliberately refused,
+   * because entry `i` is not case `i` and wrong case labels are worse than no
+   * switch. Reading both tables puts it back in case order.
+   *
+   * **Nothing in the local corpus emits this shape**, so these cases are the
+   * only verification there is. The encodings are real x86-64 and the operand
+   * spellings are the ones the shipped capstone.wasm produces (checked against
+   * it directly), but no real image has been through this path.
+   */
+  describe("the dense two-table form", () => {
+    const BYTE_TABLE = 0x20;
+    const DWORD_TABLE = 0x28;
+    const BODIES = [0x40, 0x48, 0x50];
+    /** Case → row. Deliberately not the identity: cases 3/4/5 reuse bodies. */
+    const ROWS = [0, 1, 2, 1, 0, 2];
+
+    const dense = (over: Record<number, number[]> = {}, movzx?: number[]) =>
+      image(0x80, {
+        0x00: cmpImm8(RCX, ROWS.length - 1),
+        0x03: jaTo(0x03, 0x60),
+        0x05: leaRip(0x05, RDX, IMAGE_BASE),
+        0x0c: movzx ?? movzxByteDisp(RAX, RDX, RCX, BASE + BYTE_TABLE - IMAGE_BASE),
+        0x14: movScaledDisp(RCX, RDX, RAX, BASE + DWORD_TABLE - IMAGE_BASE),
+        0x1b: addReg(RCX, RDX),
+        0x1e: jmpReg(RCX),
+        [BYTE_TABLE]: ROWS,
+        [DWORD_TABLE]: BODIES.flatMap((c) => le32(BASE + c - IMAGE_BASE)),
+        [BODIES[0]]: body,
+        [BODIES[1]]: body,
+        [BODIES[2]]: body,
+        0x60: [0xc3],
+        ...over,
+      });
+    const denseJmp = BASE + 0x1e;
+
+    it("reads both tables, so targets come out in case order", () => {
+      // Row order is 0x40/0x48/0x50; case order is 0x40/0x48/0x50/0x48/0x40/0x50.
+      // Reporting the dword table's three entries in order — what refusing this
+      // form avoided having to do — would have filed cases 3-5 under nothing and
+      // cases 0-2 under bodies that are only sometimes theirs.
+      expect(detect64(dense()).jumpTables).toEqual([
+        [denseJmp, ROWS.map((r) => BASE + BODIES[r])],
+      ]);
     });
-    expect(detect64(img).jumpTables).toEqual([]);
+
+    it("keeps its case bodies out of the function set", () => {
+      const { functions } = detect64(dense(), { entryPoint: BASE });
+      for (const c of BODIES) expect(functions.map((f) => f.address)).not.toContain(BASE + c);
+    });
+
+    it("refuses when nothing bounds the case value", () => {
+      // The `cmp` is the only statement of the byte table's length, exactly as
+      // in the single-table form.
+      const img = dense();
+      img.set([0x90, 0x90, 0x90], 0x00);
+      expect(detect64(img).jumpTables).toEqual([]);
+    });
+
+    it("refuses when neither operand of the byte load is the lea's register", () => {
+      // Then the displacement is not an RVA off the image base, and the byte
+      // table address it implies is one the program never formed. The compare
+      // is moved onto RBX so that everything *else* about this dispatch checks
+      // out: without the base test it reads a full, plausible, wrong table.
+      const img = dense(
+        { 0x00: cmpImm8(RBX, ROWS.length - 1) },
+        movzxByteDisp(RAX, RBX, RCX, BASE + BYTE_TABLE - IMAGE_BASE),
+      );
+      expect(detect64(img).jumpTables).toEqual([]);
+    });
+
+    it("refuses when both operands of the byte load are the lea's register", () => {
+      // `[rdx + rdx + d]` says nothing about which one is the case index, so
+      // there is no case register to bound. Again bounded, so the refusal is
+      // about the ambiguity and not about a missing compare.
+      const img = dense(
+        { 0x00: cmpImm8(RDX, ROWS.length - 1) },
+        movzxByteDisp(RAX, RDX, RDX, BASE + BYTE_TABLE - IMAGE_BASE),
+      );
+      expect(detect64(img).jumpTables).toEqual([]);
+    });
+
+    it("refuses a scaled byte load, which is not this idiom", () => {
+      // `[rdx + rcx*4 + d]` indexes something four bytes wide; a byte table's
+      // entries are one byte apart, so one of the two readings is wrong.
+      const img = dense({}, movzxByteDisp(RAX, RDX, RCX, BASE + BYTE_TABLE - IMAGE_BASE, 4));
+      expect(detect64(img).jumpTables).toEqual([]);
+    });
+
+    it("refuses a plain `mov` byte load, which does not widen an unsigned row", () => {
+      const img = dense({}, movByteDisp(RAX, RDX, RCX, BASE + BYTE_TABLE - IMAGE_BASE));
+      expect(detect64(img).jumpTables).toEqual([]);
+    });
+
+    it("stops at a case whose row points outside the dword table's reach", () => {
+      // Row 9 reads past the three-entry dword table into the case bodies,
+      // whose bytes do not resolve to anything in the code window.
+      const img = dense({ [BYTE_TABLE]: [0, 1, 9, 1, 0, 2] });
+      expect(detect64(img).jumpTables[0][1]).toEqual([BASE + BODIES[0], BASE + BODIES[1]]);
+    });
+
+    it("does not take this path when the single-table reading already worked", () => {
+      // The dense reader only ever runs where `boundedCaseCount` found nothing,
+      // so a normal RVA switch cannot be re-read through it.
+      expect(detect64(gccSwitch()).jumpTables).toEqual([
+        [BASE + 0x13, GCC_CASES.map((c) => BASE + c)],
+      ]);
+    });
   });
 
   it("keeps x64 case targets out of the function set", () => {
@@ -1377,6 +1488,31 @@ describe("a missing Capstone handle is reported, not absorbed", () => {
       `sub_${(BASE + 0x18).toString(16).toUpperCase()}`,
       `__handler_${(BASE + 0x1c).toString(16)}`,
     ]);
+  });
+
+  // peek-a-bin-4s9. The narrow answer above and a complete one used to be the
+  // same shape, so a caller could not tell them apart — the same defect class
+  // as a short read that reports success.
+  it("says which passes it could not run", () => {
+    const { omitted } = detectFunctions(img, BASE, true, ctxOf(), { entryPoint: BASE });
+    expect(omitted).toEqual(["call-targets", "jump-tables", "thunk-names", "tail-calls"]);
+  });
+
+  it("reports nothing omitted when the decoder is there", () => {
+    const { functions, omitted } = detectFunctions(img, BASE, true, ctxOf({ cs64: fakeCs() }), {
+      entryPoint: BASE,
+    });
+    // Same image, and the call target the decoder-less run above could not see
+    // is present — so this really is the complete answer `omitted` claims.
+    expect(functions.map((f) => f.address)).toContain(BASE + 0x10);
+    expect(omitted).toEqual([]);
+  });
+
+  it("reports the omission on the handle the architecture selects", () => {
+    // `cs32` set, 64-bit image: `detectFunctions` reads `cs64`, finds nothing,
+    // and must say so rather than report the handle it did not use.
+    expect(detectFunctions(img, BASE, true, ctxOf({ cs32: fakeCs() })).omitted).toHaveLength(4);
+    expect(detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() })).omitted).toEqual([]);
   });
 });
 

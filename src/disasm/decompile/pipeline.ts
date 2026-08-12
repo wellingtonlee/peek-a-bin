@@ -70,7 +70,7 @@ export function decompileFunction(
     }
 
     // 5. Structure CFG → structured IR statements
-    const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables);
+    const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables, is64);
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
     let cleaned = cleanupStructured(structured);

@@ -1,9 +1,9 @@
-import { useState, useRef, useCallback } from "react";
-import { useAppState, useAppDispatch, getDisplayName } from "./usePEFile";
-import { useSectionInfo } from "./useDerivedState";
-import { disasmWorker } from "../workers/disasmClient";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { SectionHeader } from "../pe/types";
+import { disasmWorker } from "../workers/disasmClient";
+import { useSectionInfo } from "./useDerivedState";
 import { type DisplayRow, rowAddress } from "./useDisassemblyRows";
+import { getDisplayName, useAppDispatch, useAppState } from "./usePEFile";
 
 export interface CrossSectionResult {
   section: SectionHeader;
@@ -229,23 +229,61 @@ export function useDisassemblySearch(
     })();
   }, [pe, searchQuery, sectionInfo, crossSearching]);
 
-  return {
-    showSearch,
-    setShowSearch,
-    searchQuery,
-    setSearchQuery,
-    searchRegexError,
-    searchMatches,
-    searchMatchIdx,
-    searchMatchGroups,
-    crossResults,
-    crossSearching,
-    handleSearch,
-    handleSearchNext,
-    handleSearchPrev,
-    handleCrossSearch,
-    searchDebounceRef,
-    resetSearch,
-    setCrossResults,
-  };
+  // The returned object is memoised, and that is load-bearing rather than a
+  // micro-optimisation: this object is one entry in handleKeyDown's dependency
+  // array (useDisassemblyKeyboard.ts). While it was a bare literal it had a
+  // fresh identity every render, so that useCallback memoised nothing and its
+  // other 36 entries were inert — a missing entry there could not misbehave
+  // because the callback was rebuilt every render anyway. Memoising here is
+  // what makes that array live, which is why the array was completed first
+  // (peek-a-bin-3qi) and audited entry-by-entry before this landed.
+  //
+  // Consequently every field below MUST appear in the dependency array unless
+  // it is stable by construction — a `useState` setter or a `useRef` object,
+  // which React guarantees never change identity, and which Biome's
+  // useExhaustiveDependencies rejects as unnecessary entries. Anything else
+  // that is returned but not listed would freeze at its first value inside any
+  // memo depending on this object: the classic stale closure, and there is no
+  // React renderer in this repo to catch it.
+  // `src/hooks/__tests__/disasmHandlerDeps.test.ts` guards both halves, and
+  // decides "stable" by reading how each name is bound rather than from a list.
+  return useMemo(
+    () => ({
+      showSearch,
+      setShowSearch,
+      searchQuery,
+      setSearchQuery,
+      searchRegexError,
+      searchMatches,
+      searchMatchIdx,
+      searchMatchGroups,
+      crossResults,
+      crossSearching,
+      handleSearch,
+      handleSearchNext,
+      handleSearchPrev,
+      handleCrossSearch,
+      searchDebounceRef,
+      resetSearch,
+      setCrossResults,
+    }),
+    [
+      showSearch,
+      searchQuery,
+      searchRegexError,
+      searchMatches,
+      searchMatchIdx,
+      searchMatchGroups,
+      crossResults,
+      crossSearching,
+      handleSearch,
+      handleSearchNext,
+      handleSearchPrev,
+      handleCrossSearch,
+      resetSearch,
+      // setShowSearch, setSearchQuery, setCrossResults and searchDebounceRef
+      // are deliberately absent: they are the stable-by-construction names
+      // above. Listing them is what Biome reports as unnecessary.
+    ],
+  );
 }

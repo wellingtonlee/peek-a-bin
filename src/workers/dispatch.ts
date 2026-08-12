@@ -19,7 +19,12 @@ import type { SectionHeader } from "../pe/types";
 import { decompileFunction } from "../disasm/decompile/pipeline";
 import { StructRegistry } from "../disasm/decompile/structs";
 import { detectIRPDispatches } from "../analysis/driver";
-import { type TargetArch, archForMachine, unsupportedOnArch } from "../disasm/arch";
+import {
+  type ImageArch,
+  archForMachine,
+  unsupportedArchMessage,
+  unsupportedOnArch,
+} from "../disasm/arch";
 import { unpackDataWindows } from "../disasm/dataWindows";
 import { type Arm64Context, detectArm64Functions, disassembleArm64 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
@@ -29,6 +34,7 @@ import {
   detectFunctions as _detectFunctions,
   hybridDisassemble as _hybridDisassemble,
   buildTypedXrefMap,
+  type DetectResult,
   buildAllXrefs as _buildAllXrefs,
 } from "../disasm/functionDetect";
 
@@ -76,8 +82,12 @@ export interface WorkerState {
    * Which decoder the loaded image needs, set by `configure` from the COFF
    * machine type. Defaults to `"x86"`, so a caller that never sends one gets
    * exactly the behaviour it had before ARM64 support existed.
+   *
+   * `"unsupported"` — ARM32/Thumb, IA-64, RISC-V, MIPS — is not a decoder but
+   * the absence of one, and the methods below split on it *before* the ARM64
+   * check so a new machine type can never fall through to the x86 path.
    */
-  arch: TargetArch;
+  arch: ImageArch;
   stringMap: Map<number, string>;
   iatMap: Map<number, { lib: string; func: string }>;
   driverMode: boolean;
@@ -162,12 +172,24 @@ export async function dispatch(
     }
 
     case "disassemble":
+      // Refuse rather than invent. An x86 linear sweep decodes essentially any
+      // byte string, so an ARM32 image came back as a full screen of plausible
+      // instructions with no signal that any of it was fiction — the same
+      // silent-failure shape peek-a-bin-cen removed from the Capstone-dead
+      // path, and the reason this throws instead of returning a short list
+      // (peek-a-bin-x7b).
+      if (state.arch === "unsupported") {
+        throw new Error(unsupportedArchMessage("Disassembly"));
+      }
       if (state.arch === "arm64") {
         return disassembleArm64(args.bytes, args.baseAddress, armCtx(state));
       }
       return _disassemble(args.bytes, args.baseAddress, args.is64, ctx(state));
 
     case "hybridDisassemble":
+      if (state.arch === "unsupported") {
+        throw new Error(unsupportedArchMessage("Disassembly"));
+      }
       if (state.arch === "arm64") {
         // Seeds are dropped deliberately. Recursive descent exists to resolve
         // the instruction boundaries a variable-length encoding leaves
@@ -187,6 +209,21 @@ export async function dispatch(
       );
 
     case "detectFunctions": {
+      // Answers, rather than throwing, for the reason `DetectResult.omitted`
+      // documents: detection's evidence is mostly not instructions. But every
+      // pass this architecture has *is* an x86 pass — the prologue byte tables,
+      // the call-target scan, the `readRvaTable` jump-table reader, the thunk
+      // and tail-call passes — and `pdata.ts` extracts no extents for anything
+      // but ARM64 and x64, so there is nothing left to answer *with*. Empty
+      // with every pass named beats a plausible list built from x86 byte
+      // patterns found in ARM code (peek-a-bin-x7b).
+      if (state.arch === "unsupported") {
+        return {
+          functions: [],
+          jumpTables: [],
+          omitted: ["call-targets", "jump-tables", "thunk-names", "tail-calls"],
+        } satisfies DetectResult;
+      }
       if (state.arch === "arm64") {
         // No jump-table reader on ARM64 — a `br` through a table is not the
         // pattern `readRvaTable` models — so the windows would go unread.
@@ -211,6 +248,12 @@ export async function dispatch(
       return buildTypedXrefMap(args.instructions, args.imageBounds);
 
     case "buildAllXrefs": {
+      // Every xref here is read out of a decoded instruction, so with no
+      // decoder there is no answer to give — and the x86 grammar handed ARM
+      // bytes does not fail, it reports references that are not there.
+      if (state.arch === "unsupported") {
+        throw new Error(unsupportedArchMessage("Cross-reference analysis"));
+      }
       if (state.arch === "arm64") {
         // `_buildAllXrefs` is an x86 operand grammar from end to end —
         // `[rip ± 0x..]`, `mov reg, imm`, `call 0x…`. Over ARM64 bytes it does
@@ -273,7 +316,10 @@ export async function dispatch(
       // DriverEntry — x86 mnemonics and x86 operand syntax. An ARM64 driver
       // stores its dispatch table with str/adrp and would simply never match,
       // so returning nothing here changes no answer; it just says so.
-      if (state.arch === "arm64") return [];
+      // Same argument for an image with no decoder at all: it matches x86
+      // mnemonics against instructions that are not x86, and there are none to
+      // match against in the first place, since `disassemble` refused.
+      if (state.arch === "arm64" || state.arch === "unsupported") return [];
       return detectIRPDispatches(args.instructions as Instruction[], args.is64 as boolean);
 
     case "resetStructRegistry":
@@ -285,6 +331,9 @@ export async function dispatch(
       // operands; handed ARM64 instructions it does not throw, it lifts almost
       // nothing and emits a small, confident, wrong C function. The panel shows
       // this message instead, which is the true state of affairs.
+      if (state.arch === "unsupported") {
+        throw new Error(unsupportedArchMessage("Decompilation"));
+      }
       if (state.arch === "arm64") {
         throw new Error(unsupportedOnArch("Decompilation", state.arch));
       }

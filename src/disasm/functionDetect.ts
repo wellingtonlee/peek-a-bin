@@ -135,9 +135,43 @@ export function disassemble(
   return instructions;
 }
 
+/**
+ * A detection pass whose evidence comes from decoded instructions.
+ *
+ * Named individually rather than as one "degraded" bit because they are lost
+ * independently and they cost different things: without `call-targets` the
+ * function list is short by every leaf function nothing else records, without
+ * `jump-tables` a switch dispatch is a dead-end block, without `thunk-names`
+ * an import thunk is `sub_401000` instead of `CreateFileW`, and without
+ * `tail-calls` a jump-terminated function looks like it simply ends.
+ */
+export type DetectPass = "call-targets" | "jump-tables" | "thunk-names" | "tail-calls";
+
 export interface DetectResult {
   functions: DisasmFunction[];
   jumpTables: [number, number[]][];
+  /**
+   * Passes that did not run, so their contribution is missing from `functions`
+   * and `jumpTables`. **Empty means this is the whole answer.**
+   *
+   * `detectFunctions` and `detectArm64Functions` deliberately keep answering
+   * without a decoder — unlike `disassemble`/`hybridDisassemble`/`buildAllXrefs`,
+   * which throw {@link CapstoneUnavailableError}, because *their* entire output
+   * is instructions (peek-a-bin-cen). Detection's evidence is mostly not: the
+   * `.pdata` extents, exports, the entry point, the unwind handlers and the
+   * x86 byte-pattern scans are all things the file itself states, and returning
+   * those is a smaller claim than returning nothing.
+   *
+   * But it is a *smaller* claim, and until this field existed nothing said so —
+   * a caller could not tell a decoder-less detection from a complete one
+   * (peek-a-bin-4s9). That is the same defect class as a short read that
+   * reports success.
+   *
+   * Only passes this architecture *has* are ever listed. The ARM64 detector has
+   * no thunk or tail-call pass at all, so their absence is not an omission and
+   * naming them here would misreport a design decision as a degradation.
+   */
+  omitted: DetectPass[];
 }
 
 /**
@@ -158,6 +192,7 @@ export interface DataWindow {
 
 /** Little-endian reads at a virtual address, or null when nothing maps it. */
 interface ImageReader {
+  u8(addr: number): number | null;
   i32(addr: number): number | null;
   u32(addr: number): number | null;
   u64(addr: number): number | null;
@@ -177,6 +212,10 @@ function makeImageReader(windows: DataWindow[]): ImageReader {
     return m.b[m.o] | (m.b[m.o + 1] << 8) | (m.b[m.o + 2] << 16) | (m.b[m.o + 3] << 24);
   };
   return {
+    u8: (addr) => {
+      const m = at(addr, 1);
+      return m === null ? null : m.b[m.o];
+    },
     i32: (addr) => {
       const v = raw32(addr);
       return v === null ? null : v | 0;
@@ -275,6 +314,35 @@ const SCALE4_BASE_FIRST =
 const SCALE4_INDEX_FIRST =
   /\[\s*([a-z][a-z0-9]*)\s*\*\s*4\s*\+\s*([a-z][a-z0-9]*)\s*(?:([+-])\s*0x([0-9a-fA-F]+)\s*)?\]/i;
 
+/**
+ * `byte ptr [rcx + r9 + 0x2f30]` → the two registers and the displacement.
+ *
+ * The *unscaled* two-register form, which is how the byte index table of a
+ * dense switch is addressed. Capstone prints a SIB scale of 1 by leaving it
+ * out — verified against the shipped `capstone.wasm`, which renders
+ * `42 0f b6 84 09 00 10 00 00` as `byte ptr [rcx + r9 + 0x1000]` — so the `*1`
+ * here is optional rather than expected.
+ *
+ * The two registers are returned unordered on purpose. Which of them Capstone
+ * prints first follows the SIB base/index fields, and the operand text does not
+ * say which is the image base; the caller knows that from the `lea` and matches
+ * on it. Requiring a scale of exactly 1 is what keeps this from also matching
+ * the `*4` entry load — `[r9 + rax*4 + 0x2000]` has a `*` where this pattern
+ * needs a `+`, a `-` or a `]`.
+ */
+const SCALE1_MEM =
+  /\[\s*([a-z][a-z0-9]*)\s*(?:\*\s*1\s*)?\+\s*([a-z][a-z0-9]*)\s*(?:\*\s*1\s*)?(?:([+-])\s*0x([0-9a-fA-F]+)\s*)?\]/i;
+
+function parseScale1Load(opStr: string): { a: string; b: string; disp: number } | null {
+  const m = opStr.match(SCALE1_MEM);
+  if (!m) return null;
+  const a = regFamily(m[1]);
+  const b = regFamily(m[2]);
+  if (!a || !b) return null;
+  const disp = m[3] ? (m[3] === "-" ? -1 : 1) * parseInt(m[4], 16) : 0;
+  return { a, b, disp };
+}
+
 /** `dword ptr [r9 + rax*4 + 0x1c]` → base `r9`, index `rax`, displacement `0x1c`. */
 function parseScale4Load(opStr: string): { base: string; index: string; disp: number } | null {
   let m = opStr.match(SCALE4_BASE_FIRST);
@@ -329,7 +397,14 @@ function parseScale4Load(opStr: string): { base: string; index: string; disp: nu
 function recoverX64RvaChain(
   jmpInsn: RecentInsn,
   recent: RecentInsn[],
-): { table: number; base: number; indexReg: string; loadIndex: number } | null {
+): {
+  table: number;
+  base: number;
+  /** The register the `lea` wrote — `base`'s name, which the dense form matches on. */
+  baseName: string;
+  indexReg: string;
+  loadIndex: number;
+} | null {
   const jmpReg = regFamily(jmpInsn.opStr);
   if (!jmpReg) return null;
 
@@ -389,7 +464,7 @@ function recoverX64RvaChain(
     if (mn === "lea" && destReg(p.opStr) === sought) {
       const target = resolveRipTarget(p);
       if (target === null) return null;
-      return { table: target + disp, base: target, indexReg: indexReg!, loadIndex };
+      return { table: target + disp, base: target, baseName: sought, indexReg: indexReg!, loadIndex };
     }
     if (destReg(p.opStr) === sought) return null;
   }
@@ -405,11 +480,12 @@ function recoverX64RvaChain(
  * the compare actually named. Without a check there is no length, and a table
  * with no length is not read at all.
  *
- * An index *loaded from memory* therefore ends the search with no count, which
- * is what refuses MSVC's dense two-table form (`movzx idx, byte ptr [...]`
- * selecting into the wide table). That form needs both tables decoded to say
- * which case reaches which body — entry *i* is not case *i* — and reporting the
- * wide table's targets in order would file real code under wrong case labels.
+ * An index *loaded from memory* therefore ends the search with no count. That
+ * is MSVC's dense two-table form (`movzx idx, byte ptr [...]` selecting into
+ * the wide table), and no count is the right answer *for this function*: the
+ * index it was asked about is an entry number, and entry numbers are not
+ * bounded by anything. The bound that form does have is on the *case* value one
+ * step further back, and {@link recoverDenseByteTable} is what goes and gets it.
  *
  * `before` is the position of the table load, not of the jump: the load's
  * destination is routinely the index register itself (`movsxd rax, [rdx +
@@ -530,6 +606,63 @@ function readAbsoluteTable(
 }
 
 /**
+ * The byte index table of MSVC's *dense* switch, walked back from the entry
+ * load of {@link recoverX64RvaChain}.
+ *
+ * A switch whose cases are dense but whose bodies are not all distinct gets two
+ * tables instead of one — a byte per case saying which body it uses, and a dword
+ * per distinct body:
+ *
+ * ```text
+ *   cmp   ecx, 0x21
+ *   ja    <default>
+ *   lea   r9,  [rip + N]                      ; __ImageBase
+ *   movzx eax, byte ptr [rcx + r9 + byteRva]  ; entry = byteTable[case]
+ *   mov   ecx, dword ptr [r9 + rax*4 + dwordRva]
+ *   add   rcx, r9
+ *   jmp   rcx
+ * ```
+ *
+ * The chain walk already recovers everything from the `mov` onwards, and then
+ * {@link boundedCaseCount} finds no bound, because `rax` is an entry number and
+ * nothing bounds an entry number. This is the missing step: the `movzx` names
+ * the byte table in its displacement and the *case* register in its other
+ * operand, and the `cmp` in front of the whole thing bounds that.
+ *
+ * Both registers of the `movzx` are compared against the `lea`'s: exactly one
+ * must be it, because the operand text does not say which is the image base
+ * (see {@link parseScale1Load}) and getting it backwards would read the byte
+ * table from the case index. `movzx` specifically, not `mov` or `movsx`: a
+ * table entry that selects a row is an unsigned index, and widening it any other
+ * way is not this idiom.
+ */
+function recoverDenseByteTable(
+  chain: NonNullable<ReturnType<typeof recoverX64RvaChain>>,
+  recent: RecentInsn[],
+): { byteTable: number; caseReg: string; loadIndex: number } | null {
+  for (let ri = chain.loadIndex - 1; ri >= 0; ri--) {
+    const p = recent[ri];
+    const mn = p.mnemonic.toLowerCase();
+    // Same reason as in the chain walk: a call clobbers every register here.
+    if (mn === "call") return null;
+    if (destReg(p.opStr) !== chain.indexReg) continue;
+    if (mn !== "movzx") return null;
+    if (!/\bbyte ptr\b/i.test(p.opStr)) return null;
+    const mem = parseScale1Load(p.opStr);
+    if (!mem) return null;
+    const aIsBase = mem.a === chain.baseName;
+    const bIsBase = mem.b === chain.baseName;
+    if (aIsBase === bIsBase) return null;
+    return {
+      byteTable: chain.base + mem.disp,
+      caseReg: aIsBase ? mem.b : mem.a,
+      loadIndex: ri,
+    };
+  }
+  return null;
+}
+
+/**
  * Case targets of an x86-64 RVA table reached through `jmp <reg>`.
  *
  * Three things bound the read, and all three are required: the chain has to
@@ -537,6 +670,21 @@ function readAbsoluteTable(
  * to have been bounds-checked (the only statement of the table's length), and
  * every entry has to land in the code window (so a table that is shorter than
  * its check claims stops at the first thing that is not a case body).
+ *
+ * The dense two-table form satisfies all three, just one step further back —
+ * see {@link recoverDenseByteTable}. It used to be refused outright
+ * (peek-a-bin-div), which was right at the time: entry *i* is not case *i*, so
+ * reporting the dword table's targets in order files real code under wrong case
+ * labels, and that is worse than reporting no switch. Reading it through the
+ * byte table restores case order, so `targets[c]` means case `c` in both forms.
+ *
+ * **Unverified against a real image.** No binary in the local corpus contains
+ * this shape — t64.exe and w64.exe hold no table-dispatched switch at all — so
+ * the encodings, the operand spellings and the two tables' relationship are
+ * checked against Capstone's real output and the documented idiom, and nothing
+ * else. It cannot silently damage the single-table form: that path is taken
+ * whenever `boundedCaseCount` succeeds, and this one only runs where the old
+ * code returned an empty list.
  */
 function readRvaTable(
   insn: RecentInsn,
@@ -548,11 +696,48 @@ function readRvaTable(
   const chain = recoverX64RvaChain(insn, recent);
   if (!chain) return [];
   const maxCases = boundedCaseCount(chain.indexReg, recent, chain.loadIndex);
-  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return [];
+  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) {
+    // A count above the ceiling is a claim not to be trusted, not an invitation
+    // to look for a second reading, so only the "no count" case falls through.
+    return maxCases > 0 ? [] : readDenseRvaTable(chain, recent, reader, codeStart, codeEnd);
+  }
 
   const targets: number[] = [];
   for (let c = 0; c < maxCases; c++) {
     const entry = reader.i32(chain.table + c * 4);
+    if (entry === null) break;
+    const target = chain.base + entry;
+    if (target < codeStart || target >= codeEnd) break;
+    targets.push(target);
+  }
+  return targets;
+}
+
+/**
+ * `targets[case] = base + int32(dwordTable[byteTable[case]])`.
+ *
+ * The byte table's length is the `cmp` in front of the dispatch, exactly as in
+ * the single-table form. The dword table needs no separate bound: every entry
+ * this reads is one the byte table pointed at, and each resulting target still
+ * has to land in the code window.
+ */
+function readDenseRvaTable(
+  chain: NonNullable<ReturnType<typeof recoverX64RvaChain>>,
+  recent: RecentInsn[],
+  reader: ImageReader,
+  codeStart: number,
+  codeEnd: number,
+): number[] {
+  const dense = recoverDenseByteTable(chain, recent);
+  if (!dense) return [];
+  const maxCases = boundedCaseCount(dense.caseReg, recent, dense.loadIndex);
+  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return [];
+
+  const targets: number[] = [];
+  for (let c = 0; c < maxCases; c++) {
+    const row = reader.u8(dense.byteTable + c);
+    if (row === null) break;
+    const entry = reader.i32(chain.table + row * 4);
     if (entry === null) break;
     const target = chain.base + entry;
     if (target < codeStart || target >= codeEnd) break;
@@ -869,8 +1054,13 @@ export function detectFunctions(
   // unwind handlers and the byte-pattern scans are all already in `addrSet`,
   // and every one of them is evidence the file itself supplies. What is lost
   // without a decoder is the call-target, jump-table and thunk passes — a
-  // narrower function list, not a silently empty one.
+  // narrower function list, not a silently empty one. `omitted` in the returned
+  // {@link DetectResult} is what says which (peek-a-bin-4s9); before it, the
+  // narrow answer and the complete one were the same shape.
   const cs = is64 ? ctx.cs64 : ctx.cs32;
+  const omitted: DetectPass[] = cs
+    ? []
+    : ["call-targets", "jump-tables", "thunk-names", "tail-calls"];
   if (cs) {
     const scan = createScan(cs, "function detection");
     let offset = 0;
@@ -1070,6 +1260,7 @@ export function detectFunctions(
   return {
     functions,
     jumpTables: Array.from(jumpTables.entries()),
+    omitted,
   };
 }
 

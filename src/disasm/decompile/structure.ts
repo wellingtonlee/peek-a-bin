@@ -1,6 +1,7 @@
 import type { BasicBlock, Loop } from "../cfg";
 import type { IRStmt, IRExpr } from "./ir";
 import { canonReg, irReg, isKnownRegister } from "./ir";
+import { parseOperand } from "./lifter";
 import { RegState } from "./regstate";
 import { computeRPO, computeDominators } from "./ssa";
 import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from "./cfgpatterns";
@@ -202,12 +203,21 @@ function computePostDominators(blocks: BasicBlock[]): Map<number, number> {
  *
  * Approach: recursive structural analysis over basic blocks, using the loop
  * detection results and the post-dominator tree.
+ *
+ * `is64` reaches only `extractCondition`, which parses the `cmp`/`test`
+ * operands of a branch with the lifter's parser. It is optional because the
+ * default reproduces exactly what the hand-rolled parser it replaced did: that
+ * parser hardcoded a width of 4, and `is64: false` is what makes
+ * `parseOperand` fall back to 4 for an immediate and for a memory operand with
+ * no size prefix. Passing the real value is strictly better and costs nothing,
+ * but omitting it cannot make a condition worse than it already was.
  */
 export function structureCFG(
   blocks: BasicBlock[],
   loops: Loop[],
   liftedBlocks: Map<number, IRStmt[]>,
   jumpTables: Map<number, number[]>,
+  is64 = false,
 ): IRStmt[] {
   if (blocks.length === 0) return [];
 
@@ -269,7 +279,20 @@ export function structureCFG(
    */
   const pinned = new Set<string>();
 
-  /** Get the condition from the last instruction(s) of a block. */
+  /**
+   * Get the condition from the last instruction(s) of a block.
+   *
+   * The `cmp`/`test` operands are parsed by `lifter.ts`'s `parseOperand`, the
+   * same function the lifter itself uses. It used to be a private
+   * `parseSimpleOperand` here, and the two disagreed in the two ways such a
+   * copy always eventually does: it hardcoded a width of 4, so `cmp byte ptr
+   * [rcx], dl` read as a 32-bit load, and it never went through
+   * `ripRelative.ts`, so `cmp byte ptr [rip + 0x13358], 0` kept the literal
+   * `rip + 0x…` — while `mov eax, dword ptr [rip + 0x142b3]` in the same
+   * function resolved to an absolute address, because *that* went through the
+   * lifter. CLAUDE.md records that `ripRelative.ts` exists because this parse
+   * was hand-rolled nine times; this was the tenth.
+   */
   function extractCondition(block: BasicBlock): IRExpr {
     const insns = block.insns;
     if (insns.length === 0) return { kind: "unknown", text: "empty block" };
@@ -282,13 +305,15 @@ export function structureCFG(
       // Find the cmp/test before this jump
       const regState = new RegState();
       for (let i = 0; i < insns.length - 1; i++) {
-        const insnMn = insns[i].mnemonic.toLowerCase();
+        const insn = insns[i];
+        const insnMn = insn.mnemonic.toLowerCase();
         if (insnMn === "cmp" || insnMn === "test") {
-          const parts = insns[i].opStr.split(",").map((s) => s.trim());
+          // No x86 memory operand contains a comma, so a plain split is a
+          // correct operand split for the two-operand forms this reads.
+          const parts = insn.opStr.split(",").map((s) => s.trim());
           if (parts.length >= 2) {
-            // Simple operand parsing for condition extraction
-            const left = parseSimpleOperand(parts[0]);
-            const right = parseSimpleOperand(parts[1]);
+            const left = parseOperand(parts[0], insn, is64);
+            const right = parseOperand(parts[1], insn, is64);
             regState.setFlags(insnMn as "cmp" | "test", left, right);
           }
         }
@@ -297,23 +322,6 @@ export function structureCFG(
     }
 
     return { kind: "unknown", text: `end: ${mn}` };
-  }
-
-  /** Simple operand parse for condition extraction (register or constant). */
-  function parseSimpleOperand(op: string): IRExpr {
-    const trimmed = op.trim().replace(/^(byte|word|dword|qword)\s+ptr\s+/i, "");
-    // Hex immediate
-    const hexM = trimmed.match(/^0x([0-9a-fA-F]+)$/);
-    if (hexM) return { kind: "const", value: parseInt(hexM[1], 16), size: 4 };
-    // Decimal
-    if (/^\d+$/.test(trimmed)) return { kind: "const", value: parseInt(trimmed, 10), size: 4 };
-    // Memory
-    const bracketM = trimmed.match(/\[([^\]]+)\]/);
-    if (bracketM) {
-      return { kind: "deref", address: parseSimpleOperand(bracketM[1]), size: 4 };
-    }
-    // Register
-    return { kind: "reg", name: trimmed, size: 4 };
   }
 
   /** BFS distances from `start`, in edges, never leaving `loopBody` if given. */
@@ -423,6 +431,38 @@ export function structureCFG(
     if (insns.length === 0) return false;
     const mn = insns[insns.length - 1].mnemonic.toLowerCase();
     return mn.startsWith("j") && mn !== "jmp";
+  }
+
+  /**
+   * Where a conditional jump ending `block` goes when the CFG has no edge for
+   * it, or `null` when it has one (or the block does not end in one).
+   *
+   * `buildCFG` only draws an edge to a target inside the instruction range it
+   * was given, so a `jcc` past the end of the detected function leaves its
+   * block with a single successor. Everything after that reads the block as
+   * unconditional: the test disappears, and so does the fact that the machine
+   * can leave there. In `t32!sub_4031A4` four such jumps vanish, two of them
+   * inside a loop, and what came out was `do { … } while (1)` — an
+   * unconditional `LeaveCriticalSection` inside a loop the reader is told never
+   * ends (peek-a-bin-lbz).
+   *
+   * The transfer itself cannot be spelled: the destination is not in this
+   * function, so there is no label to `goto` and no name to call. Stating the
+   * test with a comment for its arm is the most that is true — a reader can see
+   * the decision and where it goes. 37 conditional jumps across the corpus are
+   * in this position (20 on t32, 17 on w32, none on either 64-bit binary); all
+   * of them are a function whose detected end falls short of code that is
+   * really part of it, so the standing fix belongs to `functionDetect.ts`.
+   */
+  function lostBranchTarget(block: BasicBlock): number | null {
+    if (!endsWithCondJmp(block)) return null;
+    const last = block.insns[block.insns.length - 1];
+    const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
+    if (!m) return null;
+    const target = parseInt(m[1], 16);
+    const targetBlock = blockByAddr.get(target);
+    if (targetBlock && block.succs.includes(targetBlock.id)) return null;
+    return target;
   }
 
   /** Check if a block ends with ret. */
@@ -542,6 +582,22 @@ export function structureCFG(
       const blockStmts = liftedBlocks.get(block.id) ?? [];
       pushLabel(result, block);
       result.push(...blockStmts);
+
+      // A conditional jump the CFG has no edge for is still a test the machine
+      // makes. See `lostBranchTarget`.
+      const lostTarget = lostBranchTarget(block);
+      if (lostTarget !== null) {
+        result.push({
+          kind: "if",
+          condition: extractCondition(block),
+          thenBody: [
+            {
+              kind: "comment",
+              text: `control leaves for 0x${lostTarget.toString(16).toUpperCase()}, which is outside this function`,
+            },
+          ],
+        });
+      }
 
       // Determine what comes next based on block's exit
       if (endsWithRet(block) || block.succs.length === 0) {
@@ -1199,7 +1255,7 @@ export function structureCFG(
       for (const insn of pred.insns) {
         if (insn.mnemonic.toLowerCase() === "cmp") {
           const parts = insn.opStr.split(",").map((s) => s.trim());
-          if (parts.length >= 1) expr = parseSimpleOperand(parts[0]);
+          if (parts.length >= 1) expr = parseOperand(parts[0], insn, is64);
           break;
         }
       }
@@ -1240,7 +1296,7 @@ export function structureCFG(
         if (insn.mnemonic.toLowerCase() === "cmp") {
           const parts = insn.opStr.split(",").map((s) => s.trim());
           if (parts.length >= 1) {
-            switchExpr = parseSimpleOperand(parts[0]);
+            switchExpr = parseOperand(parts[0], insn, is64);
             break;
           }
         }
@@ -1325,33 +1381,30 @@ export function structureCFG(
    * label itself now, so all this pass has to do is pin the name against the
    * sweep that drops labels nothing jumps to.
    *
-   * Only blocks reachable from the entry qualify. The rest is alignment padding
-   * decoded past the last `ret`, and resurrecting that would bury the function
-   * in hundreds of nonsense statements.
+   * Reachability from the entry is deliberately *not* a condition. It used to
+   * be, on the grounds that the rest is alignment padding decoded past the last
+   * `ret`; that is not what it excluded (peek-a-bin-d3z). An exception funclet
+   * — an MSVC `__except`/`__finally` continuation, or a 32-bit SEH scope
+   * handler — is entered by the unwinder, not by a CFG edge, so it is
+   * unreachable by construction while being ordinary code sitting inside the
+   * function's own bounds. Across t32/t64/w64/w32 there are 1160 such blocks
+   * carrying 2685 statements and 200 `call` sites, and skipping them was the
+   * whole of the corpus's remaining lost-call count: 59 callees that the
+   * disassembly names and the emitted C never mentioned, now 0.
+   *
+   * Padding is excluded by the test that was already doing the work — a block
+   * that lifts to no statements is not resurrected — and padding lifts to
+   * nothing. On t32, 34 of the 807 unreachable blocks lift empty and are
+   * dropped here; the emitted text grows 20% on t32 and 0.1% on t64, which is
+   * the shape of "recovered real code", not "resurrected noise".
    *
    * Terminates because `structureFrom` marks its starting block visited on
    * every path through it, so each round removes at least one candidate.
    */
-  const reachable = new Set<number>([0]);
-  const queue = [0];
-  for (let i = 0; i < queue.length; i++) {
-    const block = blockById.get(queue[i]);
-    // A `ret` hands control to the caller, so nothing is reachable *through*
-    // it. `buildCFG` gives a ret-terminated block no successors in the first
-    // place; this keeps the two in step for any caller that builds its own.
-    if (!block || endsWithRet(block)) continue;
-    for (const succ of block.succs) {
-      if (!reachable.has(succ)) {
-        reachable.add(succ);
-        queue.push(succ);
-      }
-    }
-  }
-
   for (;;) {
     let next: BasicBlock | undefined;
     for (const b of blocks) {
-      if (!reachable.has(b.id) || visited.has(b.id)) continue;
+      if (visited.has(b.id)) continue;
       if ((liftedBlocks.get(b.id)?.length ?? 0) === 0) continue;
       if (!next || b.startAddr < next.startAddr) next = b;
     }

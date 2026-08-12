@@ -37,6 +37,9 @@ export const MIN_ENTROPY_BLOCKS = 64;
 /** CSS pixels each block gets on the strip. The draw uses the same number. */
 export const ENTROPY_STRIP_BLOCK_PX = 2;
 
+/** Height of the strip in CSS pixels. The canvas element is styled to match. */
+export const ENTROPY_STRIP_HEIGHT_PX = 12;
+
 /** Width step at which the block budget changes. See {@link entropyBlocksForWidth}. */
 export const ENTROPY_WIDTH_QUANTUM = 64;
 
@@ -66,6 +69,78 @@ export function entropyBlocksForWidth(
   const wanted = Math.ceil(cssWidth / blockPx);
   const quantized = Math.ceil(wanted / ENTROPY_WIDTH_QUANTUM) * ENTROPY_WIDTH_QUANTUM;
   return Math.min(maxBlocks, Math.max(MIN_ENTROPY_BLOCKS, quantized));
+}
+
+/** Backing-store size and draw scale for the entropy strip's canvas. */
+export interface EntropyStripGeometry {
+  /** `canvas.width` — the backing store, in device pixels. */
+  deviceWidth: number;
+  /** `canvas.height` — the backing store, in device pixels. */
+  deviceHeight: number;
+  /**
+   * Factor for `ctx.setTransform(scale, 0, 0, scale, 0, 0)`, after which every
+   * drawing coordinate is a CSS pixel again — the same unit the pointer
+   * handlers work in, which is the point.
+   */
+  scale: number;
+  /** Width of one block in CSS pixels. The exact quotient, never clamped. */
+  blockWidth: number;
+}
+
+/**
+ * Geometry for the entropy strip.
+ *
+ * The canvas is laid out by CSS (`w-full`, a fixed height), so its `width` and
+ * `height` *attributes* only size the backing store. Setting them to the CSS
+ * size — which is what this did before — gives one texel per CSS pixel, and on
+ * a HiDPI display the browser then upscales that to the physical grid: the bars
+ * come out soft and the 12 px strip loses its edges. Multiplying by
+ * `devicePixelRatio` and scaling the context by the same factor gives a texel
+ * per *device* pixel while leaving the drawing code in CSS pixels.
+ *
+ * `dpr` is not capped. `cssWidth * dpr` is by construction about the number of
+ * physical pixels the strip occupies, and browser zoom that raises `dpr`
+ * shrinks the CSS width in step, so the product stays bounded by the display.
+ *
+ * {@link blockWidth} is returned here rather than recomputed by each caller
+ * because the draw and the hit test must use the *same* mapping. They did not
+ * once: the draw clamped each bar to a 2 px minimum while the click handler
+ * divided by the unclamped quotient, so past the point where the bars ran off
+ * the right-hand edge the bar under the cursor was not the bar being reported.
+ * See {@link entropyBlockAtX} for the inverse.
+ */
+export function entropyStripGeometry(
+  cssWidth: number,
+  cssHeight: number,
+  blockCount: number,
+  dpr: number,
+): EntropyStripGeometry {
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const safeWidth = Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : 0;
+  const safeHeight = Number.isFinite(cssHeight) && cssHeight > 0 ? cssHeight : 0;
+  return {
+    deviceWidth: Math.max(1, Math.round(safeWidth * scale)),
+    deviceHeight: Math.max(1, Math.round(safeHeight * scale)),
+    scale,
+    blockWidth: blockCount > 0 ? safeWidth / blockCount : 0,
+  };
+}
+
+/**
+ * Index of the block at `x` CSS pixels from the strip's left edge, or -1 if `x`
+ * falls outside it.
+ *
+ * The inverse of the draw performed with {@link entropyStripGeometry}'s
+ * `blockWidth`, and the only mapping the pointer handlers are allowed to use.
+ * Note it takes the strip's *CSS* width: the canvas backing store is bigger on
+ * a HiDPI display, but `getBoundingClientRect()` and `MouseEvent.clientX` are
+ * both in CSS pixels, so device pixels never enter the hit test.
+ */
+export function entropyBlockAtX(x: number, cssWidth: number, blockCount: number): number {
+  const { blockWidth } = entropyStripGeometry(cssWidth, 0, blockCount, 1);
+  if (blockWidth <= 0 || !Number.isFinite(x)) return -1;
+  const idx = Math.floor(x / blockWidth);
+  return idx >= 0 && idx < blockCount ? idx : -1;
 }
 
 /**
