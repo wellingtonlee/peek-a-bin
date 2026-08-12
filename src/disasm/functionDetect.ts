@@ -1058,9 +1058,33 @@ function reachableCondJumpCrosses(
  *    whereas an unconditional `jmp` past the boundary is how a tail call and a
  *    shared epilogue are spelled and implies nothing.
  *
- * A start the file itself names is never withdrawn (`strong`), and a previous
- * function whose extent `.pdata` states is never extended — the linker's record
- * outranks this inference on both sides.
+ * Two exemptions bound it, and both are the linker's record outranking this
+ * inference: a start in `strong` is never withdrawn, and a previous function
+ * whose extent `.pdata` states is never extended.
+ *
+ * **`strong` is "named by a table the parser reads", which is narrower than
+ * "named by the file", and the gap is exactly this shape.** MSVC's 32-bit SEH
+ * scope table names its `__finally` funclets, and two of the five starts this
+ * withdraws on t32 are entries in one: `sub_405745` pushes scope table
+ * 0x411218, whose entry at 0x411230 is `{EnclosingLevel -2, Filter NULL,
+ * Handler 0x4058A6}`, and `sub_40628D` pushes 0x4112A8, whose entry at 0x4112C0
+ * names 0x4063B8. They are absent from `strong` only because nothing reads that
+ * table — not because the file was silent about them.
+ *
+ * Withdrawing them is still right. A NULL filter beside a handler is
+ * `__finally`, and a `__finally` funclet runs on its parent's frame with no
+ * prologue of its own: 0x4063B8 opens `cmp dword ptr [ebp + 0x10], 0`, the
+ * *parent's* third argument. It is part of that function, not another one.
+ *
+ * So if the scope table is ever parsed, **do not put its handler addresses into
+ * `strong`.** That re-breaks `sub_4031A4`: the table names handler 0x403270,
+ * and 0x403276 sits six bytes inside it, past the register reloads only the
+ * unwinder needs — promoting either one cuts the parent in half again, which is
+ * the defect this function exists to prevent. What the scope table actually
+ * states is "this address is a funclet **of** that parent", strictly more than
+ * "this address is named", so it belongs in a relation attributing the funclet
+ * to its parent rather than in a set that protects it from one
+ * (peek-a-bin-sysf).
  */
 function interiorBranchedOverStarts(
   sortedAddrs: number[],
@@ -1179,10 +1203,17 @@ export function detectFunctions(
     if (prev === undefined || matched > prev) patternAddrs.set(addr, matched);
   };
   /**
-   * Starts the *file itself* names: a `.pdata` begin, an unwind handler, the
-   * entry point, an export. {@link interiorBranchedOverStarts} will not withdraw
-   * one of these no matter what the surrounding code looks like — the evidence
-   * for them is a table the linker wrote, not an inference from bytes.
+   * Starts named by a linker-written table *this parser reads*: a `.pdata`
+   * begin, an unwind handler, the entry point, an export.
+   * {@link interiorBranchedOverStarts} will not withdraw one of these no matter
+   * what the surrounding code looks like — the evidence for them is a table the
+   * linker wrote, not an inference from bytes.
+   *
+   * Read the membership rule literally rather than as "everything the file
+   * names". MSVC's 32-bit SEH scope table names `__finally` funclet addresses
+   * and is deliberately **not** a source here; see
+   * {@link interiorBranchedOverStarts} for why adding it would reintroduce
+   * peek-a-bin-g7yp rather than sharpen this set.
    */
   const strongStarts = new Set<number>();
 
