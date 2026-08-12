@@ -4,10 +4,12 @@ import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { useEntropyStrip } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
+  dprMediaQuery,
   ENTROPY_STRIP_HEIGHT_PX,
   entropyBlockAtX,
   entropyBlocksForWidth,
   entropyStripGeometry,
+  nextStripWidth,
 } from "../utils/entropy";
 import { DataInspector } from "./DataInspector";
 import { focusOnMount } from "./focusOnMount";
@@ -219,55 +221,112 @@ export function HexView() {
     // Fires once on observe, so the first width arrives without a resize.
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width ?? el.clientWidth;
-      // Quantized, so this setState is a no-op for small changes and a drag
-      // does not re-render on every frame. `prev === 0` is the unmeasured
-      // state and must always be replaced: a strip narrow enough to land on
-      // the same (minimum) block budget as an unmeasured one would otherwise
-      // stay at 0 forever, and 0 is what keeps the strip switched off.
-      setStripWidth((prev) =>
-        prev !== 0 && entropyBlocksForWidth(prev) === entropyBlocksForWidth(width) ? prev : width,
-      );
+      // `nextStripWidth` returns `prev` whenever the block budget is unchanged,
+      // so this setState is a no-op by identity for small changes and a drag
+      // does not re-render on every frame. It is only about the block *count* —
+      // repainting the canvas at the new size is the draw effect's job, and it
+      // observes the canvas itself for exactly the resizes this one swallows.
+      setStripWidth((prev) => nextStripWidth(prev, width));
     });
     observer.observe(el);
     return () => observer.disconnect();
   }, [showEntropy]);
 
-  // Draw entropy canvas
+  // Draw entropy canvas.
+  //
+  // The canvas keeps itself painted for as long as it is mounted, rather than
+  // being drawn once per render: two of the three things that change the mapping
+  // from blocks to physical pixels are not React state and cannot be made into
+  // it without a render per animation frame.
+  //
+  //  * The element's **CSS width**, which moves on every frame of a pane drag,
+  //    while `stripWidth` above only moves when the drag crosses a whole
+  //    `ENTROPY_WIDTH_QUANTUM`. In between, the backing store kept its old size
+  //    and the browser stretched the strip to fit.
+  //  * **`window.devicePixelRatio`**, which changes when the window is dragged
+  //    to a display of a different density and, in Chrome, on browser zoom.
+  //    Dragging between displays changes no CSS dimension, so the observer
+  //    cannot see it; `dprMediaQuery` explains why the listener is re-armed
+  //    (peek-a-bin-oqp).
+  //
+  // Neither goes through state, so a resize repaints without re-rendering the
+  // hex view. Resizing the backing store cannot re-trigger the observer: the
+  // element's layout size is fixed by CSS (`w-full` plus an inline height), so
+  // the width/height *attributes* have no effect on it — which is the same
+  // property that made the HiDPI sizing safe to do without a renderer.
   useEffect(() => {
-    if (!showEntropy || !canvasRef.current || entropyBlocks.length === 0) return;
     const canvas = canvasRef.current;
+    if (!showEntropy || !canvas || entropyBlocks.length === 0) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    // CSS lays the canvas out (`w-full`, a fixed height), so width/height here
-    // size only the backing store: one texel per *device* pixel rather than per
-    // CSS pixel, which is what stops the strip being upscaled and soft on a
-    // HiDPI display. The context is scaled by the same factor, so every
-    // coordinate below is still a CSS pixel — the unit the pointer handlers
-    // use. `Math.max(2, …)` used to sit on blockWidth, and with more blocks
-    // than half the canvas width it walked straight off the right-hand edge: at
-    // 4096 blocks on a 1000 px strip every block past the 500th was drawn
-    // outside the canvas and simply not shown, while the click and hover
-    // handlers mapped x to a block using the unclamped width — so the bar under
-    // the cursor was not the bar being reported. Draw and hit test now share
-    // one mapping (`entropyStripGeometry` / `entropyBlockAtX`); keep it that
-    // way.
-    const w = canvas.clientWidth;
-    const geom = entropyStripGeometry(
-      w,
-      ENTROPY_STRIP_HEIGHT_PX,
-      entropyBlocks.length,
-      window.devicePixelRatio,
-    );
-    canvas.width = geom.deviceWidth;
-    canvas.height = geom.deviceHeight;
-    // Assigning width/height resets the context, transform included, so this
-    // has to come after and cannot accumulate across redraws.
-    ctx.setTransform(geom.scale, 0, 0, geom.scale, 0, 0);
-    ctx.clearRect(0, 0, w, ENTROPY_STRIP_HEIGHT_PX);
-    for (let i = 0; i < entropyBlocks.length; i++) {
-      ctx.fillStyle = entropyColor(entropyBlocks[i]);
-      ctx.fillRect(i * geom.blockWidth, 0, Math.ceil(geom.blockWidth), ENTROPY_STRIP_HEIGHT_PX);
+
+    // An arrow rather than a `function`: TypeScript keeps the null narrowing of
+    // `canvas` and `ctx` above through a closure created here, but not through a
+    // hoisted declaration, which it has to assume could run first.
+    const draw = () => {
+      // Both are re-read on every draw. That is the whole fix: the ratio is a
+      // live value, and caching it in the effect's closure is what made the
+      // strip stale.
+      const w = canvas.clientWidth;
+      const geom = entropyStripGeometry(
+        w,
+        ENTROPY_STRIP_HEIGHT_PX,
+        entropyBlocks.length,
+        window.devicePixelRatio,
+      );
+      // CSS lays the canvas out, so width/height here size only the backing
+      // store: one texel per *device* pixel rather than per CSS pixel, which is
+      // what stops the strip being upscaled and soft on a HiDPI display. The
+      // context is scaled by the same factor, so every coordinate below is
+      // still a CSS pixel — the unit the pointer handlers use. `Math.max(2, …)`
+      // used to sit on blockWidth, and with more blocks than half the canvas
+      // width it walked straight off the right-hand edge: at 4096 blocks on a
+      // 1000 px strip every block past the 500th was drawn outside the canvas
+      // and simply not shown, while the click and hover handlers mapped x to a
+      // block using the unclamped width — so the bar under the cursor was not
+      // the bar being reported. Draw and hit test now share one mapping
+      // (`entropyStripGeometry` / `entropyBlockAtX`); keep it that way.
+      canvas.width = geom.deviceWidth;
+      canvas.height = geom.deviceHeight;
+      // Assigning width/height resets the context, transform included, so this
+      // has to come after and cannot accumulate across redraws.
+      ctx.setTransform(geom.scale, 0, 0, geom.scale, 0, 0);
+      ctx.clearRect(0, 0, w, ENTROPY_STRIP_HEIGHT_PX);
+      for (let i = 0; i < entropyBlocks.length; i++) {
+        ctx.fillStyle = entropyColor(entropyBlocks[i]);
+        ctx.fillRect(i * geom.blockWidth, 0, Math.ceil(geom.blockWidth), ENTROPY_STRIP_HEIGHT_PX);
+      }
+    };
+
+    draw();
+
+    // Fires once on observe as well, which is harmless — the draw is idempotent
+    // and reads the live size either way.
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(canvas);
+
+    // A `(resolution: Xdppx)` query names the ratio it was built from, so it can
+    // only report leaving it. Re-arm from the new ratio, then redraw. If the
+    // ratio moves twice before this runs, the freshly armed query already fails
+    // to match and fires again, so the chain is self-correcting.
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      armDprQuery();
+      draw();
+    };
+    // Hoisted, because it and `onDprChange` refer to each other. Nothing calls
+    // it before the `const` above is initialised.
+    function armDprQuery() {
+      dprQuery?.removeEventListener("change", onDprChange);
+      dprQuery = window.matchMedia(dprMediaQuery(window.devicePixelRatio));
+      dprQuery.addEventListener("change", onDprChange);
     }
+    armDprQuery();
+
+    return () => {
+      observer.disconnect();
+      dprQuery?.removeEventListener("change", onDprChange);
+    };
   }, [showEntropy, entropyBlocks]);
 
   const handleGoTo = useCallback(() => {

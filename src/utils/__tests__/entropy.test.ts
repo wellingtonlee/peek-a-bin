@@ -13,6 +13,7 @@ import {
   computeEntropyBlocks,
   computeSectionEntropies,
   computeSectionEntropy,
+  dprMediaQuery,
   ENTROPY_STRIP_BLOCK_PX,
   ENTROPY_STRIP_HEIGHT_PX,
   ENTROPY_WIDTH_QUANTUM,
@@ -22,6 +23,7 @@ import {
   entropyStripGeometry,
   MAX_ENTROPY_BLOCKS,
   MIN_ENTROPY_BLOCKS,
+  nextStripWidth,
 } from "../entropy";
 
 /** `count` bytes, all `value`. */
@@ -344,6 +346,90 @@ describe("entropyBlocksForWidth", () => {
         const size = entropyBlockSizeFor(len, 256, budget);
         expect(Math.ceil(len / size)).toBeLessThanOrEqual(budget);
       }
+    }
+  });
+});
+
+describe("nextStripWidth", () => {
+  it("keeps the previous width whenever the block budget is unchanged", () => {
+    // The value is fed to a setState, and React compares with Object.is — so
+    // returning the *same number* is what makes a sub-quantum resize cost no
+    // render at all. Returning an equal-but-recomputed budget would not help.
+    //
+    // 1100 sits inside a step rather than on one of its edges (1024 is exactly
+    // a boundary, so a single pixel either way crosses it).
+    const prev = 1100;
+    for (const width of [1025, 1049, 1100, 1151, 1152]) {
+      expect(entropyBlocksForWidth(width)).toBe(entropyBlocksForWidth(prev));
+      expect(nextStripWidth(prev, width)).toBe(prev);
+    }
+  });
+
+  it("takes the new width once the budget moves, in either direction", () => {
+    const step = ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_PX;
+    for (const width of [1100 - step, 1100 + step]) {
+      expect(entropyBlocksForWidth(width)).not.toBe(entropyBlocksForWidth(1100));
+      expect(nextStripWidth(1100, width)).toBe(width);
+    }
+  });
+
+  it("always replaces the unmeasured 0, even at the minimum budget", () => {
+    // 0 means "the ResizeObserver has not reported yet" and is also what keeps
+    // the strip switched off (`showEntropy && stripWidth > 0`). A strip narrow
+    // enough to land on MIN_ENTROPY_BLOCKS shares its budget with the
+    // unmeasured state, so an equality test alone would leave it off forever.
+    const narrow = 8;
+    expect(entropyBlocksForWidth(narrow)).toBe(entropyBlocksForWidth(0));
+    expect(nextStripWidth(0, narrow)).toBe(narrow);
+    expect(nextStripWidth(0, 1024)).toBe(1024);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1])(
+    "discards a nonsense measurement (%s) rather than storing it",
+    (measured) => {
+      // A NaN width reaches entropyBlockSizeFor and yields a NaN block size,
+      // i.e. an empty strip with nothing reporting an error anywhere.
+      expect(nextStripWidth(1024, measured)).toBe(1024);
+      expect(nextStripWidth(0, measured)).toBe(0);
+    },
+  );
+
+  it("is idempotent, so a repeated measurement never re-renders", () => {
+    const once = nextStripWidth(0, 1337);
+    expect(nextStripWidth(once, 1337)).toBe(once);
+  });
+});
+
+describe("dprMediaQuery", () => {
+  it("names the exact ratio it was given", () => {
+    // The query has to match *now* and stop matching when the ratio changes;
+    // that is the only way devicePixelRatio is observable (peek-a-bin-oqp).
+    expect(dprMediaQuery(1)).toBe("(resolution: 1dppx)");
+    expect(dprMediaQuery(2)).toBe("(resolution: 2dppx)");
+    expect(dprMediaQuery(1.5)).toBe("(resolution: 1.5dppx)");
+  });
+
+  it("produces a different query for every ratio, so re-arming is a real change", () => {
+    const seen = new Set([1, 1.25, 1.5, 1.75, 2, 2.5, 3].map(dprMediaQuery));
+    expect(seen.size).toBe(7);
+  });
+
+  it.each([0, -2, Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number])(
+    "falls back to 1x for a ratio of %s",
+    (dpr) => {
+      // matchMedia does not throw on "(resolution: NaNdppx)" — it returns a
+      // list that never matches and never fires, so a dead listener would look
+      // exactly like a working one.
+      expect(dprMediaQuery(dpr)).toBe("(resolution: 1dppx)");
+    },
+  );
+
+  it("agrees with the ratio entropyStripGeometry would use", () => {
+    // Both sanitise; if they disagreed the strip would be armed for one ratio
+    // and drawn at another.
+    for (const dpr of [1, 1.5, 2, 3, 0, Number.NaN]) {
+      const { scale } = entropyStripGeometry(800, ENTROPY_STRIP_HEIGHT_PX, 400, dpr);
+      expect(dprMediaQuery(dpr)).toBe(`(resolution: ${scale}dppx)`);
     }
   });
 });

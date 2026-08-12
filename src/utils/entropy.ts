@@ -71,6 +71,59 @@ export function entropyBlocksForWidth(
   return Math.min(maxBlocks, Math.max(MIN_ENTROPY_BLOCKS, quantized));
 }
 
+/**
+ * The width to store after the strip measures `measured` CSS pixels, given the
+ * `prev` stored width. Returning `prev` unchanged is how a resize is made not to
+ * re-render.
+ *
+ * The stored width feeds {@link entropyBlocksForWidth}, and that answer is
+ * quantized — so a drag that moves the strip by a few pixels does not change the
+ * block count and there is no reason to put React through a render for it.
+ * Keeping the *old* width when the budget is unchanged is what makes the
+ * `ResizeObserver`'s `setState` a no-op by identity rather than by value.
+ *
+ * Two cases the equality alone gets wrong:
+ *
+ * - `prev === 0` is the *unmeasured* state, not a width. A strip narrow enough
+ *   to land on the minimum budget — which an unmeasured one also does — would
+ *   otherwise stay at 0 forever, and 0 is what keeps the strip switched off.
+ * - a non-finite or negative measurement is not a width either. It reaches
+ *   `entropyBlockSizeFor` as a NaN block size, i.e. an empty strip with no error
+ *   reported anywhere, so it is discarded rather than stored.
+ *
+ * Note this is only about *recomputing blocks*. Redrawing the canvas at the new
+ * size is a separate question with a separate answer — the draw effect observes
+ * the element directly, because a sub-quantum resize still has to repaint or the
+ * browser stretches the old backing store (peek-a-bin-oqp).
+ */
+export function nextStripWidth(prev: number, measured: number): number {
+  if (!Number.isFinite(measured) || measured < 0) return prev;
+  if (prev === 0) return measured;
+  return entropyBlocksForWidth(prev) === entropyBlocksForWidth(measured) ? prev : measured;
+}
+
+/**
+ * A media query that matches exactly the given device pixel ratio.
+ *
+ * `devicePixelRatio` has no change event and is not observable any other way: a
+ * `ResizeObserver` reports CSS pixels, so moving a window to a display of a
+ * different density — same CSS layout, twice the physical pixels — fires
+ * nothing at all. The one signal available is a media query that *names the
+ * current ratio*, which stops matching the moment the ratio changes. That makes
+ * it single-use by construction, so the listener has to be re-armed from the new
+ * ratio each time it fires.
+ *
+ * `dpr` is sanitised the same way {@link entropyStripGeometry} sanitises it, and
+ * for the same reason: some embedded webviews report 0 or `undefined`, and
+ * `(resolution: NaNdppx)` is not a valid query — `matchMedia` does not throw on
+ * one, it returns a list that never matches and never fires, i.e. the listener
+ * would be silently dead rather than obviously broken.
+ */
+export function dprMediaQuery(dpr: number): string {
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  return `(resolution: ${scale}dppx)`;
+}
+
 /** Backing-store size and draw scale for the entropy strip's canvas. */
 export interface EntropyStripGeometry {
   /** `canvas.width` — the backing store, in device pixels. */
