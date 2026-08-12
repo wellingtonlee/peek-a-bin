@@ -57,3 +57,6 @@ coverage/
 .dolt/
 .beads-credential-key
 .beads/proxieddb/
+
+# Corpus audit output (npm run corpus)
+corpus/artifacts/

@@ -170,9 +170,15 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**Measured against real binaries.** Each of these has an oracle outside the code under test —
-and the harnesses themselves live in the scratchpad, not in `src/`, so `npm test` does not run
-any of them and nothing here is re-checked unless someone re-runs it:
+**The harnesses live in `corpus/`. Run them with `npm run corpus`** — see `corpus/README.md`,
+which says what each audit proves and what a failure means. They are deliberately outside
+`npm test`: they need real MSVC binaries that are not in the repo and a C compiler, and they skip
+cleanly (naming what is missing) when either is absent. `npm run corpus:compare -- <base> <change>`
+diffs two runs guard-by-guard and is how a commit gets judged. Nothing here is re-checked unless
+someone re-runs it. (They lived only in `/tmp` scratchpads until `peek-a-bin-dfae`, and were
+rebuilt from scratch twice in one day as a result — do not move them back.)
+
+**Measured against real binaries.** Each of these has an oracle outside the code under test:
 
 - **The PE parser holds**, differentially against an **independently written from-spec reader** — sections, imports, exports, imphash, resources, checksum and `.pdata` agree on every file, including 419/419 and 381/381 ARM64 `.pdata` entries on begin/end/unwind/handler. pefile is **not** installed here, so the reference is hand-written, not pefile.
 - **Condition polarity is audited per guard against the originating jcc**, not spot-checked: **0 inverted at every re-run** (1276 guards when first audited, 1505 at `57f8406`), and every subsequent structuring change re-ran the audit. It now covers all four emitted shapes — `if`, `while`, `for` and `do/while` — and resolves candidates through `jmp`-only blocks, since anchoring to the wrong jcc one edge away produced a false inverted on an ordinary MSVC loop entry (`peek-a-bin-8r0`, `peek-a-bin-lbz`).

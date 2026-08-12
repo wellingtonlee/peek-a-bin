@@ -24,6 +24,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "corpus": "vitest run --config vitest.corpus.config.ts",
+    "corpus:compare": "node corpus/compare.mjs",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:setup": "tsx src/mcp/index.ts setup"
   },
