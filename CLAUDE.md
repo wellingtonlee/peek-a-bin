@@ -89,7 +89,15 @@ CI runs `lint`, `typecheck`, `test` and `build` on every PR, plus a separate
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (45 fields), `AppAction` discriminated union (53 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (46 fields), `AppAction` discriminated union (54 action types). Access via `useAppState()` / `useAppDispatch()`.
+
+`usePEFile.ts` also exports **`VIEW_TABS`**, the nine view tabs in display order, and it is the
+single declaration of that ordering — `AddressBar`'s tab bar and its 1-9 `TAB_KEYS` shortcut map
+are both derived from it, with labels from `VIEW_TAB_LABELS` in `components/analysisNotice.ts`.
+Do not re-spell either the order or the names: they were previously written out three times, so a
+tab could be called one thing on its button and another in the notice telling you to open it.
+`VIEW_TAB_LABELS` is `Record<ViewTab, string>` and fails the build on a missing tab, where an
+array would silently drop it from the bar.
 
 `appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. Two invariants that suite pins and you should preserve: no-op branches return the **same object reference** (returning a new equal object causes pointless re-renders), and every mutating action **replaces** rather than mutates — the annotation undo/redo snapshots hold direct references to annotation objects, so a branch that mutates in place would corrupt history retroactively.
 
@@ -97,6 +105,18 @@ CI runs `lint`, `typecheck`, `test` and `build` on every PR, plus a separate
 bar surfaces it. Without it a failed parse left the UI spinning forever. `usePEFile.ts` also
 exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast that string to
 `ViewTab` directly.
+
+**`analysisNotice()` (`components/analysisNotice.ts`) has three kinds, and they are ranked**:
+`"unsupported-arch"`, then `"analysis-failed"`, then `"partial-detection"`. The third is fed by
+`AppState.omittedPasses` (`SET_OMITTED_PASSES`, from `DetectResult.omitted`) and exists for the
+*supported*-architecture case where Capstone is dead: detection keeps answering from `.pdata`,
+the exports, the entry point and the unwind handlers, so the list is short rather than empty and
+the status bar's green "Ready" over it said nothing was wrong. An unsupported architecture
+already implies every decoder-fed pass, so partial-detection is deliberately **not** reported on
+top of it; on a failure its sentence is *appended* rather than substituted, because which stage
+threw and how much of the list survived are different facts. `DETECT_PASS_LABELS` is
+`Record<DetectPass, string>`, so wire values like `call-targets` cannot reach the screen and a
+fifth pass fails the build.
 
 **Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches). Whole-file checksum and entropy go to the separate metrics worker via `metricsClient.ts`; inputs under the thresholds in `asyncMetricState.ts` (256 KiB for the entropy strip, 1 MiB for file metrics) stay synchronous and spawn no worker, so ordinary binaries never show a loading state.
 
