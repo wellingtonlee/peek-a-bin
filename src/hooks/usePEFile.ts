@@ -1,6 +1,7 @@
 import { createContext, type Dispatch, useContext, useReducer } from "react";
 import type { Anomaly } from "../analysis/anomalies";
 import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
+import type { DetectPass } from "../disasm/functionDetect";
 import type { DisasmFunction } from "../disasm/types";
 import type { AIScanFinding, BatchRenameResult } from "../llm/types";
 import type { PEFile } from "../pe/types";
@@ -16,7 +17,16 @@ export type ViewTab =
   | "resources"
   | "anomalies";
 
-const VIEW_TABS: readonly ViewTab[] = [
+/**
+ * Every view tab, in the order the tab bar shows them.
+ *
+ * Exported because that order is also the 1–9 keyboard shortcuts: `AddressBar`
+ * builds both its buttons and its `TAB_KEYS` map from this array, so the tab a
+ * digit selects cannot disagree with the tab at that position. Display names
+ * are not here — they live in `components/analysisNotice.ts`, which is where
+ * prose that has to name a tab already reads them from.
+ */
+export const VIEW_TABS: readonly ViewTab[] = [
   "disassembly",
   "headers",
   "sections",
@@ -89,6 +99,17 @@ export interface AppState {
   callGraph: Map<number, number[]> | null;
   anomalies: Anomaly[];
   analysisPhase: AnalysisPhase;
+  /**
+   * Function-detection passes that did not run, from `DetectResult.omitted`.
+   *
+   * Empty means the function list is whole. Non-empty means it is narrower than
+   * a complete one — either the image has no decoder, or Capstone is dead — and
+   * detection answered from `.pdata`, the exports, the entry point and the
+   * unwind handlers alone. Kept in state rather than logged because a short
+   * function list looks exactly like a complete one on screen; see
+   * `components/analysisNotice.ts` for what the user is told.
+   */
+  omittedPasses: DetectPass[];
   currentInstruction: { bytes: number[]; size: number } | null;
   currentBlock: { startAddr: number; endAddr: number } | null;
   iatMap: Map<number, { lib: string; func: string }>;
@@ -154,6 +175,7 @@ export type AppAction =
   | { type: "SET_TAB"; tab: ViewTab }
   | { type: "SET_ADDRESS"; address: number }
   | { type: "SET_FUNCTIONS"; functions: DisasmFunction[] }
+  | { type: "SET_OMITTED_PASSES"; omitted: DetectPass[] }
   | { type: "SET_DISASM_READY" }
   | { type: "NAV_BACK" }
   | { type: "NAV_FORWARD" }
@@ -272,6 +294,7 @@ export const initialState: AppState = {
   callGraph: null,
   anomalies: [],
   analysisPhase: "idle",
+  omittedPasses: [],
   currentInstruction: null,
   currentBlock: null,
   iatMap: new Map(),
@@ -343,6 +366,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case "SET_FUNCTIONS":
       return { ...state, functions: action.functions };
+    case "SET_OMITTED_PASSES": {
+      // The common case by far is "nothing was omitted" arriving over an
+      // already-empty list, once per loaded file. Returning a new array for it
+      // would give the notice memo in App and StatusBar a fresh input identity
+      // and re-render both for no change, so compare and return `state` itself.
+      const prev = state.omittedPasses;
+      if (
+        prev.length === action.omitted.length &&
+        prev.every((pass, i) => pass === action.omitted[i])
+      ) {
+        return state;
+      }
+      return { ...state, omittedPasses: action.omitted };
+    }
     case "SET_DISASM_READY":
       return { ...state, disasmReady: true };
     case "NAV_BACK": {

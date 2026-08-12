@@ -308,10 +308,13 @@ export default function App() {
         // complete one — the decoder-fed passes named here did not run, either
         // because the image has no decoder or because Capstone is dead
         // (peek-a-bin-4s9). The list still looks exactly like a whole answer,
-        // which is the defect the field exists to prevent, so say so. The
-        // unsupported-architecture case is also derived independently by
-        // `analysisNotice`; the null-Capstone case has no such backstop, and
-        // this is currently its only signal. See peek-a-bin-ybv2.
+        // which is the defect the field exists to prevent, so say so — in the
+        // UI, via `analysisNotice`, not only here (peek-a-bin-ipzf). The
+        // unsupported-architecture case is also derived independently from the
+        // COFF header; the null-Capstone case has no such backstop, and this
+        // dispatch is its only signal. The console line stays for the developer
+        // reading a session's log, where the pass names are the wire values.
+        dispatch({ type: "SET_OMITTED_PASSES", omitted });
         if (omitted.length > 0) {
           console.warn(
             `[peek-a-bin] function detection ran without ${omitted.join(", ")} — ` +
@@ -678,8 +681,14 @@ export default function App() {
    */
   const machine = state.peFile?.coffHeader.machine;
   const notice = useMemo(
-    () => analysisNotice({ machine, phase: state.analysisPhase, error: state.error }),
-    [machine, state.analysisPhase, state.error],
+    () =>
+      analysisNotice({
+        machine,
+        phase: state.analysisPhase,
+        error: state.error,
+        omitted: state.omittedPasses,
+      }),
+    [machine, state.analysisPhase, state.error, state.omittedPasses],
   );
 
   const renderMainView = () => {
@@ -751,23 +760,31 @@ export default function App() {
               <div
                 role="status"
                 className={`border-b px-4 py-1.5 flex items-start gap-3 text-xs shrink-0 ${
-                  notice.kind === "unsupported-arch"
-                    ? "bg-amber-900/40 border-amber-700/50"
-                    : "bg-red-900/40 border-red-700/50"
+                  notice.kind === "analysis-failed"
+                    ? "bg-red-900/40 border-red-700/50"
+                    : "bg-amber-900/40 border-amber-700/50"
                 }`}
               >
                 <span
                   className={`font-bold tracking-wide shrink-0 ${
-                    notice.kind === "unsupported-arch" ? "text-amber-400" : "text-red-400"
+                    notice.kind === "analysis-failed" ? "text-red-400" : "text-amber-400"
                   }`}
                 >
                   {notice.label.toUpperCase()}
                 </span>
                 <span className="text-gray-300">
-                  {notice.detail}{" "}
-                  <span className="text-gray-400">
-                    Still available: {formatTabList(notice.availableTabs)}.
-                  </span>
+                  {notice.detail}
+                  {/* Only when something really is withheld. A partial function
+                      list withholds no tab at all, and "Still available:" over
+                      the whole list would read as though it did. */}
+                  {notice.unavailableTabs.length > 0 && (
+                    <>
+                      {" "}
+                      <span className="text-gray-400">
+                        Still available: {formatTabList(notice.availableTabs)}.
+                      </span>
+                    </>
+                  )}
                 </span>
                 <div className="flex-1" />
                 <button
@@ -775,9 +792,9 @@ export default function App() {
                   onClick={() => setNoticeDismissed(true)}
                   aria-label="Dismiss this notice"
                   className={`text-sm leading-none shrink-0 ${
-                    notice.kind === "unsupported-arch"
-                      ? "text-amber-500 hover:text-amber-300"
-                      : "text-red-500 hover:text-red-300"
+                    notice.kind === "analysis-failed"
+                      ? "text-red-500 hover:text-red-300"
+                      : "text-amber-500 hover:text-amber-300"
                   }`}
                   title="Dismiss"
                 >

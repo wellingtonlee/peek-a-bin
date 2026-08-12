@@ -6,35 +6,36 @@ import {
   getDisplayName,
   useAppDispatch,
   useAppState,
+  VIEW_TABS,
   type ViewTab,
 } from "../hooks/usePEFile";
 import { serializeState, validateImport } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
+import { VIEW_TAB_LABELS } from "./analysisNotice";
 import { focusOnMount } from "./focusOnMount";
 
-const TABS: { id: ViewTab; label: string }[] = [
-  { id: "disassembly", label: "Disassembly" },
-  { id: "headers", label: "Headers" },
-  { id: "sections", label: "Sections" },
-  { id: "imports", label: "Imports" },
-  { id: "exports", label: "Exports" },
-  { id: "hex", label: "Hex" },
-  { id: "strings", label: "Strings" },
-  { id: "resources", label: "Resources" },
-  { id: "anomalies", label: "Anomalies" },
-];
+/**
+ * The tab bar, in `VIEW_TABS` order with the labels the rest of the app uses.
+ *
+ * Both halves used to be spelled out here: the order duplicated `VIEW_TABS` in
+ * usePEFile.ts and the display names duplicated `VIEW_TAB_LABELS`, so a tab
+ * could be called one thing on its button and another in the notice that told
+ * you to open it (peek-a-bin-t40b). The map is typed `Record<ViewTab, string>`,
+ * so a new tab now fails the build there rather than going unlabelled here.
+ */
+const TABS: { id: ViewTab; label: string }[] = VIEW_TABS.map((id) => ({
+  id,
+  label: VIEW_TAB_LABELS[id],
+}));
 
-const TAB_KEYS: Record<string, ViewTab> = {
-  "1": "disassembly",
-  "2": "headers",
-  "3": "sections",
-  "4": "imports",
-  "5": "exports",
-  "6": "hex",
-  "7": "strings",
-  "8": "resources",
-  "9": "anomalies",
-};
+/**
+ * The 1–9 shortcuts, derived from the same order so a digit always selects the
+ * button at that position. Sliced at nine because a tenth tab has no single
+ * key to be reached by; it would need a shortcut of its own.
+ */
+const TAB_KEYS: Record<string, ViewTab> = Object.fromEntries(
+  VIEW_TABS.slice(0, 9).map((id, i) => [String(i + 1), id]),
+);
 
 interface Suggestion {
   label: string;

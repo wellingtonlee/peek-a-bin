@@ -537,6 +537,84 @@ describe("appReducer — analysis results", () => {
     });
   });
 
+  // peek-a-bin-ipzf. `DetectResult.omitted` names the detection passes that did
+  // not run. It was reaching the console and nothing else, and the state it
+  // describes — a short function list under a healthy-looking analysis — is the
+  // one that cannot be spotted on screen without being told.
+  describe("SET_OMITTED_PASSES", () => {
+    it("records the passes detection could not run", () => {
+      const next = appReducer(initialState, {
+        type: "SET_OMITTED_PASSES",
+        omitted: ["call-targets", "jump-tables"],
+      });
+      expect(next.omittedPasses).toEqual(["call-targets", "jump-tables"]);
+      expect(next).not.toBe(initialState);
+    });
+
+    it("starts empty, which is what 'the answer is whole' looks like", () => {
+      expect(initialState.omittedPasses).toEqual([]);
+    });
+
+    it("returns the same state object when nothing changed", () => {
+      // The overwhelmingly common dispatch is `[]` over an already-empty list,
+      // once per loaded file. A new object for it would re-run the notice memo
+      // in App and StatusBar and re-render both for no change.
+      expect(appReducer(initialState, { type: "SET_OMITTED_PASSES", omitted: [] })).toBe(
+        initialState,
+      );
+      const partial = appReducer(initialState, {
+        type: "SET_OMITTED_PASSES",
+        omitted: ["thunk-names"],
+      });
+      expect(appReducer(partial, { type: "SET_OMITTED_PASSES", omitted: ["thunk-names"] })).toBe(
+        partial,
+      );
+    });
+
+    it("still moves when the same number of passes changes identity", () => {
+      // Length alone is not equality: a re-analysis that swaps which pass was
+      // omitted must not be mistaken for a no-op.
+      const first = appReducer(initialState, {
+        type: "SET_OMITTED_PASSES",
+        omitted: ["thunk-names"],
+      });
+      const second = appReducer(first, { type: "SET_OMITTED_PASSES", omitted: ["tail-calls"] });
+      expect(second).not.toBe(first);
+      expect(second.omittedPasses).toEqual(["tail-calls"]);
+    });
+
+    it("clears back to empty when a later answer is whole", () => {
+      const partial = appReducer(initialState, {
+        type: "SET_OMITTED_PASSES",
+        omitted: ["call-targets"],
+      });
+      expect(
+        appReducer(partial, { type: "SET_OMITTED_PASSES", omitted: [] }).omittedPasses,
+      ).toEqual([]);
+    });
+
+    it("RESET drops them, so a second file cannot inherit the first's warning", () => {
+      const partial = run(
+        [
+          { type: "SET_PE_FILE", peFile: peFile(), fileName: "a.exe" },
+          { type: "SET_OMITTED_PASSES", omitted: ["call-targets", "jump-tables"] },
+        ],
+        initialState,
+      );
+      expect(appReducer(partial, { type: "RESET" }).omittedPasses).toEqual([]);
+    });
+
+    it("does not disturb the function list it describes", () => {
+      const loaded = run([
+        { type: "SET_PE_FILE", peFile: peFile(), fileName: "a.exe" },
+        { type: "SET_FUNCTIONS", functions: [fn(0x401000)] },
+      ]);
+      const next = appReducer(loaded, { type: "SET_OMITTED_PASSES", omitted: ["tail-calls"] });
+      expect(next.functions).toBe(loaded.functions);
+      expect(next.peFile).toBe(loaded.peFile);
+    });
+  });
+
   it("SET_CURRENT_INSTRUCTION and SET_CURRENT_BLOCK accept null to clear", () => {
     const set = run([
       { type: "SET_CURRENT_INSTRUCTION", instruction: { bytes: [0x90], size: 1 } },
@@ -797,6 +875,7 @@ describe("appReducer — no branch mutates its input", () => {
     { type: "SET_XREFS", stringXrefs: new Map(), importXrefs: new Map() },
     { type: "SET_CALL_GRAPH", callGraph: new Map() },
     { type: "SET_ANOMALIES", anomalies: [] },
+    { type: "SET_OMITTED_PASSES", omitted: ["jump-tables"] },
     { type: "SET_ANALYSIS_PHASE", phase: "ready" },
     { type: "SET_CURRENT_INSTRUCTION", instruction: null },
     { type: "SET_CURRENT_BLOCK", block: null },

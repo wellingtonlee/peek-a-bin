@@ -109,8 +109,14 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
 
   const machine = pe?.coffHeader.machine;
   const notice = useMemo(
-    () => analysisNotice({ machine, phase: state.analysisPhase, error: state.error }),
-    [machine, state.analysisPhase, state.error],
+    () =>
+      analysisNotice({
+        machine,
+        phase: state.analysisPhase,
+        error: state.error,
+        omitted: state.omittedPasses,
+      }),
+    [machine, state.analysisPhase, state.error, state.omittedPasses],
   );
 
   if (!pe) return null;
@@ -224,8 +230,17 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
           <span className="text-green-400">MCP</span>
         </span>
       )}
-      <span className="mr-4">
+      {/* The count is the thing a partial detection makes wrong, so it says so
+          in place rather than leaving the notice at the far end of the bar to
+          be connected to it. */}
+      <span
+        className="mr-4"
+        title={notice && notice.omittedPasses.length > 0 ? notice.detail : undefined}
+      >
         <span className="text-gray-500">{state.functions.length}</span> functions
+        {notice && notice.omittedPasses.length > 0 && (
+          <span className="text-amber-400"> (partial)</span>
+        )}
       </span>
       {state.driverInfo?.isDriver && (
         <span className="mr-4 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-900/40 text-amber-400 border border-amber-700/50">
@@ -236,10 +251,13 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
         {notice ? (
           // Ahead of every other branch: with the phase "failed" this used to
           // fall through to "Engine ready" in green, which is true of the
-          // engine and a lie about the file. `title` carries the full sentence
-          // — the banner in App.tsx is where it is stated at length.
+          // engine and a lie about the file. It also takes the "ready" branch's
+          // place for a partial function list — the analysis did finish, but a
+          // green tick beside a short list is the same lie in a quieter form.
+          // `title` carries the full sentence — the banner in App.tsx is where
+          // it is stated at length.
           <span
-            className={notice.kind === "unsupported-arch" ? "text-amber-400" : "text-red-400"}
+            className={notice.kind === "analysis-failed" ? "text-red-400" : "text-amber-400"}
             title={notice.detail}
           >
             {notice.label}
