@@ -33,8 +33,8 @@ flowchart TD
 
 The pipeline is phased via `analysisPhase` state:
 1. **Parse:** `parsePE()` reads headers, sections, imports, exports, resources, authenticode
-2. **Detect:** Function detection via prologue scanning, call targets, `.pdata` exception directory
-3. **Disassemble:** Hybrid recursive descent + linear sweep; gap-fill regions marked separately
+2. **Detect:** Function detection via `.pdata`, call targets, exports, unwind handlers and prologue scanning. **Where `.pdata` exists it is authoritative** — a prologue-pattern or padding-heuristic candidate strictly inside a `.pdata` range is dropped (t64: 511 → 279 functions, 232 overlapping pairs → 0). Jump-table case targets are case labels, not function starts
+3. **Disassemble:** Hybrid recursive descent + linear sweep, seeded with jump-table case targets (`disasm/seeds.ts`); gap-fill regions marked separately
 4. **Xrefs:** Cross-references built for calls, jumps, strings, imports, and data sections
 5. **Strings:** ASCII and UTF-16LE string extraction with address mapping
 6. **Anomalies:** Security characteristic scanning (WX sections, packer indicators, etc.)
@@ -42,7 +42,52 @@ The pipeline is phased via `analysisPhase` state:
 
 `AnalysisPhase` also has a terminal `"failed"` value. If any stage of the chain rejects, the
 phase moves to `"failed"` and the status bar reports it, rather than leaving the UI pinned on
-the last phase it reached.
+the last phase it reached. An exhausted Capstone decoder (`CapstoneUnavailableError`) reaches
+the user through this path — see the decoder section below.
+
+### Target architecture
+
+The decoder is selected from `coffHeader.machine` via `archForMachine()` in
+`src/disasm/arch.ts`, **not** from `is64`: `is64` is the PE32+ optional-header magic and is true
+for ARM64 too, which is why an ARM64 image once parsed, listed its `.pdata` boundaries and
+decoded to zero instructions.
+
+| Arch | Disassembly | Decompiler / x86 xrefs / IRP detection |
+|------|-------------|----------------------------------------|
+| x86, x64 | Hybrid recursive descent + gap fill (`functionDetect.ts`) | Supported |
+| ARM64 | Fixed-width linear sweep at 4-byte alignment (`arm64.ts`); function starts from evidence only — `.pdata` extents, exports, entry point, unwind handlers, and `bl` targets outside every extent. No prologue byte scan | **Declines** via `unsupportedOnArch()`. A64 branches and address idioms are read by `arm64Operands.ts` / `arm64Xref.ts` instead |
+
+A64 is fixed-width, so a linear sweep is not a heuristic — it is the decoding. Recursive
+descent exists to resolve x86's ambiguous instruction boundaries and has nothing to do here.
+
+### The Capstone decoder is bounded, and must stay that way
+
+capstone-wasm's linear memory is a fixed 16 MiB that cannot grow; its input is copied onto a
+~65.6 KiB WASM stack, and `cs_disasm` allocates one contiguous `cs_insn[]` for the whole window.
+Exceeding either kills the module *silently* — `disasm` throws when it decodes nothing, and scan
+loops read a throw as "not code, skip a byte". A 4 MiB `.text` yielded **3.2%** of its
+instructions with no error raised. `src/disasm/capstoneWindow.ts` owns every decode
+(0x2000-byte windows, 2048 instructions per call, plus a liveness probe), and a source-scraping
+guard in its test file fails the build if anything else in `src/` calls `.disasm(`.
+
+### Performance envelope
+
+Measured 2026-08-11 (node 18, i7-10710U, 2 cores). **Disassembly, not parsing, sets the
+practical file-size ceiling:** roughly 1.2 s and 68 MiB of heap per MiB of `.text`, linear over
+the range measured (up to 4 MiB of code). Extrapolating that fit — arithmetic, not a
+measurement — puts the limit around 40–50 MiB of code before a browser tab is in trouble.
+
+`parsePE()` itself is not the constraint, and its cost tracks **entry counts** rather than file
+size, with `.pdata` and `.reloc` dominating: ~0.3 ms on a 100 KB real PE, ~27 ms on a synthetic
+253 MiB image.
+
+Caveat worth keeping: no large *real* PE exists on this machine — the largest is 273 KB — so
+every large-image figure here comes from a synthetic PE with genuine structures and filler
+`.text`. Both of the main-thread costs previously tracked here are now fixed: whole-file
+checksum and entropy moved to the metrics worker (`peek-a-bin-7hg`; Headers+Sections 910 →
+148 ms and the entropy strip 6569 → 101 ms on a 253 MiB image), and worker RPCs no longer
+structured-clone the whole file (`peek-a-bin-7mf`; a file load's five calls 1868 → 706 ms). Both
+sets of figures come from node's `structuredClone` and node timings, not from a browser.
 
 ### Export table
 
@@ -63,7 +108,7 @@ points at it (kept so a malformed file still shows its named exports).
 
 `useReducer` + React Context in `src/hooks/usePEFile.ts`.
 
-- **`AppState`**: 32 fields covering PE data, analysis results, UI state, annotations, AI state
+- **`AppState`**: 45 fields covering PE data, analysis results, UI state, annotations, AI state
 - **`AppAction`**: Discriminated union with 53 action types
 - **Access:** `useAppState()` for reading, `useAppDispatch()` for dispatching
 - **Annotations:** Bookmarks, renames, comments auto-persist to localStorage per file with undo/redo via snapshot stack
@@ -93,17 +138,40 @@ RPC-style communication in `src/workers/disasmClient.ts`:
 
 - Heavy operations run off-thread: disassembly, function detection, xref building, decompilation
 - Client caches results (disasm cache, xref cache, decompile cache)
-- Transferable buffers for large arrays (don't hold references to transferred buffers)
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`) — first load fetches, subsequent loads read from cache
+
+### Binary arguments: slice, then transfer
+
+Structured clone of an `ArrayBufferView` serialises its whole backing `ArrayBuffer`, not the
+view's window, and every large byte argument here is a view onto the *entire loaded file* — so a
+4 KiB single-function `disassemble` used to copy 253 MiB. `send()` routes args through
+`prepareBinaryArgs` (`src/workers/transfer.ts`), which replaces each **top-level** binary
+argument with a private `slice()` of exactly that window and transfers it.
+
+| Call (253 MiB file / 200 MiB `.text`) | Cloned view | Slice + transfer |
+|---|---|---|
+| `detectFunctions(.text)` | 182 ms | 76 ms |
+| `disassemble(4 KiB function)` | 178 ms | ~0 ms |
+| whole-buffer argument | 186 ms | 96 ms |
+
+Two rules follow, and both are load-bearing:
+
+- **It only ever transfers buffers it allocated itself.** Transferring detaches on the sender side, and the main thread keeps reading the file through `bufferRef`, `pe.buffer`, HexView, entropy and string extraction. A caller's view and its backing buffer are never in the transfer list — that invariant is what `__tests__/transfer.test.ts` pins, and it is why holding a reference to the file buffer is not merely allowed but normal.
+- **The walk is top-level only.** An `Instruction[]` carries a tiny `bytes` view per element; transferring 500k of those measured **80.6 s against 1.6 s to clone**. Anything nested that genuinely needs to cross is flattened by its owner first — see `packDataWindows` / `unpackDataWindows` in `src/disasm/dataWindows.ts`, where every window is a view onto the whole file.
+
+The last table row is the counter-intuitive one: slicing wins even when the copy is the same
+size, because a clone costs roughly two passes where a slice costs one memcpy plus O(1)
+ownership transfer. There is no size at which cloning is the better deal.
 
 ### Worker-side split
 
-The worker is two modules, and the split exists for testability:
+There are **two workers**. The disasm worker is three modules, split for testability:
 
 | File | Holds |
 |------|-------|
 | `src/workers/disasm.worker.ts` | The worker shell — `self.onmessage`, the Capstone WASM bootstrap, and the IndexedDB module cache |
 | `src/workers/dispatch.ts` | `dispatch(method, args, state)`, the RPC method switch, plus `WorkerMethod`, `WorkerRequest`, `WorkerState` and `createWorkerState()` |
+| `src/workers/transfer.ts` | `prepareBinaryArgs` — the args walk described above |
 
 `disasm.worker.ts` cannot be imported outside a worker: it touches `self` and `indexedDB` and
 starts loading WASM at module-evaluation time. `dispatch.ts` touches none of those — the
@@ -122,6 +190,23 @@ Worker state (`cs32`/`cs64`, the string/IAT/function/jump-table maps, `driverMod
 cross-function `StructRegistry`) lives on a `WorkerState` object owned by the worker module
 rather than in module-level `let` bindings, so the dispatch itself holds nothing between calls.
 
+### The metrics worker
+
+`metrics.worker.ts` / `metricsDispatch.ts` / `metricsClient.ts` is a **second, stateless**
+worker handling whole-file checksum validation, per-section entropy and the hex entropy strip.
+
+It is separate on purpose: the disasm worker services messages **serially**, so a checksum
+posted to it queues behind a whole-image disassembly that can run for minutes. Before the split
+these ran inside `useMemo`s, which cannot yield — on a synthetic 253 MiB PE that froze the UI
+for ~140 ms (Headers), ~770 ms (Sections) and ~6.5 s (entropy strip, recomputed on every Hex tab
+open whether or not the strip was ever shown). Measured after: Headers+Sections 910 → 148 ms,
+entropy strip 6569 → 101 ms.
+
+Inputs under the thresholds in `src/hooks/asyncMetricState.ts` — 256 KiB for the strip, 1 MiB
+for file metrics — stay synchronous and spawn no worker, so an ordinary binary never shows a
+loading state. `asyncMetricState.ts` also holds `asyncMetricReducer`, the pure state machine
+behind `useFileMetrics`, kept as a leaf module because there is no React renderer here.
+
 ## Rendering
 
 - **Virtual scrolling** via `@tanstack/react-virtual` — handles large binaries without DOM bloat
@@ -129,7 +214,17 @@ rather than in module-level `let` bindings, so the dispatch itself holds nothing
 - **`DisassemblyView`** + **`HexView`** are lazy-loaded
 - **CSS grid** with `ch`-based column widths that scale with font size; 32-bit (10ch) and 64-bit (18ch) address columns
 
-> **Note:** `JumpArrows.tsx` and `DisassemblyMinimap.tsx` have their own local `DisplayRow` types that must stay in sync with the canonical union.
+> **`DisplayRow` has exactly one declaration** — the exported union in `useDisassemblyRows.ts`.
+> `JumpArrows.tsx` and `DisassemblyMinimap.tsx` used to keep private narrowed copies that had to
+> be hand-synced; they now `import type` the canonical one. Do not reintroduce a local copy: a
+> narrowed structural clone still accepts the canonical rows at the call site, so it drifts
+> silently instead of failing the build.
+
+`DisassemblyView.tsx` is ~1520 lines after being split into `DisassemblyRows.tsx`,
+`DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`, `hooks/useInsnContextMenu.ts`,
+`hooks/useDisassemblyKeyboard.ts` and `hooks/useGraphSearch.ts`. `CFGView` takes 23 props, with
+several of its former ones read from `AppState` via context. **None of this has ever been
+rendered** — see the verification status section in `CLAUDE.md`.
 
 ## Control Flow Graph
 
@@ -198,17 +293,19 @@ Per-file annotation keys are derived from the filename and stored automatically.
 src/
 ├── analysis/      # Binary analysis (driver detection, IOCTL, IRP, anomalies)
 ├── components/    # React UI components
-├── disasm/        # Disassembly engine + built-in decompiler
+├── disasm/        # Disassembly engine + built-in decompiler; capstoneWindow.ts (the only
+│                 #   caller of the WASM decoder), arch.ts, arm64*.ts, seeds.ts, dataWindows.ts
 ├── ghidra/        # REST client for the optional Ghidra server (see ghidra-server/)
-├── hooks/         # Custom React hooks (state, derived data, search) +
-│                 #   decompileTabsState.ts (decompile panel tab reducer)
+├── hooks/         # Custom React hooks (state, derived data, search) + pure leaf reducers
+│                 #   (decompileTabsState.ts, asyncMetricState.ts) that tests can import
 ├── llm/           # LLM integration (model registry, settings, streaming client,
 │                 #   prompts, retry/backoff/limiter, zod response validation)
 ├── mcp/           # MCP server (tools, resources, paths, session, Capstone wrapper)
 ├── pe/            # PE file format parser (headers, imports, exports, authenticode)
 ├── styles/        # Tailwind config + theme system
 ├── utils/         # Shared utilities (IndexedDB, export schema, entropy)
-├── workers/       # Web Worker: worker shell (disasm.worker.ts) + RPC dispatch (dispatch.ts)
+├── workers/       # Two workers: disasm (disasm.worker.ts + dispatch.ts + transfer.ts) and
+│                 #   metrics (metrics.worker.ts + metricsDispatch.ts + metricsClient.ts)
 ├── App.tsx        # Root application component
 └── main.tsx       # Entry point
 build/             # Build-time modules imported by vite.config.ts (csp.ts + its test)

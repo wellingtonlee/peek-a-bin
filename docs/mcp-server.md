@@ -52,12 +52,12 @@ Load a PE file from disk and run full analysis (parse, disassemble, detect funct
 | `filePath` | string | Yes | Absolute path to the PE file |
 | `id` | string | No | Identifier (defaults to filename) |
 
-Returns summary with header info, function count, anomalies, and driver detection.
+Returns summary with header info, function count, anomalies, and driver detection. The summary reports `arch` (`x86` / `arm64`) alongside `is64` — `is64` is the PE32+ optional-header magic, so an ARM64 image sets it and reading `is64` alone as "x64" is wrong.
 
 Files larger than 256 MB are rejected. Unreadable paths, directories and parse failures return a normal MCP error result rather than crashing the server.
 
 #### `list_files`
-List all currently loaded PE files with basic metadata (architecture, section count, function count). No parameters.
+List all currently loaded PE files with basic metadata (`arch`, `is64`, section count, function count). No parameters.
 
 #### `list_functions`
 List detected functions in a loaded file.
@@ -78,6 +78,13 @@ Decompile a function to C-like pseudocode. Runs the full pipeline: stack analysi
 | `address` | number or string | Yes | Function address (hex string or number) |
 
 Returns `{ functionName, address, code, lineMap }`.
+
+**Declines on ARM64 images**, before the address is even resolved: the decompiler is an x86
+instruction grammar, and fed A64 it returned a short, confident, wrong body — mostly
+`/* unlifted: … */`, every branch dropped, a fabricated local per register and a closing
+`return rax`, with nothing marking it as invented. `get_xrefs` on an ARM64 image reads the A64
+branch grammar (`src/disasm/arm64Operands.ts`) and reports branches as branches; it used to
+type **every** xref in an ARM64 binary as a data reference.
 
 #### `disassemble_function`
 Get formatted assembly listing for a function (address, raw bytes, mnemonic, operands, inline comments).

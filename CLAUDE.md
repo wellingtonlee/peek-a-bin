@@ -23,28 +23,33 @@ npm run check          # biome check
 npm run test:coverage  # vitest run --coverage (v8 provider)
 ```
 
-**Biome** (`biome.json`) is the linter/formatter. The whole `a11y` group is set to `warn`, not
-error — there is a real accessibility backlog and the warnings keep it visible without blocking
-CI. `correctness/useHookAtTopLevel` is `error`. CI runs `lint`, `typecheck`, `test` and `build`
-on every PR, plus a separate `npm audit --audit-level=high` job.
+**Biome** (`biome.json`) is the linter/formatter. All seven configured `a11y` rules and
+`correctness/useHookAtTopLevel` are at **`error`** — the 301-finding backlog was cleared and the
+severities were ratcheted so it cannot come back. `npx biome lint src` is currently **71
+warnings, 0 error-severity, 0 a11y**, and the 71 are only `noArrayIndexKey` (41),
+`noExplicitAny` (27) and `noAssignInExpressions` (3); `useExhaustiveDependencies` is at `warn`
+but has no outstanding findings, so a new one is a real regression rather than baseline noise.
+CI runs `lint`, `typecheck`, `test` and `build` on every PR, plus a separate
+`npm audit --audit-level=high` job.
 
 ## Source Layout (`src/`)
 
 - `pe/` — PE format parser (headers, imports, exports, resources, authenticode). `ordinalTables.ts` is generated data transcribed from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it matches nothing in any corpus. `sections.ts` holds `findCodeSection` / `isCodeSection` / `dataSectionRanges` — use them rather than rewriting the `.text`-or-executable predicate, which was hand-written at seven sites. `buildSectionIndex()` + `rvaToFileOffsetIndexed()` in `parser.ts` are the batch form of `rvaToFileOffset` for anything resolving many RVAs
-- `disasm/` — disassembly engine, types, CFG, operand parsing, stack analysis, signatures. `funcInsns.ts` collects a function's instructions (cached binary search; do not re-roll the scan — it was duplicated in three files); `ripRelative.ts` owns all `[rip ± 0x..]` parsing (it was hand-rolled nine times)
+- `disasm/` — disassembly engine, types, CFG, operand parsing, stack analysis, signatures. `capstoneWindow.ts` owns **every** call into the Capstone WASM decoder — see the gotcha; nothing else may call `cs.disasm`. `arch.ts` maps `coffHeader.machine` to a `TargetArch` and holds `unsupportedOnArch()`; do not select a decoder with `is64`, which is the PE32+ magic and true for ARM64 too. `funcInsns.ts` collects a function's instructions (cached binary search; do not re-roll the scan — it was duplicated in three files); `ripRelative.ts` owns all `[rip ± 0x..]` parsing (it was hand-rolled nine times); `seeds.ts` turns detected jump tables into recursive-descent seeds; `dataWindows.ts` builds (and packs, for the worker hop) the `.rdata`-style spans function detection needs to read an x64 jump table
+- `disasm/arm64*.ts` — ARM64 support: `arm64.ts` (fixed-width linear sweep at 4-byte alignment plus evidence-only function starts), `arm64Operands.ts` (**the single A64 branch/address grammar** — the `ripRelative.ts` precedent, do not hand-roll a second one), `arm64Xref.ts` (`buildArm64Xrefs`). Everything x86-shaped — the decompiler, x86 xref building, IRP dispatch detection, stack frames, signatures — declines on ARM64 rather than guessing
 - `disasm/decompile/` — IR lifting → SSA → folding → structuring → cleanup → type inference → promotion → struct synthesis → emission pipeline
-- `components/` — React components (DisassemblyView, CFGView, HexView, Sidebar, etc.). The disassembly view is split across `DisassemblyView.tsx` (orchestration), `DisassemblyRows.tsx` (the virtualized `SeparatorRow`/`DataRow`/`LabelRow`/`InsnRow`), `DisassemblyToolbar.tsx` and `InsnContextMenu.tsx`, with the context-menu actions in `hooks/useInsnContextMenu.ts`
-- `hooks/` — state management (usePEFile), derived state, disassembly rows, search. Also `decompileTabsState.ts`, the pure reducer behind `useDecompileTabs` (kept as its own leaf module so tests can import it without dragging in `disasmClient` → Capstone WASM)
+- `components/` — React components (DisassemblyView, CFGView, HexView, Sidebar, etc.). The disassembly view is split across `DisassemblyView.tsx` (orchestration), `DisassemblyRows.tsx` (the virtualized `SeparatorRow`/`DataRow`/`LabelRow`/`InsnRow`), `DisassemblyToolbar.tsx` and `InsnContextMenu.tsx`, with the context-menu actions in `hooks/useInsnContextMenu.ts`. All six dialogs go through one `Modal.tsx` (overlay, centring, dialog semantics, focus trap, body scroll lock, and dismissal as a per-dialog *option* — Settings and in-progress work are deliberately non-dismissible); its class composition, focus arithmetic and `accidentalDismissAllowed` rule live in `modalScaffold.ts` as pure functions, which is the only way any of it is tested. Outside-click dismissal is `hooks/useDismissOnOutsideClick.ts`
+- `hooks/` — state management (usePEFile), derived state, disassembly rows, search. `useDisassemblyKeyboard.ts` and `useGraphSearch.ts` are the two seams extracted out of `DisassemblyView`; `useFileMetrics.ts` drives the metrics worker and `asyncMetricState.ts` is its pure reducer plus the sync/async size thresholds. Also `decompileTabsState.ts`, the pure reducer behind `useDecompileTabs` (kept as its own leaf module so tests can import it without dragging in `disasmClient` → Capstone WASM). The pure-leaf-module pattern is deliberate and is the *only* way hook logic gets tested here — nothing renders a component
 - `ghidra/` — `client.ts`, the REST client for the optional Ghidra decompile server in `ghidra-server/`. Powers the decompile panel's **High Level** tab; used by `useDecompileTabs` and by SettingsModal's "Test Connection". Not a decompiler — see `disasm/decompile/` for that
-- `workers/` — Web Worker for Capstone WASM + off-thread analysis. `disasm.worker.ts` owns the `self`/`indexedDB`/WASM setup; `dispatch.ts` holds the RPC method switch (extracted so it is importable under vitest — the worker module is not); `disasmClient.ts` is the caller-side RPC client
-- `analysis/` — driver detection, anomalies, IOCTL decoding
+- `workers/` — **two** workers. The disasm worker (`disasm.worker.ts` owns the `self`/`indexedDB`/WASM setup; `dispatch.ts` holds the RPC method switch, extracted so it is importable under vitest — the worker module is not; `disasmClient.ts` is the caller-side RPC client) and a second, stateless `metrics.worker.ts` / `metricsDispatch.ts` / `metricsClient.ts` for checksum and entropy. The split is not tidiness: the disasm worker services messages **serially**, so a checksum posted to it queues behind a whole-image disassembly that can run for minutes. `transfer.ts` holds `prepareBinaryArgs`, which every RPC's args go through
+- `analysis/` — driver detection, anomalies, IOCTL decoding. `isPlausibleIOCTL` is a *shape* test that a large share of ordinary 32-bit values pass, so decoding also requires the **call site**: `ioctlCodeArgIndex` in `driver.ts` says which argument of which API carries a control code. Without that gate the emitter put 1475 confident, wrong `/* IOCTL: … */` comments into three user-mode binaries
 - `llm/` — LLM integration (multi-profile settings, streaming client, prompts, types). `models.ts` is the single source of model IDs, provider defaults and per-task token budgets — never write a model ID anywhere else. `retry.ts` holds the backoff/limiter policy; `responseSchema.ts` the zod validation. `apiLists.ts` owns `DANGEROUS_APIS` / `NOTABLE_APIS` (notable is a superset by construction — the two drifted apart when maintained separately) and `matchesApi` for A/W suffix handling; `decompileForLLM.ts` is the one decompile-a-function-for-context routine, previously copied into three hooks
 - `mcp/` — MCP server (tools, resources, session, Capstone wrapper) + `cli.ts` (setup command) + `clients.ts` (client config registry) + `paths.ts` (`parseAddr`, `resolveExportPath`)
 - `utils/` — recent files (IndexedDB), export schema, entropy, fuzzy match
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (32 fields), `AppAction` discriminated union (53 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (45 fields), `AppAction` discriminated union (53 action types). Access via `useAppState()` / `useAppDispatch()`.
 
 `appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. Two invariants that suite pins and you should preserve: no-op branches return the **same object reference** (returning a new equal object causes pointless re-renders), and every mutating action **replaces** rather than mutates — the annotation undo/redo snapshots hold direct references to annotation objects, so a branch that mutates in place would corrupt history retroactively.
 
@@ -53,9 +58,9 @@ bar surfaces it. Without it a failed parse left the UI spinning forever. `usePEF
 exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast that string to
 `ViewTab` directly.
 
-**Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches).
+**Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches). Whole-file checksum and entropy go to the separate metrics worker via `metricsClient.ts`; inputs under the thresholds in `asyncMetricState.ts` (256 KiB for the entropy strip, 1 MiB for file metrics) stay synchronous and spawn no worker, so ordinary binaries never show a loading state.
 
-**Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive + gap-fill) → build xrefs → extract strings. All async, phased via `analysisPhase` state.
+**Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive + gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs → extract strings. All async, phased via `analysisPhase` state. The decoder is chosen from `coffHeader.machine` (`disasm/arch.ts`): x86/x64 take recursive descent + gap fill, ARM64 takes the fixed-width sweep in `arm64.ts`.
 
 **Rendering**: Virtual scrolling via `@tanstack/react-virtual`. `DisplayRow` union type: `label | insn | separator | data`. `DisassemblyView` + `HexView` are lazy-loaded.
 
@@ -79,15 +84,47 @@ exports `parseViewTab()`, which narrows the `#tab=` URL parameter; do not cast t
 
 **Annotations**: Bookmarks, renames, comments auto-persist to localStorage per file. Undo/redo via snapshot stack.
 
-**Tests**: `src/pe/__tests__/` for PE parsing (including `malformed.test.ts` for adversarial input, and `metadata.test.ts`, which pins the hand-rolled MD5 against the RFC 1321 vectors *and* differentially against Node's `crypto` — a wrong digest is invisible at runtime because nothing cross-checks a hash), `src/disasm/__tests__/` and `src/disasm/decompile/__tests__/` for the engine and decompiler, `src/hooks/__tests__/` for `appReducer` and the annotation undo/redo stack, `src/mcp/__tests__/` for the MCP server, `src/utils/__tests__/` and `src/workers/__tests__/` for utilities and RPC dispatch, `src/components/__tests__/` for the keyboard drift guard. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders from `src/pe/__tests__/fixtures.ts` (no binary files).
+**Tests**: `src/pe/__tests__/` for PE parsing (including `malformed.test.ts` for adversarial input, and `metadata.test.ts`, which pins the hand-rolled MD5 against the RFC 1321 vectors *and* differentially against Node's `crypto` — a wrong digest is invisible at runtime because nothing cross-checks a hash), `src/disasm/__tests__/` and `src/disasm/decompile/__tests__/` for the engine and decompiler, `src/hooks/__tests__/` for `appReducer` and the annotation undo/redo stack, `src/mcp/__tests__/` for the MCP server, `src/utils/__tests__/` and `src/workers/__tests__/` for utilities, RPC dispatch, `prepareBinaryArgs` and the metrics worker, `src/llm/__tests__/` for retry/schema/API lists, and `src/components/__tests__/` for the pure extracts and the drift guards. Use `buildMinimalPE32()` / `buildMinimalPE64()` fixture builders from `src/pe/__tests__/fixtures.ts` (no binary files).
+
+Several suites are **drift guards that scrape source text** rather than call it — the `.disasm(` scan in `capstoneWindow.test.ts`, the import-graph check in `mcp/__tests__/importGraph.test.ts`, the `dispatch.ts` purity check, and `keyboardShortcuts.test.ts` against `docs/keyboard.md`. They are cheap and they catch a whole class of silent regression, but they encode formatting by accident; write the pattern so a reformat cannot break it.
 
 `src/disasm/decompile/__tests__/pipeline.test.ts` is the **end-to-end** one: instructions in, emitted C out. `decompileFunction` takes `Instruction[]` rather than bytes, so it needs neither Capstone nor a worker, and hand-writing the instruction stream makes the intended semantics explicit instead of trusting a disassembler to agree. Reach for it whenever a change could alter emitted output — a whole class of defect (see the condition-polarity gotcha) is invisible to stage-level tests because they assert on the IR the buggy code produced.
-
-There is **no React renderer configured** — no jsdom, no `@testing-library/react`. Hooks cannot be mounted, so hook logic is tested by extracting the decision into an exported pure function (see `parseAnnotationMessage` in `useMcpSync.ts`). **Nothing renders a component**, so no test catches a UI regression: `DisassemblyView` and everything it was split into, the modals, and the a11y work are all verified only by typecheck, lint, build and reading. Adding a renderer means adding deps to `package.json` and merging the React plugins into `vitest.config.ts`. `@vitest/coverage-v8` is also not installed, so `npm run test:coverage` currently fails.
 
 Don't hard-code a test count in docs — it goes stale within a session. Run `npm test` for the current number.
 
 **MCP setup CLI**: `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code, opencode, continue). Registry in `src/mcp/clients.ts` — add new clients by inserting a map entry. `.mcp.json` at project root enables Claude Code auto-discovery.
+
+## Verification status — what is measured and what is not
+
+Every suite in `src/` is synthetic. Real binaries were first driven through the tool on
+2026-08-11: real MSVC output covering PE32, PE32+ and ARM64 (pip `distlib`'s `t64.exe` /
+`t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
+honest — the distinction between *measured* and *reasoned* is the point of it.
+
+**Measured against real binaries.** Each of these has an oracle outside the code under test:
+
+- **The PE parser holds**, differentially against an **independently written from-spec reader** — sections, imports, exports, imphash, resources, checksum and `.pdata` agree on every file, including 419/419 and 381/381 ARM64 `.pdata` entries on begin/end/unwind/handler. pefile is **not** installed here, so the reference is hand-written, not pefile.
+- **Condition polarity is audited per guard against the originating jcc**, not spot-checked: 0 inverted across `je`/`jne`/`js`/`jns`/`jge`/`jl`/`ja`/`jae`/`jb`/`jbe`, and every subsequent structuring change re-ran the audit. Loop guards spelled as `for` or `do/while` still escape that audit (`peek-a-bin-8r0`).
+- **The emitted C is checked by a compiler.** `gcc -std=gnu89 -fsyntax-only` over every emitted function of the three x86 binaries: **996 of 1001 compile clean**, from 648 at the start of the day. The 5 survivors are one defect in two functions plus their w64 twins (`peek-a-bin-d8t`).
+- **Struct layouts are verified by a compiled and *run* `offsetof` program**, not by reading the declaration: 145/145 definitions and 819/819 fields lay out at the offsets their field names record, from 18/149 and 318/852 (`peek-a-bin-ey0`).
+- **Function boundaries** are cross-checked against `.pdata` (t64 511 → 279 functions, 232 overlapping pairs → 0) and, on ARM64, against the sweep's own alignment invariants.
+- **The practical file-size ceiling is disassembly, not parsing** — performance envelope in `docs/architecture.md`.
+
+**"Clean" is not "recovered."** 277 of those 1001 functions contain an *admitted* gap — a
+`__unrecovered_N` or a `/* unlifted: … */` — and compile precisely because the emitter names
+what it failed to recover instead of printing something plausible. That is the intended
+behaviour, not a defect count, but do not read "996/1001 compile" as "996 functions are right".
+
+**Not verified. Say so rather than implying otherwise:**
+
+- **Nothing has rendered a component.** No jsdom, no `@testing-library/react`, no renderer at all. Hooks cannot be mounted, so hook logic is tested only by extracting the decision into an exported pure function (`parseAnnotationMessage` in `useMcpSync.ts`, `modalScaffold.ts`, `listboxIds.ts`, `asyncMetricState.ts`, `decompileTabsState.ts`). `DisassemblyView` and everything split out of it, all six modals, the focus trap, the body scroll lock, the command-palette listbox and the whole a11y pass are verified by typecheck, lint, pure-function tests, build and reading — nothing else. Adding a renderer means new deps plus React plugins in `vitest.config.ts`, and that decision has never been taken.
+- **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15 minutes with the app open closes more risk than any further static work.
+- **The nginx headers and the CSP have never been exercised in a browser** — both are researched from code and build output.
+- **The a11y work has never met a screen reader.**
+- **MCP → browser WebSocket annotation sync has never been exercised end to end**, in particular since the 127.0.0.1 bind change.
+- `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
+
+When a UI or deployment change lands, the honest report says which of these it did *not* move.
 
 ## Decompiler Architecture (`src/disasm/decompile/`)
 
@@ -113,6 +150,7 @@ so adding a union member breaks the build until they are handled. Just run `npm 
 | `ssa.ts` | `renameExpr` / `renameStmt` (inside `renameVariables`) |
 | `ssadestroy.ts` | `stripVersionsExpr` / `stripVersionsStmt` |
 | `emit.ts` | `emitExpr` / `emitStmt` |
+| `fold.ts` | `hasSideEffects` — now **one** exported definition, imported by `ssaopt.ts`. It used to be two independent if-chains that had both omitted `cast`, so `rbx = (int64_t)GetLastError()` read as pure and DCE deleted the call |
 | `workers/dispatch.ts` | the RPC method dispatch (guards `WorkerMethod`, not IR) |
 
 **You must find these by hand.** The typechecker stays silent on all of them.
@@ -136,8 +174,7 @@ the new kind is dropped with no trace at all. These are the dangerous ones:
 | `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
 | `structs.ts` | `walkExprs` and the stmt walker in `collectAccessPatterns` (both nested functions) |
 
-*Not switches at all* — `foldExpr` (`fold.ts`), `hasSideEffects` (defined separately in both
-`fold.ts` and `ssaopt.ts`) and `countExprUses` (nested in `ssaopt.ts`'s
+*Not switches at all* — `foldExpr` (`fold.ts`) and `countExprUses` (nested in `ssaopt.ts`'s
 `deadCodeElimination`) are if-chains on `expr.kind`. Grep the function name, not `case`.
 
 `typeInfer.ts`'s `parseCastType` keys off type *strings*, not kinds — only relevant if the new
@@ -159,37 +196,53 @@ Scale ∈ {1,2,4,8} → `IRArrayAccess`, whether or not the function has a struc
 
 Both merge directions scan `fingerprintIndex` in insertion order and take the first match, so *which* struct absorbs which is still order-dependent.
 
+**Emitted struct definitions are `#pragma pack(1)` with explicit `_pad_0xNN` members**, and the two are inseparable — padding alone cannot express an unaligned recovered offset and C would re-align on top of it. The field *names* record the offsets the recovery found (`field_0x18`), so a declaration C would not lay out that way is a declaration that states something false: before the fix, 131 of 149 emitted definitions were wrong that way, and every `p->field_0x18` in those bodies read bytes the access never touched. A field no padding can place — overlapping one already placed, negative, past 0x8000, or of a width with no spelling — is reported in the struct body and its accesses spelled as the bytes they touch, rather than declared somewhere convenient (`peek-a-bin-ey0`).
+
 **emit.ts module-level `_typeCtx`**: Set before emission, cleared after. Enables cast suppression and type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
 
 ## Gotchas
 
+- **Nothing may call `cs.disasm` directly. Every decode goes through `disasm/capstoneWindow.ts`.** capstone-wasm's linear memory is a fixed **16 MiB that cannot grow** (its `emscripten_resize_heap` aborts immediately), the input is copied onto a **~65.6 KiB WASM stack** by emscripten's `ccall`/`stackAlloc`, and `cs_disasm` allocates one contiguous `cs_insn[]` (~240 B/insn) for the whole window. The old `CHUNK_SIZE` of 0x10000 sat within **1 KiB** of the stack cliff: 65536-byte windows decode, 66560-byte ones throw `table index is out of bounds` and leave the module permanently dead. Going over is **silent** — `disasm` *throws* when it decodes nothing, and every scan loop read a throw as "this byte is not code, skip one", which is the right reading for an undecodable byte and exactly the wrong one for a dead engine. Measured: `hybridDisassemble` over a real `.text` grown to 0.5/1/2/4 MiB returned **12.5% / 7.2% / 4.6% / 3.2%** of its instructions, raised nothing, and afterwards could not decode a single `nop`. `createScan` clamps to `CS_WINDOW_BYTES` (0x2000) and `CS_MAX_INSNS_PER_CALL` (2048) and probes the engine after a run of failed decodes, so exhaustion surfaces as `CapstoneUnavailableError` → `analysisPhase: "failed"`. Smaller windows are also *faster*. A source-scraping drift guard in `__tests__/capstoneWindow.test.ts` fails if any file under `src/` outside `capstoneWindow.ts` contains `.disasm(`.
+- **`.pdata` is authoritative for x64 function boundaries and beats prologue scanning.** Where a `.pdata` range exists, a prologue-byte or padding-heuristic candidate strictly inside it is a re-detection of a function already known exactly, not a new function: t64 went 511 → 279 functions, 232 overlapping pairs → 0, 93 fully-contained → 0, 53 empty decompiled bodies → 16. Evidence about an *entry point* — call target, jump-table target, export, entry point, unwind handler, `.pdata` begin — still wins inside a range. PE32 has no `.pdata` to arbitrate and still over-produces (`peek-a-bin-abv`).
+- **A jump-table case target is not a function start.** `detectFunctions` used to add every case target to the function-entry set, and function sizes are the gap to the next entry in that same set — so the function holding the `jmp [table]` ended at its first case and each case body became a bogus function. Downstream, `buildCFG`'s range guard rejected every target as a block leader, the indirect-jmp block got **zero** successors, and `structureSwitch` was dead code on real input: **no `switch` had ever been emitted for a real binary in the project's history**. Case targets now go to a separate set, outrank a byte-pattern guess at the same address (case bodies routinely follow alignment padding), and are fed to `hybridDisassemble` as seeds via `seeds.ts` — without them, phase-2 gap fill starts *on the table*, decodes its entries as instructions and eats the head of case 0.
+- **There is exactly one notion of "loop": dominance.** `cfg.ts`'s `detectLoops` delegates to `decompile/ssa.ts`'s `detectNaturalLoops` (an edge `u → v` is a back edge only when v dominates u) and repackages the result as `Loop[]`. It used to approximate back edges with BFS layers from the entry, which called the merge block of every `if`-without-`else` a loop header — ~86% of the loops reported on real binaries did not exist, and the mis-structuring **deleted guards**, turning conditional stores into unconditional ones. A diamond is immune to that mistake and a triangle is not, so hand-written fixtures never caught it; `__tests__/cfg.test.ts` and `decompile/__tests__/pipeline.test.ts` now pin both shapes. `detectLoops` is also what draws loop markers in the disassembly view (`useDisassemblyRows.ts`), so its semantics are shared with the UI.
+- **`structureCFG` closes an `if` at the immediate post-dominator**, computed by `computePostDominators` (`structure.ts`) — `computeDominators` over the reversed CFG rooted at a virtual exit. The two "one arm ends in `ret`" shortcuts must not fire when that arm *is* the convergence point: in a triangle the branch target is the shared tail, so structuring it as the `then` body yields an empty body and drops the guard. A nearest-common-successor heuristic is not a substitute — for a switch it picks the default block, which is not on every path, and the code after the switch is then lost.
 - **`extractCondition` returns the condition under which the jump is TAKEN.** Every entry in `regstate.ts`'s `condMap` is taken-polarity (`jg`→`>`, `jbe`→`u<=`, `js`→`< 0`), and `identifyBranches` returns the block the jcc jumps to. So the branch target is the `then` body under the *un-negated* condition, and `RegState.negate` is for the fallthrough — its own docstring says "for structuring: if-not-taken path". Getting this backwards inverted **every `if` and `while` the decompiler ever emitted** while leaving the bodies in place: valid C stating the opposite of the machine code, invisible to every stage-level test. `__tests__/pipeline.test.ts` guards it end to end now.
+- **SSA version 0 means a register's *entry* value. The definition counter starts at 1.** `renameExpr` and the phi-operand fill both map a read with an empty version stack — the function-entry or parameter value — to version 0, so if `newVersion()` also handed out 0 then `rax_0` the incoming value and `rax_0` the first definition were the same `(name, version)` pair. `ssaopt`'s `sameReg`/`regKey` key on exactly that pair, so copy propagation, constant propagation, GVN and DCE all treated the two as one value: a store of an incoming register emitted the value written to it *afterwards*, and a `return` on a path that never assigns the accumulator returned the other path's value. Real binaries: 0 lost callees, 0 throws, −66 to −71 emitted lines, polarity unchanged (`peek-a-bin-swi`).
+- **`liftBlock` emits plain register reads. It does not substitute `RegState`'s symbolic value at each read.** It used to, while still emitting the assignment that produced the value, so one machine `call` became three calls in the IR (`rax := call f(r9)`, `r9 = f(r9)`, `eflags = f(r9) & f(r9)`) and `sub rax,rcx / sar rax,1 / dec rax` emitted RCX subtracted three times. Measured fix: lines calling the same function twice 121/188/120 → 0 on t64/t32/w64, `eflags` lines 138/326/135 → 5/4/5. Propagation belongs to SSA, `ssaopt` and `foldBlock`, which have the version information that makes it sound; `RegState`'s symbolic values are still needed for `getCondition`/flag tracking (`peek-a-bin-urs`, `peek-a-bin-zsb`).
+- **No read of RSP may be moved to another program point.** `push`, `pop` and the return address a `call` pushes are not lifted, so RSP changes with nothing in the IR recording it — there is no faithful definition chain to reason over. Inlining `mov ebp, esp` across an unmodelled `push` printed `*(int32_t*)(esp + 8)` where the instruction said `[ebp + 8]`: a base register the instruction never named, one push off the value it did name. **Both** `ssaopt.ts`'s copy propagation and `fold.ts`'s single-use inlining guard this, and both are needed — the second re-introduced the defect the moment an unrelated fix made the frame-pointer copy single-use (`peek-a-bin-rt4`).
 - **`arg_N` in a stack frame means argument *position*, and only when the frame was verified.** `stack.ts` numbers a slot `arg_<index>` from its offset, but only after confirming a real `push rbp` / `mov rbp, rsp` prologue; otherwise the name is offset-based (`arg_0x10`). That distinction is load-bearing — under frame-pointer omission RBP is usually a callee-saved object pointer, so `[rbp+0x10]` is often a struct field access, and `structs.ts` keys struct provenance off `^arg_(\d+)$` precisely to exclude those. The name is the only channel between the two files (`IRParam` carries name and type and nothing else), so do not loosen it. On x64 the first slot is RCX's ABI home slot, which puts the fifth argument at `[rbp+0x30]`, past the shadow space.
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`). This exact mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 - **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or `index.html` directly — `build/csp.test.ts` fails on drift. A meta CSP cannot be committed into `index.html` because it is also the dev entry point and Vite injects an inline React Refresh preamble there. Note the shipped `connect-src` omits non-localhost plain `http:`, so a LAN Ghidra server is blocked on the HTTP nginx deployment.
 - **Do not re-add a plugin that copies `capstone.wasm`.** Rollup already rewrites `new URL("capstone.wasm", import.meta.url)` to its hashed asset; a manual copy is pure duplication and was 1.7 MiB of the PWA precache. `capstone-wasm-guard` in `vite.config.ts` fails the build if more than one WASM asset is emitted.
 - **`tools.ts` and `resources.ts` must only *type*-import `./session`.** A value import pulls in `./disasm`, which loads Capstone WASM at module scope, and both MCP suites become slow and fragile. `src/mcp/__tests__/importGraph.test.ts` enforces this.
-- **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and Biome falls back to defaults — which looks like your rule settings randomly stopped applying. The a11y group is now mostly at `error` (301 findings were cleared); keep it there.
+- **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and Biome falls back to defaults — which looks like your rule settings randomly stopped applying. All seven a11y rules are at `error` (301 findings were cleared); keep them there.
 - **A multi-line `biome-ignore` needs `//` on every line.** Biome only honours the directive on the line immediately preceding the offence, so put prose in a normal comment block above a single-line directive. Getting this wrong leaves bare text inside JSX and breaks the parse.
-- **DisassemblyView.tsx** is ~1600 lines even after the split. Read in chunks. Two seams are still unextracted and both are traps: `handleKeyDown` is ~250 lines with a 19-entry dependency array (that array *is* the behaviour — copy it verbatim if you move it), and the graph-search state machine. `CFGView` is still passed 33 props from here.
+- **DisassemblyView.tsx** is ~1520 lines even after the split. Read in chunks. The two seams that used to live here are now `hooks/useDisassemblyKeyboard.ts` (`handleKeyDown`, ~270 lines with a **37-entry** dependency array — that array *is* the behaviour; copy it verbatim if you move it, and note the entries carrying `//` comments explaining why a stable value is listed or a value is deliberately omitted) and `hooks/useGraphSearch.ts`. `CFGView` now takes 23 props, several of the former ones read from context instead. Both extractions were strictly mechanical, and neither has ever been rendered.
 - **A callback declared later in a component cannot go in an earlier hook's dependency array** — it is a `const`, so the array hits its temporal dead zone at hook-call time. This is not hypothetical: `handleKeyDown` closed over `handleDecompileToggle` (declared ~340 lines later) without it in the deps, so **D opened the decompile panel but could not close it** — the memoized handler kept a closure where `showDecompile` was still `false`. The fix is a ref assigned *during render*; an effect is too late, because a keypress can be handled before effects flush.
 - **`parseBranchTarget` lives only in `components/shared.tsx`** and resolves `call` immediates as well as jumps. JumpArrows draws jump arrows only, so it guards with `mnemonic.startsWith("j")` *before* calling — dropping that guard makes recursive/intra-function calls sprout arrows. Covered by `src/components/__tests__/parseBranchTarget.test.ts`.
 - `sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`. Used to distinguish code vs data sections.
-- Worker uses Transferable for large arrays. Don't hold references to transferred buffers.
+- **A64 mnemonic matching is by *exact* mnemonic, never by prefix.** `brk` is not a `br` and `bfi` is not a branch, so `startsWith("b")` — the habit x86 encourages — mis-classifies real instructions. `arm64Operands.ts` is the one place that knows the grammar (`b`, `b.<cc>`, `bl`, `br`/`blr` including the PAuth forms, `cbz`/`cbnz`, `tbz`/`tbnz`, `ret`, and the `adrp`+`add`/`ldr` address idiom); `buildCFG`, `layoutCFG`, `parseBranchTarget`, the `JumpArrows` guard and `buildTypedXrefMap` all read it rather than re-deriving it. The x86 path is untouched by any of it and its edge and xref lists are byte-identical — keep it that way; the one shared spelling (`ret`) is deliberately left on the x86 path, where both architectures already yield nothing.
+- **Don't put a cheap request on the disasm worker.** It services messages serially, so a checksum or entropy call posted behind a whole-image disassembly waits minutes. That is what `metrics.worker.ts` exists for. The same reasoning is why a `useMemo` is not an option: it cannot yield, and on a 253 MiB PE the entropy strip froze the UI for ~6.5 s on every Hex tab open whether or not the strip was ever shown.
+- **Never put a caller-owned buffer in a worker transfer list.** Structured clone of an `ArrayBufferView` serialises its whole backing `ArrayBuffer`, not the view's window, and every large byte argument here is a view onto the *entire loaded file* — so a 4 KiB single-function `disassemble` used to copy all 253 MiB. `disasmClient.send()` routes args through `prepareBinaryArgs` (`workers/transfer.ts`), which replaces each top-level binary argument with a private `slice()` of exactly that window and transfers **only buffers it allocated itself**. That invariant is what makes the detach hazard structurally impossible: the main thread keeps reading the file through `bufferRef`, `pe.buffer`, HexView and entropy, and transferring a caller's buffer would detach the loaded file under them. The walk is **top-level only** — an `Instruction[]` carries a tiny `bytes` buffer per element, and transferring 500k of those measured **80.6 s against 1.6 s to clone**. Anything that must cross flattened (e.g. `packDataWindows`) does so for the same reason. Slicing wins even when the copy is the same size (186 → 96 ms), so there is no threshold below which this is skipped.
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`). First load fetches, subsequent loads read from cache.
 - **`fold.ts` has a `castTypeSize` helper** for double-cast removal. Uses regex to extract bit width from type strings like `int32_t`.
 - **`cleanup.ts`** runs after `structureCFG`, before `inferTypes`. Guard clause flattening is single-level only (not recursive inversion).
 - **`StructRegistry`** persists across decompilation calls in the worker — don't clear it between functions in the same session.
 
-## Verification
+## Gates
 
 Always run after changes:
 
 ```sh
 npm run typecheck && npm run build
 npm test
-npm run lint
+npm run lint      # expect 71 warnings, 0 error-severity, 0 a11y
 ```
+
+Passing these is *not* the same as the change being verified — see **Verification status**
+above. If the change touched a component, a modal, the CSP or the nginx headers, nothing you can
+run here exercised it.
 
 ## Documentation
 

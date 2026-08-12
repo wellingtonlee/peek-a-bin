@@ -35,8 +35,10 @@ repeating it.
 | AI features (chat, batch rename, report, scanner, LLM profiles) | [ai-features.md](ai-features.md) |
 | MCP server tools, resources, or setup CLI | [mcp-server.md](mcp-server.md) |
 | Ghidra server API or deployment | [ghidra-server.md](ghidra-server.md) |
-| State, worker, rendering, or the analysis pipeline | [architecture.md](architecture.md) |
+| State, workers, rendering, or the analysis pipeline | [architecture.md](architecture.md) |
+| Target-architecture support (x86/x64/ARM64), the Capstone window, worker binary arguments | [architecture.md](architecture.md) — and [decompiler.md](decompiler.md) if what a pass *declines* to do changes |
 | Decompiler IR, passes, or type system | [decompiler.md](decompiler.md) |
+| Anything that moves what is *verified* — a new oracle, a real-binary measurement, or a gap you closed or opened | the **Verification status** section of [../CLAUDE.md](../CLAUDE.md). Keep measured and reasoned claims apart there; it is the section future agents trust |
 | Builds, Docker, CI, PWA, self-hosting | [deployment.md](deployment.md) |
 | Content Security Policy | edit `build/csp.ts` (the single source of truth for both the meta tag and the nginx header) — then [../SECURITY.md](../SECURITY.md) for directive rationale and [deployment.md](deployment.md) for delivery |
 | Security model, filesystem/network surface | [../SECURITY.md](../SECURITY.md) |

@@ -116,6 +116,11 @@ The policy itself is defined once, in **`build/csp.ts`**, and both deployment pa
 from there. The rationale for every directive lives in
 [SECURITY.md](../SECURITY.md#content-security-policy); what follows is only how it is delivered.
 
+> **Neither the CSP nor the nginx security headers has ever been exercised in a browser.** Both
+> are derived from the code and the build output, and `build/csp.test.ts` only pins the two
+> deliveries against each other — it cannot tell you the policy does not break the app. Treat a
+> first browser load behind these headers as an outstanding verification step, not a formality.
+
 | Path | Mechanism |
 |------|-----------|
 | GitHub Pages | Pages cannot set response headers, so the `inject-csp-meta` Vite plugin (`vite.config.ts`) injects `<meta http-equiv="Content-Security-Policy">` into `dist/index.html` |
