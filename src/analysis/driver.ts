@@ -43,6 +43,28 @@ const KERNEL_MODULES = new Set([
   "wdfldr.sys",
 ]);
 
+/** Whether a library name is one of the kernel-mode modules only a driver links against. */
+export function isKernelModule(libraryName: string): boolean {
+  return KERNEL_MODULES.has(libraryName.toLowerCase());
+}
+
+/**
+ * Whether an import table links a kernel-mode module — driver evidence for the
+ * places that have imports but not the `PEFile`.
+ *
+ * This is one of `detectDriver`'s three reasons, and deliberately the only one
+ * reachable here: the NATIVE subsystem and the WDM characteristics bit live in
+ * the optional header, which the decompiler is never handed. So this is
+ * strictly narrower than `detectDriver` — a driver that imports nothing from
+ * ntoskrnl is not recognised — and narrower is the safe direction for anything
+ * that decides whether to *annotate*. Answering true where `detectDriver` would
+ * answer false is not possible; the module set is the same one.
+ */
+export function importsKernelModule(imports: Iterable<{ lib: string }>): boolean {
+  for (const entry of imports) if (isKernelModule(entry.lib)) return true;
+  return false;
+}
+
 export function detectDriver(pe: PEFile): DriverInfo {
   const reasons: string[] = [];
   const kernelModules: string[] = [];
@@ -59,8 +81,7 @@ export function detectDriver(pe: PEFile): DriverInfo {
 
   // Check kernel module imports
   for (const imp of pe.imports) {
-    const lib = imp.libraryName.toLowerCase();
-    if (KERNEL_MODULES.has(lib)) {
+    if (isKernelModule(imp.libraryName)) {
       kernelModules.push(imp.libraryName);
       kernelImportCount += imp.functions.length;
     }
@@ -352,6 +373,50 @@ export function formatIOCTL(value: number): string | null {
   const decoded = decodeIOCTL(value);
   if (!decoded) return null;
   return `IOCTL: ${decoded.deviceTypeName} | Fn=0x${decoded.function.toString(16)} | ${decoded.methodName}`;
+}
+
+/**
+ * Which argument of an API carries a control code, for the APIs that take one.
+ *
+ * `isPlausibleIOCTL` accepts a large share of all 32-bit constants by
+ * construction — device type `0x01..0x45` or `>= 0x8000`, and any function code
+ * and method — so on its own it is a shape test, not evidence. `0xFFFFFFFF` and
+ * every `0x41xxxx` data address in a user-mode image pass it. What makes a
+ * constant an IOCTL is that it is *passed as the control code* to one of these,
+ * so callers should require the position as well as the shape.
+ *
+ * Positions are argument indices in the documented prototypes:
+ *   DeviceIoControl(hDevice, dwIoControlCode, ...)
+ *   Nt/ZwDeviceIoControlFile(File, Event, Apc, ApcCtx, IoStatusBlock, IoControlCode, ...)
+ *   Nt/ZwFsControlFile(File, Event, Apc, ApcCtx, IoStatusBlock, FsControlCode, ...)
+ *   IoBuildDeviceIoControlRequest(IoControlCode, ...)
+ *   WdfIoTargetSendIoctlSynchronously(IoTarget, Request, IoctlCode, ...)
+ *   WdfIoTargetFormatRequestForIoctl(IoTarget, Request, IoctlCode, ...)
+ */
+const IOCTL_CODE_ARG_INDEX: Record<string, number> = {
+  DeviceIoControl: 1,
+  NtDeviceIoControlFile: 5,
+  ZwDeviceIoControlFile: 5,
+  NtFsControlFile: 5,
+  ZwFsControlFile: 5,
+  IoBuildDeviceIoControlRequest: 0,
+  WdfIoTargetSendIoctlSynchronously: 2,
+  WdfIoTargetFormatRequestForIoctl: 2,
+};
+
+/**
+ * The control-code argument index for `name`, or null if it takes none.
+ *
+ * Names arrive decorated in several ways depending on where they were read
+ * from: an import thunk (`__imp_DeviceIoControl`), a 32-bit stdcall symbol
+ * (`_DeviceIoControl@32`), or a plain export.
+ */
+export function ioctlCodeArgIndex(name: string): number | null {
+  const bare = name
+    .replace(/^_{0,2}imp_{0,2}/, "")
+    .replace(/^_+/, "")
+    .replace(/@\d+$/, "");
+  return IOCTL_CODE_ARG_INDEX[bare] ?? null;
 }
 
 // ── IRP Major Function Table ──

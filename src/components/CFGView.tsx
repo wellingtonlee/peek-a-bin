@@ -148,7 +148,14 @@ export function CFGView({
   // Track whether we just consumed a restorePanZoom to avoid re-centering when it's cleared
   const consumedRestoreRef = useRef(false);
 
-  // Auto-center on mount or function change — pan to block containing currentAddress
+  // Auto-center on mount or function change — pan to block containing currentAddress.
+  //
+  // The array is deliberately narrow. This effect calls onPanChange/onZoomChange,
+  // which drive the very `pan` and `zoom` props it reads, so completing the array
+  // would make every user pan or zoom immediately re-center the graph on top of
+  // the gesture. `func.address` is likewise a change key the body never reads:
+  // it is what makes "on function change" mean anything.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: this effect writes pan/zoom and must not re-run when they change, or user panning would be undone on the next render.
   useEffect(() => {
     if (blocks.length === 0) return;
     const container = containerRef.current;
@@ -184,7 +191,12 @@ export function CFGView({
     }
   }, [func.address, blocks.length, restorePanZoom]);
 
-  // Re-center when decompile panel opens (container width changes)
+  // Re-center when decompile panel opens (container width changes).
+  //
+  // reCenterTrigger is a bumped counter: the effect must fire once per bump and
+  // at no other time. Adding the pan/zoom values it reads would re-center on
+  // every pan.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reCenterTrigger is the one-shot change key; the other captures are read-only inputs whose changes must not re-fire this effect.
   useEffect(() => {
     if (!reCenterTrigger || blocks.length === 0) return;
     const container = containerRef.current;
@@ -251,7 +263,13 @@ export function CFGView({
     if (el) (el as any).__zoomToFit = zoomToFit;
   }, [zoomToFit]);
 
-  // Auto-pan to current block when address changes externally
+  // Auto-pan to current block when address changes externally.
+  //
+  // `pan` and `zoom` are read only to decide whether the target block is already
+  // on screen; the effect then writes pan via onPanChange. Depending on them
+  // would make the effect chase its own output and fight manual panning, which
+  // is also why graphInteractionRef exists.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pan/zoom are read as a visibility test and written by the same effect; listing them would make it re-fire on its own output.
   useEffect(() => {
     if (restorePanZoom) return;
     if (currentBlockId < 0 || graphInteractionRef.current) {
@@ -293,7 +311,9 @@ export function CFGView({
       }
     }
     return ids;
-  }, [blocks, pan, zoom, collapsedBlocks]);
+    // cfgLayout is a useMemo keyed on the font size, so it only changes identity
+    // when the mono font size does — exactly when culling heights must be redone.
+  }, [blocks, pan, zoom, collapsedBlocks, cfgLayout]);
 
   // Wrap onNavigate to flag graph-internal navigation
   const handleGraphNavigate = useCallback(

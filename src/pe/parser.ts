@@ -89,14 +89,24 @@ interface SortedSections {
  * stops at the containing section, and RVAs resolved in bulk — import thunks,
  * `.pdata` unwind info — nearly all land in the same early section, so it exits
  * after a couple of iterations. A binary search mispredicts at every step
- * instead. Measured over 200k lookups (roughly ntoskrnl.exe's `.pdata`, ~20
- * sections) the scan came in at 6 ms and the search at 9 ms.
+ * instead.
  *
- * So the threshold sits above any image a linker produces, leaving real files
- * on the path they already took. What it guards is the other end: section count
- * is a uint16 bounded only by the file size, and a table of a thousand sections
- * put that same 200k lookups at 418 ms, twenty thousand sections at 9.9 s, both
- * on the main thread. Searching holds those at ~12 ms.
+ * Which one wins is a function of the section count *and* of where the lookups
+ * land — not of the count alone. Re-measured 2026-08-11 (node 18, i7-10710U, 2
+ * cores, 200k lookups per figure, median of 7, scan and search verified to
+ * agree on every RVA): with hits spread uniformly across the table, scan/search
+ * came in at 4.35/9.18 ms at 16 sections, 5.37/12.11 ms at 24, and the search
+ * was ahead by 1.28x at 32. With hits confined to the first two sections the
+ * scan won at every count measured, up to 20000. The threshold is also
+ * insensitive — anywhere in 16–64 is defensible, because below 64 sections the
+ * absolute gap either way is under ~25 ms per 200k lookups.
+ *
+ * So 32 sits above any table a linker emits, leaving real files on the scan
+ * they already took: 1.04x end to end, i.e. noise. Its whole value is bounding
+ * the hostile case, since section count is a uint16 bounded only by the file
+ * size. Measured old-vs-new in one process, the same 200k lookups over a
+ * 1006-section table went 405 ms → 30 ms, and over a 20006-section table
+ * 9.08 s → 57 ms, both on the main thread.
  */
 const MIN_SECTIONS_TO_SEARCH = 32;
 
@@ -948,12 +958,13 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     }
   }
 
-  // 12. Parse .pdata (Exception Directory) — x64 only
+  // 12. Parse .pdata (Exception Directory) — PE32+ only, decoded per machine type
   const runtimeFunctions = is64
     ? parsePdata(
         buffer,
         dataDirectories[IMAGE_DIRECTORY_ENTRY_EXCEPTION] || { virtualAddress: 0, size: 0 },
         sections,
+        coffHeader.machine,
         sectionIndex,
       )
     : undefined;

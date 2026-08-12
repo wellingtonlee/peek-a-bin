@@ -67,13 +67,13 @@ export function useInsnContextMenu({
     if (!ctxMenu) return;
     navigator.clipboard.writeText("0x" + ctxMenu.insn.address.toString(16).toUpperCase());
     setCtxMenu(null);
-  }, [ctxMenu]);
+  }, [ctxMenu, setCtxMenu]);
 
   const ctxCopyInsn = useCallback(() => {
     if (!ctxMenu) return;
     navigator.clipboard.writeText(`${ctxMenu.insn.mnemonic} ${ctxMenu.insn.opStr}`);
     setCtxMenu(null);
-  }, [ctxMenu]);
+  }, [ctxMenu, setCtxMenu]);
 
   const ctxCopyBytes = useCallback(() => {
     if (!ctxMenu) return;
@@ -82,7 +82,7 @@ export function useInsnContextMenu({
       .join(" ");
     navigator.clipboard.writeText(hex);
     setCtxMenu(null);
-  }, [ctxMenu]);
+  }, [ctxMenu, setCtxMenu]);
 
   const ctxGoTo = useCallback(() => {
     if (!ctxMenu) return;
@@ -95,7 +95,7 @@ export function useInsnContextMenu({
       addrInput.dispatchEvent(new Event("input", { bubbles: true }));
     }
     setCtxMenu(null);
-  }, [ctxMenu]);
+  }, [ctxMenu, setCtxMenu]);
 
   const ctxShowInHex = useCallback(() => {
     if (!ctxMenu || !pe) return;
@@ -106,27 +106,27 @@ export function useInsnContextMenu({
       dispatch({ type: "SET_TAB", tab: "hex" });
     }
     setCtxMenu(null);
-  }, [ctxMenu, pe, dispatch]);
+  }, [ctxMenu, pe, dispatch, setCtxMenu]);
 
   const ctxToggleBookmark = useCallback(() => {
     if (!ctxMenu) return;
     dispatch({ type: "TOGGLE_BOOKMARK", address: ctxMenu.insn.address });
     setCtxMenu(null);
-  }, [ctxMenu, dispatch]);
+  }, [ctxMenu, dispatch, setCtxMenu]);
 
   const ctxAddComment = useCallback(() => {
     if (!ctxMenu) return;
     const existing = comments[ctxMenu.insn.address] ?? "";
     setEditingComment({ address: ctxMenu.insn.address, value: existing });
     setCtxMenu(null);
-  }, [ctxMenu, comments]);
+  }, [ctxMenu, comments, setEditingComment, setCtxMenu]);
 
   const ctxCopyComment = useCallback(() => {
     if (!ctxMenu) return;
     const comment = comments[ctxMenu.insn.address] || ctxMenu.insn.comment;
     if (comment) navigator.clipboard.writeText(comment);
     setCtxMenu(null);
-  }, [ctxMenu, comments]);
+  }, [ctxMenu, comments, setCtxMenu]);
 
   const ctxRenameFunction = useCallback(() => {
     if (!ctxMenu) return;
@@ -137,20 +137,20 @@ export function useInsnContextMenu({
       setRenamingLabel({ address: fn.address, value: getDisplayName(fn, renames) });
     }
     setCtxMenu(null);
-  }, [ctxMenu, funcMap, renames]);
+  }, [ctxMenu, funcMap, renames, setRenamingLabel, setCtxMenu]);
 
   const ctxFollowTarget = useCallback(() => {
     if (!ctxMenu) return;
     const target = parseBranchTarget(ctxMenu.insn.mnemonic, ctxMenu.insn.opStr);
     if (target !== null) handleAddressClick(target);
     setCtxMenu(null);
-  }, [ctxMenu, handleAddressClick]);
+  }, [ctxMenu, handleAddressClick, setCtxMenu]);
 
   const ctxShowXrefs = useCallback(() => {
     if (!ctxMenu) return;
     setShowXrefPanel(true);
     setCtxMenu(null);
-  }, [ctxMenu]);
+  }, [ctxMenu, setShowXrefPanel, setCtxMenu]);
 
   // Xref count map for context menu
   const xrefCountMap = useMemo(() => {
@@ -191,7 +191,7 @@ export function useInsnContextMenu({
         insn,
       });
     },
-    [viewMode],
+    [viewMode, cfgContainerRef, parentRef, setCtxMenu],
   );
 
   return {

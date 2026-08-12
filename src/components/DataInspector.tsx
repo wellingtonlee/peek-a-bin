@@ -78,7 +78,9 @@ export function DataInspector({ offset, bytes, baseAddress }: DataInspectorProps
     }
 
     return rows;
-  }, [offset, bytes, baseAddress]);
+    // baseAddress is not read inside this memo — it is only used below when
+    // formatting the VA — so listing it here just forced recomputation.
+  }, [offset, bytes]);
 
   if (!data) return null;
 

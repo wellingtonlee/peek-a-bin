@@ -1,0 +1,564 @@
+/**
+ * ARM64 disassembly and function detection.
+ *
+ * Deliberately separate from `functionDetect.ts` rather than another branch
+ * inside it. Almost nothing there transfers: the prologue table is x86 opcode
+ * bytes, the recursive descent keys off `jmp`/`call`/`j<cc>` mnemonics and
+ * `0x…` operands, the jump-table reader models an MSVC x86 `jmp [tbl+i*n]`,
+ * and the thunk and tail-call passes read `[rip ± 0x..]`. On a fixed-width ISA
+ * none of that machinery is even needed for the disassembly itself — a linear
+ * sweep at 4-byte alignment is not a heuristic, it is the decoding.
+ *
+ * What is in scope here is what can be got right: instructions, and function
+ * boundaries from evidence (`.pdata`, exports, the entry point, unwind
+ * handlers, direct `bl` targets). Everything the x86 grammar would have to
+ * interpret — operand parsing, xrefs, stack frames, the decompiler's IR lifter
+ * — is refused by the callers rather than run on ARM64 bytes; see
+ * `unsupportedOnArch` in ./arch.ts.
+ */
+
+import type { DisasmFunction, Instruction } from "./types";
+import { type DetectResult, mapInsn } from "./functionDetect";
+import { createScan, requireCapstone } from "./capstoneWindow";
+
+/** Every A64 instruction is exactly four bytes, always 4-byte aligned. */
+export const ARM64_INSN_SIZE = 4;
+
+/**
+ * Bytes handed to Capstone in one `disasm` call.
+ *
+ * Small on purpose, and now smaller than the shared ceiling in
+ * `./capstoneWindow.ts` rather than the only bound in the codebase. The
+ * original observation stands: sweeping t64-arm.exe (110 KiB of .text) with a
+ * 64 KiB window yielded 11548 instructions and covered 202 of 419 function
+ * starts, and by the end of it even `new Capstone(...)` threw `memory access
+ * out of bounds`; the same sweep with this window yields 27428 instructions and
+ * 419/419 starts. What that was actually hitting is now measured: a 64 KiB
+ * window is the whole of capstone-wasm's ~65.6 KiB WASM stack, because the
+ * input is passed by `stackAlloc`, not by the heap.
+ *
+ * The other half of that bound is {@link disassembleArm64}'s probe: after a
+ * word fails to decode the next attempt is one instruction wide, not a full
+ * window, so a section of undecodable data costs 4 bytes per word instead of
+ * 4 KiB.
+ */
+export const ARM64_DECODE_WINDOW = 0x1000;
+
+/** What ARM64 disassembly needs from the session — one Capstone handle, opened
+ *  `CS_ARCH_ARM64`, plus the annotation maps `mapInsn` reads. */
+export interface Arm64Context {
+  cs: any;
+  stringMap: Map<number, string>;
+  iatMap: Map<number, { lib: string; func: string }>;
+  driverMode: boolean;
+}
+
+/** A `.pdata`-derived function extent, in virtual addresses. */
+export interface CodeRange {
+  beginAddress: number;
+  endAddress: number;
+}
+
+/** `addr => is addr inside one of these ranges`, for marking speculative code. */
+function rangeTest(ranges: CodeRange[] | undefined): (addr: number) => boolean {
+  if (!ranges || ranges.length === 0) return () => false;
+  const sorted = [...ranges].sort((a, b) => a.beginAddress - b.beginAddress);
+  const starts = new Float64Array(sorted.length);
+  const maxEnds = new Float64Array(sorted.length);
+  let running = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < sorted.length; i++) {
+    starts[i] = sorted[i].beginAddress;
+    running = Math.max(running, sorted[i].endAddress);
+    maxEnds[i] = running;
+  }
+  return (addr: number): boolean => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    let last = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (starts[mid] <= addr) {
+        last = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return last >= 0 && maxEnds[last] > addr;
+  };
+}
+
+/**
+ * Disassemble an ARM64 code section by linear sweep.
+ *
+ * This is both the plain and the "hybrid" disassembly for ARM64: recursive
+ * descent exists on x86 to find the instruction boundaries that a
+ * variable-length encoding makes ambiguous, and A64 has no such ambiguity. Any
+ * 4-byte-aligned word is either a valid instruction or it is not, and reading
+ * it in isolation gives the same answer as reading it in context.
+ *
+ * `pdataRanges`, when supplied, only classifies the result: a word inside a
+ * linker-recorded function extent is code the image itself vouches for
+ * (`source: "recursive"`), a word outside every extent is the sweep's own guess
+ * (`source: "gap-fill"`, which the disassembly view dims). Nothing is decoded
+ * differently because of it.
+ */
+export function disassembleArm64(
+  bytes: Uint8Array,
+  baseAddress: number,
+  ctx: Arm64Context,
+  pdataRanges?: CodeRange[],
+): Instruction[] {
+  // Throw rather than return `[]`: this sweep *is* the ARM64 disassembly, so an
+  // empty list is a complete-looking answer for a `.text` full of code
+  // (peek-a-bin-cen). `detectArm64Functions` below keeps its own `if (ctx.cs)`
+  // guard, because its other evidence does not come from the decoder.
+  const cs = requireCapstone(ctx.cs, "ARM64 sweep");
+  const out: Instruction[] = [];
+
+  const scan = createScan(cs, "ARM64 sweep", ARM64_DECODE_WINDOW);
+  const isKnownCode = rangeTest(pdataRanges);
+  const marks = pdataRanges !== undefined && pdataRanges.length > 0;
+  // A trailing partial word cannot be an instruction.
+  const len = bytes.length - (bytes.length % ARM64_INSN_SIZE);
+  let offset = 0;
+  /** The previous attempt decoded nothing, so the next one probes a single word. */
+  let probing = false;
+
+  while (offset + ARM64_INSN_SIZE <= len) {
+    // When probing, the *limit* is one word past the offset, which is how the
+    // scan is told to hand Capstone four bytes instead of a full window.
+    const limit = probing ? offset + ARM64_INSN_SIZE : len;
+    const insns = scan.decode(bytes, offset, limit, baseAddress + offset);
+
+    if (insns.length === 0) {
+      probing = true;
+      offset += ARM64_INSN_SIZE;
+      continue;
+    }
+    probing = false;
+
+    for (const insn of insns) {
+      const mapped = mapInsn(insn, ctx.stringMap, ctx.iatMap, ctx.driverMode);
+      if (marks) mapped.source = isKnownCode(insn.address) ? "recursive" : "gap-fill";
+      out.push(mapped);
+    }
+
+    const last = insns[insns.length - 1];
+    const next = last.address + last.size - baseAddress;
+    // Defensive: a decoder that reported an instruction at or before where the
+    // window started would otherwise spin here forever.
+    offset = next > offset ? next : offset + ARM64_INSN_SIZE;
+  }
+
+  return out;
+}
+
+/** `bl #0x140001018` — the only call form whose target is known statically. */
+const BL_TARGET = /^#?(0x[0-9a-fA-F]+)$/;
+
+// ── A64 switch dispatch tables ──────────────────────────────────────────────
+//
+// An A64 switch cannot name its table in the dispatching instruction the way
+// 32-bit x86 does, and it does not use the x86-64 RVA form either. Both
+// compilers spell it as a dependency chain ending in `br`, in one of two shapes
+// that differ only in whether the table base and the case base are the same
+// `adr`:
+//
+// ```text
+//   one adr, byte entries                  two adrs, word entries
+//   cmp   w11, #7                          cmp   w10, #0x37
+//   b.hi  <default>                        b.hi  <default>
+//   adr   x9, #TABLE                       adr   x9, #TABLE
+//   ldrsb x8, [x9, w11, uxtw]              ldrsw x8, [x9, w10, uxtw #2]
+//   add   x8, x9, x8, lsl #2               adr   x9, #CASEBASE
+//   br    x8                               add   x8, x9, x8, lsl #2
+//                                          br    x8
+// ```
+//
+// Entries are **offsets in instruction-sized units**, not addresses — signed or
+// unsigned by which load was used — and the `lsl #k` on the `add` is the scale.
+// The second shape reassigns the *same register* between the load and the add,
+// so the walk has to be positional: the base is the nearest `adr` before the
+// `add`, and the table is the nearest `adr` before the *load*. Reading either
+// one as the other silently relocates every case body.
+//
+// Not every `br` is a switch. The other two shapes in a real image are
+// `adrp`/`add`/`ldar xN, [x8]` — a function pointer loaded from `.data` at run
+// time, which has no static target at all — and sweep artefacts in padding.
+// Both fail the walk and contribute nothing, which is the point.
+
+/** Entries read from one A64 table. Same ceiling, and same reason, as the x86 reader. */
+const MAX_ARM64_JUMP_TABLE_CASES = 512;
+
+/** How far back the dispatch walk looks: the chain is 4-6 instructions. */
+const ARM64_MAX_RECENT = 16;
+
+/**
+ * `x9`, `w9`, `X9` → `"9"`; `xzr`/`wzr` → `"zr"`; anything else → null.
+ *
+ * A64 mixes widths within one idiom on purpose — the table load writes `w8` and
+ * the `add` that consumes it reads `x8` — so registers are only ever compared
+ * by number.
+ */
+function a64Reg(text: string | undefined): string | null {
+  if (text === undefined) return null;
+  const m = text.trim().toLowerCase().match(/^[wx](\d{1,2}|zr)$/);
+  if (!m) return null;
+  if (m[1] === "zr") return "zr";
+  const n = Number(m[1]);
+  return n <= 30 ? String(n) : null;
+}
+
+/** Mnemonics whose first operand is a source, so it must not read as a write. */
+const A64_NO_WRITE = new Set(["cmp", "cmn", "tst", "str", "strb", "strh", "stur", "stp", "st1"]);
+
+/**
+ * The register an instruction writes, or null.
+ *
+ * Deliberately crude and deliberately over-eager: anything not on the deny list
+ * is taken to write its first operand. Over-reporting a write only ends a walk
+ * early, which yields no table — the safe direction. Under-reporting would let
+ * the walk step over the instruction that actually produced the value.
+ */
+function a64Dest(mnemonic: string, opStr: string): string | null {
+  if (A64_NO_WRITE.has(mnemonic.toLowerCase())) return null;
+  return a64Reg(opStr.split(",")[0]);
+}
+
+/** `adr x9, #0x140007a8c` → `{ reg: "9", target: 0x140007a8c }`. */
+function parseAdr(mnemonic: string, opStr: string): { reg: string; target: number } | null {
+  if (mnemonic.toLowerCase() !== "adr") return null;
+  const parts = opStr.split(",");
+  const reg = a64Reg(parts[0]);
+  const m = parts[1]?.trim().match(/^#?(0x[0-9a-fA-F]+|\d+)$/);
+  if (!reg || !m) return null;
+  return { reg, target: Number(m[1]) };
+}
+
+/** `add x8, x9, x8, lsl #2` / `sub x3, x3, x8, lsl #2`, with the shift required. */
+function parseTableAdd(
+  mnemonic: string,
+  opStr: string,
+): { dest: string; base: string; offset: string; shift: number; sign: 1 | -1 } | null {
+  const mn = mnemonic.toLowerCase();
+  if (mn !== "add" && mn !== "sub") return null;
+  const parts = opStr.split(",");
+  if (parts.length !== 4) return null;
+  const dest = a64Reg(parts[0]);
+  const base = a64Reg(parts[1]);
+  const offset = a64Reg(parts[2]);
+  const sh = parts[3].trim().toLowerCase().match(/^lsl\s+#(\d+)$/);
+  // The shift is required, not defaulted to zero: it is the statement of what
+  // unit the table's entries are in, and a table whose entry scale cannot be
+  // established yields no targets rather than a plausible set.
+  if (!dest || !base || !offset || !sh) return null;
+  const shift = Number(sh[1]);
+  if (shift > 4) return null;
+  return { dest, base, offset, shift, sign: mn === "sub" ? -1 : 1 };
+}
+
+/** Byte width and signedness of the five scaled-index loads a dispatch uses. */
+const A64_TABLE_LOADS = new Map<string, { width: number; signed: boolean }>([
+  ["ldrb", { width: 1, signed: false }],
+  ["ldrsb", { width: 1, signed: true }],
+  ["ldrh", { width: 2, signed: false }],
+  ["ldrsh", { width: 2, signed: true }],
+  ["ldrsw", { width: 4, signed: true }],
+]);
+
+/**
+ * `ldrsw x8, [x9, w10, uxtw #2]` → table register, index register, entry width.
+ *
+ * The extend's shift must equal the entry width, because it is the same
+ * statement made twice — `[table + index * width]`. A mismatch means this is not
+ * a table read and the walk gives up. A plain `ldr` is refused outright: its
+ * width comes from the destination register rather than the mnemonic, and
+ * nothing observed emits one here.
+ */
+function parseTableLoad(
+  mnemonic: string,
+  opStr: string,
+): { dest: string; table: string; index: string; width: number; signed: boolean } | null {
+  const kind = A64_TABLE_LOADS.get(mnemonic.toLowerCase());
+  if (!kind) return null;
+  const m = opStr.match(/^\s*([wx]\w+)\s*,\s*\[\s*([wx]\w+)\s*,\s*([wx]\w+)\s*(?:,\s*(?:uxtw|sxtw|lsl)(?:\s+#(\d+))?\s*)?\]\s*$/i);
+  if (!m) return null;
+  const dest = a64Reg(m[1]);
+  const table = a64Reg(m[2]);
+  const index = a64Reg(m[3]);
+  if (!dest || !table || !index) return null;
+  const shift = m[4] === undefined ? 0 : Number(m[4]);
+  if (1 << shift !== kind.width) return null;
+  return { dest, table, index, width: kind.width, signed: kind.signed };
+}
+
+/** `cmp w10, #0x37` → 0x37, the largest case index the dispatch can be reached with. */
+function parseCmpImmediate(mnemonic: string, opStr: string, reg: string): number | null {
+  if (mnemonic.toLowerCase() !== "cmp") return null;
+  const parts = opStr.split(",");
+  if (a64Reg(parts[0]) !== reg) return null;
+  const m = parts[1]?.trim().match(/^#?(0x[0-9a-fA-F]+|\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+/** The chain a `br` was reached through, or null when any link is missing. */
+interface Arm64Dispatch {
+  /** Address of the table's first entry. */
+  table: number;
+  /** Address case offsets are measured from. */
+  caseBase: number;
+  width: number;
+  signed: boolean;
+  /** `caseBase + sign * (entry << shift)`. */
+  shift: number;
+  sign: 1 | -1;
+  /** Upper bound on entries, from the bounds check in front of the dispatch. */
+  count: number;
+}
+
+/**
+ * Walk back from a `br <reg>` to the table it dispatches through.
+ *
+ * `recent` is the instruction window ending at the `br`. Every step takes the
+ * nearest match and gives up the moment something else writes the register it
+ * is chasing: a later write means the value the branch used came from somewhere
+ * this walk has not modelled, and guessing there is how a table gets misread.
+ */
+function recoverArm64Dispatch(brOpStr: string, recent: Instruction[]): Arm64Dispatch | null {
+  const brReg = a64Reg(brOpStr);
+  if (brReg === null || brReg === "zr") return null;
+
+  /** Nearest index below `from` whose instruction writes `reg`, or -1. */
+  const lastWrite = (reg: string, from: number): number => {
+    for (let i = from; i >= 0; i--) {
+      if (a64Dest(recent[i].mnemonic, recent[i].opStr) === reg) return i;
+    }
+    return -1;
+  };
+
+  const iAdd = lastWrite(brReg, recent.length - 1);
+  if (iAdd < 0) return null;
+  const add = parseTableAdd(recent[iAdd].mnemonic, recent[iAdd].opStr);
+  if (!add || add.dest !== brReg) return null;
+
+  // The case base and the table load are both looked for from the `add`
+  // backwards, independently. They are frequently the *same register* rewritten
+  // in between (`adr x9, #TABLE` … `adr x9, #CASEBASE`), so position is the only
+  // thing that separates them.
+  const iBase = lastWrite(add.base, iAdd - 1);
+  if (iBase < 0) return null;
+  const baseAdr = parseAdr(recent[iBase].mnemonic, recent[iBase].opStr);
+  if (!baseAdr) return null;
+
+  const iLoad = lastWrite(add.offset, iAdd - 1);
+  if (iLoad < 0) return null;
+  const load = parseTableLoad(recent[iLoad].mnemonic, recent[iLoad].opStr);
+  if (!load) return null;
+
+  const iTable = lastWrite(load.table, iLoad - 1);
+  if (iTable < 0) return null;
+  const tableAdr = parseAdr(recent[iTable].mnemonic, recent[iTable].opStr);
+  if (!tableAdr) return null;
+
+  // The bounds check is the only statement of how long the table is, so without
+  // one there is no table. It has to be about the index the load used, and it
+  // has to come before the load — anything writing that index in between means
+  // the compare was about a different value.
+  let count = 0;
+  for (let i = iLoad - 1; i >= 0; i--) {
+    const imm = parseCmpImmediate(recent[i].mnemonic, recent[i].opStr, load.index);
+    if (imm !== null) {
+      count = imm + 1;
+      break;
+    }
+    if (a64Dest(recent[i].mnemonic, recent[i].opStr) === load.index) return null;
+  }
+  if (count <= 0 || count > MAX_ARM64_JUMP_TABLE_CASES) return null;
+
+  return {
+    table: tableAdr.target,
+    caseBase: baseAdr.target,
+    width: load.width,
+    signed: load.signed,
+    shift: add.shift,
+    sign: add.sign,
+    count,
+  };
+}
+
+/**
+ * Case targets of one A64 dispatch table.
+ *
+ * Every entry has to resolve inside the code section and land on a 4-byte
+ * boundary — an A64 instruction address is always aligned, so an unaligned
+ * target is proof the reading is wrong rather than a case body in an odd place.
+ * The read stops at the first entry that fails either test, so a table shorter
+ * than its bounds check claims yields its real cases and nothing after them.
+ */
+function readArm64Table(
+  d: Arm64Dispatch,
+  bytes: Uint8Array,
+  baseAddress: number,
+): number[] {
+  const endAddress = baseAddress + bytes.length;
+  const targets: number[] = [];
+  for (let c = 0; c < d.count; c++) {
+    const at = d.table + c * d.width - baseAddress;
+    if (at < 0 || at + d.width > bytes.length) break;
+    let raw = 0;
+    for (let b = 0; b < d.width; b++) raw |= bytes[at + b] << (8 * b);
+    raw >>>= 0;
+    const bits = d.width * 8;
+    const entry = d.signed && raw >= 2 ** (bits - 1) ? raw - 2 ** bits : raw;
+    const target = d.caseBase + d.sign * (entry * 2 ** d.shift);
+    if (target < baseAddress || target >= endAddress) break;
+    if (target % ARM64_INSN_SIZE !== 0) break;
+    targets.push(target);
+  }
+  return targets;
+}
+
+/**
+ * Every A64 dispatch table in `insns`, keyed by the address of its `br`.
+ *
+ * Exported for the tests: the walk has enough steps that testing it only
+ * through `detectArm64Functions` would mean building a whole image for each
+ * refusal case.
+ */
+export function findArm64JumpTables(
+  insns: Instruction[],
+  bytes: Uint8Array,
+  baseAddress: number,
+): Map<number, number[]> {
+  const tables = new Map<number, number[]>();
+  const recent: Instruction[] = [];
+  for (const insn of insns) {
+    // Only the plain `br`. The pointer-authenticated forms (`braa`, `brab`, …)
+    // reach a signed pointer, never a table computed like this.
+    if (insn.mnemonic.toLowerCase() === "br") {
+      const chain = recoverArm64Dispatch(insn.opStr, recent);
+      if (chain) {
+        const targets = readArm64Table(chain, bytes, baseAddress);
+        // One target is a jump, not a switch: it says nothing the CFG could not
+        // already see, and two is the least a table can distinguish.
+        if (targets.length >= 2) tables.set(insn.address, targets);
+      }
+    }
+    recent.push(insn);
+    if (recent.length > ARM64_MAX_RECENT) recent.shift();
+  }
+  return tables;
+}
+
+/**
+ * Function boundaries for an ARM64 image.
+ *
+ * Every start here is *recorded* somewhere, not guessed from a byte pattern:
+ *
+ *  * `.pdata` — the linker's own table of function extents. On ARM64 it is
+ *    mandatory for anything with a frame, and it carries the end address too,
+ *    so these functions get exact sizes.
+ *  * exports, the entry point, and `.xdata` exception handlers.
+ *  * the target of a direct `bl`. These are the leaf functions that ARM64
+ *    unwind data is allowed to omit: on t64-arm.exe, 120 of 460 distinct `bl`
+ *    targets are outside every `.pdata` extent, and — a good sign that the
+ *    sweep above is aligned correctly — not one lands strictly *inside* one.
+ *
+ * No prologue scan. `stp x29, x30, [sp, #-N]!` is the common frame setup, but
+ * matching it is a byte-pattern guess of exactly the kind `.pdata` makes
+ * unnecessary here, and it would find nothing that is not already listed.
+ *
+ * `jumpTables` holds the A64 switch dispatches recovered by
+ * {@link findArm64JumpTables} — the `adr`/`ldr`/`add`/`br` chains, and only
+ * those whose table base, entry width and length all resolve. The case bodies
+ * are decoded by the linear sweep either way; what the tables add is the CFG
+ * edges out of the dispatch block, which without them is a dead end
+ * (peek-a-bin-8ij).
+ *
+ * Case targets are deliberately *not* added to the function list. They are case
+ * labels: the `br` that reaches them sits inside a function and the bodies
+ * belong to it — the same rule `functionDetect.ts` applies to the x86 tables.
+ */
+export function detectArm64Functions(
+  bytes: Uint8Array,
+  baseAddress: number,
+  ctx: Arm64Context,
+  options?: {
+    exports?: { name: string; address: number }[];
+    entryPoint?: number;
+    pdataFunctions?: CodeRange[];
+    handlerAddresses?: number[];
+  },
+): DetectResult {
+  const endAddress = baseAddress + bytes.length;
+  const inSection = (addr: number) => addr >= baseAddress && addr < endAddress;
+  const addrSet = new Set<number>();
+  const nameMap = new Map<number, string>();
+  const pdataEndMap = new Map<number, number>();
+
+  for (const rf of options?.pdataFunctions ?? []) {
+    if (!inSection(rf.beginAddress)) continue;
+    addrSet.add(rf.beginAddress);
+    pdataEndMap.set(rf.beginAddress, rf.endAddress);
+  }
+
+  for (const ha of options?.handlerAddresses ?? []) {
+    if (!inSection(ha)) continue;
+    addrSet.add(ha);
+    nameMap.set(ha, `__handler_${ha.toString(16)}`);
+  }
+
+  if (options?.entryPoint !== undefined && inSection(options.entryPoint)) {
+    addrSet.add(options.entryPoint);
+    nameMap.set(options.entryPoint, "entry_point");
+  }
+
+  for (const exp of options?.exports ?? []) {
+    if (!inSection(exp.address)) continue;
+    addrSet.add(exp.address);
+    nameMap.set(exp.address, exp.name);
+  }
+
+  // Direct call targets. Anything landing strictly inside a `.pdata` extent is
+  // an interior label, not a function — the same rule the x86 detector applies
+  // to its byte-pattern candidates, and for the same reason: the linker's
+  // record of where a function begins outranks an inference.
+  //
+  // The same sweep feeds the switch-dispatch reader, so the section is decoded
+  // once for both.
+  let jumpTables = new Map<number, number[]>();
+  if (ctx.cs) {
+    const insidePdata = rangeTest(options?.pdataFunctions);
+    const insns = disassembleArm64(bytes, baseAddress, ctx);
+    for (const insn of insns) {
+      if (insn.mnemonic !== "bl") continue;
+      const m = insn.opStr.match(BL_TARGET);
+      if (!m) continue;
+      const target = Number(m[1]);
+      if (!inSection(target) || insidePdata(target)) continue;
+      addrSet.add(target);
+    }
+    jumpTables = findArm64JumpTables(insns, bytes, baseAddress);
+  }
+
+  const sortedAddrs = Array.from(addrSet).sort((a, b) => a - b);
+  const functions: DisasmFunction[] = sortedAddrs.map((addr) => ({
+    name: nameMap.get(addr) || `sub_${addr.toString(16).toUpperCase()}`,
+    address: addr,
+    size: 0,
+  }));
+
+  for (let i = 0; i < functions.length; i++) {
+    const pdataEnd = pdataEndMap.get(functions[i].address);
+    if (pdataEnd) {
+      functions[i].size = pdataEnd - functions[i].address;
+    } else if (i < functions.length - 1) {
+      functions[i].size = functions[i + 1].address - functions[i].address;
+    } else {
+      functions[i].size = endAddress - functions[i].address;
+    }
+  }
+
+  return { functions, jumpTables: Array.from(jumpTables.entries()) };
+}

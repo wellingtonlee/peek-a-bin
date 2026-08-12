@@ -49,6 +49,17 @@ function parseImm(s: string): number | null {
   const hexM = trimmed.match(HEX_PATTERN);
   if (hexM) {
     const v = parseInt(hexM[1], 16);
+    // An x86 immediate is at most 64 bits, and Capstone prints it unsigned:
+    // `or rdi, 0xffffffffffffffff` is `or rdi, -1`. `parseInt` rounds that to
+    // 2^64, a value no later stage can do anything true with — the constant
+    // folder saw 2^64 and produced 0. Reading the top bit as the sign, which
+    // is what the instruction does, gives a number that is both exact and
+    // right.
+    if (!Number.isSafeInteger(v)) {
+      const signed = BigInt.asIntN(64, BigInt(`0x${hexM[1]}`));
+      const n = Number(signed);
+      if (Number.isSafeInteger(n)) return trimmed.startsWith("-") ? -n : n;
+    }
     return trimmed.startsWith("-") ? -v : v;
   }
   if (DEC_PATTERN.test(trimmed)) return parseInt(trimmed, 10);
@@ -118,13 +129,18 @@ function parseMemExpr(inside: string, insn: Instruction, is64: boolean): IRExpr 
 
 /**
  * Parse a single Capstone operand string into an IR expression.
+ *
+ * A register operand lifts to a plain register read — deliberately *not* to
+ * whatever expression `RegState` last recorded for it. Substituting here
+ * produced IR that no later stage could read correctly: the assignment that
+ * computed the value was still emitted, so a side-effecting source (a call) was
+ * duplicated at every read, and the leaves of the substituted expression meant
+ * "value on entry to the block" while `ssa.ts` renames every leaf to the most
+ * recent definition. Propagation is buildSSA + ssaopt + foldBlock's job; they
+ * do it with the version information that makes it sound. The parameter is
+ * gone rather than ignored so this cannot quietly come back.
  */
-export function parseOperand(
-  op: string,
-  insn: Instruction,
-  is64: boolean,
-  regState: RegState,
-): IRExpr {
+export function parseOperand(op: string, insn: Instruction, is64: boolean): IRExpr {
   const trimmed = op.trim();
   if (!trimmed) return irUnknown("");
 
@@ -139,7 +155,7 @@ export function parseOperand(
 
   // Register
   if (isRegister(trimmed)) {
-    return regState.getOrReg(trimmed, regSize(trimmed));
+    return irReg(trimmed, regSize(trimmed));
   }
 
   // Immediate
@@ -292,7 +308,7 @@ export function liftBlock(
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
-      const src = parseOperand(parts[1], insn, is64, regState);
+      const src = parseOperand(parts[1], insn, is64);
       if (dest.kind === "deref") {
         stmts.push({
           kind: "store",
@@ -315,7 +331,7 @@ export function liftBlock(
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
-      const srcRaw = parseOperand(parts[1], insn, is64, regState);
+      const srcRaw = parseOperand(parts[1], insn, is64);
       // Determine source width from prefix or register size
       const srcSize =
         memPrefixSize(parts[1]) ||
@@ -359,7 +375,7 @@ export function liftBlock(
       if (bracketM) {
         src = parseMemExpr(bracketM[1], insn, is64);
       } else {
-        src = parseOperand(parts[1], insn, is64, regState);
+        src = parseOperand(parts[1], insn, is64);
       }
       stmts.push({ kind: "assign", dest, src, addr: insn.address });
       if (dest.kind === "reg") regState.set(dest.name, src);
@@ -386,8 +402,8 @@ export function liftBlock(
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
-      const destVal = parseOperand(parts[0], insn, is64, regState);
-      const src = parseOperand(parts[1], insn, is64, regState);
+      const destVal = parseOperand(parts[0], insn, is64);
+      const src = parseOperand(parts[1], insn, is64);
       const op = ARITH_OPS[mn];
       const result = irBinary(op, destVal, src);
       if (dest.kind === "deref") {
@@ -409,15 +425,15 @@ export function liftBlock(
     if (mn === "imul") {
       if (parts.length === 2) {
         const dest = parseDestOperand(parts[0], insn, is64);
-        const destVal = parseOperand(parts[0], insn, is64, regState);
-        const src = parseOperand(parts[1], insn, is64, regState);
+        const destVal = parseOperand(parts[0], insn, is64);
+        const src = parseOperand(parts[1], insn, is64);
         const result = irBinary("*", destVal, src);
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
       } else if (parts.length >= 3) {
         const dest = parseDestOperand(parts[0], insn, is64);
-        const a = parseOperand(parts[1], insn, is64, regState);
-        const b = parseOperand(parts[2], insn, is64, regState);
+        const a = parseOperand(parts[1], insn, is64);
+        const b = parseOperand(parts[2], insn, is64);
         const result = irBinary("*", a, b);
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
@@ -434,7 +450,7 @@ export function liftBlock(
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
-      const destVal = parseOperand(parts[0], insn, is64, regState);
+      const destVal = parseOperand(parts[0], insn, is64);
       const op: BinaryOp = mn === "inc" ? "+" : "-";
       const result = irBinary(op, destVal, irConst(1));
       if (dest.kind === "deref") {
@@ -459,7 +475,7 @@ export function liftBlock(
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
-      const destVal = parseOperand(parts[0], insn, is64, regState);
+      const destVal = parseOperand(parts[0], insn, is64);
       const result = irUnary(mn === "not" ? "~" : "-", destVal);
       if (dest.kind === "deref") {
         stmts.push({
@@ -479,8 +495,8 @@ export function liftBlock(
     // ── cmp / test → flag state + eflags IR assignment ──
     if (mn === "cmp" || mn === "test") {
       if (parts.length >= 2) {
-        const left = parseOperand(parts[0], insn, is64, regState);
-        const right = parseOperand(parts[1], insn, is64, regState);
+        const left = parseOperand(parts[0], insn, is64);
+        const right = parseOperand(parts[1], insn, is64);
         regState.setFlags(mn as "cmp" | "test", left, right);
         // Emit eflags definition for SSA cross-block propagation
         const flagExpr = mn === "cmp" ? irBinary("-", left, right) : irBinary("&", left, right);
@@ -505,8 +521,8 @@ export function liftBlock(
     if (cmovM) {
       if (parts.length >= 2) {
         const dest = parseDestOperand(parts[0], insn, is64);
-        const destVal = parseOperand(parts[0], insn, is64, regState);
-        const src = parseOperand(parts[1], insn, is64, regState);
+        const destVal = parseOperand(parts[0], insn, is64);
+        const src = parseOperand(parts[1], insn, is64);
         const jcc = "j" + cmovM[1];
         const cond = regState.getCondition(jcc);
         const result: IRExpr = { kind: "ternary", condition: cond, then: src, else: destVal };
@@ -519,7 +535,7 @@ export function liftBlock(
     // ── call ──
     if (mn === "call") {
       const target = resolveCallTarget(insn, is64, iatMap, funcMap);
-      const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64, regState);
+      const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64);
       const call: IRCall = {
         kind: "call",
         target: target.name,
@@ -535,10 +551,51 @@ export function liftBlock(
 
     // ── ret / retn ──
     if (mn === "ret" || mn === "retn") {
+      // The return value is the accumulator, named — not the expression
+      // `RegState` last recorded for it. That expression is bound to the
+      // registers it names *as they were when it was recorded*, and nothing
+      // invalidates it when one of them is written again: `mov rax, rbx` /
+      // `mov rbx, [rsp+0x30]` / `ret` returned the restored RBX, i.e. the
+      // saved-register slot, and the real return value went unread and was
+      // then deleted as dead (peek-a-bin-lh6). Naming the register makes SSA
+      // bind the read to the definition that actually reaches the `ret`,
+      // which is what the instruction does.
       const retReg = is64 ? "rax" : "eax";
-      const val = regState.get(retReg);
-      stmts.push({ kind: "return", value: val ?? irReg(retReg), addr: insn.address });
+      stmts.push({ kind: "return", value: irReg(retReg, is64 ? 8 : 4), addr: insn.address });
       continue;
+    }
+
+    // ── Tail call: a `jmp` that leaves the function ──
+    //
+    // `buildCFG` gives such a jmp no successor, because its target is not a
+    // block of this function. The instruction pushes no return address, so the
+    // callee returns to *this* function's caller: it is a call followed by a
+    // return of the accumulator, and that is what it lifts to. Dropping it
+    // made a call the program performs invisible — and the argument set-up
+    // above it then died as unread, so the reader saw a function that appears
+    // to do nothing at the end (peek-a-bin-22t).
+    //
+    // Only a jmp whose target resolves to a *name* is lifted. An indirect
+    // `jmp rax` and a jump-table dispatch whose targets were not recovered
+    // also end a successorless block, and calling either one a tail call would
+    // invent a callee that the disassembly does not name.
+    if (mn === "jmp" && block.succs.length === 0 && insn === block.insns[block.insns.length - 1]) {
+      const tail = resolveNamedTarget(insn, iatMap, funcMap);
+      if (tail) {
+        const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64);
+        const call: IRCall = {
+          kind: "call",
+          target: tail.name,
+          args,
+          display: tail.display,
+        };
+        const retReg = is64 ? "rax" : "eax";
+        stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
+        regState.invalidateCallerSaved();
+        regState.set(retReg, call);
+        stmts.push({ kind: "return", value: irReg(retReg, is64 ? 8 : 4), addr: insn.address });
+        continue;
+      }
     }
 
     // ── Conditional / unconditional jumps: handled at structure level ──
@@ -549,7 +606,7 @@ export function liftBlock(
     // ── Sign-extend idioms ──
     if (mn === "cdq") {
       // edx = eax >> 31 (sign-extend eax into edx:eax)
-      const eaxVal = regState.getOrReg("eax", 4);
+      const eaxVal = irReg("eax", 4);
       const result = irBinary(">>", eaxVal, irConst(31));
       stmts.push({ kind: "assign", dest: irReg("edx"), src: result, addr: insn.address });
       regState.set("edx", result);
@@ -557,7 +614,7 @@ export function liftBlock(
     }
     if (mn === "cqo") {
       // rdx = rax >> 63
-      const raxVal = regState.getOrReg("rax", 8);
+      const raxVal = irReg("rax", 8);
       const result = irBinary(">>", raxVal, irConst(63));
       stmts.push({ kind: "assign", dest: irReg("rdx"), src: result, addr: insn.address });
       regState.set("rdx", result);
@@ -565,7 +622,7 @@ export function liftBlock(
     }
     if (mn === "cdqe") {
       // rax = (int32_t)eax
-      const eaxVal = regState.getOrReg("eax", 4);
+      const eaxVal = irReg("eax", 4);
       const result: IRExpr = { kind: "cast", type: "int32_t", operand: eaxVal };
       stmts.push({ kind: "assign", dest: irReg("rax"), src: result, addr: insn.address });
       regState.set("rax", result);
@@ -573,7 +630,7 @@ export function liftBlock(
     }
     if (mn === "cwde") {
       // eax = (int16_t)ax
-      const axVal = regState.getOrReg("ax", 2);
+      const axVal = irReg("ax", 2);
       const result: IRExpr = { kind: "cast", type: "int16_t", operand: axVal };
       stmts.push({ kind: "assign", dest: irReg("eax"), src: result, addr: insn.address });
       regState.set("eax", result);
@@ -581,7 +638,7 @@ export function liftBlock(
     }
     if (mn === "cbw") {
       // ax = (int8_t)al
-      const alVal = regState.getOrReg("al", 1);
+      const alVal = irReg("al", 1);
       const result: IRExpr = { kind: "cast", type: "int8_t", operand: alVal };
       stmts.push({ kind: "assign", dest: irReg("ax"), src: result, addr: insn.address });
       regState.set("ax", result);
@@ -589,7 +646,7 @@ export function liftBlock(
     }
     if (mn === "cwd") {
       // dx = ax >> 15
-      const axVal = regState.getOrReg("ax", 2);
+      const axVal = irReg("ax", 2);
       const result = irBinary(">>", axVal, irConst(15));
       stmts.push({ kind: "assign", dest: irReg("dx"), src: result, addr: insn.address });
       regState.set("dx", result);
@@ -599,7 +656,7 @@ export function liftBlock(
     // ── div / idiv ──
     if (mn === "div" || mn === "idiv") {
       if (parts.length >= 1) {
-        const divisor = parseOperand(parts[0], insn, is64, regState);
+        const divisor = parseOperand(parts[0], insn, is64);
         const srcSize =
           divisor.kind === "reg"
             ? regSize(divisor.name)
@@ -608,11 +665,16 @@ export function liftBlock(
               : 4;
         const dividendHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
         const dividendLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
-        const loVal = regState.getOrReg(dividendLo, regSize(dividendLo));
+        const loVal = irReg(dividendLo, regSize(dividendLo));
         const quotient = irBinary("/", loVal, divisor);
         const remainder = irBinary("%", loVal, divisor);
-        stmts.push({ kind: "assign", dest: irReg(dividendLo), src: quotient, addr: insn.address });
+        // Remainder first. Both expressions read the dividend, and one
+        // instruction writes both halves *from the same input* — so the
+        // statement that overwrites the dividend has to come second or SSA
+        // binds the other one's read to it, giving `edx = (eax / ecx) % ecx`.
+        // Emitting EDX first also keeps a divisor like `[eax]` readable.
         stmts.push({ kind: "assign", dest: irReg(dividendHi), src: remainder, addr: insn.address });
+        stmts.push({ kind: "assign", dest: irReg(dividendLo), src: quotient, addr: insn.address });
         regState.set(dividendLo, quotient);
         regState.set(dividendHi, remainder);
       } else {
@@ -624,22 +686,25 @@ export function liftBlock(
     // ── mul (single-operand) ──
     if (mn === "mul") {
       if (parts.length >= 1) {
-        const src = parseOperand(parts[0], insn, is64, regState);
+        const src = parseOperand(parts[0], insn, is64);
         const srcSize =
           src.kind === "reg" ? regSize(src.name) : src.kind === "deref" ? src.size : 4;
         const accLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
         const accHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
-        const loVal = regState.getOrReg(accLo, regSize(accLo));
+        const loVal = irReg(accLo, regSize(accLo));
         const result = irBinary("*", loVal, src);
-        stmts.push({ kind: "assign", dest: irReg(accLo), src: result, addr: insn.address });
-        regState.set(accLo, result);
-        // High part — SSA DCE will eliminate if unused
+        // High part first — SSA DCE will eliminate it if unused. Both halves
+        // are computed from the accumulator *before* the multiply, so writing
+        // the low half first would make the high half read the product and
+        // square it.
         stmts.push({
           kind: "assign",
           dest: irReg(accHi),
           src: irBinary(">>", result, irConst(srcSize * 8)),
           addr: insn.address,
         });
+        stmts.push({ kind: "assign", dest: irReg(accLo), src: result, addr: insn.address });
+        regState.set(accLo, result);
         regState.set(accHi, irBinary(">>", result, irConst(srcSize * 8)));
       } else {
         stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
@@ -651,12 +716,19 @@ export function liftBlock(
     if (mn === "xchg" && parts.length >= 2) {
       const a = parseDestOperand(parts[0], insn, is64);
       const b = parseDestOperand(parts[1], insn, is64);
-      const aVal = parseOperand(parts[0], insn, is64, regState);
-      const bVal = parseOperand(parts[1], insn, is64, regState);
-      // tmp = a; a = b; b = tmp — SSA versions correctly
+      const aVal = parseOperand(parts[0], insn, is64);
+      const bVal = parseOperand(parts[1], insn, is64);
       if (a.kind === "reg" && b.kind === "reg") {
+        // A swap needs the temporary. `a = b; b = a` is not one: SSA renames
+        // the second statement's read of `a` to the definition the first
+        // statement just made, so both registers end up holding b's value.
+        // The temporary is a plain register, so copy propagation collapses it
+        // back to `a = b_0; b = a_0` — the temporary exists to pin the *read*
+        // to the right program point, not to survive into the output.
+        const tmp = irReg("tmp_xchg", regSize(a.name));
+        stmts.push({ kind: "assign", dest: tmp, src: aVal, addr: insn.address });
         stmts.push({ kind: "assign", dest: a, src: bVal, addr: insn.address });
-        stmts.push({ kind: "assign", dest: b, src: aVal, addr: insn.address });
+        stmts.push({ kind: "assign", dest: b, src: tmp, addr: insn.address });
         regState.set(a.name, bVal);
         regState.set(b.name, aVal);
       } else {
@@ -671,17 +743,17 @@ export function liftBlock(
         mn === "rep" ? insn.opStr.toLowerCase().replace(/^rep\s+/, "") : insn.opStr.toLowerCase();
 
       if (innerMn.startsWith("movs")) {
-        const rdi = regState.getOrReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
-        const rsi = regState.getOrReg(is64 ? "rsi" : "esi", is64 ? 8 : 4);
-        const rcx = regState.getOrReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
+        const rdi = irReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
+        const rsi = irReg(is64 ? "rsi" : "esi", is64 ? 8 : 4);
+        const rcx = irReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
         const call: IRCall = { kind: "call", target: "memcpy", args: [rdi, rsi, rcx] };
         stmts.push({ kind: "call_stmt", call, addr: insn.address });
         continue;
       }
       if (innerMn.startsWith("stos")) {
-        const rdi = regState.getOrReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
-        const al = regState.getOrReg("al", 1);
-        const rcx = regState.getOrReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
+        const rdi = irReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
+        const al = irReg("al", 1);
+        const rcx = irReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
         const call: IRCall = { kind: "call", target: "memset", args: [rdi, al, rcx] };
         stmts.push({ kind: "call_stmt", call, addr: insn.address });
         continue;
@@ -690,14 +762,14 @@ export function liftBlock(
 
     // ── Basic FPU: fld/fst/fstp/fadd/fsub/fmul/fdiv ──
     if (mn === "fld" && parts.length >= 1) {
-      const src = parseOperand(parts[0], insn, is64, regState);
+      const src = parseOperand(parts[0], insn, is64);
       stmts.push({ kind: "assign", dest: irReg("st0"), src, addr: insn.address });
       regState.set("st0", src);
       continue;
     }
     if ((mn === "fst" || mn === "fstp") && parts.length >= 1) {
       const dest = parseDestOperand(parts[0], insn, is64);
-      const st0 = regState.getOrReg("st0", 10);
+      const st0 = irReg("st0", 10);
       if (dest.kind === "deref") {
         stmts.push({
           kind: "store",
@@ -712,8 +784,8 @@ export function liftBlock(
       continue;
     }
     if (FPU_ARITH.has(mn) && parts.length >= 1) {
-      const src = parseOperand(parts[0], insn, is64, regState);
-      const st0 = regState.getOrReg("st0", 10);
+      const src = parseOperand(parts[0], insn, is64);
+      const st0 = irReg("st0", 10);
       const op = FPU_ARITH.get(mn)!;
       const result = irBinary(op, st0, src);
       stmts.push({ kind: "assign", dest: irReg("st0"), src: result, addr: insn.address });
@@ -724,7 +796,7 @@ export function liftBlock(
     // ── SSE scalar: movss/addss/subss/mulss/divss/comiss ──
     if (SSE_SCALAR.has(mn) && parts.length >= 2) {
       const dest = parseDestOperand(parts[0], insn, is64);
-      const src = parseOperand(parts[1], insn, is64, regState);
+      const src = parseOperand(parts[1], insn, is64);
       if (mn === "movss" || mn === "movsd") {
         if (dest.kind === "deref") {
           stmts.push({
@@ -740,17 +812,17 @@ export function liftBlock(
         }
       } else if (mn === "comiss" || mn === "comisd" || mn === "ucomiss" || mn === "ucomisd") {
         // Comparison — sets eflags
-        regState.setFlags("cmp", parseOperand(parts[0], insn, is64, regState), src);
+        regState.setFlags("cmp", parseOperand(parts[0], insn, is64), src);
         stmts.push({
           kind: "assign",
           dest: irReg("eflags", 4),
-          src: irBinary("-", parseOperand(parts[0], insn, is64, regState), src),
+          src: irBinary("-", parseOperand(parts[0], insn, is64), src),
           addr: insn.address,
         });
       } else {
         // Arithmetic: addss/subss/mulss/divss
         const op = SSE_SCALAR.get(mn)!;
-        const destVal = parseOperand(parts[0], insn, is64, regState);
+        const destVal = parseOperand(parts[0], insn, is64);
         const result = irBinary(op, destVal, src);
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
@@ -767,15 +839,24 @@ export function liftBlock(
 
 // ── Call Target Resolution ──
 
-function resolveCallTarget(
+/**
+ * The name a direct, RIP-relative or absolute branch target stands for, or
+ * null when the operand names no address at all (an indirect branch through a
+ * register or a computed expression).
+ *
+ * Split out from `resolveCallTarget` because a tail `jmp` may only be lifted
+ * when the target *is* nameable: `resolveCallTarget`'s `(*rax)` fallback is
+ * right for `call rax`, where the disassembly already says a call happens, and
+ * wrong for `jmp rax`, where it would invent one.
+ */
+function resolveNamedTarget(
   insn: Instruction,
-  _is64: boolean,
   iatMap: Map<number, { lib: string; func: string }>,
   funcMap: Map<number, { name: string; address: number }>,
-): { name: string; display?: string } {
+): { name: string; display?: string } | null {
   const opStr = insn.opStr.trim();
 
-  // Direct call: `call 0xNNNN`
+  // Direct: `call 0xNNNN`
   const directM = opStr.match(/^0x([0-9a-fA-F]+)$/);
   if (directM) {
     const addr = parseInt(directM[1], 16);
@@ -797,11 +878,25 @@ function resolveCallTarget(
   // Direct address in brackets: `call dword ptr [0xNNNN]`
   const addrM = opStr.match(/\[\s*0x([0-9a-fA-F]+)\s*\]/);
   if (addrM) {
-    const target = parseInt(addrM[1], 16);
-    const iat = iatMap.get(target);
+    const abs = parseInt(addrM[1], 16);
+    const iat = iatMap.get(abs);
     if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}` };
-    return { name: `sub_${target.toString(16).toUpperCase()}` };
+    return { name: `sub_${abs.toString(16).toUpperCase()}` };
   }
+
+  return null;
+}
+
+function resolveCallTarget(
+  insn: Instruction,
+  _is64: boolean,
+  iatMap: Map<number, { lib: string; func: string }>,
+  funcMap: Map<number, { name: string; address: number }>,
+): { name: string; display?: string } {
+  const named = resolveNamedTarget(insn, iatMap, funcMap);
+  if (named) return named;
+
+  const opStr = insn.opStr.trim();
 
   // Indirect call through register
   if (isRegister(opStr)) {
@@ -819,22 +914,26 @@ function resolveCallTarget(
 
 // ── Argument Collection ──
 
+/**
+ * Arguments for a Windows x64 fastcall, in register order.
+ *
+ * `RegState` is consulted for *arity only*: a call is given as many arguments
+ * as there are leading fastcall registers this block has written, which is the
+ * only arity evidence available at lift time. The argument itself is the plain
+ * register — substituting the recorded expression re-expanded whatever computed
+ * it (including another call) at the call site, and bound its leaves to the
+ * wrong definitions once SSA renaming ran.
+ */
 function collectArgs64(regState: RegState): IRExpr[] {
   const args: IRExpr[] = [];
   for (const reg of FASTCALL_REGS_64) {
-    const val = regState.get(reg);
-    if (val) args.push(val);
-    else break; // stop at first missing param
+    if (!regState.get(reg)) break; // stop at first register this block never set
+    args.push(irReg(reg, 8));
   }
   return args;
 }
 
-function collectArgs32(
-  block: BasicBlock,
-  callInsn: Instruction,
-  is64: boolean,
-  regState: RegState,
-): IRExpr[] {
+function collectArgs32(block: BasicBlock, callInsn: Instruction, is64: boolean): IRExpr[] {
   // Scan backwards from call for consecutive push instructions
   const args: IRExpr[] = [];
   const insns = block.insns;
@@ -852,7 +951,7 @@ function collectArgs32(
   for (let i = callIdx - 1; i >= 0 && args.length < 8; i--) {
     if (insns[i].mnemonic !== "push") break;
     const op = insns[i].opStr.trim();
-    args.push(parseOperand(op, insns[i], is64, regState));
+    args.push(parseOperand(op, insns[i], is64));
   }
   return args;
 }

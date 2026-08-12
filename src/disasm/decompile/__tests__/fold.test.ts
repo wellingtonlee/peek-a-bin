@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { foldBlock } from "../fold";
+import { foldBlock, hasSideEffects } from "../fold";
 import { irConst, irReg, irBinary, irUnary } from "../ir";
 import type { IRStmt, IRExpr } from "../ir";
 
@@ -185,5 +185,32 @@ describe("fold rules", () => {
         expect(result.op).toBe("u<=");
       }
     });
+  });
+});
+
+describe("hasSideEffects", () => {
+  const call: IRExpr = { kind: "call", target: "GetLastError", args: [] };
+
+  // fold.ts and ssaopt.ts each had their own copy and both omitted `cast`.
+  // ssaopt's dead-code elimination asks this before deleting an unused
+  // definition, so `rbx = (int64_t)GetLastError()` with rbx unused answered
+  // "pure" and the call went with the statement. There is one copy now; this
+  // pins the classification that made the drift matter.
+  it("sees through a cast to the call inside it", () => {
+    expect(hasSideEffects({ kind: "cast", type: "int64_t", operand: call })).toBe(true);
+  });
+
+  it("finds a call at any depth", () => {
+    expect(hasSideEffects(irBinary("&", irReg("eax"), call))).toBe(true);
+    expect(hasSideEffects({ kind: "deref", address: call, size: 4 })).toBe(true);
+    expect(hasSideEffects(irUnary("!", { kind: "cast", type: "int32_t", operand: call }))).toBe(
+      true,
+    );
+  });
+
+  it("leaves call-free expressions alone", () => {
+    expect(hasSideEffects(irBinary("+", irReg("eax"), irConst(4)))).toBe(false);
+    expect(hasSideEffects({ kind: "cast", type: "int64_t", operand: irReg("eax") })).toBe(false);
+    expect(hasSideEffects({ kind: "deref", address: irReg("rcx"), size: 8 })).toBe(false);
   });
 });

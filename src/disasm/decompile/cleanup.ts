@@ -8,6 +8,7 @@ import { RegState } from "./regstate";
  * - Guard clause flattening: if (cond) { ...; return; } else { rest } → if (cond) { ...; return; } rest
  * - Redundant goto elimination: goto L; L: → remove goto
  * - Empty block elimination: if (cond) {} → remove; if (cond) {} else { body } → if (!cond) { body }
+ * - Loop exit spelling: goto L inside a loop that L immediately follows → break
  */
 export function cleanupStructured(body: IRStmt[]): IRStmt[] {
   let result = body;
@@ -17,7 +18,117 @@ export function cleanupStructured(body: IRStmt[]): IRStmt[] {
     result = cleanupPass(result);
     if (result.length === prev.length && result.every((s, j) => s === prev[j])) break;
   }
-  return result;
+  return giveTrailingLabelsAStatement(breakForwardGotos(result));
+}
+
+/**
+ * A `goto` out of a loop to the label the loop is immediately followed by is
+ * `break`.
+ *
+ * `structure.ts` names every loop exit with a `goto`, because a loop can leave
+ * to several different places and only one of them is where `break` lands — the
+ * statement after the loop. Where the target *is* that statement the two say
+ * the same thing, and `break` is the one a reader can follow without scrolling.
+ * This is a change of spelling and nothing else: the label stays, so any other
+ * `goto` aimed at it still works, and a target that is not the loop's own
+ * continuation keeps its `goto`.
+ *
+ * `break` binds to the nearest enclosing loop *or switch*, so the rewrite stops
+ * at any of them — a `goto` from inside a nested loop names the outer one's
+ * exit and cannot be spelled `break` there.
+ */
+function breakForwardGotos(stmts: IRStmt[]): IRStmt[] {
+  return stmts.map((stmt, i) => {
+    if (stmt.kind === "while" || stmt.kind === "do_while" || stmt.kind === "for") {
+      const next = stmts[i + 1];
+      const body = breakForwardGotos(stmt.body);
+      return { ...stmt, body: next?.kind === "label" ? gotoToBreak(body, next.name) : body };
+    }
+    return rewriteBodies(stmt, breakForwardGotos);
+  });
+}
+
+/** Replace `goto label` with `break`, not descending into anything `break` would bind to. */
+function gotoToBreak(stmts: IRStmt[], label: string): IRStmt[] {
+  return stmts.map((stmt) => {
+    if (stmt.kind === "goto" && stmt.label === label) return { kind: "break" };
+    if (
+      stmt.kind === "while" ||
+      stmt.kind === "do_while" ||
+      stmt.kind === "for" ||
+      stmt.kind === "switch"
+    ) {
+      return stmt;
+    }
+    return rewriteBodies(stmt, (list) => gotoToBreak(list, label));
+  });
+}
+
+/** Rebuild `stmt` with `f` applied to each of its nested statement lists. */
+function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
+  switch (stmt.kind) {
+    case "if":
+      return { ...stmt, thenBody: f(stmt.thenBody), elseBody: stmt.elseBody && f(stmt.elseBody) };
+    case "while":
+    case "do_while":
+    case "for":
+      return { ...stmt, body: f(stmt.body) };
+    case "switch":
+      return {
+        ...stmt,
+        cases: stmt.cases.map((c) => ({ ...c, body: f(c.body) })),
+        defaultBody: stmt.defaultBody && f(stmt.defaultBody),
+      };
+    case "try":
+      return { ...stmt, body: f(stmt.body), handler: f(stmt.handler) };
+    default:
+      return stmt;
+  }
+}
+
+/**
+ * A label at the end of a block needs something to label.
+ *
+ * `structure.ts` puts a label in front of the statements of any block a `goto`
+ * reaches, and that block may lift to nothing, or be the last thing in an arm;
+ * the passes above can also remove whatever followed one (an `if` with an empty
+ * body goes away entirely). C89 has no statement there to attach the label to —
+ * `foo: }` is a syntax error, not a warning — so an empty statement is added.
+ * Dropping the label instead would strand every `goto` aimed at it.
+ */
+function giveTrailingLabelsAStatement(stmts: IRStmt[]): IRStmt[] {
+  const out = stmts.map((s) => repairStmt(s));
+  if (out.length > 0 && out[out.length - 1].kind === "label") out.push({ kind: "raw", text: "" });
+  return out;
+}
+
+function repairStmt(stmt: IRStmt): IRStmt {
+  switch (stmt.kind) {
+    case "if":
+      return {
+        ...stmt,
+        thenBody: giveTrailingLabelsAStatement(stmt.thenBody),
+        elseBody: stmt.elseBody ? giveTrailingLabelsAStatement(stmt.elseBody) : undefined,
+      };
+    case "while":
+    case "do_while":
+    case "for":
+      return { ...stmt, body: giveTrailingLabelsAStatement(stmt.body) };
+    case "switch":
+      return {
+        ...stmt,
+        cases: stmt.cases.map((c) => ({ ...c, body: giveTrailingLabelsAStatement(c.body) })),
+        defaultBody: stmt.defaultBody ? giveTrailingLabelsAStatement(stmt.defaultBody) : undefined,
+      };
+    case "try":
+      return {
+        ...stmt,
+        body: giveTrailingLabelsAStatement(stmt.body),
+        handler: giveTrailingLabelsAStatement(stmt.handler),
+      };
+    default:
+      return stmt;
+  }
 }
 
 function cleanupPass(stmts: IRStmt[]): IRStmt[] {

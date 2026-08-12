@@ -161,16 +161,29 @@ export interface ChecksumResult {
  */
 const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
-export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResult {
-  const expected = pe.optionalHeader.checksum;
+/**
+ * The checksum walk, taking only the two header fields it actually reads.
+ *
+ * Split out from {@link validateChecksum} so it can run in a worker: a whole
+ * `PEFile` cannot be posted cheaply — it holds `buffer`, so cloning it would
+ * copy the entire file *nested*, which is precisely what `workers/transfer.ts`
+ * only avoids for top-level arguments. See `workers/metricsDispatch.ts`.
+ *
+ * @param peHeaderOffset `dosHeader.e_lfanew`
+ * @param expected `optionalHeader.checksum`, the value stored in the image
+ */
+export function checksumFile(
+  buffer: ArrayBuffer,
+  peHeaderOffset: number,
+  expected: number,
+): ChecksumResult {
   const bytes = new Uint8Array(buffer);
   const limit = bytes.length;
 
   // Find checksum field offset in the file
-  // PE signature at dosHeader.e_lfanew, COFF header = 4 + 20 bytes, then optional header
+  // PE signature at peHeaderOffset, COFF header = 4 + 20 bytes, then optional header
   // Checksum is at offset 64 within the optional header
-  const peOffset = pe.dosHeader.e_lfanew;
-  const checksumOffset = peOffset + 4 + 20 + 64;
+  const checksumOffset = peHeaderOffset + 4 + 20 + 64;
 
   // One 16-bit word of the walk: a little-endian read, except at a trailing odd
   // byte where the absent high half reads as zero.
@@ -221,6 +234,10 @@ export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResul
   const actual = (sum + limit) >>> 0;
 
   return { expected, actual, valid: expected === 0 || expected === actual };
+}
+
+export function validateChecksum(buffer: ArrayBuffer, pe: PEFile): ChecksumResult {
+  return checksumFile(buffer, pe.dosHeader.e_lfanew, pe.optionalHeader.checksum);
 }
 
 // --- Imphash (MD5-based) ---

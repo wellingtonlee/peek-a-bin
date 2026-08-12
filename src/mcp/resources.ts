@@ -58,6 +58,10 @@ export function registerResources(server: McpServer, session: FileSession): void
         return {
           is64: pe.is64,
           machine: pe.coffHeader.machine,
+          // The instruction set the engine analysed this image as. `is64` is
+          // only the PE32+ magic, and `machine` is a bare number; neither tells
+          // a client that the decompiler will decline on this file.
+          arch: af.arch,
           numberOfSections: pe.coffHeader.numberOfSections,
           timeDateStamp: pe.coffHeader.timeDateStamp,
           characteristics: pe.coffHeader.characteristics,
@@ -99,10 +103,18 @@ export function registerResources(server: McpServer, session: FileSession): void
       withFile(session, fileId, uri, (af) =>
         af.pe.imports.map((imp) => ({
           library: imp.libraryName,
-          functions: imp.functions.map((fn, i) => ({
-            name: fn,
-            iatAddress: i < imp.iatAddresses.length ? hex(imp.iatAddresses[i]) : undefined,
-          })),
+          functions: imp.functions.map((fn, i) => {
+            const iatAddr = i < imp.iatAddresses.length ? imp.iatAddresses[i] : undefined;
+            // Which call sites actually use this import. The browser's Imports
+            // tab has shown this since it existed; here the map was never built.
+            const refs = iatAddr !== undefined ? (af.importXrefs.get(iatAddr) ?? []) : [];
+            return {
+              name: fn,
+              iatAddress: iatAddr !== undefined ? hex(iatAddr) : undefined,
+              xrefCount: refs.length,
+              xrefs: refs.map(hex),
+            };
+          }),
         })),
       ),
   );
@@ -129,12 +141,35 @@ export function registerResources(server: McpServer, session: FileSession): void
     new ResourceTemplate("pe://{fileId}/strings", { list: undefined }),
     async (uri, { fileId }) =>
       withFile(session, fileId, uri, (af) =>
-        Array.from(af.stringMap.entries()).map(([addr, value]) => ({
-          address: hex(addr),
-          value,
-          type: af.stringTypes.get(addr) ?? "ascii",
-        })),
+        Array.from(af.stringMap.entries()).map(([addr, value]) => {
+          // Same as the imports resource: a string with no code referencing it
+          // is noise, and which function references it is usually the question.
+          const refs = af.stringXrefs.get(addr) ?? [];
+          return {
+            address: hex(addr),
+            value,
+            type: af.stringTypes.get(addr) ?? "ascii",
+            xrefCount: refs.length,
+            xrefs: refs.map(hex),
+          };
+        }),
       ),
+  );
+
+  // ── pe://{fileId}/callgraph ──
+  server.resource(
+    "pe-callgraph",
+    new ResourceTemplate("pe://{fileId}/callgraph", { list: undefined }),
+    async (uri, { fileId }) =>
+      withFile(session, fileId, uri, (af) => {
+        const nameOf = new Map(af.functions.map((f) => [f.address, f.name]));
+        const named = (a: number): string => af.renames[String(a)] ?? nameOf.get(a) ?? hex(a);
+        return Array.from(af.callGraph, ([from, targets]) => ({
+          address: hex(from),
+          name: named(from),
+          calls: targets.map((t) => ({ address: hex(t), name: named(t) })),
+        }));
+      }),
   );
 
   // ── pe://{fileId}/functions ──

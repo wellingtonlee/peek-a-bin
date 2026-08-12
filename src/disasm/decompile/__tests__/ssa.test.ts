@@ -124,11 +124,16 @@ describe("buildSSA", () => {
     const phisAt1 = ctx.phis.get(1) ?? [];
     expect(phisAt1.length).toBe(0);
 
-    // The return in block 1 should reference eax with version 0
+    // The return in block 1 reads the definition in block 0, which is version
+    // 1: version 0 is reserved for the value a register holds on entry to the
+    // function, and `mov eax, 42` overwrites that (peek-a-bin-swi). Numbering
+    // the first definition 0 made the two indistinguishable, and every pass in
+    // ssaopt.ts that keys on (register, version) then treated an incoming value
+    // as though the definition had already run.
     const retStmt = liftedBlocks.get(1)![0];
     expect(retStmt.kind).toBe("return");
     if (retStmt.kind === "return" && retStmt.value?.kind === "reg") {
-      expect(retStmt.value.version).toBe(0);
+      expect(retStmt.value.version).toBe(1);
     }
   });
 

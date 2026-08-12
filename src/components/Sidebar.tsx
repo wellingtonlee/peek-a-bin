@@ -272,7 +272,9 @@ export function Sidebar() {
     if (activeIndex >= 0 && !filter) {
       virtualizer.scrollToIndex(activeIndex, { align: "auto" });
     }
-  }, [activeIndex, filter]);
+    // useVirtualizer holds its instance in useState, so `virtualizer` is stable
+    // for the component's lifetime and cannot make this effect re-fire.
+  }, [activeIndex, filter, virtualizer]);
 
   if (!pe) return null;
 

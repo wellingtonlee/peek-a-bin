@@ -1,7 +1,7 @@
-import { useMemo } from "react";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { useFileMetrics } from "../hooks/useFileMetrics";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { sectionCharacteristicsToString } from "../pe/constants";
-import { computeSectionEntropy, classifyEntropy } from "../utils/entropy";
+import { classifyEntropy } from "../utils/entropy";
 
 export function SectionTable() {
   const { peFile: pe, currentAddress } = useAppState();
@@ -9,18 +9,11 @@ export function SectionTable() {
 
   // Every hook must run before the `!pe` early return below, otherwise the hook
   // count changes between renders and React throws on the transition.
-  const sectionEntropies = useMemo(() => {
-    if (!pe) return [];
-    return pe.sections.map((sec) => {
-      if (sec.sizeOfRawData === 0) return 0;
-      try {
-        const bytes = new Uint8Array(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
-        return computeSectionEntropy(bytes);
-      } catch {
-        return 0;
-      }
-    });
-  }, [pe]);
+  //
+  // Entropy over every section is a walk over essentially the whole file, so
+  // above a threshold it runs in a worker; see hooks/useFileMetrics.ts.
+  const fileMetrics = useFileMetrics(pe);
+  const sectionEntropies = fileMetrics.value?.sectionEntropies ?? null;
 
   if (!pe) return null;
 
@@ -52,8 +45,8 @@ export function SectionTable() {
         </thead>
         <tbody>
           {pe.sections.map((sec, i) => {
-            const entropy = sectionEntropies[i];
-            const cls = classifyEntropy(entropy);
+            const entropy = sectionEntropies?.[i] ?? null;
+            const cls = entropy === null ? null : classifyEntropy(entropy);
             return (
               <tr
                 key={i}
@@ -76,10 +69,21 @@ export function SectionTable() {
                   0x{(sec.pointerToRawData >>> 0).toString(16).toUpperCase()}
                 </td>
                 <td className="py-2 pr-4">
-                  <span className="text-gray-300 font-mono">{entropy.toFixed(2)}</span>{" "}
-                  <span className={`${cls.color} text-[10px] px-1 py-0.5 rounded bg-gray-800`}>
-                    {cls.label}
-                  </span>
+                  {entropy === null || cls === null ? (
+                    <span
+                      className={fileMetrics.error ? "text-yellow-400" : "text-gray-500"}
+                      title={fileMetrics.error ?? undefined}
+                    >
+                      {fileMetrics.error ? "unavailable" : "computing…"}
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-gray-300 font-mono">{entropy.toFixed(2)}</span>{" "}
+                      <span className={`${cls.color} text-[10px] px-1 py-0.5 rounded bg-gray-800`}>
+                        {cls.label}
+                      </span>
+                    </>
+                  )}
                 </td>
                 <td className="py-2 text-gray-400">
                   <span className="text-blue-400">

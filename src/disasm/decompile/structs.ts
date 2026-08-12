@@ -1,5 +1,5 @@
 import type { IRExpr, IRStmt, IRFunction, IRCall } from "./ir";
-import { irFieldAccess, irArrayAccess, irConst, canonReg } from "./ir";
+import { irFieldAccess, irArrayAccess, irConst, irReg, canonReg, walkStmts } from "./ir";
 import type { DecompType } from "./typeInfer";
 import { meetTypes } from "./typeInfer";
 import type { ApiFuncType } from "./apitypes";
@@ -28,6 +28,13 @@ export interface StructField {
   type: DecompType;
   isArray: boolean;
   arrayElementSize?: number;
+  /**
+   * Whether the value loaded from this field was ever an operand of a bitwise
+   * operator — see `markBitwiseUses`. Evidence against it being a pointer, and
+   * it lives on the field rather than in a per-function map because that is the
+   * only place it can reach the function that draws the opposite conclusion.
+   */
+  bitwiseUse?: boolean;
 }
 
 export interface StructDef {
@@ -403,6 +410,128 @@ function exprKey(expr: IRExpr): string {
     default:
       return `?:${JSON.stringify(expr)}`;
   }
+}
+
+// ── Stack-Frame Bases ──
+
+/**
+ * Canonical key of the stack pointer. `canonReg` folds every width spelling
+ * (rsp/esp/sp) onto the 64-bit name, so this one key covers both architectures.
+ */
+const STACK_POINTER_KEY = `reg:${canonReg("rsp")}`;
+
+/** Canonical key of the frame pointer, under the same folding. */
+const FRAME_POINTER_KEY = `reg:${canonReg("rbp")}`;
+
+/**
+ * Bases that are the stack frame rather than an object, as canonical base keys.
+ *
+ * The stack pointer is never an object pointer. `[rsp + N]` is a local, an
+ * outgoing argument or a spill slot; nothing is ever handed `rsp` as a struct
+ * base, and a `lea rax, [rsp+0x20]` that does hand a buffer's address to a
+ * callee produces a *different* base (`rax`) — `buildAliasMap` refuses to alias
+ * it, since the assignment is arithmetic and not a copy. So the seed is
+ * unconditional.
+ *
+ * The frame pointer is the delicate half, and the rule is deliberately not
+ * "exclude rbp". Under frame-pointer omission — the majority of x64 functions —
+ * RBP is an ordinary callee-saved register, usually holding an object pointer,
+ * and `[rbp + 0x10]` genuinely is a field access. Excluding RBP outright would
+ * destroy most of the struct recovery this pass exists for.
+ *
+ * What is excluded is a frame pointer this function *established from the stack
+ * pointer*, on either of two independent pieces of evidence:
+ *
+ *  - **A parameter named `arg_<N>`.** stack.ts spells a slot that way only after
+ *    it has verified the `push rbp; mov rbp, rsp` prologue; anything else is
+ *    named after its offset (`arg_0x10`) precisely so the two cases stay
+ *    distinguishable. That name is the only channel between the two files, and
+ *    it is the same one `paramIndexByBase` reads provenance out of. It is also
+ *    the *load-bearing* half in production, because the establishing assignment
+ *    frequently does not survive to this pass at all: `mov rbp, rsp` is dropped
+ *    upstream while the accesses through RBP keep their base (see
+ *    peek-a-bin-a6n's follow-up), leaving no trace of it in the body.
+ *  - **The assignment itself, where it does survive.** `rbp = rsp`, or the
+ *    `lea rbp, [rsp + 0x20]` form of it — which stack.ts declines to derive
+ *    argument indices from, because the offsets are shifted, so the name channel
+ *    stays silent for it and only this one fires. Propagation the other way is
+ *    covered by the seed: once the accesses themselves read `[rsp + N]` the base
+ *    *is* the stack pointer.
+ *
+ * A load (`pop rbp`, `mov rbp, [rsp+8]`) is *not* stack-derived: the address is
+ * on the stack, the value is whatever was stored there. That matters because an
+ * epilogue's `pop rbp` is otherwise the one write that would make every framed
+ * function look ambiguous.
+ */
+function stackDerivedBases(func: IRFunction, canonBase: (e: IRExpr) => string): Set<string> {
+  // Both the raw key and whatever the alias map resolves it to: a function that
+  // copies the stack pointer into another register groups its `[rsp + N]`
+  // accesses under that register's key, and the frame is no less a frame for it.
+  const derived = new Set<string>([STACK_POINTER_KEY, canonBase(irReg(canonReg("rsp"), 8))]);
+
+  // A verified frame pointer, named as such by stack.ts. An `arg_0x10` — the
+  // spelling for a slot whose frame was *not* verified — deliberately does not
+  // match, so an FPO function's RBP keeps its struct.
+  if (func.params.some((p) => STACK_PARAM_RE.test(p.name))) {
+    derived.add(FRAME_POINTER_KEY);
+    derived.add(canonBase(irReg(canonReg("rbp"), 8)));
+  }
+
+  // Every reg/var definition, collected first so the fixpoint below can see a
+  // chain written in any order (`rbx = rsp` after `rbp = rbx`).
+  const defs: { destKey: string; src: IRExpr }[] = [];
+  function scan(stmts: IRStmt[]): void {
+    for (const s of stmts) {
+      if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
+        defs.push({ destKey: canonBase(s.dest), src: s.src });
+      }
+      if (s.kind === "if") {
+        scan(s.thenBody);
+        if (s.elseBody) scan(s.elseBody);
+      }
+      if (s.kind === "while" || s.kind === "do_while") scan(s.body);
+      if (s.kind === "for") {
+        scan([s.init, s.update]);
+        scan(s.body);
+      }
+      if (s.kind === "switch") {
+        for (const c of s.cases) scan(c.body);
+        if (s.defaultBody) scan(s.defaultBody);
+      }
+      if (s.kind === "try") {
+        scan(s.body);
+        scan(s.handler);
+      }
+    }
+  }
+  scan(func.body);
+
+  /** A stack address: the pointer itself, a copy of one, or one biased by a constant. */
+  function isStackRooted(e: IRExpr): boolean {
+    if (e.kind === "reg" || e.kind === "var") return derived.has(canonBase(e));
+    if (e.kind === "cast") return isStackRooted(e.operand);
+    if (e.kind === "binary" && (e.op === "+" || e.op === "-")) {
+      if (e.right.kind === "const") return isStackRooted(e.left);
+      if (e.op === "+" && e.left.kind === "const") return isStackRooted(e.right);
+    }
+    return false;
+  }
+
+  // A second definition never *un*-derives a base. One write of a stack address
+  // into a register is enough to make every access through it suspect, and
+  // refusing a struct is the benign direction — the cost is a `*(int*)(p + 8)`
+  // where a field access was due, against a fabricated object in the other.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const d of defs) {
+      if (derived.has(d.destKey)) continue;
+      if (!isStackRooted(d.src)) continue;
+      derived.add(d.destKey);
+      changed = true;
+    }
+  }
+  return derived;
 }
 
 // ── Access Pattern Collection ──
@@ -784,9 +913,15 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
     group.accesses.push(p);
   }
 
+  // Bases that are this function's own stack frame. Two offsets off the frame
+  // are two stack slots, not two fields of an object, and grouping them
+  // fabricated a struct whose "fields" were a local and an incoming argument.
+  const frameBases = stackDerivedBases(func, canonBase);
+
   // Filter: only groups with 2+ distinct offsets → struct candidates
   const candidates = new Map<string, { base: IRExpr; accesses: AccessPattern[] }>();
   for (const [key, group] of groups) {
+    if (frameBases.has(key)) continue;
     const distinctOffsets = new Set(group.accesses.map((a) => a.offset));
     if (distinctOffsets.size >= 2) {
       candidates.set(key, group);
@@ -807,35 +942,45 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
   const callArgSlots = collectCallArgSlots(func.body, canonBase);
   const baseToStruct = new Map<string, StructDef>();
   for (const [key, group] of candidates) {
-    // Deduplicate fields by offset (use largest size)
-    const fieldMap = new Map<number, { size: number; isArray: boolean; scale: number }>();
+    // Deduplicate fields by offset (use largest size), and record the stride of
+    // any index that reached it. Two indexed accesses that walk the offset with
+    // *different* strides contradict each other, and CONTRADICTED_STRIDE loses
+    // the equality test below, which is how that disagreement is settled.
+    const CONTRADICTED_STRIDE = -1;
+    const fieldMap = new Map<number, { size: number; stride: number }>();
     for (const acc of group.accesses) {
+      const stride = acc.index !== null ? acc.scale : 0;
       const existing = fieldMap.get(acc.offset);
       if (!existing) {
-        fieldMap.set(acc.offset, {
-          size: acc.size,
-          isArray: acc.index !== null,
-          scale: acc.scale,
-        });
-      } else {
-        if (acc.size > existing.size) existing.size = acc.size;
-        if (acc.index !== null) {
-          existing.isArray = true;
-          existing.scale = acc.scale;
-        }
+        fieldMap.set(acc.offset, { size: acc.size, stride });
+        continue;
       }
+      if (acc.size > existing.size) existing.size = acc.size;
+      if (stride === 0) continue;
+      existing.stride =
+        existing.stride === 0 || existing.stride === stride ? stride : CONTRADICTED_STRIDE;
     }
 
     const fields: StructField[] = [];
     for (const [offset, info] of fieldMap) {
-      const name = `${info.isArray ? "array" : "field"}_${offsetLabel(offset)}`;
+      // An index reaching an offset is evidence of an array only when the
+      // stride it walks is the width that was read there. `isArray` used to be
+      // set by any indexed access at all while the size and type came from the
+      // widest access of any kind, so a field could be declared with 8-byte
+      // elements over a recovered stride of 4 — a declaration describing an
+      // object neither reading found (peek-a-bin-hyv). Where the two disagree
+      // the *width* is kept, because it is a direct measurement of one access,
+      // and the array claim is dropped: an array of some other element type
+      // may well be there, but this is not evidence of which.
+      const isArray = info.stride > 0 && info.stride === info.size;
+      const name = `${isArray ? "array" : "field"}_${offsetLabel(offset)}`;
       fields.push({
         offset,
         size: info.size,
         name,
         type: inferFieldType(info.size),
-        isArray: info.isArray,
-        arrayElementSize: info.isArray ? info.scale : undefined,
+        isArray,
+        arrayElementSize: isArray ? info.stride : undefined,
       });
     }
 
@@ -934,6 +1079,9 @@ const GUESSED_POINTER: DecompType = { kind: "ptr", pointee: { kind: "unknown" } 
  * function established.
  */
 function refineFieldType(field: StructField, evidence: DecompType): void {
+  // A field the code does bitwise arithmetic on is not a pointer, whatever
+  // heuristic says otherwise — see markBitwiseUses.
+  if (field.bitwiseUse && (evidence.kind === "ptr" || evidence.kind === "struct")) return;
   // One case meetTypes gets backwards for a *field*: it ranks ptr above
   // everything it does not order explicitly, so `meetTypes(struct_1*, PVOID)`
   // answers PVOID. Pointer-to-nothing is the weakest thing this pass can say
@@ -981,6 +1129,56 @@ function apiParamTypes(call: IRCall): DecompType[] | null {
   return Array.isArray(hit?.params) ? hit.params : null;
 }
 
+/** Operators no pointer value is ever an operand of. */
+const BITWISE_OPS = new Set<string>(["&", "|", "^", "<<", ">>", ">>>"]);
+
+/**
+ * Record every field whose loaded value is masked, or-ed, xor-ed or shifted,
+ * and take back a pointer type that was inferred for it.
+ *
+ * A field is only guessed to be a pointer, and the guesses are cheap: a
+ * field-to-field copy, a machine word passed to an unknown callee, a value used
+ * once as a base. Arithmetic on the *value* is evidence in the other direction
+ * and there was none — nothing recorded a use of a field as anything.
+ * `struct_4::field_0x18` in t64 has six uses across the binary and every one of
+ * them is a flag word (`& 3`, `& 0xFFFFFFEF | 2`, `|= 0x20`, `& 0xFFFFFFFE`, a
+ * CRT `FILE::_flag`) — but one *other* function loaded it and used the value as
+ * a base, and because StructFields are shared live registry state that promotion
+ * reached every other function's snapshot, which then read
+ * `((struct_4 *)rdx)->field_0x18 |= 0x20` (peek-a-bin-h89).
+ *
+ * So the record has to live on the field, and it has to work in both
+ * directions: a mask seen first refuses the later promotion (`refineFieldType`,
+ * `linkNestedStructFields`), and a mask seen after one takes it back here.
+ * Otherwise the answer would depend on which function was decompiled first,
+ * which is not evidence about anything.
+ *
+ * Only bitwise operators count. `+` and `-` are ordinary pointer arithmetic and
+ * say nothing, and this deliberately does not try to read *which* mask it is:
+ * clearing a pointer's low bits is a real idiom, but a field that is both a
+ * tagged pointer and something this can spell is not a field this gets right
+ * either way. The demotion is to the plain integer of the access width, which is
+ * what the field would have been had nothing guessed at it.
+ */
+function markBitwiseUses(body: IRStmt[], fieldAt: (address: IRExpr) => StructField | null): void {
+  const mark = (operand: IRExpr) => {
+    if (operand.kind !== "deref") return;
+    const field = fieldAt(operand.address);
+    if (!field) return;
+    field.bitwiseUse = true;
+    if (field.type.kind === "ptr" || field.type.kind === "struct") {
+      field.type = inferFieldType(field.size);
+    }
+  };
+  walkStmts(body, (expr) => {
+    if (expr.kind === "binary" && BITWISE_OPS.has(expr.op)) {
+      mark(expr.left);
+      mark(expr.right);
+    }
+    if (expr.kind === "unary" && expr.op === "~") mark(expr.operand);
+  });
+}
+
 function inferFieldTypesFromUsage(
   body: IRStmt[],
   baseToStruct: Map<string, StructDef>,
@@ -995,6 +1193,9 @@ function inferFieldTypesFromUsage(
     if (!def) return null;
     return def.fields.find((f) => f.offset === decomp.offset) ?? null;
   }
+
+  // First, so that everything below sees the counter-evidence.
+  markBitwiseUses(body, fieldAt);
 
   // Walk all expressions, looking for deref patterns that match struct fields
   // and infer types from how the loaded value is used
@@ -1275,6 +1476,7 @@ function linkNestedStructFields(
     if (!inner) continue; // the loaded value is not used as a struct base
     const { field } = src;
     if (field.isArray) continue; // base + index is an element, not a pointer
+    if (field.bitwiseUse) continue; // masked or shifted somewhere: not a pointer
     if (field.size < MIN_POINTER_FIELD_SIZE) continue;
     if (!isNestableFieldType(field.type)) continue;
     // `struct` already spells itself `struct_0*` — see typeToString. Wrapping

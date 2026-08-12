@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { IRFunction, IRStmt, IRPhi } from "../ir";
+import type { IRExpr, IRFunction, IRStmt, IRPhi } from "../ir";
 import { irConst, irReg, irVar, irBinary } from "../ir";
 import { emitFunction } from "../emit";
 import type { TypeContext } from "../typeInfer";
@@ -119,5 +119,129 @@ describe("emitFunction — surviving phi statements", () => {
 
     // The line still maps back to its instruction address.
     expect([...result.lineMap.values()]).toContain(0x1010);
+  });
+});
+
+/**
+ * IOCTL decoding at a driver's dispatch switch (peek-a-bin-i7v).
+ *
+ * `structureCFG` numbers a switch's cases by their jump-table index, so a
+ * control code can never reach `IRSwitch.values` through the pipeline — the
+ * switch has to be written out here. None of the three binaries this branch is
+ * measured against is a driver, so nothing below is corroborated against a real
+ * one; what it pins is the gate, not the decoding.
+ */
+describe("emitFunction — a driver's dispatch switch names its control codes", () => {
+  /** METHOD_BUFFERED codes on device type 0x22 (UNKNOWN), the usual private range. */
+  const IOCTL_A = 0x222000;
+  const IOCTL_B = 0x222004;
+
+  function switchOn(values: number[][]): IRStmt {
+    return {
+      kind: "switch",
+      expr: irReg("eax", 4),
+      cases: values.map((v) => ({ values: v, body: [{ kind: "break" }] })) as never,
+    } as unknown as IRStmt;
+  }
+
+  const driver: TypeContext = { types: new Map(), isDriver: true };
+  const userMode: TypeContext = { types: new Map(), isDriver: false };
+
+  it("decodes every label of a switch whose labels are all control codes", () => {
+    const code = emitFunction(fn([switchOn([[IOCTL_A], [IOCTL_B]])]), driver).code;
+
+    expect(code).toContain("case 0x222000: /* IOCTL: UNKNOWN | Fn=0x800 | BUFFERED */");
+    expect(code).toContain("case 0x222004: /* IOCTL: UNKNOWN | Fn=0x801 | BUFFERED */");
+  });
+
+  it("says nothing in an image that is not a driver", () => {
+    // The shape is identical; only the evidence differs. Deciding on shape
+    // alone is what put 782 false IOCTL comments in one user-mode binary.
+    const code = emitFunction(fn([switchOn([[IOCTL_A], [IOCTL_B]])]), userMode).code;
+
+    expect(code).toContain("case 0x222000:");
+    expect(code).not.toContain("IOCTL:");
+  });
+
+  it("says nothing when a label is not a control code", () => {
+    // One ordinary small constant among them means this is some other switch,
+    // and naming a device for the ones that happen to fit would be a guess.
+    const code = emitFunction(fn([switchOn([[IOCTL_A], [IOCTL_B], [3]])]), driver).code;
+
+    expect(code).not.toContain("IOCTL:");
+  });
+
+  it("does not name a device from a single coincidental constant", () => {
+    const code = emitFunction(fn([switchOn([[IOCTL_A]])]), driver).code;
+
+    expect(code).not.toContain("IOCTL:");
+  });
+
+  it("does not survive into the next function emitted", () => {
+    // `isDriver` rides on the module-level `_typeCtx`, which is saved and
+    // restored around every call; a leak would annotate a user-mode binary.
+    emitFunction(fn([switchOn([[IOCTL_A], [IOCTL_B]])]), driver);
+
+    const after = emitFunction(fn([switchOn([[IOCTL_A], [IOCTL_B]])]));
+    expect(after.code).not.toContain("IOCTL:");
+  });
+});
+
+/**
+ * The two readings of a pointer-typed struct field that emit has to keep apart
+ * (peek-a-bin-d8t / -q30 against peek-a-bin-h89). Both arrive as the same thing
+ * — a field whose declared type is a pointer, used in arithmetic — and only the
+ * operator says which of them it is.
+ */
+describe("emitFunction — a pointer field's arithmetic says what the instruction did", () => {
+  const structDef = {
+    id: "struct_0",
+    fields: [
+      {
+        name: "field_0x0",
+        offset: 0,
+        size: 8,
+        type: { kind: "ptr", pointee: { kind: "unknown" } },
+      },
+      { name: "field_0x8", offset: 8, size: 8, type: { kind: "struct", id: "struct_1" } },
+    ],
+  } as unknown as NonNullable<IRFunction["typedefs"]>[number];
+
+  const field = (name: string, offset: number): IRExpr =>
+    ({
+      kind: "field_access",
+      base: irReg("rcx", 8),
+      structId: "struct_0",
+      fieldName: name,
+      fieldOffset: offset,
+      size: 8,
+    }) as unknown as IRExpr;
+
+  function emit(src: IRExpr): string {
+    return emitFunction(
+      fn([{ kind: "assign", dest: irVar("y", 8), src }], { typedefs: [structDef] }),
+    ).code;
+  }
+
+  it("subtracts two recovered addresses as the byte count the machine computed", () => {
+    // `PVOID` minus `struct_1 *` is not valid C, and a plain `-` between two
+    // pointers of one type would be an *element* count — neither is what `sub`
+    // did. Both fields keep their declared types above.
+    const code = emit(irBinary("-", field("field_0x0", 0), field("field_0x8", 8)));
+
+    expect(code).toContain("(uintptr_t)((struct_0 *)rcx)->field_0x0");
+    expect(code).toContain("- (uintptr_t)((struct_0 *)rcx)->field_0x8");
+    expect(code).toContain("PVOID field_0x0;");
+    expect(code).toContain("struct_1* field_0x8;");
+  });
+
+  it("leaves a mask of a pointer field to be read as the contradiction it is", () => {
+    // The h89 shape. `&` is not defined on addresses at all, so a cast here
+    // would not be a spelling choice — it would retract the pointer inference
+    // or the mask, and emit has no evidence about which one is wrong.
+    const code = emit(irBinary("&", field("field_0x8", 8), irConst(0xffffffef, 4)));
+
+    expect(code).toContain("((struct_0 *)rcx)->field_0x8 & 0xFFFFFFEF");
+    expect(code).not.toContain("uintptr_t");
   });
 });

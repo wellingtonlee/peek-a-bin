@@ -1,6 +1,7 @@
 import type { IRStmt, BinaryOp } from "./ir";
 import { walkStmts, canonReg } from "./ir";
 import { API_TYPES } from "./apitypes";
+import { importsKernelModule } from "../../analysis/driver";
 
 // ── Type Lattice ──
 
@@ -21,6 +22,18 @@ export type DecompType =
 export interface TypeContext {
   /** Map of variable/register name → inferred type */
   types: Map<string, DecompType>;
+  /**
+   * Whether the image this function came from is a kernel driver, from its
+   * imports (see `importsKernelModule`).
+   *
+   * It rides on the type context because that is the channel emit already has:
+   * `pipeline.ts` builds one here and hands the same object to `emitFunction`,
+   * which saves and restores it around every call. Optional so that a caller
+   * constructing a context by hand — the tests do — need not answer a question
+   * it has no evidence about; absent means "not known to be a driver", and
+   * every use of it is an annotation that then does not happen.
+   */
+  isDriver?: boolean;
 }
 
 /** Format a DecompType to a C-style string. */
@@ -129,7 +142,7 @@ function isFloatReg(name: string): boolean {
  */
 export function inferTypes(
   body: IRStmt[],
-  _iatMap: Map<number, { lib: string; func: string }>,
+  iatMap: Map<number, { lib: string; func: string }>,
 ): TypeContext {
   const types = new Map<string, DecompType>();
 
@@ -234,7 +247,10 @@ export function inferTypes(
   // Enum pass: infer enums from switch statements with 3+ cases
   inferEnumsFromSwitches(body, types);
 
-  return { types };
+  // Driver-ness travels with the type context because that is the only thing
+  // this stage hands to the emitter. It is a property of the image, not of the
+  // function, and the import table is the same for every function in it.
+  return { types, isDriver: importsKernelModule(iatMap.values()) };
 }
 
 function inferFromAPICalls(body: IRStmt[], types: Map<string, DecompType>): void {

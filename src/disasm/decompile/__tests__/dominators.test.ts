@@ -155,16 +155,18 @@ describe("SSA renaming covers every IRExpr kind", () => {
     const ctx = buildSSA(blocks, lifted);
 
     const renamed = ctx.liftedBlocks.get(0)!;
+    // Version 1, not 0: 0 is the value the register held on entry, and each of
+    // these registers is written by an earlier statement here (peek-a-bin-swi).
     const field = (renamed[1] as Extract<IRStmt, { kind: "assign" }>).src as IRFieldAccess;
     expect(field.kind).toBe("field_access");
     expect(field.base.kind).toBe("reg");
-    expect((field.base as { version?: number }).version).toBe(0);
+    expect((field.base as { version?: number }).version).toBe(1);
 
     const array = (renamed[2] as Extract<IRStmt, { kind: "assign" }>).src;
     expect(array.kind).toBe("array_access");
     if (array.kind === "array_access") {
-      expect((array.base as { version?: number }).version).toBe(0);
-      expect((array.index as { version?: number }).version).toBe(0);
+      expect((array.base as { version?: number }).version).toBe(1);
+      expect((array.index as { version?: number }).version).toBe(1);
     }
 
     // ...and destroySSA must strip those versions again.

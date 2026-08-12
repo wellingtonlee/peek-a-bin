@@ -1,6 +1,8 @@
-import type { Instruction, DisasmFunction, Xref } from "./types";
-import { getFuncInsns } from "./funcInsns";
 import dagre from "@dagrejs/dagre";
+import { classifyArm64Branch } from "./arm64Operands";
+import { computeDominators, computeDomTree, computeRPO, detectNaturalLoops } from "./decompile/ssa";
+import { getFuncInsns } from "./funcInsns";
+import type { DisasmFunction, Instruction, Xref } from "./types";
 
 export interface BasicBlock {
   id: number;
@@ -62,6 +64,23 @@ export function buildCFG(
       // Instruction after an unconditional branch/conditional branch is a leader
       if (i + 1 < funcInsns.length) {
         leaders.add(funcInsns[i + 1].address);
+      }
+    } else {
+      // A64. Reached only for mnemonics the x86 arm above did not claim: the
+      // two grammars share no branch spelling (see `arm64Operands.ts`), so this
+      // cannot change any x86 answer. `bl`/`blr` classify as "call" and are
+      // skipped for the same reason x86 `call` is — control returns.
+      const a64 = classifyArm64Branch(mn, insn.opStr);
+      if (a64 && a64.kind !== "call") {
+        if (a64.target !== null && a64.target >= func.address && a64.target < endAddr) {
+          leaders.add(a64.target);
+        }
+        // Everything after a jump, a conditional branch or a return starts a
+        // new block — including after an indirect `br`, whose target this
+        // module deliberately does not guess.
+        if (a64.kind !== "return" && i + 1 < funcInsns.length) {
+          leaders.add(funcInsns[i + 1].address);
+        }
       }
     }
 
@@ -205,6 +224,50 @@ export function buildCFG(
       continue;
     }
 
+    // A64 terminators. Unreachable for x86 — no x86 mnemonic classifies.
+    const a64 = classifyArm64Branch(mn, lastInsn.opStr);
+    if (a64 && a64.kind !== "call") {
+      // `ret`/`retaa`/`retab`: no successors, same as the x86 arm above.
+      if (a64.kind === "return") continue;
+
+      // An indirect `br x8` is a switch dispatch or a tail call through a
+      // register. Where the dispatch table was recovered (`arm64.ts`'s
+      // `findArm64JumpTables`, peek-a-bin-8ij) its case bodies are the block's
+      // successors; where it was not, this code will not invent one. The block
+      // then simply has no successor, which the graph view draws as a dead end
+      // — an edge to the wrong block would be indistinguishable from a real one.
+      if (a64.target !== null) {
+        const targetBlockId = addrToBlock.get(a64.target);
+        if (targetBlockId !== undefined) {
+          block.succs.push(targetBlockId);
+          blocks[targetBlockId].preds.push(block.id);
+        }
+      } else if (jumpTables) {
+        const targets = jumpTables.get(lastInsn.address);
+        if (targets) {
+          const addedSuccs = new Set<number>();
+          for (const target of targets) {
+            const targetBlockId = addrToBlock.get(target);
+            if (targetBlockId !== undefined && !addedSuccs.has(targetBlockId)) {
+              addedSuccs.add(targetBlockId);
+              block.succs.push(targetBlockId);
+              blocks[targetBlockId].preds.push(block.id);
+            }
+          }
+        }
+      }
+
+      // A conditional branch also falls through; an unconditional `b` does not.
+      if (a64.kind === "cond") {
+        const fallthroughBlockId = addrToBlock.get(block.endAddr);
+        if (fallthroughBlockId !== undefined) {
+          block.succs.push(fallthroughBlockId);
+          blocks[fallthroughBlockId].preds.push(block.id);
+        }
+      }
+      continue;
+    }
+
     // Default: fallthrough
     const fallthroughBlockId = addrToBlock.get(block.endAddr);
     if (fallthroughBlockId !== undefined) {
@@ -217,122 +280,86 @@ export function buildCFG(
 }
 
 export interface Loop {
+  /** `startAddr` of the loop header block — the block every iteration re-enters. */
   headerAddr: number;
+  /**
+   * `endAddr` of the latch: the back-edge source block furthest into the
+   * function. A loop with several back edges (`continue`s) reports only this
+   * one, which is the bottom test of a do-while when there is one.
+   */
   backEdgeFromAddr: number;
+  /** How many *other* loops of this function contain this header. */
   depth: number;
+  /** Addresses of every instruction in every block of the loop body. */
   bodyAddrs: Set<number>;
 }
 
+/**
+ * Find the natural loops of a CFG.
+ *
+ * A back edge is an edge `u → v` where **v dominates u**. This used to be
+ * approximated by BFS layers from the entry ("succLayer <= blockLayer"), which
+ * is wrong for the most common shape in compiled code: in a triangle
+ * (`cond → then → merge`, an `if` with no `else`) BFS puts both `then` and
+ * `merge` on layer 1, so `then → merge` looked like a back edge and the merge
+ * block became a loop header. A diamond is unaffected (its merge lands on
+ * layer 2), which is why hand-written fixtures never caught it. Measured
+ * against a dominator solver on three real MSVC binaries, ~86% of the loops
+ * reported that way did not exist (peek-a-bin-lrs).
+ *
+ * The dominance-based detector already lived in `decompile/ssa.ts`, where the
+ * SSA optimiser was using it; this reuses it rather than keeping a second,
+ * disagreeing notion of "loop" in the tree. `ssa.ts` only *type*-imports
+ * `BasicBlock` from here, so there is no runtime import cycle.
+ */
 export function detectLoops(blocks: BasicBlock[]): Loop[] {
   if (blocks.length === 0) return [];
 
-  // BFS layer assignment from entry block (id 0)
-  const layers = new Map<number, number>();
-  const queue: number[] = [0];
-  let queueHead = 0; // cursor instead of shift(), which is O(queue length)
-  layers.set(0, 0);
-  const visited = new Set<number>();
-
-  while (queueHead < queue.length) {
-    const id = queue[queueHead++];
-    if (visited.has(id)) continue;
-    visited.add(id);
-    const layer = layers.get(id)!;
-
-    for (const succ of blocks[id].succs) {
-      if (!layers.has(succ)) {
-        layers.set(succ, layer + 1);
-      }
-      if (!visited.has(succ)) {
-        queue.push(succ);
-      }
-    }
-  }
-
-  // Build block ID lookup
-  const blockById = new Map<number, (typeof blocks)[0]>();
+  const blockById = new Map<number, BasicBlock>();
   for (const b of blocks) blockById.set(b.id, b);
 
-  // Detect back-edges: successor's layer <= current block's layer
+  const idom = computeDominators(blocks, computeRPO(blocks));
+  const natural = detectNaturalLoops(blocks, idom, computeDomTree(idom));
+
   const loops: Loop[] = [];
-  const headerAddrs = new Set<number>();
 
-  for (const block of blocks) {
-    const blockLayer = layers.get(block.id) ?? 0;
-    for (const succId of block.succs) {
-      const succLayer = layers.get(succId) ?? 0;
-      if (succLayer <= blockLayer) {
-        // Back-edge found: successor is the loop header
-        const header = blocks[succId];
-        if (header && !headerAddrs.has(header.startAddr)) {
-          headerAddrs.add(header.startAddr);
+  for (const [headerId, bodyIds] of natural) {
+    const header = blockById.get(headerId);
+    if (!header) continue;
 
-          // Collect loop body: all blocks reachable from header that can reach the back-edge source
-          // Simple approach: walk successors from header, stop at back-edge source, collect instruction addresses
-          const bodyAddrs = new Set<number>();
-          const bodyVisited = new Set<number>();
-          const bodyQueue = [header.id];
-          let bodyHead = 0;
-          while (bodyHead < bodyQueue.length) {
-            const bid = bodyQueue[bodyHead++];
-            if (bodyVisited.has(bid)) continue;
-            bodyVisited.add(bid);
-            const b = blockById.get(bid);
-            if (!b) continue;
-            // Add all instruction addresses in this block
-            for (const insn of b.insns) bodyAddrs.add(insn.address);
-            // Don't follow successors past the back-edge source block
-            if (bid === block.id) continue;
-            for (const sid of b.succs) {
-              if (!bodyVisited.has(sid)) {
-                const sLayer = layers.get(sid) ?? 0;
-                // Only follow blocks within the loop range (between header and back-edge)
-                if (sLayer >= succLayer && sLayer <= blockLayer + 1) {
-                  bodyQueue.push(sid);
-                }
-              }
-            }
-          }
-
-          loops.push({
-            headerAddr: header.startAddr,
-            backEdgeFromAddr: block.endAddr,
-            depth: 0,
-            bodyAddrs,
-          });
-        }
-      }
+    const bodyAddrs = new Set<number>();
+    // Every block that closes the loop is a back-edge source; the latch is the
+    // last of them, which is where a bottom-tested loop keeps its condition.
+    let latchEnd = header.endAddr;
+    for (const id of bodyIds) {
+      const b = blockById.get(id);
+      if (!b) continue;
+      for (const insn of b.insns) bodyAddrs.add(insn.address);
+      if (b.succs.includes(headerId) && b.endAddr > latchEnd) latchEnd = b.endAddr;
     }
+
+    loops.push({
+      headerAddr: header.startAddr,
+      backEdgeFromAddr: latchEnd,
+      depth: 0,
+      bodyAddrs,
+    });
   }
 
-  // Sort by address
   loops.sort((a, b) => a.headerAddr - b.headerAddr);
 
-  // Compute nesting depth: a loop header inside another loop's range gets depth++
-  // Approximate loop range as [headerAddr, backEdgeFromAddr]
-  //
-  // Counting, for each header, how many ranges cover it — a sweep over sorted
-  // range starts and ends rather than the full loops-x-loops comparison.
-  // Ranges with backEdgeFromAddr <= headerAddr are empty and cover nothing, so
-  // dropping them leaves starts <= ends and makes the two sweeps independent.
-  const starts: number[] = []; // already ascending: `loops` is sorted by headerAddr
-  const ends: number[] = [];
-  for (const l of loops) {
-    if (l.backEdgeFromAddr > l.headerAddr) {
-      starts.push(l.headerAddr);
-      ends.push(l.backEdgeFromAddr);
-    }
-  }
-  ends.sort((a, b) => a - b);
-
-  let startIdx = 0;
-  let endIdx = 0;
+  // Nesting depth by containment in the natural-loop bodies, rather than by
+  // overlap of [header, latch] address ranges: a loop body need not be
+  // contiguous in memory, and two sibling loops' ranges can overlap without
+  // either containing the other. `bodyAddrs` holds instruction addresses and a
+  // header block always starts at one of its own instructions, so testing the
+  // header address against another loop's body is exact.
   for (const loop of loops) {
-    while (startIdx < starts.length && starts[startIdx] <= loop.headerAddr) startIdx++;
-    while (endIdx < ends.length && ends[endIdx] <= loop.headerAddr) endIdx++;
-    // Covering ranges, minus this loop's own range when it is one of them.
-    const self = loop.backEdgeFromAddr > loop.headerAddr ? 1 : 0;
-    loop.depth = startIdx - endIdx - self;
+    let depth = 0;
+    for (const other of loops) {
+      if (other !== loop && other.bodyAddrs.has(loop.headerAddr)) depth++;
+    }
+    loop.depth = depth;
   }
 
   return loops;
@@ -389,7 +416,17 @@ export function layoutCFG(
           type = "fallthrough";
         }
       } else {
-        type = "fallthrough";
+        // A64, by the same rule: an edge is "branch" when it goes where the
+        // conditional branch points, and "fallthrough" when it is the other
+        // one. `bl`/`blr` classify as calls and keep the fallthrough default.
+        const a64 = classifyArm64Branch(mn, lastInsn.opStr);
+        if (a64?.kind === "jump") {
+          type = "jump";
+        } else if (a64?.kind === "cond" && a64.target === blocks[succId].startAddr) {
+          type = "branch";
+        } else {
+          type = "fallthrough";
+        }
       }
 
       // Fallthrough edges get higher weight to stay straight

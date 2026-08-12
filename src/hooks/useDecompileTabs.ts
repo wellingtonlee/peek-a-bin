@@ -260,7 +260,10 @@ export function useDecompileTabs({
         systemPrompt,
       );
     },
-    [tabsState.high.ready, tabsState.high.code, tabsState.low.code, buildFunctionAsm],
+    // currentFunc is read by the onDone handler to key the AI cache. It was
+    // absent, so a navigation between functions left this callback caching the
+    // new function's output under the previous function's address.
+    [tabsState.high.ready, tabsState.high.code, tabsState.low.code, buildFunctionAsm, currentFunc],
   );
 
   const cancelAI = useCallback(() => {

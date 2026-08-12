@@ -126,6 +126,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     return items;
   }, [pe, query, sortedFuncs, state.renames]);
 
+  // results.length is a change key the body never reads: the selection resets
+  // whenever the result set changes size. Removing it would reset the highlight
+  // only on mount, leaving it pointing past the end of a shorter result list.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: results.length is the change key this reset effect is triggered by, not a value it reads.
   useEffect(() => {
     setSelectedIdx(0);
   }, [results.length]);

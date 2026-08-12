@@ -16,6 +16,102 @@ function exprEq(a: IRExpr, b: IRExpr): boolean {
 
 // ── Constant Folding ──
 
+/**
+ * The operators below whose JavaScript spelling truncates to 32 bits.
+ *
+ * `&`, `|`, `^`, `<<`, `>>` and `>>>` coerce both operands to *int32* before
+ * doing anything, `|0` does the same to a quotient, and `>>> 0` does it to a
+ * comparand. So `0x100000000 >>> 4` evaluates to 0 rather than 0x10000000 and
+ * `x & 0xFFFFFFFF00000000` evaluates to 0 — silently, with the wrong value
+ * baked into the emitted C (peek-a-bin-8fv). Everything else in the switch
+ * (`+`, `-`, `*`, `%`, and the signed comparisons) is ordinary double
+ * arithmetic and is exact for every value the IR can hold, so it is left alone.
+ *
+ * `IRConst.size` says how wide the operand is; when it says 8, the operation
+ * is redone in 64-bit BigInt.
+ */
+const WIDTH_SENSITIVE = new Set<BinaryOp>([
+  "/",
+  "&",
+  "|",
+  "^",
+  "<<",
+  ">>",
+  ">>>",
+  "u<",
+  "u<=",
+  "u>",
+  "u>=",
+]);
+
+/**
+ * Whether ToInt32 — which every JavaScript bitwise operator applies first —
+ * leaves this value alone. True for the whole signed *and* unsigned 32-bit
+ * range, because both spell the same 32 bits.
+ */
+function fitsInt32(v: number): boolean {
+  return Number.isInteger(v) && v >= -0x80000000 && v <= 0xffffffff;
+}
+
+/**
+ * A width-sensitive operator evaluated at 64 bits, or null when the answer
+ * cannot be trusted.
+ *
+ * Null is returned rather than an approximation whenever an operand is outside
+ * the exactly-representable integer range (`IRConst.value` is a `number`, so a
+ * 16-hex-digit immediate arrives already rounded), the result would be, or a
+ * shift count is out of range. Leaving the expression unfolded still says what
+ * the machine does; a folded constant that is off by a bit does not.
+ */
+function fold64(op: BinaryOp, l: number, r: number): number | null {
+  if (!Number.isSafeInteger(l) || !Number.isSafeInteger(r)) return null;
+  const a = BigInt(l);
+  const b = BigInt(r);
+  const signed = BigInt.asIntN(64, a);
+  const unsigned = BigInt.asUintN(64, a);
+  let out: bigint;
+  switch (op) {
+    case "/":
+      if (r === 0) return null;
+      // x86 idiv truncates toward zero, which is what BigInt division does.
+      out = BigInt.asIntN(64, signed / BigInt.asIntN(64, b));
+      break;
+    case "&":
+      out = BigInt.asIntN(64, unsigned & BigInt.asUintN(64, b));
+      break;
+    case "|":
+      out = BigInt.asIntN(64, unsigned | BigInt.asUintN(64, b));
+      break;
+    case "^":
+      out = BigInt.asIntN(64, unsigned ^ BigInt.asUintN(64, b));
+      break;
+    case "<<":
+      if (r < 0 || r >= 64) return null;
+      out = BigInt.asIntN(64, signed << b);
+      break;
+    case ">>":
+      if (r < 0 || r >= 64) return null;
+      out = BigInt.asIntN(64, signed >> b);
+      break;
+    case ">>>":
+      if (r < 0 || r >= 64) return null;
+      out = BigInt.asIntN(64, unsigned >> b);
+      break;
+    case "u<":
+      return unsigned < BigInt.asUintN(64, b) ? 1 : 0;
+    case "u<=":
+      return unsigned <= BigInt.asUintN(64, b) ? 1 : 0;
+    case "u>":
+      return unsigned > BigInt.asUintN(64, b) ? 1 : 0;
+    case "u>=":
+      return unsigned >= BigInt.asUintN(64, b) ? 1 : 0;
+    default:
+      return null;
+  }
+  const n = Number(out);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 function foldExpr(expr: IRExpr): IRExpr {
   if (expr.kind === "binary") {
     const left = foldExpr(expr.left);
@@ -25,6 +121,30 @@ function foldExpr(expr: IRExpr): IRExpr {
     if (left.kind === "const" && right.kind === "const") {
       const l = left.value;
       const r = right.value;
+
+      // A shift's width is its destination's — the count operand's width says
+      // nothing about it. Every other operator here takes both operands at the
+      // same width, so the wider one is the operation's.
+      const isShift = expr.op === "<<" || expr.op === ">>" || expr.op === ">>>";
+      const width = isShift ? left.size : Math.max(left.size, right.size);
+      // `IRConst.size` is 8 for *every* immediate in a 64-bit binary — the
+      // lifter records the mode, not the instruction's operand width — so
+      // `width` alone would send `or esi, 0xffffffff` down the 64-bit path and
+      // print 0xFFFFFFFF where -1 is the 32-bit register's value. The extra
+      // condition is the one thing that is not a guess: int32 arithmetic is
+      // only demonstrably wrong when an operand does not survive the coercion
+      // to int32, or when a shift count is one JavaScript would wrap to 5 bits.
+      const needs64 =
+        !fitsInt32(l) || !fitsInt32(r) || (isShift && (r >= 32 || r < 0));
+      if (width >= 8 && needs64 && WIDTH_SENSITIVE.has(expr.op)) {
+        const wide = fold64(expr.op, l, r);
+        // Falling through to the 32-bit spelling when the 64-bit one declined
+        // would produce exactly the wrong answer this guard exists to avoid,
+        // so an unfoldable operand pair stays an expression.
+        if (wide === null) return { ...expr, left, right };
+        return irConst(wide, left.size);
+      }
+
       let result: number | null = null;
       switch (expr.op) {
         case "+":
@@ -481,16 +601,124 @@ function substituteRegInStmt(stmt: IRStmt, canon: string, replacement: IRExpr): 
   }
 }
 
-/** Returns true if the expression might have side effects (calls). */
-function hasSideEffects(expr: IRExpr): boolean {
-  if (expr.kind === "call") return true;
-  if (expr.kind === "binary") return hasSideEffects(expr.left) || hasSideEffects(expr.right);
-  if (expr.kind === "unary") return hasSideEffects(expr.operand);
-  if (expr.kind === "deref") return hasSideEffects(expr.address);
-  if (expr.kind === "ternary")
-    return hasSideEffects(expr.condition) || hasSideEffects(expr.then) || hasSideEffects(expr.else);
-  if (expr.kind === "field_access") return hasSideEffects(expr.base);
-  if (expr.kind === "array_access") return hasSideEffects(expr.base) || hasSideEffects(expr.index);
+/**
+ * Returns true if evaluating the expression might have side effects (i.e. it
+ * contains a call).
+ *
+ * **This is the only copy.** `ssaopt.ts` imports it rather than keeping its own
+ * — the two were maintained separately and had drifted into agreeing only by
+ * accident. Both callers use it to decide whether an expression may be *moved*
+ * (fold's single-use inlining) or *deleted* (SSA dead-code elimination), and a
+ * false negative in either direction silently changes how many times the
+ * program calls something.
+ *
+ * The switch is exhaustive on purpose: the old if-chain omitted `cast`, so
+ * `rax = (int64_t)GetLastError()` read as pure. DCE would drop the statement —
+ * and the call with it — whenever `rax` had no remaining uses.
+ */
+export function hasSideEffects(expr: IRExpr): boolean {
+  switch (expr.kind) {
+    case "call":
+      return true;
+    case "binary":
+      return hasSideEffects(expr.left) || hasSideEffects(expr.right);
+    case "unary":
+      return hasSideEffects(expr.operand);
+    case "cast":
+      return hasSideEffects(expr.operand);
+    case "deref":
+      return hasSideEffects(expr.address);
+    case "ternary":
+      return (
+        hasSideEffects(expr.condition) || hasSideEffects(expr.then) || hasSideEffects(expr.else)
+      );
+    case "field_access":
+      return hasSideEffects(expr.base);
+    case "array_access":
+      return hasSideEffects(expr.base) || hasSideEffects(expr.index);
+    case "const":
+    case "reg":
+    case "var":
+    case "unknown":
+      return false;
+    default: {
+      // Compile error if a new IRExpr kind is added without classifying it.
+      const _exhaustive: never = expr;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Canonical names of every register the expression reads. */
+function readRegs(expr: IRExpr, out: Set<string> = new Set()): Set<string> {
+  switch (expr.kind) {
+    case "reg":
+      out.add(canonReg(expr.name));
+      break;
+    case "binary":
+      readRegs(expr.left, out);
+      readRegs(expr.right, out);
+      break;
+    case "unary":
+    case "cast":
+      readRegs(expr.operand, out);
+      break;
+    case "deref":
+      readRegs(expr.address, out);
+      break;
+    case "call":
+      for (const a of expr.args) readRegs(a, out);
+      break;
+    case "ternary":
+      readRegs(expr.condition, out);
+      readRegs(expr.then, out);
+      readRegs(expr.else, out);
+      break;
+    case "field_access":
+      readRegs(expr.base, out);
+      break;
+    case "array_access":
+      readRegs(expr.base, out);
+      readRegs(expr.index, out);
+      break;
+  }
+  return out;
+}
+
+/** True if evaluating the expression loads from memory. */
+function readsMemory(expr: IRExpr): boolean {
+  switch (expr.kind) {
+    case "deref":
+    case "field_access":
+    case "array_access":
+      return true;
+    case "binary":
+      return readsMemory(expr.left) || readsMemory(expr.right);
+    case "unary":
+    case "cast":
+      return readsMemory(expr.operand);
+    case "call":
+      return expr.args.some(readsMemory);
+    case "ternary":
+      return readsMemory(expr.condition) || readsMemory(expr.then) || readsMemory(expr.else);
+    default:
+      return false;
+  }
+}
+
+/** True if the statement assigns to any of the given canonical register names. */
+function writesAnyReg(stmt: IRStmt, regs: Set<string>): boolean {
+  if (regs.size === 0) return false;
+  if (stmt.kind === "assign" && stmt.dest.kind === "reg") return regs.has(canonReg(stmt.dest.name));
+  if (stmt.kind === "call_stmt" && stmt.resultDest?.kind === "reg")
+    return regs.has(canonReg(stmt.resultDest.name));
+  return false;
+}
+
+/** True if the statement writes to memory. */
+function writesMemory(stmt: IRStmt): boolean {
+  if (stmt.kind === "store") return true;
+  if (stmt.kind === "assign" && stmt.dest.kind === "deref") return true;
   return false;
 }
 
@@ -517,21 +745,71 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
       // Only inline register assignments (not memory stores, not calls)
       if (stmt.kind === "assign" && stmt.dest.kind === "reg" && !hasSideEffects(stmt.src)) {
         const canon = canonReg(stmt.dest.name);
+        // Inlining moves the whole right-hand side down to the point of use, so
+        // it is only sound while nothing it depends on changes in between.
+        const inputs = readRegs(stmt.src);
+        const loads = readsMemory(stmt.src);
+        // The stack pointer has no faithful definition chain in this IR:
+        // `push`, `pop` and the return address a `call` pushes are not lifted
+        // at all, so RSP changes with nothing here saying it did. `writesAnyReg`
+        // therefore cannot see the hazard, and a read of RSP must not be moved
+        // to another program point at all. This is what turned
+        // `mov ebp, esp` / … / `push [ebp + 8]` into `*(esp + 8)` — a base
+        // register the instruction never named, one push off the value it did
+        // name (peek-a-bin-rt4). `ssaopt.ts` refuses the same substitution.
+        if (inputs.has("rsp") || canon === "rsp") {
+          next.push(stmt);
+          continue;
+        }
         // Count total reads in remaining statements until next write to same register
         let totalReads = 0;
         let firstReadIdx = -1;
+        let blocked = false;
         for (let j = i + 1; j < result.length; j++) {
           const s = result[j];
           const reads = countReadsInStmt(s, canon);
           if (reads > 0 && firstReadIdx < 0) firstReadIdx = j;
           totalReads += reads;
-          // Check if this statement writes to the same register
+          // A later definition of the same register ends this value's live
+          // range: reads beyond it are reads of something else, and counting
+          // them would only block a substitution that is in fact sound.
           if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === canon) {
             break;
           }
-          if (s.kind === "call_stmt") break; // calls clobber regs
+          if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") {
+            if (canonReg(s.resultDest.name) === canon) break;
+          }
+          // Hazards only matter for statements the value has to move *past*.
+          // A statement that reads the register evaluates its right-hand side
+          // first, so a write in that same statement happens after the read.
+          if (firstReadIdx < 0) {
+            // A call clobbers the caller-saved registers, so nothing may move
+            // across one. This used to be a `break`, which ended the *use
+            // count* as well as the hazard scan: a definition read once before
+            // a call and once after looked single-use, so it was substituted
+            // into the first read and then dropped, leaving the second read
+            // naming something never assigned (peek-a-bin-9ml).
+            if (s.kind === "call_stmt") {
+              blocked = true;
+              break;
+            }
+            // `rax = rcx + 5; rcx = 99; rsi = rax` must not become
+            // `rcx = 99; rsi = rcx + 5` — that reads the new rcx. Versions are
+            // gone by the time foldBlock runs, so two SSA values of one
+            // register share a name here and nothing else catches this.
+            if (writesAnyReg(s, inputs)) {
+              blocked = true;
+              break;
+            }
+            // A load must not be moved below a store: the two addresses may
+            // alias, and nothing in this IR can prove they do not.
+            if (loads && writesMemory(s)) {
+              blocked = true;
+              break;
+            }
+          }
         }
-        if (totalReads === 1 && firstReadIdx >= 0) {
+        if (!blocked && totalReads === 1 && firstReadIdx >= 0) {
           // Inline: substitute into the statement that reads it
           result[firstReadIdx] = substituteRegInStmt(result[firstReadIdx], canon, stmt.src);
           changed = true;

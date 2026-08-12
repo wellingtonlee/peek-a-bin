@@ -1,6 +1,10 @@
 import type { SSAContext } from "./ssa";
 import type { IRStmt, IRExpr, IRReg, IRPhi } from "./ir";
 import { canonReg } from "./ir";
+// One definition, shared with foldBlock. Keeping a second copy here is how the
+// two drifted: this one classified `(int64_t)f()` as pure, so an unused
+// cast-of-call def was deleted along with the call.
+import { hasSideEffects } from "./fold";
 
 function sameReg(a: IRReg, b: IRReg): boolean {
   return canonReg(a.name) === canonReg(b.name) && a.version === b.version;
@@ -129,27 +133,79 @@ export function simplifyPhis(ctx: SSAContext): boolean {
   return changed;
 }
 
-/** Copy propagation: r_3 = r_2 → replace all uses of r_3 with r_2. */
+/**
+ * The stack pointer has no faithful definition chain in this IR, so no read of
+ * it may be moved to another program point.
+ *
+ * `liftBlock` skips `push` and `pop` outright, and `call` pushes a return
+ * address it never models either — so between two IR statements RSP can change
+ * with nothing in the IR saying it did. `rsp_0` is therefore not one value: it
+ * means "whatever RSP is *here*", and two reads carrying that version can be
+ * different machine values. SSA's guarantee does not hold for it.
+ *
+ * Substituting across that is how `mov rbp, rsp` turned every later `[rbp + 8]`
+ * into `[esp + 8]`, printing a base register the instruction never named and
+ * one `sub esp, 0xc` off the value it did name (peek-a-bin-rt4). Leaving the
+ * copy in place costs nothing: `rbp = rsp` is a real statement and the frame
+ * pointer keeps its own name, which is also what lets stack-slot promotion
+ * recognise an argument slot.
+ */
+function isStackPointer(e: IRExpr): boolean {
+  return e.kind === "reg" && canonReg(e.name) === "rsp";
+}
+
+function isCopyStmt(s: IRStmt): boolean {
+  return (
+    s.kind === "assign" &&
+    s.dest.kind === "reg" &&
+    s.src.kind === "reg" &&
+    s.dest.version !== undefined &&
+    !isStackPointer(s.dest) &&
+    !isStackPointer(s.src)
+  );
+}
+
+/**
+ * Copy propagation: r_3 = r_2 → replace all uses of r_3 with r_2.
+ *
+ * **Collect first, rewrite afterwards** — the shape `constantPropagation`
+ * already uses. `replaceRegInCtx` writes straight into `ctx.liftedBlocks`, so
+ * rewriting while walking a block and *then* storing the list built from that
+ * walk put the pre-rewrite statements back: the copy was deleted and its uses
+ * in the same block kept naming a destination that no longer had a definition.
+ * Dead-code elimination then removed whatever fed the copy, and whole branch
+ * bodies went with it (peek-a-bin-fxm).
+ *
+ * A copy's source may itself be another copy's destination, and the two are
+ * discovered in program order — definition before use — so replacing them in
+ * that order would rewrite `b_2` away before the pending `a_1 = b_2` was
+ * applied, re-creating the dangling read this function exists to avoid. Each
+ * substitution is therefore applied to the *pending* copies as well, which
+ * makes the result independent of the order they were collected in.
+ */
 export function copyPropagation(ctx: SSAContext): boolean {
-  let changed = false;
-  for (const [blockId, stmts] of ctx.liftedBlocks) {
-    const newStmts: IRStmt[] = [];
+  const copies: { dest: IRReg; src: IRExpr }[] = [];
+  for (const [, stmts] of ctx.liftedBlocks) {
     for (const s of stmts) {
-      if (
-        s.kind === "assign" &&
-        s.dest.kind === "reg" &&
-        s.src.kind === "reg" &&
-        s.dest.version !== undefined
-      ) {
-        replaceRegInCtx(ctx, s.dest as IRReg, s.src);
-        changed = true;
-        continue;
-      }
-      newStmts.push(s);
+      if (s.kind === "assign" && isCopyStmt(s)) copies.push({ dest: s.dest as IRReg, src: s.src });
     }
-    ctx.liftedBlocks.set(blockId, newStmts);
   }
-  return changed;
+  if (copies.length === 0) return false;
+
+  for (const [blockId, stmts] of ctx.liftedBlocks) {
+    ctx.liftedBlocks.set(
+      blockId,
+      stmts.filter((s) => !isCopyStmt(s)),
+    );
+  }
+  for (let i = 0; i < copies.length; i++) {
+    const c = copies[i];
+    replaceRegInCtx(ctx, c.dest, c.src);
+    for (let j = i + 1; j < copies.length; j++) {
+      copies[j].src = replaceRegInExpr(copies[j].src, c.dest, c.src);
+    }
+  }
+  return true;
 }
 
 /** Constant propagation: r_3 = 42 → replace uses with constant. */
@@ -230,6 +286,34 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
   for (const [, stmts] of ctx.liftedBlocks) {
     for (const s of stmts) countStmtUses(s);
   }
+
+  // A block ending in a Jcc has a use this pass cannot see. `structure.ts`
+  // builds the branch condition from the `cmp`/`test` *instruction* through
+  // RegState, not from the IR, so once the unread `eflags` definition is
+  // dropped the registers that condition names have no IR consumer either —
+  // and the load that computes them goes too. That is how the t64 wcslen body
+  // lost `movzx edx, [rax]` and became `while (dx != 0) { rax += 2; }`, an
+  // infinite loop (peek-a-bin-ua8).
+  //
+  // The flag definition is held live as well as counted: dropping it on this
+  // pass would make its operands dead on the next one.
+  const protectedFlagDefs = new Set<IRStmt>();
+  for (const block of ctx.blocks) {
+    const last = block.insns[block.insns.length - 1];
+    if (!last) continue;
+    const mn = last.mnemonic.toLowerCase();
+    if (!mn.startsWith("j") || mn === "jmp") continue;
+    const stmts = ctx.liftedBlocks.get(block.id) ?? [];
+    for (let i = stmts.length - 1; i >= 0; i--) {
+      const s = stmts[i];
+      if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === "eflags") {
+        countExprUses(s.src);
+        protectedFlagDefs.add(s);
+        break;
+      }
+    }
+  }
+
   for (const [, blockPhis] of ctx.phis) {
     for (const phi of blockPhis) {
       for (const op of phi.operands) {
@@ -246,6 +330,10 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
     const newStmts: IRStmt[] = [];
     for (const s of stmts) {
       if (s.kind === "assign" && s.dest.kind === "reg" && s.dest.version !== undefined) {
+        if (protectedFlagDefs.has(s)) {
+          newStmts.push(s);
+          continue;
+        }
         const key = regKey(s.dest);
         if ((useCounts.get(key) ?? 0) === 0 && !hasSideEffects(s.src)) {
           changed = true;
@@ -271,18 +359,6 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
   }
 
   return changed;
-}
-
-function hasSideEffects(expr: IRExpr): boolean {
-  if (expr.kind === "call") return true;
-  if (expr.kind === "binary") return hasSideEffects(expr.left) || hasSideEffects(expr.right);
-  if (expr.kind === "unary") return hasSideEffects(expr.operand);
-  if (expr.kind === "deref") return hasSideEffects(expr.address);
-  if (expr.kind === "ternary")
-    return hasSideEffects(expr.condition) || hasSideEffects(expr.then) || hasSideEffects(expr.else);
-  if (expr.kind === "field_access") return hasSideEffects(expr.base);
-  if (expr.kind === "array_access") return hasSideEffects(expr.base) || hasSideEffects(expr.index);
-  return false;
 }
 
 // ── Global Value Numbering ──
@@ -328,7 +404,19 @@ function canonicalizeExpr(expr: IRExpr, regToVN: Map<string, number>, uid: { n: 
   }
 }
 
-/** Global Value Numbering: eliminate redundant expressions across SSA. */
+/**
+ * Global Value Numbering: eliminate redundant expressions across SSA.
+ *
+ * **A definition may only be reused inside the subtree it dominates.** The
+ * available-expression table is pushed and popped around each dominator-tree
+ * node, so leaving a subtree forgets what was defined in it. A flat table that
+ * merely *visited* blocks in preorder also matches definitions in already-
+ * visited sibling subtrees, which do not dominate the current block — for a
+ * plain if/else where both arms compute `edx + 5`, the else arm's register was
+ * rewritten to the then arm's, and the value read after the join came from a
+ * block that had not run. SSA versions do not catch this: both registers are
+ * legitimately defined exactly once, just on paths that exclude each other.
+ */
 export function globalValueNumbering(ctx: SSAContext): boolean {
   let changed = false;
   const regToVN = new Map<string, number>();
@@ -347,15 +435,32 @@ export function globalValueNumbering(ctx: SSAContext): boolean {
   const entry = ctx.blocks.length > 0 ? ctx.blocks[0].id : undefined;
   if (entry === undefined) return false;
 
-  const stack: number[] = [entry];
+  // Explicit DFS rather than recursion — a deep dominator tree is ordinary in a
+  // large function. An `exit` frame is the scope marker: popping it means the
+  // block's subtree is done, so drop the expressions that block introduced.
+  const stack: { blockId: number; exit: boolean }[] = [{ blockId: entry, exit: false }];
+  const introduced = new Map<number, string[]>();
+
   while (stack.length > 0) {
-    const blockId = stack.pop()!;
+    const frame = stack.pop()!;
+    const blockId = frame.blockId;
+
+    if (frame.exit) {
+      for (const key of introduced.get(blockId) ?? []) exprToReg.delete(key);
+      introduced.delete(blockId);
+      continue;
+    }
+
+    stack.push({ blockId, exit: true });
     const children = ctx.domTree.get(blockId) ?? [];
     // Push children in reverse so leftmost is processed first
-    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+    for (let i = children.length - 1; i >= 0; i--) stack.push({ blockId: children[i], exit: false });
 
     const stmts = ctx.liftedBlocks.get(blockId);
     if (!stmts) continue;
+
+    const added: string[] = [];
+    introduced.set(blockId, added);
 
     for (const s of stmts) {
       if (s.kind !== "assign" || s.dest.kind !== "reg" || s.dest.version === undefined) continue;
@@ -373,6 +478,7 @@ export function globalValueNumbering(ctx: SSAContext): boolean {
         const vn = nextVN++;
         regToVN.set(regKey(dest), vn);
         exprToReg.set(key, dest);
+        added.push(key);
       }
     }
   }
@@ -429,6 +535,11 @@ export function loopInvariantCodeMotion(ctx: SSAContext, loops: Map<number, Set<
           return true;
         case "reg":
           if (expr.version === undefined) return false;
+          // A version a *call* handed out (SSAContext.clobbered) has no defining
+          // statement, so `loopDefs` cannot see it and it would otherwise read
+          // as loop-invariant. It is the opposite: the call that produced it is
+          // usually inside the loop and produces a different value each trip.
+          if (ctx.clobbered.has(regKey(expr))) return false;
           return !loopDefs.has(regKey(expr));
         case "binary":
           return isInvariant(expr.left) && isInvariant(expr.right);
@@ -552,5 +663,25 @@ export function ssaOptimize(ctx: SSAContext, loops?: Map<number, Set<number>>): 
     }
     changed = deadCodeElimination(ctx) || changed;
     if (!changed) break;
+  }
+
+  // The flag definitions held live above have served their purpose: everything
+  // they keep alive has survived the fixpoint. They have no IR consumer, so
+  // they go now rather than leaking `eflags = ...` into the emitted text
+  // (peek-a-bin-zsb). A flag definition that *does* have a side effect stays —
+  // deleting it would delete the call inside it.
+  for (const [blockId, stmts] of ctx.liftedBlocks) {
+    ctx.liftedBlocks.set(
+      blockId,
+      stmts.filter(
+        (s) =>
+          !(
+            s.kind === "assign" &&
+            s.dest.kind === "reg" &&
+            canonReg(s.dest.name) === "eflags" &&
+            !hasSideEffects(s.src)
+          ),
+      ),
+    );
   }
 }

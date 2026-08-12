@@ -1,13 +1,207 @@
 import type { BasicBlock, Loop } from "../cfg";
 import type { IRStmt, IRExpr } from "./ir";
+import { canonReg, irReg, isKnownRegister } from "./ir";
 import { RegState } from "./regstate";
+import { computeRPO, computeDominators } from "./ssa";
 import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from "./cfgpatterns";
+
+/**
+ * The label a `goto` to a block spells. One function so the `goto` and the
+ * label that receives it cannot drift on formatting — `emit.ts`'s
+ * `labelForAddr` derives the same name from the same address for the labels it
+ * places itself, and has its own note about why.
+ */
+function labelNameFor(addr: number): string {
+  return `loc_${addr.toString(16).toUpperCase()}`;
+}
+
+/** Index of the first statement that is not a label, or -1 if there is none. */
+function firstNonLabel(stmts: IRStmt[]): number {
+  for (let i = 0; i < stmts.length; i++) if (stmts[i].kind !== "label") return i;
+  return -1;
+}
+
+/**
+ * Push `if (condition) thenBody else elseBody`, with the arms reduced to what
+ * they actually contribute.
+ *
+ * An arm holding nothing but labels contributes no behaviour — it is an empty
+ * branch — but the labels are anchors for `goto`s and cannot simply be dropped.
+ * They move out to just after the `if`, which is where that arm goes anyway:
+ * an empty arm falls straight through to the join, and the join is what follows
+ * the `if`. Without this an arm whose blocks all lifted to nothing would read
+ * as a real `else`, and the negate-and-hoist that turns `if (c) {} else {x}`
+ * into `if (!c) {x}` would stop firing.
+ */
+function pushConditional(
+  out: IRStmt[],
+  condition: IRExpr,
+  thenBody: IRStmt[],
+  elseBody: IRStmt[],
+): void {
+  const isLabel = (s: IRStmt) => s.kind === "label";
+  const thenRuns = thenBody.some((s) => !isLabel(s));
+  const elseRuns = elseBody.some((s) => !isLabel(s));
+
+  if (thenRuns && elseRuns) {
+    out.push({ kind: "if", condition, thenBody, elseBody });
+  } else if (thenRuns) {
+    out.push({ kind: "if", condition, thenBody });
+    out.push(...elseBody.filter(isLabel));
+  } else if (elseRuns) {
+    out.push({ kind: "if", condition: RegState.negate(condition), thenBody: elseBody });
+    out.push(...thenBody.filter(isLabel));
+  } else {
+    out.push(...thenBody.filter(isLabel), ...elseBody.filter(isLabel));
+  }
+}
+
+/**
+ * Is there a `continue` bound to *this* loop anywhere in `body`?
+ *
+ * Nested loops are not searched: a `continue` inside one belongs to it. The
+ * question matters only for `for`, where `continue` runs the update expression;
+ * the back edge it stands for jumps straight to the test and runs nothing.
+ */
+function hasFreeContinue(stmts: IRStmt[]): boolean {
+  for (const s of stmts) {
+    if (s.kind === "continue") return true;
+    if (s.kind === "while" || s.kind === "do_while" || s.kind === "for") continue;
+    for (const nested of bodiesOf(s)) if (hasFreeContinue(nested)) return true;
+  }
+  return false;
+}
+
+/**
+ * Drop every label nothing jumps to, and any repeat of a name already defined.
+ *
+ * `structureFrom` puts a label in front of every block it emits, because which
+ * blocks turn out to be `goto` targets is only known once the whole walk is
+ * done — a back edge discovered late refers to a block emitted long before.
+ * Keeping them all would bury the reader in `loc_` lines for straight-line
+ * code, so the sweep afterwards keeps only the ones a `goto` actually needs.
+ *
+ * `pinned` names survive regardless: the leftover pass introduces a region the
+ * walk never reached, and its label is what tells the reader the code above it
+ * does not fall into it.
+ *
+ * A duplicate definition of the same label does not compile, so the first one
+ * wins; the walk visits a block once, but nothing downstream guarantees that.
+ */
+function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
+  const targets = new Set<string>();
+  const collect = (list: IRStmt[]): void => {
+    for (const s of list) {
+      if (s.kind === "goto") targets.add(s.label);
+      for (const nested of bodiesOf(s)) collect(nested);
+    }
+  };
+  collect(stmts);
+
+  const defined = new Set<string>();
+  const rewrite = (list: IRStmt[]): IRStmt[] => {
+    const out: IRStmt[] = [];
+    for (const s of list) {
+      if (s.kind === "label") {
+        if (!targets.has(s.name) && !pinned.has(s.name)) continue;
+        if (defined.has(s.name)) continue;
+        defined.add(s.name);
+        out.push(s);
+        continue;
+      }
+      out.push(rewriteBodies(s, rewrite));
+    }
+    return out;
+  };
+  return rewrite(stmts);
+}
+
+/** Every statement list nested directly inside `stmt`. */
+function bodiesOf(stmt: IRStmt): IRStmt[][] {
+  switch (stmt.kind) {
+    case "if":
+      return stmt.elseBody ? [stmt.thenBody, stmt.elseBody] : [stmt.thenBody];
+    case "while":
+    case "do_while":
+    case "for":
+      return [stmt.body];
+    case "switch":
+      return stmt.defaultBody
+        ? [...stmt.cases.map((c) => c.body), stmt.defaultBody]
+        : stmt.cases.map((c) => c.body);
+    case "try":
+      return [stmt.body, stmt.handler];
+    default:
+      return [];
+  }
+}
+
+/** Rebuild `stmt` with `f` applied to each of its nested statement lists. */
+function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
+  switch (stmt.kind) {
+    case "if":
+      return { ...stmt, thenBody: f(stmt.thenBody), elseBody: stmt.elseBody && f(stmt.elseBody) };
+    case "while":
+    case "do_while":
+    case "for":
+      return { ...stmt, body: f(stmt.body) };
+    case "switch":
+      return {
+        ...stmt,
+        cases: stmt.cases.map((c) => ({ ...c, body: f(c.body) })),
+        defaultBody: stmt.defaultBody && f(stmt.defaultBody),
+      };
+    case "try":
+      return { ...stmt, body: f(stmt.body), handler: f(stmt.handler) };
+    default:
+      return stmt;
+  }
+}
+
+/**
+ * Immediate post-dominators: the dominators of the reversed CFG, rooted at a
+ * virtual exit that every returning block feeds.
+ *
+ * `ipdom(b)` is the block where the arms of a branch in `b` are guaranteed to
+ * be back together — exactly the join an `if` closes at. Blocks that cannot
+ * reach any exit (an infinite loop, or a tail call that leaves the function)
+ * simply get no entry, and the caller falls back to its search.
+ */
+function computePostDominators(blocks: BasicBlock[]): Map<number, number> {
+  const exitId = Math.max(...blocks.map((b) => b.id)) + 1;
+  const returning = blocks.filter((b) => b.succs.length === 0).map((b) => b.id);
+  if (returning.length === 0) return new Map();
+
+  const virtualExit: BasicBlock = {
+    id: exitId,
+    startAddr: -1,
+    endAddr: -1,
+    insns: [],
+    succs: returning,
+    preds: [],
+  };
+  const returningSet = new Set(returning);
+  const reversed: BasicBlock[] = [
+    virtualExit,
+    ...blocks.map((b) => ({
+      ...b,
+      succs: b.preds,
+      preds: returningSet.has(b.id) ? [...b.succs, exitId] : b.succs,
+    })),
+  ];
+
+  const ipdom = computeDominators(reversed, computeRPO(reversed));
+  ipdom.delete(exitId);
+  // A block whose post-dominator is the virtual exit has no real join point.
+  for (const [id, pd] of ipdom) if (pd === exitId) ipdom.delete(id);
+  return ipdom;
+}
 
 /**
  * Structure a CFG into high-level control flow (if/while/do-while/switch).
  *
- * Approach: recursive structural analysis over basic blocks, using existing
- * loop detection results. No full dominator tree — uses BFS convergence.
+ * Approach: recursive structural analysis over basic blocks, using the loop
+ * detection results and the post-dominator tree.
  */
 export function structureCFG(
   blocks: BasicBlock[],
@@ -34,6 +228,46 @@ export function structureCFG(
   }
 
   const visited = new Set<number>();
+  const ipdom = computePostDominators(blocks);
+
+  /**
+   * Blocks whose `loc_` label has actually been pushed somewhere in the output.
+   *
+   * `visited` is not the same question. A block is marked visited by whoever
+   * claims it, and every claimant emits its label *except* the short-circuit
+   * fold, which consumes the blocks between two tests without emitting
+   * anything for them. A `goto` naming one of those would be a label reference
+   * to nothing, which does not compile — so the one place that has to name an
+   * already-claimed block by label asks this rather than `visited`.
+   */
+  const labelled = new Set<number>();
+
+  /** Push the `loc_` label for `block`, recording that the name now exists. */
+  function pushLabel(out: IRStmt[], block: BasicBlock): void {
+    labelled.add(block.id);
+    out.push({ kind: "label", name: labelNameFor(block.startAddr) });
+  }
+
+  /**
+   * Blocks whose closing conditional jump *is* a `do`/`while`'s condition.
+   *
+   * The back-edge test of a bottom-tested loop is spelled by the loop
+   * statement itself, so the walk must not also spell it inside the body —
+   * `do { …; if (c) goto top; } while (c)` says the same thing twice. Every
+   * other dropped arm is restored as a `goto` (see `armFrom`); this is the one
+   * place where dropping it is what makes the output true.
+   */
+  const backEdgeConditionBlocks = new Set<number>();
+
+  /**
+   * Label names that survive `pruneLabels` even with no `goto` naming them.
+   *
+   * A region the walk reached only by starting a fresh walk at it is not
+   * fallen into from the code above it, and its label is what says so. Both
+   * places that introduce one — the leftover pass at the end of this function
+   * and the same sweep inside `structureLoop` — record the name here.
+   */
+  const pinned = new Set<string>();
 
   /** Get the condition from the last instruction(s) of a block. */
   function extractCondition(block: BasicBlock): IRExpr {
@@ -82,70 +316,98 @@ export function structureCFG(
     return { kind: "reg", name: trimmed, size: 4 };
   }
 
+  /** BFS distances from `start`, in edges, never leaving `loopBody` if given. */
+  function bfsDistances(start: number, loopBody?: Set<number>): Map<number, number> {
+    const dist = new Map<number, number>([[start, 0]]);
+    const queue = [start];
+    let head = 0;
+    while (head < queue.length) {
+      const id = queue[head++];
+      const d = dist.get(id)!;
+      const block = blockById.get(id);
+      if (!block) continue;
+      for (const succ of block.succs) {
+        if (dist.has(succ)) continue;
+        // Don't leave loop body
+        if (loopBody) {
+          const succBlock = blockById.get(succ);
+          if (
+            succBlock &&
+            !loopBody.has(succBlock.startAddr) &&
+            !loopBody.has(succBlock.insns[0]?.address)
+          )
+            continue;
+        }
+        dist.set(succ, d + 1);
+        queue.push(succ);
+      }
+    }
+    return dist;
+  }
+
   /**
-   * Find convergence point of two branches via BFS.
-   * Returns the block ID where both branches meet, or -1 if none found.
+   * Where the two arms of the branch in `blockId` come back together.
+   *
+   * The post-dominator is the answer whenever there is one: it is the block
+   * every path out of the branch has to pass through, which is precisely what
+   * an `if` closes at. `branchA`/`branchB` drive the fallback search for the
+   * cases post-dominance cannot answer — a branch whose arms return
+   * separately (no join at all), and a branch inside a loop body whose join
+   * lies outside the body, where the caller has to stay within the loop.
+   */
+  function convergenceOf(
+    blockId: number,
+    branchA: number,
+    branchB: number,
+    loopBody?: Set<number>,
+  ): number {
+    const pd = ipdom.get(blockId);
+    if (pd !== undefined && pd !== blockId) {
+      const pdBlock = blockById.get(pd);
+      if (
+        pdBlock &&
+        (!loopBody ||
+          loopBody.has(pdBlock.startAddr) ||
+          loopBody.has(pdBlock.insns[0]?.address ?? -1))
+      ) {
+        return pd;
+      }
+    }
+    return findConvergence(branchA, branchB, loopBody);
+  }
+
+  /**
+   * Find the convergence point of two branches: the block both reach with the
+   * smallest total number of edges. Returns -1 if they never meet.
+   *
+   * A branch target may itself be the convergence — that is precisely the
+   * `if` without an `else`, where one arm falls into the other's target. The
+   * previous version excluded both branch heads and returned the first block
+   * B's search happened to reach inside A's reachable set, so for two `if`s in
+   * a row it picked the *second* merge, nested the second `if` inside the
+   * first and left a `goto` into the middle of it. Scoring by combined
+   * distance picks the nearest join instead, which for a diamond is still the
+   * merge block (1 + 1) and for a triangle is the branch target itself
+   * (0 + 1).
    */
   function findConvergence(branchA: number, branchB: number, loopBody?: Set<number>): number {
-    const reachableA = new Set<number>();
-    const reachableB = new Set<number>();
-    const queueA = [branchA];
-    const queueB = [branchB];
+    const distA = bfsDistances(branchA, loopBody);
+    const distB = bfsDistances(branchB, loopBody);
 
-    // BFS from branch A
-    while (queueA.length > 0) {
-      const id = queueA.shift()!;
-      if (reachableA.has(id)) continue;
-      reachableA.add(id);
-      const block = blockById.get(id);
-      if (!block) continue;
-      for (const succ of block.succs) {
-        if (!reachableA.has(succ)) {
-          // Don't leave loop body
-          if (loopBody) {
-            const succBlock = blockById.get(succ);
-            if (
-              succBlock &&
-              !loopBody.has(succBlock.startAddr) &&
-              !loopBody.has(succBlock.insns[0]?.address)
-            )
-              continue;
-          }
-          queueA.push(succ);
-        }
+    let best = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    // `distA` is in BFS order from A, so equal scores keep the block closer to
+    // A — the deterministic choice the old fallback scan also made.
+    for (const [id, da] of distA) {
+      const db = distB.get(id);
+      if (db === undefined) continue;
+      if (da + db < bestScore) {
+        bestScore = da + db;
+        best = id;
       }
     }
 
-    // BFS from branch B, looking for intersection
-    while (queueB.length > 0) {
-      const id = queueB.shift()!;
-      if (reachableB.has(id)) continue;
-      reachableB.add(id);
-      if (reachableA.has(id) && id !== branchA && id !== branchB) return id;
-      const block = blockById.get(id);
-      if (!block) continue;
-      for (const succ of block.succs) {
-        if (!reachableB.has(succ)) {
-          if (loopBody) {
-            const succBlock = blockById.get(succ);
-            if (
-              succBlock &&
-              !loopBody.has(succBlock.startAddr) &&
-              !loopBody.has(succBlock.insns[0]?.address)
-            )
-              continue;
-          }
-          queueB.push(succ);
-        }
-      }
-    }
-
-    // Fallback: find first block reachable from both
-    for (const id of reachableA) {
-      if (reachableB.has(id)) return id;
-    }
-
-    return -1;
+    return best;
   }
 
   /** Check if a block ends with unconditional jmp. */
@@ -175,27 +437,73 @@ export function structureCFG(
   /**
    * Structure a sequence of blocks starting from blockId.
    * stopAt: set of block IDs to stop before (e.g., convergence point, loop exit).
+   *
+   * `enterStart` walks the starting block even though it is already visited or
+   * in `stopAt`. Only the bottom-tested loop path uses it, to structure the
+   * loop header as the first block of the body: the header is marked visited
+   * before `structureLoop` is called and is in `stopAt` so the back edge stops
+   * there, yet its own statements and branch belong to the body.
    */
-  function structureFrom(blockId: number, stopAt: Set<number>, loopBody?: Set<number>): IRStmt[] {
+  function structureFrom(
+    blockId: number,
+    stopAt: Set<number>,
+    loopBody?: Set<number>,
+    enterStart = false,
+  ): IRStmt[] {
     const result: IRStmt[] = [];
     let current: number | null = blockId;
+    let first = true;
 
     while (current !== null) {
-      if (stopAt.has(current) || visited.has(current)) break;
+      const forced = first && enterStart;
+      first = false;
+      if (!forced && (stopAt.has(current) || visited.has(current))) break;
 
       const block = blockById.get(current);
       if (!block) break;
 
       // Check for loop header
       const loop = loopByHeader.get(block.startAddr);
-      if (loop && !visited.has(current)) {
+      if (loop && !visited.has(current) && !forced) {
         visited.add(current);
         const loopResult = structureLoop(block, loop);
+
+        // A `for` header repeats the init assignment, which the walk has
+        // already emitted as part of an earlier block. Emitting both runs it
+        // twice, and `x = f()` run twice is a different program. When it is
+        // the statement immediately before the loop it can simply move into
+        // the header; otherwise the loop is demoted back to the `while` the
+        // `for` was built from, with the update at the end of the body where
+        // the machine put it.
+        const asFor = loopResult.length === 1 && loopResult[0].kind === "for" ? loopResult[0] : null;
+        if (asFor && result[result.length - 1] === asFor.init) {
+          result.pop();
+        } else if (asFor) {
+          loopResult[0] = {
+            kind: "while",
+            condition: asFor.condition,
+            body: [...asFor.body, asFor.update],
+          };
+        }
+
+        // The header's label goes *before* the loop, not inside its body: a
+        // jump to the header re-runs the test, which is what re-entering the
+        // loop statement does and what jumping into the body would skip.
+        pushLabel(result, block);
         result.push(...loopResult);
 
-        // Continue after loop: find exit block
-        // The exit is a successor of a loop body block that's outside the loop
-        let exitId: number | null = null;
+        // Continue after the loop from one of its exits: a successor of a body
+        // block that lies outside the body.
+        //
+        // A loop can leave to several different places — the header test falls
+        // out to one, a guard inside the body breaks to another — and only one
+        // of them can be the block this walk carries on into. This used to keep
+        // whichever candidate the scan happened to see last, which dropped the
+        // rest of the function hanging off every other exit (peek-a-bin-cb2).
+        // The lowest address is picked instead so the choice does not depend on
+        // block ordering, and the leftover pass at the end of `structureCFG`
+        // picks up the exits this walk does not reach.
+        const exits: number[] = [];
         for (const bid of blocks) {
           if (!loop.bodyAddrs.has(bid.startAddr) && !loop.bodyAddrs.has(bid.insns[0]?.address))
             continue;
@@ -206,18 +514,33 @@ export function structureCFG(
               !loop.bodyAddrs.has(succBlock.startAddr) &&
               !loop.bodyAddrs.has(succBlock.insns[0]?.address)
             ) {
-              if (!visited.has(succ)) exitId = succ;
+              if (!visited.has(succ) && !exits.includes(succ)) exits.push(succ);
             }
           }
         }
-        current = exitId;
+        exits.sort(
+          (a, b) => (blockById.get(a)?.startAddr ?? 0) - (blockById.get(b)?.startAddr ?? 0),
+        );
+        current = exits.length > 0 ? exits[0] : null;
         continue;
       }
 
       visited.add(current);
 
-      // Emit block's lifted statements
+      // Emit block's lifted statements, under the label a `goto` to this block
+      // would use.
+      //
+      // Every block gets one, whether or not anything jumps here and whether or
+      // not it lifted to any statement: the walk only learns which blocks are
+      // `goto` targets once it is over — a back edge names a block emitted long
+      // before — and a block that lifted to nothing is still a place code jumps
+      // to. `pruneLabels` removes the ones that turn out to be unused, so the
+      // reader never sees a label for an address nothing reaches. Before this,
+      // `emit.ts` had to anchor labels by matching the target address against
+      // the addresses of emitted *lines*, which finds nothing when the block's
+      // first instruction folded away — two thirds of all gotos (peek-a-bin-uzi).
       const blockStmts = liftedBlocks.get(block.id) ?? [];
+      pushLabel(result, block);
       result.push(...blockStmts);
 
       // Determine what comes next based on block's exit
@@ -226,11 +549,19 @@ export function structureCFG(
         continue;
       }
 
-      // Check for switch (indirect jump with jump table)
-      if (endsWithJmp(block) && block.succs.length > 2) {
+      // Check for switch (indirect jump with jump table).
+      //
+      // The gate used to also require `block.succs.length > 2`. Successors are
+      // distinct blocks, so a table with three entries two of which share a
+      // target has two of them, fell below the threshold, and was not
+      // recognised as a switch at all: one target was emitted inline as if it
+      // were a fallthrough, the rest left to the leftover pass, and no case
+      // value appeared anywhere (peek-a-bin-rev). How many distinct blocks a
+      // table lands on is not part of what makes it a switch — the table is.
+      if (endsWithJmp(block)) {
         const lastInsn = block.insns[block.insns.length - 1];
         const jtTargets = jumpTables.get(lastInsn.address);
-        if (jtTargets) {
+        if (jtTargets && jtTargets.length > 0) {
           const switchResult = structureSwitch(block, jtTargets);
           result.push(switchResult);
 
@@ -280,10 +611,7 @@ export function structureCFG(
           if (!stopAt.has(nextId)) {
             const targetBlock = blockById.get(nextId);
             if (targetBlock) {
-              result.push({
-                kind: "goto",
-                label: `loc_${targetBlock.startAddr.toString(16).toUpperCase()}`,
-              });
+              result.push({ kind: "goto", label: labelNameFor(targetBlock.startAddr) });
             }
           }
           current = null;
@@ -304,32 +632,39 @@ export function structureCFG(
         }
 
         // Find convergence
-        const convergence = findConvergence(branchTarget, fallthrough, loopBody);
+        const convergence = convergenceOf(current, branchTarget, fallthrough, loopBody);
 
         const convergenceSet = new Set(stopAt);
         if (convergence >= 0) convergenceSet.add(convergence);
 
-        // Check for short-circuit && / || pattern
+        // Check for short-circuit && / || pattern.
+        //
+        // Folding `condA` and `condB` into one expression consumes the blocks
+        // between them, and their statements go with them. That is only sound
+        // when those blocks do nothing but test: `a && f()` in C evaluates
+        // `f()` conditionally, so a block that both computes and tests cannot
+        // be spelled as one operand of `&&` without either losing the work or
+        // lying about when it happens. The real shape is a nested `if`, which
+        // the general path below produces. On t32 this fold deleted two calls
+        // outright from `sub_405B72` (peek-a-bin-cb2).
         const sc = detectShortCircuit(current, blockById, extractCondition, identifyBranches);
-        if (sc) {
+        if (sc?.consumedBlocks.every((cid) => (liftedBlocks.get(cid)?.length ?? 0) === 0)) {
           const scConvergenceSet = new Set(stopAt);
-          const scConvergence = findConvergence(sc.trueTarget, sc.falseTarget, loopBody);
+          const scConvergence = convergenceOf(current, sc.trueTarget, sc.falseTarget, loopBody);
           if (scConvergence >= 0) scConvergenceSet.add(scConvergence);
 
           // Mark consumed blocks as visited
           for (const cid of sc.consumedBlocks) visited.add(cid);
 
-          const thenBody = structureFrom(sc.trueTarget, scConvergenceSet, loopBody);
-          const elseBody = structureFrom(sc.falseTarget, scConvergenceSet, loopBody);
-          const scCond = sc.condition;
-
-          if (thenBody.length > 0 && elseBody.length > 0) {
-            result.push({ kind: "if", condition: scCond, thenBody, elseBody });
-          } else if (thenBody.length > 0) {
-            result.push({ kind: "if", condition: scCond, thenBody });
-          } else if (elseBody.length > 0) {
-            result.push({ kind: "if", condition: RegState.negate(scCond), thenBody: elseBody });
-          }
+          const thenBody = armFrom(current, sc.trueTarget, scConvergenceSet, scConvergence, loopBody);
+          const elseBody = armFrom(
+            current,
+            sc.falseTarget,
+            scConvergenceSet,
+            scConvergence,
+            loopBody,
+          );
+          pushConditional(result, sc.condition, thenBody, elseBody);
 
           current = scConvergence >= 0 ? scConvergence : null;
           continue;
@@ -340,10 +675,29 @@ export function structureCFG(
         const branchBlock = blockById.get(branchTarget);
         const fallthroughBlock = blockById.get(fallthrough);
 
-        if (branchBlock && endsWithRet(branchBlock) && branchBlock.succs.length === 0) {
+        // A branch that is *also* the convergence point is the shared tail of
+        // both paths, not an early return belonging to one of them: taking the
+        // shortcut there structures the tail as the `then` body, and since the
+        // tail is the block both paths reach, that body comes back empty and
+        // the guard is dropped altogether — the other path's statements are
+        // then emitted unconditionally. (The triangle in peek-a-bin-lrs turned
+        // a conditional store into an unconditional one this way.) The general
+        // if/else path below handles that shape correctly, negating the
+        // condition so the non-tail side becomes the `then` body.
+        if (
+          branchBlock &&
+          branchTarget !== convergence &&
+          endsWithRet(branchBlock) &&
+          branchBlock.succs.length === 0
+        ) {
           // if (cond) { ... return; } — the branch target runs when the jcc is taken
-          const thenBody = structureFrom(branchTarget, convergenceSet, loopBody);
-          result.push({ kind: "if", condition, thenBody });
+          //
+          // Through `armFrom`/`pushConditional`, so that an arm the walk
+          // refused to follow becomes the `goto` that says where control
+          // really goes, and an arm that is genuinely the join leaves no
+          // guard with nothing in it.
+          const thenBody = armFrom(current, branchTarget, convergenceSet, convergence, loopBody);
+          pushConditional(result, condition, thenBody, []);
           // Continue with fallthrough
           current = fallthrough;
           continue;
@@ -351,12 +705,14 @@ export function structureCFG(
 
         if (
           fallthroughBlock &&
+          fallthrough !== convergence &&
           endsWithRet(fallthroughBlock) &&
           fallthroughBlock.succs.length === 0
         ) {
-          // if (!cond) { ... return; } — the fallthrough runs when the jcc is *not* taken
-          const thenBody = structureFrom(fallthrough, convergenceSet, loopBody);
-          result.push({ kind: "if", condition: RegState.negate(condition), thenBody });
+          // if (!cond) { ... return; } — the fallthrough runs when the jcc is
+          // *not* taken. Same empty-body reasoning as the branch-target case.
+          const thenBody = armFrom(current, fallthrough, convergenceSet, convergence, loopBody);
+          pushConditional(result, RegState.negate(condition), thenBody, []);
           // Continue with branch target
           current = branchTarget;
           continue;
@@ -370,30 +726,17 @@ export function structureCFG(
         // that body can be hoisted into the "then" slot.
 
         if (convergence >= 0) {
-          const thenBody = structureFrom(branchTarget, convergenceSet, loopBody);
-          const elseBody = structureFrom(fallthrough, convergenceSet, loopBody);
-
-          if (thenBody.length > 0 && elseBody.length > 0) {
-            result.push({ kind: "if", condition, thenBody, elseBody });
-          } else if (thenBody.length > 0) {
-            result.push({ kind: "if", condition, thenBody });
-          } else if (elseBody.length > 0) {
-            result.push({ kind: "if", condition: RegState.negate(condition), thenBody: elseBody });
-          }
-
+          const thenBody = armFrom(current, branchTarget, convergenceSet, convergence, loopBody);
+          const elseBody = armFrom(current, fallthrough, convergenceSet, convergence, loopBody);
+          pushConditional(result, condition, thenBody, elseBody);
           current = convergence;
         } else {
-          // No convergence found — emit both branches inline
-          const thenBody = structureFrom(branchTarget, stopAt, loopBody);
-          const elseBody = structureFrom(fallthrough, stopAt, loopBody);
-          if (thenBody.length > 0 || elseBody.length > 0) {
-            result.push({
-              kind: "if",
-              condition,
-              thenBody,
-              elseBody: elseBody.length > 0 ? elseBody : undefined,
-            });
-          }
+          // No convergence found — emit both branches inline. Nothing follows
+          // the `if`, so neither arm has a join to fall into: an arm the walk
+          // refuses becomes a `goto`.
+          const thenBody = armFrom(current, branchTarget, stopAt, -1, loopBody);
+          const elseBody = armFrom(current, fallthrough, stopAt, -1, loopBody);
+          pushConditional(result, condition, thenBody, elseBody);
           current = null;
         }
         continue;
@@ -408,6 +751,47 @@ export function structureCFG(
     }
 
     return result;
+  }
+
+  /**
+   * One arm of the branch in `fromId`: the statements the walk produced for
+   * `targetId`, or the `goto` that says where control really goes when the
+   * walk would not follow it there.
+   *
+   * `structureFrom` returns an empty list for exactly one reason — the target
+   * is in `stopAt` or already visited, so it bails before emitting anything.
+   * (Any block it does enter contributes at least its own label.) Handing that
+   * empty list to `pushConditional` deletes the guard, and the arm then reads
+   * as "falls through to whatever follows the `if`". That is true only when the
+   * target *is* what follows the `if` — the convergence. Everywhere else it is
+   * a statement about the machine that is not true, and it is how a loop's own
+   * exit test disappeared: the test at the bottom of a body whose two arms are
+   * the header and the way out has both of them in `stopAt`, so the whole
+   * `if` evaporated and the loop was left claiming it repeats on the header
+   * test alone (peek-a-bin-jlo). The bound of `sub_406437`'s table search
+   * vanished the same way, leaving `for (eax = 0; ecx != tbl[eax]; eax++)`
+   * with no `eax < 0x16` anywhere.
+   *
+   * A `goto` to the target's label is faithful whatever the target is. The
+   * loop header's label sits immediately before the loop statement, so jumping
+   * to it re-enters the loop from the top, which is what the machine's back
+   * edge does; `insertContinueStmts` then upgrades that to `continue` where
+   * the two are the same thing.
+   */
+  function armFrom(
+    fromId: number,
+    targetId: number,
+    stopSet: Set<number>,
+    convergence: number,
+    loopBody?: Set<number>,
+  ): IRStmt[] {
+    const body = structureFrom(targetId, stopSet, loopBody);
+    if (body.length > 0) return body;
+    if (targetId === convergence) return [];
+    if (backEdgeConditionBlocks.has(fromId)) return [];
+    const target = blockById.get(targetId);
+    if (!target) return [];
+    return [{ kind: "goto", label: labelNameFor(target.startAddr) }];
   }
 
   /** Identify which successor is the branch target vs fallthrough. */
@@ -478,9 +862,21 @@ export function structureCFG(
         }
       }
 
-      if (bodyStart !== null) {
-        const loopStopAt = new Set<number>([header.id]);
-        if (exitId !== null) loopStopAt.add(exitId);
+      // Both `bodyStart` and `exitId`, or this is not a pre-tested loop.
+      //
+      // A header conditional whose two arms are *both* inside the body decides
+      // something within an iteration; it does not decide whether there is
+      // another one. Reading it as the loop's test states a condition the
+      // machine never uses to continue or stop, and since which arm is which
+      // is then arbitrary the result was as often inverted as merely wrong:
+      // t32 `sub_40A702` walks the section table with `cmp edx, esi / jb` at
+      // the bottom and emitted `while (edi >= ecx)` from a bounds check in the
+      // middle of the body (peek-a-bin-bhh). Such a loop is bottom-tested — the
+      // back edge carries the real test — so it falls through to the path
+      // below, which structures the header as the first block of the body and
+      // keeps its branch as the `if` it is.
+      if (bodyStart !== null && exitId !== null) {
+        const loopStopAt = new Set<number>([header.id, exitId]);
 
         // Detect multi-exit: conditional branches inside body targeting outside → break
         const multiExits = detectMultiExitLoop(header, loop.bodyAddrs, blocks, blockById);
@@ -507,9 +903,57 @@ export function structureCFG(
           whileCondition = RegState.negate(condition);
         }
 
+        // A header that does work as well as testing cannot be a `while`.
+        //
+        // `while (c) { H; B }` runs the test first and `H` only after it
+        // passes; the machine runs `H` first and tests what `H` just computed.
+        // Where the two disagree is not a corner: `sub_14000D8C4`'s header is
+        // the `WriteFile` call itself, so the emitted loop tested the *previous*
+        // call's result before making the first one, and `sub_140009740`'s
+        // header loads the byte its test looks at, so the first iteration was
+        // guarded on a stale register (peek-a-bin-jlo, peek-a-bin-bhh). The
+        // shapes that are exact:
+        //
+        //   H empty          →  while (c) { B }
+        //   B empty          →  do { H } while (c)
+        //   neither          →  while (1) { H; if (!c) goto exit; B }
+        //
+        // The third is the ugly one, and it is chosen deliberately: a `while`
+        // whose condition cannot be stated without also stating when `H` runs
+        // is a loop the reader cannot check against the disassembly. `do/while`
+        // is only reached for when the loop leaves by this test alone —
+        // otherwise falling out of the `do` would land on the wrong exit.
+        if (headerStmts.length > 0) {
+          const exitBlock = blockById.get(exitId);
+          const exitLabel = exitBlock ? labelNameFor(exitBlock.startAddr) : null;
+          if (firstNonLabel(bodyWithContinue) < 0 && multiExits.length === 0) {
+            return [{ kind: "do_while", condition: whileCondition, body: fullBody }];
+          }
+          if (exitLabel !== null) {
+            return [
+              {
+                kind: "while",
+                condition: { kind: "const", value: 1, size: 4 },
+                body: [
+                  ...headerStmts,
+                  {
+                    kind: "if",
+                    condition: RegState.negate(whileCondition),
+                    thenBody: [{ kind: "goto", label: exitLabel }],
+                  },
+                  ...bodyWithContinue,
+                ],
+              },
+            ];
+          }
+        }
+
         // Better loop classification: if body starts with if (cond) break; → while(!cond)
-        if (whileCondition.kind === "const" && whileCondition.value === 1 && fullBody.length > 0) {
-          const first = fullBody[0];
+        // The scan skips over labels: a label carries no behaviour, and the
+        // block it introduces is what supplies the leading guard.
+        const leadIdx = firstNonLabel(fullBody);
+        if (whileCondition.kind === "const" && whileCondition.value === 1 && leadIdx >= 0) {
+          const first = fullBody[leadIdx];
           if (
             first.kind === "if" &&
             first.thenBody.length === 1 &&
@@ -520,16 +964,33 @@ export function structureCFG(
               {
                 kind: "while",
                 condition: RegState.negate(first.condition),
-                body: fullBody.slice(1),
+                body: [...fullBody.slice(0, leadIdx), ...fullBody.slice(leadIdx + 1)],
               },
             ];
           }
         }
 
-        // Try for-loop detection
+        // Try for-loop detection.
+        //
+        // `detectForLoop` recognises the induction variable, but the body it
+        // returns is every body block's statements concatenated in block-id
+        // order, with the control flow between them discarded — the arms of an
+        // `if` inside the loop come out as unconditional, consecutive code, and
+        // the header's own statements are missing entirely (peek-a-bin-42l:
+        // 111 statements per x64 binary, every one of them inside a loop). The
+        // structured `fullBody` is used instead, with the update hoisted out of
+        // it, so only the recognition comes from `detectForLoop`.
         const bodyBlockIds = collectLoopBodyBlockIds(header, loop);
         const forLoop = detectForLoop(header, bodyBlockIds, liftedBlocks, blockById);
-        if (forLoop) {
+        // Hoisting is only sound when the update really is what runs last on
+        // every iteration: as the final statement of the body, and with no
+        // `continue` that would reach the `for`'s update but not the machine's.
+        if (
+          forLoop &&
+          fullBody.length > 0 &&
+          fullBody[fullBody.length - 1] === forLoop.update &&
+          !hasFreeContinue(fullBody)
+        ) {
           // detectForLoop returns `condition: irConst(1)` as a placeholder and
           // documents that the caller fills it in — the header condition is
           // only available here. Always override it.
@@ -539,7 +1000,7 @@ export function structureCFG(
               init: forLoop.init,
               condition: whileCondition,
               update: forLoop.update,
-              body: forLoop.bodyStmts,
+              body: fullBody.slice(0, -1),
             },
           ];
         }
@@ -548,25 +1009,40 @@ export function structureCFG(
       }
     }
 
-    // Fallback: do-while pattern or just emit body with goto
-    const bodyBlockIds: number[] = [];
+    // Fallback: bottom-tested loop. The header does not end in a two-way
+    // conditional — for a `do`/`while` it ends in a `jmp`, or in nothing at all
+    // — so there is no pre-test to lift out, and the body is simply everything
+    // the header leads to.
+    //
+    // That body is structured like any other region. Concatenating the body
+    // blocks' lifted statements in block-id order instead, which is what this
+    // did, keeps every statement but throws away the control flow between
+    // them: both arms of an `if` inside the loop came out as consecutive
+    // unconditional code (peek-a-bin-b37). Nothing is dropped, so no
+    // statement-identity check sees it — the result is valid C stating
+    // something the machine does not do, the same class as the inverted
+    // conditions of peek-a-bin-h9v. It is the sibling of the `for` defect
+    // fixed just above, in the other arm of this function.
+    const inLoop = (b: BasicBlock): boolean =>
+      loop.bodyAddrs.has(b.startAddr) || loop.bodyAddrs.has(b.insns[0]?.address);
+
+    // The walk must not wander out of the loop. It stops at the header — that
+    // edge is the back edge, which the `do`/`while` itself expresses — and at
+    // every block outside the body that a body block can reach. Those exits
+    // belong to the caller: `structureFrom` continues from one of them after
+    // the loop and the leftover pass at the end picks up the others.
+    const loopStopAt = new Set<number>([header.id]);
     for (const b of blocks) {
-      if (b.id === header.id) continue;
-      if (loop.bodyAddrs.has(b.startAddr) || loop.bodyAddrs.has(b.insns[0]?.address)) {
-        bodyBlockIds.push(b.id);
+      if (!inLoop(b)) continue;
+      for (const succ of b.succs) {
+        const succBlock = blockById.get(succ);
+        if (succBlock && !inLoop(succBlock)) loopStopAt.add(succ);
       }
     }
 
-    const body: IRStmt[] = [...headerStmts];
-    for (const bid of bodyBlockIds) {
-      if (!visited.has(bid)) {
-        visited.add(bid);
-        const blockStmts = liftedBlocks.get(bid) ?? [];
-        body.push(...blockStmts);
-      }
-    }
-
-    // Find back-edge block for condition
+    // The back edge's own test is the loop statement's condition, so it is
+    // found before the body is walked: `armFrom` has to know not to spell it a
+    // second time inside the body.
     const backEdgeBlock = blocks.find(
       (b) =>
         b.endAddr === loop.backEdgeFromAddr ||
@@ -575,18 +1051,56 @@ export function structureCFG(
     let loopCondition: IRExpr = { kind: "const", value: 1, size: 4 }; // true = infinite loop
     if (backEdgeBlock && endsWithCondJmp(backEdgeBlock)) {
       loopCondition = extractCondition(backEdgeBlock);
+      backEdgeConditionBlocks.add(backEdgeBlock.id);
     }
 
-    // do-while with leading break → while
+    // The body starts at the header, walked as an ordinary region.
+    //
+    // Pushing the header's statements and then each in-loop successor's region
+    // in turn, which is what this did, is only right when the header has one
+    // successor inside the loop. With two — the shape that arrives here now
+    // that a header conditional with both arms in the body no longer counts as
+    // a pre-test — it emits both arms of that `if` as consecutive
+    // unconditional code, the peek-a-bin-b37 defect one level up. `enterStart`
+    // walks the header itself despite its being visited and in `stopAt`, so
+    // its branch is structured like any other.
+    const body: IRStmt[] = structureFrom(header.id, loopStopAt, loop.bodyAddrs, true);
+
+    // Whatever that walk did not reach — a region entered only by a jump it
+    // cut — is appended under its own label, exactly as the leftover pass at
+    // the end of `structureCFG` does for the function as a whole, so that no
+    // part of the body goes missing. Terminates because `structureFrom` marks
+    // its starting block visited on every path through it.
+    for (;;) {
+      let next: BasicBlock | undefined;
+      for (const b of blocks) {
+        if (b.id === header.id || !inLoop(b) || visited.has(b.id)) continue;
+        if ((liftedBlocks.get(b.id)?.length ?? 0) === 0) continue;
+        if (!next || b.startAddr < next.startAddr) next = b;
+      }
+      if (!next) break;
+      const tail = structureFrom(next.id, loopStopAt, loop.bodyAddrs);
+      if (tail.length === 0) continue;
+      pinned.add(labelNameFor(next.startAddr));
+      body.push(...tail);
+    }
+
+    // do-while with leading break → while (labels skipped: see the same scan
+    // in the pre-tested path above)
+    const leadIdx = firstNonLabel(body);
+    const lead = leadIdx >= 0 ? body[leadIdx] : undefined;
     if (
-      body.length > 0 &&
-      body[0].kind === "if" &&
-      body[0].thenBody.length === 1 &&
-      body[0].thenBody[0].kind === "break" &&
-      !body[0].elseBody
+      lead?.kind === "if" &&
+      lead.thenBody.length === 1 &&
+      lead.thenBody[0].kind === "break" &&
+      !lead.elseBody
     ) {
       return [
-        { kind: "while", condition: RegState.negate(body[0].condition), body: body.slice(1) },
+        {
+          kind: "while",
+          condition: RegState.negate(lead.condition),
+          body: [...body.slice(0, leadIdx), ...body.slice(leadIdx + 1)],
+        },
       ];
     }
 
@@ -607,7 +1121,7 @@ export function structureCFG(
 
   /** Insert continue statements for conditional branches back to loop header. */
   function insertContinueStmts(body: IRStmt[], header: BasicBlock, _loop: Loop): IRStmt[] {
-    const headerLabel = `loc_${header.startAddr.toString(16).toUpperCase()}`;
+    const headerLabel = labelNameFor(header.startAddr);
     return body.map((stmt) => {
       // Replace goto to header with continue
       if (stmt.kind === "goto" && stmt.label === headerLabel) {
@@ -631,36 +1145,94 @@ export function structureCFG(
     });
   }
 
-  /** Structure a switch statement. */
-  function structureSwitch(block: BasicBlock, targets: number[]): IRStmt {
-    // Try to find the switch expression and default target from the predecessor
-    // block that performs the bounds check (cmp reg, N / ja default).
-    let switchExpr: IRExpr = { kind: "unknown", text: "switch_expr" };
-    let defaultAddr: number | null = null;
+  /**
+   * The register a jump table is indexed by, or null.
+   *
+   * `jmp [reg*4 + table]` picks its target by `reg` alone, so `reg` *is* the
+   * subject of the switch by construction: entry *i* runs exactly when it
+   * holds *i*, which is what the case values say. Nothing else in the function
+   * has to agree for that to hold.
+   */
+  function jumpTableIndexReg(block: BasicBlock): string | null {
+    const last = block.insns[block.insns.length - 1];
+    const mem = last?.opStr.match(/\[([^\]]*)\]/);
+    if (!mem) return null;
+    const scaled = mem[1].match(/\b([a-z][a-z0-9]*)\s*\*\s*[1248]\b/i);
+    if (!scaled || !isKnownRegister(scaled[1])) return null;
+    return scaled[1].toLowerCase();
+  }
 
-    // Walk predecessors looking for the bounds-check block (ends with ja/jae)
+  /**
+   * The compared operand of a bounds check on a predecessor of `block`, and
+   * the default target if that check has one.
+   *
+   * Two shapes, and they are not symmetric:
+   *
+   * - `cmp x, N / ja default` — out of range on the *taken* path. The in-range
+   *   path falls through into the table, and the jump target is the default
+   *   arm of the switch.
+   * - `cmp x, N / jb table` — in range on the *taken* path, which is the form
+   *   MSVC emits for `memcpy`'s dispatch (t32's `sub_40B780`). There is no
+   *   default: the fallthrough is the out-of-range code, which is not reached
+   *   from the switch block at all and so is not an arm of it. Reading the
+   *   jump target as a default here would attribute unrelated code to the
+   *   switch.
+   */
+  function boundsCheckOf(block: BasicBlock): { expr: IRExpr | null; defaultAddr: number | null } {
     for (const predId of block.preds) {
       const pred = blockById.get(predId);
       if (!pred || pred.insns.length === 0) continue;
       const lastInsn = pred.insns[pred.insns.length - 1];
       const lastMn = lastInsn.mnemonic.toLowerCase();
-      if (lastMn === "ja" || lastMn === "jae") {
-        // Extract switch expression from cmp in this predecessor
-        for (const insn of pred.insns) {
-          if (insn.mnemonic.toLowerCase() === "cmp") {
-            const parts = insn.opStr.split(",").map((s) => s.trim());
-            if (parts.length >= 1) {
-              switchExpr = parseSimpleOperand(parts[0]);
-            }
-            break;
-          }
+      const outOfRangeTaken = lastMn === "ja" || lastMn === "jae" || lastMn === "jnb";
+      const inRangeTaken =
+        lastMn === "jb" || lastMn === "jbe" || lastMn === "jnae" || lastMn === "jna";
+      if (!outOfRangeTaken && !inRangeTaken) continue;
+
+      const m = lastInsn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      const targetAddr = m ? parseInt(m[1], 16) : null;
+      // The in-range form is only this switch's guard if what it jumps to is
+      // this switch.
+      if (inRangeTaken && targetAddr !== block.startAddr) continue;
+
+      let expr: IRExpr | null = null;
+      for (const insn of pred.insns) {
+        if (insn.mnemonic.toLowerCase() === "cmp") {
+          const parts = insn.opStr.split(",").map((s) => s.trim());
+          if (parts.length >= 1) expr = parseSimpleOperand(parts[0]);
+          break;
         }
-        // The ja/jae target is the default case block
-        const m = lastInsn.opStr.match(/^0x([0-9a-fA-F]+)$/);
-        if (m) defaultAddr = parseInt(m[1], 16);
-        break;
       }
+      return { expr, defaultAddr: outOfRangeTaken ? targetAddr : null };
     }
+    return { expr: null, defaultAddr: null };
+  }
+
+  /** Structure a switch statement. */
+  function structureSwitch(block: BasicBlock, targets: number[]): IRStmt {
+    let switchExpr: IRExpr = { kind: "unknown", text: "switch_expr" };
+
+    // Two independent readings of what is being switched on: the register the
+    // table is indexed by, and the value a predecessor bounds-checks.
+    //
+    // They usually name the same register, and then the bounds check's
+    // spelling wins — it is the width the comparison was written at, and it
+    // comes with the default target. When they disagree the index register is
+    // the honest answer: in t32's `sub_40B780` the guard is `cmp ecx, 8` and
+    // the table is `jmp [edx*4 + 0x40b8f0]`, where `edx` is `ecx & 3` — a
+    // different value with a different range, so `switch (ecx)` against case
+    // values 0..3 would be a statement about the machine that is not true.
+    // Only a `ja`/`jae` guard was consulted before, so the inverted-sense form
+    // left the subject unrecovered entirely (peek-a-bin-rev).
+    const indexReg = jumpTableIndexReg(block);
+    const { expr: boundsExpr, defaultAddr } = boundsCheckOf(block);
+    const agrees =
+      indexReg !== null &&
+      boundsExpr?.kind === "reg" &&
+      canonReg(boundsExpr.name) === canonReg(indexReg);
+
+    if (boundsExpr && (agrees || indexReg === null)) switchExpr = boundsExpr;
+    else if (indexReg !== null) switchExpr = irReg(indexReg);
 
     // Fallback: scan current block for cmp (original behavior)
     if (switchExpr.kind === "unknown") {
@@ -688,35 +1260,149 @@ export function structureCFG(
     const switchStopAt = new Set<number>();
     for (const succId of block.succs) switchStopAt.add(succId);
 
+    /**
+     * The body for one arm of the switch.
+     *
+     * A block is emitted once, so an arm whose target another region already
+     * claimed cannot have the statements again. MSVC emits one jump table per
+     * copy-direction/alignment path of `memcpy` and lands them all on the same
+     * few tail blocks — t32's `sub_40B780` has nine tables over two distinct
+     * target sets — so this is the normal case there, not a corner. Emitting
+     * `break` for those arms says the case does nothing, which is indistinguishable
+     * from a case that really is empty and was wrong for four arms of that one
+     * function (peek-a-bin-dp6). A `goto` to the label the block was emitted
+     * under says where the case goes instead, and needs no second copy of the
+     * statements. Where even the label does not exist — the short-circuit fold
+     * consumes blocks without emitting anything — there is nothing to name, and
+     * `break` is all that is left.
+     */
+    function armBody(targetBlock: BasicBlock | undefined): IRStmt[] {
+      if (targetBlock && !visited.has(targetBlock.id)) {
+        visited.add(targetBlock.id);
+        const body: IRStmt[] = [];
+        pushLabel(body, targetBlock);
+        body.push(...(liftedBlocks.get(targetBlock.id) ?? []), { kind: "break" });
+        return body;
+      }
+      if (targetBlock && labelled.has(targetBlock.id)) {
+        return [{ kind: "goto", label: labelNameFor(targetBlock.startAddr) }];
+      }
+      return [{ kind: "break" }];
+    }
+
     for (const [targetAddr, values] of targetToCase) {
       // Skip if this is the default target — handle it separately
       if (defaultAddr !== null && targetAddr === defaultAddr) continue;
-      const targetBlock = blockByAddr.get(targetAddr);
-      if (targetBlock && !visited.has(targetBlock.id)) {
-        visited.add(targetBlock.id);
-        const body = liftedBlocks.get(targetBlock.id) ?? [];
-        cases.push({ values, body: [...body, { kind: "break" as const }] });
-      } else {
-        cases.push({ values, body: [{ kind: "break" as const }] });
-      }
+      cases.push({ values, body: armBody(blockByAddr.get(targetAddr)) });
     }
 
     // Structure the default case body
     let defaultBody: IRStmt[] | undefined;
     if (defaultAddr !== null) {
-      const defaultBlock = blockByAddr.get(defaultAddr);
-      if (defaultBlock && !visited.has(defaultBlock.id)) {
-        visited.add(defaultBlock.id);
-        const body = liftedBlocks.get(defaultBlock.id) ?? [];
-        defaultBody = [...body, { kind: "break" as const }];
-      } else {
-        defaultBody = [{ kind: "break" as const }];
-      }
+      defaultBody = armBody(blockByAddr.get(defaultAddr));
     }
 
     return { kind: "switch", expr: switchExpr, cases, defaultBody };
   }
 
   // Start structuring from the entry block (id 0)
-  return structureFrom(0, new Set(), undefined);
+  const result = structureFrom(0, new Set(), undefined);
+
+  /**
+   * Append whatever the walk never reached.
+   *
+   * `structureFrom` follows one chain of blocks and stops wherever it runs into
+   * a `stopAt`, a visited block, or an exit it did not choose. Every block only
+   * reachable through a path it cut is then simply absent from the output, and
+   * nothing downstream can tell: the statements never enter the tree, so there
+   * is no dangling reference, no comment, nothing. A reader concludes the code
+   * does not exist. On three real MSVC binaries that silently deleted 6% of
+   * every statement the front end produced (peek-a-bin-cb2).
+   *
+   * Each leftover is introduced by its `loc_` label, which is both honest — the
+   * block is jumped to, not fallen into — and the anchor `emit.ts` already
+   * looks for when it places the label for a `goto`. `structureFrom` emits that
+   * label itself now, so all this pass has to do is pin the name against the
+   * sweep that drops labels nothing jumps to.
+   *
+   * Only blocks reachable from the entry qualify. The rest is alignment padding
+   * decoded past the last `ret`, and resurrecting that would bury the function
+   * in hundreds of nonsense statements.
+   *
+   * Terminates because `structureFrom` marks its starting block visited on
+   * every path through it, so each round removes at least one candidate.
+   */
+  const reachable = new Set<number>([0]);
+  const queue = [0];
+  for (let i = 0; i < queue.length; i++) {
+    const block = blockById.get(queue[i]);
+    // A `ret` hands control to the caller, so nothing is reachable *through*
+    // it. `buildCFG` gives a ret-terminated block no successors in the first
+    // place; this keeps the two in step for any caller that builds its own.
+    if (!block || endsWithRet(block)) continue;
+    for (const succ of block.succs) {
+      if (!reachable.has(succ)) {
+        reachable.add(succ);
+        queue.push(succ);
+      }
+    }
+  }
+
+  for (;;) {
+    let next: BasicBlock | undefined;
+    for (const b of blocks) {
+      if (!reachable.has(b.id) || visited.has(b.id)) continue;
+      if ((liftedBlocks.get(b.id)?.length ?? 0) === 0) continue;
+      if (!next || b.startAddr < next.startAddr) next = b;
+    }
+    if (!next) break;
+
+    const tail = structureFrom(next.id, new Set(), undefined);
+    if (tail.length === 0) continue;
+    pinned.add(labelNameFor(next.startAddr));
+    result.push(...tail);
+  }
+
+  /**
+   * Emit any block a `goto` names but the walk never reached.
+   *
+   * The pass above only resurrects blocks that lifted to at least one
+   * statement, on the grounds that a block contributing nothing is not worth a
+   * region of its own. A block a `goto` jumps to is worth one regardless: the
+   * label is what the `goto` needs to compile, and `structureFrom` emits the
+   * label as part of walking the block. `armFrom` can name such a block —
+   * an exit whose own statements all folded away, say — so without this the
+   * honest `goto` would be a label reference to nothing.
+   *
+   * Terminates for the same reason as the pass above: each round marks at
+   * least one more block visited, and a visited block is never a candidate
+   * again.
+   */
+  for (;;) {
+    const wanted = new Set<string>();
+    const have = new Set<string>(pinned);
+    const scan = (list: IRStmt[]): void => {
+      for (const s of list) {
+        if (s.kind === "goto") wanted.add(s.label);
+        else if (s.kind === "label") have.add(s.name);
+        for (const nested of bodiesOf(s)) scan(nested);
+      }
+    };
+    scan(result);
+
+    let next: BasicBlock | undefined;
+    for (const b of blocks) {
+      if (visited.has(b.id) || !wanted.has(labelNameFor(b.startAddr))) continue;
+      if (have.has(labelNameFor(b.startAddr))) continue;
+      if (!next || b.startAddr < next.startAddr) next = b;
+    }
+    if (!next) break;
+
+    const tail = structureFrom(next.id, new Set(), undefined);
+    if (tail.length === 0) break;
+    pinned.add(labelNameFor(next.startAddr));
+    result.push(...tail);
+  }
+
+  return pruneLabels(result, pinned);
 }

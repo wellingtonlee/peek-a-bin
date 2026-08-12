@@ -23,7 +23,6 @@ import { BottomPanelContainer } from "./BottomPanelContainer";
 import { useDecompileTabs } from "../hooks/useDecompileTabs";
 import type { PEFile } from "../pe/types";
 import { canonReg } from "../disasm/decompile/ir";
-import { parseBranchTarget } from "./shared";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { useSetGraphOverview } from "../hooks/useGraphOverview";
 import { AIChatPanel } from "./AIChatPanel";
@@ -33,6 +32,8 @@ import { SeparatorRow, DataRow, LabelRow, InsnRow } from "./DisassemblyRows";
 import { InsnContextMenu } from "./InsnContextMenu";
 import { DisassemblyToolbar } from "./DisassemblyToolbar";
 import { useInsnContextMenu, type ContextMenuState } from "../hooks/useInsnContextMenu";
+import { useGraphSearch } from "../hooks/useGraphSearch";
+import { useDisassemblyKeyboard } from "../hooks/useDisassemblyKeyboard";
 
 const _SUSPICIOUS_MNEMONICS = new Set([
   "int",
@@ -360,7 +361,7 @@ export function DisassemblyView() {
           return true;
       }
     },
-    [insnFilter, state.comments, SUSPICIOUS_MNEMONICS],
+    [insnFilter, state.comments],
   );
 
   const filterMatchCount = useMemo(() => {
@@ -446,7 +447,13 @@ export function DisassemblyView() {
     return () => window.removeEventListener("keydown", handler);
   }, [search.showSearch, currentFunc]);
 
-  // Reset collapsed blocks on function change
+  // Reset collapsed blocks on function change.
+  //
+  // The dependency is deliberately a key the body never reads: the effect
+  // exists precisely to fire when the containing function changes. Dropping it
+  // to satisfy the rule would run the reset once and never again, leaving the
+  // previous function's collapsed block IDs applied to the new graph.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: currentFunc?.address is the change key this effect is triggered by, not a value it reads.
   useEffect(() => {
     setCollapsedBlocks(new Set());
   }, [currentFunc?.address]);
@@ -468,7 +475,10 @@ export function DisassemblyView() {
     if (viewMode === "linear" && rows.length > 0 && currentIndex >= 0) {
       virtualizer.scrollToIndex(currentIndex, { align: "center" });
     }
-  }, [currentIndex, rows.length, viewMode]);
+    // useVirtualizer holds its instance in useState, so `virtualizer` is a
+    // stable reference for the component's lifetime and adding it here cannot
+    // make this effect re-fire.
+  }, [currentIndex, rows.length, viewMode, virtualizer]);
 
   // Dispatch current instruction & block info for status bar
   useEffect(() => {
@@ -584,380 +594,64 @@ export function DisassemblyView() {
     return { navBlocks, addrToBlock };
   }, [currentFunc, instructions, typedXrefMap]);
 
-  // Graph search: compute matches when query changes
-  const handleGraphSearch = useCallback(
-    (query: string) => {
-      setGraphSearchQuery(query);
-      if (!query || instructions.length === 0) {
-        setGraphSearchMatches([]);
-        setGraphSearchIdx(0);
-        return;
-      }
-      // Support /regex/ and /regex/i syntax
-      let matcher: (text: string) => boolean;
-      const regexMatch = query.match(/^\/(.+)\/([i]?)$/);
-      if (regexMatch) {
-        try {
-          const rx = new RegExp(regexMatch[1], regexMatch[2]);
-          matcher = (text) => rx.test(text);
-        } catch {
-          matcher = (text) => text.toLowerCase().includes(query.toLowerCase());
-        }
-      } else {
-        const q = query.toLowerCase();
-        matcher = (text) => text.toLowerCase().includes(q);
-      }
-      const matches: number[] = [];
-      for (const insn of instructions) {
-        const text = `${insn.mnemonic} ${insn.opStr}`;
-        if (matcher(text)) matches.push(insn.address);
-      }
-      setGraphSearchMatches(matches);
-      setGraphSearchIdx(0);
-      if (matches.length > 0) {
-        setCollapsedBlocks(new Set());
-        dispatch({ type: "SET_ADDRESS", address: matches[0] });
-      }
-    },
-    [instructions, dispatch],
-  );
+  const {
+    handleGraphSearch,
+    graphSearchNextMatch,
+    graphSearchPrevMatch,
+    closeGraphSearch,
+    graphSearchMatchSet,
+    graphSearchCurrentMatch,
+  } = useGraphSearch({
+    instructions,
+    dispatch,
+    setCollapsedBlocks,
+    graphSearchMatches,
+    graphSearchIdx,
+    setShowGraphSearch,
+    setGraphSearchQuery,
+    setGraphSearchMatches,
+    setGraphSearchIdx,
+  });
 
-  const graphSearchNextMatch = useCallback(() => {
-    if (graphSearchMatches.length === 0) return;
-    const next = (graphSearchIdx + 1) % graphSearchMatches.length;
-    setGraphSearchIdx(next);
-    dispatch({ type: "SET_ADDRESS", address: graphSearchMatches[next] });
-  }, [graphSearchMatches, graphSearchIdx, dispatch]);
-
-  const graphSearchPrevMatch = useCallback(() => {
-    if (graphSearchMatches.length === 0) return;
-    const prev = (graphSearchIdx - 1 + graphSearchMatches.length) % graphSearchMatches.length;
-    setGraphSearchIdx(prev);
-    dispatch({ type: "SET_ADDRESS", address: graphSearchMatches[prev] });
-  }, [graphSearchMatches, graphSearchIdx, dispatch]);
-
-  const closeGraphSearch = useCallback(() => {
-    setShowGraphSearch(false);
-    setGraphSearchQuery("");
-    setGraphSearchMatches([]);
-    setGraphSearchIdx(0);
-  }, []);
-
-  // Graph search match sets for CFGView highlighting
-  const graphSearchMatchSet = useMemo(() => new Set(graphSearchMatches), [graphSearchMatches]);
-  const graphSearchCurrentMatch = graphSearchMatches[graphSearchIdx] ?? undefined;
-
-  /**
-   * Always the current `handleDecompileToggle`.
-   *
-   * That callback is declared ~340 lines below this point and depends on
-   * `showDecompile`, `instructions`, `decompile` and `viewMode`, none of which
-   * are in handleKeyDown's dependency array. Closing over it directly meant D
-   * kept re-running the OPEN branch: pressing it set showDecompile true, but
-   * handleKeyDown's deps were unchanged, so it held the stale closure where
-   * showDecompile was still false and the panel could not be closed.
-   *
-   * Adding the callback to handleKeyDown's deps is not possible — it is a
-   * `const` declared later, so the dependency array would hit its temporal dead
-   * zone — and hoisting it would drag `useDecompileTabs` and its own
-   * dependencies above this point, reordering hooks in a component with no test
-   * coverage. A ref keeps the indirection local.
-   */
-  const decompileToggleRef = useRef<() => void>(() => {});
-
-  // Keyboard navigation
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (search.showSearch && e.key === "Escape") {
-        search.resetSearch();
-        parentRef.current?.focus();
-        return;
-      }
-
-      if (e.key === "Escape") {
-        if (highlightedReg) {
-          setHighlightedReg(null);
-          return;
-        }
-        if (ctxMenu) {
-          setCtxMenu(null);
-          return;
-        }
-        if (selectionRange) {
-          setSelectionRange(null);
-          return;
-        }
-        // Pop breadcrumb if available, else navigate back
-        if (state.callStack.length > 0) {
-          const last = state.callStack[state.callStack.length - 1];
-          if (last.viewSnapshot) {
-            setViewMode(last.viewSnapshot.viewMode);
-            setRestorePanZoom({
-              pan: last.viewSnapshot.graphPan,
-              zoom: last.viewSnapshot.graphZoom,
-            });
-          }
-          dispatch({ type: "SET_ADDRESS", address: last.address });
-          dispatch({ type: "POP_CALL_STACK", index: state.callStack.length - 1 });
-          return;
-        }
-        // NAV_BACK: restore view state if saved
-        {
-          const destAddr =
-            state.historyIndex > 0 ? state.addressHistory[state.historyIndex - 1] : undefined;
-          if (destAddr !== undefined) {
-            const saved = navViewStateMapRef.current.get(destAddr);
-            if (saved) {
-              setViewMode(saved.viewMode);
-              setRestorePanZoom({ pan: saved.graphPan, zoom: saved.graphZoom });
-            }
-          }
-        }
-        dispatch({ type: "NAV_BACK" });
-        return;
-      }
-
-      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-        if (selectionRange) {
-          e.preventDefault();
-          navigator.clipboard.writeText(
-            formatRangeCopy(selectionRange, rows, pe, state.renames, state.comments),
-          );
-          return;
-        }
-      }
-
-      if (
-        document.activeElement?.tagName === "INPUT" ||
-        document.activeElement?.tagName === "TEXTAREA"
-      )
-        return;
-
-      // Space handled by window-level effect
-
-      // 0: zoom-to-fit in graph mode
-      if (e.key === "0" && viewMode === "graph") {
-        e.preventDefault();
-        const el = cfgContainerRef.current;
-        if (el) {
-          // CFGView sets __zoomToFit on the first child with overflow-hidden
-          const cfgEl = el.querySelector(".cfg-container") as any;
-          if (cfgEl?.__zoomToFit) cfgEl.__zoomToFit();
-        }
-        return;
-      }
-
-      if (e.key === ";") {
-        e.preventDefault();
-        const existing = state.comments[state.currentAddress] ?? "";
-        setEditingComment({ address: state.currentAddress, value: existing });
-        return;
-      }
-
-      if (e.key === "x" || e.key === "X") {
-        e.preventDefault();
-        setShowCallPanel((v) => !v);
-        return;
-      }
-
-      if (e.key === "r" || e.key === "R") {
-        e.preventDefault();
-        setShowXrefPanel((v) => !v);
-        return;
-      }
-
-      if (e.key === "i" || e.key === "I") {
-        e.preventDefault();
-        setShowDetail((v) => !v);
-        return;
-      }
-
-      if (e.key === "d" || e.key === "D") {
-        e.preventDefault();
-        decompileToggleRef.current();
-        return;
-      }
-
-      if (e.key === "b" || e.key === "B") {
-        e.preventDefault();
-        dispatch({ type: "TOGGLE_BOOKMARK" });
-        return;
-      }
-
-      // Enter: follow branch target of current instruction
-      if (e.key === "Enter") {
-        e.preventDefault();
-        const curRow = rows[currentIndex];
-        if (curRow && curRow.kind === "insn") {
-          const target = parseBranchTarget(curRow.insn.mnemonic, curRow.insn.opStr);
-          if (target !== null) {
-            const vs = { viewMode, graphPan, graphZoom };
-            if (currentFunc) {
-              dispatch({
-                type: "PUSH_CALL_STACK",
-                address: state.currentAddress,
-                name: getDisplayName(currentFunc, state.renames),
-                viewSnapshot: vs,
-              });
-            }
-            navViewStateMapRef.current.set(state.currentAddress, vs);
-
-            // Auto-switch to linear when navigating to non-executable section from graph
-            if (viewMode === "graph" && pe) {
-              const rva = target - pe.optionalHeader.imageBase;
-              const sec = pe.sections.find(
-                (s) => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize,
-              );
-              if (sec && !(sec.characteristics & 0x20000000)) {
-                setViewMode("linear");
-              }
-            }
-
-            dispatch({ type: "SET_ADDRESS", address: target });
-          }
-        }
-        return;
-      }
-
-      // N: rename function containing current address
-      if (e.key === "n" || e.key === "N") {
-        e.preventDefault();
-        if (currentFunc) {
-          setRenamingLabel({
-            address: currentFunc.address,
-            value: getDisplayName(currentFunc, state.renames),
-          });
-          // Scroll to the function label
-          const labelIdx = rows.findIndex(
-            (r) => r.kind === "label" && r.fn.address === currentFunc.address,
-          );
-          if (labelIdx >= 0) {
-            virtualizer.scrollToIndex(labelIdx, { align: "center" });
-          }
-        }
-        return;
-      }
-
-      if (e.key === "g" || e.key === "G") {
-        e.preventDefault();
-        const addrInput = document.querySelector<HTMLInputElement>('input[placeholder*="address"]');
-        addrInput?.focus();
-        return;
-      }
-
-      if ((e.ctrlKey || e.metaKey) && e.key === "f") {
-        e.preventDefault();
-        if (viewMode === "graph") {
-          setShowGraphSearch(true);
-          setTimeout(() => graphSearchInputRef.current?.focus(), 0);
-        } else {
-          search.setShowSearch(true);
-          setTimeout(() => searchInputRef.current?.focus(), 0);
-        }
-        return;
-      }
-
-      if (e.key === "/") {
-        e.preventDefault();
-        if (viewMode === "graph") {
-          setShowGraphSearch(true);
-          setTimeout(() => graphSearchInputRef.current?.focus(), 0);
-        } else {
-          search.setShowSearch(true);
-          setTimeout(() => searchInputRef.current?.focus(), 0);
-        }
-        return;
-      }
-
-      // Graph mode arrow key navigation
-      if (
-        viewMode === "graph" &&
-        (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab")
-      ) {
-        e.preventDefault();
-        // Build block data from CFG
-        const cfg = buildCFGForNav();
-        if (!cfg) return;
-        const { navBlocks, addrToBlock } = cfg;
-        const curBlockId = addrToBlock.get(state.currentAddress);
-        if (curBlockId === undefined) return;
-        const curBlock = navBlocks.get(curBlockId);
-        if (!curBlock) return;
-
-        if (e.key === "Tab") {
-          // Cycle through successor blocks
-          if (curBlock.succs.length > 0) {
-            const succBlock = navBlocks.get(curBlock.succs[0]);
-            if (succBlock) dispatch({ type: "SET_ADDRESS", address: succBlock.startAddr });
-          }
-          return;
-        }
-
-        const insnIdx = curBlock.insns.findIndex(
-          (insn: Instruction) => insn.address === state.currentAddress,
-        );
-        if (e.key === "ArrowDown") {
-          if (insnIdx < curBlock.insns.length - 1) {
-            dispatch({ type: "SET_ADDRESS", address: curBlock.insns[insnIdx + 1].address });
-          } else if (curBlock.succs.length > 0) {
-            // Move to fallthrough successor (last in succs for conditional, first otherwise)
-            const ftIdx = curBlock.succs.length > 1 ? curBlock.succs.length - 1 : 0;
-            const succBlock = navBlocks.get(curBlock.succs[ftIdx]);
-            if (succBlock) dispatch({ type: "SET_ADDRESS", address: succBlock.startAddr });
-          }
-        } else if (e.key === "ArrowUp") {
-          if (insnIdx > 0) {
-            dispatch({ type: "SET_ADDRESS", address: curBlock.insns[insnIdx - 1].address });
-          } else if (curBlock.preds.length > 0) {
-            const predBlock = navBlocks.get(curBlock.preds[0]);
-            if (predBlock)
-              dispatch({
-                type: "SET_ADDRESS",
-                address: predBlock.insns[predBlock.insns.length - 1].address,
-              });
-          }
-        }
-        return;
-      }
-
-      const scrollAmount = e.key === "PageUp" || e.key === "PageDown" ? 40 : 1;
-
-      if (e.key === "ArrowDown" || e.key === "PageDown") {
-        e.preventDefault();
-        const newIdx = Math.min(currentIndex + scrollAmount, rows.length - 1);
-        const addr = rowAddress(rows[newIdx]);
-        if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
-      }
-
-      if (e.key === "ArrowUp" || e.key === "PageUp") {
-        e.preventDefault();
-        const newIdx = Math.max(currentIndex - scrollAmount, 0);
-        const addr = rowAddress(rows[newIdx]);
-        if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
-      }
-    },
-    [
-      currentIndex,
-      rows,
-      dispatch,
-      search,
-      ctxMenu,
-      state.currentAddress,
-      state.comments,
-      selectionRange,
-      state.renames,
-      pe,
-      currentFunc,
-      virtualizer,
-      funcMap,
-      state.callStack,
-      viewMode,
-      graphPan,
-      graphZoom,
-      state.addressHistory,
-      state.historyIndex,
-    ],
-  );
+  const { decompileToggleRef, handleKeyDown } = useDisassemblyKeyboard({
+    search,
+    parentRef,
+    searchInputRef,
+    graphSearchInputRef,
+    cfgContainerRef,
+    navViewStateMapRef,
+    highlightedReg,
+    setHighlightedReg,
+    ctxMenu,
+    setCtxMenu,
+    selectionRange,
+    setSelectionRange,
+    setViewMode,
+    setRestorePanZoom,
+    setEditingComment,
+    setRenamingLabel,
+    setShowCallPanel,
+    setShowXrefPanel,
+    setShowDetail,
+    setShowGraphSearch,
+    dispatch,
+    rows,
+    pe,
+    currentIndex,
+    currentFunc,
+    virtualizer,
+    viewMode,
+    graphPan,
+    graphZoom,
+    currentAddress: state.currentAddress,
+    comments: state.comments,
+    renames: state.renames,
+    callStack: state.callStack,
+    addressHistory: state.addressHistory,
+    historyIndex: state.historyIndex,
+    buildCFGForNav,
+    formatRangeCopy,
+  });
 
   const handleAddressClick = useCallback(
     (address: number) => {
@@ -1091,7 +785,11 @@ export function DisassemblyView() {
     prevDecompFuncRef.current = currentFunc.address;
     decompile.resetForNewFunc();
     decompile.triggerTab(decompile.tabsState.activeTab);
-  }, [showDecompile, currentFunc?.address, decompile]);
+    // `currentFunc` rather than `currentFunc?.address`: the body reads both, and
+    // useContainingFunc returns the element out of the sorted function array, so
+    // the reference is unchanged while the address stays inside the same
+    // function. prevDecompFuncRef still guards the body against a re-run.
+  }, [showDecompile, currentFunc, decompile]);
 
   // Decompiler ↔ ASM sync maps
   const addrToLines = useMemo(() => {

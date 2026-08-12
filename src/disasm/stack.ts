@@ -5,19 +5,32 @@ import { getFuncInsns } from "./funcInsns";
  * Stack-operand patterns, one pair per width. They depend only on `is64`, so
  * they are built once here rather than recompiled for every instruction.
  * None carry the `g` flag, so there is no shared `lastIndex` to reset.
+ *
+ * The displacement alternates hex and decimal because Capstone prints it both
+ * ways: `0x` only from 0xA up, and a bare digit below that. Matching `0x` alone
+ * silently dropped every slot in the first ten bytes of the frame — which on
+ * x86 is *argument 0* (`[ebp + 8]`) and the first locals (`[ebp - 4]`,
+ * `[ebp - 8]`). A function whose only parameter was reached through
+ * `push dword ptr [ebp + 8]` came back with no parameters at all.
  */
+const DISP = "(0[xX][0-9a-fA-F]+|\\d+)";
 const BP_LOCAL_RE = {
-  64: /\[rbp\s*-\s*0x([0-9a-fA-F]+)\]/i,
-  32: /\[ebp\s*-\s*0x([0-9a-fA-F]+)\]/i,
+  64: new RegExp(`\\[rbp\\s*-\\s*${DISP}\\]`, "i"),
+  32: new RegExp(`\\[ebp\\s*-\\s*${DISP}\\]`, "i"),
 };
 const SP_RE = {
-  64: /\[rsp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
-  32: /\[esp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+  64: new RegExp(`\\[rsp\\s*\\+\\s*${DISP}\\]`, "i"),
+  32: new RegExp(`\\[esp\\s*\\+\\s*${DISP}\\]`, "i"),
 };
 const BP_PARAM_RE = {
-  64: /\[rbp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
-  32: /\[ebp\s*\+\s*0x([0-9a-fA-F]+)\]/i,
+  64: new RegExp(`\\[rbp\\s*\\+\\s*${DISP}\\]`, "i"),
+  32: new RegExp(`\\[ebp\\s*\\+\\s*${DISP}\\]`, "i"),
 };
+
+/** A displacement as Capstone printed it: `0x`-prefixed hex, or bare decimal. */
+function parseDisp(text: string): number {
+  return /^0[xX]/.test(text) ? parseInt(text.slice(2), 16) : parseInt(text, 10);
+}
 
 /**
  * Geometry of the incoming-argument area, relative to the frame pointer, for a
@@ -161,21 +174,21 @@ export function analyzeStackFrame(
     // [rbp - 0xN] → local variable
     const bpLocalMatch = op.match(bpLocalRe);
     if (bpLocalMatch) {
-      const offset = parseInt(bpLocalMatch[1], 16);
+      const offset = parseDisp(bpLocalMatch[1]);
       record("bp", offset, -offset, inferSize(op), false);
     }
 
     // [rsp + 0xN] → could be local or param depending on offset vs frameSize
     const spMatch = op.match(spRe);
     if (spMatch) {
-      const offset = parseInt(spMatch[1], 16);
+      const offset = parseDisp(spMatch[1]);
       record("sp", offset, offset, inferSize(op), false);
     }
 
     // [rbp + 0xN] → parameter (above saved rbp + return addr)
     const bpParamMatch = op.match(bpParamRe);
     if (bpParamMatch) {
-      const offset = parseInt(bpParamMatch[1], 16);
+      const offset = parseDisp(bpParamMatch[1]);
       // The argument area starts one slot past the return address: [ebp+0x8]
       // in 32-bit, [rbp+0x10] in 64-bit — which on x64 is the home slot the
       // ABI reserves for the argument passed in RCX, not the first argument

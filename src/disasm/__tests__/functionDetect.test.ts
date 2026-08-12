@@ -8,6 +8,8 @@ import {
   buildAllXrefs,
   type DisasmContext,
 } from "../functionDetect";
+import { buildCFG } from "../cfg";
+import { CapstoneUnavailableError } from "../capstoneWindow";
 import type { Instruction } from "../types";
 
 const BASE = 0x401000;
@@ -29,13 +31,39 @@ function raw(mnemonic: string, opStr: string, address = BASE, size = 5) {
 }
 
 // ── A minimal stand-in for the Capstone WASM decoder ──
-// Encodings: E8=call rel32, E9=jmp rel32, EB=jmp rel8, 74=je rel8, C3=ret,
-// 90=nop, CC=int3, 83 F8 ii=cmp eax imm8, FF 24 C5 dd=jmp [rax*8+disp32],
-// FF 25 dd=jmp [rip+disp32], 00=undecodable (stops the chunk).
+// Encodings: E8=call rel32, E9=jmp rel32, EB=jmp rel8, 74=je rel8, 77=ja rel8,
+// C3=ret, 90=nop, CC=int3, 83 /7 ii=cmp r32 imm8, FF 24 C5 dd=jmp
+// [rax*8+disp32], FF 25 dd=jmp [rip+disp32], 00=undecodable (stops the chunk),
+// plus the x86-64 switch idiom: 48 8D /r (rip)=lea r64, 48 63 /r=movsxd,
+// 8B /r=mov r32, 0F B6 /r=movzx r32, 48 01 /r=add r64, 48 89 /r=mov r64,
+// FF E0+r=jmp r64. Real encodings throughout, printed the way Capstone prints
+// them — the detector parses these strings, so a fake that spelled them
+// differently would test nothing.
 function readI32(b: Uint8Array, i: number): number {
   return b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24) | 0;
 }
 const hex = (n: number) => `0x${(n >>> 0).toString(16)}`;
+const R64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
+const R32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+/** Capstone's spelling of a signed displacement inside a memory operand. */
+const sdisp = (v: number) => (v < 0 ? `- 0x${(-v).toString(16)}` : `+ 0x${v.toString(16)}`);
+
+/**
+ * `[base + index*scale]` with an optional displacement, from a ModRM/SIB pair.
+ * Returns null for anything that is not a mod=00/mod=10 SIB form.
+ */
+function memOperand(b: Uint8Array, i: number): { text: string; size: number } | null {
+  const modrm = b[i];
+  const mod = modrm >> 6;
+  if ((modrm & 7) !== 4 || (mod !== 0 && mod !== 2)) return null;
+  const sib = b[i + 1];
+  const scale = 1 << (sib >> 6);
+  const index = R64[(sib >> 3) & 7];
+  const base = R64[sib & 7];
+  const disp = mod === 2 ? readI32(b, i + 2) : 0;
+  const tail = mod === 2 ? ` ${sdisp(disp)}` : "";
+  return { text: `[${base} + ${index}*${scale}${tail}]`, size: mod === 2 ? 6 : 2 };
+}
 
 interface FakeInsn {
   address: number;
@@ -92,8 +120,63 @@ function fakeCs() {
           emit("int3", "", 1);
           continue;
         }
-        if (b === 0x83 && bytes[i + 1] === 0xf8 && i + 2 < bytes.length) {
-          emit("cmp", `eax, ${hex(bytes[i + 2])}`, 3);
+        if (b === 0x83 && (bytes[i + 1] & 0xf8) === 0xf8 && i + 2 < bytes.length) {
+          emit("cmp", `${R32[bytes[i + 1] & 7]}, ${hex(bytes[i + 2])}`, 3);
+          continue;
+        }
+        if (b === 0x81 && (bytes[i + 1] & 0xf8) === 0xf8 && i + 5 < bytes.length) {
+          emit("cmp", `${R32[bytes[i + 1] & 7]}, ${hex(readI32(bytes, i + 2))}`, 6);
+          continue;
+        }
+        if (b === 0x77 && i + 1 < bytes.length) {
+          emit("ja", hex(here + 2 + ((bytes[i + 1] << 24) >> 24)), 2);
+          continue;
+        }
+        if (
+          b === 0x48 &&
+          bytes[i + 1] === 0x8d &&
+          (bytes[i + 2] & 0xc7) === 0x05 &&
+          i + 6 < bytes.length
+        ) {
+          emit("lea", `${R64[(bytes[i + 2] >> 3) & 7]}, [rip ${sdisp(readI32(bytes, i + 3))}]`, 7);
+          continue;
+        }
+        if (b === 0x48 && bytes[i + 1] === 0x63) {
+          const mem = memOperand(bytes, i + 2);
+          if (mem && i + 1 + mem.size < bytes.length) {
+            emit("movsxd", `${R64[(bytes[i + 2] >> 3) & 7]}, dword ptr ${mem.text}`, 2 + mem.size);
+            continue;
+          }
+        }
+        if (b === 0x8b) {
+          const mem = memOperand(bytes, i + 1);
+          if (mem && i + mem.size < bytes.length) {
+            emit("mov", `${R32[(bytes[i + 1] >> 3) & 7]}, dword ptr ${mem.text}`, 1 + mem.size);
+            continue;
+          }
+        }
+        if (b === 0x0f && bytes[i + 1] === 0xb6) {
+          const mem = memOperand(bytes, i + 2);
+          if (mem && i + 1 + mem.size < bytes.length) {
+            emit("movzx", `${R32[(bytes[i + 2] >> 3) & 7]}, byte ptr ${mem.text}`, 2 + mem.size);
+            continue;
+          }
+        }
+        if (
+          b === 0x48 &&
+          (bytes[i + 1] === 0x01 || bytes[i + 1] === 0x89) &&
+          bytes[i + 2] >= 0xc0
+        ) {
+          const modrm = bytes[i + 2];
+          emit(
+            bytes[i + 1] === 0x01 ? "add" : "mov",
+            `${R64[modrm & 7]}, ${R64[(modrm >> 3) & 7]}`,
+            3,
+          );
+          continue;
+        }
+        if (b === 0xff && bytes[i + 1] >= 0xe0 && bytes[i + 1] <= 0xe7 && i + 1 < bytes.length) {
+          emit("jmp", R64[bytes[i + 1] & 7], 2);
           continue;
         }
         if (b === 0xff && bytes[i + 1] === 0x24 && bytes[i + 2] === 0xc5 && i + 6 < bytes.length) {
@@ -411,6 +494,585 @@ describe("detectFunctions — prologue scanning", () => {
   });
 });
 
+/**
+ * peek-a-bin-abv. The prologue table's entries are prefixes of one another, so
+ * more than one fires on the same function and the extra hits land a byte or two
+ * past the real entry. A PE32 image has no `.pdata` to arbitrate, which is why
+ * this showed up there first: on t32.exe 154 of 447 "functions" were a 2-byte
+ * `mov edi, edi` with the real body filed under a second entry 2 bytes in, and
+ * all 154 decompiled to an empty body.
+ */
+describe("detectFunctions — a prologue inside a prologue is one function", () => {
+  const addrs32 = (img: Uint8Array, options?: Parameters<typeof detectFunctions>[4]) =>
+    detectFunctions(img, BASE, false, ctxOf(), options).functions;
+  const addrs64 = (img: Uint8Array) =>
+    detectFunctions(img, BASE, true, ctxOf()).functions.map((f) => f.address);
+
+  it("reports the MSVC hot-patch prologue once, at the `mov edi, edi`", () => {
+    // 8b ff 55 8b ec — `mov edi, edi; push ebp; mov ebp, esp`. The plain
+    // `55 8b ec` rule matches two bytes in and used to add a second start.
+    const img = image(0x40, { 0x10: [0x8b, 0xff, 0x55, 0x8b, 0xec, 0x5d, 0xc3] });
+    const fns = addrs32(img);
+    expect(fns.map((f) => f.address)).toEqual([BASE + 0x10]);
+    expect(fns[0].size).toBeGreaterThan(2);
+  });
+
+  it("still reports a bare `push ebp; mov ebp, esp` with nothing in front of it", () => {
+    // The other direction: suppression must be about being inside a *match*,
+    // not about the bytes at -2 being anything in particular.
+    const img = image(0x40, { 0x10: [0x55, 0x8b, 0xec] });
+    expect(addrs32(img).map((f) => f.address)).toEqual([BASE + 0x10]);
+  });
+
+  it("reports only the outermost x64 prologue when three rules overlap", () => {
+    // 40 53 48 83 ec matches at 0x10; 53 48 83 ec at 0x11; 48 83 ec at 0x12.
+    const img = image(0x40, { 0x10: [0x40, 0x53, 0x48, 0x83, 0xec, 0x28] });
+    expect(addrs64(img)).toEqual([BASE + 0x10]);
+  });
+
+  it("reports only the outermost of `57 56 48 83 ec`", () => {
+    const img = image(0x40, { 0x10: [0x57, 0x56, 0x48, 0x83, 0xec, 0x28] });
+    expect(addrs64(img)).toEqual([BASE + 0x10]);
+  });
+
+  it("keeps two adjacent prologues that do not overlap", () => {
+    const img = image(0x40, { 0x10: [0x55, 0x48, 0x89, 0xe5], 0x14: [0x55, 0x48, 0x89, 0xe5] });
+    expect(addrs64(img)).toEqual([BASE + 0x10, BASE + 0x14]);
+  });
+
+  it("keeps an interior address a call reaches, because that is not a guess", () => {
+    // A hot-patched function whose +2 entry is genuinely called: the call is
+    // evidence of an entry point, so it is in `addrSet` before any pattern is
+    // admitted and no suppression can touch it.
+    const img = image(0x40, {
+      0x00: callTo(0x00, BASE + 0x12),
+      0x10: [0x8b, 0xff, 0x55, 0x8b, 0xec],
+    });
+    const fns = detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() })).functions;
+    expect(fns.map((f) => f.address)).toContain(BASE + 0x12);
+    expect(fns.map((f) => f.address)).toContain(BASE + 0x10);
+  });
+
+  it("keeps a small leaf thunk that no prologue rule matches", () => {
+    // t32.exe's one surviving <=4-byte function: `call eax; ret`, reached only
+    // by a direct call. Nothing about this fix may cost it.
+    const img = image(0x40, { 0x00: callTo(0x00, BASE + 0x20), 0x20: [0xff, 0xd0, 0xc3] });
+    const fns = detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() })).functions;
+    expect(fns.map((f) => f.address)).toContain(BASE + 0x20);
+  });
+
+  it("lets the padding heuristic be ruled out but rule nothing out", () => {
+    // A padding candidate matches no prologue bytes, so a prologue starting one
+    // byte after it is still a start.
+    const img = image(0x40, { 0x02: [0xcc, 0xcc], 0x04: [0x41], 0x05: [0x55, 0x48, 0x89, 0xe5] });
+    expect(addrs64(img)).toEqual([BASE + 4, BASE + 5]);
+  });
+});
+
+describe("detectFunctions — .pdata outranks the pattern scan", () => {
+  const RANGE = [{ beginAddress: BASE, endAddress: BASE + 0x40 }];
+  const addrs = (img: Uint8Array, options: Parameters<typeof detectFunctions>[4], ctx = ctxOf()) =>
+    detectFunctions(img, BASE, true, ctx, options).functions.map((f) => f.address);
+
+  it("drops a prologue match inside a .pdata function", () => {
+    const img = image(0x100, { 0x20: [0x48, 0x83, 0xec, 0x28] });
+    expect(addrs(img, { pdataFunctions: RANGE })).toEqual([BASE]);
+  });
+
+  it("keeps that same prologue match when the image has no .pdata", () => {
+    const img = image(0x100, { 0x20: [0x48, 0x83, 0xec, 0x28] });
+    expect(addrs(img, {})).toContain(BASE + 0x20);
+  });
+
+  it("keeps a prologue match outside every .pdata range", () => {
+    const img = image(0x100, { 0x50: [0x48, 0x83, 0xec, 0x28] });
+    expect(addrs(img, { pdataFunctions: RANGE })).toContain(BASE + 0x50);
+  });
+
+  it("keeps a prologue match at a .pdata function's first byte", () => {
+    const img = image(0x100, { 0x00: [0x48, 0x83, 0xec, 0x28] });
+    expect(addrs(img, { pdataFunctions: RANGE })).toEqual([BASE]);
+  });
+
+  it("keeps a prologue match at the byte a .pdata range ends on", () => {
+    // endAddress is exclusive, so the first byte after a function is fair game.
+    const img = image(0x100, { 0x40: [0x48, 0x83, 0xec, 0x28] });
+    expect(addrs(img, { pdataFunctions: RANGE })).toContain(BASE + 0x40);
+  });
+
+  it("drops a post-padding start inside a .pdata function", () => {
+    const img = image(0x100, { 0x20: [0xcc, 0xcc, 0xcc, 0xcc, 0x41, 0x41] });
+    expect(addrs(img, { pdataFunctions: RANGE })).toEqual([BASE]);
+  });
+
+  it("keeps a call target inside a .pdata function", () => {
+    // A direct call is evidence about an entry point in its own right; only the
+    // byte-pattern guesses are what .pdata overrides.
+    const img = image(0x100, { 0x00: callTo(0x00, BASE + 0x20) });
+    expect(addrs(img, { pdataFunctions: RANGE }, ctxOf({ cs64: fakeCs() }))).toContain(BASE + 0x20);
+  });
+
+  it("keeps an exported symbol inside a .pdata function", () => {
+    const img = image(0x100, {});
+    expect(
+      addrs(img, { pdataFunctions: RANGE, exports: [{ name: "mid", address: BASE + 0x20 }] }),
+    ).toContain(BASE + 0x20);
+  });
+
+  it("keeps an exception handler inside a .pdata function", () => {
+    const img = image(0x100, {});
+    expect(addrs(img, { pdataFunctions: RANGE, handlerAddresses: [BASE + 0x20] })).toContain(
+      BASE + 0x20,
+    );
+  });
+
+  it("suppresses only inside the ranges it was given", () => {
+    const img = image(0x100, {
+      0x20: [0x48, 0x83, 0xec, 0x28],
+      0x60: [0x48, 0x83, 0xec, 0x28],
+      0xa0: [0x48, 0x83, 0xec, 0x28],
+    });
+    expect(
+      addrs(img, {
+        pdataFunctions: [
+          { beginAddress: BASE + 0x80, endAddress: BASE + 0xc0 },
+          { beginAddress: BASE, endAddress: BASE + 0x40 },
+        ],
+      }),
+    ).toEqual([BASE, BASE + 0x60, BASE + 0x80]);
+  });
+});
+
+describe("detectFunctions — jump-table targets are case labels, not functions", () => {
+  // A 32-bit image whose only function starts at BASE, bounds-checks eax and
+  // dispatches through a table at 0x20 to three case bodies at 0x40/0x44/0x48.
+  // Each case body is `nop; ret` so the decoder has something real to land on.
+  const TABLE = 0x20;
+  const CASES = [0x40, 0x44, 0x48];
+  const LEN = 0x60;
+  const cs32 = () => ctxOf({ cs32: fakeCs() });
+  const switcher = (extra: Record<number, number[]> = {}) =>
+    image(LEN, {
+      0x00: [0x83, 0xf8, 0x02], // cmp eax, 2
+      0x03: [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)], // jmp [eax*4 + table]
+      [TABLE]: [...le32(BASE + CASES[0]), ...le32(BASE + CASES[1]), ...le32(BASE + CASES[2])],
+      [CASES[0]]: [0x90, 0xc3],
+      [CASES[1]]: [0x90, 0xc3],
+      [CASES[2]]: [0x90, 0xc3],
+      ...extra,
+    });
+  const detect = (img: Uint8Array, options: Parameters<typeof detectFunctions>[4] = {}) =>
+    detectFunctions(img, BASE, false, cs32(), { entryPoint: BASE, ...options });
+
+  it("does not start a function at a case target", () => {
+    const { functions } = detect(switcher());
+    expect(functions.map((f) => f.address)).toEqual([BASE]);
+  });
+
+  it("still reports the table itself", () => {
+    // The suppression is about `addrSet`; jump-table *detection* is untouched.
+    const { jumpTables } = detect(switcher());
+    expect(jumpTables).toEqual([[BASE + 3, CASES.map((c) => BASE + c)]]);
+  });
+
+  it("leaves the dispatching function long enough to contain its case bodies", () => {
+    // The bug this pins: sizing runs to the next entry of the same set the case
+    // targets were being added to, so the function stopped at its first case.
+    const { functions } = detect(switcher());
+    expect(functions[0].size).toBe(LEN);
+    expect(functions[0].address + functions[0].size).toBeGreaterThan(BASE + CASES[2]);
+  });
+
+  it("keeps a case target that a direct call also reaches", () => {
+    // A call is evidence about an entry point in its own right. Something that
+    // is both called and dispatched to really is a function, and stays one.
+    const { functions } = detect(switcher({ 0x0a: callTo(0x0a, BASE + CASES[1]) }));
+    expect(functions.map((f) => f.address)).toContain(BASE + CASES[1]);
+  });
+
+  it("keeps a case target that is also an export", () => {
+    const { functions } = detect(switcher(), {
+      exports: [{ name: "shared", address: BASE + CASES[1] }],
+    });
+    expect(functions.map((f) => f.address)).toContain(BASE + CASES[1]);
+  });
+
+  it("keeps a case target that is also an exception handler", () => {
+    const { functions } = detect(switcher(), { handlerAddresses: [BASE + CASES[1]] });
+    expect(functions.map((f) => f.address)).toContain(BASE + CASES[1]);
+  });
+
+  it("drops a prologue match sitting on a case target", () => {
+    // Case bodies routinely start with something prologue-shaped, and the
+    // byte-pattern scan cannot tell a case label from an entry point.
+    const { functions } = detect(switcher({ [CASES[1]]: [0x55, 0x8b, 0xec] }));
+    expect(functions.map((f) => f.address)).toEqual([BASE]);
+  });
+
+  it("keeps the same prologue match one byte off a case target", () => {
+    const { functions } = detect(switcher({ [CASES[1] + 1]: [0x55, 0x8b, 0xec] }));
+    expect(functions.map((f) => f.address)).toContain(BASE + CASES[1] + 1);
+  });
+
+  it("composes with the .pdata suppression", () => {
+    // 64-bit, so the table entries are 8 bytes wide. Three prologue matches:
+    // one inside a .pdata function, one on a case target, one on neither.
+    const le64 = (v: number) => [...le32(v), 0, 0, 0, 0];
+    const PROLOGUE = [0x48, 0x83, 0xec, 0x28]; // sub rsp, 0x28
+    const img = image(0x120, {
+      0x00: [0x83, 0xf8, 0x01], // cmp eax, 1
+      0x03: [0xff, 0x24, 0xc5, ...le32(BASE + 0x100)],
+      0x20: PROLOGUE, // inside .pdata → dropped
+      0x60: PROLOGUE, // case target → dropped
+      0xa0: PROLOGUE, // neither → kept
+      0x100: [...le64(BASE + 0x60), ...le64(BASE + 0x80)],
+    });
+    const { functions, jumpTables } = detectFunctions(img, BASE, true, ctxOf({ cs64: fakeCs() }), {
+      entryPoint: BASE,
+      pdataFunctions: [{ beginAddress: BASE, endAddress: BASE + 0x40 }],
+    });
+    expect(jumpTables[0][1]).toEqual([BASE + 0x60, BASE + 0x80]);
+    expect(functions.map((f) => f.address)).toEqual([BASE, BASE + 0xa0]);
+  });
+});
+
+// ── x86-64 RVA jump tables (peek-a-bin-ydh) ──
+// x64 code is position-independent, so the dispatch cannot name its table: the
+// table address arrives through a `lea`, the entry through a scaled load, and
+// the two are added. Entries are signed 32-bit *displacements from the lea's
+// target*, not addresses. Register numbers are the ModRM/SIB encodings.
+const RAX = 0;
+const RCX = 1;
+const RDX = 2;
+const RBX = 3;
+/** `lea <r64>, [rip + d]` — 7 bytes, resolving to `target`. */
+const leaRip = (at: number, reg: number, target: number) => [
+  0x48,
+  0x8d,
+  0x05 | (reg << 3),
+  ...le32(target - (BASE + at + 7)),
+];
+/** `movsxd <r64>, dword ptr [<base> + <idx>*4]` — 4 bytes. */
+const movsxdScaled = (dst: number, base: number, idx: number) => [
+  0x48,
+  0x63,
+  0x04 | (dst << 3),
+  0x80 | (idx << 3) | base,
+];
+/** `mov <r32>, dword ptr [<base> + <idx>*4 + disp32]` — 7 bytes. */
+const movScaledDisp = (dst: number, base: number, idx: number, disp: number) => [
+  0x8b,
+  0x84 | (dst << 3),
+  0x80 | (idx << 3) | base,
+  ...le32(disp),
+];
+/** `movzx <r32>, byte ptr [<base> + <idx>*1]` — 4 bytes. */
+const movzxByte = (dst: number, base: number, idx: number) => [
+  0x0f,
+  0xb6,
+  0x04 | (dst << 3),
+  (idx << 3) | base,
+];
+const addReg = (dst: number, src: number) => [0x48, 0x01, 0xc0 | (src << 3) | dst];
+const movReg = (dst: number, src: number) => [0x48, 0x89, 0xc0 | (src << 3) | dst];
+const jmpReg = (r: number) => [0xff, 0xe0 | r];
+const cmpImm8 = (r: number, imm: number) => [0x83, 0xf8 | r, imm];
+const cmpImm32 = (r: number, imm: number) => [0x81, 0xf8 | r, ...le32(imm)];
+const jaTo = (at: number, target: number) => [0x77, (target - (BASE + at + 2)) & 0xff];
+const body = [0x90, 0xc3]; // nop; ret — something real for a case label to be
+
+describe("detectFunctions — x86-64 RVA jump tables", () => {
+  const ctx64 = () => ctxOf({ cs64: fakeCs() });
+  const detect64 = (img: Uint8Array, options: Parameters<typeof detectFunctions>[4] = {}) =>
+    detectFunctions(img, BASE, true, ctx64(), options);
+
+  // The GCC/clang spelling: the `lea` names the table, entries are relative to
+  // it. Table at 0x20, four case bodies at 0x40/0x48/0x50/0x58.
+  const GCC_TABLE = 0x20;
+  const GCC_CASES = [0x40, 0x48, 0x50, 0x58];
+  const gccSwitch = (extra: Record<number, number[]> = {}) =>
+    image(0x80, {
+      0x00: cmpImm8(RCX, 3),
+      0x03: jaTo(0x03, 0x60),
+      0x05: leaRip(0x05, RDX, BASE + GCC_TABLE),
+      0x0c: movsxdScaled(RAX, RDX, RCX),
+      0x10: addReg(RAX, RDX),
+      0x13: jmpReg(RAX),
+      [GCC_TABLE]: GCC_CASES.flatMap((c) => le32(c - GCC_TABLE)),
+      [GCC_CASES[0]]: body,
+      [GCC_CASES[1]]: body,
+      [GCC_CASES[2]]: body,
+      [GCC_CASES[3]]: body,
+      0x60: [0xc3],
+      ...extra,
+    });
+
+  it("reads a table whose entries are offsets from the lea target", () => {
+    // Nothing here is an address: the four entries are 0x20/0x28/0x30/0x38.
+    // Read as absolute pointers — the 32-bit path's rule — they would resolve
+    // into the first page of the image and be rejected, which is why the whole
+    // shape has to be recognised rather than fed to the existing reader.
+    const { jumpTables } = detect64(gccSwitch());
+    expect(jumpTables).toEqual([[BASE + 0x13, GCC_CASES.map((c) => BASE + c)]]);
+  });
+
+  it("finds the bounds check when the load overwrites the index register", () => {
+    // `movsxd rax, dword ptr [rdx + rax*4]` — the index and the loaded entry
+    // share a register, which is what compilers actually emit. The check has to
+    // be looked for *before the load*: searching back from the jump instead
+    // meets the load first, reads it as the index being clobbered, and reports
+    // no table at all. Verified on a real x64 image before this was fixed.
+    const img = image(0x80, {
+      0x00: cmpImm8(RAX, 3),
+      0x03: jaTo(0x03, 0x60),
+      0x05: leaRip(0x05, RDX, BASE + GCC_TABLE),
+      0x0c: movsxdScaled(RAX, RDX, RAX),
+      0x10: addReg(RAX, RDX),
+      0x13: jmpReg(RAX),
+      [GCC_TABLE]: GCC_CASES.flatMap((c) => le32(c - GCC_TABLE)),
+      [GCC_CASES[0]]: body,
+      [GCC_CASES[1]]: body,
+      [GCC_CASES[2]]: body,
+      [GCC_CASES[3]]: body,
+      0x60: [0xc3],
+    });
+    expect(detect64(img).jumpTables).toEqual([[BASE + 0x13, GCC_CASES.map((c) => BASE + c)]]);
+  });
+
+  it("keys the table by the address of the indirect jump", () => {
+    // buildCFG and structureCFG both look tables up by the jump's address.
+    const { jumpTables } = detect64(gccSwitch());
+    expect(jumpTables[0][0]).toBe(BASE + 0x13);
+  });
+
+  it("reads entries as signed, so a case body before the table resolves", () => {
+    const img = image(0x80, {
+      0x00: cmpImm8(RCX, 1),
+      0x03: leaRip(0x03, RDX, BASE + 0x60),
+      0x0a: movsxdScaled(RAX, RDX, RCX),
+      0x0e: addReg(RAX, RDX),
+      0x11: jmpReg(RAX),
+      0x30: body,
+      0x38: body,
+      0x60: [...le32(0x30 - 0x60), ...le32(0x38 - 0x60)],
+    });
+    expect(detect64(img).jumpTables[0][1]).toEqual([BASE + 0x30, BASE + 0x38]);
+  });
+
+  // The MSVC spelling: the `lea` names __ImageBase, the table's RVA rides in
+  // the load's displacement, and entries are image-relative.
+  const IMAGE_BASE = BASE - 0x1000;
+  const MSVC_CASES = [0x40, 0x48, 0x50];
+  const msvcSwitch = (tableAddr: number, extra: Record<number, number[]> = {}) =>
+    image(0x80, {
+      0x00: cmpImm8(RAX, 2),
+      0x03: leaRip(0x03, RDX, IMAGE_BASE),
+      0x0a: movScaledDisp(RCX, RDX, RAX, tableAddr - IMAGE_BASE),
+      0x11: addReg(RCX, RDX),
+      0x14: jmpReg(RCX),
+      ...extra,
+    });
+  const msvcEntries = MSVC_CASES.flatMap((c) => le32(BASE + c - IMAGE_BASE));
+
+  it("resolves the form where the lea names the image base and the load carries the table RVA", () => {
+    const img = msvcSwitch(BASE + 0x20, {
+      0x20: msvcEntries,
+      [MSVC_CASES[0]]: body,
+      [MSVC_CASES[1]]: body,
+      [MSVC_CASES[2]]: body,
+    });
+    expect(detect64(img).jumpTables).toEqual([[BASE + 0x14, MSVC_CASES.map((c) => BASE + c)]]);
+  });
+
+  it("cannot reach a table outside the code section without being given the bytes", () => {
+    // Where x64 compilers actually put these tables. The detector is handed the
+    // code section, so this is a real limit, not a preference: with no window
+    // covering the table there is nothing to read and nothing is reported.
+    const img = msvcSwitch(0x410000, {
+      [MSVC_CASES[0]]: body,
+      [MSVC_CASES[1]]: body,
+      [MSVC_CASES[2]]: body,
+    });
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("reads a table outside the code section from a data window", () => {
+    const img = msvcSwitch(0x410000, {
+      [MSVC_CASES[0]]: body,
+      [MSVC_CASES[1]]: body,
+      [MSVC_CASES[2]]: body,
+    });
+    const { jumpTables } = detect64(img, {
+      dataWindows: [{ base: 0x410000, bytes: new Uint8Array(msvcEntries) }],
+    });
+    expect(jumpTables).toEqual([[BASE + 0x14, MSVC_CASES.map((c) => BASE + c)]]);
+  });
+
+  it("ignores a register dispatch with no bounds check", () => {
+    // No `cmp` means no statement of the table's length, and a table read
+    // without a length invents case targets out of whatever follows it.
+    const img = gccSwitch();
+    img.set([0x90, 0x90, 0x90], 0x00); // erase the cmp
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses a bounds check too large to be a case count", () => {
+    // The compared immediate comes from the file, and nothing else states the
+    // table's length. Here it claims 4097 cases and every dword that follows
+    // resolves to a plausible target, so an uncapped reader would report a
+    // 24-entry table invented out of unrelated bytes. Raising
+    // MAX_JUMP_TABLE_CASES above the claim makes this test fail.
+    const img = image(0x80, {
+      0x00: cmpImm32(RCX, 0x1000),
+      0x06: leaRip(0x06, RDX, BASE + 0x20),
+      0x0d: movsxdScaled(RAX, RDX, RCX),
+      0x11: addReg(RAX, RDX),
+      0x14: jmpReg(RAX),
+      0x20: Array.from({ length: 24 }, () => le32(0x20)).flat(),
+    });
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("stops at the first entry that leaves the code section", () => {
+    // The check says four cases; the third entry points outside the image, so
+    // the table ends there instead of continuing into whatever follows.
+    const img = gccSwitch({
+      [GCC_TABLE]: [...le32(0x20), ...le32(0x28), ...le32(0x7fff0000), ...le32(0x38)],
+    });
+    expect(detect64(img).jumpTables[0][1]).toEqual([BASE + 0x40, BASE + 0x48]);
+  });
+
+  it("follows a copy of the index register to find the bounds check", () => {
+    // `cmp ecx, N / ja / mov rbx, rcx / … [rdx + rbx*4]` — the check names the
+    // register the index was copied from, which is still a check on the index.
+    const img = image(0x80, {
+      0x00: cmpImm8(RCX, 1),
+      0x03: jaTo(0x03, 0x60),
+      0x05: leaRip(0x05, RDX, BASE + 0x20),
+      0x0c: movReg(RBX, RCX),
+      0x0f: movsxdScaled(RAX, RDX, RBX),
+      0x13: addReg(RAX, RDX),
+      0x16: jmpReg(RAX),
+      0x20: [...le32(0x20), ...le32(0x28)],
+      0x40: body,
+      0x48: body,
+      0x60: [0xc3],
+    });
+    expect(detect64(img).jumpTables[0][1]).toEqual([BASE + 0x40, BASE + 0x48]);
+  });
+
+  it("gives up when the table base is overwritten before the jump", () => {
+    // `mov rdx, rbx` between the load and the `add` means the value added was
+    // not the lea's — following the chain past it would report a table read
+    // from an address the program never used.
+    const img = image(0x80, {
+      0x00: cmpImm8(RCX, 1),
+      0x03: leaRip(0x03, RDX, BASE + 0x20),
+      0x0a: movsxdScaled(RAX, RDX, RCX),
+      0x0e: movReg(RDX, RBX),
+      0x11: addReg(RAX, RDX),
+      0x14: jmpReg(RAX),
+      0x20: [...le32(0x20), ...le32(0x28)],
+      0x40: body,
+      0x48: body,
+    });
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("gives up when a call sits inside the chain", () => {
+    // Every register this idiom uses is volatile, so a call between the `lea`
+    // and the jump means the base register no longer holds the lea's value.
+    const img = image(0x80, {
+      0x00: cmpImm8(RCX, 1),
+      0x03: jaTo(0x03, 0x60),
+      0x05: leaRip(0x05, RDX, BASE + 0x20),
+      0x0c: callTo(0x0c, BASE + 0x60),
+      0x11: movsxdScaled(RAX, RDX, RCX),
+      0x15: addReg(RAX, RDX),
+      0x18: jmpReg(RAX),
+      0x20: [...le32(0x20), ...le32(0x28)],
+      0x40: body,
+      0x48: body,
+      0x60: [0xc3],
+    });
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses the dense two-table form rather than guess its case values", () => {
+    // MSVC's byte-index variant: a byte table selects the entry, so entry `i`
+    // is not case `i`. Reporting the wide table's targets in order would put
+    // real code behind wrong case labels — worse than reporting no switch.
+    const img = image(0x80, {
+      0x00: cmpImm8(RCX, 3),
+      0x03: jaTo(0x03, 0x60),
+      0x05: leaRip(0x05, RDX, BASE + 0x20),
+      0x0c: movzxByte(RAX, RDX, RCX),
+      0x10: movScaledDisp(RCX, RDX, RAX, 0),
+      0x17: addReg(RCX, RDX),
+      0x1a: jmpReg(RCX),
+      0x20: [...le32(0x20), ...le32(0x28)],
+      0x40: body,
+      0x48: body,
+      0x60: [0xc3],
+    });
+    expect(detect64(img).jumpTables).toEqual([]);
+  });
+
+  it("keeps x64 case targets out of the function set", () => {
+    // The same rule the 32-bit path follows (peek-a-bin-jy4): a case body is
+    // interior to the dispatching function, and registering it as a function
+    // start truncates that function at its first case.
+    const img = gccSwitch({ [GCC_CASES[1]]: [0x48, 0x83, 0xec, 0x28] }); // prologue-shaped
+    const { functions } = detect64(img, { entryPoint: BASE });
+    for (const c of GCC_CASES) expect(functions.map((f) => f.address)).not.toContain(BASE + c);
+    expect(functions[0].address).toBe(BASE);
+    expect(functions[0].size).toBe(0x80);
+  });
+
+  it("gives the register dispatch one CFG successor per case", () => {
+    const ctx = ctx64();
+    const img = gccSwitch();
+    const { functions, jumpTables } = detectFunctions(img, BASE, true, ctx, { entryPoint: BASE });
+    const insns = hybridDisassemble(img, BASE, true, [BASE], ctx);
+    const blocks = buildCFG(functions[0], insns, new Map(), new Map(jumpTables));
+    const dispatch = blocks.find((b) => b.insns.some((i) => i.address === BASE + 0x13));
+    const succAddrs = dispatch?.succs.map((s) => blocks[s].startAddr).sort((a, b) => a - b);
+    expect(succAddrs).toEqual(GCC_CASES.map((c) => BASE + c));
+  });
+});
+
+describe("detectFunctions → buildCFG — a dispatched-to case body is a block", () => {
+  // The end of the chain the case-label fix exists to repair: with the targets
+  // registered as functions, the dispatching function ended at its first case,
+  // buildCFG's range guard rejected every target as a leader, and the block
+  // ending in the indirect jmp came out with *zero* successors — which is why
+  // the structurer's switch path never fired on a real binary.
+  const TABLE = 0x20;
+  const CASES = [0x40, 0x44, 0x48];
+  const img = image(0x60, {
+    0x00: [0x83, 0xf8, 0x02],
+    0x03: [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)],
+    [TABLE]: [...le32(BASE + CASES[0]), ...le32(BASE + CASES[1]), ...le32(BASE + CASES[2])],
+    [CASES[0]]: [0x90, 0xc3],
+    [CASES[1]]: [0x90, 0xc3],
+    [CASES[2]]: [0x90, 0xc3],
+  });
+
+  it("gives the indirect jump one successor per case", () => {
+    const ctx = ctxOf({ cs32: fakeCs() });
+    const { functions, jumpTables } = detectFunctions(img, BASE, false, ctx, { entryPoint: BASE });
+    const insns = hybridDisassemble(img, BASE, false, [BASE], ctx);
+    const blocks = buildCFG(functions[0], insns, new Map(), new Map(jumpTables));
+
+    const dispatch = blocks.find((b) => b.insns.some((i) => i.address === BASE + 3));
+    expect(dispatch).toBeDefined();
+    const last = dispatch!.insns[dispatch!.insns.length - 1];
+    expect(last.address).toBe(BASE + 3);
+    const succAddrs = dispatch?.succs.map((s) => blocks[s].startAddr).sort((a, b) => a - b);
+    expect(succAddrs).toEqual(CASES.map((c) => BASE + c));
+  });
+});
+
 describe("detectFunctions — with a decoder", () => {
   const ctx = () => ctxOf({ cs64: fakeCs() });
 
@@ -436,7 +1098,10 @@ describe("detectFunctions — with a decoder", () => {
     expect(jumpTables).toHaveLength(1);
     const [, targets] = jumpTables[0];
     expect(targets).toEqual([BASE + 0x40, BASE + 0x44, BASE + 0x48]);
-    for (const t of targets) expect(functions.map((f) => f.address)).toContain(t);
+    // The targets are case labels, not entry points — see the dedicated block
+    // below. Nothing else in this image vouches for them, so no function starts
+    // at any of them.
+    for (const t of targets) expect(functions.map((f) => f.address)).not.toContain(t);
   });
 
   it("ignores an indirect jump with no preceding bounds check", () => {
@@ -644,6 +1309,77 @@ describe("hybridDisassemble", () => {
   });
 });
 
+/**
+ * peek-a-bin-cen. `ctx.cs32`/`ctx.cs64` are undefined until the worker's WASM
+ * bootstrap resolves and stay undefined if it fails, and only the `init` RPC
+ * awaits it — so a decode RPC really can arrive with no handle. Every stage
+ * whose whole output is instructions must say so instead of returning a
+ * complete-looking empty answer; the one stage that has other evidence to fall
+ * back on must NOT, and both halves are pinned here.
+ */
+describe("a missing Capstone handle is reported, not absorbed", () => {
+  const img = image(0x20, { 0x00: callTo(0x00, BASE + 0x10), 0x05: [0xc3], 0x10: [0xc3] });
+
+  it("makes `disassemble` throw rather than return an empty list", () => {
+    expect(() => disassemble(img, BASE, true, ctxOf())).toThrow(CapstoneUnavailableError);
+    expect(() => disassemble(img, BASE, false, ctxOf())).toThrow(/Capstone is not initialised/);
+  });
+
+  it("makes `hybridDisassemble` throw rather than return an empty list", () => {
+    expect(() => hybridDisassemble(img, BASE, true, [BASE], ctxOf())).toThrow(
+      CapstoneUnavailableError,
+    );
+  });
+
+  it("makes `buildAllXrefs` throw rather than return four empty maps", () => {
+    expect(() => buildAllXrefs(img, BASE, true, [BASE], [BASE + 0x10], null)).toThrow(
+      CapstoneUnavailableError,
+    );
+  });
+
+  it("names the stage that had no decoder", () => {
+    expect(() => disassemble(img, BASE, true, ctxOf())).toThrow(/linear disassembly/);
+    expect(() => hybridDisassemble(img, BASE, true, [], ctxOf())).toThrow(/hybrid disassembly/);
+    expect(() => buildAllXrefs(img, BASE, true, [], [], null)).toThrow(/xref building/);
+  });
+
+  it("checks the handle the architecture actually selects", () => {
+    // A 32-bit call with only a 64-bit handle open is still undecodable, and
+    // reading `cs64` because `cs32` happened to be set would hide it.
+    expect(() => disassemble(img, BASE, false, ctxOf({ cs64: fakeCs() }))).toThrow(
+      CapstoneUnavailableError,
+    );
+    expect(() => disassemble(img, BASE, true, ctxOf({ cs32: fakeCs() }))).toThrow(
+      CapstoneUnavailableError,
+    );
+  });
+
+  it("still lets `detectFunctions` report the starts the file itself records", () => {
+    // The other direction. Detection's evidence is not made of instructions:
+    // `.pdata` extents, exports, the entry point and unwind handlers are all
+    // statements the image makes, and reporting them with no call targets is a
+    // narrower answer, not a silently empty one.
+    const { functions } = detectFunctions(img, BASE, true, ctxOf(), {
+      entryPoint: BASE,
+      exports: [{ name: "Exported", address: BASE + 0x10 }],
+      pdataFunctions: [{ beginAddress: BASE + 0x18, endAddress: BASE + 0x20 }],
+      handlerAddresses: [BASE + 0x1c],
+    });
+    expect(functions.map((f) => f.address)).toEqual([
+      BASE,
+      BASE + 0x10,
+      BASE + 0x18,
+      BASE + 0x1c,
+    ]);
+    expect(functions.map((f) => f.name)).toEqual([
+      "entry_point",
+      "Exported",
+      `sub_${(BASE + 0x18).toString(16).toUpperCase()}`,
+      `__handler_${(BASE + 0x1c).toString(16)}`,
+    ]);
+  });
+});
+
 describe("buildTypedXrefMap", () => {
   const insn = (mnemonic: string, opStr: string, address: number, size = 5): Instruction => ({
     address,
@@ -714,6 +1450,211 @@ describe("buildTypedXrefMap", () => {
   it("records every address in a multi-operand instruction", () => {
     const xrefs = buildTypedXrefMap([insn("mov", "dword ptr [0x404000], 0x405000", BASE)]);
     expect(xrefs.map(([addr]) => addr)).toEqual([0x404000, 0x405000]);
+  });
+
+  /**
+   * peek-a-bin-jfp. The fallback scan has no grammar behind it — every `0x…`
+   * token above 0x10000 in an operand became a data reference — so bitmasks and
+   * sentinels were reported as references to addresses that cannot exist.
+   * Measured before the bound: 305 of t64.exe's 856 data xrefs, 318 of
+   * t32.exe's 881, 239 of t64-arm.exe's 1007.
+   */
+  describe("the fallback scan is bounded by the image", () => {
+    /** t64.exe's own numbers: base 0x140000000, sizeOfImage 0x21000. */
+    const bounds = { base: 0x140000000, size: 0x21000 };
+    const targets = (i: Instruction) => buildTypedXrefMap([i], bounds).map(([addr]) => addr);
+
+    it("drops a -1 sentinel that is larger than any address in the image", () => {
+      // `or edx, 0xffffffff` accounts for 82 of t64.exe's out-of-image xrefs.
+      expect(targets(insn("or", "edx, 0xffffffff", BASE))).toEqual([]);
+    });
+
+    it("drops a 64-bit mask that is larger than any address at all", () => {
+      // `or rbx, 0xffffffffffffffff` was reported as a reference to
+      // 0x10000000000000000 — past the end of the 64-bit address space.
+      expect(targets(insn("or", "rbx, 0xffffffffffffffff", BASE))).toEqual([]);
+    });
+
+    it("drops an A64 alignment mask", () => {
+      expect(targets(insn("and", "x5, x5, #0xfffffffffffffff0", BASE, 4))).toEqual([]);
+    });
+
+    it("drops a constant below the image base", () => {
+      // `mov ebx, 0x4100000` in an image based at 0x140000000.
+      expect(targets(insn("mov", "ebx, 0x4100000", BASE))).toEqual([]);
+    });
+
+    it("drops an NTSTATUS constant compared against", () => {
+      // STATUS_ACCESS_VIOLATION, which is neither an address nor near one.
+      expect(targets(insn("cmp", "dword ptr [rax], 0xc0000005", BASE))).toEqual([]);
+    });
+
+    it("keeps an absolute memory operand inside the image", () => {
+      expect(targets(insn("mov", "eax, dword ptr [0x140010100]", BASE))).toEqual([0x140010100]);
+    });
+
+    it("keeps the image base itself and drops the byte past the end", () => {
+      expect(targets(insn("mov", "eax, 0x140000000", BASE))).toEqual([0x140000000]);
+      expect(targets(insn("mov", "eax, 0x140020fff", BASE))).toEqual([0x140020fff]);
+      expect(targets(insn("mov", "eax, 0x140021000", BASE))).toEqual([]);
+    });
+
+    it("still applies the 0x10000 floor to an image mapped low", () => {
+      const low = { base: 0, size: 0x100000 };
+      expect(buildTypedXrefMap([insn("mov", "eax, 0x100", BASE)], low)).toEqual([]);
+      expect(buildTypedXrefMap([insn("mov", "eax, 0x20000", BASE)], low).map(([a]) => a)).toEqual([
+        0x20000,
+      ]);
+    });
+
+    it("keeps every reference when no bounds are given", () => {
+      // "Nobody said where the image is" is not the same claim as "everything
+      // is in range", so the unbounded call must not start dropping things.
+      expect(buildTypedXrefMap([insn("or", "edx, 0xffffffff", BASE)]).map(([a]) => a)).toEqual([
+        0xffffffff,
+      ]);
+    });
+
+    it("does not bound a direct branch, whose destination is stated", () => {
+      // A `call` outside the image is a fact about the file, not a misread
+      // constant, and the same goes for an A64 branch.
+      expect(targets(insn("call", "0x7ff900001000", BASE))).toEqual([0x7ff900001000]);
+      expect(targets(insn("b", "#0x7ff900001000", BASE, 4))).toEqual([0x7ff900001000]);
+    });
+
+    it("does not bound a rip-relative displacement, which is computed not guessed", () => {
+      const far = insn("lea", "rax, [rip + 0x7ffffff0]", BASE, 7);
+      expect(targets(far)).toEqual([BASE + 7 + 0x7ffffff0]);
+    });
+  });
+
+  // ── A64 ──
+  // Every instruction and operand string below is copied verbatim out of
+  // t64-arm.exe as Capstone prints it. Before the fix, all of them produced a
+  // single `type: "data"` xref: an A64 branch writes `#0x…`, which matches
+  // neither the `^0x…$` direct form nor `resolveRipTarget`, but does satisfy
+  // the loose hex scan's `!mn.startsWith("j")` guard — so all 7263 xrefs in
+  // t64-arm.exe were reported as data references to something that is code.
+  //
+  // The assertions are `toEqual` on the whole result on purpose: they pin the
+  // type AND the absence of a second, data-typed xref for the same target.
+  describe("ARM64 branches", () => {
+    const A = 0x140001000;
+    const a64 = (mnemonic: string, opStr: string, address = A) => insn(mnemonic, opStr, address, 4);
+
+    it("classifies bl as a call xref", () => {
+      expect(buildTypedXrefMap([a64("bl", "#0x140003160")])).toEqual([
+        [0x140003160, [{ from: A, type: "call" }]],
+      ]);
+    });
+
+    it("classifies b as a jmp xref", () => {
+      expect(buildTypedXrefMap([a64("b", "#0x140001210")])).toEqual([
+        [0x140001210, [{ from: A, type: "jmp" }]],
+      ]);
+    });
+
+    it("classifies every b.<cond> form as a branch xref", () => {
+      for (const mn of ["b.eq", "b.ne", "b.lo", "b.hs", "b.hi", "b.ls", "b.gt", "b.le", "b.al"]) {
+        expect(buildTypedXrefMap([a64(mn, "#0x140001018")])).toEqual([
+          [0x140001018, [{ from: A, type: "branch" }]],
+        ]);
+      }
+    });
+
+    it("classifies cbz and cbnz as branch xrefs", () => {
+      expect(buildTypedXrefMap([a64("cbz", "x3, #0x140001164")])).toEqual([
+        [0x140001164, [{ from: A, type: "branch" }]],
+      ]);
+      expect(buildTypedXrefMap([a64("cbnz", "w0, #0x140001164")])).toEqual([
+        [0x140001164, [{ from: A, type: "branch" }]],
+      ]);
+    });
+
+    it("classifies the three-operand tbz and tbnz as branch xrefs", () => {
+      expect(buildTypedXrefMap([a64("tbz", "w2, #2, #0x14000114c")])).toEqual([
+        [0x14000114c, [{ from: A, type: "branch" }]],
+      ]);
+      expect(buildTypedXrefMap([a64("tbnz", "w2, #1, #0x14000114c")])).toEqual([
+        [0x14000114c, [{ from: A, type: "branch" }]],
+      ]);
+    });
+
+    it("groups A64 references to one target the way the x86 path does", () => {
+      expect(
+        buildTypedXrefMap([
+          a64("bl", "#0x140001164", A),
+          a64("b", "#0x140001164", A + 4),
+          a64("cbz", "x3, #0x140001164", A + 8),
+        ]),
+      ).toEqual([
+        [
+          0x140001164,
+          [
+            { from: A, type: "call" },
+            { from: A + 4, type: "jmp" },
+            { from: A + 8, type: "branch" },
+          ],
+        ],
+      ]);
+    });
+
+    // Passes before the fix as well: an indirect branch has no literal address
+    // for the loose scan to pick up either. Pinned so that a later "resolve the
+    // register" attempt cannot quietly start emitting a guessed target — a
+    // missing edge is a gap, a wrong edge is a lie nothing downstream detects.
+    it("records nothing for an indirect branch or call", () => {
+      expect(buildTypedXrefMap([a64("br", "x8")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("blr", "x2")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("braa", "x16, x17")])).toEqual([]);
+    });
+
+    // Passes before and after. `ret` is the one mnemonic the two architectures
+    // spell the same way, and it is deliberately left on the x86 path, where
+    // both produce nothing (x86 `ret imm16` cannot exceed 0xffff, so the loose
+    // scan's `> 0x10000` guard rejects it).
+    it("records nothing for a return on either architecture", () => {
+      expect(buildTypedXrefMap([a64("ret", "")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("ret", "x30")])).toEqual([]);
+      expect(buildTypedXrefMap([insn("ret", "0x10", BASE, 3)])).toEqual([]);
+    });
+
+    // Passes before and after — this is the direction the fix must NOT change.
+    // `adrp`+`add` is how A64 materialises an address, and 681 of t64-arm.exe's
+    // xrefs come from it; a literal-pool `ldr` is likewise a data reference.
+    it("still records a materialised address as a data xref", () => {
+      expect(buildTypedXrefMap([a64("adrp", "x16, #0x140027000")])).toEqual([
+        [0x140027000, [{ from: A, type: "data" }]],
+      ]);
+      expect(buildTypedXrefMap([a64("adr", "x8, #0x1400018b0")])).toEqual([
+        [0x1400018b0, [{ from: A, type: "data" }]],
+      ]);
+      expect(buildTypedXrefMap([a64("ldr", "s10, #0x140025b74")])).toEqual([
+        [0x140025b74, [{ from: A, type: "data" }]],
+      ]);
+    });
+
+    // Passes before and after. The classifier matches by exact mnemonic, so
+    // these keep the data path they have always had; a prefix test on "b" or
+    // "br" would sweep them up (t64-arm.exe contains 18 `brk`).
+    it("does not treat brk or the bitfield mnemonics as branches", () => {
+      expect(buildTypedXrefMap([a64("brk", "#0xf000")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("bfi", "w0, w1, #0, #8")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("bfxil", "x0, x1, #0, #0x20")])).toEqual([]);
+      expect(buildTypedXrefMap([a64("bic", "x8, x8, #0xff000000")])).toEqual([
+        [0xff000000, [{ from: A, type: "data" }]],
+      ]);
+    });
+
+    // Passes before and after: the x86 half of the disjointness claim. None of
+    // these is an A64 mnemonic, so none may be diverted off the x86 path.
+    it("leaves x86 mnemonics that begin with b on the data path", () => {
+      for (const mn of ["bt", "bts", "bsf", "bsr", "bswap"]) {
+        expect(buildTypedXrefMap([insn(mn, "eax, dword ptr [0x404000]", BASE)])).toEqual([
+          [0x404000, [{ from: BASE, type: "data" }]],
+        ]);
+      }
+    });
   });
 });
 

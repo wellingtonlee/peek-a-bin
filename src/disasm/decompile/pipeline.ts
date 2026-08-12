@@ -115,28 +115,58 @@ export function decompileFunction(
 
 /**
  * Wrap structured statements in __try/__except blocks based on .pdata exception info.
- * Looks for RuntimeFunctions that overlap the current function and have exception handlers.
+ * Looks for the RuntimeFunction describing the current function, if it has a handler.
+ *
+ * **Units.** `DisasmFunction.address` is a virtual address — the image base is
+ * already in it. `RuntimeFunction.beginAddress` is an RVA, exactly as parsed
+ * out of `.pdata`; nothing normalises the array on the way here (the worker and
+ * the MCP server both forward `pe.runtimeFunctions` untouched). Comparing the
+ * two directly matched nothing at all: on t64.exe all 240 entries match
+ * `beginAddress + imageBase` and none match the raw RVA, so `__try` was emitted
+ * zero times across 1475 real functions despite 50 handlers being present
+ * (peek-a-bin-yrh).
+ *
+ * The image base is not plumbed this far, so it is recovered here from the pair
+ * instead: a VA and its RVA differ by the image base, which the PE spec
+ * requires to be a multiple of 64K. That is not by itself a unique test — two
+ * functions exactly 64K apart are congruent — so an ambiguous match is
+ * *discarded* rather than guessed at. A missing `__try` is a gap; a `__try`
+ * attributed to the wrong function is a lie about what the code does.
  */
 function wrapExceptionRegions(
   body: IRStmt[],
   func: DisasmFunction,
   runtimeFunctions: RuntimeFunction[],
 ): IRStmt[] {
-  // Find RuntimeFunctions with handlers that overlap this function's address range
-  const funcRVA = func.address;
-  const matching = runtimeFunctions.filter(
-    (rf) =>
-      rf.handlerAddress !== undefined &&
-      rf.beginAddress === funcRVA &&
-      (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
+  const withHandler = runtimeFunctions.filter(
+    (rf) => rf.handlerAddress !== undefined && (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
   );
+
+  // Same unit on both sides: either the caller normalised the array to VAs, or
+  // the image is based at 0.
+  let matching = withHandler.filter((rf) => rf.beginAddress === func.address);
+
+  if (matching.length === 0) {
+    const IMAGE_BASE_ALIGNMENT = 0x10000;
+    const congruent = withHandler.filter((rf) => {
+      const imageBase = func.address - rf.beginAddress;
+      return imageBase > 0 && imageBase % IMAGE_BASE_ALIGNMENT === 0;
+    });
+    // Prefer an entry whose extent is the function's own; only an unambiguous
+    // survivor is used.
+    const exact = congruent.filter((rf) => rf.endAddress - rf.beginAddress === func.size);
+    const candidates = exact.length > 0 ? exact : congruent;
+    matching = candidates.length === 1 ? candidates : [];
+  }
 
   if (matching.length === 0) return body;
 
   // For now, wrap the entire function body in a try block for the first matching handler.
   // The handler body is represented as a comment referencing the handler address.
   const rf = matching[0];
-  const handlerAddr = rf.handlerAddress!;
+  // `handlerAddress` is an RVA like `beginAddress`; report it in the same unit
+  // as every other address in the pane, i.e. as a VA.
+  const handlerAddr = rf.handlerAddress! + (func.address - rf.beginAddress);
   const tryStmt: IRTry = {
     kind: "try",
     body,

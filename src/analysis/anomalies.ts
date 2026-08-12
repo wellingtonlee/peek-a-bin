@@ -1,11 +1,33 @@
 import type { PEFile } from "../pe/types";
-import { validateChecksum, detectOverlay } from "../pe/metadata";
+import { type ChecksumResult, validateChecksum, detectOverlay } from "../pe/metadata";
 import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import { computeSectionEntropies } from "../utils/entropy";
+import { sectionRanges } from "../workers/metricsDispatch";
 
 export interface Anomaly {
   severity: "info" | "warning" | "critical";
   title: string;
   detail: string;
+}
+
+/**
+ * The two whole-file walks {@link detectAnomalies} needs, computed elsewhere.
+ *
+ * Both are linear passes over the entire image — measured together at ~910 ms on
+ * a 253 MiB PE — and both are already computed by `metrics.worker.ts` for the
+ * Headers and Sections tabs, cached per `ArrayBuffer`. Passing them in is how
+ * the browser keeps that work off the main thread; omit the argument and this
+ * module does the walks itself, which is what the MCP server (no worker) and
+ * small files still do.
+ *
+ * Either member may be `null` for "could not be computed". The checks that need
+ * it are then skipped and one `info` anomaly says so, rather than the whole
+ * anomaly pass failing or — worse — silently reporting a clean file.
+ */
+export interface AnomalyMetrics {
+  checksum: ChecksumResult | null;
+  /** One entropy per section, in section-table order. */
+  sectionEntropies: number[] | null;
 }
 
 // Section characteristics flags come from pe/constants — this file used to
@@ -34,23 +56,24 @@ const SUSPICIOUS_SECTION_NAMES = new Set([
   ".enigma2",
 ]);
 
-function computeSectionEntropy(buffer: ArrayBuffer, offset: number, size: number): number {
-  if (size === 0) return 0;
-  const bytes = new Uint8Array(buffer, offset, Math.min(size, buffer.byteLength - offset));
-  const freq = new Uint32Array(256);
-  for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
-  let entropy = 0;
-  const len = bytes.length;
-  for (let i = 0; i < 256; i++) {
-    if (freq[i] === 0) continue;
-    const p = freq[i] / len;
-    entropy -= p * Math.log2(p);
-  }
-  return entropy;
-}
+// The private `computeSectionEntropy` that used to live here is gone: it was a
+// second copy of `utils/entropy`'s walk that had drifted from it in three ways.
+// It clamped a section overrunning EOF and scored the bytes that were there
+// (the shared one scored 0), and it threw `RangeError` for an offset past EOF,
+// a negative offset or a negative length — all three straight out of an
+// attacker-controlled section table, and all three fatal to the whole load,
+// since `App.tsx` calls this inside the try around `parsePE`. The clamping
+// behaviour was the right one and moved into `computeSectionEntropies`; the
+// throwing is gone.
 
-export function detectAnomalies(pe: PEFile): Anomaly[] {
+export function detectAnomalies(pe: PEFile, metrics?: AnomalyMetrics): Anomaly[] {
   const anomalies: Anomaly[] = [];
+  // Compute the whole-file walks here only if the caller did not. See
+  // {@link AnomalyMetrics}.
+  const checksum = metrics ? metrics.checksum : validateChecksum(pe.buffer, pe);
+  const sectionEntropies = metrics
+    ? metrics.sectionEntropies
+    : computeSectionEntropies(pe.buffer, sectionRanges(pe));
   const opt = pe.optionalHeader;
   const entryRVA = opt.addressOfEntryPoint;
 
@@ -118,8 +141,7 @@ export function detectAnomalies(pe: PEFile): Anomaly[] {
   }
 
   // Warning: Checksum mismatch
-  const checksum = validateChecksum(pe.buffer, pe);
-  if (checksum.expected !== 0 && !checksum.valid) {
+  if (checksum !== null && checksum.expected !== 0 && !checksum.valid) {
     anomalies.push({
       severity: "warning",
       title: "Checksum mismatch",
@@ -128,9 +150,12 @@ export function detectAnomalies(pe: PEFile): Anomaly[] {
   }
 
   // Warning: High entropy in code section
-  for (const sec of pe.sections) {
+  //
+  // `sectionEntropies` is indexed by section-table position — see
+  // `sectionRanges`, the one function every caller builds the ranges with.
+  for (const [i, sec] of pe.sections.entries()) {
     if ((sec.characteristics & IMAGE_SCN_CNT_CODE) !== 0 && sec.sizeOfRawData > 0) {
-      const entropy = computeSectionEntropy(pe.buffer, sec.pointerToRawData, sec.sizeOfRawData);
+      const entropy = sectionEntropies?.[i] ?? 0;
       if (entropy > 7.0) {
         anomalies.push({
           severity: "warning",
@@ -157,6 +182,24 @@ export function detectAnomalies(pe: PEFile): Anomaly[] {
       severity: "info",
       title: "DEP disabled",
       detail: "NX_COMPAT is not set. The binary does not opt-in to Data Execution Prevention.",
+    });
+  }
+
+  // Info: a check could not run.
+  //
+  // Only reachable when a caller passed metrics with a null member — i.e. the
+  // metrics worker failed. Saying so beats an anomaly list that looks clean:
+  // "no checksum warning" and "checksum not checked" are different answers, and
+  // this pass is the one place a user goes to find out whether a file is
+  // suspicious.
+  const skipped: string[] = [];
+  if (checksum === null) skipped.push("checksum validation");
+  if (sectionEntropies === null) skipped.push("section entropy");
+  if (skipped.length > 0) {
+    anomalies.push({
+      severity: "info",
+      title: "Some checks did not run",
+      detail: `${skipped.join(" and ")} could not be computed for this file, so any anomaly they would have reported is missing. See the browser console for the underlying error.`,
     });
   }
 

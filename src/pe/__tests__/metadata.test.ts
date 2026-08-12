@@ -71,12 +71,35 @@ describe("md5", () => {
     expect(md5(input)).toBe(nodeMD5(input));
   });
 
-  it("encodes the bit length past the 2^32-bit boundary", () => {
-    // 2^29 bytes = 2^32 bits, where the low 32-bit length word wraps to zero and
-    // the high word must carry. Anything that only writes the low word breaks.
-    const input = new Uint8Array(0x20000000);
-    expect(md5(input)).toBe(nodeMD5(input));
-  }, 30000);
+  /**
+   * Timeout for the 2^32-bit boundary case below.
+   *
+   * That case is inherently slow: measured on an idle machine it spends 10.9 s
+   * in this MD5 and 0.6 s in node:crypto. The 30 s that used to stand here was
+   * vitest's own default written out longhand, so it raised nothing — and at
+   * under 3x the quiet-run cost it sat inside the noise. On a machine running
+   * other work the same case took ~57 s and failed the entire suite.
+   *
+   * So this is a slow test, not a flaky one, and the bound is set to catch a
+   * genuine hang (>15x the quiet-run cost) rather than to police throughput.
+   * It does not shrink the input: see the case for why 2^29 bytes is the
+   * smallest message that reaches the carry at all.
+   */
+  const BOUNDARY_CASE_TIMEOUT_MS = 180_000;
+
+  it(
+    "encodes the bit length past the 2^32-bit boundary",
+    () => {
+      // 2^29 bytes = 2^32 bits, where the low 32-bit length word wraps to zero
+      // and the high word must carry. Anything that only writes the low word
+      // breaks. 2^29 is the smallest input that reaches the carry, so the half
+      // gigabyte is irreducible — a shorter message asserts nothing about the
+      // high word.
+      const input = new Uint8Array(0x20000000);
+      expect(md5(input)).toBe(nodeMD5(input));
+    },
+    BOUNDARY_CASE_TIMEOUT_MS,
+  );
 });
 
 /**

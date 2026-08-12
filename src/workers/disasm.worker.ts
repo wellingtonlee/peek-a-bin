@@ -131,6 +131,11 @@ const initPromise = (async () => {
   }
   state.cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
   state.cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
+  // ARM64 comes out of the same WASM module that is already loaded — a
+  // `Capstone` is a `cs_open` handle, not an engine — so this adds no download,
+  // no second `.wasm` asset to precache, and no measurable startup time. Opened
+  // eagerly alongside the others so `configure` has nothing to wait for.
+  state.csArm64 = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM);
 })();
 
 // `init` waits on this rather than on a placeholder.

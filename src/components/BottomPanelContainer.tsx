@@ -42,7 +42,13 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   const [activeTab, setActiveTab] = useState<string>("");
   const [poppedOut, setPoppedOut] = useState<Map<string, FloatingState>>(new Map());
 
-  // Set activeTab to first visible if current is gone
+  // Set activeTab to first visible if current is gone.
+  //
+  // The first dependency is a joined id string on purpose: `visiblePanels` is
+  // rebuilt by `panels.filter(...)` on every render, so depending on the array
+  // itself would run this effect every render. The string changes only when the
+  // set of visible panels actually changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the joined panel-id string is a deliberate value-identity key standing in for the freshly-filtered visiblePanels array.
   useEffect(() => {
     const tabbedPanels = visiblePanels.filter((p) => !poppedOut.has(p.id));
     if (tabbedPanels.length > 0 && !tabbedPanels.find((p) => p.id === activeTab)) {

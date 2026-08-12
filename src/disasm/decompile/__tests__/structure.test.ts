@@ -41,6 +41,12 @@ const ne0 = (reg = "ecx"): IRExpr => irBinary("!=", irReg(reg, 4), irConst(0, 4)
 /** A recognisable statement per block. */
 const mark = (n: number): IRStmt => ({ kind: "assign", dest: irReg("eax", 4), src: irConst(n) });
 
+/** The label `structureCFG` introduces a leftover block with. */
+const loc = (n: number): IRStmt => ({
+  kind: "label",
+  name: `loc_${addrOf(n).toString(16).toUpperCase()}`,
+});
+
 function structure(
   blocks: BasicBlock[],
   lifted: Record<number, IRStmt[]> = {},
@@ -115,15 +121,50 @@ describe("structureCFG — straight-line code", () => {
     expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([mark(0)]);
   });
 
-  it("emits a goto for a jump back to an already-visited block", () => {
+  it("emits a goto for a jump back to an already-visited block, under its label", () => {
     const blocks = [
       bb(0, { succs: [1], code: [["jmp", 1]] }),
       bb(1, { succs: [0], preds: [0], code: [["jmp", 0]] }),
     ];
     expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([
+      loc(0),
       mark(0),
       mark(1),
       { kind: "goto", label: `loc_${addrOf(0).toString(16).toUpperCase()}` },
+    ]);
+  });
+
+  it("labels only the blocks something jumps to", () => {
+    // Every block is emitted under a label while the walk runs, because a back
+    // edge found later can name a block emitted long before. The ones nothing
+    // reaches are swept away again: three `loc_` lines for straight-line code
+    // is noise a reader pays for.
+    const blocks = [
+      bb(0, { succs: [1], code: [["jmp", 1]] }),
+      bb(1, { succs: [2], preds: [0], code: [["jmp", 2]] }),
+      bb(2, { preds: [1], code: [["ret", ""]] }),
+    ];
+    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)], 2: [mark(2)] })).toEqual([
+      mark(0),
+      mark(1),
+      mark(2),
+    ]);
+  });
+
+  it("labels a jumped-to block that lifted to no statements at all", () => {
+    // Block 1 lifts to nothing, so no emitted statement carries its address and
+    // an emitter matching on addresses has nothing to anchor to. The label is a
+    // statement in its own right, so it survives the block being empty.
+    const blocks = [
+      bb(0, { succs: [1], code: [["jmp", 1]] }),
+      bb(1, { succs: [2], preds: [0, 2], code: [["jmp", 2]] }),
+      bb(2, { succs: [1], preds: [1], code: [["jmp", 1]] }),
+    ];
+    expect(structure(blocks, { 0: [mark(0)], 2: [mark(2)] })).toEqual([
+      mark(0),
+      loc(1),
+      mark(2),
+      { kind: "goto", label: `loc_${addrOf(1).toString(16).toUpperCase()}` },
     ]);
   });
 
@@ -270,7 +311,7 @@ describe("structureCFG — conditionals", () => {
     expect(inverted).toEqual({ kind: "unary", op: "!", operand: { kind: "unknown", text: "je" } });
   });
 
-  it("stops when the branch target cannot be resolved", () => {
+  it("stops when the branch target cannot be resolved, but still emits both arms", () => {
     const blocks = [
       bb(0, {
         succs: [1, 2],
@@ -282,7 +323,18 @@ describe("structureCFG — conditionals", () => {
       bb(1, { preds: [0], code: [["ret", ""]] }),
       bb(2, { preds: [0], code: [["ret", ""]] }),
     ];
-    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)], 2: [mark(2)] })).toEqual([mark(0)]);
+    // The *walk* still stops — `je rax` gives no target to structure an `if`
+    // around, so no conditional is emitted. What changed (peek-a-bin-cb2) is
+    // what happens to the two arms afterwards: this used to assert
+    // `[mark(0)]`, i.e. both blocks deleted outright. They are real code that
+    // the branch reaches, so they are appended under their labels instead.
+    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)], 2: [mark(2)] })).toEqual([
+      mark(0),
+      loc(1),
+      mark(1),
+      loc(2),
+      mark(2),
+    ]);
   });
 
   it("emits both branches inline when they never converge", () => {
@@ -347,18 +399,41 @@ describe("structureCFG — short-circuit conditions", () => {
     expect(out[1]).toEqual(mark(4));
   });
 
-  // KNOWN BUG (reported, not fixed): the blocks folded into the condition are
-  // marked visited and their lifted statements are never emitted. Anything the
-  // second test block did besides the compare — a call, an assignment — is
-  // silently dropped from the output.
-  it("discards the statements of a block folded into the condition", () => {
+  // This asserted `expect(flat).not.toContain("GetLastError")` — the old
+  // comment called it a KNOWN BUG (reported, not fixed) and pinned the loss in
+  // place. It is fixed (peek-a-bin-cb2): a block that does work as well as
+  // testing is no longer eligible for the fold.
+  //
+  // x86 semantics: the machine runs `call GetLastError` unconditionally once
+  // control falls out of the first test, and only then evaluates the second.
+  // `condA && condB` in C has no place to put that call — the C `&&` evaluates
+  // its right operand conditionally and evaluates no statements at all — so
+  // the only faithful shape is the nested `if` the general path builds.
+  it("keeps the statements of a block that would otherwise fold into the condition", () => {
     const call: IRStmt = {
       kind: "call_stmt",
       call: { kind: "call", target: "GetLastError", args: [] },
     };
     const out = structure(shortCircuit(), { 1: [call], 2: [mark(2)], 3: [mark(3)] });
     const flat = JSON.stringify(out);
-    expect(flat).not.toContain("GetLastError"); // the call is lost
+    expect(flat).toContain("GetLastError");
+    // Not folded: the outer condition is the first test on its own.
+    expect(out[0]).toMatchObject({ kind: "if", condition: eq0("ecx") });
+    // ...and the call sits on the path where the first test passed, ahead of
+    // the second test, exactly where the machine runs it.
+    const outer = out[0] as { elseBody: IRStmt[] };
+    expect(outer.elseBody[0]).toEqual(call);
+    // The second test names where it goes. Block 3 is the shared FAIL target
+    // of both tests and the first arm already emitted it, so the second test
+    // reaches it by `goto`; asserting the negated form (`if (edx != 0)` with
+    // an implicit fallthrough) would say the machine skips block 3's
+    // statements on this path, which it does not.
+    expect(outer.elseBody[1]).toMatchObject({
+      kind: "if",
+      condition: eq0("edx"),
+      thenBody: [{ kind: "goto", label: (loc(3) as { name: string }).name }],
+      elseBody: [mark(2)],
+    });
   });
 });
 
@@ -393,9 +468,30 @@ describe("structureCFG — loops", () => {
     expect(out[2]).toEqual(mark(3));
   });
 
-  it("includes the header statements at the top of the loop body", () => {
+  // Was: `while (ecx != 0) { mark(1); mark(2); }`, which states that the test
+  // runs before the header's own statements. The machine runs block 1 in full
+  // — statements first, `cmp`/`je` last — so the test sees what those
+  // statements just produced, and on the iteration that leaves the loop they
+  // have already run. `while (1)` with the test spelled out where the machine
+  // performs it is the only shape that says both.
+  it("puts the header statements ahead of the test, not inside a pre-tested while", () => {
     const out = structure(whileLoop(), { 1: [mark(1)], 2: [mark(2)] }, [loopOf(1, [2], 2)]);
-    expect(out[0]).toMatchObject({ kind: "while", body: [mark(1), mark(2)] });
+    expect(out[0]).toMatchObject({
+      kind: "while",
+      condition: { kind: "const", value: 1 },
+      body: [
+        mark(1),
+        { kind: "if", condition: eq0(), thenBody: [{ kind: "goto", label: "loc_401300" }] },
+        mark(2),
+      ],
+    });
+  });
+
+  it("keeps a plain pre-tested while when the header only tests", () => {
+    // No statements in block 1, so nothing runs before the test and
+    // `while (cond)` says exactly what the machine does.
+    const out = structure(whileLoop(), { 2: [mark(2)] }, [loopOf(1, [2], 2)]);
+    expect(out[0]).toMatchObject({ kind: "while", condition: ne0(), body: [mark(2)] });
   });
 
   it("keeps the condition when the branch target is the loop body", () => {
@@ -488,6 +584,54 @@ describe("structureCFG — loops", () => {
     expect(out[0]).toMatchObject({ kind: "do_while", condition: eq0(), body: [mark(1), mark(2)] });
   });
 
+  it("structures the body of a do-while rather than concatenating its blocks", () => {
+    // Header 1 ends in `jmp`, so this takes the bottom-tested fallback. Inside
+    // the body, block 2 branches to 3 or 4 and they join at 5, which tests the
+    // back edge. The fallback used to concatenate 2..5's statements in block-id
+    // order, which emits both arms unconditionally (peek-a-bin-b37).
+    const blocks = [
+      bb(0, { succs: [1], code: [["jmp", 1]] }),
+      bb(1, { succs: [2], preds: [0, 5], code: [["jmp", 2]] }),
+      bb(2, {
+        succs: [4, 3],
+        preds: [1],
+        code: [
+          ["cmp", "edx, 0x0"],
+          ["je", 4],
+        ],
+      }),
+      bb(3, { succs: [5], preds: [2], code: [["jmp", 5]] }),
+      bb(4, { succs: [5], preds: [2], code: [["jmp", 5]] }),
+      bb(5, {
+        succs: [1, 6],
+        preds: [3, 4],
+        code: [
+          ["cmp", "ecx, 0x0"],
+          ["jne", 1],
+        ],
+      }),
+      bb(6, { preds: [5], code: [["ret", ""]] }),
+    ];
+    const out = structure(
+      blocks,
+      { 1: [mark(1)], 2: [mark(2)], 3: [mark(3)], 4: [mark(4)], 5: [mark(5)], 6: [mark(6)] },
+      [loopOf(1, [2, 3, 4, 5], 5)],
+    );
+
+    const doWhile = out[0] as { kind: string; body: IRStmt[] };
+    expect(doWhile.kind).toBe("do_while");
+    // `je 4` is taken when edx == 0, so block 4 is the `then` body.
+    expect(findStmt(doWhile.body, "if")).toMatchObject({
+      condition: eq0("edx"),
+      thenBody: [mark(4)],
+      elseBody: [mark(3)],
+    });
+    // The join runs once either way, after the guard and inside the loop.
+    expect(JSON.stringify(doWhile.body).match(/"value":5/g)).toHaveLength(1);
+    // Nothing from the body escaped to the outside of the loop.
+    expect(JSON.stringify(out.slice(1))).not.toContain('"value":3');
+  });
+
   it("falls back to an infinite do-while when no back-edge condition is found", () => {
     const blocks = [
       bb(0, { succs: [1], code: [["jmp", 1]] }),
@@ -576,20 +720,38 @@ describe("structureCFG — for loops", () => {
     expect(forStmt.condition).toEqual(irBinary("<", irReg("ecx", 4), irConst(10, 4)));
   });
 
-  // KNOWN BUG (reported, not fixed): the initialiser is emitted twice — once as
-  // part of the predecessor block that structureFrom already walked, and again
-  // inside the `for` header.
-  it("emits the initialiser both before and inside the loop", () => {
+  // Was a KNOWN BUG: the initialiser was emitted twice — once as part of the
+  // predecessor block the walk had already emitted, and again in the `for`
+  // header. `x = f()` run twice is a different program, so the statement moves
+  // into the header instead of being copied there.
+  it("moves the initialiser into the for header rather than repeating it", () => {
     const out = structure(counted(), { 0: [init], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
-    expect(out[0]).toEqual(init); // already emitted here
-    expect(out[1]).toMatchObject({ kind: "for", init }); // and again here
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: "for", init });
   });
 
-  // KNOWN BUG (reported, not fixed): detectForLoop returns a flat concatenation
-  // of the body blocks' lifted statements, and structureCFG uses it verbatim.
-  // Every `if`, nested loop, `break` and `continue` that the structurer had
-  // already recovered inside the loop body is discarded.
-  it("flattens control flow inside the loop body", () => {
+  it("keeps the loop a while when the initialiser is not the statement before it", () => {
+    // `mark(9)` sits between the initialiser and the loop, so hoisting `init`
+    // into the header would move it past that statement. The loop stays a
+    // `while` with the update at the end of the body, where the machine put it,
+    // and nothing is duplicated or lost.
+    const out = structure(counted(), { 0: [init, mark(9)], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    expect(out).toEqual([
+      init,
+      mark(9),
+      {
+        kind: "while",
+        condition: irBinary("<", irReg("ecx", 4), irConst(10, 4)),
+        body: [mark(2), inc],
+      },
+    ]);
+  });
+
+  // Was a KNOWN BUG: detectForLoop returns a flat concatenation of the body
+  // blocks' lifted statements and structureCFG used it verbatim, discarding
+  // every `if`, nested loop, `break` and `continue` the structurer had already
+  // recovered — and the header's own statements with them (peek-a-bin-42l).
+  it("keeps control flow inside the loop body", () => {
     // Body: 2 tests edx and branches to 4, both paths reach 5, which increments
     // and jumps back to the header. The `if` must survive — it does not.
     const blocks = [
@@ -626,9 +788,40 @@ describe("structureCFG — for loops", () => {
     ]);
     const forStmt = findStmt(out, "for") as { body: IRStmt[] } | undefined;
     expect(forStmt).toBeDefined();
-    // The `if` is gone: both arms are emitted unconditionally, one after the other.
-    expect(forStmt?.body).toEqual([mark(3), mark(4)]);
-    expect(forStmt?.body.some((s) => s.kind === "if")).toBe(false);
+    expect(forStmt?.body).toEqual([
+      { kind: "if", condition: eq0("edx"), thenBody: [mark(4)], elseBody: [mark(3)] },
+    ]);
+  });
+
+  it("keeps the header's own statements, which the flat body left out", () => {
+    // The header is the test block; anything it computes before the test runs
+    // on every iteration and belongs in the loop. The flat body was built from
+    // the body blocks only, so a header statement vanished from the output.
+    //
+    // It is no longer a `for`: `for (ecx = 0; ecx < 10; ecx++) { mark1; mark2; }`
+    // runs `mark1` only after the test passes, and the machine runs it before
+    // every test — including the one that ends the loop. A `for` header has no
+    // room for a statement that runs on the way in, so the loop is spelled with
+    // the test where the machine performs it.
+    const out = structure(counted(), { 0: [init], 1: [mark(1)], 2: [mark(2), inc] }, [
+      loopOf(1, [2], 2),
+    ]);
+    expect(findStmt(out, "for")).toBeUndefined();
+    expect(out[0]).toEqual(init);
+    expect(out[1]).toMatchObject({
+      kind: "while",
+      condition: { kind: "const", value: 1 },
+      body: [
+        mark(1),
+        {
+          kind: "if",
+          condition: irBinary(">=", irReg("ecx", 4), irConst(0xa, 4)),
+          thenBody: [{ kind: "goto", label: "loc_401300" }],
+        },
+        mark(2),
+        inc,
+      ],
+    });
   });
 
   it("keeps a while loop when no initialiser precedes it", () => {
@@ -699,10 +892,13 @@ describe("structureCFG — switches", () => {
     expect(sw.expr).toEqual(irReg("eax", 4));
   });
 
-  it("leaves the default body empty once the bounds check has emitted it", () => {
+  it("sends the default arm to the block the bounds check already emitted", () => {
     // The `ja default` edge is structured as an ordinary if first, so the
     // default block is already visited by the time the switch is built and its
     // statements end up outside the switch, under the bounds-check condition.
+    // The arm must not get a second copy of them — but `break`, which is what
+    // it used to get, says the default does nothing, when what it does is the
+    // block it was emitted under (peek-a-bin-dp6).
     const blocks = switchCFG();
     const out = structure(
       blocks,
@@ -711,8 +907,10 @@ describe("structureCFG — switches", () => {
       jumpTable(blocks, [2, 3]),
     );
     const sw = findStmt(out, "switch") as { defaultBody?: IRStmt[] };
-    expect(sw.defaultBody).toEqual([{ kind: "break" }]);
+    expect(sw.defaultBody).toEqual([{ kind: "goto", label: "loc_401400" }]);
     expect(findStmt(out, "if")).toMatchObject({ thenBody: expect.arrayContaining([mark(4)]) });
+    // Emitted once: the statements are under the `if`, not in the switch too.
+    expect(sw).not.toMatchObject({ defaultBody: expect.arrayContaining([mark(4)]) });
   });
 
   it("excludes the default block from the case list", () => {

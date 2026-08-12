@@ -1,17 +1,17 @@
-import { useState, useCallback, useMemo } from "react";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
+import { useCallback, useMemo, useState } from "react";
+import { useFileMetrics } from "../hooks/useFileMetrics";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
-  MachineTypes as MACHINE_TYPES,
-  SubsystemNames as SUBSYSTEM_NAMES,
   DataDirectoryNames as DATA_DIR_NAMES,
+  MachineTypes as MACHINE_TYPES,
   RelocTypeNames as RELOC_TYPE_NAMES,
+  SubsystemNames as SUBSYSTEM_NAMES,
 } from "../pe/constants";
 import {
-  parseRichHeader,
-  parseDebugDirectory,
-  validateChecksum,
   computeImphash,
   detectOverlay,
+  parseDebugDirectory,
+  parseRichHeader,
 } from "../pe/metadata";
 
 const COFF_CHARACTERISTICS: Record<number, string> = {
@@ -345,7 +345,10 @@ export function HeaderView() {
   // count changes between renders and React throws on the transition.
   const richHeader = useMemo(() => (pe ? parseRichHeader(pe.buffer) : null), [pe]);
   const debugInfo = useMemo(() => (pe ? parseDebugDirectory(pe.buffer, pe) : []), [pe]);
-  const checksum = useMemo(() => (pe ? validateChecksum(pe.buffer, pe) : null), [pe]);
+  // Off the main thread above a threshold — a large image's checksum is a walk
+  // over every byte in the file. See hooks/useFileMetrics.ts.
+  const fileMetrics = useFileMetrics(pe);
+  const checksum = fileMetrics.value?.checksum ?? null;
   const imphash = useMemo(() => (pe ? computeImphash(pe.imports) : null), [pe]);
   const overlay = useMemo(() => (pe ? detectOverlay(pe.buffer, pe) : null), [pe]);
 
@@ -491,7 +494,13 @@ export function HeaderView() {
         <table>
           <tbody>
             <Row label="Checksum Validation">
-              {!checksum ? (
+              {fileMetrics.loading ? (
+                <span className="text-gray-500">Computing…</span>
+              ) : fileMetrics.error ? (
+                <span className="text-yellow-400" title={fileMetrics.error}>
+                  Unavailable ({fileMetrics.error})
+                </span>
+              ) : !checksum ? (
                 <span className="text-gray-500">Unavailable</span>
               ) : checksum.expected === 0 ? (
                 <span className="text-gray-500">Not set (0x00000000)</span>

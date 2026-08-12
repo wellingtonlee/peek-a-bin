@@ -7,14 +7,14 @@
  * checked against values that actually came out of the parser.
  */
 
-import { describe, it, expect } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { registerResources } from "../resources";
-import { stubSession } from "./harness";
-import { parsePE } from "../../pe/parser";
+import { describe, expect, it } from "vitest";
 import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
+import { parsePE } from "../../pe/parser";
+import { registerResources } from "../resources";
 import type { FileSession } from "../session";
+import { stubSession } from "./harness";
 
 type ResourceHandler = (
   uri: URL,
@@ -112,6 +112,15 @@ describe("pe://{fileId}/headers", () => {
     });
     expect(headers).toHaveProperty("numberOfSections", 2);
   });
+
+  it("names the instruction set, which is not what is64 says (peek-a-bin-9b1)", async () => {
+    // An ARM64 image is PE32+, so `is64: true` and a bare `machine` number leave
+    // a client no way to know the decompile tool will decline on this file.
+    const { session } = stubSession({ pe: samplePE(), arch: "arm64" } as never);
+    const headers = await body(captureResources(session).get("pe-headers")!, "headers");
+
+    expect(headers).toMatchObject({ is64: true, arch: "arm64" });
+  });
 });
 
 describe("pe://{fileId}/sections", () => {
@@ -169,7 +178,9 @@ describe("pe://{fileId}/strings", () => {
     } as never);
     const strings = await body(captureResources(session).get("pe-strings")!, "strings");
 
-    expect(strings).toEqual([{ address: "0x140002000", value: "Hello", type: "ascii" }]);
+    expect(strings).toEqual([
+      { address: "0x140002000", value: "Hello", type: "ascii", xrefCount: 0, xrefs: [] },
+    ]);
   });
 
   it("carries an explicit utf16le type through", async () => {
@@ -180,7 +191,94 @@ describe("pe://{fileId}/strings", () => {
     } as never);
     const strings = await body(captureResources(session).get("pe-strings")!, "strings");
 
-    expect(strings).toEqual([{ address: "0x140002000", value: "Wide", type: "utf16le" }]);
+    expect(strings).toEqual([
+      { address: "0x140002000", value: "Wide", type: "utf16le", xrefCount: 0, xrefs: [] },
+    ]);
+  });
+
+  it("reports which code addresses reference each string (peek-a-bin-0d0)", async () => {
+    // The browser's Strings tab has always shown this. On the MCP side the map
+    // it comes from — `buildXrefs`'s stringXrefs — was computed by a function
+    // nothing called, so every string here read as unreferenced.
+    const { session } = stubSession({
+      pe: samplePE(),
+      stringMap: new Map([
+        [0x140002000, "Used"],
+        [0x140002010, "Unused"],
+      ]),
+      stringTypes: new Map(),
+      stringXrefs: new Map([[0x140002000, [0x140001010, 0x140001040]]]),
+    } as never);
+    const strings = (await body(captureResources(session).get("pe-strings")!, "strings")) as {
+      value: string;
+      xrefCount: number;
+      xrefs: string[];
+    }[];
+
+    expect(strings[0]).toMatchObject({
+      value: "Used",
+      xrefCount: 2,
+      xrefs: ["0x140001010", "0x140001040"],
+    });
+    expect(strings[1]).toMatchObject({ value: "Unused", xrefCount: 0, xrefs: [] });
+  });
+});
+
+describe("pe://{fileId}/callgraph", () => {
+  it("names both ends of every edge, preferring a rename", async () => {
+    const { session } = stubSession({
+      pe: samplePE(),
+      functions: [
+        { address: 0x140001000, name: "sub_1000", size: 16 },
+        { address: 0x140001100, name: "sub_1100", size: 16 },
+      ],
+      renames: { [String(0x140001100)]: "decrypt" },
+      callGraph: new Map([[0x140001000, [0x140001100, 0x140009999]]]),
+    } as never);
+    const graph = (await body(captureResources(session).get("pe-callgraph")!, "callgraph")) as {
+      address: string;
+      name: string;
+      calls: { address: string; name: string }[];
+    }[];
+
+    expect(graph).toHaveLength(1);
+    expect(graph[0]).toMatchObject({ address: "0x140001000", name: "sub_1000" });
+    expect(graph[0].calls).toEqual([
+      { address: "0x140001100", name: "decrypt" },
+      // A target that is not a detected function still appears — an import
+      // thunk or a tail-called stub — named by its address rather than dropped.
+      { address: "0x140009999", name: "0x140009999" },
+    ]);
+  });
+
+  it("throws McpError for an unknown fileId rather than returning a body", async () => {
+    const { session } = stubSession({ pe: samplePE() } as never);
+    const handler = captureResources(session).get("pe-callgraph")!;
+
+    await expect(handler(new URL("pe://missing/callgraph"), { fileId: "missing" })).rejects.toThrow(
+      McpError,
+    );
+  });
+});
+
+describe("pe://{fileId}/imports — xrefs", () => {
+  it("counts the call sites that use each IAT entry (peek-a-bin-0d0)", async () => {
+    const pe = samplePE();
+    const iat = pe.imports[0].iatAddresses;
+    const { session } = stubSession({
+      pe,
+      importXrefs: new Map([[iat[0], [0x140001020]]]),
+    } as never);
+    const imports = (await body(captureResources(session).get("pe-imports")!, "imports")) as {
+      functions: { name: string; xrefCount: number; xrefs: string[] }[];
+    }[];
+
+    expect(imports[0].functions[0]).toMatchObject({
+      name: "Sleep",
+      xrefCount: 1,
+      xrefs: ["0x140001020"],
+    });
+    expect(imports[0].functions[1]).toMatchObject({ xrefCount: 0, xrefs: [] });
   });
 });
 

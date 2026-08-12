@@ -19,8 +19,12 @@ import { parsePE } from "./pe/parser";
 import { dataSectionRanges, findCodeSection } from "./pe/sections";
 import { disasmWorker } from "./workers/disasmClient";
 import { buildIATLookup } from "./disasm/operands";
+import { buildDataWindows } from "./disasm/dataWindows";
 import { detectDriver } from "./analysis/driver";
 import { detectAnomalies } from "./analysis/anomalies";
+import { metricsWorker } from "./workers/metricsClient";
+import { sectionRanges } from "./workers/metricsDispatch";
+import { MAX_SYNC_FILE_METRIC_BYTES } from "./hooks/asyncMetricState";
 import { loadFontSize } from "./llm/settings";
 import { loadTheme, applyTheme } from "./styles/themes";
 import { saveRecentFile } from "./utils/recentFiles";
@@ -203,12 +207,43 @@ export default function App() {
     }
   }, [state.fileName, state.bookmarks, state.renames, state.comments]);
 
+  /**
+   * The image this analysis chain has already been started for.
+   *
+   * `SET_STRINGS` replaces `state.peFile` with a new object (it spreads to add
+   * the extracted strings), so this effect's dependency changed when the
+   * strings landed and the WHOLE chain ran a second time — a second
+   * `detectFunctions` over the same bytes, a second `SET_FUNCTIONS`, a second
+   * `buildAllXrefs`, and `analysisPhase` bouncing from "ready" back to
+   * "detecting-functions". The buffer is the file's stable identity, so
+   * comparing against it runs the chain exactly once per loaded image.
+   */
+  const analyzedBufferRef = useRef<ArrayBuffer | null>(null);
+  /**
+   * The string map the last xref build used, for the rebuild guard below.
+   * Identity, not size: a map that is the same object is provably the same set.
+   */
+  const xrefStringsRef = useRef<Map<number, string> | null>(null);
+  /**
+   * The latest PE, readable from inside the async chain.
+   *
+   * Assigned during render, not in an effect: the chain is already running by
+   * the time an effect would fire, and what it needs is whatever strings exist
+   * when it reaches the xref build — not the ones that existed when it started.
+   * (`handleKeyDown` in DisassemblyView uses the same pattern, for the same
+   * reason and after the same class of bug.)
+   */
+  const latestPeRef = useRef(state.peFile);
+  latestPeRef.current = state.peFile;
+
   // Run function detection when both PE file and disasm engine are ready
   useEffect(() => {
     if (!state.peFile || !state.disasmReady) return;
     const pe = state.peFile;
     const buffer = bufferRef.current;
     if (!buffer) return;
+    if (analyzedBufferRef.current === buffer) return;
+    analyzedBufferRef.current = buffer;
 
     const textSection = findCodeSection(pe.sections);
     if (!textSection) return;
@@ -239,7 +274,13 @@ export default function App() {
         .map((rf) => pe.optionalHeader.imageBase + rf.handlerAddress!) ?? [];
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" });
     disasmWorker
-      .configure(pe.strings, iatLookup, { driverMode: driverInfo.isDriver })
+      .configure(pe.strings, iatLookup, {
+        driverMode: driverInfo.isDriver,
+        // The machine type, not `is64`, is what picks the disassembler — see
+        // src/disasm/arch.ts. Sent on this first configure only; the later one
+        // (strings arriving) leaves the worker's architecture alone.
+        machine: pe.coffHeader.machine,
+      })
       .then(() =>
         disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
           exports: pe.exports
@@ -251,6 +292,10 @@ export default function App() {
           entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
           pdataFunctions,
           handlerAddresses,
+          // `.rdata` &c: an x64 switch's jump table lives outside .text, so
+          // without these the detector reads none of its entries. Packed into
+          // one transferable buffer by the client, not cloned per window.
+          dataWindows: buildDataWindows(buffer, pe.sections, pe.optionalHeader.imageBase),
         }),
       )
       .then(async (funcs) => {
@@ -292,8 +337,17 @@ export default function App() {
           }
         }
 
-        // Auto-build xrefs in background after function detection
-        const stringAddrs = Array.from(pe.strings.keys());
+        // Auto-build xrefs in background after function detection.
+        //
+        // The strings come from the ref, not from this closure's `pe`: string
+        // extraction is a separate worker call posted before this one, so by
+        // now it has almost always answered and the app has a newer PEFile with
+        // the strings in it. Reading them here means this build is complete,
+        // and the rebuild the strings effect below would otherwise post — a
+        // second whole-`.text` sweep, 155 ms on t64-arm.exe — is skipped.
+        const strings = latestPeRef.current?.strings ?? pe.strings;
+        xrefStringsRef.current = strings;
+        const stringAddrs = Array.from(strings.keys());
         const iatAddrs: number[] = [];
         for (const imp of pe.imports) {
           for (const addr of imp.iatAddresses) iatAddrs.push(addr);
@@ -347,8 +401,12 @@ export default function App() {
     const iatLookup = buildIATLookup(pe.imports);
     disasmWorker.configure(pe.strings, iatLookup);
 
-    // Re-build xrefs now that strings are available
-    if (buffer && state.functions.length > 0) {
+    // Re-build xrefs now that strings are available — unless the detection
+    // chain already built them with exactly this map, which is the usual case
+    // now that it reads the newest one. Identity comparison: the same Map
+    // object is the same set of strings, and a different file always has a
+    // different object, so this cannot skip wrongly across files.
+    if (buffer && state.functions.length > 0 && xrefStringsRef.current !== pe.strings) {
       const textSection = findCodeSection(pe.sections);
       if (textSection) {
         const sectionBytes = new Uint8Array(
@@ -365,6 +423,7 @@ export default function App() {
         const funcEntries2: [number, number][] = state.functions.map((f) => [f.address, f.size]);
         const dataSections2 = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
         if (stringAddrs.length > 0 || iatAddrs.length > 0) {
+          xrefStringsRef.current = pe.strings;
           disasmWorker
             .buildAllXrefs(
               sectionBytes,
@@ -385,13 +444,69 @@ export default function App() {
         }
       }
     }
-  }, [
-    state.peFile,
-    state.peFile?.strings.size,
-    state.disasmReady,
-    state.functions.length,
-    dispatch,
-  ]);
+    // state.functions (not .length) because the body maps over it, and `dispatch`
+    // dropped: useReducer guarantees its identity, so it was inert. The
+    // stringsConfiguredRef guard above makes any extra fire a no-op.
+  }, [state.peFile, state.peFile?.strings.size, state.disasmReady, state.functions]);
+
+  // Anomaly detection.
+  //
+  // Two of its checks are whole-file walks — `validateChecksum` and every
+  // section's entropy — measured together at ~910 ms on a synthetic 253 MiB PE
+  // (138 ms + 772 ms, interleaved medians). That ran inline in `handleFile`,
+  // i.e. on the main thread, with nothing on screen to show for it. The metrics
+  // worker already computes exactly this pair for the Headers and Sections
+  // tabs and caches it per `ArrayBuffer`, so on a large file this asks for the
+  // same result: whoever gets there first pays, the rest share it.
+  //
+  // The threshold is `useFileMetrics`'s: below it the walks cost less than the
+  // hand-off and stay inline, which is every ordinary binary (the largest real
+  // PE on the machine this was measured on is 273 KB).
+  const anomalyBufferRef = useRef<ArrayBuffer | null>(null);
+  useEffect(() => {
+    const pe = state.peFile;
+    if (!pe) {
+      anomalyBufferRef.current = null;
+      return;
+    }
+    // `SET_STRINGS` gives a new PEFile object for the same image; nothing this
+    // pass reads changed, so run it once per buffer rather than once per object.
+    if (anomalyBufferRef.current === pe.buffer) return;
+    anomalyBufferRef.current = pe.buffer;
+
+    if (pe.buffer.byteLength <= MAX_SYNC_FILE_METRIC_BYTES) {
+      const anomalies = detectAnomalies(pe);
+      if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+      return;
+    }
+
+    // The stale-result guard, the same scheme as `hooks/asyncMetricState.ts`:
+    // the request carries the identity of the file it was made for and its
+    // reply is dropped unless that is still the loaded file. A user who drops a
+    // 253 MiB image and then a small one while the first is still walking would
+    // otherwise get the big file's anomalies listed under the small one.
+    let cancelled = false;
+    metricsWorker
+      .fileMetrics(pe.buffer, pe.dosHeader.e_lfanew, pe.optionalHeader.checksum, sectionRanges(pe))
+      .then((metrics) => {
+        if (cancelled) return;
+        const anomalies = detectAnomalies(pe, metrics);
+        if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // Not fatal — the rest of the analysis does not depend on this — but not
+        // silent either: `detectAnomalies` still runs every check that needs no
+        // whole-file walk, and records that the other two did not run.
+        console.error("[peek-a-bin] file metrics failed; anomaly checks skipped", err);
+        const anomalies = detectAnomalies(pe, { checksum: null, sectionEntropies: null });
+        if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // dispatch dropped: useReducer guarantees a stable identity.
+  }, [state.peFile]);
 
   // Parse hash on file load — apply saved address/tab from URL
   const hashAppliedRef = useRef(false);
@@ -412,7 +527,9 @@ export default function App() {
       if (!Number.isNaN(addr)) dispatch({ type: "SET_ADDRESS", address: addr });
     }
     if (tabStr) dispatch({ type: "SET_TAB", tab: tabStr });
-  }, [state.peFile, dispatch]);
+    // dispatch dropped: useReducer guarantees a stable identity, so it never
+    // triggered a re-run.
+  }, [state.peFile]);
 
   // Sync state to URL hash (replaceState to avoid polluting history)
   const prevCallStackLenRef = useRef(0);
@@ -449,7 +566,9 @@ export default function App() {
     };
     window.addEventListener("popstate", handler);
     return () => window.removeEventListener("popstate", handler);
-  }, [state.peFile, state.currentAddress, state.activeTab, dispatch]);
+    // dispatch dropped: useReducer guarantees a stable identity, so it never
+    // caused the popstate listener to be re-registered.
+  }, [state.peFile, state.currentAddress, state.activeTab]);
 
   const handleFile = useCallback((buffer: ArrayBuffer, fileName: string) => {
     dispatch({ type: "RESET" });
@@ -458,12 +577,14 @@ export default function App() {
     dispatch({ type: "SET_LOADING" });
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
     try {
-      bufferRef.current = buffer;
       const pe = parsePE(buffer);
+      // Assigned only once the parse succeeded. Assigning before it meant a
+      // rejected file — a 275 MB ELF dropped on the app — stayed pinned by this
+      // ref until some later load happened to replace it.
+      bufferRef.current = buffer;
       dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
-      // Run anomaly detection synchronously (fast)
-      const anomalies = detectAnomalies(pe);
-      if (anomalies.length > 0) dispatch({ type: "SET_ANOMALIES", anomalies });
+      // Anomaly detection runs in the effect below — it needs two whole-file
+      // walks, which is ~910 ms of main-thread work on a 253 MiB image.
       // Save to IndexedDB for recent files
       void saveRecentFile(fileName, buffer).catch((err) =>
         console.error("[peek-a-bin] failed to save recent file", err),
@@ -478,6 +599,10 @@ export default function App() {
         // Non-fatal: the PE is loaded and browsable without extracted strings.
         .catch((err) => console.error("[peek-a-bin] string extraction failed", err));
     } catch (e) {
+      // RESET above already dropped the previous PE, so the previous buffer is
+      // unreachable through the UI; drop this ref's hold on it too rather than
+      // keeping a whole file alive behind an error screen.
+      bufferRef.current = null;
       dispatch({ type: "SET_ANALYSIS_PHASE", phase: "idle" });
       dispatch({
         type: "SET_ERROR",

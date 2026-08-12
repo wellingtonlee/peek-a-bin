@@ -1,4 +1,5 @@
-import { useMemo, useState, useRef, useCallback } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { classifyArm64Branch, isArm64JumpMnemonic } from "../disasm/arm64Operands";
 
 // --- Register names set ---
 export const REG_NAMES = new Set([
@@ -277,10 +278,32 @@ export function mnemonicClass(m: string): string {
 }
 
 // --- Branch target parser ---
+/**
+ * The address a call or branch transfers to, or null when there is none to be
+ * had — an indirect operand, or a spelling this parser will not guess at.
+ *
+ * Resolves `call` immediates as well as jumps, which is why `JumpArrows` guards
+ * with {@link isJumpMnemonic} before calling: a recursive or intra-function
+ * call lands inside the drawn window and would sprout an arrow that view never
+ * had. The A64 arm is added by mnemonic, and the two mnemonic sets are disjoint
+ * (see `disasm/arm64Operands.ts`), so no x86 answer changes.
+ */
 export function parseBranchTarget(mnemonic: string, opStr: string): number | null {
   if (mnemonic === "call" || mnemonic === "jmp" || mnemonic.startsWith("j")) {
     const m = opStr.match(/^0x([0-9a-fA-F]+)$/);
     if (m) return parseInt(m[1], 16);
   }
-  return null;
+  return classifyArm64Branch(mnemonic, opStr)?.target ?? null;
+}
+
+/**
+ * True for a mnemonic whose target a jump arrow should be drawn for.
+ *
+ * Replaces the bare `mnemonic.startsWith("j")` guard, which is an x86 test: no
+ * A64 branch starts with `j`, so on ARM64 it drew nothing at all. Calls are
+ * excluded on both architectures — x86 `call`, A64 `bl`/`blr`.
+ */
+export function isJumpMnemonic(mnemonic: string): boolean {
+  if (mnemonic.startsWith("j")) return true;
+  return isArm64JumpMnemonic(mnemonic);
 }

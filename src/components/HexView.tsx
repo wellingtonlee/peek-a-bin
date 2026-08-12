@@ -1,12 +1,16 @@
-import { useMemo, useRef, useState, useCallback, useEffect } from "react";
-import { focusOnMount } from "./focusOnMount";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useAppState, useAppDispatch } from "../hooks/usePEFile";
-import { DataInspector } from "./DataInspector";
-import { computeEntropyBlocks } from "../utils/entropy";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { useEntropyStrip } from "../hooks/useFileMetrics";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { entropyBlocksForWidth } from "../utils/entropy";
+import { DataInspector } from "./DataInspector";
+import { focusOnMount } from "./focusOnMount";
 
 const BYTES_PER_ROW = 16;
+
+/** Stable empty result, so the handlers below keep stable identities. */
+const NO_BLOCKS: number[] = [];
 
 function parseBytePattern(input: string): (number | null)[] | null {
   const parts = input.trim().split(/\s+/);
@@ -72,6 +76,17 @@ export function HexView() {
   const [editingByte, setEditingByte] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [showEntropy, setShowEntropy] = useState(false);
+  /**
+   * Width of the entropy strip in CSS pixels, 0 until it has been measured.
+   *
+   * The block count follows this: a strip has ~1000 px and the cap used to be
+   * 4096 blocks, so four to eight of every ten blocks were computed and then
+   * drawn outside the canvas. Quantized in `entropyBlocksForWidth`, so a drag
+   * that moves the width by a few pixels does not change the value and there is
+   * nothing to debounce.
+   */
+  const [stripWidth, setStripWidth] = useState(0);
+  const stripRef = useRef<HTMLDivElement>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [hexCtxMenu, setHexCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [entropyTooltip, setEntropyTooltip] = useState<{
@@ -123,10 +138,20 @@ export function HexView() {
     return new Uint8Array(pe.buffer, sectionInfo.pointerToRawData, sectionInfo.sizeOfRawData);
   }, [pe, sectionInfo]);
 
-  const entropyBlocks = useMemo(() => {
-    if (!sectionBytes) return [];
-    return computeEntropyBlocks(sectionBytes);
-  }, [sectionBytes]);
+  // Only computed while the strip is actually shown — it used to run on every
+  // Hex tab open regardless, which on a 200 MiB `.text` was seconds of frozen
+  // main thread for a bar the user never asked for. Above a size threshold it
+  // runs in a worker; see hooks/useFileMetrics.ts.
+  // Nothing is requested until the strip has been measured (`stripWidth > 0`):
+  // asking at a default width first and at the real one a frame later would
+  // compute the whole section twice.
+  const entropyStrip = useEntropyStrip(
+    sectionBytes,
+    showEntropy && stripWidth > 0,
+    entropyBlocksForWidth(stripWidth),
+  );
+  const entropyBlocks = entropyStrip.value?.blocks ?? NO_BLOCKS;
+  const entropyBlockSize = entropyStrip.value?.blockSize ?? 256;
 
   const rowCount = sectionBytes ? Math.ceil(sectionBytes.length / BYTES_PER_ROW) : 0;
 
@@ -153,7 +178,9 @@ export function HexView() {
     if (currentRowIdx >= 0) {
       virtualizer.scrollToIndex(currentRowIdx, { align: "center" });
     }
-  }, [currentRowIdx]);
+    // useVirtualizer holds its instance in useState, so `virtualizer` is stable
+    // for the component's lifetime and cannot make this effect re-fire.
+  }, [currentRowIdx, virtualizer]);
 
   // Byte pattern search
   useEffect(() => {
@@ -177,6 +204,29 @@ export function HexView() {
     setMatchCount(offsets.length);
   }, [sectionBytes, byteSearch]);
 
+  // Track the strip's width so the block count can follow it.
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!showEntropy || !el) {
+      setStripWidth(0);
+      return;
+    }
+    // Fires once on observe, so the first width arrives without a resize.
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? el.clientWidth;
+      // Quantized, so this setState is a no-op for small changes and a drag
+      // does not re-render on every frame. `prev === 0` is the unmeasured
+      // state and must always be replaced: a strip narrow enough to land on
+      // the same (minimum) block budget as an unmeasured one would otherwise
+      // stay at 0 forever, and 0 is what keeps the strip switched off.
+      setStripWidth((prev) =>
+        prev !== 0 && entropyBlocksForWidth(prev) === entropyBlocksForWidth(width) ? prev : width,
+      );
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showEntropy]);
+
   // Draw entropy canvas
   useEffect(() => {
     if (!showEntropy || !canvasRef.current || entropyBlocks.length === 0) return;
@@ -187,7 +237,14 @@ export function HexView() {
     canvas.width = w;
     canvas.height = 12;
     ctx.clearRect(0, 0, w, 12);
-    const blockWidth = Math.max(2, w / entropyBlocks.length);
+    // `Math.max(2, …)` used to be here, and with more blocks than half the
+    // canvas width it walked straight off the right-hand edge: at 4096 blocks
+    // on a 1000 px strip every block past the 500th was drawn outside the
+    // canvas and simply not shown, while the click and hover handlers below
+    // mapped x to a block using the unclamped width — so the bar under the
+    // cursor was not the bar being reported. The block count now follows the
+    // width, which makes the exact quotient right for both.
+    const blockWidth = w / entropyBlocks.length;
     for (let i = 0; i < entropyBlocks.length; i++) {
       ctx.fillStyle = entropyColor(entropyBlocks[i]);
       ctx.fillRect(i * blockWidth, 0, Math.ceil(blockWidth), 12);
@@ -219,13 +276,13 @@ export function HexView() {
       const blockWidth = rect.width / entropyBlocks.length;
       const blockIdx = Math.floor(x / blockWidth);
       if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
-        const offset = blockIdx * 256;
+        const offset = blockIdx * entropyBlockSize;
         const rowIdx = Math.floor(offset / BYTES_PER_ROW);
         virtualizer.scrollToIndex(rowIdx, { align: "center" });
         dispatch({ type: "SET_ADDRESS", address: baseAddress + offset });
       }
     },
-    [entropyBlocks, sectionBytes, baseAddress, dispatch, virtualizer],
+    [entropyBlocks, entropyBlockSize, sectionBytes, baseAddress, dispatch, virtualizer],
   );
 
   const handleEntropyMouse = useCallback(
@@ -239,8 +296,8 @@ export function HexView() {
       const blockWidth = rect.width / entropyBlocks.length;
       const blockIdx = Math.floor(x / blockWidth);
       if (blockIdx >= 0 && blockIdx < entropyBlocks.length) {
-        const offset = blockIdx * 256;
-        const endOffset = Math.min(offset + 256, sectionBytes.length);
+        const offset = blockIdx * entropyBlockSize;
+        const endOffset = Math.min(offset + entropyBlockSize, sectionBytes.length);
         setEntropyTooltip({
           x: e.clientX - rect.left,
           blockIdx,
@@ -252,7 +309,7 @@ export function HexView() {
         setEntropyTooltip(null);
       }
     },
-    [entropyBlocks, sectionBytes],
+    [entropyBlocks, entropyBlockSize, sectionBytes],
   );
 
   const handleDownload = useCallback(() => {
@@ -547,25 +604,45 @@ export function HexView() {
         )}
       </div>
 
-      {/* Entropy bar */}
-      {showEntropy && entropyBlocks.length > 0 && (
-        <div className="relative px-4 py-0.5 bg-gray-900/50 border-b border-gray-800">
-          <canvas
-            ref={canvasRef}
-            className="w-full cursor-pointer"
-            style={{ height: "12px" }}
-            onClick={handleEntropyClick}
-            onMouseMove={handleEntropyMouse}
-            onMouseLeave={() => setEntropyTooltip(null)}
-          />
-          {entropyTooltip && (
-            <div
-              className="absolute z-30 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-[10px] text-gray-300 pointer-events-none"
-              style={{ left: Math.min(entropyTooltip.x, 300), top: 18 }}
-            >
-              Block {entropyTooltip.blockIdx} | 0x{entropyTooltip.offset.toString(16)}-0x
-              {entropyTooltip.endOffset.toString(16)} | Entropy: {entropyTooltip.value.toFixed(2)}
+      {/* Entropy bar.
+          One container, mounted for as long as the strip is toggled on, because
+          it is also what `ResizeObserver` measures — and the block count is
+          derived from that width before there is anything to draw. */}
+      {showEntropy && (
+        <div
+          ref={stripRef}
+          className="relative px-4 py-0.5 bg-gray-900/50 border-b border-gray-800"
+        >
+          {(entropyStrip.loading || entropyStrip.error) && (
+            <div className="text-[10px]">
+              {entropyStrip.error ? (
+                <span className="text-yellow-400">Entropy unavailable: {entropyStrip.error}</span>
+              ) : (
+                <span className="text-gray-400">Computing entropy…</span>
+              )}
             </div>
+          )}
+          {entropyBlocks.length > 0 && (
+            <>
+              <canvas
+                ref={canvasRef}
+                className="w-full cursor-pointer"
+                style={{ height: "12px" }}
+                onClick={handleEntropyClick}
+                onMouseMove={handleEntropyMouse}
+                onMouseLeave={() => setEntropyTooltip(null)}
+              />
+              {entropyTooltip && (
+                <div
+                  className="absolute z-30 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-[10px] text-gray-300 pointer-events-none"
+                  style={{ left: Math.min(entropyTooltip.x, 300), top: 18 }}
+                >
+                  Block {entropyTooltip.blockIdx} | 0x{entropyTooltip.offset.toString(16)}-0x
+                  {entropyTooltip.endOffset.toString(16)} | Entropy:{" "}
+                  {entropyTooltip.value.toFixed(2)}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

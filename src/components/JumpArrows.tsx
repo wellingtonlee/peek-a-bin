@@ -1,8 +1,8 @@
-import { useMemo } from "react";
 import type { VirtualItem } from "@tanstack/react-virtual";
+import { useMemo } from "react";
 import type { DisasmFunction } from "../disasm/types";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
-import { parseBranchTarget } from "./shared";
+import { isJumpMnemonic, parseBranchTarget } from "./shared";
 
 interface JumpArrowsProps {
   visibleItems: VirtualItem[];
@@ -69,7 +69,9 @@ export function JumpArrows({
       // Jumps only. The shared `parseBranchTarget` also resolves `call`
       // immediates, and a recursive or intra-function call lands inside
       // [funcStart, funcEnd) — it would sprout an arrow this view never drew.
-      if (!insn.mnemonic.startsWith("j")) continue;
+      // `isJumpMnemonic` is the architecture-neutral form of the old
+      // `startsWith("j")` test, which excluded every A64 branch by accident.
+      if (!isJumpMnemonic(insn.mnemonic)) continue;
 
       const target = parseBranchTarget(insn.mnemonic, insn.opStr);
       if (target === null) continue;

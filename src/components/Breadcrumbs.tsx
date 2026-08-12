@@ -33,7 +33,11 @@ export function Breadcrumbs() {
     };
   }, [updateFades]);
 
-  // Auto-scroll to end when call stack changes
+  // Auto-scroll to end when call stack changes.
+  //
+  // state.callStack.length is a change key the body never reads; without it the
+  // breadcrumb bar would only scroll to the end on mount.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: state.callStack.length is the change key this scroll effect is triggered by, not a value it reads.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollLeft = el.scrollWidth;

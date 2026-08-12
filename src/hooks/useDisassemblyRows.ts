@@ -150,7 +150,10 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     return () => {
       cancelled = true;
     };
-  }, [pe, sectionInfo, state.disasmReady, state.hexPatches.size, state.functions, isExecutable]);
+    // state.hexPatches rather than its .size: the reducer replaces the Map on
+    // every patch action, so identity tracks content exactly, whereas .size
+    // misses a patch that overwrites an already-patched offset.
+  }, [pe, sectionInfo, state.disasmReady, state.hexPatches, state.functions, isExecutable]);
 
   // Build funcMap for O(1) lookup
   const funcMap = useMemo(() => {
@@ -161,6 +164,10 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
 
   // Build typed xref map (off main thread via worker)
   const [typedXrefMap, setTypedXrefMap] = useState<Map<number, Xref[]>>(new Map());
+  // Read as two numbers rather than passing `pe`: the effect below must re-run
+  // when the image moves, not when the PEFile object is rebuilt.
+  const imageBase = pe?.optionalHeader.imageBase;
+  const sizeOfImage = pe?.optionalHeader.sizeOfImage;
   useEffect(() => {
     if (instructions.length === 0) {
       setTypedXrefMap(new Map());
@@ -168,7 +175,19 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     }
     let cancelled = false;
     disasmWorker
-      .buildTypedXrefMap(instructions)
+      // Bounded by the mapped image. The fallback operand scan behind this
+      // reports any large `0x…` token as a data reference, so unbounded it
+      // marked bitmasks and status constants as xref targets that no address
+      // in the file matches — 305 phantom data xrefs on t64.exe alone
+      // (peek-a-bin-jfp). Omitted only when there is no PE loaded, which the
+      // `instructions.length === 0` guard above has already excluded in
+      // practice.
+      .buildTypedXrefMap(
+        instructions,
+        imageBase !== undefined && sizeOfImage !== undefined
+          ? { base: imageBase, size: sizeOfImage }
+          : undefined,
+      )
       .then((map) => {
         if (cancelled) return;
         // Compared against `prev` rather than the captured `typedXrefMap`: the
@@ -190,7 +209,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     return () => {
       cancelled = true;
     };
-  }, [instructions]);
+  }, [instructions, imageBase, sizeOfImage]);
 
   // Legacy xref map — stabilized to avoid unnecessary row rebuilds
   const xrefTargetSetRef = useRef(new Set<number>());
@@ -268,7 +287,9 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
       funcAddrsMap,
       sectionRanges,
     );
-  }, [isExecutable, pe, sectionInfo, state.functions]);
+    // state.iatMap is read above and is reducer-owned (replaced, never mutated),
+    // so it only changes identity when the IAT is actually re-set.
+  }, [isExecutable, pe, sectionInfo, state.functions, state.iatMap]);
 
   // Build display rows (with basic block separators and block indices)
   const rows: DisplayRow[] = useMemo(() => {

@@ -52,7 +52,14 @@ export async function decompileForLLM(
     const instructions = await disasmWorker.disassemble(funcBytes, fn.address, pe.is64);
     if (instructions.length === 0) return null;
 
-    const xrefMap = await disasmWorker.buildTypedXrefMap(instructions);
+    // Bounded by the mapped image: the fallback operand scan otherwise reports
+    // bitmasks and status constants as data references to addresses outside
+    // the file (peek-a-bin-jfp), and this map is what the decompiler reads to
+    // decide what a value points at before the pseudocode goes to the model.
+    const xrefMap = await disasmWorker.buildTypedXrefMap(instructions, {
+      base: pe.optionalHeader.imageBase,
+      size: pe.optionalHeader.sizeOfImage,
+    });
     const sf = analyzeStackFrame(fn, instructions, pe.is64);
     const sig = inferSignature(fn, instructions, pe.is64);
     const funcEntries: [number, { name: string; address: number }][] = functions.map((f) => [

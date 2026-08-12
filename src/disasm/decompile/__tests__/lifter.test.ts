@@ -49,15 +49,18 @@ function liftOne(mnemonic: string, opStr: string, opts: LiftOpts = {}): IRStmt {
   return stmts[0];
 }
 
-const operand = (op: string, is64 = true, state = new RegState()): IRExpr =>
-  parseOperand(op, insn("mov", ""), is64, state);
+const operand = (op: string, is64 = true): IRExpr => parseOperand(op, insn("mov", ""), is64);
 
 describe("parseOperand", () => {
-  it("resolves a register through the register state", () => {
+  it("lifts a register operand to a plain register read", () => {
+    // Deliberately independent of RegState: a register operand names a
+    // register, and which value that register holds at this program point is
+    // SSA's answer to give, not the lifter's (peek-a-bin-urs).
     const st = new RegState();
-    expect(operand("rax", true, st)).toEqual(irReg("rax", 8));
     st.set("rax", irConst(7));
-    expect(operand("rax", true, st)).toEqual(irConst(7));
+    expect(operand("rax")).toEqual(irReg("rax", 8));
+    expect(parseOperand("rax", insn("mov", ""), true)).toEqual(irReg("rax", 8));
+    expect(st.get("rax")).toEqual(irConst(7));
   });
 
   it("sizes registers from their names", () => {
@@ -127,19 +130,18 @@ describe("parseOperand", () => {
 
   it("resolves rip-relative addresses against the next instruction", () => {
     const i = insn("mov", "", 0x401000);
-    expect(parseOperand("qword ptr [rip + 0x100]", i, true, new RegState())).toEqual(
+    expect(parseOperand("qword ptr [rip + 0x100]", i, true)).toEqual(
       irDeref(irConst(0x401000 + SIZE + 0x100, 8), 8),
     );
-    expect(parseOperand("qword ptr [rip - 0x100]", i, true, new RegState())).toEqual(
+    expect(parseOperand("qword ptr [rip - 0x100]", i, true)).toEqual(
       irDeref(irConst(0x401000 + SIZE - 0x100, 8), 8),
     );
   });
 
-  it("substitutes known register values inside an address", () => {
+  it("keeps a base register inside an address as a register", () => {
     const st = new RegState();
     st.set("rax", irConst(0x1000));
-    // Address registers are read through the state as well.
-    expect(operand("dword ptr [rax]", true, st)).toEqual(irDeref(irReg("rax", 8), 4));
+    expect(operand("dword ptr [rax]")).toEqual(irDeref(irReg("rax", 8), 4));
   });
 
   it("leaves an unrecognised address term as unknown", () => {
@@ -197,7 +199,11 @@ describe("liftBlock — data movement", () => {
     expect(st.get("rax")).toEqual(irConst(0x10, 8));
   });
 
-  it("substitutes a known source register value", () => {
+  it("lifts a register-to-register move as a copy of the register", () => {
+    // `mov rbx, rax` copies whatever RAX holds *here*. Naming the register is
+    // what lets SSA bind the read to the definition that actually reaches it;
+    // inlining the tracked value instead bound it to the block-entry value
+    // (peek-a-bin-urs). Propagation is copyPropagation's and foldBlock's job.
     const stmts = lift([
       ["mov", "rax, 0x10"],
       ["mov", "rbx, rax"],
@@ -205,7 +211,7 @@ describe("liftBlock — data movement", () => {
     expect(stmts[1]).toEqual({
       kind: "assign",
       dest: irReg("rbx", 8),
-      src: irConst(0x10, 8),
+      src: irReg("rax", 8),
       addr: START + SIZE,
     });
   });
@@ -270,17 +276,22 @@ describe("liftBlock — data movement", () => {
     });
   });
 
-  it("lifts xchg between registers as two assignments", () => {
+  it("lifts xchg between registers through a temporary", () => {
+    // `xchg rax, rbx` swaps. `rax = rbx; rbx = rax` does not: SSA renames the
+    // second read of RAX to the definition the first statement just made, so
+    // both registers end up holding RBX. The temporary pins RAX's read to the
+    // program point before the swap; copy propagation removes it afterwards.
     const st = new RegState();
     st.set("rax", irConst(1));
     st.set("rbx", irConst(2));
     const stmts = lift([["xchg", "rax, rbx"]], { state: st });
     expect(stmts).toEqual([
-      { kind: "assign", dest: irReg("rax", 8), src: irConst(2), addr: START },
-      { kind: "assign", dest: irReg("rbx", 8), src: irConst(1), addr: START },
+      { kind: "assign", dest: irReg("tmp_xchg", 8), src: irReg("rax", 8), addr: START },
+      { kind: "assign", dest: irReg("rax", 8), src: irReg("rbx", 8), addr: START },
+      { kind: "assign", dest: irReg("rbx", 8), src: irReg("tmp_xchg", 8), addr: START },
     ]);
-    expect(st.get("rax")).toEqual(irConst(2));
-    expect(st.get("rbx")).toEqual(irConst(1));
+    expect(st.get("rax")).toEqual(irReg("rbx", 8));
+    expect(st.get("rbx")).toEqual(irReg("rax", 8));
   });
 
   it("falls back to raw asm for xchg with a memory operand", () => {
@@ -320,10 +331,13 @@ describe("liftBlock — arithmetic", () => {
   });
 
   it("reads the destination before overwriting it", () => {
+    // `add rax, 3` is a read-modify-write, so RAX appears on both sides. One
+    // statement is enough: SSA renames the use before it versions the
+    // definition, so the read is the old RAX.
     const st = new RegState();
     st.set("rax", irConst(5));
     expect(liftOne("add", "rax, 0x3", { state: st })).toMatchObject({
-      src: irBinary("+", irConst(5), irConst(3, 8)),
+      src: irBinary("+", irReg("rax", 8), irConst(3, 8)),
     });
   });
 
@@ -394,37 +408,43 @@ describe("liftBlock — arithmetic", () => {
     expect(liftOne("neg", "rax")).toMatchObject({ src: irUnary("-", irReg("rax", 8)) });
   });
 
-  it("lifts mul into a low half and a shifted high half", () => {
+  it("lifts mul into a shifted high half and a low half", () => {
+    // High half first: both halves are the same product of the accumulator
+    // *before* the multiply, so writing EAX first made the high half read the
+    // product and square it.
     const stmts = lift([["mul", "ecx"]]);
     expect(stmts[0]).toMatchObject({
-      dest: irReg("eax", 4),
-      src: irBinary("*", irReg("eax", 4), irReg("ecx", 4)),
-    });
-    expect(stmts[1]).toMatchObject({
       dest: irReg("edx", 4),
       src: { op: ">>", right: irConst(32) },
+    });
+    expect(stmts[1]).toMatchObject({
+      dest: irReg("eax", 4),
+      src: irBinary("*", irReg("eax", 4), irReg("ecx", 4)),
     });
   });
 
   it("picks the accumulator width from the mul operand", () => {
-    expect(lift([["mul", "rcx"]])[0]).toMatchObject({ dest: irReg("rax", 8) });
-    expect(lift([["mul", "cx"]])[0]).toMatchObject({ dest: irReg("ax", 2) });
+    expect(lift([["mul", "rcx"]])[1]).toMatchObject({ dest: irReg("rax", 8) });
+    expect(lift([["mul", "cx"]])[1]).toMatchObject({ dest: irReg("ax", 2) });
   });
 
   it("lifts div into a quotient and a remainder over the original dividend", () => {
+    // One instruction writes both halves from the same input, so the statement
+    // that overwrites the dividend must come second — EDX first. Emitting EAX
+    // first made the remainder read the quotient: `edx = (eax / ecx) % ecx`.
     const st = new RegState();
     st.set("eax", irConst(100));
     const stmts = lift([["div", "ecx"]], { state: st });
     expect(stmts[0]).toEqual({
       kind: "assign",
-      dest: irReg("eax", 4),
-      src: irBinary("/", irConst(100), irReg("ecx", 4)),
+      dest: irReg("edx", 4),
+      src: irBinary("%", irReg("eax", 4), irReg("ecx", 4)),
       addr: START,
     });
     expect(stmts[1]).toEqual({
       kind: "assign",
-      dest: irReg("edx", 4),
-      src: irBinary("%", irConst(100), irReg("ecx", 4)),
+      dest: irReg("eax", 4),
+      src: irBinary("/", irReg("eax", 4), irReg("ecx", 4)),
       addr: START,
     });
   });
@@ -585,9 +605,13 @@ describe("liftBlock — calls and returns", () => {
       ["mov", "rdx, 0x2"],
       ["call", "0x402000"],
     ]);
+    // RegState answers only "how many leading fastcall registers did this
+    // block write" — the argument itself is the register, so SSA binds it to
+    // the definition reaching the call rather than re-expanding whatever
+    // computed it (which duplicated calls passed as arguments).
     expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([
-      irConst(1, 8),
-      irConst(2, 8),
+      irReg("rcx", 8),
+      irReg("rdx", 8),
     ]);
   });
 
@@ -653,32 +677,44 @@ describe("liftBlock — calls and returns", () => {
       ],
       { state: st },
     );
-    // RCX was clobbered, RBX survives.
+    // Both statements now name their register — the IR no longer shows the
+    // difference, so assert it where it still matters: RegState is what
+    // decides a call's arity and what getCondition reads.
     expect(stmts[3]).toMatchObject({ src: irReg("rcx", 8) });
-    expect(stmts[4]).toMatchObject({ src: irConst(2, 8) });
+    expect(stmts[4]).toMatchObject({ src: irReg("rbx", 8) });
+    expect(st.get("rcx")).toBeUndefined();
+    expect(st.get("rbx")).toEqual(irConst(2, 8));
   });
 
   it("makes the call result available as the return register", () => {
+    // The call defines RAX and the `ret` reads RAX; the two are connected by
+    // the register, which is what the ABI says and what SSA can follow.
     const stmts = lift([
       ["call", "0x402000"],
       ["ret", ""],
     ]);
-    expect(stmts[1]).toMatchObject({
-      kind: "return",
-      value: { kind: "call", target: "sub_402000" },
+    expect(stmts[0]).toMatchObject({
+      kind: "call_stmt",
+      resultDest: irReg("rax", 8),
+      call: { target: "sub_402000" },
     });
+    expect(stmts[1]).toMatchObject({ kind: "return", value: irReg("rax", 8) });
   });
 
-  it("returns the tracked value of the return register", () => {
-    expect(
-      lift([
-        ["mov", "rax, 0x7"],
-        ["ret", ""],
-      ])[1],
-    ).toEqual({
+  it("does not return a value the return register no longer holds", () => {
+    // t64 sub_140001514's epilogue. RegState still mapped RAX to reg(RBX)
+    // when the `ret` was reached, so the lifter emitted `return rbx` — by then
+    // the *restored* RBX, i.e. the saved-register slot. Naming RAX binds the
+    // read to the definition that actually reaches the `ret` (peek-a-bin-lh6).
+    const stmts = lift([
+      ["mov", "rax, rbx"],
+      ["mov", "rbx, qword ptr [rsp + 0x30]"],
+      ["ret", ""],
+    ]);
+    expect(stmts[2]).toEqual({
       kind: "return",
-      value: irConst(7, 8),
-      addr: START + SIZE,
+      value: irReg("rax", 8),
+      addr: START + 2 * SIZE,
     });
   });
 
@@ -690,13 +726,19 @@ describe("liftBlock — calls and returns", () => {
   // KNOWN BUG (reported, not fixed): `pop` is skipped entirely, so it never
   // clears the popped register's definition. A value moved into a register
   // before it is popped survives and folds into everything downstream.
-  it("keeps a stale definition across a pop of the same register", () => {
+  // KNOWN BUG (reported, not fixed): `pop` is not lifted at all, so the last
+  // IR definition of RAX is still the `mov` above it. The `ret` no longer
+  // carries the stale value itself — it names RAX — but nothing tells SSA that
+  // the pop redefined it, so the read still resolves to the wrong definition.
+  it("does not see a pop redefine the register it pops into", () => {
     const stmts = lift([
       ["mov", "rax, 0x5"],
       ["pop", "rax"],
       ["ret", ""],
     ]);
-    expect(stmts[1]).toEqual({ kind: "return", value: irConst(5, 8), addr: START + 2 * SIZE });
+    expect(stmts).toHaveLength(2); // the pop lifted to nothing
+    expect(stmts[0]).toMatchObject({ dest: irReg("rax", 8), src: irConst(5, 8) });
+    expect(stmts[1]).toEqual({ kind: "return", value: irReg("rax", 8), addr: START + 2 * SIZE });
   });
 });
 
@@ -746,7 +788,7 @@ describe("liftBlock — string, FPU and SSE", () => {
     st.set("st0", irConst(1));
     expect(liftOne("fstp", "dword ptr [rbp - 0x4]", { state: st })).toMatchObject({
       kind: "store",
-      value: irConst(1),
+      value: irReg("st0", 10),
       size: 4,
     });
   });
@@ -756,7 +798,7 @@ describe("liftBlock — string, FPU and SSE", () => {
     st.set("st0", irConst(2));
     expect(liftOne("fadd", "dword ptr [rax]", { state: st })).toMatchObject({
       dest: irReg("st0", 10),
-      src: irBinary("+", irConst(2), irDeref(irReg("rax", 8), 4)),
+      src: irBinary("+", irReg("st0", 10), irDeref(irReg("rax", 8), 4)),
     });
     expect(liftOne("fdiv", "dword ptr [rax]", { state: st })).toMatchObject({ src: { op: "/" } });
   });

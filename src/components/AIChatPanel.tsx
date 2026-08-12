@@ -71,7 +71,12 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-scroll to bottom on new messages
+  // Auto-scroll to bottom on new messages.
+  //
+  // Both dependencies are change keys the body never reads: the effect exists
+  // to fire when a message arrives or a stream ticks. Dropping them to satisfy
+  // the rule would scroll once on mount and never again.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: chat.messages and chat.streaming are the change keys this scroll effect is triggered by, not values it reads.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chat.messages, chat.streaming]);

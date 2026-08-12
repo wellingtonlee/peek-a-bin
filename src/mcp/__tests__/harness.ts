@@ -62,9 +62,25 @@ export function stubSession(overrides: Partial<AnalyzedFile> = {}): {
   const file = {
     id: "sample",
     fileName: "sample.exe",
+    // Spelled out rather than left undefined: the x86-only tools now decline on
+    // anything that is not "x86", so a stub that omits this would be refused —
+    // which is the right direction for a forgotten field, but makes for
+    // confusing failures in suites that are not about architecture at all.
+    arch: "x86",
     functions: [],
     instructions: [],
     xrefMap: new Map(),
+    // The whole-image xref maps `FileSession.loadFile` now builds. Empty rather
+    // than absent: the handlers read them unconditionally, exactly as they read
+    // `xrefMap`, and a stub that left them undefined would fail every unrelated
+    // suite with a TypeError rather than an empty answer.
+    stringXrefs: new Map(),
+    importXrefs: new Map(),
+    dataXrefs: new Map(),
+    callGraph: new Map(),
+    stringMap: new Map(),
+    iatMap: new Map(),
+    stringTypes: new Map(),
     anomalies: [],
     bookmarks: [],
     renames: {},

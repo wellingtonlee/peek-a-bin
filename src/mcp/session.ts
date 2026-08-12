@@ -4,18 +4,22 @@
  */
 
 import { parsePE, extractStrings } from "../pe/parser";
-import { findCodeSection } from "../pe/sections";
+import { dataSectionRanges, findCodeSection } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import type { Instruction, DisasmFunction, Xref } from "../disasm/types";
 import { buildIATLookup } from "../disasm/operands";
 import { detectAnomalies, type Anomaly } from "../analysis/anomalies";
 import { detectDriver, type DriverInfo } from "../analysis/driver";
 import { StructRegistry } from "../disasm/decompile/structs";
+import { jumpTableTargets } from "../disasm/seeds";
+import { buildDataWindows } from "../disasm/dataWindows";
+import { type TargetArch, archForMachine } from "../disasm/arch";
 import {
   initCapstone,
   detectFunctionsFromBytes,
   hybridDisassembleBytes,
   buildXrefMap,
+  buildXrefs,
 } from "./disasm";
 
 export interface AnalyzedFile {
@@ -25,10 +29,36 @@ export interface AnalyzedFile {
   instructions: Instruction[];
   functions: DisasmFunction[];
   xrefMap: Map<number, Xref[]>;
+  /**
+   * Whole-image reference maps, each keyed by the address being referenced and
+   * valued with the addresses of the instructions that reference it.
+   *
+   * `xrefMap` above is a different question: it is per-instruction, built from
+   * the decoded operands of one instruction at a time, and answers "what points
+   * at this code address". These four are the sweep the browser runs
+   * (`disasmWorker.buildAllXrefs`) and answer "who uses this string / this
+   * import / this data address", plus the call graph. They were computed by
+   * `buildXrefs` and thrown away — nothing called it — so an MCP client saw none
+   * of it.
+   */
+  stringXrefs: Map<number, number[]>;
+  importXrefs: Map<number, number[]>;
+  dataXrefs: Map<number, number[]>;
+  /** Function entry → the entries it calls. */
+  callGraph: Map<number, number[]>;
   iatMap: Map<number, { lib: string; func: string }>;
   stringMap: Map<number, string>;
   stringTypes: Map<number, "ascii" | "utf16le">;
   jumpTables: Map<number, number[]>;
+  /**
+   * The instruction set this image was analysed as, from `coffHeader.machine`.
+   *
+   * Not the same question as `pe.is64`. Consumers that run an x86-only stage —
+   * the decompiler, the stack-frame analyser, operand parsing — must check this
+   * and decline for anything but `"x86"`, because those stages produce
+   * confident nonsense rather than an error when handed ARM64 instructions.
+   */
+  arch: TargetArch;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
   structRegistry: StructRegistry;
@@ -52,6 +82,10 @@ export class FileSession {
     const pe = parsePE(buffer);
     const imageBase = pe.optionalHeader.imageBase;
     const is64 = pe.is64;
+    // `is64` is the PE32+ magic — a pointer width. The machine type is what
+    // says which decoder to open; an ARM64 image is PE32+ too, and picking by
+    // `is64` alone disassembled it as x86-64 and produced nothing at all.
+    const arch = archForMachine(pe.coffHeader.machine);
 
     // 2. Build IAT lookup
     const iatMap = buildIATLookup(pe.imports);
@@ -97,6 +131,7 @@ export class FileSession {
       textBytes,
       textBase,
       is64,
+      arch,
       stringMap,
       iatMap,
       driverMode,
@@ -105,17 +140,32 @@ export class FileSession {
         entryPoint: imageBase + pe.optionalHeader.addressOfEntryPoint,
         pdataFunctions,
         handlerAddresses,
+        // `.rdata` and the other readable data sections. Without them an x64
+        // switch is invisible: the compiler puts its RVA table there, so the
+        // detector can recover the dispatch chain and still read no entries.
+        // Views onto `buffer`, so this copies nothing.
+        dataWindows: buildDataWindows(buffer, pe.sections, imageBase),
       },
     );
     const functions = detectResult.functions;
     const jumpTables = new Map(detectResult.jumpTables);
 
     // 7. Hybrid disassemble
-    const seeds = functions.map((f) => f.address);
+    //
+    // Jump-table targets are seeds as well as function starts. The recursive
+    // descent gives up at an indirect `jmp`, so without them the case bodies of
+    // a switch are reached only by phase 2's linear gap fill — and where MSVC
+    // puts the table immediately before its first case body (the normal x86
+    // layout) that sweep starts *on the table*, walks off its end misaligned
+    // and swallows the head of case 0. `seeds` is only a BFS work queue, so
+    // adding a target here starts a decode at the right address without
+    // claiming it is a function.
+    const seeds = [...functions.map((f) => f.address), ...jumpTableTargets(jumpTables)];
     const instructions = hybridDisassembleBytes(
       textBytes,
       textBase,
       is64,
+      arch,
       seeds,
       stringMap,
       iatMap,
@@ -124,8 +174,50 @@ export class FileSession {
     );
 
     // 8. Build xref map
-    const xrefEntries = buildXrefMap(instructions);
+    //
+    // Bounded by the image the optional header describes. `buildTypedXrefMap`'s
+    // fallback arm reads any large `0x…` operand token as a data reference, so
+    // without these two numbers `or edx, 0xffffffff` and `cmp dword ptr [rax],
+    // 0xc0000005` were reported to MCP clients as references to addresses that
+    // do not exist in the file — 305 of t64.exe's 856 data xrefs, 318 of
+    // t32.exe's 881 (peek-a-bin-jfp). Every in-image reference is unaffected.
+    const xrefEntries = buildXrefMap(instructions, {
+      base: imageBase,
+      size: pe.optionalHeader.sizeOfImage,
+    });
     const xrefMap = new Map(xrefEntries);
+
+    // 8b. Whole-image xrefs: string, import and data references plus the call
+    // graph. The browser has had these since it existed (App.tsx calls
+    // `disasmWorker.buildAllXrefs`); on this side `buildXrefs` was written and
+    // then never called, so `get_xrefs` answered with per-instruction refs only
+    // and no MCP client could ask who used a string or an import.
+    //
+    // Cost, measured through this function on the five real test images (median
+    // of 5): 72/74/57 ms on t32/t64/w64 against a 389/297/264 ms load, and — with
+    // `instructions` handed over so the A64 sweep is not repeated — 19/16 ms on
+    // t64-arm/w64-arm against 475/334 ms. Roughly a fifth of a load on x86 and a
+    // twentieth on ARM64, for four maps the client otherwise cannot obtain at
+    // all: there is no tool that would let it rebuild them.
+    const iatAddrs: number[] = [];
+    for (const imp of pe.imports) {
+      for (const addr of imp.iatAddresses) iatAddrs.push(addr);
+    }
+    const allXrefs = buildXrefs(
+      textBytes,
+      textBase,
+      is64,
+      arch,
+      Array.from(stringMap.keys()),
+      iatAddrs,
+      functions.map((f) => [f.address, f.size] as [number, number]),
+      dataSectionRanges(pe.sections, imageBase),
+      // ARM64 only, and the reason that arch is the cheap one here: the sweep
+      // this would otherwise redo is the one step 7 just did over the same bytes
+      // at the same base. Handing the array over costs nothing without a worker
+      // boundary in the way.
+      instructions,
+    );
 
     // 9. Detect anomalies
     const anomalies = detectAnomalies(pe);
@@ -140,10 +232,15 @@ export class FileSession {
       instructions,
       functions,
       xrefMap,
+      stringXrefs: new Map(allXrefs.stringXrefs),
+      importXrefs: new Map(allXrefs.importXrefs),
+      dataXrefs: new Map(allXrefs.dataXrefs),
+      callGraph: new Map(allXrefs.callGraph),
       iatMap,
       stringMap,
       stringTypes,
       jumpTables,
+      arch,
       anomalies,
       driverInfo,
       structRegistry,

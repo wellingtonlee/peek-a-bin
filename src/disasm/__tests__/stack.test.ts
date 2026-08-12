@@ -219,6 +219,54 @@ describe("analyzeStackFrame — argument numbering", () => {
 // An index can only be read out of the offset if the frame pointer is really a
 // frame pointer. In x64 code RBP is more often a callee-saved object pointer,
 // and `[rbp + 0x10]` is then a field of that object, not an argument.
+/**
+ * Capstone prints a displacement as `0x`-prefixed hex only from 0xA up and as a
+ * bare digit below it, so operand patterns that insisted on the `0x` saw nothing
+ * in the first ten bytes of the frame. On x86 that is argument 0 and the first
+ * locals — the most-used slots in the frame, missing from every frame analysed.
+ */
+describe("analyzeStackFrame — displacements Capstone printed in decimal", () => {
+  it("records the argument at [ebp + 8], written without a 0x", () => {
+    const insns = body(...PROLOGUE_32, ["push", "dword ptr [ebp + 8]"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+  });
+
+  it("numbers a decimal and a hex slot on the same scale", () => {
+    // [ebp+8] and [ebp+0xC] are arguments 0 and 1 and differ only in spelling.
+    const insns = body(
+      ...PROLOGUE_32,
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["mov", "edx, dword ptr [ebp + 0xC]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual([
+      "arg_0",
+      "arg_1",
+    ]);
+  });
+
+  it("records the locals at [ebp - 4] and [ebp - 8]", () => {
+    const insns = body(
+      ...PROLOGUE_32,
+      ["mov", "dword ptr [ebp - 4], eax"],
+      ["mov", "dword ptr [ebp - 8], ecx"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, false)!;
+    expect(frame.vars.map((v) => v.name)).toEqual(["var_4", "var_8"]);
+    expect(frame.vars.map((v) => v.signedOffset)).toEqual([-4, -8]);
+  });
+
+  it("reads a bare digit as decimal, not as hex", () => {
+    // The two spellings must not collide: `[rsp + 8]` is byte 8 and
+    // `[rsp + 0x8]` is the same slot, but a decimal `[rsp + 10]` — which
+    // Capstone never prints — would be byte 10, not byte 16.
+    const insns = body(["mov", "rax, qword ptr [rsp + 8]"], ["mov", "rcx, qword ptr [rsp + 0x8]"]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true)!;
+    expect(frame.vars).toHaveLength(1);
+    expect(frame.vars[0].offset).toBe(8);
+    expect(frame.vars[0].accessCount).toBe(2);
+  });
+});
+
 describe("analyzeStackFrame — frame-pointer verification", () => {
   it("does not number slots of a function with no frame-pointer prologue", () => {
     const insns = body(

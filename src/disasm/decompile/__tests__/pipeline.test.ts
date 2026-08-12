@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { decompileFunction } from "../pipeline";
 import { StructRegistry } from "../structs";
+import { analyzeStackFrame } from "../../stack";
 import type { Instruction, DisasmFunction, Xref } from "../../types";
+import type { RuntimeFunction } from "../../../pe/types";
 
 /**
  * End-to-end pipeline tests: instructions in, C-like pseudocode out.
@@ -84,6 +86,18 @@ function runWithStructs(
     new Map(),
     new StructRegistry(),
   ).code;
+}
+
+/**
+ * The emitted code with the struct-pointer cast taken off every field access.
+ *
+ * A field access is emitted as `((struct_0 *)ebx)->field_0x8`, because the base
+ * is usually a register and nothing declares a register (see `structPointer` in
+ * emit.ts). Assertions about *what* is accessed read better without it; the cast
+ * itself is pinned separately, below.
+ */
+function withoutStructCasts(code: string): string {
+  return code.replace(/\(\(struct_\w+ \*\)([^()]*)\)->/g, "$1->");
 }
 
 /** The declared type of a field in the emitted `typedef struct` block. */
@@ -245,7 +259,7 @@ describe("decompileFunction — struct field types", () => {
       imports("Sleep"),
     );
 
-    expect(code).toContain("Sleep(ebx->field_0x8)");
+    expect(withoutStructCasts(code)).toContain("Sleep(ebx->field_0x8)");
     expect(declaredType(code, "field_0x8")).toBe("uint32_t");
   });
 
@@ -260,7 +274,7 @@ describe("decompileFunction — struct field types", () => {
       imports("CloseHandle"),
     );
 
-    expect(code).toContain("CloseHandle(ebx->field_0x8)");
+    expect(withoutStructCasts(code)).toContain("CloseHandle(ebx->field_0x8)");
     expect(declaredType(code, "field_0x8")).toBe("HANDLE");
   });
 
@@ -276,7 +290,7 @@ describe("decompileFunction — struct field types", () => {
       ]),
     );
 
-    expect(code).toContain("sub_408000(ebx->field_0x8)");
+    expect(withoutStructCasts(code)).toContain("sub_408000(ebx->field_0x8)");
     expect(declaredType(code, "field_0x8")).toBe("PVOID");
   });
 
@@ -293,8 +307,99 @@ describe("decompileFunction — struct field types", () => {
       ]),
     );
 
-    expect(code).toContain("ebx->field_0x8 = esi->field_0x4");
+    // Two statements, not one: the `ret` reads EAX too, so the load is a
+    // two-use definition and cannot be inlined into the store. The subject
+    // here is the *type*, and that is unchanged — see the field-to-field copy
+    // in the two lines below.
+    const body = withoutStructCasts(code);
+    expect(body).toContain("eax = esi->field_0x4;");
+    expect(body).toContain("ebx->field_0x8 = eax;");
     expect(declaredType(code, "field_0x8")).toBe("uint32_t");
+  });
+});
+
+/**
+ * How a recovered field access names the object it reads.
+ *
+ * Struct recovery works out that a register holds a `struct_N *` and the
+ * emitter wrote `ebx->field_0x8` — of a register, which nothing declares. That
+ * was 1656 `invalid type argument of '->'` errors across three binaries, far
+ * the largest category of broken output: the recovery was right and only the
+ * spelling was missing.
+ *
+ * The repair is a cast at the point of use rather than a declaration, and the
+ * second test below is why. A register is not a variable — the same register
+ * holds a struct pointer on one line and an integer the next — so declaring
+ * `struct_1 *rax;` would make C scale the byte offsets written off that
+ * register elsewhere by `sizeof(struct_1)`. That version compiles and describes
+ * different addresses, which is the failure this project has been bitten by
+ * before.
+ */
+describe("decompileFunction — a field access names its struct", () => {
+  const load = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "dword ptr [ebx + 0x10], 1"],
+      ["mov", "eax, dword ptr [ebx + 8]"],
+      ["ret"],
+    ]);
+
+  it("casts the base to the struct, so the access has a type to act on", () => {
+    const code = runWithStructs(load());
+
+    expect(code).toContain("((struct_0 *)ebx)->field_0x8");
+    // The bare form was not valid C for any base the emitter actually produces.
+    expect(code).not.toMatch(/(^|[^)])\bebx->/);
+  });
+
+  it("leaves the register itself untyped, so byte offsets off it still mean bytes", () => {
+    // `[ebx + ecx]` has no constant offset, so it is not a field and stays a
+    // byte-addressed dereference — in the same function, off the same register
+    // that carries the struct. Declaring `struct_0 *ebx;` would make C scale
+    // that `ecx` by `sizeof(struct_0)`: still valid C, now a different address.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "eax, dword ptr [ebx + 8]"],
+        ["mov", "dword ptr [esi], eax"],
+        ["mov", "eax, dword ptr [ebx + ecx]"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("((struct_0 *)ebx)->field_0x8");
+    expect(code).not.toMatch(/^\s*struct_\w+\s*\*\s*ebx;/m);
+    expect(code).toContain("*(int32_t*)(ebx + ecx)");
+  });
+
+  it("declares every struct it casts to", () => {
+    const code = runWithStructs(load());
+    const declared = new Set(
+      [...code.matchAll(/^typedef struct (struct_\w+) \1;$/gm)].map((m) => m[1]),
+    );
+
+    for (const [, id] of code.matchAll(/\(\((struct_\w+) \*\)/g)) expect(declared).toContain(id);
+  });
+
+  it("does not cast a base that is already declared as that pointer", () => {
+    // The nested case: `esi` is promoted to a variable declared `struct_1*`, so
+    // repeating the type at the access site would say nothing new.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "esi, dword ptr [ebx + 8]"],
+        ["mov", "dword ptr [esi], 7"],
+        ["mov", "dword ptr [esi + 4], 9"],
+        ["ret"],
+      ]),
+    );
+
+    // Whether esi ends up declared is up to promotion; if it is, no cast.
+    if (/^\s*struct_\w+\s*\*\s*esi;/m.test(code)) {
+      expect(code).toContain("esi->field_0x0 = 7");
+      expect(code).not.toContain("(struct_1 *)esi");
+    } else {
+      expect(code).toContain("((struct_1 *)esi)->field_0x0 = 7");
+    }
   });
 });
 
@@ -321,14 +426,14 @@ describe("decompileFunction — nested struct fields", () => {
     );
 
     // The two objects, and the load that links them.
-    expect(code).toContain("esi = ebx->field_0x8");
-    expect(code).toContain("esi->field_0x0 = 7");
+    expect(withoutStructCasts(code)).toContain("esi = ebx->field_0x8");
+    expect(withoutStructCasts(code)).toContain("esi->field_0x0 = 7");
     // Before this pass, `uint32_t field_0x8;` — the outer declaration said
     // nothing about the object the rest of the function goes on to use.
     expect(declaredType(code, "field_0x8")).toBe("struct_1*");
     // …and struct_1 has to be declared, or the block names a type it never
     // defines.
-    expect(code).toContain("} struct_1;");
+    expect(code).toContain("struct struct_1 {");
   });
 
   it("resolves a chain of nestings in one pass", () => {
@@ -346,7 +451,7 @@ describe("decompileFunction — nested struct fields", () => {
 
     expect(declaredType(code, "field_0x8")).toBe("struct_1*");
     expect(declaredType(code, "field_0x24")).toBe("struct_2*");
-    expect(code).toContain("} struct_2;");
+    expect(code).toContain("struct struct_2 {");
   });
 
   it("leaves the field alone when the register holds two different objects", () => {
@@ -422,7 +527,3303 @@ describe("decompileFunction — nested struct fields", () => {
     );
 
     expect(declaredType(code, "field_0x8")).toBe("struct_0*");
-    // One struct, so exactly one declaration — the closure must not loop.
-    expect(code.match(/typedef struct \{/g)).toHaveLength(1);
+    // One struct, so exactly one definition — the closure must not loop.
+    expect(code.match(/^struct struct_\d+ \{$/gm)).toHaveLength(1);
+    // …and one forward declaration, which is what makes the self-reference
+    // legal C rather than a use of an undeclared type.
+    expect(code.match(/^typedef struct struct_\d+ struct_\d+;$/gm)).toHaveLength(1);
+  });
+});
+
+/**
+ * Declaration order in the emitted typedef block.
+ *
+ * A struct field can point at a struct that is declared later (or, since
+ * `IRFunction.typedefs` only snapshots what this function touched, at one that
+ * is never declared here at all). The block used to be emitted in registry
+ * order with anonymous `typedef struct { ... } struct_N;`, so a forward
+ * reference was simply a use of an undeclared type and the output did not
+ * compile — t64's sub_14000228C declared a `struct_6*` field inside struct_5,
+ * above struct_6. Forward declarations fix that without needing an order,
+ * which matters because the self-reference case above has a cycle and no
+ * ordering exists for it.
+ */
+describe("decompileFunction — typedef declaration order", () => {
+  it("forward-declares a struct above the field that points at it", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "eax, dword ptr [ebx + 8]"],
+        ["mov", "esi, eax"],
+        ["mov", "dword ptr [esi], 7"],
+        ["mov", "dword ptr [esi + 4], 9"],
+        ["ret"],
+      ]),
+    );
+
+    const forward = code.indexOf("typedef struct struct_1 struct_1;");
+    const use = code.indexOf("struct_1* field_0x8;");
+    const definition = code.indexOf("struct struct_1 {");
+
+    expect(forward).toBeGreaterThanOrEqual(0);
+    expect(use).toBeGreaterThan(forward);
+    // The definition genuinely comes after the use — this is the arrangement
+    // that did not compile, and the forward declaration is what fixes it.
+    expect(definition).toBeGreaterThan(use);
+  });
+
+  it("declares every struct name the block mentions", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "esi, dword ptr [ebx + 8]"],
+        ["mov", "dword ptr [esi + 0x20], 2"],
+        ["mov", "edi, dword ptr [esi + 0x24]"],
+        ["mov", "dword ptr [edi], 7"],
+        ["mov", "dword ptr [edi + 0xC], 9"],
+        ["ret"],
+      ]),
+    );
+
+    const declared = new Set(
+      [...code.matchAll(/^typedef struct (struct_\d+) \1;$/gm)].map((m) => m[1]),
+    );
+    const mentioned = new Set(
+      code
+        .split("\n")
+        .filter((l) => !l.startsWith("typedef struct "))
+        .flatMap((l) => l.match(/\bstruct_\d+\b/g) ?? []),
+    );
+    expect(mentioned.size).toBeGreaterThan(0);
+    for (const name of mentioned) expect(declared).toContain(name);
+  });
+});
+
+/**
+ * IOCTL annotation.
+ *
+ * `isPlausibleIOCTL` is a shape test — device type in `0x01..0x45` or
+ * `>= 0x8000`, any function code, any method — which a large share of ordinary
+ * 32-bit constants satisfy. Running it over every constant the emitter touched
+ * put 782 `IOCTL:` comments into one of pip's console-launcher stubs (40% of
+ * its functions), naming devices and function codes that do not exist. The
+ * annotation now needs the call site as well as the shape.
+ */
+describe("decompileFunction — IOCTL annotation", () => {
+  it("does not decode a constant that never reaches an IOCTL parameter", () => {
+    // 0x4110B0 is a data address in a user-mode image; it decodes as device
+    // type 0x41 (BLUETOOTH) purely because of where its bits fall.
+    const code = run(
+      seq(0x401000, [["push", "0xC"], ["push", "0x4110B0"], ["call", "0x408000"], ["ret"]]),
+    );
+
+    expect(code).toContain("sub_408000(0x4110B0, 0xC)");
+    expect(code).not.toContain("IOCTL:");
+  });
+
+  it("does not decode a constant outside a call at all", () => {
+    const code = run(seq(0x401000, [["mov", "eax, 0x412284"], ["ret"]]));
+
+    expect(code).toContain("0x412284");
+    expect(code).not.toContain("IOCTL:");
+  });
+
+  it("still decodes the control code of a real DeviceIoControl call", () => {
+    // The positive case the gate has to keep: 0x222000 is
+    // CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS),
+    // in the second argument, where DeviceIoControl takes its control code.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0x222000"],
+        ["push", "esi"],
+        ["call", "dword ptr [0x402000]"],
+        ["ret"],
+      ]),
+      imports("DeviceIoControl"),
+    );
+
+    expect(code).toContain("0x222000 /* IOCTL: UNKNOWN | Fn=0x800 | BUFFERED */");
+  });
+
+  it("leaves the other arguments of that call alone", () => {
+    // Same call, with a plausible-looking constant in the input-buffer
+    // argument. Only argument 1 is a control code.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0"],
+        ["push", "0x4110B0"],
+        ["push", "0x222000"],
+        ["push", "esi"],
+        ["call", "dword ptr [0x402000]"],
+        ["ret"],
+      ]),
+      imports("DeviceIoControl"),
+    );
+
+    expect(code).toContain("0x222000 /* IOCTL: UNKNOWN | Fn=0x800 | BUFFERED */");
+    // The input buffer keeps its bare value: only argument 1 is a control code.
+    expect(code).toContain("0x4110B0,");
+    expect(code).not.toContain("0x4110B0 /*");
+  });
+});
+
+/**
+ * What the emitter says when the recovery gave up.
+ *
+ * Two shapes reached the output claiming more than they had. A condition the
+ * lifter could not reconstruct emitted as `if (!)` with a comment where the
+ * test belongs — a statement that reads as a recovered branch and states
+ * nothing. An instruction with no C form emitted as MSVC's `__asm { ... };`,
+ * which is not C outside MSVC. Between them they were the bulk of ~1744 syntax
+ * errors across three binaries.
+ *
+ * Both now say what they are. The unrecovered value becomes a named free
+ * variable carrying the original text, declared uninitialised, because that is
+ * what it is; the unlifted instruction becomes a comment, because inventing an
+ * `__asm__("...")` gcc will syntax-check and then fail to assemble is precisely
+ * the "compiles while lying" failure this project has been bitten by.
+ */
+describe("decompileFunction — what the emitter says when recovery failed", () => {
+  /** `bt` sets CF from a bit test; nothing models CF, so the `jb` has no condition. */
+  const unrecoveredCondition = (): Instruction[] =>
+    seq(0x401000, [
+      ["bt", "eax, 3"],
+      ["jb", "0x401014"],
+      ["mov", "ecx, 1"],
+      ["ret"],
+      ["mov", "ecx, 2"], // 0x401010
+      ["ret"],
+    ]);
+
+  it("names the unrecovered condition instead of emitting an empty test", () => {
+    const code = run(unrecoveredCondition());
+    const guard = code.split("\n").find((l) => l.includes("if ("));
+
+    expect(guard).toBeDefined();
+    // The old output: `if (!/* jb */)`, which is not an expression at all.
+    expect(guard).not.toMatch(/if \(!?\s*\/\*[^*]*\*\/\s*\)/);
+    expect(guard).toMatch(/__unrecovered_\d+/);
+    // The mnemonic that produced it stays where the reader is looking.
+    expect(guard).toContain("jb");
+  });
+
+  it("declares the placeholder, so the reader is told and the C stays valid", () => {
+    const code = run(unrecoveredCondition());
+
+    expect(code).toMatch(/^ +intptr_t __unrecovered_1; \/\* not recovered: jb \*\/$/m);
+  });
+
+  it("gives two unrecovered values two names, since they are two facts", () => {
+    const code = run(
+      seq(0x401000, [
+        ["bt", "eax, 3"],
+        ["jb", "0x401014"],
+        ["mov", "ecx, 1"],
+        ["jmp", "0x401018"],
+        ["mov", "ecx, 2"], // 0x401010
+        ["bt", "edx, 1"], // 0x401014
+        ["jb", "0x401028"],
+        ["mov", "esi, 3"],
+        ["ret"],
+        ["mov", "esi, 4"], // 0x401028
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("__unrecovered_1");
+    expect(code).toContain("__unrecovered_2");
+    // Two declarations, not one shared name asserting the two tests are equal.
+    expect(code.match(/^ +intptr_t __unrecovered_\d+;/gm)).toHaveLength(2);
+  });
+
+  it("reports an unlifted instruction as a comment rather than as MSVC asm", () => {
+    // `leave` has no C form and no operands to lift.
+    const code = run(seq(0x401000, [["push", "ebp"], ["mov", "ebp, esp"], ["leave"], ["ret"]]));
+
+    expect(code).not.toContain("__asm");
+    expect(code).toMatch(/\/\* unlifted: leave *\*\/;/);
+  });
+
+  it("keeps the operands of an unlifted instruction verbatim", () => {
+    const code = run(
+      seq(0x401000, [["rep movsd", "dword ptr es:[edi], dword ptr [esi]"], ["ret"]]),
+    );
+
+    expect(code).toContain("/* unlifted: rep movsd dword ptr es:[edi], dword ptr [esi] */;");
+  });
+
+  it("still gives a trailing label the empty statement it needs", () => {
+    // cleanup.ts asks for that with an empty `raw`, which is not an unlifted
+    // instruction and must not be reported as one.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 1"],
+        ["jne", "0x401018"],
+        ["cmp", "ebx, 2"],
+        ["je", "0x401020"],
+        ["call", "0x402010"],
+        ["ret"],
+        ["call", "0x402000"], // 401018
+        ["jmp", "0x401028"],
+        ["call", "0x402014"], // 401020
+        ["jmp", "0x401030"],
+        ["nop"], // 401028
+        ["jmp", "0x401010"],
+        ["call", "0x402008"], // 401030
+        ["jmp", "0x401028"],
+      ]),
+    );
+    const lines = code.split("\n");
+    const at = lines.findIndex((l) => l.trim() === "loc_401028:");
+
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at + 1].trim()).toBe(";");
+  });
+});
+
+/**
+ * Indirect calls, which are calls through a value rather than to a name.
+ *
+ * The lifter names the target `*esi`, and emitting that verbatim asked C to
+ * dereference an integer — 314 errors across three binaries once the field
+ * accesses stopped hiding them, in 70 functions that had nothing else wrong.
+ */
+describe("decompileFunction — indirect calls", () => {
+  it("says what is being called through, instead of dereferencing an integer", () => {
+    const code = run(seq(0x401000, [["mov", "esi, 0x402000"], ["call", "esi"], ["ret"]]));
+
+    expect(code).not.toMatch(/\(\*\w+\)\(/);
+    expect(code).toContain("((intptr_t (*)())esi)(");
+  });
+
+  it("leaves a direct call to a name alone", () => {
+    const code = run(seq(0x401000, [["call", "0x408000"], ["ret"]]));
+
+    expect(code).toContain("sub_408000()");
+    expect(code).not.toContain("intptr_t (*)()");
+  });
+
+  it("reports a target it could not parse rather than pasting the operand in", () => {
+    const code = run(seq(0x401000, [["call", "dword ptr [ebp + 8]"], ["ret"]]));
+
+    expect(code).not.toContain("dword ptr [ebp + 8])(");
+    expect(code).toMatch(
+      /\(\(intptr_t \(\*\)\(\)\)__unrecovered_\d+ \/\* dword ptr \[ebp \+ 8\] \*\/\)/,
+    );
+  });
+});
+
+/**
+ * Tail calls — a `jmp` that leaves the function.
+ *
+ * `buildCFG` gives such a jmp no successor, and the lifter used to skip every
+ * `j*` mnemonic, so the call the program makes did not appear anywhere in the
+ * output. The argument set-up above it was then deleted as unread, which is
+ * why `t64!sub_140002680` — `mov rcx, [rip+0x14a82] / add rsp,0x28 / jmp
+ * 0x140002208` — emitted a body that appears to do nothing at the end
+ * (peek-a-bin-22t). A reader of that output concludes the code does not call
+ * it, which is worse than ugly output.
+ *
+ * A tail call is `call` plus `ret` with the return address reused, so it lifts
+ * to exactly what this file already asserts for that pair.
+ */
+describe("decompileFunction — a tail call is a call", () => {
+  /** As `run`, 64-bit, with an import table so a `jmp [rip+..]` can name an API. */
+  function run64WithIat(
+    instructions: Instruction[],
+    iatMap: Map<number, { lib: string; func: string }>,
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      iatMap,
+      new Map(),
+      new Map(),
+    ).code;
+  }
+
+  it("names the function a direct tail jmp transfers to", () => {
+    const code = run(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["add", "rsp, 0x28"],
+        ["jmp", "0x401100"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("sub_401100(");
+  });
+
+  it("keeps the argument the tail call was given, which died as unread before", () => {
+    // The shape of t64!sub_140002680: the argument register is loaded, the
+    // frame is torn down, and control leaves by `jmp`.
+    const code = run(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["mov", "rcx, 5"],
+        ["add", "rsp, 0x28"],
+        ["jmp", "0x401100"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("sub_401100(5)");
+  });
+
+  it("names the import a tail jmp through the IAT reaches", () => {
+    // `jmp qword ptr [rip + 0x100]` at 0x401004, size 4 → 0x401004 + 4 + 0x100.
+    const iat = new Map([[0x401108, { lib: "KERNEL32.dll", func: "EnterCriticalSection" }]]);
+    const code = run64WithIat(
+      [
+        ins(0x401000, "lea", "rcx, [rdx + 0x30]"),
+        ins(0x401004, "jmp", "qword ptr [rip + 0x100]"),
+      ],
+      iat,
+    );
+
+    expect(code).toContain("EnterCriticalSection(");
+    expect(code).not.toContain("rip + 0x100");
+  });
+
+  it("emits the tail call on the taken side of a branch, whose body looked dropped", () => {
+    // t64!sub_14000270C: the `jge` arm is `lea rcx,[rdx+0x30]; jmp
+    // EnterCriticalSection`, an unlifted tail call, so that arm emitted nothing.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 0x14"], // 0x401000
+        ["jge", "0x401010"], // 0x401004
+        ["call", "0x407908"], // 0x401008
+        ["ret"], // 0x40100c
+        ["lea", "rcx, [rdx + 0x30]"], // 0x401010
+        ["jmp", "0x401200"], // 0x401014
+      ]),
+      true,
+    );
+
+    expect(code).toContain("sub_401200(");
+    expect(code).toContain("sub_407908(");
+  });
+
+  it("calls the function a 32-bit tail jmp transfers to", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 1"],
+        ["jmp", "0x401100"],
+      ]),
+    );
+
+    expect(code).toContain("sub_401100(");
+  });
+
+  it("does not call a jmp that stays inside the function", () => {
+    // This jmp has a successor, so it is ordinary control flow, not a call.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 1"],
+        ["jmp", "0x40100c"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("sub_40100C");
+    expect(code).not.toContain("0x40100c(");
+  });
+
+  it("does not invent a callee for an indirect tail jmp", () => {
+    // `jmp eax` also ends a successorless block, but the disassembly names no
+    // target — an unrecovered jump-table dispatch looks exactly like this.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 1"],
+        ["jmp", "eax"],
+      ]),
+    );
+
+    expect(code).not.toContain("(*eax)");
+    expect(code).not.toMatch(/\beax\(/);
+  });
+});
+
+/**
+ * String literals, judged as C literals rather than as display text.
+ *
+ * The emitter escaped `"` and nothing else, which is the half of the job that
+ * well-behaved sample data shows you. Recovered strings are bytes out of a
+ * hostile file: `<launcher_dir>\` is a real string in every distlib launcher,
+ * and its trailing backslash escaped the closing quote, so the literal ran on
+ * into the rest of the line (8 "missing terminating quote" errors and 2 stray
+ * backslashes across three binaries).
+ */
+describe("decompileFunction — string literals", () => {
+  /** As `run`, but with a string table, so a constant can resolve to a literal. */
+  function runWithStrings(instructions: Instruction[], strings: Map<number, string>): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      strings,
+      new Map(),
+    ).code;
+  }
+
+  /** The one emitted line that carries the literal. */
+  function literalLine(code: string): string {
+    return code.split("\n").find((l) => l.includes('"')) ?? "";
+  }
+
+  const load = (s: string) =>
+    literalLine(
+      runWithStrings(seq(0x401000, [["mov", "eax, 0x403000"], ["ret"]]), new Map([[0x403000, s]])),
+    );
+
+  it("escapes a trailing backslash instead of escaping the closing quote", () => {
+    const line = load("<launcher_dir>\\");
+
+    expect(line).toContain('"<launcher_dir>\\\\"');
+    // The quote count is what gcc's tokeniser is really doing: an odd number
+    // means the literal never closed.
+    expect(line.split('"').length - 1).toBe(2);
+  });
+
+  it("escapes an embedded quote and backslash separately", () => {
+    expect(load('say "hi"\\now')).toContain('"say \\"hi\\"\\\\now"');
+  });
+
+  it("escapes a newline rather than emitting a line break inside the literal", () => {
+    const line = load("a\r\nb\tc");
+
+    expect(line).toContain('"a\\r\\nb\\tc"');
+    expect(line).not.toContain("\n");
+  });
+
+  it("spells a control byte in octal, which cannot absorb the digit after it", () => {
+    // `\x1` followed by a literal `1` would be read back as `\x11`: C's hex
+    // escapes are greedy, three-digit octal is not.
+    expect(load("a\x0111b")).toContain('"a\\001' + '11b"');
+  });
+
+  it("keeps a high byte as one byte", () => {
+    expect(load("café")).toContain('"caf\\351"');
+  });
+
+  it("breaks up a trigraph", () => {
+    expect(load("what??!")).toContain('"what?\\?!"');
+  });
+});
+
+/**
+ * Control-flow structuring, judged on the emitted C.
+ *
+ * `detectLoops` used to declare a back edge from BFS layers ("the successor is
+ * on my layer or above"), which is true of the merge block of every `if`
+ * without an `else`: the branch reaches the merge in one edge and so does the
+ * fallthrough body, so both sit on layer 1 and the body → merge edge looked
+ * like a loop. A diamond is immune — its merge lands on layer 2 — which is why
+ * hand-written fixtures never caught it, while ~86% of the loops reported on
+ * three real MSVC binaries turned out not to exist (peek-a-bin-lrs).
+ *
+ * These shapes are written as instruction streams because the defect is only
+ * visible in the emitted text: the guard around a conditional store was
+ * *dropped* and the store became unconditional, which no stage-level assertion
+ * on the IR would have noticed.
+ */
+describe("decompileFunction — control-flow structuring", () => {
+  /** All `if`/`while`/`for`/`do` lines, trimmed, in order. */
+  function controlLines(code: string): string[] {
+    return code
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^(\}\s*)?(else\b|if \(|while \(|for \(|do \{)/.test(l));
+  }
+
+  it("keeps the guard on an if without an else, and invents no loop", () => {
+    // test ecx, ecx / je merge  → the store runs only when ecx != 0.
+    const code = run(
+      seq(0x401000, [
+        ["test", "ecx, ecx"],
+        ["je", "0x401014"],
+        ["mov", "edx, 5"],
+        ["mov", "dword ptr [ecx], edx"],
+        ["xor", "eax, eax"],
+        ["ret"], // 0x401014 — the merge, reached both ways
+      ]),
+    );
+
+    // `je` is taken when ecx == 0 and the taken path skips the store, so the
+    // store's guard is the negation: ecx != 0.
+    expect(code).toContain("if (ecx != 0)");
+    const guarded = code.slice(code.indexOf("if (ecx != 0)"));
+    expect(guarded).toContain("= 5;");
+    expect(code).not.toMatch(/\bwhile\b|\bdo\b/);
+  });
+
+  it("keeps both arms of an if/else", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 0"],
+        ["je", "0x401014"],
+        ["mov", "eax, 1"],
+        ["jmp", "0x401018"],
+        ["mov", "eax, 2"],
+        ["mov", "eax, 3"], // 0x401014 — the `je` target
+        ["ret"], // 0x401018 — the merge
+      ]),
+    );
+
+    expect(controlLines(code)).toEqual(["if (ecx == 0) {", "} else {"]);
+    expect(code).not.toMatch(/\bwhile\b|\bdo\b/);
+  });
+
+  it("still finds a genuine pre-tested loop", () => {
+    //   0x401004 cmp ecx, 8      ← header, dominates the latch below
+    //   0x401008 jge exit
+    //   0x40100c inc ecx
+    //   0x401010 jmp 0x401004    ← back edge
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 0"],
+        ["cmp", "ecx, 8"],
+        ["jge", "0x401014"],
+        ["inc", "ecx"],
+        ["jmp", "0x401004"],
+        ["ret"],
+      ]),
+    );
+
+    // `jge` leaves the loop, so iteration continues while ecx < 8. Either
+    // spelling of the loop carries that: the induction variable is recognised
+    // here, so it comes out as a `for` whenever the initialisation ends up
+    // adjacent to the loop — which it does once the phi's `ecx = ecx` self-copy
+    // is no longer emitted between the two.
+    expect(code).toMatch(/(while \(ecx < 8\)|for \(ecx = 0; ecx < 8; ecx\+\+\))/);
+    expect(code).not.toContain("ecx >= 8");
+  });
+
+  it("still finds a genuine bottom-tested loop", () => {
+    //   0x401004 inc eax         ← header; the jl below jumps back to it
+    //   0x401008 cmp eax, 5
+    //   0x40100c jl  0x401004    ← back edge
+    const code = run(
+      seq(0x401000, [
+        ["xor", "eax, eax"],
+        ["inc", "eax"],
+        ["cmp", "eax, 5"],
+        ["jl", "0x401004"],
+        ["ret"],
+      ]),
+    );
+
+    // `do`/`while`, not `while`: the increment is in the header, so it runs
+    // before the test on every iteration including the first. `while (eax < 5)
+    // { eax++; }` would test the value the increment has not produced yet, and
+    // would run the increment one time fewer than the machine does.
+    // `controlLines` counts `do {` and `} while (…);` separately.
+    const loop = controlLines(code);
+    expect(loop).toEqual(["do {", "} while (eax < 5);"]);
+    // The increment has to survive, in either spelling emit.ts uses for it.
+    expect(code).toMatch(/(eax\+\+|eax \+= 1|= eax \+ 1)/);
+  });
+
+  it("keeps the back-edge test of a loop that also leaves from its header", () => {
+    // The `WriteFile` retry shape of t64 `sub_14000D8C4` / w64 `sub_14000BD44`
+    // (peek-a-bin-jlo), reduced. The loop has two exits and continues only when
+    // *both* tests say so:
+    //
+    //   0x401004 mov  [ebp-4], 3     ← header: the work (the `WriteFile` call)
+    //   0x401008 test eax, eax
+    //   0x40100c je   0x40101c       ← leaves when eax == 0
+    //   0x401010 add  esi, 4
+    //   0x401014 cmp  edi, esi
+    //   0x401018 jg   0x401004       ← back edge: repeats while edi > esi
+    //   0x40101c ret                   both exits land here
+    //
+    // The emitted loop said `while (eax != 0)` and stopped there: the body
+    // ended, the loop repeated, and `edi > esi` appeared nowhere inside it. C
+    // that claims the loop runs again on `eax != 0` alone.
+    const code = run(
+      seq(0x401000, [
+        ["xor", "esi, esi"],
+        ["mov", "dword ptr [ebp - 4], 3"], // 0x401004 — header
+        ["test", "eax, eax"],
+        ["je", "0x40101c"],
+        ["add", "esi, 4"], // 0x401010
+        ["cmp", "edi, esi"],
+        ["jg", "0x401004"],
+        ["mov", "edx, 1"], // 0x40101c
+        ["ret"],
+      ]),
+    );
+
+    // Both tests are inside the loop, and the loop repeats only when both hold.
+    expect(code).toMatch(/if \(edi <= esi\) \{\n\s+break;/);
+    expect(code).toMatch(/if \(eax == 0\) \{\n\s+break;/);
+    // …and the one thing it must never say is that `eax` alone decides.
+    expect(code).not.toMatch(/while \(eax != 0\) \{/);
+  });
+
+  it("does not take a header test whose arms both stay in the loop as the loop test", () => {
+    // t32 `sub_40A702` / `sub_40C2E3` / `sub_4052AE` (peek-a-bin-bhh): the
+    // block the back edge lands on ends in a branch that picks between two
+    // places *inside* the body. It decides nothing about whether there is
+    // another iteration, and reading it as the loop's test produced
+    // `while (edi >= ecx)` for a loop the machine runs while `edx < esi`.
+    //
+    //   0x401004 cmp  edi, ecx      ← header, both arms below stay in the loop
+    //   0x401008 jb   0x401014
+    //   0x40100c mov  [edi], 7
+    //   0x401010 jmp  0x401014
+    //   0x401014 inc  edx
+    //   0x401018 cmp  edx, esi
+    //   0x40101c jb   0x401004      ← back edge: the real test
+    const code = run(
+      seq(0x401000, [
+        ["xor", "edx, edx"],
+        ["cmp", "edi, ecx"], // 0x401004 — header
+        ["jb", "0x401014"],
+        ["mov", "dword ptr [edi], 7"], // 0x40100c
+        ["jmp", "0x401014"],
+        ["inc", "edx"], // 0x401014
+        ["cmp", "edx, esi"],
+        ["jb", "0x401004"],
+        ["ret"], // 0x401020
+      ]),
+    );
+
+    // The loop test is the back edge's, and it is not negated.
+    expect(code).toMatch(/\} while \(edx < esi\);/);
+    // The header's comparison is a guard inside the body — never the loop's
+    // own condition, in either polarity.
+    expect(code).not.toMatch(/(while|for) \([^)]*edi[^)]*\)/);
+    // `jb` skips the store, so the store runs when edi >= ecx, and it still
+    // runs conditionally.
+    expect(code).toMatch(/if \(edi >= ecx\) \{\n\s+\*\(int32_t\*\)\(edi\) = 7;/);
+  });
+
+  it("does not test a header's own statements before running them", () => {
+    // The `while ((c = *p) != 0)` shape: the header loads the byte the test
+    // looks at, so `while (al != 0) { al = *rbx; … }` guards the first
+    // iteration on whatever `al` held *before* the loop, and stops running the
+    // load one iteration early. w64 `sub_140009740` (peek-a-bin-bhh).
+    //
+    //   0x401004 mov  al, [esi]     ← header does work…
+    //   0x401008 test al, al
+    //   0x40100c je   0x401018      ← …and only then tests it
+    //   0x401010 inc  esi
+    //   0x401014 jmp  0x401004
+    const code = run(
+      seq(0x401000, [
+        ["xor", "esi, esi"],
+        ["mov", "al, byte ptr [esi]"], // 0x401004 — header
+        ["test", "al, al"],
+        ["je", "0x401018"],
+        ["inc", "esi"], // 0x401010
+        ["jmp", "0x401004"],
+        ["mov", "edx, 1"], // 0x401018
+        ["ret"],
+      ]),
+    );
+
+    // No pre-test on a register the loop body is what assigns.
+    expect(code).not.toMatch(/while \(al != 0\) \{/);
+    // The load comes first, then the test, in that order.
+    const load = code.search(/al = /);
+    const test = code.search(/al == 0/);
+    expect(load).toBeGreaterThanOrEqual(0);
+    expect(test).toBeGreaterThan(load);
+    expect(code).toMatch(/break;|goto /);
+  });
+
+  it("emits two `if`s in a row as siblings, not as one nested in the other", () => {
+    //   if (ecx) *ecx = 1;
+    //   if (edx) *edx = 2;
+    // Both merges are `if`-without-`else` triangles, and the second one is the
+    // first one's merge block.
+    const code = run(
+      seq(0x401000, [
+        ["test", "ecx, ecx"],
+        ["je", "0x40100c"],
+        ["mov", "dword ptr [ecx], 1"],
+        ["test", "edx, edx"], // 0x40100c
+        ["je", "0x401018"],
+        ["mov", "dword ptr [edx], 2"],
+        ["xor", "eax, eax"], // 0x401018
+        ["ret"],
+      ]),
+    );
+
+    expect(controlLines(code)).toEqual(["if (ecx != 0) {", "if (edx != 0) {"]);
+    // Siblings: both guards at the same indentation, and no jump out of one
+    // into the middle of the other.
+    const indents = code
+      .split("\n")
+      .filter((l) => l.trim().startsWith("if ("))
+      .map((l) => l.match(/^ */)![0].length);
+    expect(indents[0]).toBe(indents[1]);
+    expect(code).not.toContain("goto");
+  });
+
+  it("keeps a guard that sits inside a loop body", () => {
+    //   0x401004 cmp ecx, 8       ← header
+    //   0x401008 jge exit
+    //   0x40100c test edx, edx    ← guard inside the body
+    //   0x401010 je  0x401018
+    //   0x401014 mov [edx], ecx
+    //   0x401018 inc ecx
+    //   0x40101c jmp 0x401004     ← back edge
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 0"],
+        ["cmp", "ecx, 8"],
+        ["jge", "0x401020"],
+        ["test", "edx, edx"],
+        ["je", "0x401018"],
+        ["mov", "dword ptr [edx], ecx"],
+        ["inc", "ecx"],
+        ["jmp", "0x401004"],
+        ["ret"],
+      ]),
+    );
+
+    const lines = controlLines(code);
+    // `while` or `for` — see "still finds a genuine pre-tested loop"; what
+    // matters here is that the guard stays inside whichever one it is.
+    expect(lines[0]).toMatch(/(while \(ecx < 8\)|for \(ecx = 0; ecx < 8; ecx\+\+\))/);
+    expect(lines).toContain("if (edx != 0) {");
+    expect(code).toContain("= ecx;");
+  });
+
+  it("does not turn a tail call into an infinite loop", () => {
+    // add rsp, 0x28 / jmp <another function> — `jmp` out of the function is not
+    // a back edge, and the block it leaves has no successor at all.
+    const code = run(
+      seq(0x401000, [
+        ["sub", "rsp, 0x28"],
+        ["test", "ecx, ecx"],
+        ["je", "0x401014"],
+        ["mov", "edx, 1"],
+        ["add", "rsp, 0x28"], // 0x401010
+        ["jmp", "0x408000"], // 0x401014 — outside [0x401000, 0x401018)
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("while (1)");
+    expect(code).not.toContain("do {");
+  });
+
+  /**
+   * peek-a-bin-cb2. A loop with two different exit targets: the header's `jge`
+   * leaves to one, an `if` inside the body leaves to the other. Structuring a
+   * loop ends by picking *one* block to carry on from, so everything hanging off
+   * the other exit used to vanish from the output with no trace at all — the
+   * worst kind of defect this pipeline can have, because the reader concludes
+   * the code does not exist.
+   */
+  it("keeps both exit paths of a loop that breaks to two different places", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 0"],
+        ["cmp", "ecx, 8"], // 0x401004 — loop header
+        ["jge", "0x40101c"], // exit A
+        ["test", "edx, edx"], // 0x40100c
+        ["je", "0x401024"], // exit B — a *different* way out of the same loop
+        ["inc", "ecx"], // 0x401014
+        ["jmp", "0x401004"], // back edge
+        ["mov", "eax, 0x11"], // 0x40101c — exit A
+        ["ret"],
+        ["mov", "eax, 0x22"], // 0x401024 — exit B
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("0x11");
+    expect(code).toContain("0x22");
+  });
+
+  /**
+   * peek-a-bin-cb2, the loop-free half. Two conditional blocks branching to the
+   * same failure target are folded into `condA && condB`, and every block the
+   * fold consumes is marked visited — so any *work* those blocks did between
+   * the two tests is discarded with them. On t32 that deleted two whole calls
+   * from one function (`sub_405B72`).
+   *
+   * `a && f()` in C only evaluates `f()` when `a` holds, so the collapse is
+   * only sound for a block that does nothing but test. When it does more, the
+   * shape is a nested `if`, and the statements have to survive either way.
+   */
+  it("does not fold a side effect away into a short-circuit condition", () => {
+    const code = run(
+      seq(0x401000, [
+        ["test", "ecx, ecx"],
+        ["je", "0x401018"], // A fails → skip everything
+        ["call", "0x402000"], // 0x401008 — runs only when ecx != 0
+        ["test", "edx, edx"], // 0x40100c
+        ["je", "0x401018"], // B fails → same target, so this looks like `&&`
+        ["mov", "dword ptr [ecx], 1"], // 0x401014
+        ["ret"], // 0x401018
+      ]),
+    );
+
+    expect(code).toContain("sub_402000");
+  });
+});
+
+/**
+ * `.pdata` exception regions. `DisasmFunction.address` is a VA and
+ * `RuntimeFunction.beginAddress` is an RVA; comparing them directly matched
+ * nothing on any real image, so `__try` was emitted zero times across 1475
+ * functions of three real binaries despite the handlers being present
+ * (peek-a-bin-yrh).
+ */
+describe("decompileFunction — .pdata exception regions", () => {
+  const body = seq(0x401000, [["mov", "eax, 1"], ["ret"]]);
+  const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 8 };
+
+  function decompile(runtimeFunctions: RuntimeFunction[]): string {
+    return decompileFunction(
+      func,
+      body,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      runtimeFunctions,
+    ).code;
+  }
+
+  /** An entry whose RVAs correspond to `func` under a 0x400000 image base. */
+  const entry = (begin: number, size: number, handler?: number): RuntimeFunction => ({
+    beginAddress: begin,
+    endAddress: begin + size,
+    unwindInfoAddress: 0x3000,
+    handlerAddress: handler,
+    handlerFlags: handler === undefined ? 0 : 1,
+  });
+
+  it("wraps the body when the entry is the same function, expressed as an RVA", () => {
+    const code = decompile([entry(0x1000, 8, 0x2000)]);
+    expect(code).toContain("__try {");
+    expect(code).toContain("__except(");
+    // The handler is an RVA too; it is reported in the same unit as every
+    // other address in the pane, i.e. rebased to a VA.
+    expect(code).toContain("0x402000");
+    expect(code).not.toContain("0x2000\n");
+  });
+
+  it("still matches an array the caller already normalised to VAs", () => {
+    const code = decompile([entry(0x401000, 8, 0x402000)]);
+    expect(code).toContain("__try {");
+    expect(code).toContain("0x402000");
+  });
+
+  it("ignores an entry with no exception handler", () => {
+    expect(decompile([entry(0x1000, 8)])).not.toContain("__try");
+  });
+
+  it("refuses to guess between two entries an image base apart", () => {
+    // 0x1000 and 0x11000 are both 64K-congruent with the function's VA and
+    // both claim its extent: there is no evidence for either, so neither is
+    // used. A wrongly attributed __try is worse than a missing one.
+    const code = decompile([entry(0x1000, 8, 0x2000), entry(0x11000, 8, 0x12000)]);
+    expect(code).not.toContain("__try");
+  });
+});
+
+/**
+ * `goto` and the label it needs.
+ *
+ * `structure.ts` emits a `goto loc_<addr>` when a block's only successor has
+ * already been emitted, and nothing ever emitted the matching label — every one
+ * of the 762 gotos in the three real binaries dangled (peek-a-bin-alc). The
+ * label is placed by address, on the first emitted line carrying the target
+ * address, so it lands wherever that block's code actually ended up — including
+ * inside a branch body, which is legal C and is where these jumps go.
+ *
+ * The instruction streams below are shaped to defeat convergence detection: the
+ * else arm reaches the shared block two blocks later than it reaches the join,
+ * so the join wins as the convergence and the shared block is left to be jumped
+ * to rather than emitted after the `if`.
+ */
+describe("decompileFunction — goto labels", () => {
+  /**
+   * 0x401028 is emitted inside the then-arm and jumped to from the else-arm.
+   * `[10]` is that block's only body instruction, so a caller can blank it.
+   */
+  const sharedBlockJump = (bodyOfTarget: [string, string?]): Instruction[] =>
+    seq(0x401000, [
+      ["cmp", "eax, 1"], // 401000
+      ["jne", "0x401018"], // 401004 → then-arm
+      ["cmp", "ebx, 2"], // 401008   else-arm
+      ["je", "0x401020"], // 40100c
+      ["call", "0x402010"], // 401010 the join
+      ["ret"], // 401014
+      ["call", "0x402000"], // 401018 then-arm
+      ["jmp", "0x401028"], // 40101c → the shared block
+      ["call", "0x402014"], // 401020
+      ["jmp", "0x401030"], // 401024
+      bodyOfTarget, // 401028 the shared block
+      ["jmp", "0x401010"], // 40102c → the join
+      ["call", "0x402008"], // 401030
+      ["jmp", "0x401028"], // 401034 → the shared block, already emitted
+    ]);
+
+  it("emits the label for a goto whose target reached the output", () => {
+    const code = run(sharedBlockJump(["call", "0x402004"]));
+
+    expect(code).toContain("goto loc_401028;");
+    // The label, on the line the target block's own code was emitted at.
+    expect(code).toMatch(/^\s*loc_401028:$/m);
+    const lines = code.split("\n");
+    expect(lines[lines.findIndex((l) => l.trim() === "loc_401028:") + 1].trim()).toBe(
+      "sub_402004();",
+    );
+    // Nothing was invented: exactly one label, for the one jump that needs it.
+    expect(code.match(/^\s*loc_[0-9A-F]+:$/gm)).toHaveLength(1);
+  });
+
+  it("does not label an address nothing jumps to", () => {
+    // Same stream, minus the second reference to the shared block, so no goto
+    // is emitted at all. Labelling every block start would litter the output.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 1"],
+        ["je", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"], // 0x401010
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("goto ");
+    expect(code).not.toMatch(/^\s*loc_[0-9A-F]+:$/m);
+  });
+
+  it("labels a target block that lifted to no statements at all", () => {
+    // The shared block is a `nop`: it lifts to nothing, so no emitted line
+    // carries 0x401028 and an emitter matching on addresses has nothing to
+    // anchor to — that was two thirds of every goto (peek-a-bin-uzi).
+    // `structure.ts` knows where the block goes whether or not it produced a
+    // statement, so it emits the label there, and the empty statement after it
+    // is what C requires of a label at the end of a block.
+    const code = run(sharedBlockJump(["nop"]));
+
+    expect(code).toContain("goto loc_401028;");
+    expect(code).not.toContain("// no label:");
+    const lines = code.split("\n");
+    const at = lines.findIndex((l) => l.trim() === "loc_401028:");
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at + 1].trim()).toBe(";");
+  });
+
+  it("keeps the line map pointing at the right instructions after inserting labels", () => {
+    // The labels are spliced into the emitted lines, so every address mapped
+    // below the insertion point shifts by one. A stale map sends the
+    // disassembly pane to the wrong instruction on click.
+    const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 0x38 };
+    const result = decompileFunction(
+      func,
+      sharedBlockJump(["call", "0x402004"]),
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    );
+    const lines = result.code.split("\n");
+    for (const [line, addr] of result.lineMap) {
+      expect(lines[line]).not.toMatch(/^\s*loc_[0-9A-F]+:$/);
+      if (addr === 0x401028) expect(lines[line].trim()).toBe("sub_402004();");
+    }
+  });
+});
+
+/**
+ * What a counted loop's body is allowed to lose on the way to `for` (peek-a-bin-42l).
+ *
+ * `detectForLoop` recognises the induction variable and hands back a body that
+ * is every body block's statements concatenated in block-id order. Used as the
+ * loop body verbatim that is a rewrite, not a recovery: the control flow
+ * between those blocks is gone, and blocks belonging to the loop that the walk
+ * had already emitted somewhere else come back a second time. On the three
+ * distlib binaries it lost 111 statements per x64 image and duplicated enough
+ * on t32 to make two functions four times longer than the code they describe.
+ */
+describe("decompileFunction — a for loop keeps its body", () => {
+  /**
+   * `for (ecx = 0; ecx < 10; ecx++)` around a branch: the arms call different
+   * functions and join at the increment, which is the back edge's block.
+   */
+  const countedLoopWithBranch = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "rcx, 0"], // 401000 init
+      ["jmp", "0x401008"], // 401004
+      ["cmp", "rcx, 0xa"], // 401008 the test
+      ["jge", "0x40102c"], // 40100c exit
+      ["cmp", "edx, 0"], // 401010 body: branch
+      ["je", "0x401020"], // 401014
+      ["call", "0x402000"], // 401018 not-taken arm
+      ["jmp", "0x401024"], // 40101c
+      ["call", "0x402004"], // 401020 taken arm
+      ["add", "rcx, 1"], // 401024 the update
+      ["jmp", "0x401008"], // 401028 back edge
+      ["ret"], // 40102c
+    ]);
+
+  /** The same loop with a load in the header, which runs on every iteration. */
+  const countedLoopWithHeaderWork = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "rcx, 0"], // 401000
+      ["jmp", "0x401008"], // 401004
+      ["mov", "rax, qword ptr [rsi]"], // 401008 header work
+      ["cmp", "rcx, 0xa"], // 40100c
+      ["jge", "0x401030"], // 401010
+      ["cmp", "edx, 0"], // 401014
+      ["je", "0x401024"], // 401018
+      ["call", "0x402000"], // 40101c
+      ["jmp", "0x401028"], // 401020
+      ["call", "0x402004"], // 401024
+      ["add", "rcx, 1"], // 401028
+      ["jmp", "0x401008"], // 40102c
+      ["ret"], // 401030
+    ]);
+
+  it("keeps the branch inside the body instead of running both arms", () => {
+    const code = run(countedLoopWithBranch(), true);
+
+    expect(code).toMatch(/^\s*for \(/m);
+    // Both calls are conditional, and each appears exactly once.
+    expect(code).toContain("} else {");
+    expect(code.match(/sub_402000\(\);/g)).toHaveLength(1);
+    expect(code.match(/sub_402004\(\);/g)).toHaveLength(1);
+  });
+
+  it("keeps the statements of the loop header itself", () => {
+    // The load runs on every iteration, before the test. The flat body was
+    // built from the body blocks only, so the header's own work vanished.
+    const code = run(countedLoopWithHeaderWork(), true);
+
+    expect(code).toContain("rax = *(int64_t*)(rsi);");
+  });
+
+  it("does not repeat the initialiser it lifted into the header", () => {
+    const code = run(countedLoopWithBranch(), true);
+    // Once, in the `for` header — never also as a statement before the loop.
+    expect(code.match(/rcx = 0\b/g)).toHaveLength(1);
+    expect(code).not.toMatch(/^\s*rcx = 0;$/m);
+  });
+});
+
+/**
+ * Array fields in the emitted typedef block (peek-a-bin-b2x).
+ *
+ * `isArray` records only that the field was reached through an index; struct
+ * synthesis never learns an element count. Declaring all of them `[]` produced
+ * "flexible array member not at end of struct" for 26 structs across the three
+ * real binaries — and a field with another field after it plainly cannot run
+ * past that field's offset, so the layout does bound it.
+ */
+describe("decompileFunction — array fields are sized from the layout", () => {
+  it("sizes an array field from the offset of the field that follows it", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + ecx*4], 1"],
+        ["mov", "dword ptr [ebx + 8], 2"],
+        ["ret"],
+      ]),
+    );
+
+    // Two 4-byte elements fit between offset 0 and offset 8.
+    expect(code).toContain("uint32_t array_0x0[2];");
+    expect(code).not.toContain("array_0x0[]");
+  });
+
+  it("counts elements by element size, not by field size", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "word ptr [ebx + ecx*2], 1"],
+        ["mov", "dword ptr [ebx + 8], 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("uint16_t array_0x0[4];");
+  });
+
+  it("leaves a trailing array field open, which is what a flexible array member means", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx], 1"],
+        ["mov", "dword ptr [ebx + ecx*4 + 8], 2"],
+        ["ret"],
+      ]),
+    );
+
+    // Nothing after it bounds it, and it is last, so `[]` is both legal and
+    // the honest reading.
+    expect(code).toContain("uint32_t array_0x8[];");
+    const structBlock = code.slice(code.indexOf("struct struct_0 {"), code.indexOf("};"));
+    expect(structBlock.trimEnd().split("\n").pop()?.trim()).toBe("uint32_t array_0x8[];");
+  });
+});
+
+describe("decompileFunction — an expression is only moved where it still means the same thing", () => {
+  // peek-a-bin-juu, the half of it that lives in fold.ts. `foldBlock`'s
+  // single-use inlining scanned forward for the one statement that reads the
+  // destination register, and stopped only at a write to *that* register or at
+  // a call. It never checked the expression's own inputs, so a redefinition of
+  // one of them in between was invisible — and after destroySSA the versions
+  // are gone, so two different SSA values of a register share one name and
+  // nothing downstream can tell them apart either.
+  //
+  // `cmove rbx, r9` reads r9 before `inc r9` runs. Emitting the increment first
+  // states that the conditional move saw the incremented value.
+  it("keeps a conditional move ahead of the increment it reads", () => {
+    const code = run(
+      seq(0x401000, [
+        ["xor", "ebx, ebx"],
+        ["mov", "eax, dword ptr [r9]"], // 0x401004 — loop head
+        ["cmp", "eax, r10d"],
+        ["cmove", "rbx, r9"],
+        ["inc", "r9"],
+        ["cmp", "r9, 10"],
+        ["jl", "0x401004"],
+        ["mov", "rax, rbx"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const body = code.split("\n").map((l) => l.trim());
+    const move = body.findIndex((l) => l.includes("? r9 :"));
+    const inc = body.findIndex((l) => l.startsWith("r9++"));
+    expect(move).toBeGreaterThanOrEqual(0);
+    expect(inc).toBeGreaterThanOrEqual(0);
+    // Before the fix these came out the other way round.
+    expect(move).toBeLessThan(inc);
+  });
+});
+
+describe("decompileFunction — a value is only reused where it has actually been computed", () => {
+  // Global value numbering kept one flat table of available expressions while
+  // walking the dominator tree, so a definition stayed visible after its
+  // subtree was left. Both arms of this branch compute `edx + 5` into ebx; the
+  // else arm's definition was rewritten to the then arm's, the phi went
+  // trivial, and the assignment disappeared from the else arm entirely — the
+  // emitted C then returned the *incoming* ebx on a path where the machine
+  // code assigns it. SSA versions do not catch this: each register really is
+  // defined once, just on paths that exclude each other.
+  it("assigns on every path the machine code assigns on", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 0"],
+        ["je", "0x401014"],
+        ["lea", "ebx, [edx + 5]"],
+        ["mov", "ebp, 1"],
+        ["jmp", "0x40101c"],
+        ["lea", "esi, [edx + 5]"], // 0x401014 — reached when ecx == 0
+        ["mov", "ebx, esi"],
+        ["mov", "eax, ebx"], // 0x40101c — join
+        ["ret"],
+      ]),
+    );
+
+    // Two assignments of the same value, one per arm. Before the fix the
+    // `else` arm was empty and only one assignment survived.
+    const assigns = code.split("\n").filter((l) => /= edx \+ 5;$/.test(l.trim()));
+    expect(assigns).toHaveLength(2);
+    expect(code).toContain("else");
+  });
+});
+
+/**
+ * A function's own stack frame is not an object, and must not be synthesised
+ * into one (peek-a-bin-a6n).
+ *
+ * The whole difficulty is that the two readings of `[rbp + N]` are spelled
+ * identically. In a function that established a frame pointer it is a stack
+ * slot — an incoming argument or a local — and the struct this pass used to
+ * build out of them had a local and an argument as its two "fields". Under
+ * frame-pointer omission, which is most of x64, RBP is an ordinary callee-saved
+ * register usually holding an object pointer, and `[rbp + N]` really is a field
+ * access.
+ *
+ * So the pairs below differ by exactly the two prologue instructions and expect
+ * opposite things. Excluding RBP outright would satisfy the first of each pair
+ * and break the second, which is the failure mode being guarded: it would
+ * delete most of the struct recovery on x64.
+ *
+ * The accesses are written with an index register on purpose. A plain
+ * `[rbp + 0x30]` in a framed function is promoted to a named slot long before
+ * struct synthesis sees it; an indexed one is not, and is how a frame reached
+ * the emitted output as `esp->field_0x8` in the first place.
+ */
+describe("decompileFunction — the stack frame is not a struct", () => {
+  /**
+   * Identical in both cases. `[rbp + 0x10]` is the argument slot whose *name*
+   * carries the verdict — `arg_0` when stack.ts verified the prologue,
+   * `arg_0x10` when it did not. The pair at 4 and 8 sits below the argument
+   * area, so no promotion pass claims either one and both reach struct
+   * synthesis as raw derefs, which is what makes the two cases comparable at
+   * all. They are 4 bytes wide because the subject here is which base is an
+   * object, not what a layout does with fields that overlap — an 8-byte read at
+   * 4 runs through 8, and no struct declaration can place both (peek-a-bin-ey0).
+   */
+  const ACCESSES: [string, string?][] = [
+    ["mov", "rax, qword ptr [rbp + 0x10]"],
+    ["mov", "edx, dword ptr [rbp + 4]"],
+    ["mov", "dword ptr [rbp + 8], edx"],
+    ["ret"],
+  ];
+
+  const PROLOGUE: [string, string?][] = [
+    ["push", "rbp"],
+    ["mov", "rbp, rsp"],
+    ["sub", "rsp, 0x20"],
+  ];
+
+  /** 64-bit, with the StackFrame the real caller computes — as dispatch.ts does. */
+  function run64(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, true),
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  it("does not synthesise a struct out of a verified frame pointer", () => {
+    const code = run64(seq(0x401000, [...PROLOGUE, ...ACCESSES]));
+
+    // Before the fix: `struct struct_0 { field_0x4; field_0x8; }` and
+    // `rbp->field_0x8 = rbp->field_0x4` — two stack slots declared as an
+    // object, and not compilable C either, since rbp is not a struct pointer.
+    expect(code).not.toContain("typedef struct");
+    expect(code).not.toMatch(/\b(?:rbp|rsp|ebp|esp)->/);
+    // The accesses are still emitted, as the stack references they are.
+    expect(code).toMatch(/rbp \+ /);
+    // …and the argument slot is still an argument.
+    expect(code).toContain("arg_0");
+  });
+
+  it("still synthesises a struct from a frame-pointer-omitted object pointer", () => {
+    // Identical accesses, no prologue: nothing here ever wrote a stack address
+    // into RBP, so it holds an object it was handed — and stack.ts says as much
+    // by naming the slot `arg_0x10` rather than `arg_0`.
+    const code = run64(seq(0x401000, ACCESSES));
+
+    expect(code).toContain("typedef struct");
+    expect(code).toContain("field_0x4");
+    expect(code).toContain("field_0x8");
+    expect(withoutStructCasts(code)).toMatch(/rbp->field_0x8 = rbp->field_0x4/);
+  });
+
+  it("does not synthesise a struct out of the stack pointer itself", () => {
+    // No frame pointer anywhere — two indexed accesses off RSP, an outgoing
+    // argument slot and a spill slot. The stack pointer is never an object.
+    const code = run64(
+      seq(0x401000, [
+        ["sub", "rsp, 0x40"],
+        ["mov", "rax, qword ptr [rsp + rcx*8 + 0x18]"],
+        ["mov", "qword ptr [rsp + rcx*8 + 0x20], rax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("typedef struct");
+    expect(code).not.toMatch(/\brsp->/);
+  });
+
+  it("does not synthesise a struct out of a frame pointer established with lea", () => {
+    // `lea rbp, [rsp + 0x20]` shifts every argument offset, so stack.ts refuses
+    // to number the slots and the name channel stays silent. The assignment
+    // survives in the body, which is the other half of the evidence.
+    const code = run64(
+      seq(0x401000, [
+        ["push", "rbp"],
+        ["lea", "rbp, [rsp + 0x20]"],
+        ["mov", "rax, qword ptr [rbp + rcx*8 + 0x30]"],
+        ["mov", "qword ptr [rbp + rcx*8 + 0x38], rax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("typedef struct");
+    expect(code).not.toMatch(/\brbp->/);
+  });
+});
+
+/**
+ * The parameter reached only through `push dword ptr [ebp + 8]`.
+ *
+ * Capstone prints a displacement as `0x`-prefixed hex only from 0xA up and as a
+ * bare digit below it, so `analyzeStackFrame`'s `0x`-only operand patterns saw
+ * nothing in the first ten bytes of the frame — which on x86 is argument 0 at
+ * `[ebp + 8]` and the first locals at `[ebp - 4]` / `[ebp - 8]`. The frame came
+ * back holding whatever happened to live at 0xA or beyond and nothing else, so
+ * the function was emitted as taking no arguments and the unrecognised slots
+ * stayed raw derefs all the way to the output.
+ */
+describe("decompileFunction — stack slots below 0xA", () => {
+  /** A 32-bit run with the StackFrame the real caller computes. */
+  function runWithStackFrame(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, false),
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  it("recovers the argument at [ebp + 8] alongside the one at [ebp + 0xC]", () => {
+    const code = runWithStackFrame(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["mov", "eax, dword ptr [ebp + 0xC]"],
+        ["push", "dword ptr [ebp + 8]"],
+        ["call", "0x408000"],
+        ["ret"],
+      ]),
+    );
+
+    const signature = code.split("\n").find((l) => /^\w[^;]*\(/.test(l))!;
+    // Before the fix the signature named only arg_1 — the argument at 0xC —
+    // and argument 0 was emitted as a bare `*(int32_t*)(ebp + 8)`.
+    expect(signature).toContain("arg_0");
+    expect(signature).toContain("arg_1");
+    expect(code).toContain("sub_408000(arg_0)");
+  });
+
+  it("names the local at [ebp - 4] like any other", () => {
+    const code = runWithStackFrame(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["sub", "esp, 0x10"],
+        ["mov", "dword ptr [ebp - 4], eax"],
+        ["mov", "dword ptr [ebp - 0x10], eax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("var_4");
+    expect(code).toContain("var_10");
+  });
+});
+
+/**
+ * A register's incoming value and its first definition are two different
+ * values, and SSA has to keep them apart.
+ *
+ * `renameVariables` numbered the first definition 0, and a read with an empty
+ * version stack — the function-entry value — also renamed to 0. Every pass in
+ * `ssaopt.ts` keys on (canonical register, version), so the two were one value:
+ * constant and copy propagation rewrote *incoming* values with a definition
+ * that may never have run, and the phi that should have joined them went
+ * trivial, taking the branch it came from with it (peek-a-bin-swi).
+ */
+describe("decompileFunction — an incoming register value is not the first definition", () => {
+  it("stores the incoming register, not the value written to it afterwards", () => {
+    // `mov [rsp+0x48], rsi` saves the *caller's* rsi; `xor esi, esi` after it
+    // is a different value. Before the fix this emitted `= 0`.
+    const code = run(
+      seq(0x401000, [["mov", "qword ptr [rsp + 0x48], rsi"], ["xor", "esi, esi"], ["ret"]]),
+      true,
+    );
+
+    const store = code.split("\n").find((l) => l.includes("rsp + 0x48"));
+    expect(store).toBeDefined();
+    expect(store).toContain("= rsi");
+    expect(store).not.toContain("= 0");
+  });
+
+  it("keeps the branch whose other path leaves the register alone", () => {
+    // ebx is written only when ecx != 0, then stored either way. Before the fix
+    // the phi at the join saw one value, the `if` disappeared, and the store
+    // read `1` on the path where the machine stores the incoming ebx.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 0"],
+        ["je", "0x401010"],
+        ["mov", "ebx, 1"],
+        ["jmp", "0x401010"],
+        ["mov", "dword ptr [edx], ebx"], // 0x401010 — the join
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("if (ecx != 0)");
+    const store = code.split("\n").find((l) => l.includes("(edx)"));
+    expect(store).toContain("= ebx");
+    expect(store).not.toContain("= 1");
+  });
+
+  it("returns the incoming accumulator on the path that does not assign it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 0"],
+        ["je", "0x401010"],
+        ["mov", "eax, edx"],
+        ["jmp", "0x401010"],
+        ["ret"], // 0x401010
+      ]),
+    );
+
+    // Before the fix: `return edx;` — on the bypass path the machine returns
+    // whatever eax already held.
+    expect(code).not.toMatch(/return edx;/);
+    expect(code).toContain("if (ecx != 0)");
+  });
+});
+
+/**
+ * Two values of one register cannot share the register's name.
+ *
+ * `destroySSA` drops version numbers, which is only sound while one version of
+ * a register is live at a time. `ssaopt.ts` breaks that on purpose — GVN
+ * forwards a value to a later use, copy propagation forwards a source across a
+ * later write to it — so the read has to keep a name of its own
+ * (peek-a-bin-lh6's neighbourhood: same mechanism, different pass).
+ */
+describe("decompileFunction — a value survives a later write to the register holding it", () => {
+  it("stores the value the register held when it was copied", () => {
+    // rcx holds the incoming rax; rax is then overwritten with 5. The store
+    // must be of the *old* rax. Before the fix it emitted `= 5`.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rcx, rax"],
+        ["cmp", "rdx, 0"],
+        ["je", "0x401018"],
+        ["mov", "rax, 5"],
+        ["mov", "qword ptr [rbx], rcx"],
+        ["ret"], // 0x401018
+      ]),
+      true,
+    );
+
+    const store = code.split("\n").find((l) => l.includes("(rbx)"));
+    expect(store).toBeDefined();
+    expect(store).not.toContain("= 5");
+  });
+
+  it("does not emit a register assigned to itself", () => {
+    // Phi destruction inserts a copy per operand; between two versions of one
+    // register that copy is `ebx = ebx` once the versions come off. It carries
+    // no behaviour and was a quarter of all emitted lines on t64.exe. The loop
+    // below carries ebx round the back edge without writing it on every path,
+    // which is exactly the shape that produced one.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 0"],
+        ["mov", "ebx, 0"],
+        ["cmp", "ecx, 8"], // 0x401008 — header
+        ["jge", "0x401020"],
+        ["add", "ebx, ecx"],
+        ["inc", "ecx"],
+        ["jmp", "0x401008"],
+        ["mov", "dword ptr [edx], ebx"], // 0x401020
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toMatch(/^\s*(\w+) = \1;\s*$/m);
+    // …and the statements that do carry behaviour are still there.
+    expect(code).toMatch(/ebx \+= ecx|ebx = ebx \+ ecx/);
+    expect(code).toMatch(/ecx\+\+|ecx = ecx \+ 1/);
+  });
+});
+
+/**
+ * What a `do`-`while` body is allowed to lose (peek-a-bin-b37).
+ *
+ * The sibling of the `for`-loop defect above, in the other arm of
+ * `structureLoop`. When the loop header does not end in a conditional jump —
+ * a bottom-tested loop whose header ends in `jmp`, which is what MSVC emits
+ * for `do { } while` — the fallback concatenated every body block's lifted
+ * statements in block-id order and called that the body. The control flow
+ * between them was simply gone: both arms of an `if` inside the loop came out
+ * as consecutive unconditional code. Nothing is dropped, so no
+ * statement-identity instrument sees it; the result is valid C stating
+ * something the machine does not do, which is this project's worst defect
+ * class (see the condition-polarity gotcha).
+ */
+describe("decompileFunction — a do-while keeps its body's control flow", () => {
+  /**
+   * `do { ecx = 0; if (edx == 0) f2(); else f1(); } while (eax < 5);`
+   *
+   * The header at 0x401004 ends in `jmp`, so `structureLoop` takes the
+   * do-while fallback. `je` is taken when edx == 0 and lands on the call to
+   * 0x402004, so that call is the one guarded by `edx == 0`.
+   */
+  const doWhileWithBranch = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "eax, 0"], // 401000
+      ["mov", "ecx, 0"], // 401004 loop header (jumped back to)
+      ["jmp", "0x40100c"], // 401008 — unconditional, so no pre-test
+      ["cmp", "edx, 0"], // 40100c
+      ["je", "0x40101c"], // 401010
+      ["call", "0x402000"], // 401014 not-taken arm
+      ["jmp", "0x401020"], // 401018
+      ["call", "0x402004"], // 40101c taken arm (edx == 0)
+      ["cmp", "eax, 5"], // 401020
+      ["jl", "0x401004"], // 401024 back edge
+      ["ret"], // 401028
+    ]);
+
+  it("guards each arm instead of running both", () => {
+    const code = run(doWhileWithBranch());
+    const lines = code.split("\n");
+
+    expect(code).toContain("do {");
+    expect(code.match(/sub_402000\(\);/g)).toHaveLength(1);
+    expect(code.match(/sub_402004\(\);/g)).toHaveLength(1);
+
+    // Both calls must sit in opposite arms of a guard on edx, with the arm
+    // matching the sense of the `je` that selects it.
+    const ifIdx = lines.findIndex((l) => /\bif \(/.test(l));
+    expect(ifIdx).toBeGreaterThanOrEqual(0);
+    const cond = lines[ifIdx].match(/if \(([^)]*)\)/)?.[1];
+    expect(cond).toMatch(/^edx (==|!=) 0$/);
+
+    const elseIdx = lines.findIndex((l, i) => i > ifIdx && /\}\s*else\s*\{/.test(l));
+    expect(elseIdx).toBeGreaterThan(ifIdx);
+    const thenArm = lines.slice(ifIdx + 1, elseIdx).join("\n");
+    const elseArm = lines.slice(elseIdx + 1).join("\n");
+
+    const guarded = cond === "edx == 0" ? "sub_402004();" : "sub_402000();";
+    const other = cond === "edx == 0" ? "sub_402000();" : "sub_402004();";
+    expect(thenArm).toContain(guarded);
+    expect(thenArm).not.toContain(other);
+    expect(elseArm).toContain(other);
+  });
+
+  it("keeps the loop itself bottom-tested on the back edge's condition", () => {
+    const code = run(doWhileWithBranch());
+    expect(code).toMatch(/\}\s*while \(eax < 5\);/);
+  });
+});
+
+/**
+ * The subject of a recovered `switch` (peek-a-bin-rev).
+ *
+ * Jump-table case targets only stopped truncating their own function this
+ * morning (peek-a-bin-jy4), which made these the first switches the
+ * decompiler has ever emitted from a real binary. `structureSwitch` recovered
+ * the subject from a `ja`/`jae` bounds check alone, so the inverted-sense form
+ * — `cmp ecx, 8 / jb table`, where the in-range path is the branch taken —
+ * emitted `switch (/* switch_expr *\/)`, a switch with no subject.
+ *
+ * The bounds check is also not the subject in general. In t32's `sub_40B780`
+ * the guard is `cmp ecx, 8` while the table is `jmp [edx*4 + 0x40b8f0]`, and
+ * `edx` is `ecx & 3` — a different value with a different range. The index
+ * register of the indirect jump is what selects the case, so it is the one
+ * thing that is the subject by construction.
+ */
+describe("decompileFunction — a switch states what it switches on", () => {
+  function runTables(instructions: Instruction[], tables: Map<number, number[]>): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      tables,
+      new Map(),
+      new Map(),
+      new Map(),
+    ).code;
+  }
+
+  /** `cmp ecx, 8 / jb table`, with the table indexed by a different register. */
+  const invertedGuard = (): Instruction[] =>
+    seq(0x401000, [
+      ["cmp", "ecx, 8"], // 401000
+      ["jb", "0x401010"], // 401004 — in range on the *taken* path
+      ["call", "0x402000"], // 401008 out-of-range path
+      ["ret"], // 40100c
+      ["jmp", "dword ptr [edx*4 + 0x403000]"], // 401010 the table
+      ["call", "0x402004"], // 401014 case 0
+      ["ret"], // 401018
+      ["call", "0x402008"], // 40101c case 1
+      ["ret"], // 401020
+      ["call", "0x40200c"], // 401024 case 2
+      ["ret"], // 401028
+    ]);
+
+  const threeEntries = new Map([[0x401010, [0x401014, 0x40101c, 0x401024]]]);
+
+  it("names the register the jump table is indexed by", () => {
+    const code = runTables(invertedGuard(), threeEntries);
+
+    expect(code).toContain("switch (edx)");
+    expect(code).not.toContain("switch_expr");
+    // `ecx` is the bounds-checked value, not the one selecting the case.
+    expect(code).not.toContain("switch (ecx)");
+  });
+
+  it("still recovers a case per table entry behind the inverted guard", () => {
+    const code = runTables(invertedGuard(), threeEntries);
+
+    // Case values are spelled as the members of the enum type inference
+    // synthesises for a switch with three or more cases.
+    expect(code).toMatch(/case (0|VAL_0x0):/);
+    expect(code).toMatch(/case (1|VAL_0x1):/);
+    expect(code).toMatch(/case (2|VAL_0x2):/);
+    expect(code).toContain("sub_402004();");
+    expect(code).toContain("sub_402008();");
+    expect(code).toContain("sub_40200C();");
+  });
+
+  it("recognises a table whose entries share targets", () => {
+    // Three entries, two distinct blocks. The gate counted successor blocks,
+    // so this shape fell below `> 2` and was never recognised as a switch at
+    // all — one target was emitted inline and the other left to the leftover
+    // pass, with no `switch` and no case values anywhere.
+    const code = runTables(
+      invertedGuard(),
+      new Map([[0x401010, [0x401014, 0x401014, 0x40101c]]]),
+    );
+
+    expect(code).toContain("switch (edx)");
+    expect(code).toMatch(/case (0|VAL_0x0):\s*\n\s*case (1|VAL_0x1):/);
+    expect(code).toMatch(/case (2|VAL_0x2):/);
+  });
+
+  it("keeps taking the subject and the default from a ja bounds check", () => {
+    // The form that already worked, so that corroborating the two sources
+    // does not cost the one the `ja` path recovers.
+    const code = runTables(
+      seq(0x401000, [
+        ["cmp", "eax, 2"], // 401000
+        ["ja", "0x401024"], // 401004 out of range → default
+        ["jmp", "dword ptr [eax*4 + 0x403000]"], // 401008 the table
+        ["call", "0x402004"], // 40100c case 0
+        ["ret"], // 401010
+        ["call", "0x402008"], // 401014 case 1
+        ["ret"], // 401018
+        ["call", "0x40200c"], // 40101c case 2
+        ["ret"], // 401020
+        ["call", "0x402010"], // 401024 default
+        ["ret"], // 401028
+      ]),
+      new Map([[0x401008, [0x40100c, 0x401014, 0x40101c]]]),
+    );
+
+    expect(code).toContain("switch (eax)");
+    expect(code).toMatch(/case (0|VAL_0x0):/);
+    expect(code).toMatch(/case (2|VAL_0x2):/);
+    expect(code).toContain("default:");
+  });
+
+  /**
+   * Two tables that dispatch into the same blocks (peek-a-bin-dp6).
+   *
+   * MSVC emits one table per copy-direction/alignment path of `memcpy` and
+   * lands them all on the same four tail blocks: t32's `sub_40B780` has nine
+   * tables over two distinct target sets. A block is emitted once, so the
+   * switch that reaches it first takes the body and every later switch used to
+   * emit `case VAL_0x1: break;` — true about the case value and silent about
+   * what the case does, which is exactly the shape a reader cannot tell from a
+   * case that really is empty.
+   */
+  const sharedTargets = (): Instruction[] =>
+    seq(0x401000, [
+      ["cmp", "eax, 1"], // 401000
+      ["je", "0x40100c"], // 401004 → the second table
+      ["jmp", "dword ptr [ecx*4 + 0x403000]"], // 401008 first table
+      ["jmp", "dword ptr [edx*4 + 0x403100]"], // 40100c second table
+      ["call", "0x402004"], // 401010 case 0 of both
+      ["ret"], // 401014
+      ["call", "0x402008"], // 401018 case 1 of both
+      ["ret"], // 40101c
+      ["call", "0x40200c"], // 401020 case 2 of both
+      ["ret"], // 401024
+    ]);
+
+  const bothTables = new Map([
+    [0x401008, [0x401010, 0x401018, 0x401020]],
+    [0x40100c, [0x401010, 0x401018, 0x401020]],
+  ]);
+
+  it("gives the second switch over shared blocks a body per case", () => {
+    const code = runTables(sharedTargets(), bothTables);
+
+    // Both tables are switches, on their own index registers.
+    expect(code).toContain("switch (ecx)");
+    expect(code).toContain("switch (edx)");
+    // The blocks themselves are still emitted exactly once...
+    expect(code.match(/sub_402004\(\)/g)).toHaveLength(1);
+    expect(code.match(/sub_402008\(\)/g)).toHaveLength(1);
+    expect(code.match(/sub_40200C\(\)/g)).toHaveLength(1);
+    // ...and the switch that did not get them says where each case goes.
+    expect(code).toContain("goto loc_401010;");
+    expect(code).toContain("goto loc_401018;");
+    expect(code).toContain("goto loc_401020;");
+  });
+
+  it("leaves no case claiming to be empty when its block was taken", () => {
+    const code = runTables(sharedTargets(), bothTables);
+
+    // `case …:` immediately followed by `break;` is the shape that says "this
+    // case does nothing"; none of these six cases does nothing.
+    expect(code).not.toMatch(/case [^\n]*:\s*\n\s*break;/);
+  });
+});
+
+describe("decompileFunction — an instruction is lifted once, and reads what it reads", () => {
+  /**
+   * `liftBlock` used to resolve a register operand through `RegState`, i.e. to
+   * the symbolic expression that register was last given — while still
+   * emitting the assignment that produced it. Everything below is a
+   * consequence of that (peek-a-bin-urs, peek-a-bin-zsb, peek-a-bin-juu), and
+   * none of it was visible to a stage-level test: the IR the lifter handed on
+   * was self-consistent, just not a description of the machine code.
+   */
+
+  it("calls a function once when the machine code calls it once", () => {
+    // `test eax, eax` after a call reads the accumulator. Substituting the
+    // recorded value put the whole call expression on both sides of the `&`,
+    // so one CALL instruction became three calls in the emitted C — a real
+    // change of behaviour for anything with a side effect, which is every
+    // call the decompiler cannot see inside.
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x402000"],
+        ["test", "eax, eax"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code.match(/sub_402000\(/g)).toHaveLength(1);
+  });
+
+  it("does not leak the eflags pseudo-register into the output", () => {
+    // The flag definition has no consumer, so dead-code elimination should
+    // drop it. It survived only because the duplicated call inside it made
+    // `hasSideEffects` true.
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x402000"],
+        ["test", "eax, eax"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("eflags");
+  });
+
+  it("does not re-expand a subexpression the register no longer holds", () => {
+    // The t64 wcslen epilogue: (rax - rcx) / 2 - 1. Each instruction reads the
+    // accumulator the previous one wrote, so substituting the recorded
+    // expression nested it into itself and RCX came out subtracted three
+    // times — arithmetically wrong, not merely verbose.
+    const code = run(
+      seq(0x401000, [
+        ["sub", "rax, rcx"],
+        ["sar", "rax, 1"],
+        ["dec", "rax"],
+        ["mov", "qword ptr [rdx], rax"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code.match(/rcx/g)).toHaveLength(1);
+    expect(code).toContain("rax - rcx >> 1");
+  });
+
+  it("swaps both registers on an xchg", () => {
+    // `a = b; b = a` is not a swap: SSA renames the second read of `a` to the
+    // definition the first statement just made, so both registers ended up
+    // holding B. The lifter goes through a temporary, which copy propagation
+    // then removes.
+    const code = run(
+      seq(0x401000, [
+        ["xchg", "eax, ebx"],
+        ["mov", "dword ptr [ecx], eax"],
+        ["mov", "dword ptr [edx], ebx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("*(int32_t*)(ecx) = ebx;");
+    expect(code).toContain("*(int32_t*)(edx) = eax;");
+  });
+
+  it("takes a div's quotient and remainder from the same dividend", () => {
+    // One instruction writes EAX and EDX from the same input. Emitting EAX
+    // first made the remainder read the quotient.
+    const code = run(
+      seq(0x401000, [
+        ["div", "ecx"],
+        ["mov", "dword ptr [esi], eax"],
+        ["mov", "dword ptr [edi], edx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("edx = eax % ecx;");
+    expect(code).toContain("eax /= ecx;");
+  });
+
+  it("takes a mul's high and low halves from the same product", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mul", "ecx"],
+        ["mov", "dword ptr [esi], eax"],
+        ["mov", "dword ptr [edi], edx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("edx = eax * ecx >> 0x20;");
+    expect(code).toContain("eax *= ecx;");
+  });
+});
+
+describe("decompileFunction — a return names the accumulator", () => {
+  /**
+   * `ret` used to emit whatever expression `RegState` had recorded for RAX,
+   * which is bound to the registers it names *as they were when it was
+   * recorded* — and nothing invalidates it when one of them is written again
+   * (peek-a-bin-lh6). Every case below is an epilogue: the point where a
+   * callee-saved register is restored is exactly where the two disagree.
+   */
+
+  it("returns the value the accumulator was given, not the register it came from", () => {
+    // t64 sub_140001514. RAX takes RBX, then RBX is restored from its spill
+    // slot. RegState still mapped RAX to reg(RBX), so this returned the
+    // restored RBX — emitted as `var_30`, the saved-register slot itself.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, rbx"],
+        ["mov", "rbx, qword ptr [rsp + 0x30]"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return rbx;");
+    expect(code).not.toContain("var_30");
+  });
+
+  it("does not return a value written after the accumulator was set", () => {
+    // The knock-on the bead records: with the true RAX definition unread, DCE
+    // deleted `rax = rbx`, that made RBX dead, and the whole `or rbx, -1`
+    // block went with it. Here that block is the one being returned from, so
+    // the wrong answer is visible directly — it returned -1.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, rbx"],
+        ["or", "rbx, -1"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return rbx;");
+    expect(code).not.toContain("return -1;");
+  });
+
+  it("keeps a load above the store it was written before", () => {
+    // The `ret` re-expanded the load, which put a second copy of it below a
+    // store to an address nothing can prove does not alias.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [ecx]"],
+        ["mov", "dword ptr [edx], 7"],
+        ["mov", "esi, eax"],
+        ["mov", "dword ptr [ebx], esi"],
+        ["ret"],
+      ]),
+    );
+
+    const lines = code.split("\n");
+    const load = lines.findIndex((l) => l.includes("(ecx)"));
+    const store = lines.findIndex((l) => l.includes("(edx) = 7"));
+    expect(load).toBeGreaterThanOrEqual(0);
+    expect(load).toBeLessThan(store);
+    expect(code.match(/\(ecx\)/g)).toHaveLength(1);
+  });
+
+  it("names the base register the instruction named, not the stack pointer", () => {
+    // `mov ebp, esp` then a `push` — which the lifter does not model, so RSP
+    // changes with nothing in the IR saying it did. Inlining the copy moved
+    // the read of ESP past that push, printing a base register the
+    // instruction never named and one push off the value it did name
+    // (peek-a-bin-rt4). `foldBlock` now refuses it, as `ssaopt.ts` already did.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ebp, esp"],
+        ["push", "dword ptr [ebp + 8]"],
+        ["call", "0x408000"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("sub_408000(*(int32_t*)(ebp + 8))");
+    expect(code).not.toContain("esp + 8");
+  });
+});
+
+describe("decompileFunction — the instructions a branch condition reads survive", () => {
+  /**
+   * The branch condition is not an IR value: `structure.ts` takes it from
+   * `RegState.getCondition`, which recorded the `cmp`/`test` operands from the
+   * *instruction*. So the registers a condition names have no IR consumer, and
+   * dead-code elimination was right — given what it could see — to delete the
+   * `eflags` definition and then everything that fed it (peek-a-bin-ua8).
+   *
+   * `ssaOptimize` now holds the flag definition of any block ending in a Jcc
+   * live through the fixpoint, and drops it afterwards so nothing leaks into
+   * the emitted text.
+   */
+
+  it("keeps the load a loop condition depends on, so the loop can end", () => {
+    // t64 sub_14000A4AC, wcslen. Without the load that updates DX this emitted
+    // `while (dx != 0) { rax += 2; }` — an infinite loop (peek-a-bin-juu).
+    // The condition names the register the body assigns rather than the
+    // sub-register spelling `test dx, dx` used (peek-a-bin-uxm).
+    const code = run(
+      seq(0x401000, [
+        ["movzx", "edx, word ptr [rax]"],
+        ["add", "rax, 2"],
+        ["test", "dx, dx"],
+        ["jne", "0x401000"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("while ((uint16_t)edx != 0)");
+    expect(code).toContain("(rax)");
+    expect(code).toContain("rax += 2;");
+  });
+
+  it("keeps the load an if condition depends on", () => {
+    const code = run(
+      seq(0x402000, [
+        ["mov", "ecx, dword ptr [eax]"],
+        ["cmp", "ecx, 5"],
+        ["jg", "0x402014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("ecx = *(int32_t*)(eax);");
+    expect(code).toContain("if (ecx > 5)");
+  });
+
+  it("does not leave the held flag definition in the output", () => {
+    const code = run(
+      seq(0x402000, [
+        ["mov", "ecx, dword ptr [eax]"],
+        ["cmp", "ecx, 5"],
+        ["jg", "0x402014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("eflags");
+  });
+});
+
+describe("decompileFunction — a definition read twice is not deleted after one of them", () => {
+  it("keeps a definition that is read again after a call", () => {
+    // `foldBlock`'s single-use scan used to stop at the first `call_stmt`,
+    // which ended the *use count* as well as the hazard scan. A definition
+    // read once before a call and once after therefore looked single-use: it
+    // was substituted into the first read and dropped, and the second read
+    // named a register nothing assigns (peek-a-bin-9ml). The call is a
+    // boundary for whether the value may *move*, not for how many times it is
+    // read.
+    //
+    // The register is RBX, which is callee-saved: the original fixture used RCX
+    // and asserted that its value reached the read after the call, which is the
+    // one thing the Windows x64 ABI says does not happen (peek-a-bin-0t4). The
+    // defect 9ml is about — a definition read on both sides of a call counted
+    // as single-use — needs a register whose value genuinely survives, or the
+    // second read is not a read of that definition at all.
+    const code = run(
+      seq(0x401000, [
+        ["lea", "rbx, [rdi + 0x30]"],
+        ["mov", "qword ptr [rsp + 0x20], rbx"],
+        ["call", "0x403b24"],
+        ["mov", "rdx, rbx"],
+        ["mov", "qword ptr [rsi], rdx"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("rbx = rdi + 0x30;");
+    expect(code).toContain("*(int64_t*)(rsp + 0x20) = rbx;");
+    expect(code).toContain("*(int64_t*)(rsi) = rbx;");
+  });
+});
+
+/**
+ * A logical shift right, which C has no operator for (peek-a-bin-kce).
+ *
+ * `shr` lifts to `>>>`, JavaScript's unsigned shift, and it used to reach the
+ * output verbatim — 66 syntax errors over three real binaries, the largest
+ * remaining category. The repair has to carry a width: `>>` alone is an
+ * arithmetic shift and shifts the sign bit in where the machine shifts zeros,
+ * and a fixed `(uintptr_t)` cast picks a width instead of finding one. The
+ * width is on the operand node, which is why none of this needed new IR.
+ */
+describe("decompileFunction — a logical shift right says which bits it shifts", () => {
+  it("takes the width from a 32-bit register operand", () => {
+    const code = run(seq(0x401000, [["shr", "eax, 1"], ["ret"]]));
+
+    expect(code).toContain("(uint32_t)eax >> 1");
+    expect(code).not.toContain(">>>");
+  });
+
+  it("takes the width from a 64-bit register operand", () => {
+    const code = run(
+      seq(0x401000, [["shr", "rdx, 0x10"], ["mov", "qword ptr [rcx], rdx"], ["ret"]]),
+      true,
+    );
+
+    expect(code).toContain("(uint64_t)rdx >> 0x10");
+    expect(code).not.toContain(">>>");
+  });
+
+  it("takes the width of a memory operand from the access size", () => {
+    const code = run(seq(0x401000, [["shr", "byte ptr [ebp + 8], 3"], ["ret"]]));
+
+
+    expect(code).toContain("(uint8_t)");
+    expect(code).not.toContain(">>>");
+  });
+
+  it("has no compound form, so the shift is spelled out", () => {
+    // `x >>>= 1` was emitted too, and `x >>= 1` would be the arithmetic shift.
+    const code = run(
+      seq(0x401000, [["shr", "ecx, 1"], ["mov", "dword ptr [edx], ecx"], ["ret"]]),
+    );
+
+    expect(code).not.toContain(">>>=");
+    expect(code).toContain("(uint32_t)ecx >> 1");
+  });
+
+  it("parenthesises a compound operand, so the cast applies to all of it", () => {
+    // `(uint32_t)eax + 4 >> 1` would compile and mean something else: the cast
+    // binds tighter than the addition. This is the silent-wrong-value case.
+    const code = run(seq(0x401000, [["add", "eax, 4"], ["shr", "eax, 1"], ["ret"]]));
+
+
+    expect(code).toMatch(/\(uint32_t\)\(eax \+ 4\) >> 1/);
+  });
+
+  it("reports the value rather than emit a shift the width contradicts", () => {
+    // 32 bits off an 8-bit operand: one of the two is wrong, and every C
+    // spelling of it would state a width. `>> 32` on a `uint8_t` is also
+    // undefined behaviour, so it would not even be reliably wrong.
+    const code = run(seq(0x401000, [["shr", "al, 0x20"], ["ret"]]));
+
+    expect(code).toContain("__unrecovered_1");
+    expect(code).toContain("logical shift right");
+    expect(code).toMatch(/intptr_t __unrecovered_1;\s*\/\* not recovered/);
+    expect(code).not.toContain(">>>");
+  });
+});
+
+/**
+ * A truncated string states the prefix it recovered, not a value ending in
+ * three dots (peek-a-bin-7l0).
+ */
+describe("decompileFunction — a shortened string literal stays true", () => {
+  function runStrings(instructions: Instruction[], strings: Map<number, string>): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      strings,
+      new Map(),
+    ).code;
+  }
+
+  const push = (): Instruction[] =>
+    seq(0x401000, [["mov", "eax, 0x403000"], ["ret"]]);
+
+  it("keeps the ellipsis outside the quotes, where it cannot be read as data", () => {
+    const long = "C:\\Users\\Public\\Documents\\Very\\Long\\Path\\file.txt";
+    const code = runStrings(push(), new Map([[0x403000, long]]));
+
+    const prefix = long.slice(0, 37).replace(/\\/g, "\\\\");
+    expect(code).toContain(`"${prefix}" /* + ${long.length - 37} more characters */`);
+    expect(code).not.toContain('..."');
+  });
+
+  it("leaves a string that fits exactly as it is", () => {
+    const code = runStrings(push(), new Map([[0x403000, "short one"]]));
+
+    expect(code).toContain('"short one"');
+    expect(code).not.toContain("more characters");
+  });
+});
+
+/**
+ * The enum synthesised for a switch reaches the output as a declaration
+ * (peek-a-bin-a0p), and its member names stay where they mean something.
+ */
+describe("decompileFunction — a synthesised enum is declared before it is used", () => {
+  function runTables(instructions: Instruction[], tables: Map<number, number[]>): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      tables,
+      new Map(),
+      new Map(),
+      new Map(),
+    ).code;
+  }
+
+  const threeCases = (): Instruction[] =>
+    seq(0x401000, [
+      ["cmp", "eax, 2"], // 401000
+      ["ja", "0x401024"], // 401004 out of range → default
+      ["jmp", "dword ptr [eax*4 + 0x403000]"], // 401008 the table
+      ["mov", "dword ptr [edi], 2"], // 40100c case 0 — an unrelated 2
+      ["ret"], // 401010
+      ["call", "0x402008"], // 401014 case 1
+      ["ret"], // 401018
+      ["call", "0x40200c"], // 40101c case 2
+      ["ret"], // 401020
+      ["call", "0x402010"], // 401024 default
+      ["ret"], // 401028
+    ]);
+
+  const table = new Map([[0x401008, [0x40100c, 0x401014, 0x40101c]]]);
+
+  it("declares every member it names, with the value the name stands for", () => {
+    const code = runTables(threeCases(), table);
+
+    // The case labels were emitted as undeclared identifiers: not integer
+    // constant expressions, so the switch did not compile.
+    expect(code).toMatch(/typedef enum \{[^}]*VAL_0x0 = 0[^}]*\} enum_0;/);
+    expect(code).toContain("case VAL_0x0:");
+    expect(code.indexOf("typedef enum")).toBeLessThan(code.indexOf("case VAL_0x0:"));
+  });
+
+  it("leaves an unrelated constant of the same value alone", () => {
+    // Every literal matching any member of any enum in the function used to be
+    // renamed — a coincidence of value read as membership of the enumeration.
+    const code = runTables(threeCases(), table);
+
+    expect(code).toContain("*(int32_t*)(edi) = 2;");
+    expect(code).not.toContain("VAL_0x2;");
+  });
+});
+
+/**
+ * A field the layout calls an array, accessed as a scalar (peek-a-bin-hyv).
+ *
+ * `structs.ts` marks an offset `isArray` when an index reaches it, and direct
+ * accesses to the same offset stay — a direct access *is* consistent with an
+ * array, being element zero, so the two readings only contradict each other
+ * when the stride is not the width read there (the last case below, which
+ * structs.ts now settles by dropping the array claim). The spelling still has to
+ * be true either way: `p->array_0x0` is an address, not the value at that
+ * offset, so reading one silently yielded a pointer where the machine loaded
+ * data, and writing one did not compile at all.
+ */
+describe("decompileFunction — a scalar access to an array field means that access", () => {
+  /** As `runWithStructs`, in 64-bit mode. */
+  function run64WithStructs(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  const indexedAndDirect = (store: string): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "dword ptr [ecx + eax*4], edx"], // the indexed access that sets isArray
+      ["mov", "dword ptr [ecx + 0x10], esi"], // a second offset, so a struct is synthesised
+      [store.split("|")[0], store.split("|")[1]],
+      ["ret"],
+    ]);
+
+  it("writes the first element, when the access is exactly one element wide", () => {
+    const code = runWithStructs(indexedAndDirect("mov|dword ptr [ecx], 0x16"));
+
+    expect(code).toContain("array_0x0[0] = 0x16;");
+    expect(code).not.toMatch(/->array_0x0 = /);
+  });
+
+  it("reads the first element rather than the array's address", () => {
+    // `edx = p->array_0x0;` compiles and means the address — a wrong value that
+    // no compiler complains about, which is the worse half of this defect.
+    const code = runWithStructs([
+      ...indexedAndDirect("mov|edi, dword ptr [ecx]").slice(0, 3),
+      ins(0x40100c, "mov", "dword ptr [ebx], edi"),
+      ins(0x401010, "ret"),
+    ]);
+
+    expect(code).toContain("array_0x0[0]");
+    expect(code).not.toMatch(/= \(\(struct_0 \*\)ecx\)->array_0x0;/);
+  });
+
+  it("does not call an offset an array when the stride is not the width read there", () => {
+    // The other half of peek-a-bin-hyv, and the one that had to be settled in
+    // structs.ts: the index walks in steps of 4 while the widest access at the
+    // offset is 8. `uint64_t array_0x0[n]` describes an object neither reading
+    // found — the elements are not 8 bytes, and an array of 4-byte elements is
+    // not what was written. The width is a direct measurement of one access, so
+    // it is kept; the array claim is the one dropped, and the name says so.
+    const code = run64WithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [rcx + rax*4], edx"],
+        ["mov", "dword ptr [rcx + 0x10], esi"],
+        ["mov", "qword ptr [rcx], rdx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("((struct_0 *)rcx)->field_0x0 = rdx;");
+    expect(code).toContain("uint64_t field_0x0;");
+    expect(code).not.toContain("array_0x0");
+  });
+});
+
+/**
+ * The layout an emitted struct definition actually has (peek-a-bin-ey0).
+ *
+ * A field *name* carries the offset the recovery found, so the declaration is
+ * only true if C puts the field there. 131 of the 149 struct definitions emitted
+ * over the three distlib binaries did not: the fields were declared back to back
+ * and the compiler placed them by its own alignment rules, so
+ * `struct_0 { uint32_t field_0x0; uint16_t field_0x18; }` read byte 4 every time
+ * the body said `field_0x18`. Valid C, stating something the machine does not do.
+ *
+ * These assert on the layout rather than on the spelling: the emitted block is
+ * read back the way a compiler under `#pragma pack(1)` reads it, and every field
+ * has to land where its own name says. The gcc side of the same measurement —
+ * `offsetof` over every emitted struct of the three binaries — is in the bead.
+ */
+describe("decompileFunction — a struct lays out at the offsets its field names record", () => {
+  /** As `runWithStructs`, in 64-bit mode, where an 8-byte field is reachable. */
+  function run64(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  /** The width of a member spelling, as a compiler under `#pragma pack(1)` sees it. */
+  function widthOf(type: string): number {
+    const fixed = /^u?int(8|16|32|64)_t$/.exec(type);
+    if (fixed) return Number(fixed[1]) / 8;
+    if (type.endsWith("*")) return 8; // a pointer, on any compiler this targets
+    if (type === "float") return 4;
+    if (type === "double") return 8;
+    return 4; // `int`, `unsigned int`
+  }
+
+  /**
+   * Every member of `struct <id>` in the emitted code and the offset it lands
+   * at, computed from the declarations alone — nothing here asks the emitter
+   * where it thinks it put them.
+   */
+  function emittedLayout(code: string, id: string): Map<string, number> {
+    const start = code.indexOf(`struct ${id} {`);
+    expect(start, `no definition of ${id}`).toBeGreaterThanOrEqual(0);
+    const body = code.slice(start, code.indexOf("};", start));
+    const offsets = new Map<string, number>();
+    let cursor = 0;
+    for (const raw of body.split("\n").slice(1)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("/*")) continue;
+      const m = /^([A-Za-z_]\w*\s*\*?)\s+(\w+)(?:\[(\w*)\])?;/.exec(line);
+      expect(m, `unparsed member: ${line}`).not.toBeNull();
+      if (!m) continue;
+      const [, type, name, count] = m;
+      offsets.set(name, cursor);
+      const element = widthOf(type.replace(/\s+/g, ""));
+      cursor += count === undefined ? element : count === "" ? 0 : element * Number(count);
+    }
+    return offsets;
+  }
+
+  /** Every field of every emitted struct sits at the offset its name records. */
+  function expectNamesToMatchLayout(code: string): void {
+    const ids = [...code.matchAll(/^struct (struct_\w+) \{$/gm)].map((m) => m[1]);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      for (const [name, offset] of emittedLayout(code, id)) {
+        const recorded = /^(?:field|array)_0x([0-9A-F]+)$/.exec(name);
+        if (!recorded) continue; // padding
+        expect(offset, `${id}.${name}`).toBe(Number.parseInt(recorded[1], 16));
+      }
+    }
+  }
+
+  it("pads the gap between two fields, so the second is where its name says", () => {
+    const code = runWithStructs(
+      seq(0x401000, [["mov", "dword ptr [ebx], 1"], ["mov", "word ptr [ebx + 0x18], dx"], ["ret"]]),
+    );
+
+    // The defect exactly: C put field_0x18 at 4.
+    expect(code).toContain("uint8_t _pad_0x4[0x14];");
+    expect(emittedLayout(code, "struct_0").get("field_0x18")).toBe(0x18);
+    expectNamesToMatchLayout(code);
+  });
+
+  it("packs, because padding alone cannot express an unaligned offset", () => {
+    // field_0x3 is 4 bytes wide at an offset of 3. Padding puts it there and
+    // default alignment moves it straight back to 4; only the pragma holds it.
+    const code = runWithStructs(
+      seq(0x401000, [["mov", "byte ptr [ebx], 1"], ["mov", "dword ptr [ebx + 3], eax"], ["ret"]]),
+    );
+
+    expect(code).toContain("#pragma pack(push, 1)");
+    expect(code).toContain("#pragma pack(pop)");
+    expect(code.indexOf("#pragma pack(push, 1)")).toBeLessThan(code.indexOf("struct struct_0 {"));
+    expect(emittedLayout(code, "struct_0").get("field_0x3")).toBe(3);
+  });
+
+  it("does not declare a field whose bytes overlap one already placed", () => {
+    // An 8-byte access at 0 and a 2-byte access at 2 cannot both be members:
+    // one of the two readings is wrong, and no amount of padding places both.
+    // A union would say they are both members of one object, which is a claim
+    // about the object rather than about the accesses that were seen.
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "qword ptr [rbx], rax"],
+        ["mov", "word ptr [rbx + 2], dx"],
+        ["mov", "qword ptr [rbx + 8], rcx"],
+        ["ret"],
+      ]),
+    );
+
+    const layout = emittedLayout(code, "struct_0");
+    expect(layout.has("field_0x2")).toBe(false);
+    expect(layout.get("field_0x0")).toBe(0);
+    expect(layout.get("field_0x8")).toBe(8);
+    // Reported rather than dropped: the reading is still in the output.
+    expect(code).toMatch(/\/\* field_0x2: 2 bytes at 0x2 — its bytes overlap field_0x0/);
+    expectNamesToMatchLayout(code);
+  });
+
+  it("spells an access to a field it could not place as the bytes that access touched", () => {
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "qword ptr [rbx], rax"],
+        ["mov", "word ptr [rbx + 2], dx"],
+        ["mov", "qword ptr [rbx + 8], rcx"],
+        ["ret"],
+      ]),
+    );
+
+    // `->field_0x2` would not compile against the declaration above, and the
+    // cast has to go through `uint8_t*`: arithmetic on the struct pointer would
+    // scale the 2 by the struct's size.
+    expect(code).toContain("*(uint16_t*)((uint8_t*)rbx + 2) = dx;");
+    expect(code).not.toContain("->field_0x2");
+  });
+
+  it("does not place a field at a negative offset", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "word ptr [ebx - 2], dx"],
+        ["mov", "dword ptr [ebx + 4], eax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(emittedLayout(code, "struct_0").has("field_neg_0x2")).toBe(false);
+    expect(code).toContain("*(uint16_t*)((uint8_t*)ebx - 2) = dx;");
+    expect(code).toMatch(/a negative offset is not a position in a struct/);
+    expectNamesToMatchLayout(code);
+  });
+
+  it("leaves a struct incomplete when no field can be placed at all", () => {
+    // Both offsets are absolute addresses that reached a base as a
+    // displacement — struct synthesis does produce these — and declaring the
+    // first means 36KB of padding nobody observed.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x9000], eax"],
+        ["mov", "dword ptr [ebx + 0x9100], eax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("typedef struct struct_0 struct_0;");
+    expect(code).not.toContain("struct struct_0 {");
+    expect(code).toContain("struct_0 is left incomplete");
+    expect(code).toContain("*(int32_t*)((uint8_t*)ebx + 0x9000) = eax;");
+  });
+
+  it("declares a field at the width its access had when the inferred type would move the next one", () => {
+    // field_0x8 holds a pointer, and 32-bit pointers are 4 bytes — but the
+    // emitted C is read with 8-byte ones, which would put field_0xC at 0x10.
+    // The inferred type is what the reader wants and the offset is what the
+    // recovery established, so the type moves to a comment.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0xC], 1"],
+        ["mov", "esi, dword ptr [ebx + 8]"],
+        ["mov", "dword ptr [esi], 7"],
+        ["mov", "dword ptr [esi + 4], 9"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("uint32_t field_0x8; /* struct_1* */");
+    expect(emittedLayout(code, "struct_0").get("field_0xC")).toBe(0xc);
+    expectNamesToMatchLayout(code);
+  });
+
+  it("keeps the inferred type where it displaces nothing", () => {
+    // The same shape with the next field 8 bytes on: the pointer fits, so the
+    // declaration that says what the object is stays.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "esi, dword ptr [ebx + 8]"],
+        ["mov", "dword ptr [esi], 7"],
+        ["mov", "dword ptr [esi + 4], 9"],
+        ["ret"],
+      ]),
+    );
+
+    expect(declaredType(code, "field_0x8")).toBe("struct_1*");
+    expect(emittedLayout(code, "struct_0").get("field_0x10")).toBe(0x10);
+    expectNamesToMatchLayout(code);
+  });
+
+  it("keeps an array field's element size and its extent in agreement", () => {
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + ecx*4], 1"],
+        ["mov", "word ptr [ebx + 0x12], dx"],
+        ["ret"],
+      ]),
+    );
+
+    // Four whole 4-byte elements fit below 0x12; the odd two bytes are padding,
+    // not a fifth element the accesses never reached.
+    expect(code).toContain("uint32_t array_0x0[4];");
+    expect(code).toContain("uint8_t _pad_0x10[2];");
+    expect(emittedLayout(code, "struct_0").get("field_0x12")).toBe(0x12);
+    expectNamesToMatchLayout(code);
+  });
+});
+
+/**
+ * A field the code does bitwise arithmetic on is not a pointer (peek-a-bin-h89).
+ *
+ * `struct_4::field_0x18` in t64 was declared `struct_4 *` and then masked:
+ * `((struct_4 *)rdx)->field_0x18 |= 0x20`, which does not compile and, more to
+ * the point, is not what the field is — all six of its uses in that binary are
+ * flag arithmetic on a CRT `FILE::_flag`. The pointer came from *another*
+ * function, which loaded the value and used it as a base, and reached this one
+ * because StructFields are shared live registry state.
+ *
+ * The two functions below are that pair, sharing a registry as the worker's
+ * does. Both orders are checked: which function a session decompiles first is
+ * not evidence about the field.
+ */
+describe("decompileFunction — arithmetic on a field is evidence against a pointer", () => {
+  function run(instructions: Instruction[], registry: StructRegistry): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: `sub_${instructions[0].address.toString(16).toUpperCase()}`,
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      registry,
+    ).code;
+  }
+
+  /** Loads field 0x18 and dereferences the value at two offsets: the nesting. */
+  const promoter = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "dword ptr [ebx + 0x30], 1"],
+      ["mov", "esi, dword ptr [ebx + 0x18]"],
+      ["mov", "dword ptr [esi], 7"],
+      ["mov", "dword ptr [esi + 4], 9"],
+      ["ret"],
+    ]);
+
+  /** Sets a bit in the same field of the same shape. */
+  const masker = (): Instruction[] =>
+    seq(0x402000, [
+      ["mov", "dword ptr [ebx + 0x30], 1"],
+      ["or", "dword ptr [ebx + 0x18], 0x20"],
+      ["ret"],
+    ]);
+
+  it("takes back a pointer type when a later function masks the field", () => {
+    const registry = new StructRegistry();
+    expect(run(promoter(), registry)).toContain("struct_1* field_0x18;");
+
+    const code = run(masker(), registry);
+
+    expect(declaredType(code, "field_0x18")).toBe("uint32_t");
+    expect(code).toContain("->field_0x18 |= 0x20;");
+    expect(code).not.toContain("struct_1*");
+  });
+
+  it("refuses the pointer when the mask was seen first", () => {
+    const registry = new StructRegistry();
+    run(masker(), registry);
+
+    const code = run(promoter(), registry);
+
+    // The nesting is still visible where it belongs — esi is used as a base —
+    // but the field it came out of is not declared as one.
+    expect(declaredType(code, "field_0x18")).toBe("uint32_t");
+    expect(code).toContain("((struct_1 *)esi)->field_0x0 = 7;");
+  });
+});
+
+/**
+ * A machine `add`/`sub` is byte arithmetic. C's `+`/`-` is not, once an operand
+ * has a pointer type — it scales by the pointee, and struct recovery hands the
+ * emitter pointer-typed fields all the time. Two consequences, one loud and one
+ * silent, and the silent one is the worse of the two: `p->field + 8` on a
+ * `struct_1*` field compiles and means 8 *objects* on, which is a statement the
+ * machine code contradicts (peek-a-bin-d8t, peek-a-bin-q30).
+ */
+describe("decompileFunction — arithmetic on a recovered address is byte arithmetic", () => {
+  function run64(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  /**
+   * Loads the field at 0x10 and uses it as a base twice, which is what makes it
+   * a `struct_1*`. The CRT `FILE` shape this is taken from does the same to
+   * `_base`, and then subtracts it from `_ptr`.
+   */
+  const nestedAt0x10 = (): [string, string?][] => [
+    ["mov", "rdx, qword ptr [rbx + 0x10]"],
+    ["mov", "qword ptr [rdx], 7"],
+    ["mov", "qword ptr [rdx + 8], 9"],
+  ];
+
+  it("states the byte difference of two recovered addresses", () => {
+    const code = run64(
+      seq(0x401000, [
+        ...nestedAt0x10(),
+        ["mov", "rcx, qword ptr [rbx + 0x10]"],
+        ["mov", "rax, qword ptr [rbx]"],
+        ["sub", "rax, rcx"],
+        ["ret"],
+      ]),
+    );
+
+    // The two fields are recovered as one integer word and one struct pointer,
+    // and C rejects the subtraction outright — the last five gcc errors over
+    // the three distlib binaries were all this line.
+    expect(code).toContain("field_0x0 - (uintptr_t)");
+    expect(code).toContain("(uintptr_t)((struct_0 *)rbx)->field_0x10");
+    // The recovery itself is untouched: both fields keep the types the
+    // evidence gave them, so nothing about which one is right is hidden.
+    expect(declaredType(code, "field_0x10")).toBe("struct_1*");
+  });
+
+  it("adds the bytes the instruction added, not that many objects", () => {
+    const code = run64(
+      seq(0x401000, [
+        ...nestedAt0x10(),
+        ["mov", "rcx, qword ptr [rbx + 0x10]"],
+        ["add", "rcx, 8"],
+        ["mov", "qword ptr [rbx + 0x20], rcx"],
+        ["ret"],
+      ]),
+    );
+
+    // `p->field_0x10 + 8` compiles, and on a `struct_1*` means 0x80 bytes on.
+    expect(code).toContain("(uintptr_t)((struct_0 *)rbx)->field_0x10 + 8");
+  });
+
+  it("leaves a bitwise use of a pointer-typed field to say what it says", () => {
+    // The counterpart case (peek-a-bin-h89): a mask of a value inferred as a
+    // pointer is a contradiction between two claims, and emit has no evidence
+    // about which of them is wrong. `&` therefore gets no cast — unlike `-`,
+    // it is not an operation C defines on addresses at all, so making it
+    // compile would mean retracting one claim silently.
+    const code = run64(
+      seq(0x401000, [
+        ...nestedAt0x10(),
+        ["mov", "rcx, qword ptr [rbx + 0x10]"],
+        ["and", "rcx, 0xFFFFFFF0"],
+        ["mov", "qword ptr [rbx + 0x20], rcx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("& 0xFFFFFFF0");
+    expect(code).not.toContain("(uintptr_t)((struct_0 *)rbx)->field_0x10 &");
+  });
+});
+
+/**
+ * A sub-register read is a read of the same storage the body writes under a
+ * wider name, and the emitted C used to say otherwise: `while (dx != 0)` around
+ * a body whose only assignment is to `edx` names a variable nothing in the
+ * function assigns, so as C the loop cannot terminate (peek-a-bin-uxm).
+ */
+describe("decompileFunction — a sub-register read names storage the body writes", () => {
+  function run64(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    ).code;
+  }
+
+  it("narrows the register the loop body assigns, so the loop can end", () => {
+    // t64's wcslen: movzx into edx, test dx.
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "rax, rcx"],
+        ["movzx", "edx, word ptr [rax]"],
+        ["add", "rax, 2"],
+        ["test", "dx, dx"],
+        ["jne", "0x401004"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("while ((uint16_t)edx != 0)");
+    expect(code).not.toMatch(/\bdx != 0/);
+  });
+
+  it("leaves a sub-register the body does assign exactly as it is", () => {
+    // t32's wcslen writes `dx` itself, so the C already says what it means and
+    // a cast would be noise.
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "rax, rcx"],
+        ["mov", "dx, word ptr [rax]"],
+        ["add", "rax, 2"],
+        ["test", "dx, dx"],
+        ["jne", "0x401004"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("while (dx != 0)");
+    expect(code).not.toContain("(uint16_t)");
+  });
+
+  it("keeps a signed test of the low byte signed", () => {
+    // `js` after a load into edx tests bit 7 of DL. An unsigned narrowing would
+    // make `>= 0` constantly true — compilable, and a different program. The
+    // width comes from the register name, the signedness from the operator.
+    const code = run64(
+      seq(0x401000, [
+        ["mov", "edx, dword ptr [rcx]"],
+        ["test", "dl, dl"],
+        ["js", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("if ((int8_t)edx >= 0)");
+    expect(code).not.toContain("(uint8_t)edx");
+  });
+});
+
+/**
+ * A call destroys the registers it was passed, and the emitted C has to say so.
+ *
+ * The IR used to record only the result register, so SSA bound a read after a
+ * call to the definition before it — and every pass downstream was then
+ * entitled to propagate that value across the call. The output did not lose
+ * anything, it *stated* something false: `*(int64_t*)(rsi) = rcx;` with RCX
+ * still bound to the `lea` above the call (peek-a-bin-0t4).
+ *
+ * Stripping the version alone would not fix it. C's `rcx` holds whatever the
+ * last `rcx = …` line assigned, so a bare `rcx` after the call reads exactly
+ * the pre-call value; the read has to name something else.
+ *
+ * The model is deliberately narrower than the ABI's volatile set, which also
+ * covers R10 and R11 — see `clobberedByCall` in `ssa.ts` for the measurements
+ * that decided it, and the R10 case below for what the wider set cost.
+ */
+describe("decompileFunction — a register a call was passed does not survive it", () => {
+  it("does not bind a post-call read of RCX to the definition before the call", () => {
+    // Windows x64: RCX is volatile. `mov rdx, rcx` after the call reads
+    // whatever the callee left there, not `rbx + 0x30`.
+    const code = run(
+      seq(0x401000, [
+        ["lea", "rcx, [rbx + 0x30]"],
+        ["call", "0x403b24"],
+        ["mov", "rdx, rcx"],
+        ["mov", "qword ptr [rsi], rdx"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const store = code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toBeDefined();
+    // Before the fix: `*(int64_t*)(rsi) = rcx;` with `rcx = rbx + 0x30;` above.
+    expect(store).not.toMatch(/=\s*rcx\s*;/);
+    expect(store).not.toContain("rbx + 0x30");
+    expect(code).toContain("clobbered_rcx");
+    // The argument the call really was given is still there.
+    expect(code).toContain("sub_403B24(rbx + 0x30)");
+  });
+
+  it("lets a callee-saved register survive the same call", () => {
+    // RBX is non-volatile under every Windows calling convention: clobbering it
+    // too would throw away a real definition chain rather than a false one.
+    const code = run(
+      seq(0x401000, [
+        ["lea", "rbx, [rdi + 0x30]"],
+        ["call", "0x403b24"],
+        ["mov", "qword ptr [rsi], rbx"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    const store = code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toContain("rbx");
+    expect(code).not.toContain("clobbered_rbx");
+  });
+
+  it("lets R10 survive a call it was not passed, because compiled code relies on that", () => {
+    // R10 is volatile under the ABI, and MSVC still parks live values there
+    // across calls to helpers it has analysed: t64!sub_1400063E8 holds `[rcx]`
+    // in R10 across two of them, and `__chkstk` preserves everything but
+    // RAX/R10/R11 by contract. Clobbering the whole volatile set deleted a
+    // guard outright in t64!sub_140004A9C. The claim this file pins is the
+    // narrow one — the call consumed RCX, and nothing was said about R10.
+    const code = run(
+      seq(0x401000, [
+        ["lea", "r10, [rbx + 0x30]"],
+        ["mov", "rcx, rdi"],
+        ["call", "0x403b24"],
+        ["mov", "qword ptr [rsi], r10"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("r10 = rbx + 0x30;");
+    expect(code).toContain("*(int64_t*)(rsi) = r10;");
+    expect(code).not.toContain("clobbered_r10");
+  });
+
+  it("keeps the value on the path that does not call, and only that path", () => {
+    // rcx is 1 at the join only when the branch skipped the call; the calling
+    // arm passes 2 and gets back something indeterminate. Before the fix the
+    // arm emitted `rcx = 2;` and the join read it, so the store claimed the
+    // argument was still in RCX afterwards.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rcx, 1"], // 0x401000
+        ["cmp", "rdx, 0"], // 0x401004
+        ["je", "0x401014"], // 0x401008
+        ["mov", "rcx, 2"], // 0x40100c
+        ["call", "0x403b24"], // 0x401010
+        ["mov", "qword ptr [rsi], rcx"], // 0x401014 — the join
+        ["ret"], // 0x401018
+      ]),
+      true,
+    );
+
+    expect(code).toContain("if (rdx != 0)");
+    expect(code).toContain("sub_403B24(2)");
+    // The calling arm has to say the register no longer holds the argument.
+    expect(code).toMatch(/rcx = clobbered_rcx_\d+;/);
+    expect(code).toContain("*(int64_t*)(rsi) = rcx;");
+  });
+
+  it("does not carry a value round a loop through a call in its body", () => {
+    // The call at the top of the body is passed RCX and destroys it, so the
+    // increment below is not of the previous trip's value. Before the fix the
+    // increment disappeared altogether — `do { sub_403B24(rdi); } while (rcx <
+    // 0x10);`, a loop that as C cannot terminate.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rbx, rdi"], // 0x401000
+        ["mov", "rcx, rbx"], // 0x401004 — loop header
+        ["call", "0x403b24"], // 0x401008
+        ["add", "rcx, 1"], // 0x40100c
+        ["cmp", "rcx, 0x10"], // 0x401010
+        ["jb", "0x401004"], // 0x401014
+        ["ret"], // 0x401018
+      ]),
+      true,
+    );
+
+    expect(code).toMatch(/rcx = clobbered_rcx_\d+ \+ 1;/);
+    expect(code).toContain("while (rcx < 0x10)");
+  });
+});
+
+/**
+ * Constant folding at the width the operands say they are.
+ *
+ * The folder evaluated every constant binary op with plain JavaScript
+ * operators, and `&`, `|`, `^`, `<<`, `>>`, `>>>`, `|0` and `>>> 0` all coerce
+ * to *int32* first. So every bit above 31 was dropped and a wrong constant was
+ * emitted with nothing to signal it — `0x100000000 >>> 4` folded to 0 and
+ * `1 << 0x20` folded to 1 (peek-a-bin-8fv).
+ *
+ * Each case below is chosen so the 64-bit answer and the int32 answer differ:
+ * a case they agree on is not evidence.
+ */
+describe("decompileFunction — a 64-bit constant folds at 64 bits", () => {
+  it("keeps the bits a logical shift right moves down from above bit 31", () => {
+    // Folded to 0 before: `0x100000000 >>> 4` is 0 in int32.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 0x100000000"],
+        ["shr", "rax, 4"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return 0x10000000;");
+  });
+
+  it("does not wrap a shift count past 31 back round", () => {
+    // Folded to 1 before: JavaScript masks a shift count to 5 bits, so
+    // `1 << 0x20` is `1 << 0`.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 1"],
+        ["shl", "rax, 0x20"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return 0x100000000;");
+  });
+
+  it("keeps the high half of a mask", () => {
+    // Folded to 0 before: both operands truncate to 0 in int32.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 0x100000000"],
+        ["and", "rax, 0x1ffffffff"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return 0x100000000;");
+  });
+
+  it("keeps the high half of a bitwise or", () => {
+    // Folded to 0xFF before.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 0x100000000"],
+        ["or", "rax, 0xff"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return 0x1000000FF;");
+  });
+
+  it("keeps the bits an arithmetic shift right moves down", () => {
+    // Folded to 0 before.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 0x800000000"],
+        ["sar", "rax, 4"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return 0x80000000;");
+  });
+
+  it("leaves the expression alone rather than fold to a value it cannot hold", () => {
+    // `1 << 0x3f` is 2^63, past the exactly-representable range of the
+    // `number` an IRConst holds. Before, int32 truncation gave -0x80000000;
+    // an unfolded shift is still true.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 1"],
+        ["shl", "rax, 0x3f"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("-0x80000000");
+    expect(code).toContain("1 << 0x3F");
+  });
+
+  it("still folds a 32-bit shift at 32 bits", () => {
+    // `shr eax, 4` on 0x80000000 is 0x08000000 at either width; this pins that
+    // the 32-bit path was not disturbed.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 0x80000000"],
+        ["shr", "eax, 4"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("return 0x8000000;");
+  });
+
+  it("still lets a 32-bit shift drop the bits that leave the register", () => {
+    // `shl eax, 2` on 0x40000000 is 0 in a 32-bit register, and stays 0.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 0x40000000"],
+        ["shl", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("return 0;");
+  });
+});
+
+/**
+ * A 64-bit immediate is read at 64 bits.
+ *
+ * Capstone prints an immediate unsigned, so `or rdi, -1` arrives as
+ * `0xffffffffffffffff`, and `parseInt` rounds that to 2^64 — a value no later
+ * stage can do anything true with. The folder then evaluated `0 | 2^64` and
+ * emitted `rdi = 0`, which is the opposite of what the instruction does.
+ */
+describe("decompileFunction — a 64-bit immediate keeps its value", () => {
+  it("reads an all-ones immediate as the negative one it is", () => {
+    // Emitted `return 0;` before.
+    const code = run(
+      seq(0x401000, [
+        ["xor", "eax, eax"],
+        ["or", "rax, 0xffffffffffffffff"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return -1;");
+  });
+
+  it("does not paste an unrepresentable literal into the output", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "rax, 0xfffffffffffffffe"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("0x10000000000000000");
+    expect(code).toContain("return -2;");
+  });
+
+  it("leaves a 32-bit all-ones immediate reading as -1", () => {
+    // `or eax, 0xffffffff` is a 32-bit operation; -1 is its value and the
+    // spelling this file already had. Pins that the 64-bit path does not
+    // capture it and print 0xFFFFFFFF instead.
+    const code = run(
+      seq(0x401000, [
+        ["xor", "eax, eax"],
+        ["or", "eax, 0xffffffff"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("return -1;");
+  });
+});
+
+/**
+ * Dropping SSA version numbers is only sound while one version of a register is
+ * live at a time, and `ssaopt` deliberately breaks that — copy propagation
+ * forwards a source across a later write to it, GVN forwards a value to a later
+ * use. Both are fine in SSA and both become wrong when the versions come off.
+ *
+ * `splitStaleReads` used to see only inside one block, so a value redefined in
+ * another block was left to bind to whatever the register held by then
+ * (peek-a-bin-bld). It now asks which version actually reaches the read, and
+ * takes the copy at that version's own definition — the one point where the
+ * register is known to hold it — and only where that definition dominates the
+ * read.
+ */
+describe("decompileFunction — a value read after another block redefined its register", () => {
+  it("stores the first call's result, not the second's", () => {
+    // `mov rbx, rax` makes RBX a copy of the first result; copy propagation
+    // forwards it to the store, which is in a later block — by which point the
+    // second call has rewritten RAX. Before the fix the store read `rax` and so
+    // claimed the *second* result was the address written through.
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x403000"], // 0x401000
+        ["mov", "rbx, rax"], // 0x401004
+        ["call", "0x403010"], // 0x401008
+        ["test", "rax, rax"], // 0x40100c
+        ["je", "0x40101c"], // 0x401010
+        ["mov", "qword ptr [rbx], 0"], // 0x401014
+        ["jmp", "0x40101c"], // 0x401018
+        ["ret"], // 0x40101c
+      ]),
+      true,
+    );
+
+    expect(code).toContain("sub_403000()");
+    expect(code).toContain("sub_403010()");
+    const store = code.split("\n").find((l) => l.includes("= 0;") && l.includes("*("));
+    expect(store).toBeDefined();
+    // Before the fix: `*(int64_t*)(rax) = 0;`
+    expect(store).not.toMatch(/\(rax\)/);
+    expect(store).toMatch(/rax_\d+/);
+    // The copy is taken before the call that destroys the value, not after.
+    const lines = code.split("\n");
+    const copyAt = lines.findIndex((l) => /rax_\d+ = rax;/.test(l));
+    const secondCallAt = lines.findIndex((l) => l.includes("sub_403010"));
+    expect(copyAt).toBeGreaterThanOrEqual(0);
+    expect(copyAt).toBeLessThan(secondCallAt);
+  });
+
+  it("names the split value the way the function spells the register", () => {
+    // The same shape in 32-bit code. The split name follows the reads, so a
+    // function whose disassembly only ever says `eax` does not get an `rax_1`
+    // naming a register it never mentions.
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x403000"],
+        ["mov", "esi, eax"],
+        ["call", "0x403010"],
+        ["test", "eax, eax"],
+        ["je", "0x40101c"],
+        ["mov", "dword ptr [esi], 0"],
+        ["jmp", "0x40101c"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/eax_\d+ = eax;/);
+    expect(code).not.toMatch(/\brax_\d+\b/);
+  });
+
+  it("keeps the register's own definition, which a branch condition still reads", () => {
+    // The copy is written as `esi_1 = arg; esi = esi_1;`, not `esi = arg;
+    // esi_1 = esi;`. Branch conditions are built by `structure.ts` from
+    // `RegState`, so they are not in the statement list `foldBlock` counts uses
+    // over: with the reads renamed, appending the copy made the definition look
+    // single-use, it folded into the copy, and the guard was left reading a
+    // variable nothing assigns.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "esi, dword ptr [ebp + 8]"], // 0x401000
+        ["test", "esi, esi"], // 0x401004
+        ["je", "0x401018"], // 0x401008
+        ["call", "0x403010"], // 0x40100c
+        ["mov", "esi, eax"], // 0x401010 — redefines esi
+        ["jmp", "0x401018"], // 0x401014
+        ["mov", "dword ptr [edi], esi"], // 0x401018 — the join
+        ["ret"], // 0x40101c
+      ]),
+    );
+
+    // Whatever the guard reads, the body has to assign it.
+    const guard = code.split("\n").find((l) => l.includes("if ("));
+    expect(guard).toBeDefined();
+    const named = /\b(e?[a-z]{2}\d*)\b/.exec(guard!.replace(/if \(|\)/g, ""));
+    expect(named).not.toBeNull();
+    expect(code).toMatch(new RegExp(`^\\s*${named![1]} =`, "m"));
   });
 });

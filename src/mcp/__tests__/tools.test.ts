@@ -12,12 +12,14 @@
  * that imports the harness re-imports the whole tool import graph.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { unsupportedOnArch } from "../../disasm/arch";
 import type { Xref } from "../../disasm/types";
-import { captureTools, stubSession, textOf, type ToolHandler } from "./harness";
+import type { AnalyzedFile } from "../session";
+import { captureTools, stubSession, type ToolHandler, textOf } from "./harness";
 
 /** A session whose xref map has a single entry, keyed by `address`. */
 function sessionWithXrefAt(address: number) {
@@ -148,9 +150,125 @@ describe("annotation tools — accepted addresses reach the session", () => {
   });
 });
 
+describe("get_xrefs — the whole-image maps (peek-a-bin-0d0)", () => {
+  /** A file with one string, one import and one call edge, all at known addresses. */
+  function referencedSession() {
+    return stubSession({
+      functions: [
+        { name: "sub_401000", address: 0x401000, size: 0x40 },
+        { name: "sub_401100", address: 0x401100, size: 0x40 },
+      ],
+      stringMap: new Map([[0x40a000, "password"]]),
+      iatMap: new Map([[0x40b000, { lib: "KERNEL32.dll", func: "CreateFileA" }]]),
+      stringXrefs: new Map([[0x40a000, [0x401010, 0x401120]]]),
+      importXrefs: new Map([[0x40b000, [0x401030]]]),
+      dataXrefs: new Map([[0x40c000, [0x401040]]]),
+      callGraph: new Map([[0x401000, [0x401100]]]),
+    });
+  }
+
+  it("answers a string address with its value and its users", async () => {
+    // Before the maps were wired in, this returned xrefCount 0 and nothing else:
+    // `xrefMap` is keyed by code target, so a data address was simply absent.
+    const { session } = referencedSession();
+    const getXrefs = captureTools(session).get("get_xrefs")!;
+
+    const result = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x40a000" })));
+
+    expect(result.string).toBe("password");
+    expect(result.stringRefs).toEqual(["0x401010", "0x401120"]);
+  });
+
+  it("answers an IAT address with the imported name and its call sites", async () => {
+    const { session } = referencedSession();
+    const getXrefs = captureTools(session).get("get_xrefs")!;
+
+    const result = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x40b000" })));
+
+    expect(result.import).toBe("KERNEL32.dll!CreateFileA");
+    expect(result.importRefs).toEqual(["0x401030"]);
+  });
+
+  it("reports data references and both directions of the call graph", async () => {
+    const { session } = referencedSession();
+    const getXrefs = captureTools(session).get("get_xrefs")!;
+
+    const data = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x40c000" })));
+    expect(data.dataRefs).toEqual(["0x401040"]);
+
+    const caller = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x401000" })));
+    expect(caller.calls).toEqual(["0x401100"]);
+    expect(caller.calledBy).toEqual([]);
+
+    const callee = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x401100" })));
+    expect(callee.calls).toEqual([]);
+    expect(callee.calledBy).toEqual(["0x401000"]);
+  });
+
+  it("leaves the per-instruction xrefs exactly as they were", async () => {
+    const { session } = sessionWithXrefAt(0x402000);
+    const getXrefs = captureTools(session).get("get_xrefs")!;
+
+    const result = JSON.parse(textOf(await getXrefs({ fileId: "sample", address: "0x402000" })));
+    expect(result.xrefCount).toBe(1);
+    expect(result.xrefs).toEqual([{ from: "0x401234", type: "call" }]);
+  });
+});
+
+describe("get_call_graph (peek-a-bin-0d0)", () => {
+  const graphSession = () =>
+    stubSession({
+      functions: [
+        { name: "sub_401000", address: 0x401000, size: 0x40 },
+        { name: "sub_401100", address: 0x401100, size: 0x40 },
+      ],
+      renames: { [String(0x401100)]: "decrypt" },
+      callGraph: new Map([[0x401000, [0x401100]]]),
+    });
+
+  it("returns every edge when no address is given", async () => {
+    const { session } = graphSession();
+    const handler = captureTools(session).get("get_call_graph")!;
+
+    const result = JSON.parse(textOf(await handler({ fileId: "sample" })));
+
+    expect(result.functionCount).toBe(1);
+    expect(result.edges).toEqual([
+      {
+        from: "0x401000",
+        name: "sub_401000",
+        calls: [{ address: "0x401100", name: "decrypt" }],
+      },
+    ]);
+  });
+
+  it("returns callers and callees for one address", async () => {
+    const { session } = graphSession();
+    const handler = captureTools(session).get("get_call_graph")!;
+
+    const result = JSON.parse(textOf(await handler({ fileId: "sample", address: "0x401100" })));
+
+    expect(result.name).toBe("decrypt");
+    expect(result.calledBy).toEqual([{ address: "0x401000", name: "sub_401000" }]);
+    expect(result.calls).toEqual([]);
+  });
+
+  it("refuses an unparseable address rather than dumping the whole graph", async () => {
+    // `address` is optional here, so a malformed one must not fall through to
+    // the omitted-argument branch and answer with something that looks fine.
+    const { session } = graphSession();
+    const handler = captureTools(session).get("get_call_graph")!;
+
+    const result = await handler({ fileId: "sample", address: "not-an-address" });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/invalid address/);
+  });
+});
+
 describe("tool handlers — unknown file", () => {
   it.each([
     "get_xrefs",
+    "get_call_graph",
     "add_comment",
     "rename_function",
     "add_bookmark",
@@ -163,6 +281,95 @@ describe("tool handlers — unknown file", () => {
     const result = await handler({ fileId: "missing", address: "0x1000", text: "x", name: "x" });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/not loaded/);
+  });
+});
+
+describe("decompile_function — architecture refusal (peek-a-bin-9b1)", () => {
+  const arm64Function = {
+    pe: { is64: true, sections: [] },
+    functions: [{ name: "sub_140001018", address: 0x140001018, size: 0x40 }],
+    instructions: [
+      {
+        address: 0x140001018,
+        bytes: new Uint8Array(4),
+        mnemonic: "stp",
+        opStr: "x19, x20, [sp, #-0x30]!",
+        size: 4,
+      },
+      { address: 0x14000101c, bytes: new Uint8Array(4), mnemonic: "ret", opStr: "", size: 4 },
+    ],
+  } as unknown as Partial<AnalyzedFile>;
+
+  it("declines on an ARM64 image instead of emitting pseudo-C", async () => {
+    const { session } = stubSession({ ...arm64Function, arch: "arm64" });
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const result = await decompile({ fileId: "sample", address: "0x140001018" });
+
+    expect(result.isError).toBe(true);
+    // Whatever else it says, it must not read like a decompilation.
+    expect(textOf(result)).not.toMatch(/return|__unrecovered|unlifted/);
+  });
+
+  it("uses the same wording as the browser worker's refusal", async () => {
+    // Both sides call `unsupportedOnArch`, so this cannot drift into two
+    // different explanations of the same refusal.
+    const { session } = stubSession({ ...arm64Function, arch: "arm64" });
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const result = await decompile({ fileId: "sample", address: "0x140001018" });
+
+    expect(textOf(result)).toBe(`Error: ${unsupportedOnArch("Decompilation", "arm64")}`);
+  });
+
+  it("refuses before resolving the address, so it never depends on one", async () => {
+    // The refusal is a property of the image. An ARM64 file must decline for an
+    // address that is not a function at all, rather than reporting the address.
+    const { session } = stubSession({ arch: "arm64" });
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const result = await decompile({ fileId: "sample", address: "0xdeadbeef" });
+
+    expect(textOf(result)).toMatch(/not supported for ARM64/);
+    expect(textOf(result)).not.toMatch(/no function at address/);
+  });
+
+  it("leaves the x86 path alone", async () => {
+    // Same arguments, x86 image: the handler proceeds past the arch gate and
+    // fails on the address, as it always did.
+    const { session } = stubSession({ arch: "x86" });
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const result = await decompile({ fileId: "sample", address: "0xdeadbeef" });
+
+    expect(textOf(result)).toMatch(/no function at address 0xdeadbeef/);
+    expect(textOf(result)).not.toMatch(/not supported/);
+  });
+
+  it("still disassembles ARM64 — only the x86 grammars decline", async () => {
+    // `disassemble_function` reports what Capstone decoded. That is real on
+    // ARM64, so it must NOT be swept up in the refusal.
+    const { session } = stubSession({ ...arm64Function, arch: "arm64" });
+    const disassemble = captureTools(session).get("disassemble_function")!;
+
+    const result = await disassemble({ fileId: "sample", address: "0x140001018" });
+
+    expect(result.isError).toBeUndefined();
+    expect(textOf(result)).toMatch(/stp\s+x19, x20, \[sp, #-0x30\]!/);
+  });
+});
+
+/** Just enough PE shape for the tools that read `af.pe`. */
+const arm64ImageStub = { pe: { is64: true, sections: [] } } as unknown as Partial<AnalyzedFile>;
+
+describe("load_pe / list_files report the architecture", () => {
+  it("list_files carries arch next to is64", async () => {
+    // An ARM64 image is PE32+, so `is64: true` alone reads as "x64" to a client.
+    const { session } = stubSession({ ...arm64ImageStub, arch: "arm64" });
+    const listFiles = captureTools(session).get("list_files")!;
+
+    const [entry] = JSON.parse(textOf(await listFiles({})));
+    expect(entry.arch).toBe("arm64");
   });
 });
 

@@ -2,16 +2,17 @@
  * MCP tool registrations for Peek-a-Bin.
  */
 
-import { z } from "zod";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AnalyzedFile, FileSession } from "./session";
-import { parseAddr, resolveExportPath } from "./paths";
-import { analyzeStackFrame } from "../disasm/stack";
-import { inferSignature } from "../disasm/signatures";
+import { z } from "zod";
+import { unsupportedOnArch } from "../disasm/arch";
 import { decompileFunction } from "../disasm/decompile/pipeline";
-import { validateImport, type ExportSchemaV1 } from "../utils/exportSchema";
+import { inferSignature } from "../disasm/signatures";
+import { analyzeStackFrame } from "../disasm/stack";
+import { type ExportSchemaV1, validateImport } from "../utils/exportSchema";
+import { parseAddr, resolveExportPath } from "./paths";
+import type { AnalyzedFile, FileSession } from "./session";
 
 /** Upper bound on files accepted by `load_pe`, guarding against accidental huge reads. */
 const MAX_PE_FILE_BYTES = 256 * 1024 * 1024;
@@ -101,6 +102,10 @@ export function registerTools(server: McpServer, session: FileSession): void {
         id: fileId,
         fileName,
         is64: pe.is64,
+        // `is64` is the PE32+ optional-header magic — a pointer width, not an
+        // instruction set. An ARM64 image is PE32+, so a client reading `is64`
+        // alone concludes "x64". Report the machine type's answer next to it.
+        arch: analyzed.arch,
         imageBase: hex(pe.optionalHeader.imageBase),
         entryPoint: hex(pe.optionalHeader.addressOfEntryPoint),
         subsystem: pe.optionalHeader.subsystem,
@@ -123,6 +128,7 @@ export function registerTools(server: McpServer, session: FileSession): void {
         id: f.id,
         fileName: f.fileName,
         is64: af.pe.is64,
+        arch: af.arch,
         sectionCount: af.pe.sections.length,
         functionCount: af.functions.length,
       };
@@ -178,6 +184,18 @@ export function registerTools(server: McpServer, session: FileSession): void {
     },
     async ({ fileId, address }) =>
       withFile(session, fileId, (af) => {
+        // Refuse rather than emit, exactly as the browser worker does
+        // (`src/workers/dispatch.ts`, case "decompileFunction"). The IR lifter,
+        // `analyzeStackFrame` and `inferSignature` below are all x86 grammars;
+        // handed ARM64 instructions they do not throw, they lift almost nothing
+        // and return a short, confident, wrong C function — mostly
+        // `/* unlifted: … */`, every branch dropped, a fabricated
+        // `__unrecovered_N` per register and a closing `return rax`. An MCP
+        // client has no way to tell that from a real decompilation, so this
+        // check comes before any of them run and before the address is even
+        // resolved: the refusal is a property of the image, not of the address.
+        if (af.arch !== "x86") return err(unsupportedOnArch("Decompilation", af.arch));
+
         const addr = parseAddr(address);
         if (addr === null)
           return err(
@@ -272,7 +290,7 @@ export function registerTools(server: McpServer, session: FileSession): void {
   // ── get_xrefs ──
   server.tool(
     "get_xrefs",
-    "Get cross-references to/from an address",
+    "Get cross-references to/from an address: code refs, string/import/data refs, and call graph edges",
     {
       fileId: z.string().describe("ID of the loaded PE file"),
       address: z.union([z.number(), z.string()]).describe("Target address"),
@@ -286,6 +304,19 @@ export function registerTools(server: McpServer, session: FileSession): void {
           );
 
         const xrefs = af.xrefMap.get(addr) ?? [];
+        // The whole-image maps. Before these were wired up (peek-a-bin-0d0) this
+        // tool answered with `xrefs` alone, so asking about a string or an
+        // import address returned an empty result no matter how many
+        // instructions used it.
+        const stringRefs = af.stringXrefs.get(addr) ?? [];
+        const importRefs = af.importXrefs.get(addr) ?? [];
+        const dataRefs = af.dataXrefs.get(addr) ?? [];
+        const calls = af.callGraph.get(addr) ?? [];
+        const calledBy: number[] = [];
+        for (const [from, targets] of af.callGraph) {
+          if (targets.includes(addr)) calledBy.push(from);
+        }
+        const imported = af.iatMap.get(addr);
 
         return json({
           address: hex(addr),
@@ -294,6 +325,61 @@ export function registerTools(server: McpServer, session: FileSession): void {
             from: hex(x.from),
             type: x.type,
           })),
+          // What kind of thing the address turned out to be, when the analysis
+          // knows: a client that guessed an address from a decompiled line
+          // should not have to ask three more tools to find out.
+          string: af.stringMap.get(addr),
+          import: imported ? `${imported.lib}!${imported.func}` : undefined,
+          stringRefs: stringRefs.map(hex),
+          importRefs: importRefs.map(hex),
+          dataRefs: dataRefs.map(hex),
+          calls: calls.map(hex),
+          calledBy: calledBy.map(hex),
+        });
+      }),
+  );
+
+  // ── get_call_graph ──
+  server.tool(
+    "get_call_graph",
+    "Get the whole-image call graph, or the callers and callees of one function",
+    {
+      fileId: z.string().describe("ID of the loaded PE file"),
+      address: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe("Function address; omit for the whole graph"),
+    },
+    async ({ fileId, address }) =>
+      withFile(session, fileId, (af) => {
+        const named = (a: number): string =>
+          af.renames[String(a)] ?? af.functions.find((f) => f.address === a)?.name ?? hex(a);
+
+        if (address === undefined) {
+          const edges = Array.from(af.callGraph, ([from, targets]) => ({
+            from: hex(from),
+            name: named(from),
+            calls: targets.map((t) => ({ address: hex(t), name: named(t) })),
+          }));
+          return json({ fileId, functionCount: edges.length, edges });
+        }
+
+        const addr = parseAddr(address);
+        if (addr === null)
+          return err(
+            `invalid address "${address}" — expected a hex string like "0x1234" or a number`,
+          );
+
+        const calls = af.callGraph.get(addr) ?? [];
+        const calledBy: number[] = [];
+        for (const [from, targets] of af.callGraph) {
+          if (targets.includes(addr)) calledBy.push(from);
+        }
+        return json({
+          address: hex(addr),
+          name: named(addr),
+          calls: calls.map((t) => ({ address: hex(t), name: named(t) })),
+          calledBy: calledBy.map((t) => ({ address: hex(t), name: named(t) })),
         });
       }),
   );

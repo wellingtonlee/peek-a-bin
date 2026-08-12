@@ -9,6 +9,7 @@ import {
   decodeIOCTL,
   isPlausibleIOCTL,
   formatIOCTL,
+  ioctlCodeArgIndex,
   detectIRPDispatches,
   IRP_MAJOR_FUNCTIONS,
 } from "../driver";
@@ -190,6 +191,36 @@ describe("decodeIOCTL", () => {
     expect(formatIOCTL(0x00070000)).toBe("IOCTL: DISK | Fn=0x0 | BUFFERED");
     expect(formatIOCTL(0x002d1400)).toBe("IOCTL: MASS_STORAGE | Fn=0x500 | BUFFERED");
     expect(formatIOCTL(0x1234)).toBeNull();
+  });
+});
+
+/**
+ * `isPlausibleIOCTL` is a shape test that a large share of ordinary constants
+ * pass, so consumers pair it with the position of the constant at a call. This
+ * is the position half.
+ */
+describe("ioctlCodeArgIndex", () => {
+  it("gives the documented argument position for each API that takes a control code", () => {
+    expect(ioctlCodeArgIndex("DeviceIoControl")).toBe(1);
+    expect(ioctlCodeArgIndex("NtDeviceIoControlFile")).toBe(5);
+    expect(ioctlCodeArgIndex("ZwDeviceIoControlFile")).toBe(5);
+    expect(ioctlCodeArgIndex("NtFsControlFile")).toBe(5);
+    expect(ioctlCodeArgIndex("IoBuildDeviceIoControlRequest")).toBe(0);
+    expect(ioctlCodeArgIndex("WdfIoTargetSendIoctlSynchronously")).toBe(2);
+  });
+
+  it("sees through the decoration a symbol arrives with", () => {
+    // An import thunk, and a 32-bit stdcall symbol.
+    expect(ioctlCodeArgIndex("__imp_DeviceIoControl")).toBe(1);
+    expect(ioctlCodeArgIndex("_DeviceIoControl@32")).toBe(1);
+    expect(ioctlCodeArgIndex("_imp__DeviceIoControl")).toBe(1);
+  });
+
+  it("says nothing about an API that takes no control code", () => {
+    expect(ioctlCodeArgIndex("Sleep")).toBeNull();
+    expect(ioctlCodeArgIndex("sub_408000")).toBeNull();
+    // Not a false hit on the import-thunk prefix.
+    expect(ioctlCodeArgIndex("ImpersonateNamedPipeClient")).toBeNull();
   });
 });
 

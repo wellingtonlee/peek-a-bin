@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { buildCFG, detectLoops, type BasicBlock } from "../cfg";
-import type { Instruction, DisasmFunction, Xref } from "../types";
+import { describe, expect, it } from "vitest";
+import { type BasicBlock, buildCFG, detectLoops } from "../cfg";
+import type { DisasmFunction, Instruction, Xref } from "../types";
 
 const START = 0x401000;
 
@@ -280,5 +280,318 @@ describe("buildCFG", () => {
       const indirect = blocks.find((b) => b.startAddr === 0x401005)!;
       expect(indirect.succs.map((id) => blocks[id].startAddr)).toEqual([0x40100c]);
     });
+  });
+});
+
+/**
+ * `detectLoops` is dominance-based: an edge `u → v` is a back edge only when v
+ * dominates u. It used to approximate that with BFS layers from the entry,
+ * which called the merge block of every `if`-without-`else` a loop header —
+ * ~86% of the loop headers reported on three real MSVC binaries did not exist
+ * (peek-a-bin-lrs). The decompiler is not the only consumer: the disassembly
+ * view marks loop headers from this same function.
+ */
+describe("detectLoops — shapes that are not loops", () => {
+  it("does not call the merge of an if-without-else a loop", () => {
+    //   0x401000 test ecx, ecx
+    //   0x401002 je   0x401009   ← both paths end at 0x401009
+    //   0x401004 mov  [ecx], edx
+    //   0x401009 ret
+    const { blocks } = cfg([
+      ["test", "ecx, ecx", 2],
+      ["je", "0x401009", 2],
+      ["mov", "dword ptr [ecx], edx", 5],
+      ["ret", "", 1],
+    ]);
+    expect(blocks.map((b) => b.startAddr)).toEqual([0x401000, 0x401004, 0x401009]);
+    expect(detectLoops(blocks)).toEqual([]);
+  });
+
+  it("does not call the merge of an if-else a loop either", () => {
+    const { blocks } = cfg([
+      ["test", "ecx, ecx", 2],
+      ["je", "0x401009", 2],
+      ["mov", "eax, 1", 5], // 0x401004
+      ["jmp", "0x40100e", 2],
+      ["mov", "eax, 2", 5], // 0x401009
+      ["ret", "", 1], // 0x40100e
+    ]);
+    expect(detectLoops(blocks)).toEqual([]);
+  });
+
+  it("does not treat a forward jump over a block as a back edge", () => {
+    const { blocks } = cfg([
+      ["jmp", "0x401007", 2], // 0x401000
+      ["mov", "eax, 1", 5], // 0x401002 — unreachable
+      ["ret", "", 1], // 0x401007
+    ]);
+    expect(detectLoops(blocks)).toEqual([]);
+  });
+});
+
+describe("detectLoops — nesting", () => {
+  it("gives an inner loop a greater depth than the outer one", () => {
+    //   0x401000 mov ecx, 0
+    //   0x401005 cmp ecx, 8       ← outer header
+    //   0x401008 jge 0x401019
+    //   0x40100a mov edx, 0       ← outer body / inner preheader
+    //   0x40100f cmp edx, 4       ← inner header
+    //   0x401012 jge 0x401017
+    //   0x401014 inc edx
+    //   0x401015 jmp 0x40100f     ← inner back edge
+    //   0x401017 inc ecx
+    //   0x401018 jmp 0x401005     ← outer back edge (unreachable-free)
+    //   0x40101d ret
+    const { blocks } = cfg([
+      ["mov", "ecx, 0", 5],
+      ["cmp", "ecx, 8", 3],
+      ["jge", "0x40101d", 2],
+      ["mov", "edx, 0", 5],
+      ["cmp", "edx, 4", 3],
+      ["jge", "0x401017", 2],
+      ["inc", "edx", 1],
+      ["jmp", "0x40100f", 2],
+      ["inc", "ecx", 1], // 0x401017
+      ["jmp", "0x401005", 5], // 0x401018
+      ["ret", "", 1], // 0x40101d
+    ]);
+    const loops = detectLoops(blocks);
+    expect(loops.map((l) => l.headerAddr)).toEqual([0x401005, 0x40100f]);
+    expect(loops[0].depth).toBe(0);
+    expect(loops[1].depth).toBe(1);
+    // The outer body covers the inner header; the inner body does not cover
+    // the outer one.
+    expect(loops[0].bodyAddrs.has(0x40100f)).toBe(true);
+    expect(loops[1].bodyAddrs.has(0x401005)).toBe(false);
+  });
+});
+
+/**
+ * peek-a-bin-8bj — ARM64 control flow.
+ *
+ * `buildCFG` split blocks on `jmp`/`j<cc>`/`ret` and read `^0x…$` operands, all
+ * of which are x86 spellings. On an ARM64 image it therefore produced one block
+ * per function and NO edges at all: measured on t64-arm.exe, 659 blocks and 0
+ * edges across 539 functions, 454 of them a single block.
+ *
+ * Every A64 operand string below is Capstone's own output on that file. The
+ * A64 base is 0x140001000 rather than `START` so a mis-scaled address cannot
+ * accidentally coincide with an x86 one.
+ */
+const A64 = 0x140001000;
+
+/** Fixed-width 4-byte A64 instructions. */
+function a64(
+  specs: [mnemonic: string, opStr: string][],
+  opts: { funcSize?: number; jumpTables?: Map<number, number[]> } = {},
+): { blocks: BasicBlock[]; insns: Instruction[] } {
+  const insns = layout(
+    A64,
+    specs.map(([m, o]) => [m, o, 4] as Spec),
+  );
+  const func: DisasmFunction = { name: "f", address: A64, size: opts.funcSize ?? insns.length * 4 };
+  return { blocks: buildCFG(func, insns, new Map(), opts.jumpTables), insns };
+}
+
+/** `0x…` of a block start, for readable failures. */
+const starts = (blocks: BasicBlock[]) => blocks.map((b) => b.startAddr);
+
+describe("buildCFG — ARM64 (peek-a-bin-8bj)", () => {
+  it("splits at a conditional branch and wires both successors", () => {
+    // cmp / b.ne <else> / mov / ret / mov / ret
+    const { blocks } = a64([
+      ["cmp", "x16, x17"],
+      ["b.ne", `#0x${(A64 + 0x10).toString(16)}`],
+      ["mov", "x0, #0"],
+      ["ret", ""],
+      ["mov", "x0, #1"],
+      ["ret", ""],
+    ]);
+
+    expect(starts(blocks)).toEqual([A64, A64 + 0x08, A64 + 0x10]);
+    // Taken edge first, then the fallthrough — the order the x86 arm uses.
+    expect(blocks[0].succs).toEqual([2, 1]);
+    expect(blocks[1].succs).toEqual([]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it.each(["cbz", "cbnz"])("splits at %s, reading past the register operand", (mn) => {
+    const { blocks } = a64([
+      [mn, `w2, #0x${(A64 + 0x0c).toString(16)}`],
+      ["mov", "x0, #0"],
+      ["ret", ""],
+      ["ret", ""],
+    ]);
+
+    expect(starts(blocks)).toEqual([A64, A64 + 0x04, A64 + 0x0c]);
+    expect(blocks[0].succs).toEqual([2, 1]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it.each(["tbz", "tbnz"])("splits at %s, reading past the register AND the bit", (mn) => {
+    const { blocks } = a64([
+      [mn, `w2, #2, #0x${(A64 + 0x0c).toString(16)}`],
+      ["mov", "x0, #0"],
+      ["ret", ""],
+      ["ret", ""],
+    ]);
+
+    expect(blocks[0].succs).toEqual([2, 1]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it("gives an unconditional b one successor and no fallthrough", () => {
+    const { blocks } = a64([
+      ["b", `#0x${(A64 + 0x08).toString(16)}`],
+      ["brk", "#1"],
+      ["ret", ""],
+    ]);
+
+    expect(blocks[0].succs).toEqual([2]);
+    // The skipped `brk` block is reachable from nothing.
+    expect(blocks[1].preds).toEqual([]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it("finds a backward b.ne loop, which detectLoops then sees", () => {
+    // The `sub / ldr / cmp / b.ne <back>` probe loop from t64-arm.exe.
+    const { blocks } = a64([
+      ["mov", "x16, #0"],
+      ["sub", "x17, x17, #1, lsl #12"],
+      ["ldr", "xzr, [x17]"],
+      ["cmp", "x17, x16"],
+      ["b.ne", `#0x${(A64 + 0x04).toString(16)}`],
+      ["ret", ""],
+    ]);
+
+    expect(starts(blocks)).toEqual([A64, A64 + 0x04, A64 + 0x14]);
+    // Self edge back to the loop header, plus the exit.
+    expect(blocks[1].succs).toEqual([1, 2]);
+    expect(detectLoops(blocks).map((l) => l.headerAddr)).toEqual([A64 + 0x04]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it("does not end a block at bl — a call returns", () => {
+    // `bl` is A64's `call`. Ending a block there would double the block count
+    // and hang a fallthrough edge off every call site.
+    const { blocks } = a64([
+      ["mov", "x0, #1"],
+      ["bl", "#0x140003160"],
+      ["mov", "x1, x0"],
+      ["ret", ""],
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].succs).toEqual([]);
+  });
+
+  it("does not end a block at brk, which is not br", () => {
+    const { blocks } = a64([
+      ["mov", "x0, #1"],
+      ["brk", "#1"],
+      ["mov", "x1, x0"],
+      ["ret", ""],
+    ]);
+    expect(blocks).toHaveLength(1);
+  });
+});
+
+describe("buildCFG — ARM64 declines rather than guessing an edge", () => {
+  it("gives an indirect br NO successor, and still ends the block", () => {
+    // A `br x8` is a switch dispatch or a register tail call. Guessing the
+    // fallthrough would be a wrong edge, and a wrong edge is indistinguishable
+    // downstream from a real one. t64-arm.exe has 26 of these.
+    const { blocks } = a64([
+      ["ldr", "x8, [x0]"],
+      ["br", "x8"],
+      ["mov", "x0, #1"],
+      ["ret", ""],
+    ]);
+
+    expect(starts(blocks)).toEqual([A64, A64 + 0x08]);
+    expect(blocks[0].succs).toEqual([]);
+    expect(blocks[1].preds).toEqual([]);
+  });
+
+  it("emits no edge for a b whose target is outside the function", () => {
+    // A tail call. 60 of t64-arm.exe's direct branches leave their own function.
+    const { blocks } = a64([
+      ["mov", "x0, #1"],
+      ["b", "#0x140099999"],
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].succs).toEqual([]);
+  });
+
+  it("emits no edge for a conditional branch whose target it cannot read", () => {
+    // Fallthrough still exists — that one is known. The taken edge does not.
+    const { blocks } = a64([
+      ["cbz", "w2, x9"],
+      ["mov", "x0, #1"],
+      ["ret", ""],
+    ]);
+
+    expect(blocks[0].succs).toEqual([1]);
+    expectEdgesConsistent(blocks);
+  });
+});
+
+/**
+ * peek-a-bin-8ij. Where `arm64.ts` recovered the dispatch table, the case bodies
+ * are the `br` block's successors. Where it did not, the block above still has
+ * none — recovering some tables must not turn "unknown" into "guessed" for the
+ * rest.
+ */
+describe("buildCFG — ARM64 dispatch tables", () => {
+  const dispatch: [string, string][] = [
+    ["cmp", "w1, #1"],
+    ["b.hi", `#0x${(A64 + 0x14).toString(16)}`],
+    ["adr", `x9, #0x${(A64 + 0x18).toString(16)}`],
+    ["ldrb", "w8, [x9, w1, uxtw]"],
+    ["add", "x8, x9, x8, lsl #2"],
+    ["br", "x8"], // 0x14
+    ["mov", "x0, #1"], // 0x18 — case 0
+    ["ret", ""],
+    ["mov", "x0, #2"], // 0x20 — case 1
+    ["ret", ""],
+  ];
+
+  it("wires the br block to every case body the table names", () => {
+    const { blocks } = a64(dispatch, {
+      jumpTables: new Map([[A64 + 0x14, [A64 + 0x18, A64 + 0x20]]]),
+    });
+
+    const brBlock = blocks.find((b) => b.insns.some((i) => i.mnemonic === "br"))!;
+    const succStarts = brBlock.succs.map((id) => blocks[id].startAddr);
+    expect(succStarts).toEqual([A64 + 0x18, A64 + 0x20]);
+    expectEdgesConsistent(blocks);
+  });
+
+  it("still gives the br no successor when no table was recovered", () => {
+    const { blocks } = a64(dispatch);
+
+    const brBlock = blocks.find((b) => b.insns.some((i) => i.mnemonic === "br"))!;
+    expect(brBlock.succs).toEqual([]);
+  });
+
+  it("does not add a fallthrough edge alongside the case edges", () => {
+    // A dispatch does not fall through, and the instruction after the `br` is
+    // case 0 here — an extra edge to it would double-count.
+    const { blocks } = a64(dispatch, {
+      jumpTables: new Map([[A64 + 0x14, [A64 + 0x20]]]),
+    });
+
+    const brBlock = blocks.find((b) => b.insns.some((i) => i.mnemonic === "br"))!;
+    expect(brBlock.succs.map((id) => blocks[id].startAddr)).toEqual([A64 + 0x20]);
+  });
+
+  it("ignores a table entry that is not a block start in this function", () => {
+    const { blocks } = a64(dispatch, {
+      jumpTables: new Map([[A64 + 0x14, [A64 + 0x18, A64 + 0x900]]]),
+    });
+
+    const brBlock = blocks.find((b) => b.insns.some((i) => i.mnemonic === "br"))!;
+    expect(brBlock.succs.map((id) => blocks[id].startAddr)).toEqual([A64 + 0x18]);
   });
 });

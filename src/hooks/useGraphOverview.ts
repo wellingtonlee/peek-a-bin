@@ -23,7 +23,9 @@ export const GraphOverviewContext = createContext<GraphOverviewState>({
 
 export function useGraphOverviewState(): GraphOverviewState {
   const [data, setData] = useState<GraphOverviewData | null>(null);
-  return useMemo(() => ({ data, setData }), [data, setData]);
+  // setData is this hook's own useState setter, so its identity is stable and
+  // Biome resolves it as such; listing it is redundant.
+  return useMemo(() => ({ data, setData }), [data]);
 }
 
 export function useGraphOverview() {

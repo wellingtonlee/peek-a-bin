@@ -35,7 +35,13 @@ export function CallPanel({
 
   const findContainingFunc = (addr: number) => binarySearchFunc(sortedFuncs, addr);
 
-  // Callers: xrefs to this function's address, resolved to containing function
+  // Callers: xrefs to this function's address, resolved to containing function.
+  //
+  // The array is correct as written but the rule cannot see it: the only thing
+  // findContainingFunc closes over is `sortedFuncs`, which is listed, while
+  // findContainingFunc itself is a plain arrow rebuilt every render — adding it
+  // would recompute this memo on every render and defeat the memoisation.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sortedFuncs is findContainingFunc's only capture; depending on the unmemoised arrow instead would recompute every render.
   const callers = useMemo(() => {
     const sources = xrefMap.get(func.address) || [];
     const seen = new Set<number>();

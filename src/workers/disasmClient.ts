@@ -1,7 +1,13 @@
 import type { Instruction, DisasmFunction, Xref, StackFrame } from "../disasm/types";
+// Type-only: erased at compile time, so this adds no runtime edge to
+// functionDetect (and none to Capstone through it).
+import type { ImageBounds } from "../disasm/functionDetect";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { SectionHeader } from "../pe/types";
 import type { IRPDispatchEntry } from "../analysis/driver";
+import { prepareBinaryArgs } from "./transfer";
+import { jumpTableTargets } from "../disasm/seeds";
+import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -31,7 +37,15 @@ class DisasmWorkerClient {
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private disasmCache = new Map<string, Instruction[]>();
-  private xrefCache = new WeakMap<Instruction[], Map<number, Xref[]>>();
+  /**
+   * Typed xref maps, keyed by the instruction array they were built from.
+   *
+   * The entry carries the `imageBounds` it was built under as well: the same
+   * instructions bounded and unbounded are different answers, so a cache keyed
+   * on identity alone would hand a bounded caller the unbounded map, or the
+   * reverse, depending only on who asked first.
+   */
+  private xrefCache = new WeakMap<Instruction[], { boundsKey: string; map: Map<number, Xref[]> }>();
   private decompileCache = new Map<number, { code: string; lineMap: Map<number, number> }>();
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
 
@@ -85,10 +99,18 @@ class DisasmWorkerClient {
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, method, timer });
       try {
-        this.worker.postMessage({ id, method, args });
+        // Byte arguments are views onto the whole loaded file, and structured
+        // clone of a view copies its entire backing buffer — so posting these
+        // untransferred copied the file on every call. `prepareBinaryArgs`
+        // substitutes a private copy of just the view's window and hands that
+        // over; the caller's buffer is never transferred and never detaches.
+        // See ./transfer.ts for the measurements behind this.
+        const { args: payload, transfer } = prepareBinaryArgs(args);
+        this.worker.postMessage({ id, method, args: payload }, transfer);
       } catch (err) {
-        // e.g. DataCloneError on a non-transferable argument — fail now instead
-        // of leaving the entry and its watchdog around for the full timeout.
+        // e.g. DataCloneError on a non-transferable argument, or a TypeError
+        // from copying an already-detached view — fail now instead of leaving
+        // the entry and its watchdog around for the full timeout.
         this.take(id)?.reject(err);
       }
     });
@@ -98,10 +120,20 @@ class DisasmWorkerClient {
     await this.send("init");
   }
 
+  /**
+   * Hand the worker the per-file context every later call reads.
+   *
+   * `machine` is the COFF machine type, and it is what selects the decoder —
+   * `is64`, which the individual methods take, is the PE32+ magic and says only
+   * how wide a pointer is. Omitting it leaves whatever the worker already had,
+   * because this is called twice per file: once here with everything known, and
+   * again from the effect that re-sends the strings after extraction, which has
+   * no reason to know the machine type.
+   */
   async configure(
     strings: Map<number, string>,
     iat: Map<number, { lib: string; func: string }>,
-    options?: { driverMode?: boolean },
+    options?: { driverMode?: boolean; machine?: number },
   ): Promise<void> {
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
@@ -109,6 +141,7 @@ class DisasmWorkerClient {
       stringEntries: Array.from(strings.entries()),
       iatEntries: Array.from(iat.entries()),
       driverMode: options?.driverMode,
+      machine: options?.machine,
     });
   }
 
@@ -137,17 +170,36 @@ class DisasmWorkerClient {
     const key = `hybrid:${baseAddress}:${is64}`;
     const cached = this.disasmCache.get(key);
     if (cached) return cached;
+    // Jump-table case bodies are seeded here rather than by the caller: the
+    // targets are a by-product of `detectFunctions`, which this client already
+    // keeps in `this.jumpTables` for `configureDecompileMaps`, so every caller
+    // gets them without having to thread them through. See ../disasm/seeds.ts
+    // for why the BFS cannot find these on its own. Out-of-section seeds are
+    // discarded by `hybridDisassemble` itself, so seeding another section's
+    // targets is harmless.
     const result: Instruction[] = await this.send("hybridDisassemble", {
       bytes,
       baseAddress,
       is64,
-      seeds,
+      seeds: [...seeds, ...jumpTableTargets(this.jumpTables)],
       pdataRanges,
     });
     this.disasmCache.set(key, result);
     return result;
   }
 
+  /**
+   * Detect functions in a code section.
+   *
+   * `options.dataWindows` — `.rdata` above all — is what makes an x64 jump
+   * table readable: the table lives outside the code section, so without it the
+   * detector sees the dispatch chain and can read none of its entries. It does
+   * **not** travel inside `options`: every window is a view onto the whole
+   * loaded file, and `prepareBinaryArgs` only transfers top-level binary
+   * arguments, so a nested view would be structured-cloned — copying the entire
+   * file once per window. It is packed into one flat top-level buffer instead
+   * (see ../disasm/dataWindows.ts) and rebuilt by the dispatch.
+   */
   async detectFunctions(
     bytes: Uint8Array,
     baseAddress: number,
@@ -157,10 +209,19 @@ class DisasmWorkerClient {
       entryPoint?: number;
       pdataFunctions?: { beginAddress: number; endAddress: number }[];
       handlerAddresses?: number[];
+      dataWindows?: DataWindow[];
     },
   ): Promise<DisasmFunction[]> {
+    const { dataWindows, ...rest } = options ?? {};
+    const packed = packDataWindows(dataWindows);
     const result: { functions: DisasmFunction[]; jumpTables: [number, number[]][] } =
-      await this.send("detectFunctions", { bytes, baseAddress, is64, options });
+      await this.send("detectFunctions", {
+        bytes,
+        baseAddress,
+        is64,
+        options: options ? rest : undefined,
+        ...packed,
+      });
     this.jumpTables = new Map(result.jumpTables);
     return result.functions;
   }
@@ -222,12 +283,28 @@ class DisasmWorkerClient {
     return this.send("detectIRPDispatches", { instructions, is64 });
   }
 
-  async buildTypedXrefMap(instructions: Instruction[]): Promise<Map<number, Xref[]>> {
+  /**
+   * `imageBounds` is where the loader maps the image
+   * (`{ base: optionalHeader.imageBase, size: optionalHeader.sizeOfImage }`).
+   * It bounds `buildTypedXrefMap`'s fallback operand scan, the arm that reads
+   * any large `0x…` token as a data reference; unbounded, that arm reported
+   * bitmasks and status constants as references to addresses outside the image
+   * (peek-a-bin-jfp). Two plain numbers, so nothing here is binary and
+   * `prepareBinaryArgs` leaves the object alone.
+   */
+  async buildTypedXrefMap(
+    instructions: Instruction[],
+    imageBounds?: ImageBounds,
+  ): Promise<Map<number, Xref[]>> {
+    const boundsKey = imageBounds ? `${imageBounds.base}:${imageBounds.size}` : "";
     const cached = this.xrefCache.get(instructions);
-    if (cached) return cached;
-    const entries: [number, Xref[]][] = await this.send("buildTypedXrefMap", { instructions });
+    if (cached && cached.boundsKey === boundsKey) return cached.map;
+    const entries: [number, Xref[]][] = await this.send("buildTypedXrefMap", {
+      instructions,
+      imageBounds,
+    });
     const result = new Map(entries);
-    this.xrefCache.set(instructions, result);
+    this.xrefCache.set(instructions, { boundsKey, map: result });
     return result;
   }
 

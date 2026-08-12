@@ -8,6 +8,77 @@ export interface SSAContext {
   phis: Map<number, IRPhi[]>;
   idom: Map<number, number>;
   domTree: Map<number, number[]>;
+  /**
+   * `canonicalName_version` keys handed out by a *call* rather than by a
+   * statement — see `clobberedByCall`. Nothing in the IR defines them, so a read
+   * carrying one is a read of an indeterminate machine value.
+   */
+  clobbered: Set<string>;
+}
+
+/**
+ * The Windows x64 fastcall argument registers, in order. `lifter.ts` fills a
+ * call's argument list from exactly this sequence and stops at the first one the
+ * block never wrote, so an argument in position *i* that is a bare read of
+ * `FASTCALL_ARG_REGS[i]` is the lifter saying "this register was passed to this
+ * call" — see `clobberedByCall`.
+ */
+const FASTCALL_ARG_REGS = ["rcx", "rdx", "r8", "r9"];
+
+/**
+ * The registers a call destroys: the ones the decompiler has already said the
+ * call was *given*.
+ *
+ * The ABI's volatile set is wider — RAX, RCX, RDX and R8-R11 on Windows x64 —
+ * and clobbering all of it is what the machine permits but not what compiled
+ * code does. Measured on t64/t32/w64: MSVC parks live values in R10 across calls
+ * to helpers it has analysed (t64!sub_1400063E8 holds `[rcx]` in R10 across two
+ * of them), and `__chkstk` preserves everything but RAX/R10/R11 by documented
+ * contract, so the arguments of every function with a large frame are read after
+ * a call to it. Treating the whole volatile set as destroyed renamed 17 reads of
+ * t64!sub_14000D8C4's own parameters and deleted a guard outright in
+ * t64!sub_140004A9C. A read of R10 after a call is *evidence the compiler proved
+ * it survives*; a read of an argument register the same call consumed is not.
+ *
+ * RAX needs nothing here: `liftBlock` already gives every `call_stmt` a
+ * `resultDest` of RAX/EAX, which is a definition in its own right.
+ *
+ * So this is narrower than the ABI on purpose. It is the part that is supported
+ * by the decompiler's own reading of the call rather than only by what a
+ * conforming callee is allowed to do (peek-a-bin-0t4).
+ */
+export function clobberedByCall(stmt: IRStmt): string[] {
+  if (stmt.kind !== "call_stmt") return [];
+  const out: string[] = [];
+  for (let i = 0; i < stmt.call.args.length && i < FASTCALL_ARG_REGS.length; i++) {
+    const arg = stmt.call.args[i];
+    // 32-bit arguments come from `push`, so they are stack expressions and never
+    // match — x86 gets no clobber, which is the conservative reading: cdecl and
+    // stdcall pass nothing in ECX/EDX, so nothing here says the callee used them.
+    if (arg.kind === "reg" && canonReg(arg.name) === FASTCALL_ARG_REGS[i])
+      out.push(FASTCALL_ARG_REGS[i]);
+  }
+  return out;
+}
+
+/** The `regKey` spelling `ssaopt.ts` and `SSAContext.clobbered` share. */
+export function versionKey(canon: string, version: number): string {
+  return `${canon}_${version}`;
+}
+
+/**
+ * The name a read of a clobbered version emits under.
+ *
+ * It is a *variable*, and one that nothing ever assigns: the value the call left
+ * in the register is not recoverable, and naming it after the register would put
+ * the emitted C back where it started — C's `rcx` still holds whatever the last
+ * `rcx = …` line put there, so a bare `rcx` after a call reads exactly the
+ * pre-call value the machine destroyed. One name per (register, version) rather
+ * than per occurrence, because two reads of the same clobbered version really
+ * are the same indeterminate value.
+ */
+export function clobberedName(canon: string, version: number): string {
+  return `clobbered_${canon}_${version}`;
 }
 
 // ── Reverse Postorder ──
@@ -225,8 +296,13 @@ function collectDefs(stmts: IRStmt[]): Set<string> {
     if (s.kind === "assign" && s.dest.kind === "reg") {
       defs.add(canonReg(s.dest.name));
     }
-    if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") {
-      defs.add(canonReg(s.resultDest.name));
+    if (s.kind === "call_stmt") {
+      // A call defines the registers it was passed, not just its result
+      // register. Phi placement keys off this: without it, a join whose one arm
+      // calls and whose other does not gets no phi for RCX, so a read at the
+      // join binds straight through to the definition the call consumed.
+      if (s.resultDest?.kind === "reg") defs.add(canonReg(s.resultDest.name));
+      for (const r of clobberedByCall(s)) defs.add(r);
     }
   }
   return defs;
@@ -326,8 +402,13 @@ export function insertPhis(
         if (!defined.has(u)) liveIn.get(b.id)!.add(u);
       }
       if (s.kind === "assign" && s.dest.kind === "reg") defined.add(canonReg(s.dest.name));
-      if (s.kind === "call_stmt" && s.resultDest?.kind === "reg")
-        defined.add(canonReg(s.resultDest.name));
+      if (s.kind === "call_stmt") {
+        if (s.resultDest?.kind === "reg") defined.add(canonReg(s.resultDest.name));
+        // Same reason as `collectDefs`: an argument register read *after* the
+        // call that consumed it is not an upward-exposed use, so it must not
+        // make the register live-in and pull a phi (and a definition) from above.
+        for (const r of clobberedByCall(s)) defined.add(r);
+      }
     }
   }
 
@@ -395,6 +476,8 @@ export function renameVariables(
   phis: Map<number, IRPhi[]>,
   domTree: Map<number, number[]>,
   entry: number,
+  /** Filled with the `versionKey`s a call handed out. See `SSAContext.clobbered`. */
+  clobbered: Set<string> = new Set(),
 ): void {
   const counter = new Map<string, number>();
   const stacks = new Map<string, number[]>();
@@ -403,7 +486,14 @@ export function renameVariables(
 
   function newVersion(reg: string): number {
     const canon = canonReg(reg);
-    const ver = counter.get(canon) ?? 0;
+    // Version 0 is reserved for the register's function-entry value: a read with
+    // an empty version stack is an incoming/parameter value, and both readers
+    // below map that to version 0. So the first *definition* must be 1. With the
+    // counter starting at 0 the incoming value and the first definition were the
+    // same (canonical name, version) pair, and every pass in ssaopt.ts that keys
+    // on that pair — copy/constant propagation, GVN, DCE — treated them as one
+    // value, rewriting entry values with a definition that may not have run.
+    const ver = counter.get(canon) ?? 1;
     counter.set(canon, ver + 1);
     if (!stacks.has(canon)) stacks.set(canon, []);
     stacks.get(canon)!.push(ver);
@@ -505,13 +595,27 @@ export function renameVariables(
         case "store":
           return { ...stmt, address: renameExpr(stmt.address), value: renameExpr(stmt.value) };
         case "call_stmt": {
+          // Arguments are renamed first, so they still read the versions that
+          // reached the call site; the clobber applies to everything after it.
           const call = { ...stmt.call, args: stmt.call.args.map(renameExpr) };
           let resultDest = stmt.resultDest;
+          let resultCanon: string | null = null;
           if (resultDest?.kind === "reg") {
-            const canon = canonReg(resultDest.name);
+            resultCanon = canonReg(resultDest.name);
+            const ver = newVersion(resultCanon);
+            trackPush(resultCanon);
+            resultDest = { ...resultDest, version: ver };
+          }
+          // Each argument register the call consumed gets a fresh version too,
+          // with no statement behind it. That is the whole point: a later read
+          // now binds to a version the call created rather than to the
+          // definition the call consumed, and no pass can propagate a value it
+          // cannot find a definition for.
+          for (const canon of clobberedByCall({ ...stmt, call })) {
+            if (canon === resultCanon) continue;
             const ver = newVersion(canon);
             trackPush(canon);
-            resultDest = { ...resultDest, version: ver };
+            clobbered.add(versionKey(canon, ver));
           }
           return { ...stmt, call, resultDest };
         }
@@ -578,7 +682,14 @@ export function renameVariables(
 
 export function buildSSA(blocks: BasicBlock[], liftedBlocks: Map<number, IRStmt[]>): SSAContext {
   if (blocks.length === 0) {
-    return { blocks, liftedBlocks, phis: new Map(), idom: new Map(), domTree: new Map() };
+    return {
+      blocks,
+      liftedBlocks,
+      phis: new Map(),
+      idom: new Map(),
+      domTree: new Map(),
+      clobbered: new Set(),
+    };
   }
 
   const rpo = computeRPO(blocks);
@@ -587,7 +698,8 @@ export function buildSSA(blocks: BasicBlock[], liftedBlocks: Map<number, IRStmt[
   const domTree = computeDomTree(idom);
   const phis = insertPhis(blocks, liftedBlocks, domFrontier);
 
-  renameVariables(blocks, liftedBlocks, phis, domTree, rpo[0]);
+  const clobbered = new Set<string>();
+  renameVariables(blocks, liftedBlocks, phis, domTree, rpo[0], clobbered);
 
-  return { blocks, liftedBlocks, phis, idom, domTree };
+  return { blocks, liftedBlocks, phis, idom, domTree, clobbered };
 }

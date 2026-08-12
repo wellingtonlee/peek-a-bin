@@ -7,8 +7,19 @@
  * wrong number instead of a quietly updated baseline.
  */
 
-import { describe, it, expect } from "vitest";
-import { computeEntropyBlocks, computeSectionEntropy, classifyEntropy } from "../entropy";
+import { describe, expect, it } from "vitest";
+import {
+  classifyEntropy,
+  computeEntropyBlocks,
+  computeSectionEntropies,
+  computeSectionEntropy,
+  entropyBlockSizeFor,
+  entropyBlocksForWidth,
+  ENTROPY_STRIP_BLOCK_PX,
+  ENTROPY_WIDTH_QUANTUM,
+  MAX_ENTROPY_BLOCKS,
+  MIN_ENTROPY_BLOCKS,
+} from "../entropy";
 
 /** `count` bytes, all `value`. */
 function repeated(value: number, count: number): Uint8Array {
@@ -174,5 +185,162 @@ describe("classifyEntropy", () => {
     // Characterization: every `<` comparison against NaN is false, so a NaN
     // average is reported as packed/encrypted. Callers should not feed it NaN.
     expect(classifyEntropy(Number.NaN).label).toBe("very high - packed/encrypted?");
+  });
+});
+
+describe("entropyBlockSizeFor", () => {
+  it("leaves the minimum block size alone while the count fits", () => {
+    expect(entropyBlockSizeFor(0)).toBe(256);
+    expect(entropyBlockSizeFor(256)).toBe(256);
+    expect(entropyBlockSizeFor(256 * MAX_ENTROPY_BLOCKS)).toBe(256);
+  });
+
+  it("grows the block size past the cap so the count stays bounded", () => {
+    // One byte past the point where 256-byte blocks would exceed the cap.
+    const over = 256 * MAX_ENTROPY_BLOCKS + 1;
+    expect(entropyBlockSizeFor(over)).toBe(512);
+    expect(Math.ceil(over / entropyBlockSizeFor(over))).toBeLessThanOrEqual(MAX_ENTROPY_BLOCKS);
+  });
+
+  it("keeps the block count under the cap at every scale up to 4 GiB", () => {
+    // The cap is what stops the strip computing — and the canvas drawing —
+    // hundreds of blocks per pixel; a size that slipped past it would be
+    // invisible except as a freeze.
+    for (let len = 1; len <= 4 * 1024 ** 3; len *= 3) {
+      const size = entropyBlockSizeFor(len);
+      expect(Math.ceil(len / size)).toBeLessThanOrEqual(MAX_ENTROPY_BLOCKS);
+    }
+  });
+
+  it("always returns a multiple of the minimum, so block boundaries stay aligned", () => {
+    for (let len = 1; len <= 4 * 1024 ** 3; len *= 7) {
+      expect(entropyBlockSizeFor(len) % 256).toBe(0);
+    }
+  });
+
+  it("honours a caller-supplied minimum and cap", () => {
+    expect(entropyBlockSizeFor(4096, 512, 4)).toBe(1024);
+    expect(entropyBlockSizeFor(2048, 512, 4)).toBe(512);
+  });
+});
+
+describe("computeSectionEntropies", () => {
+  const buffer = (() => {
+    const b = new ArrayBuffer(1024);
+    const v = new Uint8Array(b);
+    for (let i = 0; i < 256; i++) v[i] = i; // uniform: H = 8
+    // rest stays zero: H = 0
+    return b;
+  })();
+
+  it("returns one entropy per range, in order", () => {
+    const out = computeSectionEntropies(buffer, [
+      { offset: 0, length: 256 },
+      { offset: 256, length: 256 },
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBeCloseTo(8, 12);
+    expect(out[1]).toBe(0);
+  });
+
+  it("agrees with computeSectionEntropy on the same window", () => {
+    expect(computeSectionEntropies(buffer, [{ offset: 4, length: 100 }])[0]).toBe(
+      computeSectionEntropy(new Uint8Array(buffer, 4, 100)),
+    );
+  });
+
+  it("scores a range that overruns the end over the bytes that are there", () => {
+    // Not 0. `detectAnomalies` warns about a high-entropy code section, and a
+    // packer truncating `sizeOfRawData` past EOF is exactly the case it is
+    // looking at; scoring the section "empty" drops the warning. This is the
+    // behaviour `analysis/anomalies.ts`'s own copy of the walk had before the
+    // two were merged (peek-a-bin-vrl) — they had drifted.
+    //
+    // A buffer whose tail is varied, so "the bytes that are there" and "0" are
+    // distinguishable: the shared `buffer` above is zero-filled past 256 and
+    // scores 0 either way.
+    const varied = new ArrayBuffer(300);
+    const bytes = new Uint8Array(varied);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+
+    const overrun = computeSectionEntropies(varied, [{ offset: 256, length: 4096 }])[0];
+    expect(overrun).toBe(computeSectionEntropy(new Uint8Array(varied, 256, 44)));
+    expect(overrun).toBeGreaterThan(5);
+  });
+
+  it.each([
+    ["an empty range", { offset: 0, length: 0 }],
+    ["a negative length", { offset: 0, length: -1 }],
+    ["a negative offset", { offset: -8, length: 16 }],
+    ["an offset exactly at the end", { offset: 1024, length: 16 }],
+    ["an offset past the end", { offset: 99999, length: 16 }],
+  ])("scores %s as 0 rather than throwing", (_label, range) => {
+    // Section tables are attacker-controlled; pointerToRawData + sizeOfRawData
+    // past EOF is routine in packed samples.
+    expect(computeSectionEntropies(buffer, [range])).toEqual([0]);
+  });
+
+  it("returns an empty array for no ranges", () => {
+    expect(computeSectionEntropies(buffer, [])).toEqual([]);
+  });
+});
+
+describe("entropyBlocksForWidth", () => {
+  it("never asks for more blocks than the strip has room to draw", () => {
+    // The bug this replaces: a fixed cap of 4096 blocks on a canvas ~1000 px
+    // wide. Every block past the 500th was computed, then drawn off the right
+    // edge of the canvas and never seen (peek-a-bin-5cr).
+    for (const width of [320, 640, 800, 1024, 1280, 1920, 2560, 3840]) {
+      const blocks = entropyBlocksForWidth(width);
+      // The quantum is what lets this exceed width/2 slightly; bound it by the
+      // step rather than pretending it is exact.
+      expect(blocks).toBeLessThanOrEqual(width / ENTROPY_STRIP_BLOCK_PX + ENTROPY_WIDTH_QUANTUM);
+      expect(blocks).toBeGreaterThanOrEqual(
+        Math.min(width / ENTROPY_STRIP_BLOCK_PX, MAX_ENTROPY_BLOCKS),
+      );
+    }
+  });
+
+  it("is unchanged by a resize smaller than the quantum, so nothing needs debouncing", () => {
+    const base = entropyBlocksForWidth(1024);
+    for (let dx = -ENTROPY_STRIP_BLOCK_PX; dx <= 0; dx++) {
+      expect(entropyBlocksForWidth(1024 + dx)).toBe(base);
+    }
+    // And it does move once the width crosses a whole step.
+    expect(entropyBlocksForWidth(1024 + ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_PX)).toBe(
+      base + ENTROPY_WIDTH_QUANTUM,
+    );
+  });
+
+  it("returns a whole number of quantum steps", () => {
+    for (let w = 1; w < 4000; w += 7) {
+      expect(entropyBlocksForWidth(w) % ENTROPY_WIDTH_QUANTUM).toBe(0);
+    }
+  });
+
+  it("stays inside the fixed cap and the floor", () => {
+    expect(entropyBlocksForWidth(100000)).toBe(MAX_ENTROPY_BLOCKS);
+    expect(entropyBlocksForWidth(1)).toBe(MIN_ENTROPY_BLOCKS);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "falls back to the floor for an unmeasured width (%s)",
+    (width) => {
+      // `HexView` starts at 0 before the ResizeObserver reports; a NaN or an
+      // Infinity here would reach `entropyBlockSizeFor` and produce a NaN block
+      // size, i.e. an empty strip with no error anywhere.
+      expect(entropyBlocksForWidth(width)).toBe(MIN_ENTROPY_BLOCKS);
+    },
+  );
+
+  it("feeds a block size that keeps the count within the budget", () => {
+    // The two functions have to agree, or the point of the budget is lost.
+    for (const width of [640, 1024, 1920]) {
+      const budget = entropyBlocksForWidth(width);
+      for (const len of [1024, 64 * 1024, 1024 * 1024, 200 * 1024 * 1024]) {
+        const size = entropyBlockSizeFor(len, 256, budget);
+        expect(Math.ceil(len / size)).toBeLessThanOrEqual(budget);
+      }
+    }
   });
 });
