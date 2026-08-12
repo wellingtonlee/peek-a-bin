@@ -59,6 +59,11 @@ if (bins.length === 0) {
 }
 
 const readSummary = (dir, b) => JSON.parse(readFileSync(join(dir, `summary_${b}.json`), "utf8"));
+const readFuncs = (dir, b) =>
+  readFileSync(join(dir, `funcs_${b}.jsonl`), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
 const readGuards = (dir, b) =>
   readFileSync(join(dir, `guards_${b}.jsonl`), "utf8")
     .split("\n")
@@ -175,6 +180,29 @@ for (const b of bins) {
     note(
       `  *** CROSS-SUBSTITUTED RUN: base=${B.tablesFrom ?? "own"} change=${C.tablesFrom ?? "own"}`,
     );
+  }
+
+  // ── Emitted C, function by function. ──────────────────────────────────
+  //
+  // The companion to cross-substitution: "byte-identical C" is the finding that
+  // settles whether a change caused a difference or merely revealed it. Joined
+  // on function ADDRESS, since names move when detection changes.
+  {
+    const fb = new Map(readFuncs(baseDir, b).map((f) => [f.addr, f.code]));
+    const fc = new Map(readFuncs(chgDir, b).map((f) => [f.addr, f.code]));
+    const shared = [...fb.keys()].filter((a) => fc.has(a));
+    const same = shared.filter((a) => fb.get(a) === fc.get(a));
+    const differing = shared.filter((a) => fb.get(a) !== fc.get(a));
+    note(
+      `  emitted C identical            ${`${same.length}/${shared.length}`.padStart(10)}` +
+        ` functions in both${differing.length === 0 ? "   (byte-identical throughout)" : ""}`,
+    );
+    if (differing.length > 0 && differing.length <= 12) {
+      const names = new Map(readFuncs(chgDir, b).map((f) => [f.addr, f.name]));
+      note(
+        `    differing: ${differing.map((a) => `${names.get(a)}@0x${a.toString(16)}`).join(" ")}`,
+      );
+    }
   }
 
   // ── The per-guard join. ────────────────────────────────────────────────

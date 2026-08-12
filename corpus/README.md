@@ -241,6 +241,23 @@ about detection is". Every run that used substituted tables says so loudly in it
 in `summary_*.json`'s `tablesFrom`, because such a run is **not** a measurement of that commit as
 it would actually behave and must never be quoted as one.
 
+Measured on that same pair (t32), which shows exactly how far the isolation reaches:
+
+| | instructions | tables | guards audited | `switch` in `sub_4045B1` |
+|---|---|---|---|---|
+| base `fe032ab` | 18140 | 10 | 493 | 0 |
+| base **+ change's tables** | 18140 | 13 | **459** | **1** |
+| change `4a4ec70` | 18060 | 13 | 459 | 1 |
+
+Handing base the tables reproduces the whole of the guard change — 459 audited against the
+change's 459, and `compare.mjs` reports **0 changed, 0 only-base** guards between them, against
+5 changed and 41 only-base without substitution — and recovers the `switch`. It does **not**
+reproduce the 80 removed instructions, because those go away through `jumpTableSpans` feeding
+`hybridDisassemble`'s coverage, which is a *disassembly-stage* input rather than the `jumpTables`
+map. So one commit's two effects come apart cleanly: the map explains the restructuring, the spans
+explain the instruction removal. Substituting the instruction stream as well would close the
+remaining gap and is not implemented.
+
 ## Layout
 
 | File | |
