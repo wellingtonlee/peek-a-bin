@@ -1,6 +1,7 @@
 // One definition, shared with foldBlock. Keeping a second copy here is how the
 // two drifted: this one classified `(int64_t)f()` as pure, so an unused
 // cast-of-call def was deleted along with the call.
+import { flagResultSetter } from "./flagResult";
 import { hasSideEffects } from "./fold";
 import type { IRExpr, IRPhi, IRReg, IRStmt } from "./ir";
 import { canonReg } from "./ir";
@@ -311,6 +312,49 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
         protectedFlagDefs.add(s);
         break;
       }
+    }
+  }
+
+  // The same blindness, one instruction earlier, for a Jcc whose flags come
+  // from arithmetic rather than a `cmp`. `dec ecx / jnz` sets ZF from the
+  // decrement, so `structure.ts` spells the guard `ecx != 0` by naming the
+  // destination — but the lifter emits no `eflags` assign for `dec`, the only
+  // reader of `ecx` here *is* the flags, and the flags are not in the IR. So
+  // the loop above protects nothing, the def has zero uses, and it is deleted
+  // before the structurer ever looks. 190 branches across the three reference
+  // binaries stayed `__unrecovered_N` for exactly this reason (peek-a-bin-pu06).
+  //
+  // `flagResultSetter` is the *same* predicate the structurer uses to decide it
+  // will name this register, so protection is neither wider nor narrower than
+  // the use it exists to serve. One check cannot be made from here: the
+  // structurer asks the *post-fold* IR whether this is still the register's
+  // last write, and folding has not happened yet. So a def whose value is later
+  // inlined into its only use is protected here and declined there — which
+  // costs nothing, because an inlined def is not deleted, it has moved.
+  //
+  // Unlike the `eflags` defs above, these are real instructions and must reach
+  // the output — the guard names the value this statement assigns — so they are
+  // deliberately *not* stripped by the cleanup after the fixpoint.
+  for (const block of ctx.blocks) {
+    const setter = flagResultSetter(block);
+    if (!setter) continue;
+    const stmts = ctx.liftedBlocks.get(block.id) ?? [];
+    let def: IRStmt | null = null;
+    for (const s of stmts) {
+      // Track the last writer, so a def the block later overwrites is left to
+      // die: the structurer would reject it at the same test.
+      if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === setter.destReg)
+        def = s;
+      else if (
+        s.kind === "call_stmt" &&
+        s.resultDest?.kind === "reg" &&
+        canonReg(s.resultDest.name) === setter.destReg
+      )
+        def = null;
+    }
+    if (def?.kind === "assign" && def.addr === setter.address) {
+      countExprUses(def.src);
+      protectedFlagDefs.add(def);
     }
   }
 

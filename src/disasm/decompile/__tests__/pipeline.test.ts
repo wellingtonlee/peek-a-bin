@@ -1126,7 +1126,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
   });
 
-  it("leaves the condition unrecovered when the result was eliminated as dead", () => {
+  it("keeps a result nothing else reads, so the condition survives DCE", () => {
     const code = run(
       seq(0x401000, [
         ["dec", "ecx"],
@@ -1138,11 +1138,16 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    // Nothing reads `ecx` again, so the decrement is gone from the emitted
-    // code — and a guard naming `ecx` would be reading whatever reached the
-    // block instead of the value the flags describe.
-    expect(code).not.toContain("ecx--");
-    expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
+    // The only reader of `ecx` here is the flags, and the flags are not in the
+    // IR — so dead-code elimination used to delete the decrement, and the guard
+    // it would have been read from went with it. That single cause accounted
+    // for 190 of the remaining unrecovered branches across the three reference
+    // binaries. `deadCodeElimination` now holds this definition live, keyed off
+    // the same `flagResultSetter` the structurer uses to decide it will name
+    // the register (peek-a-bin-pu06).
+    expect(code).toContain("ecx--");
+    expect(code).toMatch(/if \(ecx != 0\)/);
+    expect(code).not.toContain("__unrecovered_");
   });
 
   it("still reads the `cmp` when a block has both arithmetic and a compare", () => {
@@ -1160,6 +1165,92 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
 
     // The `cmp` is what the `jne` reads; the `dec` before it is not.
     expect(code).toContain("if (ecx != 5) {");
+  });
+
+  // The protection DCE applies is keyed off the same predicate the structurer
+  // uses, so these pin the edges of that predicate end to end rather than the
+  // protection in isolation — a def held live that the structurer then declines
+  // to name is a statement nobody reads, appearing in the emitted C for no
+  // reason (peek-a-bin-pu06).
+  it("recovers each flag-setting form whose result nothing else reads", () => {
+    for (const [mn, ops, guard] of [
+      ["dec", "ecx", "ecx != 0"],
+      ["sub", "ecx, edx", "ecx != 0"],
+      ["and", "ecx, 3", "ecx != 0"],
+      ["or", "ecx, ecx", "ecx != 0"],
+      ["xor", "ecx, edx", "ecx != 0"],
+      ["shr", "ecx, 2", "ecx != 0"],
+    ] as const) {
+      const code = run(
+        seq(0x401000, [
+          [mn, ops],
+          ["jne", "0x401010"],
+          ["mov", "esi, 1"],
+          ["ret"],
+          ["mov", "esi, 2"], // 0x401010
+          ["ret"],
+        ]),
+      );
+      expect(code, `${mn} ${ops}`).toMatch(new RegExp(`if \\(${guard.replace(/[!]/g, "\\!")}\\)`));
+      expect(code, `${mn} ${ops}`).not.toContain("__unrecovered_");
+    }
+  });
+
+  it("does not hold a definition live for a Jcc the result cannot answer", () => {
+    // `jb` reads CF, which is not a function of the result, so the structurer
+    // declines it. Protecting the `sub` anyway would resurrect a statement
+    // nothing reads into the output.
+    const code = run(
+      seq(0x401000, [
+        ["sub", "ecx, edx"],
+        ["jb", "0x401010"],
+        ["mov", "esi, 1"],
+        ["ret"],
+        ["mov", "esi, 2"], // 0x401010
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jb \*\/\)/);
+    expect(code).not.toMatch(/^\s*ecx\b.*=/m);
+  });
+
+  it("does not hold a definition live when a shift count could be zero", () => {
+    // `shl eax, cl` with cl == 0 leaves the flags to an earlier instruction.
+    const code = run(
+      seq(0x401000, [
+        ["shl", "ecx, cl"],
+        ["jne", "0x401010"],
+        ["mov", "esi, 1"],
+        ["ret"],
+        ["mov", "esi, 2"], // 0x401010
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
+  });
+
+  it("declines when the result is overwritten by a dead instruction", () => {
+    // The overwriting `mov` is itself dead, so dead-code elimination drops it
+    // on its first iteration and the `dec` becomes the block's last write to
+    // ECX on the second. Deciding protection from the *instructions* rather
+    // than the in-flight IR is what keeps this answer independent of which
+    // iteration asked — the machine still puts EDX in ECX before the branch.
+    const code = run(
+      seq(0x401000, [
+        ["dec", "ecx"],
+        ["mov", "ecx, edx"],
+        ["jne", "0x401014"],
+        ["mov", "esi, 1"],
+        ["ret"],
+        ["mov", "esi, 2"], // 0x401014
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
+    expect(code).not.toContain("ecx--");
   });
 });
 
