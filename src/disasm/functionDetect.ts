@@ -151,6 +151,22 @@ export interface DetectResult {
   functions: DisasmFunction[];
   jumpTables: [number, number[]][];
   /**
+   * `[start, end)` of the bytes the recovered tables themselves occupy, deduped.
+   *
+   * A jump table is data in the middle of a code section, and nothing in the
+   * image says so: recursive descent never walks into one, so `hybridDisassemble`
+   * phase 2 reaches it as an uncovered gap and decodes the case addresses as
+   * instructions. On t32.exe that turned the 32 bytes at 0x4086a4 into six
+   * conditional jumps aiming past the end of the function they were filed under
+   * (peek-a-bin-y1di). Pass these to `hybridDisassemble` and those bytes are
+   * left alone.
+   *
+   * Empty is not "no tables": a table this could not size is a table that was
+   * not read at all, and one read from outside the code window (an x64 `.rdata`
+   * RVA table) is reported here too but falls outside the bytes the sweep sees.
+   */
+  jumpTableSpans: [number, number][];
+  /**
    * Passes that did not run, so their contribution is missing from `functions`
    * and `jumpTables`. **Empty means this is the whole answer.**
    *
@@ -306,6 +322,95 @@ function cmpImmediate(opStr: string): number | null {
   if (hexMatch) return parseInt(hexMatch[1], 16);
   const decMatch = opStr.match(/,\s*(\d+)$/);
   if (decMatch) return parseInt(decMatch[1], 10);
+  return null;
+}
+
+/** A lone immediate operand, hex or decimal — the `7` of `push 7`. */
+function loneImmediate(opStr: string): number | null {
+  const t = opStr.trim();
+  const hexMatch = t.match(/^0x([0-9a-fA-F]+)$/);
+  if (hexMatch) return parseInt(hexMatch[1], 16);
+  const decMatch = t.match(/^(\d+)$/);
+  if (decMatch) return parseInt(decMatch[1], 10);
+  return null;
+}
+
+/** Mnemonics that move the stack pointer, so a `pop` cannot be paired past them. */
+const STACK_TRAFFIC = new Set([
+  "push",
+  "pop",
+  "pusha",
+  "pushad",
+  "popa",
+  "popad",
+  "pushf",
+  "pushfd",
+  "pushfq",
+  "popf",
+  "popfd",
+  "popfq",
+  "call",
+  "ret",
+  "retn",
+  "retf",
+  "leave",
+  "enter",
+  "int",
+  "int3",
+  "iret",
+  "iretd",
+]);
+
+/**
+ * The immediate a `pop` at `popIndex` takes off the stack, or null.
+ *
+ * The pairing is only claimed where nothing between the two instructions can
+ * have moved the stack pointer or written through it: the first thing found
+ * going back must be the `push`, and any other stack traffic — including an
+ * `add esp, N`, a memory operand naming `esp`, or a `call`, which is both — ends
+ * the search with no answer. Being one slot out here would report a bound the
+ * program never checked.
+ */
+function pushedImmediate(recent: RecentInsn[], popIndex: number): number | null {
+  for (let ri = popIndex - 1; ri >= 0; ri--) {
+    const p = recent[ri];
+    const mn = p.mnemonic.toLowerCase();
+    if (mn === "push") return loneImmediate(p.opStr);
+    if (STACK_TRAFFIC.has(mn)) return null;
+    if (/\b[er]?sp\b/i.test(p.opStr)) return null;
+  }
+  return null;
+}
+
+/**
+ * The constant a register holds at `before`, or null when it is not a constant.
+ *
+ * MSVC spells a small bound as `push 7` / `pop ecx` — two bytes against the five
+ * of `mov ecx, 7` — and then compares against the register, so the check in
+ * front of a 32-bit dispatch reads `cmp eax, ecx` with the length one step
+ * further back. {@link readAbsoluteTable} used to see only the register and
+ * refuse the table (peek-a-bin-mk42).
+ *
+ * Both recognised forms state a literal. Anything else that writes the register
+ * ends the search rather than being followed: a bound this cannot read is a
+ * table that is not read at all, which is the same answer the compared-immediate
+ * path gives, and it is the safe direction — every entry still has to resolve
+ * into the code window, but the *count* is the only statement of the table's
+ * length there is.
+ */
+function constantRegisterValue(reg: string, recent: RecentInsn[], before: number): number | null {
+  for (let ri = before - 1; ri >= 0; ri--) {
+    const p = recent[ri];
+    const mn = p.mnemonic.toLowerCase();
+    // A call clobbers every register this could be about, as in the chain walk.
+    if (mn === "call") return null;
+    if (mn === "pop") {
+      if (regFamily(p.opStr) !== reg) continue;
+      return pushedImmediate(recent, ri);
+    }
+    if (destReg(p.opStr) !== reg) continue;
+    return mn === "mov" ? cmpImmediate(p.opStr) : null;
+  }
   return null;
 }
 
@@ -567,10 +672,39 @@ function pdataRangeTest(
 }
 
 /**
+ * One dispatch's recovered table: where it points, and which bytes it occupies.
+ *
+ * `spans` are `[start, end)` in virtual addresses, and only ever cover entries
+ * actually read — the read stops at the first entry that does not resolve, so a
+ * table shorter than its bounds check claims is reported at its real length.
+ * They matter because those bytes are *data* sitting in the middle of a code
+ * section: `hybridDisassemble`'s gap fill decodes everything recursive descent
+ * did not reach, and a table is uncovered by construction (peek-a-bin-y1di).
+ *
+ * A span may lie outside the code window — an x64 RVA table lives in `.rdata` —
+ * so a consumer clamps rather than assuming.
+ */
+interface TableRead {
+  targets: number[];
+  spans: [number, number][];
+}
+
+/** The "nothing was recovered" answer, built fresh so no refusal aliases another. */
+const noTable = (): TableRead => ({ targets: [], spans: [] });
+
+/**
  * Case targets of a table the dispatching instruction names itself.
  *
  * The 32-bit shape — `jmp dword ptr [eax*4 + 0x40941c]`, or a RIP-relative
  * operand on x64 — where the entries are absolute addresses of pointer width.
+ *
+ * The bounds check is the table's only length, and it is compared against a
+ * register as readily as against an immediate (see
+ * {@link constantRegisterValue}). Following the register is not a weaker claim
+ * than reading the immediate: both are the same instruction saying the same
+ * thing, and everything downstream of the count — the {@link
+ * MAX_JUMP_TABLE_CASES} ceiling, and every entry having to resolve into the
+ * code window — applies unchanged.
  */
 function readAbsoluteTable(
   insn: RecentInsn,
@@ -579,17 +713,23 @@ function readAbsoluteTable(
   is64: boolean,
   codeStart: number,
   codeEnd: number,
-): number[] {
+): TableRead {
   let maxCases = 0;
   for (let ri = recent.length - 1; ri >= Math.max(0, recent.length - CMP_LOOKBACK); ri--) {
     const prev = recent[ri];
     if (prev.mnemonic === "cmp") {
       const imm = cmpImmediate(prev.opStr);
-      if (imm !== null) maxCases = imm + 1;
+      if (imm !== null) {
+        maxCases = imm + 1;
+      } else {
+        const pair = regPair(prev.opStr);
+        const bound = pair ? constantRegisterValue(pair[1], recent, ri) : null;
+        if (bound !== null) maxCases = bound + 1;
+      }
       break;
     }
   }
-  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return [];
+  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return noTable();
 
   let tableBase = 0;
   const scaleMatch = insn.opStr.match(/\[.*\*\d\s*\+\s*0x([0-9a-fA-F]+)\]/);
@@ -598,7 +738,7 @@ function readAbsoluteTable(
     const ripTarget = resolveRipTarget(insn);
     if (ripTarget !== null) tableBase = ripTarget;
   }
-  if (!tableBase) return [];
+  if (!tableBase) return noTable();
 
   const ptrSize = is64 ? 8 : 4;
   const targets: number[] = [];
@@ -608,7 +748,8 @@ function readAbsoluteTable(
     if (target === null || target < codeStart || target >= codeEnd) break;
     targets.push(target);
   }
-  return targets;
+  if (targets.length === 0) return noTable();
+  return { targets, spans: [[tableBase, tableBase + targets.length * ptrSize]] };
 }
 
 /**
@@ -698,14 +839,14 @@ function readRvaTable(
   reader: ImageReader,
   codeStart: number,
   codeEnd: number,
-): number[] {
+): TableRead {
   const chain = recoverX64RvaChain(insn, recent);
-  if (!chain) return [];
+  if (!chain) return noTable();
   const maxCases = boundedCaseCount(chain.indexReg, recent, chain.loadIndex);
   if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) {
     // A count above the ceiling is a claim not to be trusted, not an invitation
     // to look for a second reading, so only the "no count" case falls through.
-    return maxCases > 0 ? [] : readDenseRvaTable(chain, recent, reader, codeStart, codeEnd);
+    return maxCases > 0 ? noTable() : readDenseRvaTable(chain, recent, reader, codeStart, codeEnd);
   }
 
   const targets: number[] = [];
@@ -716,7 +857,8 @@ function readRvaTable(
     if (target < codeStart || target >= codeEnd) break;
     targets.push(target);
   }
-  return targets;
+  if (targets.length === 0) return noTable();
+  return { targets, spans: [[chain.table, chain.table + targets.length * 4]] };
 }
 
 /**
@@ -733,13 +875,14 @@ function readDenseRvaTable(
   reader: ImageReader,
   codeStart: number,
   codeEnd: number,
-): number[] {
+): TableRead {
   const dense = recoverDenseByteTable(chain, recent);
-  if (!dense) return [];
+  if (!dense) return noTable();
   const maxCases = boundedCaseCount(dense.caseReg, recent, dense.loadIndex);
-  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return [];
+  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return noTable();
 
   const targets: number[] = [];
+  let maxRow = -1;
   for (let c = 0; c < maxCases; c++) {
     const row = reader.u8(dense.byteTable + c);
     if (row === null) break;
@@ -747,9 +890,19 @@ function readDenseRvaTable(
     if (entry === null) break;
     const target = chain.base + entry;
     if (target < codeStart || target >= codeEnd) break;
+    maxRow = Math.max(maxRow, row);
     targets.push(target);
   }
-  return targets;
+  if (targets.length === 0) return noTable();
+  // Both tables are data. The dword table is indexed by row rather than by case,
+  // so its extent is the highest row reached and not the number of cases.
+  return {
+    targets,
+    spans: [
+      [dense.byteTable, dense.byteTable + targets.length],
+      [chain.table, chain.table + (maxRow + 1) * 4],
+    ],
+  };
 }
 
 /**
@@ -1277,6 +1430,9 @@ export function detectFunctions(
    * the suppression pass below for what that fixes (peek-a-bin-jy4).
    */
   const jumpTableTargets = new Set<number>();
+  /** `[start, end)` of the bytes each recovered table occupies — see {@link TableRead}. */
+  const jumpTableSpans: [number, number][] = [];
+  const spanKeys = new Set<string>();
   const reader = makeImageReader([{ base: baseAddress, bytes }, ...(options?.dataWindows ?? [])]);
   // Unlike `disassemble`/`hybridDisassemble`/`buildAllXrefs`, this stage keeps
   // its no-decoder branch rather than throwing (peek-a-bin-cen). Its answer is
@@ -1326,13 +1482,23 @@ export function detectFunctions(
 
         // Jump table detection
         if (insn.mnemonic === "jmp" && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
-          const targets =
+          const table =
             is64 && regFamily(insn.opStr)
               ? readRvaTable(insn, recentInsns, reader, baseAddress, endAddress)
               : readAbsoluteTable(insn, recentInsns, reader, is64, baseAddress, endAddress);
-          if (targets.length >= 2) {
-            jumpTables.set(insn.address, targets);
-            for (const t of targets) jumpTableTargets.add(t);
+          if (table.targets.length >= 2) {
+            jumpTables.set(insn.address, table.targets);
+            for (const t of table.targets) jumpTableTargets.add(t);
+            // Deduped: one table serves several dispatches — t32.exe's
+            // `0x40ba8c` is read by three — and a span is about the bytes, not
+            // about the `jmp` that reached them.
+            for (const [start, end] of table.spans) {
+              const key = `${start}:${end}`;
+              if (!spanKeys.has(key)) {
+                spanKeys.add(key);
+                jumpTableSpans.push([start, end]);
+              }
+            }
           }
         }
 
@@ -1521,10 +1687,23 @@ export function detectFunctions(
   return {
     functions,
     jumpTables: Array.from(jumpTables.entries()),
+    jumpTableSpans,
     omitted,
   };
 }
 
+/**
+ * Recursive descent from `seeds`, then a linear fill of what it did not reach.
+ *
+ * `jumpTableSpans` are byte ranges the caller knows to be data —
+ * `DetectResult.jumpTableSpans`, the tables detection actually read. Phase 2
+ * fills every uncovered gap, and a jump table is uncovered by construction: no
+ * control-flow path leads *into* it, so without this the case addresses of an
+ * x86 switch are decoded as instructions (peek-a-bin-y1di). Omitting the
+ * argument keeps the old behaviour, which is the right default for a caller
+ * that has not detected any: "nobody said where the tables are" is not the same
+ * claim as "there are none".
+ */
 export function hybridDisassemble(
   bytes: Uint8Array,
   baseAddress: number,
@@ -1532,6 +1711,7 @@ export function hybridDisassemble(
   seeds: number[],
   ctx: DisasmContext,
   pdataRanges?: { beginAddress: number; endAddress: number }[],
+  jumpTableSpans?: [number, number][],
 ): Instruction[] {
   // See `disassemble` — same reasoning, same silent-empty shape.
   const cs = requireCapstone(is64 ? ctx.cs64 : ctx.cs32, "hybrid disassembly");
@@ -1669,6 +1849,16 @@ export function hybridDisassemble(
     const start = addr - baseAddress;
     const end = Math.min(start + insn.size, bytes.length);
     for (let j = start; j < end; j++) covered[j] = 1;
+  }
+  // A recovered jump table's bytes are data, and marking them covered is how
+  // that is said here: the gap ends at the table and a fresh one starts after
+  // it, so the fill neither decodes the case addresses nor walks off the end of
+  // them misaligned into the first case body. Clamped rather than trusted — a
+  // span may name an x64 table in `.rdata`, which is not in `bytes` at all.
+  for (const [start, end] of jumpTableSpans ?? []) {
+    const lo = Math.max(0, start - baseAddress);
+    const hi = Math.min(bytes.length, end - baseAddress);
+    for (let j = lo; j < hi; j++) covered[j] = 1;
   }
   let gapStart = -1;
 

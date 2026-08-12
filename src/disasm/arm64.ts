@@ -856,5 +856,7 @@ export function detectArm64Functions(
     }
   }
 
-  return { functions, jumpTables: Array.from(jumpTables.entries()), omitted };
+  // No jump-table reader on this architecture, so no table bytes are known to
+  // be data — an empty span list is the whole truth here, not a degradation.
+  return { functions, jumpTables: Array.from(jumpTables.entries()), jumpTableSpans: [], omitted };
 }

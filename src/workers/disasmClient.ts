@@ -76,6 +76,14 @@ class DisasmWorkerClient {
   private decompileCache = new Map<number, { code: string; lineMap: Map<number, number> }>();
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
   /**
+   * `[start, end)` of the bytes those tables occupy, from the same detection
+   * pass. Held here for the same reason the targets are: `hybridDisassemble`
+   * needs them, and threading them through every caller would put a detail of
+   * the sweep into the UI layer. Data, not code — see
+   * `DetectResult.jumpTableSpans`.
+   */
+  jumpTableSpans: [number, number][] = [];
+  /**
    * The COFF machine type of the image every later decode belongs to, or
    * `undefined` when nothing has declared one.
    *
@@ -191,6 +199,7 @@ class DisasmWorkerClient {
     this.xrefCache = new WeakMap();
     this.decompileCache.clear();
     this.jumpTables = new Map();
+    this.jumpTableSpans = [];
   }
 
   /** How the declared image decodes; `"x86"` when nothing was declared. */
@@ -284,6 +293,10 @@ class DisasmWorkerClient {
         is64,
         seeds: [...seeds, ...jumpTableTargets(this.jumpTables)],
         pdataRanges,
+        // Same provenance and the same reason: the spans are a by-product of
+        // `detectFunctions`, and without them phase 2's gap fill decodes each
+        // recovered table's case addresses as instructions (peek-a-bin-y1di).
+        jumpTableSpans: this.jumpTableSpans,
       }),
     );
     this.disasmCache.set(key, result);
@@ -328,6 +341,7 @@ class DisasmWorkerClient {
     const result: {
       functions: DisasmFunction[];
       jumpTables: [number, number[]][];
+      jumpTableSpans?: [number, number][];
       omitted?: DetectPass[];
     } = await this.send(
       "detectFunctions",
@@ -340,6 +354,10 @@ class DisasmWorkerClient {
       }),
     );
     this.jumpTables = new Map(result.jumpTables);
+    // `?? []` for the same reason as `omitted` below: a reply from before the
+    // field existed says nothing about tables, and no spans is what the sweep
+    // behaved as all along.
+    this.jumpTableSpans = result.jumpTableSpans ?? [];
     return { functions: result.functions, omitted: result.omitted ?? [] };
   }
 

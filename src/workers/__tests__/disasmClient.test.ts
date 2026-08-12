@@ -860,3 +860,55 @@ describe("App declares the loaded image before the reducer sees it", () => {
     expect(declared).toBeLessThan(dispatched);
   });
 });
+
+/**
+ * peek-a-bin-y1di — the spans travel exactly as the targets above do, and for
+ * the same reason: `detectFunctions` is the only thing that knows where the
+ * tables are, and threading them through `useDisassemblyRows` would put a
+ * detail of the sweep into the UI layer. Without them the gap fill decodes each
+ * table's case addresses as instructions.
+ */
+describe("DisasmWorkerClient — jump-table spans are carried to the sweep", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function afterDetect(reply: Record<string, unknown>) {
+    const { client, worker } = await loadClient();
+    const p = client.detectFunctions(new Uint8Array(64), 0x1000, false);
+    worker.reply(worker.posted[0].id, { functions: [], jumpTables: [], ...reply });
+    await p;
+    return { client, worker };
+  }
+
+  it("sends the spans detection reported", async () => {
+    const spans: [number, number][] = [
+      [0x4086a4, 0x4086c4],
+      [0x40ba8c, 0x40ba9c],
+    ];
+    const { client, worker } = await afterDetect({ jumpTableSpans: spans });
+
+    void client.hybridDisassemble(new Uint8Array(64), 0x400000, false, [0x401000]);
+
+    expect(worker.received[1].args.jumpTableSpans).toEqual(spans);
+  });
+
+  it("sends none when a reply carries no spans at all", async () => {
+    // A worker from before the field existed says nothing about tables, which
+    // is the behaviour the sweep had all along.
+    const { client, worker } = await afterDetect({});
+
+    void client.hybridDisassemble(new Uint8Array(64), 0x400000, false, []);
+
+    expect(worker.received[1].args.jumpTableSpans).toEqual([]);
+  });
+
+  it("forgets them when a new image is declared", async () => {
+    const { client, worker } = await afterDetect({ jumpTableSpans: [[0x4086a4, 0x4086c4]] });
+    client.setImage(0x8664);
+
+    void client.hybridDisassemble(new Uint8Array(64), 0x400000, true, []);
+
+    expect(worker.received[1].args.jumpTableSpans).toEqual([]);
+  });
+});

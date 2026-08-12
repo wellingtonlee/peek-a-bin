@@ -1285,3 +1285,52 @@ describe("dispatch — buildAllXrefs routes ARM64 to the A64 reader", () => {
     expect(used).toContain("cs64");
   });
 });
+
+/**
+ * peek-a-bin-y1di — the bytes of a recovered jump table are data, and the
+ * worker is where that gets said: `detectFunctions` finds the spans, the client
+ * carries them, and this dispatch hands them to the sweep. Dropped here, the
+ * gap fill decodes each table's case addresses as instructions again.
+ */
+describe("dispatch — hybridDisassemble is told which bytes are jump tables", () => {
+  /** Decodes any four bytes, so every uncovered byte becomes a gap-fill insn. */
+  function everyFourBytes() {
+    return {
+      disasm(bytes: Uint8Array, options: { address: number }) {
+        if (bytes.length < 4) throw new Error("Failed to disassemble");
+        return [
+          {
+            address: options.address,
+            bytes: bytes.subarray(0, 4),
+            mnemonic: "nop",
+            opStr: "",
+            size: 4,
+          },
+        ];
+      },
+    };
+  }
+
+  const sweep = async (jumpTableSpans?: [number, number][]) =>
+    (await dispatch(
+      "hybridDisassemble",
+      {
+        bytes: new Uint8Array(16),
+        baseAddress: 0x401000,
+        is64: true,
+        seeds: [],
+        jumpTableSpans,
+      },
+      state({ cs64: everyFourBytes() }),
+    )) as Instruction[];
+
+  it("decodes the whole range when no spans are given", async () => {
+    expect((await sweep()).map((i) => i.address)).toEqual([0x401000, 0x401004, 0x401008, 0x40100c]);
+  });
+
+  it("leaves a span's bytes undecoded", async () => {
+    const addrs = (await sweep([[0x401004, 0x40100c]])).map((i) => i.address);
+
+    expect(addrs).toEqual([0x401000, 0x40100c]);
+  });
+});

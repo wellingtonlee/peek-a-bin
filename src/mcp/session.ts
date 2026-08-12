@@ -190,6 +190,10 @@ export class FileSession {
           iatMap,
           driverMode,
           pdataFunctions,
+          // The bytes of the tables those targets came out of. Seeding the case
+          // bodies starts the decode in the right places; this stops phase 2
+          // from decoding the table itself as instructions (peek-a-bin-y1di).
+          detectResult.jumpTableSpans,
         )
       : [];
 

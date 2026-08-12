@@ -234,6 +234,9 @@ export async function dispatch(
         args.seeds,
         ctx(state),
         args.pdataRanges,
+        // Byte ranges detection recovered as jump tables. Data, so the gap fill
+        // leaves them alone rather than decoding case addresses as code.
+        args.jumpTableSpans,
       );
     }
 
@@ -251,6 +254,7 @@ export async function dispatch(
         return {
           functions: [],
           jumpTables: [],
+          jumpTableSpans: [],
           omitted: ["call-targets", "jump-tables", "thunk-names", "tail-calls"],
         } satisfies DetectResult;
       }

@@ -108,6 +108,7 @@ export function detectFunctionsFromBytes(
     return {
       functions: [],
       jumpTables: [],
+      jumpTableSpans: [],
       omitted: ["call-targets", "jump-tables", "thunk-names", "tail-calls"],
     } satisfies DetectResult;
   }
@@ -132,6 +133,7 @@ export function hybridDisassembleBytes(
   iatMap: Map<number, { lib: string; func: string }>,
   driverMode: boolean,
   pdataRanges?: { beginAddress: number; endAddress: number }[],
+  jumpTableSpans?: [number, number][],
 ): Instruction[] {
   if (arch === "unsupported") throw new Error(unsupportedArchMessage("Disassembly"));
   if (arch === "arm64") {
@@ -151,6 +153,7 @@ export function hybridDisassembleBytes(
     seeds,
     makeCtx(stringMap, iatMap, driverMode),
     pdataRanges,
+    jumpTableSpans,
   );
 }
 

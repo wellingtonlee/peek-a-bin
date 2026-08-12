@@ -43,6 +43,15 @@ function readI32(b: Uint8Array, i: number): number {
   return b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24) | 0;
 }
 const hex = (n: number) => `0x${(n >>> 0).toString(16)}`;
+/**
+ * An immediate the way Capstone prints one: decimal below ten, hex above.
+ *
+ * Verified against the shipped decoder on t32.exe — `6a 07` comes back as
+ * `push 7` and `83 f9 08` as `cmp ecx, 8`, while `83 e0 0f` is `and eax, 0xf`.
+ * Both spellings have to be read, so a fake that emitted only one would leave
+ * half of the immediate parsing in `functionDetect.ts` untested.
+ */
+const imm = (n: number) => (n < 10 ? String(n) : hex(n));
 const R64 = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
 const R32 = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
 const R8 = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
@@ -135,6 +144,30 @@ function fakeCs() {
         }
         if (b === 0x77 && i + 1 < bytes.length) {
           emit("ja", hex(here + 2 + ((bytes[i + 1] << 24) >> 24)), 2);
+          continue;
+        }
+        if (b === 0x3b && bytes[i + 1] >= 0xc0) {
+          emit("cmp", `${R32[(bytes[i + 1] >> 3) & 7]}, ${R32[bytes[i + 1] & 7]}`, 2);
+          continue;
+        }
+        if (b === 0x6a && i + 1 < bytes.length) {
+          emit("push", imm(bytes[i + 1]), 2);
+          continue;
+        }
+        if (b >= 0x58 && b <= 0x5f) {
+          emit("pop", R32[b & 7], 1);
+          continue;
+        }
+        if (b >= 0xb8 && b <= 0xbf && i + 4 < bytes.length) {
+          emit("mov", `${R32[b & 7]}, ${imm(readI32(bytes, i + 1))}`, 5);
+          continue;
+        }
+        if (b === 0x83 && (bytes[i + 1] & 0xf8) === 0xc0 && i + 2 < bytes.length) {
+          emit("add", `${R32[bytes[i + 1] & 7]}, ${imm(bytes[i + 2])}`, 3);
+          continue;
+        }
+        if (b === 0x89 && bytes[i + 1] >= 0xc0) {
+          emit("mov", `${R32[bytes[i + 1] & 7]}, ${R32[(bytes[i + 1] >> 3) & 7]}`, 2);
           continue;
         }
         if (
@@ -848,6 +881,162 @@ describe("detectFunctions — jump-table targets are case labels, not functions"
   });
 });
 
+// ── A bound the dispatch compares against a register (peek-a-bin-mk42) ──
+// MSVC spells a small bound `push 7` / `pop ecx` and then compares against the
+// register, which is two bytes cheaper than `cmp eax, 7`. Reading only the
+// immediate form refused three of t32.exe's tables and one of w32.exe's, and a
+// table that is not recovered is also a table whose bytes nothing knows to be
+// data — see the span tests below.
+describe("detectFunctions — a bound compared against a register", () => {
+  const TABLE = 0x20;
+  const CASES = [0x40, 0x44, 0x48];
+  const LEN = 0x60;
+  /** `jmp dword ptr [eax*4 + <table>]`, the 32-bit dispatch, 7 bytes. */
+  const dispatch = [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)];
+  const bodies = {
+    [TABLE]: [...le32(BASE + CASES[0]), ...le32(BASE + CASES[1]), ...le32(BASE + CASES[2])],
+    [CASES[0]]: [0x90, 0xc3],
+    [CASES[1]]: [0x90, 0xc3],
+    [CASES[2]]: [0x90, 0xc3],
+  };
+  const detect32 = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE });
+  /** `push N; pop ecx; cmp eax, ecx; jmp [eax*4 + table]` at the image start. */
+  const pushPop = (bound: number, extra: Record<number, number[]> = {}) =>
+    image(LEN, {
+      0x00: [0x6a, bound], // push N
+      0x02: [0x59], // pop ecx
+      0x03: [0x3b, 0xc1], // cmp eax, ecx
+      0x05: dispatch,
+      ...bodies,
+      ...extra,
+    });
+
+  it("recovers a table bounded by push/pop into a register", () => {
+    expect(detect32(pushPop(2)).jumpTables).toEqual([[BASE + 5, CASES.map((c) => BASE + c)]]);
+  });
+
+  it("recovers a table bounded by `mov ecx, N`", () => {
+    const img = image(LEN, {
+      0x00: [0xb9, ...le32(2)], // mov ecx, 2
+      0x05: [0x3b, 0xc1], // cmp eax, ecx
+      0x07: dispatch,
+      ...bodies,
+    });
+    expect(detect32(img).jumpTables).toEqual([[BASE + 7, CASES.map((c) => BASE + c)]]);
+  });
+
+  it("stops at the first entry that is not in the code window", () => {
+    // The bound claims eight cases and only three entries resolve. The count is
+    // an upper bound on the read, never the length of the answer.
+    expect(detect32(pushPop(7)).jumpTables[0][1]).toEqual(CASES.map((c) => BASE + c));
+  });
+
+  it("refuses when the stack moved between the push and the pop", () => {
+    // `add esp, 4` after the push means the popped value is not the pushed one.
+    const img = image(LEN, {
+      0x00: [0x6a, 0x02],
+      0x02: [0x83, 0xc4, 0x04], // add esp, 4
+      0x05: [0x59],
+      0x06: [0x3b, 0xc1],
+      0x08: dispatch,
+      ...bodies,
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses when a call sits between the constant and the compare", () => {
+    const img = image(LEN, {
+      0x00: [0x6a, 0x02],
+      0x02: [0x59],
+      0x03: callTo(0x03, BASE + CASES[0]),
+      0x08: [0x3b, 0xc1],
+      0x0a: dispatch,
+      ...bodies,
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses a register that holds a copy of another register", () => {
+    // `mov ecx, edx` states nothing about a length, and following it further
+    // would be guessing at a value the instruction stream does not carry.
+    const img = image(LEN, {
+      0x00: [0x89, 0xd1], // mov ecx, edx
+      0x02: [0x3b, 0xc1],
+      0x04: dispatch,
+      ...bodies,
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("applies the case ceiling to a register-carried bound", () => {
+    const img = image(LEN, {
+      0x00: [0xb9, ...le32(0x1000)], // mov ecx, 0x1000
+      0x05: [0x3b, 0xc1],
+      0x07: dispatch,
+      ...bodies,
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+});
+
+describe("detectFunctions — jumpTableSpans", () => {
+  const TABLE = 0x20;
+  const CASES = [0x40, 0x44, 0x48];
+  const LEN = 0x60;
+  const switcher = (extra: Record<number, number[]> = {}, entries = CASES) =>
+    image(LEN, {
+      0x00: [0x83, 0xf8, entries.length - 1], // cmp eax, n-1
+      0x03: [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)],
+      [TABLE]: entries.flatMap((c) => le32(BASE + c)),
+      [CASES[0]]: [0x90, 0xc3],
+      [CASES[1]]: [0x90, 0xc3],
+      [CASES[2]]: [0x90, 0xc3],
+      ...extra,
+    });
+  const detect32 = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE });
+
+  it("reports the bytes the recovered table occupies", () => {
+    expect(detect32(switcher()).jumpTableSpans).toEqual([[BASE + TABLE, BASE + TABLE + 12]]);
+  });
+
+  it("reports only as far as it read", () => {
+    // Bound of eight, three resolvable entries: the span is the three, because
+    // claiming the other five bytes are data would be claiming the bound.
+    const img = image(LEN, {
+      0x00: [0x83, 0xf8, 0x07], // cmp eax, 7
+      0x03: [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)],
+      [TABLE]: CASES.flatMap((c) => le32(BASE + c)),
+      [CASES[0]]: [0x90, 0xc3],
+      [CASES[1]]: [0x90, 0xc3],
+      [CASES[2]]: [0x90, 0xc3],
+    });
+    expect(detect32(img).jumpTableSpans).toEqual([[BASE + TABLE, BASE + TABLE + 12]]);
+  });
+
+  it("reports one span for a table two dispatches share", () => {
+    // t32.exe reads 0x40ba8c from three different `jmp`s. A span is about the
+    // bytes, not about who reached them.
+    const img = switcher({ 0x0a: [0xff, 0x24, 0xc5, ...le32(BASE + TABLE)] });
+    const { jumpTables, jumpTableSpans } = detect32(img);
+    expect(jumpTables.length).toBe(2);
+    expect(jumpTableSpans).toEqual([[BASE + TABLE, BASE + TABLE + 12]]);
+  });
+
+  it("reports nothing when no table was recovered", () => {
+    expect(detect32(image(LEN, { 0x00: [0xc3] })).jumpTableSpans).toEqual([]);
+  });
+
+  it("reports nothing without a decoder", () => {
+    const { jumpTableSpans, omitted } = detectFunctions(switcher(), BASE, false, ctxOf(), {
+      entryPoint: BASE,
+    });
+    expect(jumpTableSpans).toEqual([]);
+    expect(omitted).toContain("jump-tables");
+  });
+});
+
 // ── x86-64 RVA jump tables (peek-a-bin-ydh) ──
 // x64 code is position-independent, so the dispatch cannot name its table: the
 // table address arrives through a `lea`, the entry through a scaled load, and
@@ -1508,6 +1697,71 @@ describe("hybridDisassemble", () => {
         { beginAddress: BASE, endAddress: BASE + 0x100 },
       ]),
     ).toEqual([]);
+  });
+
+  // ── Recovered jump tables are data (peek-a-bin-y1di) ──
+  // A table sits in `.text` and no control-flow path leads into it, so it is
+  // uncovered by construction and phase 2 decodes its case addresses as
+  // instructions. On t32.exe the 32 bytes at 0x4086a4 came out as six
+  // conditional jumps aiming past the end of the function they were filed
+  // under, and nothing downstream could tell them from real code.
+  describe("jump-table spans", () => {
+    const TABLE = 0x08;
+    const CASES = [0x18, 0x1a];
+    // Entries that decode as something if they are read as code: `74 xx` is a
+    // `je`, which is exactly the shape the phantom instructions took.
+    const tableImage = () =>
+      image(0x20, {
+        0x00: [0xc3],
+        [TABLE]: [...le32(BASE + CASES[0]), ...le32(BASE + CASES[1])],
+        [CASES[0]]: [0x90, 0xc3],
+        [CASES[1]]: [0x90, 0xc3],
+      });
+    const spans = (): [number, number][] => [[BASE + TABLE, BASE + TABLE + 8]];
+    const inTable = (insns: Instruction[]) =>
+      insns.filter((i) => i.address >= BASE + TABLE && i.address < BASE + TABLE + 8);
+
+    it("decodes a table's bytes when nobody says they are data", () => {
+      // The defect, pinned so the fix below is measuring something.
+      const insns = hybridDisassemble(tableImage(), BASE, true, [BASE], ctx());
+      expect(inTable(insns).length).toBeGreaterThan(0);
+    });
+
+    it("leaves the bytes of a recovered table alone", () => {
+      const insns = hybridDisassemble(tableImage(), BASE, true, [BASE], ctx(), undefined, spans());
+      expect(inTable(insns)).toEqual([]);
+    });
+
+    it("resumes the fill after the table", () => {
+      const insns = hybridDisassemble(tableImage(), BASE, true, [BASE], ctx(), undefined, spans());
+      expect(insns.map((i) => i.address)).toContain(BASE + CASES[0]);
+    });
+
+    it("keeps an instruction recursive descent actually reached inside a span", () => {
+      // Seeded into the span: a control-flow path leading there is evidence
+      // about the bytes that outranks the span, and dropping it would hide it.
+      const insns = hybridDisassemble(
+        tableImage(),
+        BASE,
+        true,
+        [BASE, BASE + TABLE],
+        ctx(),
+        undefined,
+        spans(),
+      );
+      expect(insns.find((i) => i.address === BASE + TABLE)?.source).toBe("recursive");
+    });
+
+    it("clamps a span that lies outside the disassembled bytes", () => {
+      // An x64 RVA table lives in `.rdata`, so its span names addresses this
+      // call has no bytes for.
+      const withOutside = hybridDisassemble(tableImage(), BASE, true, [BASE], ctx(), undefined, [
+        [BASE - 0x1000, BASE - 0x800],
+        [BASE + 0x1000, BASE + 0x2000],
+      ]);
+      const none = hybridDisassemble(tableImage(), BASE, true, [BASE], ctx());
+      expect(withOutside.map((i) => i.address)).toEqual(none.map((i) => i.address));
+    });
   });
 
   it("never decodes the same address twice", () => {

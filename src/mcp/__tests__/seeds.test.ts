@@ -25,6 +25,23 @@ import { jumpTableTargets } from "../../disasm/seeds";
 
 const SESSION = resolve(dirname(fileURLToPath(import.meta.url)), "..", "session.ts");
 
+/**
+ * The argument list of `call`, from its opening parenthesis to the one that
+ * closes it. Counted rather than found by the next `)`, because the arguments
+ * carry comments — and a bead id in a comment is enough parentheses to cut the
+ * list short and pass a guard that should fail.
+ */
+function argumentsOf(source: string, call: string): string {
+  const start = source.indexOf(call);
+  if (start < 0) return "";
+  let depth = 0;
+  for (let i = start + call.length - 1; i < source.length; i++) {
+    if (source[i] === "(") depth++;
+    else if (source[i] === ")" && --depth === 0) return source.slice(start, i);
+  }
+  return source.slice(start);
+}
+
 describe("jumpTableTargets", () => {
   it("flattens every table's targets", () => {
     const tables = new Map([
@@ -77,5 +94,28 @@ describe("FileSession — hybridDisassemble seeds", () => {
         "`...jumpTableTargets(jumpTables)`.",
     ).toMatch(/jumpTableTargets\(/);
     expect(seedLine).toMatch(/functions\.map/);
+  });
+});
+
+/**
+ * peek-a-bin-y1di — the same call, the other half of the same fact.
+ *
+ * Seeding the case bodies says where the switch goes; the spans say that the
+ * table itself is data. Without them phase 2 fills the table as a gap and
+ * decodes the case addresses as instructions — six phantom conditional jumps
+ * inside t32.exe's `sub_407ABC`, each aiming past the end of the function.
+ * Source text for the same reason as above: importing `../session` for value
+ * loads Capstone WASM at module scope.
+ */
+describe("FileSession — hybridDisassemble jump-table spans", () => {
+  it("passes the recovered table extents to the sweep", () => {
+    const source = readFileSync(SESSION, "utf-8");
+
+    expect(
+      argumentsOf(source, "hybridDisassembleBytes("),
+      "src/mcp/session.ts calls hybridDisassembleBytes without detectResult.jumpTableSpans, " +
+        "so the bytes of every recovered jump table are gap-filled as code again " +
+        "(peek-a-bin-y1di).",
+    ).toMatch(/jumpTableSpans/);
   });
 });
