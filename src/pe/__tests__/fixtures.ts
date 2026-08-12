@@ -7,6 +7,7 @@ import {
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
+  IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DOS_SIGNATURE,
   IMAGE_FILE_MACHINE_AMD64,
@@ -72,6 +73,25 @@ export interface TLSDef {
   characteristics?: number;
 }
 
+/**
+ * An `IMAGE_LOAD_CONFIG_DIRECTORY`, with each of the three sizes that bound a
+ * read of it settable independently — that divergence is the whole point of the
+ * structure's difficulty, so a fixture that cannot express it cannot test it.
+ */
+export interface LoadConfigDef {
+  /**
+   * Bytes actually emitted. Defaults to just past `CHPEMetadataPointer` (0xD0 on
+   * PE32+, 0x80 on PE32); set it shorter to build the linker-truncated case.
+   */
+  bytes?: number;
+  /** The structure's own `Size` field. Defaults to the emitted byte count. */
+  declaredSize?: number;
+  /** `Size` written into the data directory entry. Defaults to the emitted byte count. */
+  directorySize?: number;
+  /** Written at the CHPE offset, if the emitted structure is long enough to hold it. */
+  chpeMetadataPointer?: number;
+}
+
 export interface RelocBlockDef {
   virtualAddress: number;
   entries: { type: number; offset: number }[];
@@ -85,6 +105,7 @@ export interface DirectorySpec {
   imports?: ImportLibraryDef[];
   exports?: ExportDirDef;
   tls?: TLSDef;
+  loadConfig?: LoadConfigDef;
   relocations?: RelocBlockDef[];
 }
 
@@ -262,6 +283,28 @@ function buildDirectorySection(
     dv.setUint32(tlsOff + ptrSize * 4 + 4, t.characteristics ?? 0, true);
 
     dirs.set(IMAGE_DIRECTORY_ENTRY_TLS, { virtualAddress: rvaOf(tlsOff), size: structSize });
+  }
+
+  // --- Load config ---
+  if (spec.loadConfig) {
+    const lc = spec.loadConfig;
+    // The 32-bit and 64-bit structures put CHPEMetadataPointer in different
+    // places and give it different widths; the fixture follows the same two
+    // layouts the parser does rather than a widened copy of one of them.
+    const chpeOffset = is64 ? 0xc8 : 0x7c;
+    const chpeSize = is64 ? 8 : 4;
+    const emitted = lc.bytes ?? chpeOffset + chpeSize;
+    const lcOff = alloc(emitted, 8);
+    if (emitted >= 4) dv.setUint32(lcOff, lc.declaredSize ?? emitted, true);
+    if (lc.chpeMetadataPointer !== undefined && emitted >= chpeOffset + chpeSize) {
+      // The field is pointer-width in both layouts, so this is the same write
+      // `writePtr` does everywhere else.
+      writePtr(lcOff + chpeOffset, lc.chpeMetadataPointer);
+    }
+    dirs.set(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, {
+      virtualAddress: rvaOf(lcOff),
+      size: lc.directorySize ?? emitted,
+    });
   }
 
   // --- Base relocations ---

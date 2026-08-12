@@ -497,6 +497,96 @@ describe("parseBaseRelocations", () => {
   });
 });
 
+/**
+ * peek-a-bin-7p5t. `CHPEMetadataPointer` is the only place the format says an
+ * image is hybrid; without it ARM64EC and ARM64X can only be inferred from how
+ * well their bytes decode as A64, which is evidence about the bytes.
+ *
+ * Every case here is synthetic. There is no ARM64EC or ARM64X binary on this
+ * machine, so what is verified is the *reader* — the offset it uses per
+ * optional-header magic, and that all three sizes bound it. That a real hybrid
+ * image's field says what these fixtures say it does is unverified.
+ */
+describe("parseLoadConfig — CHPEMetadataPointer", () => {
+  it("reads the field from 0xC8 on PE32+", () => {
+    const buf = buildMinimalPE64({
+      directories: { loadConfig: { chpeMetadataPointer: PE64_BASE + 0x3000 } },
+    });
+
+    const lc = parsePE(buf).loadConfig;
+    expect(lc?.chpeMetadataPointer).toBe(PE64_BASE + 0x3000);
+    expect(lc?.declaredSize).toBe(0xd0);
+  });
+
+  it("reads the field from 0x7C on PE32", () => {
+    // The 32-bit structure is not the 64-bit one with narrow pointers — it
+    // orders two fields differently — so the offset is counted against its own
+    // layout. Reading 0xC8 here would land in whatever follows the structure.
+    const buf = buildMinimalPE32({
+      directories: { loadConfig: { chpeMetadataPointer: PE32_BASE + 0x3000 } },
+    });
+
+    const lc = parsePE(buf).loadConfig;
+    expect(lc?.chpeMetadataPointer).toBe(PE32_BASE + 0x3000);
+    expect(lc?.declaredSize).toBe(0x80);
+  });
+
+  it("distinguishes a field that is present and zero from one that is absent", () => {
+    // An ordinary non-hybrid image with a modern linker: the field exists and
+    // holds 0. That is a positive statement about the image and must not read
+    // as "could not tell", which is what `undefined` means.
+    //
+    // This is the shape both real ARM64 binaries on this machine take —
+    // t64-arm.exe and w64-arm.exe carry a 0x138-byte structure whose
+    // CHPEMetadataPointer is 0 — so it is the case a consumer must not mistake
+    // for hybrid.
+    const present = parsePE(
+      buildMinimalPE64({ directories: { loadConfig: { chpeMetadataPointer: 0 } } }),
+    ).loadConfig;
+    expect(present?.chpeMetadataPointer).toBe(0);
+
+    const absent = parsePE(
+      buildMinimalPE64({ directories: { loadConfig: { bytes: 0x70 } } }),
+    ).loadConfig;
+    expect(absent).toBeDefined();
+    expect(absent?.chpeMetadataPointer).toBeUndefined();
+  });
+
+  it("reports both sizes, and the directory entry's RVA", () => {
+    const buf = buildMinimalPE64({
+      directories: { loadConfig: { declaredSize: 0xd0, directorySize: 0x140 } },
+      directoryRVA: 0x2000,
+    });
+
+    const lc = parsePE(buf).loadConfig;
+    expect(lc?.virtualAddress).toBe(0x2000);
+    expect(lc?.declaredSize).toBe(0xd0);
+    expect(lc?.directorySize).toBe(0x140);
+  });
+
+  it("leaves loadConfig undefined when directory 10 is absent", () => {
+    expect(parsePE(buildMinimalPE64()).loadConfig).toBeUndefined();
+    expect(
+      parsePE(buildMinimalPE64({ directories: { tls: { callbacks: [] } } })).loadConfig,
+    ).toBeUndefined();
+  });
+
+  it("coexists with the other directories", () => {
+    const buf = buildMinimalPE64({
+      directories: {
+        imports: [{ libraryName: "KERNEL32.dll", functions: [{ name: "Sleep" }] }],
+        tls: { callbacks: [PE64_BASE + 0x1000] },
+        loadConfig: { chpeMetadataPointer: PE64_BASE + 0x3000 },
+      },
+    });
+
+    const pe = parsePE(buf);
+    expect(pe.imports[0].functions).toEqual(["Sleep"]);
+    expect(pe.tlsDirectory?.callbacks).toEqual([PE64_BASE + 0x1000]);
+    expect(pe.loadConfig?.chpeMetadataPointer).toBe(PE64_BASE + 0x3000);
+  });
+});
+
 describe("all four directories together", () => {
   it("parses imports, exports, TLS and relocations from one image", () => {
     const buf = buildMinimalPE64({

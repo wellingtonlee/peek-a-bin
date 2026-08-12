@@ -185,6 +185,44 @@ export interface TLSDirectory {
   characteristics: number;
 }
 
+/**
+ * The part of `IMAGE_LOAD_CONFIG_DIRECTORY` (data directory 10) this parser
+ * reads: enough to say whether the image declares CHPE metadata.
+ *
+ * "CHPE" is Compiled Hybrid PE — the marker an ARM64EC or ARM64X image carries,
+ * and the only *declaration* of hybrid-ness in the format. Everything else about
+ * such an image (machine type 0xAA64, a `.text` that decodes as A64 for some of
+ * its length) is shared with an ordinary ARM64 build, which is why
+ * `disassembleArm64` currently has to infer the difference from its decode rate
+ * — evidence about the bytes rather than an answer about the image.
+ *
+ * Two sizes, both reported, because they disagree in practice and the smaller
+ * one is what bounds a read. `directorySize` is what the data directory entry
+ * claims; `declaredSize` is the `Size` field the structure writes about itself at
+ * offset 0. Older linkers emit a structure that stops long before
+ * `CHPEMetadataPointer`, so a reader that trusts the offset alone is reading
+ * whatever the linker put next.
+ */
+export interface LoadConfigDirectory {
+  /** RVA from the data directory entry. */
+  virtualAddress: number;
+  /** `Size` in the data directory entry. */
+  directorySize: number;
+  /** The structure's own `Size` field, at offset 0. */
+  declaredSize: number;
+  /**
+   * `CHPEMetadataPointer` as written — a VA, so subtract `imageBase` to get an
+   * RVA. Zero means the field is present and the image is not hybrid.
+   *
+   * `undefined` is the third answer and a different one: the structure is too
+   * short to contain the field, the field is not fully inside the section's raw
+   * data, or the image is PE32 with no 32-bit CHPE slot. "Not declared" and "not
+   * readable" must not collapse into one value, because only the first is
+   * evidence about the image.
+   */
+  chpeMetadataPointer?: number;
+}
+
 export interface RelocationEntry {
   type: number;
   offset: number;
@@ -237,6 +275,7 @@ export interface PEFile {
   imports: ImportEntry[];
   exports: ExportEntry[];
   tlsDirectory?: TLSDirectory;
+  loadConfig?: LoadConfigDirectory;
   relocations?: RelocationBlock[];
   runtimeFunctions?: RuntimeFunction[];
   resources?: ResourceTree;

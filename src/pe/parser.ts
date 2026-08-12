@@ -9,6 +9,7 @@ import {
   IMAGE_DIRECTORY_ENTRY_EXCEPTION,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
+  IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
   IMAGE_DIRECTORY_ENTRY_RESOURCE,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DOS_SIGNATURE,
@@ -27,6 +28,7 @@ import type {
   DOSHeader,
   ExportEntry,
   ImportEntry,
+  LoadConfigDirectory,
   OptionalHeader32,
   OptionalHeader64,
   PEFile,
@@ -202,6 +204,25 @@ export function rvaToFileOffsetIndexed(rva: number, index: SectionIndex): number
   if (offset >= section.virtualSize) return -1;
   if (offset >= section.sizeOfRawData) return -1;
   return section.pointerToRawData + offset;
+}
+
+/**
+ * File offset of `rva`, but only if the whole of `[rva, rva + length)` lands in
+ * one section's raw data. `-1` otherwise.
+ *
+ * `rvaToFileOffsetIndexed` answers for a single byte, which is the wrong
+ * question for a fixed-size structure: a directory that begins 8 bytes before
+ * the end of `.rdata` resolves perfectly well and then reads its remaining
+ * fields out of whatever follows in the file. Resolving the last byte too is the
+ * cheapest way to ask the section table the question that matters, and it reuses
+ * the containment rules rather than restating them.
+ */
+function rvaRangeToFileOffset(rva: number, length: number, index: SectionIndex): number {
+  if (length <= 0) return -1;
+  const start = rvaToFileOffsetIndexed(rva, index);
+  if (start < 0) return -1;
+  const last = rvaToFileOffsetIndexed(rva + length - 1, index);
+  return last === start + length - 1 ? start : -1;
 }
 
 /**
@@ -808,6 +829,75 @@ function parseTLSDirectory(
 }
 
 /**
+ * Byte offset of `CHPEMetadataPointer` within `IMAGE_LOAD_CONFIG_DIRECTORY`, and
+ * the width of the field, per optional-header magic.
+ *
+ * The two layouts are not one structure with wider pointers — the 32-bit form
+ * swaps `ProcessHeapFlags` and `ProcessAffinityMask` relative to the 64-bit one —
+ * so each offset is counted against its own definition rather than derived from
+ * the other. 0xC8/8 is the PE32+ slot, which is the one ARM64EC and ARM64X use.
+ * 0x7C/4 is the PE32 slot, which belongs to the older x86-on-ARM64 CHPE images.
+ */
+const CHPE_METADATA_POINTER = {
+  pe32: { offset: 0x7c, size: 4 },
+  pe32plus: { offset: 0xc8, size: 8 },
+} as const;
+
+/**
+ * Read data directory 10 far enough to answer whether the image declares CHPE
+ * metadata. See `LoadConfigDirectory` for what the answer means.
+ *
+ * Three separate claims bound the read and the smallest wins: the data
+ * directory's `Size`, the structure's own `Size` field, and what the section
+ * table actually maps.
+ *
+ * They disagree routinely rather than exceptionally: `CHPEMetadataPointer` sits
+ * near the end of a structure linkers have been growing for two decades, and the
+ * two PE32 binaries measured here declare 0x48 bytes against a 0x40-byte
+ * directory entry where the 32-bit field alone needs 0x80. Reading at the offset
+ * without checking all three claims is a read of whatever `.rdata` holds next,
+ * reported as a pointer — and a non-zero value there says "hybrid image" about a
+ * file that is nothing of the sort. Every failure here returns `undefined` for
+ * the field, never a value.
+ */
+function parseLoadConfig(
+  view: DataView,
+  loadConfigDir: DataDirectory,
+  sectionIndex: SectionIndex,
+  is64: boolean,
+): LoadConfigDirectory | undefined {
+  if (!loadConfigDir.virtualAddress || !loadConfigDir.size) return undefined;
+
+  // The `Size` field itself has to be inside the image before it can bound
+  // anything, so it goes through the same range check as the field below.
+  const headerOffset = rvaRangeToFileOffset(loadConfigDir.virtualAddress, 4, sectionIndex);
+  if (headerOffset < 0 || headerOffset + 4 > view.byteLength) return undefined;
+  const declaredSize = view.getUint32(headerOffset, true);
+
+  const { offset, size } = is64 ? CHPE_METADATA_POINTER.pe32plus : CHPE_METADATA_POINTER.pe32;
+  const needed = offset + size;
+
+  let chpeMetadataPointer: number | undefined;
+  // Both sizes have to cover the field. `declaredSize` is the one that is
+  // usually short; `loadConfigDir.size` is the one a crafted file inflates.
+  if (declaredSize >= needed && loadConfigDir.size >= needed) {
+    const fieldOffset = rvaRangeToFileOffset(loadConfigDir.virtualAddress, needed, sectionIndex);
+    if (fieldOffset >= 0 && fieldOffset + needed <= view.byteLength) {
+      chpeMetadataPointer = is64
+        ? Number(view.getBigUint64(fieldOffset + offset, true))
+        : view.getUint32(fieldOffset + offset, true);
+    }
+  }
+
+  return {
+    virtualAddress: loadConfigDir.virtualAddress,
+    directorySize: loadConfigDir.size,
+    declaredSize,
+    chpeMetadataPointer,
+  };
+}
+
+/**
  * Parse Base Relocations
  */
 function parseBaseRelocations(
@@ -940,6 +1030,14 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     imageBase,
   );
 
+  // 9b. Parse the Load Config Directory (CHPE metadata only, for now)
+  const loadConfig = parseLoadConfig(
+    view,
+    dataDirectories[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG] || { virtualAddress: 0, size: 0 },
+    sectionIndex,
+    is64,
+  );
+
   // 10. Parse Base Relocations
   const relocations = parseBaseRelocations(
     view,
@@ -989,6 +1087,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     imports,
     exports,
     tlsDirectory,
+    loadConfig,
     relocations,
     runtimeFunctions,
     resources,

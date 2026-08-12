@@ -354,6 +354,146 @@ describe("malformed PE handling", () => {
     });
   });
 
+  /**
+   * The load-config directory (peek-a-bin-7p5t). `CHPEMetadataPointer` sits at
+   * 0xC8 of a structure whose real length is whatever the linker felt like
+   * emitting, so the interesting failures are all "the field's offset exists,
+   * the bytes at it belong to something else". Every one of these must yield
+   * `chpeMetadataPointer: undefined` rather than a number: a wrong pointer here
+   * would be read as evidence that an ordinary image is hybrid.
+   */
+  describe("load config directory", () => {
+    it("ignores the field when the structure's own Size stops short of it", {
+      timeout: TIMEOUT,
+    }, () => {
+      // 0x70 is an ordinary length for an older linker's structure — this is not
+      // a hostile file, just an old one. The bytes at 0xC8 are the next
+      // structure's, and the fixture puts a recognisable value there.
+      //
+      // Not hypothetical: both PE32 binaries on this machine (t32.exe, w32.exe)
+      // declare a 0x48-byte load config against a 0x40-byte directory entry,
+      // where the 32-bit field at 0x7C needs 0x80. Reading at the offset without
+      // this check would report .rdata's next bytes as a CHPE pointer.
+      const buf = buildMinimalPE64({
+        directories: { loadConfig: { declaredSize: 0x70, chpeMetadataPointer: 0xdeadbeef } },
+      });
+
+      const lc = parsePE(buf).loadConfig;
+      expect(lc?.declaredSize).toBe(0x70);
+      expect(lc?.chpeMetadataPointer).toBeUndefined();
+    });
+
+    it("ignores the field when the data directory's Size stops short of it", {
+      timeout: TIMEOUT,
+    }, () => {
+      // The other direction: the structure claims to be long, the directory
+      // entry says otherwise. The smaller claim has to win either way round.
+      const buf = buildMinimalPE64({
+        directories: {
+          loadConfig: { declaredSize: 0x140, directorySize: 0x70, chpeMetadataPointer: 0xdeadbeef },
+        },
+      });
+
+      expect(parsePE(buf).loadConfig?.chpeMetadataPointer).toBeUndefined();
+    });
+
+    it("does not read a truncated structure past the end of its section", {
+      timeout: TIMEOUT,
+    }, () => {
+      // Both sizes claim the full structure and the RVA resolves, but only 0x20
+      // bytes of the section remain. A *second* section follows in the file, so
+      // the bytes at 0xC8 exist and are readable — they just belong to something
+      // else. A file-length check passes here and a section check does not,
+      // which is the whole reason the bound is expressed against the section
+      // table rather than against `view.byteLength`.
+      const rva = 0x1000;
+      const first = new Uint8Array(0x200);
+      new DataView(first.buffer).setUint32(0x1e0, 0x140, true); // Size field
+      const second = new Uint8Array(0x200).fill(0xaa); // recognisable, and not zero
+      const buf = buildMinimalPE64({
+        sections: [dataSection(".rdata", rva, first), dataSection(".data", rva + 0x1000, second)],
+        dataDirectories: new Map([[10, { virtualAddress: rva + 0x1e0, size: 0x140 }]]),
+      });
+
+      let pe!: ReturnType<typeof parsePE>;
+      expect(() => {
+        pe = parsePE(buf);
+      }).not.toThrow();
+      // The premise, asserted rather than assumed: the field's bytes are inside
+      // the file but outside the section the directory lives in.
+      const section = pe.sections[0];
+      const fieldOffset = section.pointerToRawData + 0x1e0 + 0xc8;
+      expect(fieldOffset + 8).toBeLessThanOrEqual(buf.byteLength);
+      expect(fieldOffset).toBeGreaterThan(section.pointerToRawData + section.sizeOfRawData);
+
+      expect(pe.loadConfig?.declaredSize).toBe(0x140);
+      expect(pe.loadConfig?.chpeMetadataPointer).toBeUndefined();
+    });
+
+    it("survives a directory RVA that resolves outside every section", {
+      timeout: TIMEOUT,
+    }, () => {
+      const buf = buildMinimalPE64({
+        dataDirectories: new Map([[10, { virtualAddress: 0x99999999, size: 0x140 }]]),
+      });
+
+      let pe!: ReturnType<typeof parsePE>;
+      expect(() => {
+        pe = parsePE(buf);
+      }).not.toThrow();
+      expect(pe.loadConfig).toBeUndefined();
+    });
+
+    it("survives a 0xFFFFFFFF directory size", { timeout: TIMEOUT }, () => {
+      // An inflated directory size must not license a read past the section;
+      // the structure here really is only 0x70 bytes long.
+      const buf = buildMinimalPE64({
+        directories: {
+          loadConfig: { bytes: 0x70, declaredSize: 0xffffffff, directorySize: 0xffffffff },
+        },
+      });
+
+      const started = Date.now();
+      const lc = parsePE(buf).loadConfig;
+      expect(Date.now() - started).toBeLessThan(TIMEOUT);
+      expect(lc?.chpeMetadataPointer).toBeUndefined();
+    });
+
+    it("survives a directory whose Size field itself is off the end of the file", {
+      timeout: TIMEOUT,
+    }, () => {
+      // Not even the 4 bytes at offset 0 are readable. The early bound has to
+      // come before the Size read, not after it.
+      const rva = 0x1000;
+      const data = new Uint8Array(0x200);
+      const buf = buildMinimalPE64({
+        sections: [dataSection(".rdata", rva, data)],
+        dataDirectories: new Map([[10, { virtualAddress: rva + 0x1fe, size: 0x140 }]]),
+      });
+
+      let pe!: ReturnType<typeof parsePE>;
+      expect(() => {
+        pe = parsePE(buf);
+      }).not.toThrow();
+      expect(pe.loadConfig).toBeUndefined();
+    });
+
+    it("leaves loadConfig undefined when the image has fewer than 11 data directories", {
+      timeout: TIMEOUT,
+    }, () => {
+      // numberOfRvaAndSizes is 10, so index 10 does not exist at all. Indexing
+      // past the end of the array must not throw.
+      const buf = buildMinimalPE64({ numberOfRvaAndSizes: 10 });
+
+      let pe!: ReturnType<typeof parsePE>;
+      expect(() => {
+        pe = parsePE(buf);
+      }).not.toThrow();
+      expect(pe.dataDirectories.length).toBe(10);
+      expect(pe.loadConfig).toBeUndefined();
+    });
+  });
+
   describe("authenticode DER", () => {
     it("rejects a 4-byte DER length with the high bit set", { timeout: TIMEOUT }, () => {
       // `contentLen = (contentLen << 8) | byte` is signed-32 in JS, so 0xFF...
