@@ -25,10 +25,15 @@ function exprEq(a: IRExpr, b: IRExpr): boolean {
  * `x & 0xFFFFFFFF00000000` evaluates to 0 — silently, with the wrong value
  * baked into the emitted C (peek-a-bin-8fv). Everything else in the switch
  * (`+`, `-`, `*`, `%`, and the signed comparisons) is ordinary double
- * arithmetic and is exact for every value the IR can hold, so it is left alone.
+ * arithmetic, exact for every operand the IR can hold, so it is left alone —
+ * but its *result* can leave the exactly-representable range, and the switch
+ * declines to fold when it does rather than printing a rounded constant. Unary
+ * `~` is the same int32 truncation and is handled at its own site below.
  *
  * `IRConst.size` says how wide the operand is; when it says 8, the operation
- * is redone in 64-bit BigInt.
+ * is redone in 64-bit BigInt. BigInt is confined to the evaluation itself:
+ * `IRConst.value` is a `number`, so a value that will not round-trip through
+ * one cannot be represented at all and the fold is refused instead.
  */
 const WIDTH_SENSITIVE = new Set<BinaryOp>([
   "/",
@@ -51,6 +56,50 @@ const WIDTH_SENSITIVE = new Set<BinaryOp>([
  */
 function fitsInt32(v: number): boolean {
   return Number.isInteger(v) && v >= -0x80000000 && v <= 0xffffffff;
+}
+
+/**
+ * The width in bytes of the value an expression produces, or null when this IR
+ * does not say.
+ *
+ * `const` is deliberately *not* consulted: `IRConst.size` is the image's mode —
+ * 8 for every immediate in a 64-bit binary — not the width of the operand the
+ * instruction actually wrote, so reading it here would call `eax & 0xffffffff`
+ * a 64-bit operation. Everything else carries a real width: a register spells
+ * its own, a deref carries the access size, a cast names the width it converts
+ * to, and a binary is as wide as the widest operand that knows.
+ *
+ * Null means "no evidence", and every caller treats that as *not* 64-bit. That
+ * is the pre-existing behaviour for everything the analysis cannot see, and it
+ * keeps this change to the case that is demonstrably unsound rather than to
+ * every case that cannot be proved sound.
+ */
+function knownWidth(expr: IRExpr): number | null {
+  switch (expr.kind) {
+    case "reg":
+    case "var":
+    case "deref":
+      return expr.size;
+    case "cast":
+      return castTypeSize(expr.type);
+    case "unary":
+      return knownWidth(expr.operand);
+    case "binary": {
+      const l = knownWidth(expr.left);
+      const r = knownWidth(expr.right);
+      if (l === null) return r;
+      if (r === null) return l;
+      return Math.max(l, r);
+    }
+    default:
+      return null;
+  }
+}
+
+/** True unless the expression is known to be wider than 32 bits. */
+function narrowEnoughForMask32(expr: IRExpr): boolean {
+  const w = knownWidth(expr);
+  return w === null || w <= 4;
 }
 
 /**
@@ -210,7 +259,13 @@ function foldExpr(expr: IRExpr): IRExpr {
           result = l >>> 0 >= r >>> 0 ? 1 : 0;
           break;
       }
-      if (result !== null) return irConst(result, left.size);
+      // `+`, `-` and `*` are exact double arithmetic on the way *in* and can
+      // still land outside the range a `number` represents exactly on the way
+      // out, at which point the constant printed is a rounded one and nothing
+      // downstream can tell. Refusing leaves an expression that still says what
+      // the machine does. Comparisons yield 0/1 and `/` is `|0`-truncated, so
+      // this only ever fires for the three that can grow.
+      if (result !== null && Number.isSafeInteger(result)) return irConst(result, left.size);
     }
 
     // Identity elimination
@@ -223,8 +278,13 @@ function foldExpr(expr: IRExpr): IRExpr {
       if (expr.op === "*" && right.value === 1) return left;
       // x * 0 → 0
       if (expr.op === "*" && right.value === 0) return irConst(0, right.size);
-      // x & 0xFFFFFFFF → x (32-bit mask on 32-bit value)
-      if (expr.op === "&" && (right.value === 0xffffffff || right.value === -1)) return left;
+      // x & -1 → x. All-ones at every width, so no width test is needed.
+      if (expr.op === "&" && right.value === -1) return left;
+      // x & 0xFFFFFFFF → x, but only when x is not wider than the mask. On a
+      // 64-bit left operand this is a real truncation of the high half, and
+      // dropping it emits a value keeping bits the instruction cleared
+      // (peek-a-bin-6hw).
+      if (expr.op === "&" && right.value === 0xffffffff && narrowEnoughForMask32(left)) return left;
       // x | 0 → x
       if (expr.op === "|" && right.value === 0) return left;
       // x ^ 0 → x
@@ -275,8 +335,11 @@ function foldExpr(expr: IRExpr): IRExpr {
     if (right.kind === "const") {
       // x & 0 → 0
       if (expr.op === "&" && right.value === 0) return irConst(0, right.size);
-      // x | 0xFFFFFFFF → 0xFFFFFFFF
-      if (expr.op === "|" && (right.value === 0xffffffff || right.value === -1))
+      // x | -1 → -1. All-ones at every width.
+      if (expr.op === "|" && right.value === -1) return irConst(right.value, right.size);
+      // x | 0xFFFFFFFF → 0xFFFFFFFF, same width condition as the `&` identity
+      // above: at 64 bits the high half of x survives the OR (peek-a-bin-6hw).
+      if (expr.op === "|" && right.value === 0xffffffff && narrowEnoughForMask32(left))
         return irConst(right.value, right.size);
       // Strength reduction: x * 2 → x << 1
       if (expr.op === "*" && right.value === 2)
@@ -320,8 +383,20 @@ function foldExpr(expr: IRExpr): IRExpr {
     // Constant fold unary
     if (operand.kind === "const") {
       switch (expr.op) {
-        case "~":
+        case "~": {
+          // `~` is a JavaScript bitwise operator and truncates to int32 like
+          // the rest of them: `~0x100000000` is -1, not -0x100000001. It only
+          // differs from the 64-bit answer when the operand does not survive
+          // ToInt32 — sign extension makes the two agree for everything that
+          // does — so that is exactly the condition for redoing it wide.
+          // `x ^ -1` is `~x`, so the 64-bit evaluator already has this case.
+          if (operand.size >= 8 && !fitsInt32(operand.value)) {
+            const wide = fold64("^", operand.value, -1);
+            if (wide === null) return { ...expr, operand };
+            return irConst(wide, operand.size);
+          }
           return irConst(~operand.value, operand.size);
+        }
         case "-":
           return irConst(-operand.value, operand.size);
         case "!":
