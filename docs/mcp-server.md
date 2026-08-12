@@ -52,7 +52,9 @@ Load a PE file from disk and run full analysis (parse, disassemble, detect funct
 | `filePath` | string | Yes | Absolute path to the PE file |
 | `id` | string | No | Identifier (defaults to filename) |
 
-Returns summary with header info, function count, anomalies, and driver detection. The summary reports `arch` (`x86` / `arm64`) alongside `is64` — `is64` is the PE32+ optional-header magic, so an ARM64 image sets it and reading `is64` alone as "x64" is wrong.
+Returns summary with header info, function count, anomalies, and driver detection. The summary reports `arch` (`x86` / `arm64` / `unsupported`) alongside `is64` — `is64` is the PE32+ optional-header magic, so an ARM64 image sets it and reading `is64` alone as "x64" is wrong.
+
+`unsupported` means the image's machine type has no decoder here (ARM32/Thumb, IA-64, RISC-V, MIPS). `load_pe` still succeeds and still returns everything the PE parser read; it just skips the two calls that would throw, so the function list is empty and `omitted` names the detection passes that could not run. Every tool whose output is instructions declines for such a file rather than decoding it as x86.
 
 Files larger than 256 MB are rejected. Unreadable paths, directories and parse failures return a normal MCP error result rather than crashing the server.
 
@@ -79,7 +81,8 @@ Decompile a function to C-like pseudocode. Runs the full pipeline: stack analysi
 
 Returns `{ functionName, address, code, lineMap }`.
 
-**Declines on ARM64 images**, before the address is even resolved: the decompiler is an x86
+**Declines on ARM64 images and on any machine type with no decoder**, before the address is even
+resolved: the decompiler is an x86
 instruction grammar, and fed A64 it returned a short, confident, wrong body — mostly
 `/* unlifted: … */`, every branch dropped, a fabricated local per register and a closing
 `return rax`, with nothing marking it as invented. `get_xrefs` on an ARM64 image reads the A64

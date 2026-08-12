@@ -14,7 +14,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 
 - **PE Analysis** — headers, sections, imports, exports, resources, authenticode signatures
 - **Disassembly** — x86/x64 via Capstone WASM with hybrid recursive descent + linear sweep, jump arrows, minimap
-- **ARM64** — PE32+ ARM64 images disassemble via a fixed-width sweep, with A64-aware CFG, jump arrows and cross-references; the decompiler is x86-only and says so rather than guessing
+- **ARM64** — PE32+ ARM64 images disassemble via a fixed-width sweep, with A64-aware CFG, jump arrows and cross-references; the decompiler is x86-only and says so rather than guessing. An image whose machine type has no decoder here (ARM32/Thumb, IA-64, RISC-V, MIPS) is refused visibly instead of being decoded as x86, and still shows its headers, sections, imports, exports, resources and strings
 - **Decompiler** — IR-based built-in decompiler with SSA, type inference, and struct synthesis; optional Ghidra server for high-level output
 - **Control Flow Graph** — inline IDA-style graph view with collapsible blocks, keyboard navigation, and pan/zoom
 - **AI-Powered Analysis** — chat, batch auto-rename, analysis reports, vulnerability scanner (bring your own API key)

@@ -33,7 +33,7 @@ flowchart TD
 
 The pipeline is phased via `analysisPhase` state:
 1. **Parse:** `parsePE()` reads headers, sections, imports, exports, resources, authenticode
-2. **Detect:** Function detection via `.pdata`, call targets, exports, unwind handlers and prologue scanning. **Where `.pdata` exists it is authoritative** — a prologue-pattern or padding-heuristic candidate strictly inside a `.pdata` range is dropped (t64: 511 → 279 functions, 232 overlapping pairs → 0). Jump-table case targets are case labels, not function starts
+2. **Detect:** Function detection via `.pdata`, call targets, exports, unwind handlers and prologue scanning. **Where `.pdata` exists it is authoritative** — a prologue-pattern or padding-heuristic candidate strictly inside a `.pdata` range is dropped (t64: 511 → 279 functions, 232 overlapping pairs → 0). Jump-table case targets are case labels, not function starts. A pattern candidate strictly inside another candidate's matched bytes is suppressed too, since MSVC's hot-patch prologue table has entries that are prefixes of one another and every hot-patched function was being reported twice (t32 447 → 293 functions, 154 empty decompiled bodies → 0). The result carries `omitted` naming any decoder-fed pass that did not run — see [Target architecture](#target-architecture)
 3. **Disassemble:** Hybrid recursive descent + linear sweep, seeded with jump-table case targets (`disasm/seeds.ts`); gap-fill regions marked separately
 4. **Xrefs:** Cross-references built for calls, jumps, strings, imports, and data sections
 5. **Strings:** ASCII and UTF-16LE string extraction with address mapping
@@ -52,13 +52,57 @@ The decoder is selected from `coffHeader.machine` via `archForMachine()` in
 for ARM64 too, which is why an ARM64 image once parsed, listed its `.pdata` boundaries and
 decoded to zero instructions.
 
+`archForMachine()` returns `ImageArch = "x86" | "arm64" | "unsupported"`. `undefined` — "the
+caller never told us" — yields `"x86"`, so a call site that has not been threaded through cannot
+silently start decoding as something else, and cannot silently start *refusing* either.
+
 | Arch | Disassembly | Decompiler / x86 xrefs / IRP detection |
 |------|-------------|----------------------------------------|
-| x86, x64 | Hybrid recursive descent + gap fill (`functionDetect.ts`) | Supported |
-| ARM64 | Fixed-width linear sweep at 4-byte alignment (`arm64.ts`); function starts from evidence only — `.pdata` extents, exports, entry point, unwind handlers, and `bl` targets outside every extent. No prologue byte scan | **Declines** via `unsupportedOnArch()`. A64 branches and address idioms are read by `arm64Operands.ts` / `arm64Xref.ts` instead |
+| x86, x64 (I386, AMD64) | Hybrid recursive descent + gap fill (`functionDetect.ts`) | Supported |
+| ARM64 (0xAA64) | Fixed-width linear sweep at 4-byte alignment (`arm64.ts`); function starts from evidence only — `.pdata` extents, exports, entry point, unwind handlers, and `bl` targets outside every extent. No prologue byte scan | **Declines** via `unsupportedOnArch()`. A64 branches and address idioms are read by `arm64Operands.ts` / `arm64Xref.ts` instead |
+| Anything else — ARM32/Thumb, IA-64, RISC-V, MIPS | **Refuses.** See below | **Declines** via `unsupportedArchMessage()` |
 
 A64 is fixed-width, so a linear sweep is not a heuristic — it is the decoding. Recursive
 descent exists to resolve x86's ambiguous instruction boundaries and has nothing to do here.
+
+#### Refusing an architecture
+
+`"unsupported"` used to be `"x86"`, which meant an ARMNT image produced a screenful of
+plausible x86 instructions that were pure fiction — and an x86 linear sweep decodes essentially
+any byte string, so unlike the ARM64 case there is no coverage signal to notice it by. Capstone
+itself is not the limit: the shipped WASM does contain `CS_ARCH_ARM` and both ARM and Thumb
+decode through it. The engine around it is x86 — `pdata.ts` extracts extents for ARM64 and x64
+only, and the prologue byte tables, the operand and xref grammars, the stack-frame analyser and
+`cfg.ts`'s mnemonic tests are all x86 — and Thumb-2 is variable-length, so the linear sweep that
+makes `arm64.ts` sound does not carry over. Decoding anyway would replace loud fiction with
+quiet fiction.
+
+The refusal is deliberately **asymmetric**, and the split is per stage rather than at load:
+
+- **Throws** from `disassemble`, `hybridDisassemble`, `buildAllXrefs` and `decompileFunction`, whose entire output is instructions — an empty list there is indistinguishable from a correct answer.
+- **Returns empty with `DetectResult.omitted` populated** from function detection, so headers, sections, imports, exports, resources, strings and Authenticode — format-level facts this tool reads correctly for any machine type — still reach the user. `FileSession.loadFile` guards its two throwing calls behind a `decodable` flag for the same reason.
+
+In every dispatch the `"unsupported"` arm is tested **before** the `"arm64"` arm, because the
+tail of that chain is the x86 path.
+
+**ARM64EC and ARM64X carry machine 0xAA64 as well** and hold x64 code (EC) or both (X).
+Distinguishing them properly needs the CHPE metadata pointer from the load-config directory,
+which the parser does not read, so the evidence used is the bytes themselves: an A64 sweep
+decodes 97.4% / 97.7% of the two real ARM64 binaries against 21.8–27.9% of four x86/x64 ones —
+about a quarter of arbitrary x86 bytes decode as *something* in A64, which is exactly why the
+failure was silent. `disassembleArm64` throws `Arm64DecodeRateError` below a 50% floor on
+sections of 256 words or more, and `detectArm64Functions` catches it and degrades via `omitted`.
+An ARM64X image, half of which is genuine A64, may sit above the floor.
+
+#### `DetectResult.omitted`
+
+Function detection is the one stage that keeps answering without a decoder, because its evidence
+is mostly not made of instructions. What it returns is then *narrower* than usual, and nothing
+said so — a decoder-less detection had the same shape as a complete one. `omitted:
+DetectPass[]` names the passes that did not run (`"call-targets"`, `"jump-tables"`,
+`"thunk-names"`, `"tail-calls"`) and is **empty when the answer is whole**. Only passes the
+architecture actually has are ever listed: the ARM64 detector has no thunk or tail-call pass, so
+their absence is a design decision rather than a degradation.
 
 ### The Capstone decoder is bounded, and must stay that way
 
