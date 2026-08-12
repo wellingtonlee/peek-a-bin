@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { detectNaturalLoops, computeRPO, computeDominators, computeDomTree } from "../ssa";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
+import { computeDominators, computeDomTree, computeRPO, detectNaturalLoops } from "../ssa";
 
 function makeBlock(id: number, succs: number[], preds: number[]): BasicBlock {
   return {

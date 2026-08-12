@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { appReducer, initialState, type AppAction, type AppState } from "../usePEFile";
-import type { PEFile } from "../../pe/types";
+import { describe, expect, it } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
+import type { PEFile } from "../../pe/types";
+import { type AppAction, type AppState, appReducer, initialState } from "../usePEFile";
 
 /**
  * Reducer-level coverage for `appReducer`.
@@ -485,6 +485,56 @@ describe("appReducer — analysis results", () => {
   it("SET_ANALYSIS_PHASE reaches the failed state, so a bad parse cannot spin forever", () => {
     const next = appReducer(initialState, { type: "SET_ANALYSIS_PHASE", phase: "failed" });
     expect(next.analysisPhase).toBe("failed");
+  });
+
+  // peek-a-bin-8ru3 / peek-a-bin-x7b. The engine refuses to disassemble an
+  // image whose machine type it has no decoder for, and the entire point of
+  // refusing per *stage* rather than at load is that the headers, sections,
+  // imports, exports, resources and strings still reach the user. That holds
+  // only if the failure path leaves `peFile` alone: App renders the tabs off
+  // `state.peFile`, so a branch that cleared it would blank every one of them
+  // and turn a precise refusal back into "something went wrong". An unguarded
+  // throw discarded exactly this in `mcp/session.ts`'s loadFile.
+  describe("a failed analysis keeps everything the parser recovered", () => {
+    const loaded = run([
+      { type: "SET_PE_FILE", peFile: peFile(), fileName: "arm32.exe" },
+      { type: "SET_ANALYSIS_PHASE", phase: "detecting-functions" },
+    ]);
+
+    it("SET_ERROR after a successful parse does not drop the PE", () => {
+      const next = appReducer(loaded, { type: "SET_ERROR", error: "Analysis failed: no decoder" });
+      expect(next.peFile).toBe(loaded.peFile);
+      expect(next.fileName).toBe("arm32.exe");
+      expect(next.error).toBe("Analysis failed: no decoder");
+    });
+
+    it("neither does the failed phase", () => {
+      const next = appReducer(loaded, { type: "SET_ANALYSIS_PHASE", phase: "failed" });
+      expect(next.peFile).toBe(loaded.peFile);
+      expect(next.analysisPhase).toBe("failed");
+    });
+
+    it("holds the phase and the reason at the same time", () => {
+      // App dispatches the two separately, so neither may clear the other —
+      // the phase without the message is the "something went wrong" screen.
+      const next = run(
+        [
+          { type: "SET_ANALYSIS_PHASE", phase: "failed" },
+          { type: "SET_ERROR", error: "Cross-reference analysis is not supported" },
+        ],
+        loaded,
+      );
+      expect(next.analysisPhase).toBe("failed");
+      expect(next.error).toBe("Cross-reference analysis is not supported");
+      expect(next.peFile).toBe(loaded.peFile);
+    });
+
+    it("an empty function list is not itself a reset — the file is still loaded", () => {
+      // Detection answers `[]` rather than throwing for an unsupported image.
+      const next = appReducer(loaded, { type: "SET_FUNCTIONS", functions: [] });
+      expect(next.functions).toEqual([]);
+      expect(next.peFile).toBe(loaded.peFile);
+    });
   });
 
   it("SET_CURRENT_INSTRUCTION and SET_CURRENT_BLOCK accept null to clear", () => {

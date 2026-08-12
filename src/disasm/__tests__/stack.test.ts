@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { analyzeStackFrame, stackVarKey } from "../stack";
 import type { DisasmFunction, Instruction } from "../types";
 

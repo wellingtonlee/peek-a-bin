@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { inferSignature } from "../signatures";
-import type { Instruction, DisasmFunction } from "../types";
+import type { DisasmFunction, Instruction } from "../types";
 
 const START = 0x401000;
 const INSN_SIZE = 4;

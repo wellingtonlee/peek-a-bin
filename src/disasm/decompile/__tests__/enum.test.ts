@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { inferTypes, typeToString, meetTypes, type DecompType } from "../typeInfer";
+import { describe, expect, it } from "vitest";
 import type { IRStmt, IRSwitch } from "../ir";
 import { irReg } from "../ir";
+import { type DecompType, inferTypes, meetTypes, typeToString } from "../typeInfer";
 
 describe("Enum Type Inference", () => {
   it("should infer enum from switch with 3+ cases", () => {

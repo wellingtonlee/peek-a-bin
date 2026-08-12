@@ -1,39 +1,40 @@
-import { useEffect, useRef, useMemo, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
-import { useSortedFuncs, useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
-import { useDisassemblyRows, binarySearchRows, rowAddress } from "../hooks/useDisassemblyRows";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { buildCFG, layoutCFG } from "../disasm/cfg";
+import { canonReg } from "../disasm/decompile/ir";
+import { type FunctionSignature, inferSignature } from "../disasm/signatures";
+import { analyzeStackFrame } from "../disasm/stack";
+import type { DisasmFunction, Instruction } from "../disasm/types";
+import { useAIChat } from "../hooks/useAIChat";
+import { useDecompileTabs } from "../hooks/useDecompileTabs";
+import { useContainingFunc, useSectionInfo, useSortedFuncs } from "../hooks/useDerivedState";
+import { useDisassemblyKeyboard } from "../hooks/useDisassemblyKeyboard";
+import type { DisplayRow } from "../hooks/useDisassemblyRows";
+import { binarySearchRows, rowAddress, useDisassemblyRows } from "../hooks/useDisassemblyRows";
 import { useDisassemblySearch } from "../hooks/useDisassemblySearch";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
-import type { DisplayRow } from "../hooks/useDisassemblyRows";
-import { disasmWorker } from "../workers/disasmClient";
-import type { Instruction, DisasmFunction } from "../disasm/types";
-import { CallPanel } from "./CallPanel";
-import { JumpArrows } from "./JumpArrows";
-import { InstructionDetail } from "./InstructionDetail";
-import { DisassemblyMinimap } from "./DisassemblyMinimap";
-import { analyzeStackFrame } from "../disasm/stack";
-import { CFGView } from "./CFGView";
-import { inferSignature, type FunctionSignature } from "../disasm/signatures";
-import { Breadcrumbs } from "./Breadcrumbs";
-import { XrefPanel } from "./XrefPanel";
-import { DecompileView } from "./DecompileView";
-import { ResizeHandle } from "./ResizeHandle";
-import { BottomPanelContainer } from "./BottomPanelContainer";
-import { useDecompileTabs } from "../hooks/useDecompileTabs";
-import type { PEFile } from "../pe/types";
-import { canonReg } from "../disasm/decompile/ir";
-import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { useSetGraphOverview } from "../hooks/useGraphOverview";
-import { AIChatPanel } from "./AIChatPanel";
-import { useAIChat } from "../hooks/useAIChat";
-import { useVulnScanner } from "../hooks/useVulnScanner";
-import { SeparatorRow, DataRow, LabelRow, InsnRow } from "./DisassemblyRows";
-import { InsnContextMenu } from "./InsnContextMenu";
-import { DisassemblyToolbar } from "./DisassemblyToolbar";
-import { useInsnContextMenu, type ContextMenuState } from "../hooks/useInsnContextMenu";
 import { useGraphSearch } from "../hooks/useGraphSearch";
-import { useDisassemblyKeyboard } from "../hooks/useDisassemblyKeyboard";
+import { type ContextMenuState, useInsnContextMenu } from "../hooks/useInsnContextMenu";
+import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { useVulnScanner } from "../hooks/useVulnScanner";
+import type { PEFile } from "../pe/types";
+import { disasmWorker } from "../workers/disasmClient";
+import { AIChatPanel } from "./AIChatPanel";
+import { analysisNotice, VIEW_TAB_LABELS } from "./analysisNotice";
+import { BottomPanelContainer } from "./BottomPanelContainer";
+import { Breadcrumbs } from "./Breadcrumbs";
+import { CallPanel } from "./CallPanel";
+import { CFGView } from "./CFGView";
+import { DecompileView } from "./DecompileView";
+import { DisassemblyMinimap } from "./DisassemblyMinimap";
+import { DataRow, InsnRow, LabelRow, SeparatorRow } from "./DisassemblyRows";
+import { DisassemblyToolbar } from "./DisassemblyToolbar";
+import { InsnContextMenu } from "./InsnContextMenu";
+import { InstructionDetail } from "./InstructionDetail";
+import { JumpArrows } from "./JumpArrows";
+import { ResizeHandle } from "./ResizeHandle";
+import { XrefPanel } from "./XrefPanel";
 
 const _SUSPICIOUS_MNEMONICS = new Set([
   "int",
@@ -953,6 +954,39 @@ export function DisassemblyView() {
   }, [setGraphOverview]);
 
   if (!pe) return null;
+
+  // Ahead of the spinner and of `disasmError`, both of which depend on the
+  // worker having answered. The machine type is known the moment the file
+  // parses, so this states the case immediately rather than after a round trip
+  // — and, more to the point, it means nothing here can ever render a screen of
+  // x86 decoded out of ARM bytes, however the worker's `configure` and this
+  // view's disassemble request happen to interleave.
+  const archNotice = analysisNotice({
+    machine: pe.coffHeader.machine,
+    phase: state.analysisPhase,
+    error: state.error,
+  });
+  if (archNotice?.kind === "unsupported-arch") {
+    return (
+      <div className="p-6 max-w-2xl text-sm">
+        <h2 className="text-amber-400 font-semibold mb-2">No disassembly for this image</h2>
+        <p className="text-gray-300 mb-4">{archNotice.detail}</p>
+        <p className="text-gray-500 mb-2">Still available:</p>
+        <div className="flex flex-wrap gap-2">
+          {archNotice.availableTabs.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => dispatch({ type: "SET_TAB", tab })}
+              className="px-2 py-1 rounded border border-gray-700 text-gray-300 hover:border-blue-500 hover:text-blue-400 text-xs"
+            >
+              {VIEW_TAB_LABELS[tab]}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (disassembling) {
     return (

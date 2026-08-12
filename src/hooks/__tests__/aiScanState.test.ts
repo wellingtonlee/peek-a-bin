@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { appReducer, initialState, type AppAction, type AppState } from "../usePEFile";
+import { describe, expect, it } from "vitest";
 import type { AIScanFinding } from "../../llm/types";
+import { type AppAction, type AppState, appReducer, initialState } from "../usePEFile";
 
 function finding(title: string, address = 0x401000): AIScanFinding {
   return {

@@ -1,7 +1,7 @@
-import type { IRExpr, IRStmt, IRFunction, BinaryOp } from "./ir";
+import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
+import type { BinaryOp, IRExpr, IRFunction, IRStmt } from "./ir";
 import { canonReg, isKnownRegister, regSize, walkExpr, walkStmts } from "./ir";
-import { isPlausibleIOCTL, formatIOCTL, ioctlCodeArgIndex } from "../../analysis/driver";
-import type { TypeContext, DecompType } from "./typeInfer";
+import type { DecompType, TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 
 // ── Expression Emission ──
@@ -189,7 +189,9 @@ function emitLogicalShiftRight(expr: IRExpr & { kind: "binary" }, parentPrec: nu
   } else if (width === null || widthContradicted) {
     const why =
       width === null ? "operand width unknown" : `shifts by ${shiftText} of only ${width} bytes`;
-    return unrecoveredValue(`logical shift right, ${why}: ${emitExpr(expr.left, 0)} >> ${shiftText}`);
+    return unrecoveredValue(
+      `logical shift right, ${why}: ${emitExpr(expr.left, 0)} >> ${shiftText}`,
+    );
   } else if (expr.left.kind === "cast" && expr.left.type === UNSIGNED_TYPE[width]) {
     // Already unsigned at exactly that width; a second cast would say nothing.
     result = `${emitExpr(expr.left, prec)} >> ${shiftText}`;
@@ -1641,12 +1643,18 @@ function assumedWidth(t: DecompType): number | null {
 /**
  * The largest offset this will lay a field out at.
  *
- * Struct synthesis can hand over a "field" at 0x140014770 — an absolute address
- * that reached a base as a displacement — and placing it means declaring five
- * gigabytes of padding nobody observed, in a struct nothing can use. C89's own
- * translation limits guarantee an object of only 32767 bytes, so a layout past
- * that is not one the emitted dialect promises to be able to state at all;
- * beyond it the field is reported rather than placed.
+ * Struct synthesis used to hand over a "field" at 0x140014770 — an absolute
+ * address that reached a base as a displacement — and placing it means
+ * declaring five gigabytes of padding nobody observed, in a struct nothing can
+ * use. C89's own translation limits guarantee an object of only 32767 bytes, so
+ * a layout past that is not one the emitted dialect promises to be able to
+ * state at all; beyond it the field is reported rather than placed.
+ *
+ * `MAX_FIELD_OFFSET` in structs.ts now refuses to call such a displacement an
+ * offset in the first place, and the two bounds are deliberately equal — but
+ * they are separate statements (what this dialect can lay out; what can be a
+ * position in an object), so this stays as the backstop that keeps a def
+ * arriving from anywhere else visible rather than misplaced.
  */
 const MAX_LAYOUT_EXTENT = 0x8000;
 

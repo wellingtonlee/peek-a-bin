@@ -12,6 +12,16 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  ARCH_LABEL,
+  archForMachine,
+  IMAGE_FILE_MACHINE_AMD64,
+  IMAGE_FILE_MACHINE_ARM64,
+  IMAGE_FILE_MACHINE_I386,
+  isKnownMachine,
+  unsupportedArchMessage,
+  unsupportedOnArch,
+} from "../arch";
+import {
   ARM64_DECODE_WINDOW,
   ARM64_INSN_SIZE,
   ARM64_MIN_DECODE_FRACTION,
@@ -23,18 +33,8 @@ import {
   disassembleArm64,
   findArm64JumpTables,
 } from "../arm64";
+import { CapstoneUnavailableError, CS_ARCH_ARM64 } from "../capstoneWindow";
 import type { Instruction } from "../types";
-import {
-  ARCH_LABEL,
-  IMAGE_FILE_MACHINE_AMD64,
-  IMAGE_FILE_MACHINE_ARM64,
-  IMAGE_FILE_MACHINE_I386,
-  archForMachine,
-  isKnownMachine,
-  unsupportedArchMessage,
-  unsupportedOnArch,
-} from "../arch";
-import { CS_ARCH_ARM64, CapstoneUnavailableError } from "../capstoneWindow";
 
 /** `nop` on A64 — `d503201f`, little-endian. See {@link fakeCs}. */
 function isArm64Nop(bytes: Uint8Array, i: number): boolean {
@@ -662,7 +662,9 @@ describe("findArm64JumpTables", () => {
   });
 
   it("refuses a bounds check about a different register", () => {
-    const rows = byteEntryChain.map((r) => (r[0] === "cmp" ? (["cmp", "w4, #3"] as [string, string]) : r));
+    const rows = byteEntryChain.map((r) =>
+      r[0] === "cmp" ? (["cmp", "w4, #3"] as [string, string]) : r,
+    );
     expect(find(rows, imageWith([1, 2, 3, 4]))).toEqual(new Map());
   });
 
@@ -745,12 +747,16 @@ describe("findArm64JumpTables", () => {
   });
 
   it("does not report a one-entry table", () => {
-    const rows = byteEntryChain.map((r) => (r[0] === "cmp" ? (["cmp", "w1, #0"] as [string, string]) : r));
+    const rows = byteEntryChain.map((r) =>
+      r[0] === "cmp" ? (["cmp", "w1, #0"] as [string, string]) : r,
+    );
     expect(find(rows, imageWith([1]))).toEqual(new Map());
   });
 
   it("ignores the pointer-authenticated branch forms", () => {
-    const rows = byteEntryChain.map((r) => (r[0] === "br" ? (["braa", "x8, x17"] as [string, string]) : r));
+    const rows = byteEntryChain.map((r) =>
+      r[0] === "br" ? (["braa", "x8, x17"] as [string, string]) : r,
+    );
     expect(find(rows, imageWith([1, 2, 3, 4]))).toEqual(new Map());
   });
 
@@ -838,13 +844,29 @@ describe("findArm64JumpTables", () => {
       // The sweep's own artefact: `br x1` at 0x1400040e0 in t64-arm.exe follows
       // a `nop` and two words that do not decode, so there is no chain because
       // the bytes before it are not instructions.
-      expect(classifyArm64Br("x1", recent([["nop", ""], ["br", "x1"]]))).toEqual({
+      expect(
+        classifyArm64Br(
+          "x1",
+          recent([
+            ["nop", ""],
+            ["br", "x1"],
+          ]),
+        ),
+      ).toEqual({
         kind: "unrecognised",
       });
     });
 
     it("calls a branch through the zero register unrecognised", () => {
-      expect(classifyArm64Br("xzr", recent([["nop", ""], ["br", "xzr"]]))).toEqual({
+      expect(
+        classifyArm64Br(
+          "xzr",
+          recent([
+            ["nop", ""],
+            ["br", "xzr"],
+          ]),
+        ),
+      ).toEqual({
         kind: "unrecognised",
       });
     });

@@ -1,8 +1,7 @@
-import { describe, it, expect } from "vitest";
-import type { IRTry } from "../ir";
-import { walkStmts, irConst, irReg } from "../ir";
+import { describe, expect, it } from "vitest";
 import { emitFunction } from "../emit";
-import type { IRFunction } from "../ir";
+import type { IRFunction, IRTry } from "../ir";
+import { irConst, irReg, walkStmts } from "../ir";
 
 describe("Exception Handling IR", () => {
   it("walkStmts should traverse try body and handler", () => {

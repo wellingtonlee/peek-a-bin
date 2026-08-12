@@ -1,11 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
-import type { IRStmt } from "../ir";
-import type { IRExpr } from "../ir";
-import { irReg, irConst, irBinary, irDeref, canonReg } from "../ir";
-import { computeRPO, computeDominators, computeDomFrontier, buildSSA } from "../ssa";
-import { ssaOptimize } from "../ssaopt";
+import type { IRExpr, IRStmt } from "../ir";
+import { canonReg, irBinary, irConst, irDeref, irReg } from "../ir";
+import { buildSSA, computeDomFrontier, computeDominators, computeRPO } from "../ssa";
 import { destroySSA } from "../ssadestroy";
+import { ssaOptimize } from "../ssaopt";
 
 // ── Helpers ──
 

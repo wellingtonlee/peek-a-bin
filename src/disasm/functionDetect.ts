@@ -4,11 +4,11 @@
  * can reuse the same algorithms.
  */
 
-import type { Instruction, DisasmFunction, Xref } from "./types";
-import { isPlausibleIOCTL, formatIOCTL } from "../analysis/driver";
-import { resolveRipTarget } from "./ripRelative";
+import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
-import { createScan, requireCapstone } from "./capstoneWindow";
+import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
+import { resolveRipTarget } from "./ripRelative";
+import type { DisasmFunction, Instruction, Xref } from "./types";
 
 /** Context maps passed in instead of module-level state */
 export interface DisasmContext {
@@ -464,7 +464,13 @@ function recoverX64RvaChain(
     if (mn === "lea" && destReg(p.opStr) === sought) {
       const target = resolveRipTarget(p);
       if (target === null) return null;
-      return { table: target + disp, base: target, baseName: sought, indexReg: indexReg!, loadIndex };
+      return {
+        table: target + disp,
+        base: target,
+        baseName: sought,
+        indexReg: indexReg!,
+        loadIndex,
+      };
     }
     if (destReg(p.opStr) === sought) return null;
   }
@@ -784,6 +790,200 @@ function interiorPatternStarts(matches: Map<number, number>): Set<number> {
   return interior;
 }
 
+/** Instructions after which control does not simply continue to the next one. */
+const NO_FALLTHROUGH = new Set(["ret", "retn", "int3", "ud2"]);
+
+/**
+ * Is any conditional jump *reachable from `from`* aimed at or past `boundary`,
+ * while its own fallthrough stays before it?
+ *
+ * The reachability is the whole point, and it is why this decodes rather than
+ * reading the linear scan's answer. A `.text` section carries data — jump
+ * tables above all, which MSVC drops in immediately after the function that
+ * dispatches through them — and a linear decode turns those bytes into
+ * plausible instructions. t32.exe holds eight absolute case addresses at
+ * 0x4086a4, right after `sub_407ABC`'s final `ret`, and they decode as
+ * `jle 0x4086e7 / jl 0x4086ef / jl 0x4086f3 / jge 0x4086f7 / jge 0x4086fb /
+ * jle 0x408703` — six conditional jumps straddling the next function's start,
+ * none of which the program can execute. w32.exe has the same table with the
+ * same effect. Walking forward from `from` never reaches them, because the
+ * `ret` in front of the table stops the walk.
+ *
+ * The walk follows fallthrough and direct branches only. A `call` is followed
+ * by its fallthrough and nothing else — the callee's body is not this
+ * function's — and an indirect jump ends its path rather than guessing.
+ */
+function reachableCondJumpCrosses(
+  from: number,
+  boundary: number,
+  windowEnd: number,
+  bytes: Uint8Array,
+  baseAddress: number,
+  scan: CapstoneScan,
+): boolean {
+  const lo = from - baseAddress;
+  const hi = windowEnd - baseAddress;
+  if (lo < 0 || hi > bytes.length || hi <= lo) return false;
+
+  const decoded = new Map<number, { mn: string; size: number; target: number | null }>();
+  let offset = lo;
+  while (offset < hi) {
+    const insns = scan.decode(bytes, offset, hi, baseAddress + offset);
+    if (insns.length === 0) {
+      offset += 1;
+      continue;
+    }
+    for (const insn of insns) {
+      const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      decoded.set(insn.address, {
+        mn: insn.mnemonic,
+        size: insn.size,
+        target: m ? parseInt(m[1], 16) : null,
+      });
+    }
+    const last = insns[insns.length - 1];
+    offset += last.address - (baseAddress + offset) + last.size;
+  }
+
+  const seen = new Set<number>();
+  const queue: number[] = [from];
+  while (queue.length > 0) {
+    const addr = queue.pop()!;
+    if (addr < from || addr >= windowEnd || seen.has(addr)) continue;
+    seen.add(addr);
+    const insn = decoded.get(addr);
+    if (!insn) continue; // not on the linear grid — this path is not followed
+    if (NO_FALLTHROUGH.has(insn.mn)) continue;
+    if (insn.mn === "jmp") {
+      if (insn.target !== null) queue.push(insn.target);
+      continue;
+    }
+    if (insn.mn.startsWith("j")) {
+      if (insn.target !== null) {
+        if (insn.target >= boundary && insn.target < windowEnd) return true;
+        queue.push(insn.target);
+      }
+      queue.push(addr + insn.size);
+      continue;
+    }
+    queue.push(addr + insn.size);
+  }
+  return false;
+}
+
+/**
+ * Detected starts that the function in front of them conditionally jumps over.
+ *
+ * Sizes here are "distance to the next detected start", so one false start in
+ * the middle of a function truncates it — and a truncated function loses every
+ * `jcc` aiming past its new end, because `buildCFG` draws no edge to a target
+ * outside the instruction range it was given. The block then reads as
+ * unconditional and the test disappears from the output entirely
+ * (peek-a-bin-g7yp). PE32 images have no `.pdata` to arbitrate with, which is
+ * why all 37 measured cases were 32-bit.
+ *
+ * What actually produces the false start is MSVC's x86 `__finally`: the funclet
+ * is emitted **inside its parent**, is reached by a `call` from the parent, ends
+ * in a `ret`, and the parent's own body resumes on the next byte. It is a call
+ * target, so it is a function start by every rule this detector has, and it cuts
+ * its parent in half. `t32!sub_4031A4` is the worked example — 0x403276 is
+ * `push 0xa; call _unlock; pop ecx; ret`, called from 0x403249, with the parent
+ * continuing at 0x40327F and four of its `jcc`s aiming there or later.
+ *
+ * Two things have to hold before a start is withdrawn, and they are chosen to
+ * refuse the case this could get catastrophically wrong — merging two genuinely
+ * separate functions:
+ *
+ *  * **Nothing outside the previous function calls it.** A helper laid out right
+ *    after its only caller is ordinary and must survive; a funclet has exactly
+ *    one caller and it is its parent. `t32!sub_40A925` is the shape this saves:
+ *    a second entry point sharing a tail with the code in front of it, called
+ *    from 0x4043CE and 0x404471 as well as from its neighbour.
+ *  * **A conditional jump the previous function can actually execute crosses
+ *    it** — see {@link reachableCondJumpCrosses}. *Conditional* specifically: a
+ *    `jcc` leaves its fallthrough behind, so both sides belong to one function,
+ *    whereas an unconditional `jmp` past the boundary is how a tail call and a
+ *    shared epilogue are spelled and implies nothing.
+ *
+ * A start the file itself names is never withdrawn (`strong`), and a previous
+ * function whose extent `.pdata` states is never extended — the linker's record
+ * outranks this inference on both sides.
+ */
+function interiorBranchedOverStarts(
+  sortedAddrs: number[],
+  strong: Set<number>,
+  callSites: Map<number, number[]>,
+  forwardCondJumps: number[],
+  pdataEndMap: Map<number, number>,
+  bytes: Uint8Array,
+  baseAddress: number,
+  endAddress: number,
+  scan: CapstoneScan,
+): Set<number> {
+  const interior = new Set<number>();
+  if (sortedAddrs.length < 2) return interior;
+
+  // `forwardCondJumps` is filled in scan order, so it is already sorted by
+  // source address: a binary search gives the jumps that start inside a
+  // candidate's predecessor without touching the rest.
+  const firstJumpFrom = (addr: number): number => {
+    let lo = 0;
+    let hi = forwardCondJumps.length / 2 - 1;
+    let at = forwardCondJumps.length / 2;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (forwardCondJumps[mid * 2] >= addr) {
+        at = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return at;
+  };
+
+  let prev = sortedAddrs[0];
+  for (let i = 1; i < sortedAddrs.length; i++) {
+    const boundary = sortedAddrs[i];
+    const windowEnd = i + 1 < sortedAddrs.length ? sortedAddrs[i + 1] : endAddress;
+    if (strong.has(boundary) || pdataEndMap.has(prev)) {
+      prev = boundary;
+      continue;
+    }
+
+    const callers = callSites.get(boundary);
+    if (callers?.some((c) => c < prev || c >= boundary)) {
+      prev = boundary;
+      continue;
+    }
+
+    let straddles = false;
+    for (let j = firstJumpFrom(prev); j * 2 < forwardCondJumps.length; j++) {
+      const src = forwardCondJumps[j * 2];
+      if (src >= boundary) break;
+      const dst = forwardCondJumps[j * 2 + 1];
+      if (dst >= boundary && dst < windowEnd) {
+        straddles = true;
+        break;
+      }
+    }
+    if (!straddles) {
+      prev = boundary;
+      continue;
+    }
+
+    if (reachableCondJumpCrosses(prev, boundary, windowEnd, bytes, baseAddress, scan)) {
+      interior.add(boundary);
+      // `prev` deliberately stays where it is: the next boundary is measured
+      // from the function this one was just folded back into.
+      continue;
+    }
+    prev = boundary;
+  }
+
+  return interior;
+}
+
 export function detectFunctions(
   bytes: Uint8Array,
   baseAddress: number,
@@ -825,12 +1025,20 @@ export function detectFunctions(
     const prev = patternAddrs.get(addr);
     if (prev === undefined || matched > prev) patternAddrs.set(addr, matched);
   };
+  /**
+   * Starts the *file itself* names: a `.pdata` begin, an unwind handler, the
+   * entry point, an export. {@link interiorBranchedOverStarts} will not withdraw
+   * one of these no matter what the surrounding code looks like — the evidence
+   * for them is a table the linker wrote, not an inference from bytes.
+   */
+  const strongStarts = new Set<number>();
 
   // Integrate .pdata seeds
   if (options?.pdataFunctions) {
     for (const rf of options.pdataFunctions) {
       if (rf.beginAddress >= baseAddress && rf.beginAddress < endAddress) {
         addrSet.add(rf.beginAddress);
+        strongStarts.add(rf.beginAddress);
         pdataEndMap.set(rf.beginAddress, rf.endAddress);
       }
     }
@@ -841,6 +1049,7 @@ export function detectFunctions(
     for (const ha of options.handlerAddresses) {
       if (ha >= baseAddress && ha < endAddress) {
         addrSet.add(ha);
+        strongStarts.add(ha);
         nameMap.set(ha, `__handler_${ha.toString(16)}`);
       }
     }
@@ -850,6 +1059,7 @@ export function detectFunctions(
     const ep = options.entryPoint;
     if (ep >= baseAddress && ep < endAddress) {
       addrSet.add(ep);
+      strongStarts.add(ep);
       nameMap.set(ep, "entry_point");
     }
   }
@@ -858,6 +1068,7 @@ export function detectFunctions(
     for (const exp of options.exports) {
       if (exp.address >= baseAddress && exp.address < endAddress) {
         addrSet.add(exp.address);
+        strongStarts.add(exp.address);
         nameMap.set(exp.address, exp.name);
       }
     }
@@ -1037,6 +1248,25 @@ export function detectFunctions(
 
   // Call target collection
   const callTargets = new Set<number>();
+  /**
+   * Where each direct `call` came from, keyed by its target.
+   *
+   * `callTargets` says an address is called; this says by whom, which is what
+   * {@link interiorBranchedOverStarts} needs to tell a helper function that
+   * happens to sit after its only caller from a funclet the caller contains.
+   */
+  const callSites = new Map<number, number[]>();
+  /**
+   * Every forward conditional jump, as `from, to` pairs in scan order.
+   *
+   * The pre-filter for the interior-start check below, so that the expensive
+   * part (a reachability walk that decodes) only runs where a jump actually
+   * straddles a candidate boundary. Forward only: the check asks whether a
+   * function branches *over* the start that follows it, and a backward jump
+   * cannot. Two numbers per conditional jump — 2291 of them in t32.exe's
+   * `.text`, the same order as the call targets already held here.
+   */
+  const forwardCondJumps: number[] = [];
   const jumpTables = new Map<number, number[]>();
   /**
    * Every address any jump table dispatches to.
@@ -1076,6 +1306,17 @@ export function detectFunctions(
             if (target >= baseAddress && target < endAddress) {
               addrSet.add(target);
               callTargets.add(target);
+              const sites = callSites.get(target);
+              if (sites) sites.push(insn.address);
+              else callSites.set(target, [insn.address]);
+            }
+          }
+        } else if (insn.mnemonic.startsWith("j") && insn.mnemonic !== "jmp") {
+          const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+          if (m) {
+            const target = parseInt(m[1], 16);
+            if (target > insn.address && target < endAddress) {
+              forwardCondJumps.push(insn.address, target);
             }
           }
         }
@@ -1153,7 +1394,27 @@ export function detectFunctions(
     addrSet.add(addr);
   }
 
-  const sortedAddrs = Array.from(addrSet).sort((a, b) => a - b);
+  // A start the previous function branches over is that function's own code —
+  // an MSVC `__finally` funclet, or a prologue pattern that matched mid-body —
+  // and leaving it in truncates its parent. See
+  // {@link interiorBranchedOverStarts}; it needs a decoder, so without one this
+  // arbitration is simply not made, as with the other decoder-fed passes.
+  const allStarts = Array.from(addrSet).sort((a, b) => a - b);
+  const interiorStarts = cs
+    ? interiorBranchedOverStarts(
+        allStarts,
+        strongStarts,
+        callSites,
+        forwardCondJumps,
+        pdataEndMap,
+        bytes,
+        baseAddress,
+        endAddress,
+        createScan(cs, "interior-start arbitration"),
+      )
+    : new Set<number>();
+  const sortedAddrs =
+    interiorStarts.size > 0 ? allStarts.filter((a) => !interiorStarts.has(a)) : allStarts;
   const functions: DisasmFunction[] = sortedAddrs.map((addr) => ({
     name: nameMap.get(addr) || `sub_${addr.toString(16).toUpperCase()}`,
     address: addr,

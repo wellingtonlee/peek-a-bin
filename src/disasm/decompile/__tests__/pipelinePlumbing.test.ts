@@ -29,15 +29,15 @@
  * `src/mcp/__tests__/plumbing.test.ts`.
  */
 
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { structureCFG } from "../structure";
-import { irConst, irReg } from "../ir";
-import type { IRStmt } from "../ir";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
 import type { Instruction } from "../../types";
+import type { IRStmt } from "../ir";
+import { irConst, irReg } from "../ir";
+import { structureCFG } from "../structure";
 
 const DECOMPILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

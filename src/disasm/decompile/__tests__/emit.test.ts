@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
-import type { IRExpr, IRFunction, IRStmt, IRPhi } from "../ir";
-import { irConst, irReg, irVar, irBinary } from "../ir";
+import { describe, expect, it } from "vitest";
 import { emitFunction } from "../emit";
+import type { IRExpr, IRFunction, IRPhi, IRStmt } from "../ir";
+import { irBinary, irConst, irReg, irVar } from "../ir";
+import { MAX_FIELD_OFFSET } from "../structs";
 import type { TypeContext } from "../typeInfer";
 
 // ── Helpers ──
@@ -243,5 +244,95 @@ describe("emitFunction — a pointer field's arithmetic says what the instructio
 
     expect(code).toContain("((struct_0 *)rcx)->field_0x8 & 0xFFFFFFEF");
     expect(code).not.toContain("uintptr_t");
+  });
+});
+
+/**
+ * The layout backstop, now that struct synthesis refuses to produce these at all
+ * (peek-a-bin-u3v): a StructDef reaching emission with a field no declaration
+ * can place is still reported inside the struct body rather than put somewhere
+ * convenient, which is what kept the misplacement visible in the first place
+ * (peek-a-bin-ey0).
+ *
+ * These defs are hand-built because the pipeline no longer produces them. The
+ * check earning its keep is the *coupling* one: emit states the largest layout
+ * it will write, structs.ts states the largest displacement it will call an
+ * offset, and the two are equal — so a change to either that makes synthesis
+ * looser lands here rather than in silently misplaced fields.
+ */
+describe("emitFunction — a field no declaration can place is reported, not placed", () => {
+  const def = (fields: unknown[]) =>
+    ({ id: "struct_0", fields }) as unknown as NonNullable<IRFunction["typedefs"]>[number];
+
+  const uint = (size: number) => ({ kind: "int", size, signed: false });
+
+  function emitWith(fields: unknown[]): string {
+    return emitFunction(
+      fn([{ kind: "assign", dest: irVar("y", 8), src: irConst(1, 4) }], {
+        typedefs: [def(fields)],
+      }),
+    ).code;
+  }
+
+  it("reports a negative offset rather than placing it", () => {
+    const code = emitWith([
+      { name: "field_neg_0x8", offset: -8, size: 4, type: uint(4), isArray: false },
+      { name: "field_0x0", offset: 0, size: 4, type: uint(4), isArray: false },
+    ]);
+
+    expect(code).toContain("uint32_t field_0x0;");
+    expect(code).toMatch(/\/\* field_neg_0x8: 4 bytes at -0x8 — a negative offset/);
+  });
+
+  it("reports a field whose bytes overlap one already placed", () => {
+    const code = emitWith([
+      { name: "field_0x0", offset: 0, size: 8, type: uint(8), isArray: false },
+      { name: "field_0x2", offset: 2, size: 2, type: uint(2), isArray: false },
+    ]);
+
+    expect(code).toContain("uint64_t field_0x0;");
+    expect(code).toMatch(/\/\* field_0x2: 2 bytes at 0x2 — its bytes overlap field_0x0/);
+  });
+
+  it("reports an offset past the largest layout it states, and leaves the struct incomplete", () => {
+    const code = emitWith([
+      { name: "field_0x9000", offset: 0x9000, size: 4, type: uint(4), isArray: false },
+      { name: "field_0x9100", offset: 0x9100, size: 4, type: uint(4), isArray: false },
+    ]);
+
+    expect(code).toContain("typedef struct struct_0 struct_0;");
+    expect(code).not.toContain("struct struct_0 {");
+    expect(code).toContain("struct_0 is left incomplete");
+  });
+
+  it("states the same bound struct synthesis does", () => {
+    // Equal on purpose and justified separately (see both docstrings): a
+    // displacement that large is an address, and a layout that large is past
+    // what the emitted dialect promises. If MAX_FIELD_OFFSET ever rises above
+    // this, synthesis starts handing over fields emit will only report.
+    expect(MAX_FIELD_OFFSET).toBe(0x8000);
+    const inside = emitWith([
+      { name: "field_0x0", offset: 0, size: 1, type: uint(1), isArray: false },
+      {
+        name: `field_0x${(MAX_FIELD_OFFSET - 1).toString(16).toUpperCase()}`,
+        offset: MAX_FIELD_OFFSET - 1,
+        size: 1,
+        type: uint(1),
+        isArray: false,
+      },
+    ]);
+    expect(inside).not.toContain("largest layout this states");
+
+    const outside = emitWith([
+      { name: "field_0x0", offset: 0, size: 1, type: uint(1), isArray: false },
+      {
+        name: `field_0x${MAX_FIELD_OFFSET.toString(16).toUpperCase()}`,
+        offset: MAX_FIELD_OFFSET,
+        size: 1,
+        type: uint(1),
+        isArray: false,
+      },
+    ]);
+    expect(outside).toContain("largest layout this states");
   });
 });

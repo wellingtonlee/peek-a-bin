@@ -13,12 +13,12 @@
  * silently acquire a different meaning on one side.
  */
 
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SHORTCUT_GROUPS } from "../KeyboardShortcuts";
+import { describe, expect, it } from "vitest";
 import { parseViewTab } from "../../hooks/usePEFile";
+import { SHORTCUT_GROUPS } from "../KeyboardShortcuts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const DOC_PATH = resolve(REPO_ROOT, "docs/keyboard.md");

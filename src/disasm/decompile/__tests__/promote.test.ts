@@ -1,12 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { promoteVars } from "../promote";
-import { irBinary, irConst, irDeref, irReg, irVar } from "../ir";
-import type { IRExpr, IRStmt } from "../ir";
-import type { StackFrame, StackVar } from "../../types";
+import { describe, expect, it } from "vitest";
 import type { FunctionSignature } from "../../signatures";
-import type { TypeContext } from "../typeInfer";
-import type { DecompType } from "../typeInfer";
 import { stackVarKey } from "../../stack";
+import type { StackFrame, StackVar } from "../../types";
+import type { IRExpr, IRStmt } from "../ir";
+import { irBinary, irConst, irDeref, irReg, irVar } from "../ir";
+import { promoteVars } from "../promote";
+import type { DecompType, TypeContext } from "../typeInfer";
 
 const ADDR = 0x401000;
 

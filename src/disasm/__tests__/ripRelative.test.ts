@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  matchRipOperand,
   matchRipMemExpr,
-  resolveRipTarget,
+  matchRipOperand,
   resolveRipMemExpr,
+  resolveRipTarget,
 } from "../ripRelative";
 
 const insn = (address: number, opStr: string, size: number) => ({ address, size, opStr });

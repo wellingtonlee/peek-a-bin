@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { collectFuncInsns, buildFuncInsnMap, getFuncInsns } from "../funcInsns";
-import type { Instruction, DisasmFunction } from "../types";
+import { describe, expect, it } from "vitest";
+import { buildFuncInsnMap, collectFuncInsns, getFuncInsns } from "../funcInsns";
+import type { DisasmFunction, Instruction } from "../types";
 
 /** Instructions laid out back-to-back, `size` bytes each. */
 function layout(start: number, count: number, size = 4): Instruction[] {

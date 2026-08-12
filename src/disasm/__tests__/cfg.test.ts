@@ -243,6 +243,40 @@ describe("buildCFG", () => {
     expect(blocks[0].insns.map((i) => i.address)).toEqual([0x401004, 0x401008]);
   });
 
+  describe("a funclet inside the function (peek-a-bin-g7yp)", () => {
+    // MSVC's x86 `__finally` sits *inside* its parent: the parent calls it, it
+    // ends in `ret`, and the parent's body resumes on the next byte. The
+    // detector used to treat it as a function start and so cut the parent in
+    // half at 0x40100b, and then the branch above lost the edge that reaches
+    // 0x40100d — the test disappeared from the graph and the structurer read the
+    // block as unconditional. This is what the repaired extent has to produce.
+    const specs: Spec[] = [
+      ["cmp", "eax, 0", 3], // 0x401000
+      ["je", "0x40100d", 2], // 0x401003 — over the funclet, back into the parent
+      ["call", "0x40100b", 5], // 0x401005 — the funclet
+      ["ret", "", 1], // 0x40100a
+      ["nop", "", 1], // 0x40100b — the funclet
+      ["ret", "", 1], // 0x40100c
+      ["nop", "", 1], // 0x40100d — the parent resumes
+      ["ret", "", 1], // 0x40100e
+    ];
+
+    it("gives the branch over it both successors", () => {
+      const { blocks } = cfg(specs);
+      const starts = blocks[0].succs.map((s) => blocks[s].startAddr).sort((a, b) => a - b);
+      expect(starts).toEqual([0x401005, 0x40100d]);
+      expectEdgesConsistent(blocks);
+    });
+
+    it("leaves the funclet block with no predecessor, because a call is not an edge", () => {
+      const { blocks } = cfg(specs);
+      const funclet = blocks.find((b) => b.startAddr === 0x40100b);
+      expect(funclet).toBeDefined();
+      expect(funclet?.preds).toEqual([]);
+      expect(funclet?.succs).toEqual([]);
+    });
+  });
+
   describe("jump tables", () => {
     const specs: Spec[] = [
       ["cmp", "eax, 3", 3], // 0x401000

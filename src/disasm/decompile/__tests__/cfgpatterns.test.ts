@@ -1,14 +1,14 @@
-import { describe, it, expect } from "vitest";
-import {
-  detectShortCircuit,
-  detectForLoop,
-  detectMultiExitLoop,
-  detectIfElseIfChain,
-} from "../cfgpatterns";
-import { irBinary, irConst, irReg, irVar } from "../ir";
-import type { IRExpr, IRStmt } from "../ir";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
 import type { Instruction } from "../../types";
+import {
+  detectForLoop,
+  detectIfElseIfChain,
+  detectMultiExitLoop,
+  detectShortCircuit,
+} from "../cfgpatterns";
+import type { IRExpr, IRStmt } from "../ir";
+import { irBinary, irConst, irReg, irVar } from "../ir";
 
 const BASE = 0x401000;
 const addrOf = (id: number) => BASE + id * 0x10;

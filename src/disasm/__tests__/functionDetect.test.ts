@@ -1,15 +1,15 @@
-import { describe, it, expect } from "vitest";
-import {
-  mapInsn,
-  disassemble,
-  detectFunctions,
-  hybridDisassemble,
-  buildTypedXrefMap,
-  buildAllXrefs,
-  type DisasmContext,
-} from "../functionDetect";
-import { buildCFG } from "../cfg";
+import { describe, expect, it } from "vitest";
 import { CapstoneUnavailableError } from "../capstoneWindow";
+import { buildCFG } from "../cfg";
+import {
+  buildAllXrefs,
+  buildTypedXrefMap,
+  type DisasmContext,
+  detectFunctions,
+  disassemble,
+  hybridDisassemble,
+  mapInsn,
+} from "../functionDetect";
 import type { Instruction } from "../types";
 
 const BASE = 0x401000;
@@ -581,6 +581,106 @@ describe("detectFunctions — a prologue inside a prologue is one function", () 
   });
 });
 
+describe("detectFunctions — a start the function before it jumps over (peek-a-bin-g7yp)", () => {
+  // MSVC's x86 `__finally` funclet is emitted *inside* its parent: the parent
+  // `call`s it, it ends in `ret`, and the parent's own body resumes on the next
+  // byte. Every rule this detector has makes it a function start, and sizes are
+  // "distance to the next start", so it used to cut its parent in half — and a
+  // truncated parent loses every `jcc` aiming past its new end, because buildCFG
+  // draws no edge to a target outside the range it was given.
+  //
+  // `t32!sub_4031A4` is the measured case: 0x403276 is `push 0xa; call _unlock;
+  // pop ecx; ret`, called from 0x403249, with the parent continuing at 0x40327F
+  // and four `jcc`s aiming there or later. All four tests vanished from the
+  // emitted C and the loop around them came out as `while (1)`.
+  //
+  //   0x00  je   0x401014   ; crosses the funclet, lands back in the parent
+  //   0x02  call 0x401010   ; the funclet
+  //   0x10  ...  ret        ; the funclet, ending here
+  //   0x14  ...  ret        ; the parent resumes
+  //   0x16  cc cc           ; padding — 0x18 is the next real function
+  const FUNCLET = 0x10;
+  const RESUME = 0x14;
+  const NEXT = 0x18;
+  /** 0x40 decodes as a one-byte filler and is not padding, so it starts nothing. */
+  const filled = (len: number, parts: Record<number, number[]>): Uint8Array => {
+    const out = new Uint8Array(len).fill(0x40);
+    for (const [off, bytes] of Object.entries(parts)) out.set(bytes, Number(off));
+    return out;
+  };
+  const parent = {
+    0x00: [0x74, RESUME - 0x02], // je BASE+0x14
+    0x02: callTo(0x02, BASE + FUNCLET),
+    [FUNCLET]: [0x40, 0xc3],
+    [RESUME]: [0x40, 0xc3],
+    0x16: [0xcc, 0xcc],
+    [NEXT]: [0x40, 0xc3],
+  };
+  const detect = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE }).functions;
+
+  it("withdraws it, so the parent keeps the code past it", () => {
+    const funcs = detect(filled(0x20, parent));
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+    expect(funcs[0].size).toBe(NEXT);
+  });
+
+  it("still ends the parent where the next real function starts", () => {
+    // The negative half of the same assertion: withdrawing a start must not run
+    // the parent on into a function that is genuinely separate.
+    const funcs = detect(filled(0x20, parent));
+    expect(funcs[1].address).toBe(BASE + NEXT);
+    expect(funcs[0].address + funcs[0].size).toBe(funcs[1].address);
+  });
+
+  it("gives the crossing jcc both of its successors", () => {
+    // The end of the chain: with the parent sized right, buildCFG has a block at
+    // the branch target and the test survives into the graph.
+    const img = filled(0x20, parent);
+    const ctx = ctxOf({ cs32: fakeCs() });
+    const { functions } = detectFunctions(img, BASE, false, ctx, { entryPoint: BASE });
+    const insns = hybridDisassemble(img, BASE, false, [BASE], ctx);
+    const blocks = buildCFG(functions[0], insns, new Map());
+    const branch = blocks.find((b) => b.insns.some((i) => i.mnemonic === "je"));
+    expect(branch).toBeDefined();
+    expect(branch?.succs.map((s) => blocks[s].startAddr).sort((a, b) => a - b)).toEqual([
+      BASE + 0x02,
+      BASE + RESUME,
+    ]);
+  });
+
+  it("keeps a start that something outside the previous function calls", () => {
+    // `t32!sub_40A925`: a second entry point sharing a tail with the code in
+    // front of it, called from 0x4043CE and 0x404471 as well as from its
+    // neighbour. One caller from outside is enough to make it a function, and a
+    // helper laid out right after its only caller must survive too.
+    const img = filled(0x28, { ...parent, [NEXT]: callTo(NEXT, BASE + FUNCLET), 0x1d: [0xc3] });
+    const funcs = detect(img);
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+    expect(funcs[0].size).toBe(FUNCLET);
+  });
+
+  it("ignores a crossing jcc the function cannot reach", () => {
+    // `.text` carries data. t32.exe holds eight absolute case addresses at
+    // 0x4086a4, right after `sub_407ABC`'s final `ret`, and a linear decode
+    // turns them into `jle 0x4086e7 / jl 0x4086ef / jl 0x4086f3 / jge 0x4086f7 /
+    // jge 0x4086fb / jle 0x408703` — six conditional jumps straddling the next
+    // function's start that the program cannot execute. Suppressing on those
+    // would swallow a real 288-byte function (w32.exe has the same table with
+    // the same effect, in front of `sub_408014`).
+    //
+    //   0x00  ret            ; the function really ends here
+    //   0x02  74 10          ; data, decoding as `je 0x401014`
+    //   0x04  cc cc cc cc    ; padding — 0x08 is the next function
+    const img = filled(0x20, {
+      0x00: [0x40, 0xc3],
+      0x02: [0x74, 0x10],
+      0x04: [0xcc, 0xcc, 0xcc, 0xcc],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + 0x08]);
+  });
+});
+
 describe("detectFunctions — .pdata outranks the pattern scan", () => {
   const RANGE = [{ beginAddress: BASE, endAddress: BASE + 0x40 }];
   const addrs = (img: Uint8Array, options: Parameters<typeof detectFunctions>[4], ctx = ctxOf()) =>
@@ -1060,9 +1160,7 @@ describe("detectFunctions — x86-64 RVA jump tables", () => {
       // Reporting the dword table's three entries in order — what refusing this
       // form avoided having to do — would have filed cases 3-5 under nothing and
       // cases 0-2 under bodies that are only sometimes theirs.
-      expect(detect64(dense()).jumpTables).toEqual([
-        [denseJmp, ROWS.map((r) => BASE + BODIES[r])],
-      ]);
+      expect(detect64(dense()).jumpTables).toEqual([[denseJmp, ROWS.map((r) => BASE + BODIES[r])]]);
     });
 
     it("keeps its case bodies out of the function set", () => {
@@ -1476,12 +1574,7 @@ describe("a missing Capstone handle is reported, not absorbed", () => {
       pdataFunctions: [{ beginAddress: BASE + 0x18, endAddress: BASE + 0x20 }],
       handlerAddresses: [BASE + 0x1c],
     });
-    expect(functions.map((f) => f.address)).toEqual([
-      BASE,
-      BASE + 0x10,
-      BASE + 0x18,
-      BASE + 0x1c,
-    ]);
+    expect(functions.map((f) => f.address)).toEqual([BASE, BASE + 0x10, BASE + 0x18, BASE + 0x1c]);
     expect(functions.map((f) => f.name)).toEqual([
       "entry_point",
       "Exported",

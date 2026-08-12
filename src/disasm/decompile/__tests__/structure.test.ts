@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { structureCFG } from "../structure";
-import { irBinary, irConst, irReg } from "../ir";
-import type { IRExpr, IRStmt } from "../ir";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock, Loop } from "../../cfg";
 import type { Instruction } from "../../types";
+import type { IRExpr, IRStmt } from "../ir";
+import { irBinary, irConst, irReg } from "../ir";
+import { structureCFG } from "../structure";
 
 const BASE = 0x401000;
 const addrOf = (id: number) => BASE + id * 0x100;
@@ -123,11 +123,7 @@ describe("structureCFG — straight-line code", () => {
     // own `loc_` label instead, by the leftover pass — a `ret` ends the path
     // through a block but does not make the code after it stop existing, and
     // block 1 is where an exception funclet lands (peek-a-bin-d3z).
-    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([
-      mark(0),
-      loc(1),
-      mark(1),
-    ]);
+    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual([mark(0), loc(1), mark(1)]);
   });
 
   it("emits a goto for a jump back to an already-visited block, under its label", () => {
@@ -744,7 +740,9 @@ describe("structureCFG — for loops", () => {
     // into the header would move it past that statement. The loop stays a
     // `while` with the update at the end of the body, where the machine put it,
     // and nothing is duplicated or lost.
-    const out = structure(counted(), { 0: [init, mark(9)], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    const out = structure(counted(), { 0: [init, mark(9)], 2: [mark(2), inc] }, [
+      loopOf(1, [2], 2),
+    ]);
     expect(out).toEqual([
       init,
       mark(9),

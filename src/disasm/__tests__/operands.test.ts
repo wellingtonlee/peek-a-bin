@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { parseOperandTargets, buildIATLookup } from "../operands";
-import type { Instruction } from "../types";
+import { describe, expect, it } from "vitest";
 import type { ImportEntry } from "../../pe/types";
+import { buildIATLookup, parseOperandTargets } from "../operands";
+import type { Instruction } from "../types";
 
 /** Typical x64 PE layout used by most cases below. */
 const BASE = 0x140000000;

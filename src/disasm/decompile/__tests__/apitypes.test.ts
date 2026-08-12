@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
 import { API_TYPES } from "../apitypes";
-import { typeToString, type DecompType } from "../typeInfer";
+import { type DecompType, typeToString } from "../typeInfer";
 
 const entries = Object.entries(API_TYPES);
 const names = Object.keys(API_TYPES);

@@ -1,60 +1,63 @@
 import {
-  useReducer,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useMemo,
   lazy,
   Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
 } from "react";
-import {
-  appReducer,
-  initialState,
-  AppStateContext,
-  AppDispatchContext,
-  parseViewTab,
-} from "./hooks/usePEFile";
-import { parsePE } from "./pe/parser";
-import { dataSectionRanges, findCodeSection } from "./pe/sections";
-import { disasmWorker } from "./workers/disasmClient";
-import { buildIATLookup } from "./disasm/operands";
-import { buildDataWindows } from "./disasm/dataWindows";
-import { detectDriver } from "./analysis/driver";
 import { detectAnomalies } from "./analysis/anomalies";
-import { metricsWorker } from "./workers/metricsClient";
-import { sectionRanges } from "./workers/metricsDispatch";
-import { MAX_SYNC_FILE_METRIC_BYTES } from "./hooks/asyncMetricState";
-import { loadFontSize } from "./llm/settings";
-import { loadTheme, applyTheme } from "./styles/themes";
-import { saveRecentFile } from "./utils/recentFiles";
-import { validateAnnotations } from "./utils/exportSchema";
+import { detectDriver } from "./analysis/driver";
+import { analysisNotice, formatTabList } from "./components/analysisNotice";
 import { FileLoader } from "./components/FileLoader";
-import { Sidebar } from "./components/Sidebar";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
+import { Sidebar } from "./components/Sidebar";
+import { buildDataWindows } from "./disasm/dataWindows";
+import { buildIATLookup } from "./disasm/operands";
+import { MAX_SYNC_FILE_METRIC_BYTES } from "./hooks/asyncMetricState";
+import {
+  AppDispatchContext,
+  AppStateContext,
+  appReducer,
+  initialState,
+  parseViewTab,
+} from "./hooks/usePEFile";
+import { loadFontSize } from "./llm/settings";
+import { parsePE } from "./pe/parser";
+import { dataSectionRanges, findCodeSection } from "./pe/sections";
+import { applyTheme, loadTheme } from "./styles/themes";
+import { validateAnnotations } from "./utils/exportSchema";
+import { saveRecentFile } from "./utils/recentFiles";
+import { disasmWorker } from "./workers/disasmClient";
+import { metricsWorker } from "./workers/metricsClient";
+import { sectionRanges } from "./workers/metricsDispatch";
+
 const DisassemblyView = lazy(() =>
   import("./components/DisassemblyView").then((m) => ({ default: m.DisassemblyView })),
 );
 const HexView = lazy(() => import("./components/HexView").then((m) => ({ default: m.HexView })));
-import { ImportsView } from "./components/ImportsView";
-import { ExportsView } from "./components/ExportsView";
-import { StringsView } from "./components/StringsView";
-import { ResourcesView } from "./components/ResourcesView";
-import { AnomaliesView } from "./components/AnomaliesView";
+
 import { AddressBar } from "./components/AddressBar";
-import { StatusBar } from "./components/StatusBar";
-import { CommandPalette } from "./components/CommandPalette";
-import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
-import { SettingsModal } from "./components/SettingsModal";
-import { GoToAddressModal } from "./components/GoToAddressModal";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
-import { useMcpSync } from "./hooks/useMcpSync";
-import { BatchRenameModal } from "./components/BatchRenameModal";
 import { AIReportPanel } from "./components/AIReportPanel";
+import { AnomaliesView } from "./components/AnomaliesView";
+import { BatchRenameModal } from "./components/BatchRenameModal";
+import { CommandPalette } from "./components/CommandPalette";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ExportsView } from "./components/ExportsView";
+import { GoToAddressModal } from "./components/GoToAddressModal";
+import { ImportsView } from "./components/ImportsView";
+import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
+import { ResourcesView } from "./components/ResourcesView";
+import { SettingsModal } from "./components/SettingsModal";
+import { StatusBar } from "./components/StatusBar";
+import { StringsView } from "./components/StringsView";
 import { useAIReport } from "./hooks/useAIReport";
 import { useBatchRename } from "./hooks/useBatchRename";
+import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
+import { useMcpSync } from "./hooks/useMcpSync";
 import { useVulnScanner } from "./hooks/useVulnScanner";
 
 export default function App() {
@@ -66,6 +69,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [goToOpen, setGoToOpen] = useState(false);
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
   const aiReport = useAIReport(state, dispatch);
   const batchRename = useBatchRename(state, dispatch);
@@ -298,8 +302,22 @@ export default function App() {
           dataWindows: buildDataWindows(buffer, pe.sections, pe.optionalHeader.imageBase),
         }),
       )
-      .then(async (funcs) => {
+      .then(async ({ functions: funcs, omitted }) => {
         dispatch({ type: "SET_FUNCTIONS", functions: funcs });
+        // A non-empty `omitted` means this function list is narrower than a
+        // complete one — the decoder-fed passes named here did not run, either
+        // because the image has no decoder or because Capstone is dead
+        // (peek-a-bin-4s9). The list still looks exactly like a whole answer,
+        // which is the defect the field exists to prevent, so say so. The
+        // unsupported-architecture case is also derived independently by
+        // `analysisNotice`; the null-Capstone case has no such backstop, and
+        // this is currently its only signal. See peek-a-bin-ybv2.
+        if (omitted.length > 0) {
+          console.warn(
+            `[peek-a-bin] function detection ran without ${omitted.join(", ")} — ` +
+              `the function list is narrower than a complete one`,
+          );
+        }
         // Pre-send func map + jump tables to worker for decompilation
         const funcEntryMap = new Map<number, { name: string; address: number }>();
         for (const fn of funcs)
@@ -574,6 +592,7 @@ export default function App() {
     dispatch({ type: "RESET" });
     stringsConfiguredRef.current = false;
     setDriverBannerDismissed(false);
+    setNoticeDismissed(false);
     dispatch({ type: "SET_LOADING" });
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
     try {
@@ -582,6 +601,18 @@ export default function App() {
       // rejected file — a 275 MB ELF dropped on the app — stayed pinned by this
       // ref until some later load happened to replace it.
       bufferRef.current = buffer;
+      // The load handshake, and it must stay *above* the dispatch below.
+      //
+      // The architecture is a property of this file, and every later decode
+      // request carries it from here. Telling the worker in the detection
+      // effect instead was a race: `useDisassemblyRows` posts its own
+      // disassembly from a different effect in a lazily-loaded child, and a
+      // child's effect runs before its parent's, so on the second file of a
+      // session the decode was posted before the `configure` that named the
+      // architecture — and the worker, servicing serially, answered it with the
+      // previous image's decoder (peek-a-bin-x4o2). Declared here, before the
+      // reducer has even seen the file, nothing can decode ahead of it.
+      disasmWorker.setImage(pe.coffHeader.machine);
       dispatch({ type: "SET_PE_FILE", peFile: pe, fileName });
       // Anomaly detection runs in the effect below — it needs two whole-file
       // walks, which is ~910 ms of main-thread work on a 253 MiB image.
@@ -633,6 +664,22 @@ export default function App() {
   const fontStyle = useMemo(
     () => ({ "--mono-font-size": `${fontSize}px` }) as React.CSSProperties,
     [fontSize],
+  );
+
+  /**
+   * Why there is no disassembly, when there is none.
+   *
+   * `state.error` reaches nothing else once a PE has parsed: FileLoader is its
+   * only other consumer and it unmounts as soon as `peFile` is set, so the
+   * analysis chain's `SET_ERROR` — including the engine's refusal for an image
+   * with no decoder — had no render site at all. This banner is it. The
+   * decision itself is in ./components/analysisNotice.ts, where a test can
+   * reach it.
+   */
+  const machine = state.peFile?.coffHeader.machine;
+  const notice = useMemo(
+    () => analysisNotice({ machine, phase: state.analysisPhase, error: state.error }),
+    [machine, state.analysisPhase, state.error],
   );
 
   const renderMainView = () => {
@@ -694,6 +741,44 @@ export default function App() {
                   type="button"
                   onClick={() => setDriverBannerDismissed(true)}
                   className="text-amber-500 hover:text-amber-300 text-sm leading-none"
+                  title="Dismiss"
+                >
+                  &times;
+                </button>
+              </div>
+            )}
+            {notice && !noticeDismissed && (
+              <div
+                role="status"
+                className={`border-b px-4 py-1.5 flex items-start gap-3 text-xs shrink-0 ${
+                  notice.kind === "unsupported-arch"
+                    ? "bg-amber-900/40 border-amber-700/50"
+                    : "bg-red-900/40 border-red-700/50"
+                }`}
+              >
+                <span
+                  className={`font-bold tracking-wide shrink-0 ${
+                    notice.kind === "unsupported-arch" ? "text-amber-400" : "text-red-400"
+                  }`}
+                >
+                  {notice.label.toUpperCase()}
+                </span>
+                <span className="text-gray-300">
+                  {notice.detail}{" "}
+                  <span className="text-gray-400">
+                    Still available: {formatTabList(notice.availableTabs)}.
+                  </span>
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setNoticeDismissed(true)}
+                  aria-label="Dismiss this notice"
+                  className={`text-sm leading-none shrink-0 ${
+                    notice.kind === "unsupported-arch"
+                      ? "text-amber-500 hover:text-amber-300"
+                      : "text-red-500 hover:text-red-300"
+                  }`}
                   title="Dismiss"
                 >
                   &times;

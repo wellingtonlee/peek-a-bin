@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { appReducer, initialState, type AppAction, type AppState } from "../usePEFile";
+import { describe, expect, it } from "vitest";
+import { type AppAction, type AppState, appReducer, initialState } from "../usePEFile";
 
 /**
  * The annotation undo/redo snapshot stack.

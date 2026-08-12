@@ -1,10 +1,10 @@
 import type { BasicBlock, Loop } from "../cfg";
-import type { IRStmt, IRExpr } from "./ir";
+import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
+import type { IRExpr, IRStmt } from "./ir";
 import { canonReg, irReg, isKnownRegister } from "./ir";
 import { parseOperand } from "./lifter";
 import { RegState } from "./regstate";
-import { computeRPO, computeDominators } from "./ssa";
-import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from "./cfgpatterns";
+import { computeDominators, computeRPO } from "./ssa";
 
 /**
  * The label a `goto` to a block spells. One function so the `goto` and the
@@ -14,6 +14,166 @@ import { detectShortCircuit, detectMultiExitLoop, detectForLoop } from "./cfgpat
  */
 function labelNameFor(addr: number): string {
   return `loc_${addr.toString(16).toUpperCase()}`;
+}
+
+/**
+ * Instructions that leave every flag exactly as they found them.
+ *
+ * This list is a *permission to keep looking backwards* for the instruction
+ * that set the flags a Jcc reads, so anything not on it — including anything
+ * unrecognised — ends the search with no answer. That asymmetry is the whole
+ * safety property: a mnemonic wrongly on this list makes the decompiler read a
+ * condition off the wrong instruction, while one wrongly left off it only
+ * costs a recovery. `not` and `pop` really do write a register without
+ * touching the flags, and that is fine: `conditionFromFlagResult` asks the IR
+ * which instruction wrote the register last, so one of these overwriting the
+ * result is caught there rather than here. `bt` writes CF but leaves ZF and SF
+ * alone, which is exactly why it is *not* here — a Jcc after it that reads ZF
+ * is reading an older test.
+ */
+const FLAG_TRANSPARENT = new Set([
+  "mov",
+  "movabs",
+  "movzx",
+  "movsx",
+  "movsxd",
+  "lea",
+  "push",
+  "pop",
+  "nop",
+  "not",
+  "bswap",
+  "cbw",
+  "cwd",
+  "cwde",
+  "cdq",
+  "cdqe",
+  "cqo",
+]);
+
+/**
+ * Instructions whose ZF and SF are the zero-ness and sign of the value they
+ * wrote — every arithmetic and logical operation that has a single destination.
+ *
+ * Deliberately absent, and why:
+ *
+ * - `imul`/`mul`/`div`/`idiv` — Intel documents ZF and SF as *undefined*.
+ * - `rol`/`ror`/`rcl`/`rcr` — write CF and OF only; ZF and SF survive from
+ *   whatever set them last, so a Jcc after one is reading an older test.
+ * - `bt`/`bts`/`btr` — write CF only, same problem.
+ * - `not` — writes no flags at all (it is in `FLAG_TRANSPARENT`).
+ * - `adc`/`sbb`/`xadd` — the result is fine, but `lifter.ts` does not lift
+ *   them to an assignment, so `conditionFromFlagResult` could not name it.
+ * - `lock`-prefixed forms — Capstone spells these `lock dec`, which matches
+ *   nothing here and so ends the search, which is right: they are read-modify-
+ *   write on memory, and this only names registers.
+ */
+const RESULT_FLAG_SETTERS = new Set([
+  "add",
+  "sub",
+  "and",
+  "or",
+  "xor",
+  "inc",
+  "dec",
+  "neg",
+  "shl",
+  "sal",
+  "shr",
+  "sar",
+]);
+
+/** The shift forms, whose flags are undefined when the count happens to be 0. */
+const SHIFTS = new Set(["shl", "sal", "shr", "sar"]);
+
+/**
+ * The condition a Jcc reads in a block that sets its flags with something
+ * other than `cmp`/`test`, or null when that cannot be answered exactly.
+ *
+ * `dec ecx / jnz`, `sub eax, ebx / je`, `and eax, 3 / je` and `or rax, rax /
+ * je` are all ordinary compiler output, and to `extractCondition` they used to
+ * look like a Jcc with no test at all — 606 blocks across the three reference
+ * binaries, every one of them emitting `__unrecovered_N`.
+ *
+ * Three things have to hold before an answer is exact, and each is checked:
+ *
+ * 1. **The instruction really is what set the flags.** The search walks back
+ *    from the Jcc through `FLAG_TRANSPARENT` instructions only, so a `call` or
+ *    anything unrecognised in between ends it with no answer rather than
+ *    attributing the flags to something older.
+ * 2. **The flags are a function of the result.** `RESULT_FLAG_SETTERS` is the
+ *    list for which ZF and SF are the result's zero-ness and sign, and
+ *    `RegState.getCondition` answers only the Jcc forms that read one of those
+ *    and nothing else. A shift by a count that could be zero leaves the flags
+ *    untouched, so only an immediate non-zero count qualifies.
+ * 3. **The emitted code still names that result.** The condition is spelled by
+ *    naming the destination register, which is only true of the result while
+ *    that register's last write in the block *is* this instruction. `stmts` is
+ *    the block's final IR, after SSA, dead-code elimination and folding, so
+ *    this is asked of the code that will actually be emitted: if the
+ *    assignment was folded into a later use or deleted as dead, the register
+ *    no longer holds the result and there is no answer. (Nothing protects an
+ *    arithmetic def the way `ssaopt.ts` protects the `eflags` def behind a
+ *    `cmp`, precisely because the flags this reads have no IR representation.)
+ *
+ * The condition is then true at the `if`, which is where the block's
+ * statements have already been emitted — that ordering is what makes naming
+ * the *result* rather than the operands the correct reading.
+ */
+function conditionFromFlagResult(block: BasicBlock, jcc: string, stmts: IRStmt[]): IRExpr | null {
+  const insns = block.insns;
+  let setter: { mnemonic: string; opStr: string; address: number } | null = null;
+  for (let i = insns.length - 2; i >= 0; i--) {
+    const mn = insns[i].mnemonic.toLowerCase();
+    if (FLAG_TRANSPARENT.has(mn)) continue;
+    if (RESULT_FLAG_SETTERS.has(mn)) setter = insns[i];
+    break;
+  }
+  if (!setter) return null;
+
+  const mn = setter.mnemonic.toLowerCase();
+  // No x86 memory operand contains a comma, so a plain split is a correct
+  // operand split for the one- and two-operand forms this reads.
+  const parts = setter.opStr.split(",").map((s) => s.trim().toLowerCase());
+  // A memory destination is not named by this: `dec dword ptr [rcx]` leaves
+  // its result where only a load could read it, and the load is not there.
+  if (!isKnownRegister(parts[0] ?? "")) return null;
+  // `shl eax, cl` with cl == 0 is a no-op that leaves the flags to an earlier
+  // instruction, so a register count is never good enough.
+  if (SHIFTS.has(mn) && immediateCount(parts[1] ?? "") === 0) return null;
+
+  const canon = canonReg(parts[0]);
+  let lastWrite: IRStmt | null = null;
+  for (const s of stmts) {
+    if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === canon)
+      lastWrite = s;
+    else if (
+      s.kind === "call_stmt" &&
+      s.resultDest?.kind === "reg" &&
+      canonReg(s.resultDest.name) === canon
+    )
+      lastWrite = s;
+  }
+  if (lastWrite?.kind !== "assign" || lastWrite.addr !== setter.address) return null;
+  const dest = lastWrite.dest;
+  if (dest.kind !== "reg") return null;
+
+  const state = new RegState();
+  state.setFlagsFromResult(irReg(dest.name, dest.size));
+  const cond = state.getCondition(jcc);
+  // An unrecoverable Jcc is left to the caller to report the way it always
+  // has, so that the emitted `__unrecovered_N` comment still names the Jcc.
+  return cond.kind === "unknown" ? null : cond;
+}
+
+/** A shift's count when it is a non-zero immediate, else 0 (never a count). */
+function immediateCount(text: string): number {
+  const n = /^0x[0-9a-f]+$/.test(text)
+    ? Number.parseInt(text.slice(2), 16)
+    : /^\d+$/.test(text)
+      ? Number.parseInt(text, 10)
+      : 0;
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** Index of the first statement that is not a label, or -1 if there is none. */
@@ -304,10 +464,12 @@ export function structureCFG(
     if (mn.startsWith("j") && mn !== "jmp") {
       // Find the cmp/test before this jump
       const regState = new RegState();
+      let sawCmpTest = false;
       for (let i = 0; i < insns.length - 1; i++) {
         const insn = insns[i];
         const insnMn = insn.mnemonic.toLowerCase();
         if (insnMn === "cmp" || insnMn === "test") {
+          sawCmpTest = true;
           // No x86 memory operand contains a comma, so a plain split is a
           // correct operand split for the two-operand forms this reads.
           const parts = insn.opStr.split(",").map((s) => s.trim());
@@ -317,6 +479,13 @@ export function structureCFG(
             regState.setFlags(insnMn as "cmp" | "test", left, right);
           }
         }
+      }
+      // A block with a `cmp`/`test` in it keeps exactly the reading it always
+      // had, whatever else it contains. Only a block with neither reaches the
+      // flag-result path, so nothing already recovered can change sense.
+      if (!sawCmpTest) {
+        const fromResult = conditionFromFlagResult(block, mn, liftedBlocks.get(block.id) ?? []);
+        if (fromResult) return fromResult;
       }
       return regState.getCondition(mn);
     }
@@ -515,7 +684,8 @@ export function structureCFG(
         // the header; otherwise the loop is demoted back to the `while` the
         // `for` was built from, with the update at the end of the body where
         // the machine put it.
-        const asFor = loopResult.length === 1 && loopResult[0].kind === "for" ? loopResult[0] : null;
+        const asFor =
+          loopResult.length === 1 && loopResult[0].kind === "for" ? loopResult[0] : null;
         if (asFor && result[result.length - 1] === asFor.init) {
           result.pop();
         } else if (asFor) {
@@ -712,7 +882,13 @@ export function structureCFG(
           // Mark consumed blocks as visited
           for (const cid of sc.consumedBlocks) visited.add(cid);
 
-          const thenBody = armFrom(current, sc.trueTarget, scConvergenceSet, scConvergence, loopBody);
+          const thenBody = armFrom(
+            current,
+            sc.trueTarget,
+            scConvergenceSet,
+            scConvergence,
+            loopBody,
+          );
           const elseBody = armFrom(
             current,
             sc.falseTarget,

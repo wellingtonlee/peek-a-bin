@@ -1,15 +1,20 @@
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
-import { useAppState, useAppDispatch, getDisplayName } from "../hooks/usePEFile";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
-import { Skeleton } from "./Skeleton";
+import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
-  loadProfiles,
-  saveProfiles,
   getActiveProfile,
   type LLMProfileStore,
+  loadProfiles,
+  saveProfiles,
 } from "../llm/settings";
+import { analysisNotice } from "./analysisNotice";
+import { Skeleton } from "./Skeleton";
 
+// No entry for "failed": its render site below is behind `isAnalyzing`, which
+// excludes it, so a label here was unreachable and the bar fell through to a
+// green "Engine ready" over a dead analysis. The failure states are `notice`'s
+// now — see ./analysisNotice.ts.
 const phaseLabels: Record<string, string> = {
   parsing: "Parsing PE...",
   "extracting-strings": "Extracting strings...",
@@ -17,7 +22,6 @@ const phaseLabels: Record<string, string> = {
   "recursive-descent": "Recursive descent...",
   "gap-filling": "Gap filling...",
   "building-xrefs": "Building xrefs...",
-  failed: "Analysis failed",
 };
 
 const SECTION_CHAR_FLAGS: [number, string][] = [
@@ -102,6 +106,12 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
     const rva = state.currentAddress - pe.optionalHeader.imageBase;
     return sectionInfo.pointerToRawData + (rva - sectionInfo.virtualAddress);
   }, [pe, sectionInfo, state.currentAddress]);
+
+  const machine = pe?.coffHeader.machine;
+  const notice = useMemo(
+    () => analysisNotice({ machine, phase: state.analysisPhase, error: state.error }),
+    [machine, state.analysisPhase, state.error],
+  );
 
   if (!pe) return null;
 
@@ -223,7 +233,18 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
         </span>
       )}
       <span>
-        {isAnalyzing ? (
+        {notice ? (
+          // Ahead of every other branch: with the phase "failed" this used to
+          // fall through to "Engine ready" in green, which is true of the
+          // engine and a lie about the file. `title` carries the full sentence
+          // — the banner in App.tsx is where it is stated at length.
+          <span
+            className={notice.kind === "unsupported-arch" ? "text-amber-400" : "text-red-400"}
+            title={notice.detail}
+          >
+            {notice.label}
+          </span>
+        ) : isAnalyzing ? (
           <span className="text-yellow-400">
             <Spinner />
             {phaseLabel}

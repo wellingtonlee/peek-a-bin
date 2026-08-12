@@ -12,16 +12,16 @@
  *    packed form must not smuggle a whole-file view across the wire.
  */
 
-import { describe, it, expect } from "vitest";
-import {
-  buildDataWindows,
-  packDataWindows,
-  unpackDataWindows,
-  type DataWindow,
-} from "../dataWindows";
+import { describe, expect, it } from "vitest";
 import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
 import { parsePE } from "../../pe/parser";
 import type { SectionHeader } from "../../pe/types";
+import {
+  buildDataWindows,
+  type DataWindow,
+  packDataWindows,
+  unpackDataWindows,
+} from "../dataWindows";
 
 const IMAGE_BASE = 0x140000000;
 

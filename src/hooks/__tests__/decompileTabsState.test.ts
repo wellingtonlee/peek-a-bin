@@ -1,12 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  tabsReducer,
-  initialTabsState,
-  decompileServerKey,
-  readHighCache,
-  writeHighCache,
   type DecompileServerConfig,
+  decompileServerKey,
   type HighCacheEntry,
+  initialTabsState,
+  readHighCache,
+  tabsReducer,
+  writeHighCache,
 } from "../decompileTabsState";
 
 const DISABLED: DecompileServerConfig = {

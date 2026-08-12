@@ -1,5 +1,5 @@
-import type { IRExpr, BinaryOp } from "./ir";
-import { irBinary, irConst, irUnary, irReg, canonReg } from "./ir";
+import type { BinaryOp, IRExpr } from "./ir";
+import { canonReg, irBinary, irConst, irReg, irUnary } from "./ir";
 
 /** Volatile registers under the Windows x64 ABI (a superset of the x86 ones). */
 const CALLER_SAVED = new Set(["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"]);
@@ -11,10 +11,11 @@ const CALLER_SAVED = new Set(["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"]);
 export class RegState {
   defs = new Map<string, IRExpr>();
 
-  // Flag state from last cmp/test
+  // Flag state from last cmp/test, or from an instruction that left its result
+  // somewhere the caller can name (`setFlagsFromResult`).
   flagLeft: IRExpr | null = null;
   flagRight: IRExpr | null = null;
-  flagOp: "cmp" | "test" | null = null;
+  flagOp: "cmp" | "test" | "result" | null = null;
 
   set(reg: string, expr: IRExpr): void {
     this.defs.set(reg.toLowerCase(), expr);
@@ -34,6 +35,28 @@ export class RegState {
     this.flagRight = right;
   }
 
+  /**
+   * Flags left by an instruction that wrote `result` — `dec ecx`, `sub eax,
+   * ecx`, `and eax, 3`, `or rax, rax`.
+   *
+   * x86 sets the flags from the *result*, not from the operands, so `result`
+   * must be an expression for the value the instruction produced as read
+   * **after** it ran: for `dec ecx / jnz` that is `ecx`, which by then holds
+   * the decremented value, and the loop repeats while `ecx != 0`. Naming the
+   * operands instead (`ecx - 1`) states the same test one iteration early.
+   *
+   * Only ZF and SF are answerable from the result alone, so `getCondition`
+   * answers only the Jcc forms that read one of them and nothing else. CF and
+   * OF depend on the operands and on the operation: `sub eax, ecx / jl` is
+   * `eax_before < ecx` signed, which the result cannot express because it
+   * disagrees on signed overflow. Those stay unrecovered.
+   */
+  setFlagsFromResult(result: IRExpr): void {
+    this.flagOp = "result";
+    this.flagLeft = result;
+    this.flagRight = irConst(0, result.kind === "reg" ? result.size : 4);
+  }
+
   /** Map a Jcc mnemonic to an IR condition expression from current flag state. */
   getCondition(jcc: string): IRExpr {
     const left = this.flagLeft;
@@ -41,6 +64,29 @@ export class RegState {
 
     if (!left || !right) {
       return { kind: "unknown", text: jcc };
+    }
+
+    // An instruction that left its result in `left` (see `setFlagsFromResult`).
+    // ZF is set exactly when that result is zero and SF is its top bit, so
+    // `== 0` / `!= 0` and `< 0` / `>= 0` are exact — for every one of the
+    // arithmetic and logical operations, whatever it did to CF and OF.
+    if (this.flagOp === "result") {
+      switch (jcc) {
+        case "je":
+        case "jz":
+          return irBinary("==", left, right);
+        case "jne":
+        case "jnz":
+          return irBinary("!=", left, right);
+        case "js":
+          return irBinary("<", left, right);
+        case "jns":
+          return irBinary(">=", left, right);
+        default:
+          // Every other Jcc reads CF or OF as well, and neither is a function
+          // of the result. Unknown is the honest answer.
+          return { kind: "unknown", text: jcc };
+      }
     }
 
     // test reg, reg → flags set based on AND result

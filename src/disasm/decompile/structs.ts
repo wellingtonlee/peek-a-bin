@@ -1,9 +1,9 @@
-import type { IRExpr, IRStmt, IRFunction, IRCall } from "./ir";
-import { irFieldAccess, irArrayAccess, irConst, irReg, canonReg, walkStmts } from "./ir";
-import type { DecompType } from "./typeInfer";
-import { meetTypes } from "./typeInfer";
 import type { ApiFuncType } from "./apitypes";
 import { API_TYPES } from "./apitypes";
+import type { IRCall, IRExpr, IRFunction, IRStmt } from "./ir";
+import { canonReg, irArrayAccess, irConst, irFieldAccess, irReg, walkStmts } from "./ir";
+import type { DecompType } from "./typeInfer";
+import { meetTypes } from "./typeInfer";
 
 /**
  * A parameter position — one function's argument slot, identified by the
@@ -722,14 +722,65 @@ function inferFieldType(size: number): DecompType {
 const ARRAY_SCALES = new Set([1, 2, 4, 8]);
 
 /**
- * Offset as a C identifier fragment. Negative offsets are real — a frame or
- * object pointer biased into the middle of its allocation is common — and
- * `0x-8` is not a valid identifier, so the sign is spelled out.
+ * Offset as a C identifier fragment. `isFieldOffset` keeps negative offsets out
+ * of field synthesis, so the sign branch is a guard rather than a case that
+ * fires: a field named `field_0x-8` would not be an identifier at all, and the
+ * emitted declaration is this name verbatim.
  */
 function offsetLabel(offset: number): string {
   return offset < 0
     ? `neg_0x${(-offset).toString(16).toUpperCase()}`
     : `0x${offset.toString(16).toUpperCase()}`;
+}
+
+/**
+ * Largest displacement that is treated as a position inside an object.
+ *
+ * `decomposeAddress` reports the displacement of `[base + 0x412620]` as an
+ * offset, but a displacement that large is an *address* that happened to reach a
+ * base as a constant — a global table indexed by a register, where the register
+ * is the index and the constant is the table. t32's image base is 0x400000 and
+ * the "fields" recovered off such a base were 0x400000, 0x412620, 0x412CE0;
+ * t64's were 0x140014770 and 0x140014880, both plainly image addresses.
+ * Declaring them means padding out gigabytes for an object nothing allocates.
+ *
+ * The bound is the one emit.ts states as the largest layout it will write
+ * (C89's guaranteed object size, 32767 bytes) — the two are deliberately equal
+ * but justified separately, and emit.ts keeps its own check as a backstop. A
+ * struct genuinely 32KB long loses the accesses past that bound as fields; they
+ * are still emitted, as byte offsets from the base.
+ */
+export const MAX_FIELD_OFFSET = 0x8000;
+
+/**
+ * Whether a decomposed displacement can be a member's offset in the object its
+ * base names.
+ *
+ * Two displacements cannot, and both used to become fields that no C struct can
+ * lay out — reported inside the emitted struct body rather than placed
+ * (peek-a-bin-u3v):
+ *
+ * - **A negative one.** A member of the object a pointer names is at a
+ *   non-negative offset from it; `offsetof` has no other answer. An access
+ *   *before* the base is an access to something else — in t64's
+ *   `__handler_1400043dc` the base is `rdi + (rsi + 1) * 16`, an array element
+ *   pointer, and its `[rbx - 0xC]`, `[rbx - 8]`, `[rbx - 4]` reach the fields of
+ *   the *previous* element. Re-basing the group onto its lowest access was the
+ *   alternative and is a worse claim: nothing observed says the object starts
+ *   there, and it would restate every access in the function against an origin
+ *   that was invented. Dropping the access from the *type* keeps the recovered
+ *   accesses at or after the base, which are the ones the base is evidence for.
+ * - **One at or past MAX_FIELD_OFFSET**, which is an address rather than an
+ *   offset.
+ *
+ * Ineligible accesses are not fields and do not count toward the two-distinct-
+ * offsets test that makes a base a struct candidate at all, so a base whose only
+ * second offset is one of these gets no struct. The accesses themselves are
+ * untouched: with no field at that offset the rewrite leaves the dereference
+ * alone and it is emitted as the byte arithmetic it is.
+ */
+function isFieldOffset(offset: number): boolean {
+  return offset >= 0 && offset < MAX_FIELD_OFFSET;
 }
 
 // ── Parameter Provenance ──
@@ -885,6 +936,74 @@ function collectCallArgSlots(
   return slots;
 }
 
+// ── Candidate Fields ──
+
+/**
+ * The fields one base's accesses support, in offset order.
+ *
+ * Accesses at the same offset are one field of the widest access seen there.
+ * What is left can still contradict itself — an 8-byte access at 0 and a 2-byte
+ * access at 2 are two readings of overlapping bytes, and at most one of them is
+ * a member. C has no faithful spelling for the pair (a union would assert both
+ * are members of one type, which is a claim about the object rather than about
+ * the accesses seen), so the later one by offset is not made a field at all and
+ * its access stays as byte arithmetic. First-by-offset is arbitrary between two
+ * partial overlaps but deterministic, and for the common containment case —
+ * every one of the nine in the three distlib binaries — it keeps the wider
+ * reading, which is the one the narrow access is a part of.
+ *
+ * This used to be settled in emit.ts, which reported the loser inside the struct
+ * body. Deciding it here means the loser is also out of the *fingerprint*, so
+ * two bases are no longer kept apart by a field neither of their declarations
+ * can contain.
+ */
+function candidateFields(accesses: AccessPattern[]): StructField[] {
+  // Deduplicate fields by offset (use largest size), and record the stride of
+  // any index that reached it. Two indexed accesses that walk the offset with
+  // *different* strides contradict each other, and CONTRADICTED_STRIDE loses
+  // the equality test below, which is how that disagreement is settled.
+  const CONTRADICTED_STRIDE = -1;
+  const fieldMap = new Map<number, { size: number; stride: number }>();
+  for (const acc of accesses) {
+    const stride = acc.index !== null ? acc.scale : 0;
+    const existing = fieldMap.get(acc.offset);
+    if (!existing) {
+      fieldMap.set(acc.offset, { size: acc.size, stride });
+      continue;
+    }
+    if (acc.size > existing.size) existing.size = acc.size;
+    if (stride === 0) continue;
+    existing.stride =
+      existing.stride === 0 || existing.stride === stride ? stride : CONTRADICTED_STRIDE;
+  }
+
+  const fields: StructField[] = [];
+  let end = 0; // one past the extent of the last field kept
+  for (const [offset, info] of [...fieldMap].sort((a, b) => a[0] - b[0])) {
+    if (offset < end) continue; // overlaps a field already kept
+    // An index reaching an offset is evidence of an array only when the
+    // stride it walks is the width that was read there. `isArray` used to be
+    // set by any indexed access at all while the size and type came from the
+    // widest access of any kind, so a field could be declared with 8-byte
+    // elements over a recovered stride of 4 — a declaration describing an
+    // object neither reading found (peek-a-bin-hyv). Where the two disagree
+    // the *width* is kept, because it is a direct measurement of one access,
+    // and the array claim is dropped: an array of some other element type
+    // may well be there, but this is not evidence of which.
+    const isArray = info.stride > 0 && info.stride === info.size;
+    fields.push({
+      offset,
+      size: info.size,
+      name: `${isArray ? "array" : "field"}_${offsetLabel(offset)}`,
+      type: inferFieldType(info.size),
+      isArray,
+      arrayElementSize: isArray ? info.stride : undefined,
+    });
+    end = offset + info.size;
+  }
+  return fields;
+}
+
 // ── Struct Synthesis Pass ──
 
 export function synthesizeStructs(func: IRFunction, registry: StructRegistry): IRFunction {
@@ -901,9 +1020,13 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
     return aliasMap.get(key) ?? key;
   }
 
-  // Group accesses by canonical base
+  // Group accesses by canonical base. An access whose displacement cannot be a
+  // member's offset is not evidence about this base's shape at all — see
+  // isFieldOffset — so it is left out of the grouping entirely rather than
+  // becoming a field nothing can declare.
   const groups = new Map<string, { base: IRExpr; accesses: AccessPattern[] }>();
   for (const p of patterns) {
+    if (!isFieldOffset(p.offset)) continue;
     const key = canonBase(p.base);
     let group = groups.get(key);
     if (!group) {
@@ -918,13 +1041,17 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
   // fabricated a struct whose "fields" were a local and an incoming argument.
   const frameBases = stackDerivedBases(func, canonBase);
 
-  // Filter: only groups with 2+ distinct offsets → struct candidates
-  const candidates = new Map<string, { base: IRExpr; accesses: AccessPattern[] }>();
+  // Filter: only groups supporting 2+ fields → struct candidates. The count is
+  // of the fields that survive `candidateFields`, not of distinct offsets: an
+  // access contained in another one's bytes is a second reading of the same
+  // field rather than a second field, and a base with nothing else is no more a
+  // struct candidate than a base accessed at one offset is.
+  const candidates = new Map<string, { base: IRExpr; fields: StructField[] }>();
   for (const [key, group] of groups) {
     if (frameBases.has(key)) continue;
-    const distinctOffsets = new Set(group.accesses.map((a) => a.offset));
-    if (distinctOffsets.size >= 2) {
-      candidates.set(key, group);
+    const fields = candidateFields(group.accesses);
+    if (fields.length >= 2) {
+      candidates.set(key, { base: group.base, fields });
     }
   }
 
@@ -942,48 +1069,7 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
   const callArgSlots = collectCallArgSlots(func.body, canonBase);
   const baseToStruct = new Map<string, StructDef>();
   for (const [key, group] of candidates) {
-    // Deduplicate fields by offset (use largest size), and record the stride of
-    // any index that reached it. Two indexed accesses that walk the offset with
-    // *different* strides contradict each other, and CONTRADICTED_STRIDE loses
-    // the equality test below, which is how that disagreement is settled.
-    const CONTRADICTED_STRIDE = -1;
-    const fieldMap = new Map<number, { size: number; stride: number }>();
-    for (const acc of group.accesses) {
-      const stride = acc.index !== null ? acc.scale : 0;
-      const existing = fieldMap.get(acc.offset);
-      if (!existing) {
-        fieldMap.set(acc.offset, { size: acc.size, stride });
-        continue;
-      }
-      if (acc.size > existing.size) existing.size = acc.size;
-      if (stride === 0) continue;
-      existing.stride =
-        existing.stride === 0 || existing.stride === stride ? stride : CONTRADICTED_STRIDE;
-    }
-
-    const fields: StructField[] = [];
-    for (const [offset, info] of fieldMap) {
-      // An index reaching an offset is evidence of an array only when the
-      // stride it walks is the width that was read there. `isArray` used to be
-      // set by any indexed access at all while the size and type came from the
-      // widest access of any kind, so a field could be declared with 8-byte
-      // elements over a recovered stride of 4 — a declaration describing an
-      // object neither reading found (peek-a-bin-hyv). Where the two disagree
-      // the *width* is kept, because it is a direct measurement of one access,
-      // and the array claim is dropped: an array of some other element type
-      // may well be there, but this is not evidence of which.
-      const isArray = info.stride > 0 && info.stride === info.size;
-      const name = `${isArray ? "array" : "field"}_${offsetLabel(offset)}`;
-      fields.push({
-        offset,
-        size: info.size,
-        name,
-        type: inferFieldType(info.size),
-        isArray,
-        arrayElementSize: isArray ? info.stride : undefined,
-      });
-    }
-
+    const fields = group.fields;
     const fingerprint = buildFingerprint(fields);
 
     // Provenance, strongest first: a struct a caller already passed into this

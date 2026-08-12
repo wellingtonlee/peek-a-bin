@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { foldBlock, hasSideEffects } from "../fold";
-import { irConst, irReg, irBinary, irUnary } from "../ir";
-import type { IRStmt, IRExpr } from "../ir";
+import type { IRExpr, IRStmt } from "../ir";
+import { irBinary, irConst, irReg, irUnary } from "../ir";
 
 function assign(dest: IRExpr, src: IRExpr): IRStmt {
   return { kind: "assign", dest, src };

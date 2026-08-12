@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { BasicBlock } from "../../cfg";
+import type { Instruction } from "../../types";
+import type { IRExpr, IRStmt } from "../ir";
+import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
 import { liftBlock, parseOperand } from "../lifter";
 import { RegState } from "../regstate";
-import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
-import type { IRExpr, IRStmt } from "../ir";
-import type { Instruction } from "../../types";
-import type { BasicBlock } from "../../cfg";
 
 const START = 0x401000;
 const SIZE = 4;

@@ -1,13 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // useDisassemblyRows pulls in the worker client, which constructs a `Worker` at
 // module load. There is no Worker in the node test environment, and these tests
 // exercise the module's pure search helpers, so stub the singleton away.
 vi.mock("../../workers/disasmClient", () => ({ disasmWorker: {} }));
 
-import { binarySearchRows, rowAddress, type DisplayRow } from "../useDisassemblyRows";
-import { binarySearchFunc } from "../useDerivedState";
 import type { DisasmFunction, Instruction } from "../../disasm/types";
+import { binarySearchFunc } from "../useDerivedState";
+import { binarySearchRows, type DisplayRow, rowAddress } from "../useDisassemblyRows";
 
 function insn(address: number, blockIdx = 0): DisplayRow {
   return {

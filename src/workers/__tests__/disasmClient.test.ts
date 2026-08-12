@@ -1,4 +1,12 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
+// The far end of the wire. Importing it here is what lets a test post a request
+// through the client and then answer it with the real dispatch, in the order a
+// serially-servicing worker would see the messages — which is the only way to
+// state an ordering property about the two together.
+import { createWorkerState, dispatch, type WorkerState } from "../dispatch";
 
 /** One RPC request as it goes over the wire. `args` is deliberately loose —
  * these tests reach into whichever member the method under test sends. */
@@ -45,8 +53,11 @@ async function loadClient() {
   vi.stubGlobal("Worker", FakeWorker);
   vi.resetModules();
   const mod = await import("../disasmClient");
-  return { client: mod.disasmWorker, worker: FakeWorker.last! };
+  return { client: mod.disasmWorker, worker: FakeWorker.last!, mod };
 }
+
+/** The client singleton's type, which the module does not export by name. */
+type DisasmClient = Awaited<ReturnType<typeof loadClient>>["client"];
 
 describe("DisasmWorkerClient — a wedged worker cannot hang callers forever", () => {
   // Fake timers are switched on only after the dynamic import resolves.
@@ -480,5 +491,372 @@ describe("DisasmWorkerClient — the image bounds reach the worker", () => {
 
     expect(await client.buildTypedXrefMap(instructions, bounds)).toBe(map);
     expect(worker.posted).toHaveLength(1);
+  });
+});
+
+/**
+ * peek-a-bin-x4o2: which architecture a section is decoded as used to depend on
+ * which message reached the worker first.
+ *
+ * `App`'s detection effect posted `configure({ machine })`; `useDisassemblyRows`
+ * posted `disassemble` / `hybridDisassemble` from a different effect, in a
+ * lazily-loaded child, with no ordering relationship to it. A child's effect
+ * runs before its parent's, so on the second file loaded into a session the
+ * decode was posted *first* — and the worker, which services messages serially
+ * off one mutable `state.arch`, answered it with the previous image's decoder.
+ * For an ARM64 image that is an x86 sweep over A64 bytes: a full screen of
+ * plausible instructions, none of them real, with no coverage signal to notice
+ * it by. `DisassemblyView`'s new refusal panel masks the unsupported case; it
+ * does not mask this one.
+ *
+ * The fix makes each decode request state its own architecture, so no ordering
+ * of messages can change the answer. These drive the real `dispatch` over the
+ * real posted messages, in the order the worker would see them.
+ */
+describe("DisasmWorkerClient — the architecture travels with the decode request", () => {
+  const ARM64_MACHINE = 0xaa64;
+  const AMD64_MACHINE = 0x8664;
+  const ARMNT_MACHINE = 0x01c4; // ARM Thumb-2: a real image, no decoder here
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A Capstone stand-in that records which handle was asked to decode. */
+  function stubCs(tag: string) {
+    const seen: number[] = [];
+    return {
+      tag,
+      seen,
+      disasm(bytes: Uint8Array, options: { address: number }) {
+        seen.push(options.address);
+        if (bytes.length < 4) throw new Error("Failed to disassemble");
+        return [
+          {
+            address: options.address,
+            bytes: bytes.subarray(0, 4),
+            mnemonic: tag,
+            opStr: "",
+            size: 4,
+          },
+        ];
+      },
+    };
+  }
+
+  /** A just-started worker: Capstone up, and `arch` still on its default. */
+  function freshWorkerState(): WorkerState {
+    return Object.assign(createWorkerState(Promise.resolve()), {
+      cs32: stubCs("x86-32"),
+      cs64: stubCs("x86-64"),
+      csArm64: stubCs("arm64"),
+    });
+  }
+
+  it("decodes as ARM64 when the disassemble is serviced BEFORE the configure", async () => {
+    const { client, worker } = await loadClient();
+    // The load handshake: `App.handleFile` declares the machine the instant the
+    // file parses, before the reducer — and so before any effect — sees it.
+    client.setImage(ARM64_MACHINE);
+
+    // The interleaving the bug is made of, constructed explicitly rather than
+    // assumed away: the decode is posted first, the configure second.
+    void client.hybridDisassemble(new Uint8Array(8), 0x140001000, true, []);
+    void client.configure(new Map(), new Map(), { machine: ARM64_MACHINE });
+    expect(worker.received.map((m) => m.method)).toEqual(["hybridDisassemble", "configure"]);
+
+    // Now the far end, in that order, on a worker whose session state still
+    // says x86 because its `configure` has not run yet.
+    const s = freshWorkerState();
+    expect(s.arch).toBe("x86");
+    const insns = (await dispatch("hybridDisassemble", worker.received[0].args, s)) as {
+      mnemonic: string;
+    }[];
+
+    // Before the fix: two "x86-64" instructions, cached, and shown as fact.
+    expect(insns.map((i) => i.mnemonic)).toEqual(["arm64", "arm64"]);
+    expect(s.cs64.seen).toEqual([]);
+    expect(s.csArm64.seen).toEqual([0x140001000, 0x140001004]);
+  });
+
+  it("refuses an image with no decoder even when the configure is still queued", async () => {
+    // The same race for an ARM32 image. `disassemble` is the linear-sweep path,
+    // which is what a section with no detected functions takes.
+    const { client, worker } = await loadClient();
+    client.setImage(ARMNT_MACHINE);
+
+    void client.disassemble(new Uint8Array(64), 0x401000, false);
+    void client.configure(new Map(), new Map(), { machine: ARMNT_MACHINE });
+
+    const s = freshWorkerState();
+    await expect(dispatch("disassemble", worker.received[0].args, s)).rejects.toThrow(
+      /Disassembly is not supported for this image's machine type/,
+    );
+    expect(s.cs32.seen).toEqual([]);
+    expect(s.cs64.seen).toEqual([]);
+  });
+
+  it("does not let a stale session architecture decide an x86 image's decode", async () => {
+    // The mirror image, and the one a second file load produces: the worker is
+    // mid-ARM64 session and an x86 file is dropped on it. The decode for the
+    // new file is posted before its configure, so session state says ARM64.
+    const { client, worker } = await loadClient();
+    client.setImage(AMD64_MACHINE);
+
+    void client.hybridDisassemble(new Uint8Array(8), 0x140001000, true, []);
+
+    const s = Object.assign(freshWorkerState(), { arch: "arm64" as const });
+    const insns = (await dispatch("hybridDisassemble", worker.received[0].args, s)) as {
+      mnemonic: string;
+    }[];
+
+    expect(insns.every((i) => i.mnemonic === "x86-64")).toBe(true);
+    expect(s.csArm64.seen).toEqual([]);
+  });
+
+  it.each([
+    ["disassemble", (c: DisasmClient) => c.disassemble(new Uint8Array(8), 0x140001000, true)],
+    [
+      "hybridDisassemble",
+      (c: DisasmClient) => c.hybridDisassemble(new Uint8Array(8), 0x140001000, true, []),
+    ],
+    [
+      "detectFunctions",
+      (c: DisasmClient) => c.detectFunctions(new Uint8Array(8), 0x140001000, true),
+    ],
+    [
+      "buildAllXrefs",
+      (c: DisasmClient) => c.buildAllXrefs(new Uint8Array(8), 0x140001000, true, [], []),
+    ],
+    ["detectIRPDispatches", (c: DisasmClient) => c.detectIRPDispatches([], true)],
+    [
+      "decompileFunction",
+      (c: DisasmClient) =>
+        c.decompileFunction(
+          { name: "sub_140001000", address: 0x140001000, size: 16 },
+          [],
+          new Map(),
+          null,
+          null,
+          true,
+          new Map(),
+        ),
+    ],
+  ] as [string, (c: DisasmClient) => Promise<unknown>][])(
+    "stamps %s with the declared machine type",
+    async (_label, call) => {
+      // Every method whose answer depends on which decoder ran. A method left
+      // unstamped keeps the old race, silently.
+      const { client, worker } = await loadClient();
+      client.setImage(ARM64_MACHINE);
+
+      void call(client);
+
+      expect(worker.received[0].args.machine).toBe(ARM64_MACHINE);
+    },
+  );
+
+  it("sends no machine at all when no image has been declared", async () => {
+    // The pre-existing contract: an un-threaded caller gets exactly the
+    // behaviour it had before any of this existed, which is the worker's own
+    // `state.arch`. `undefined` here is what makes that fallback reachable.
+    const { client, worker } = await loadClient();
+
+    void client.disassemble(new Uint8Array(8), 0x401000, false);
+
+    expect(worker.received[0].args.machine).toBeUndefined();
+    const s = freshWorkerState();
+    await dispatch("disassemble", worker.received[0].args, s);
+    expect(s.cs32.seen[0]).toBe(0x401000);
+    expect(s.csArm64.seen).toEqual([]);
+  });
+
+  it("takes the machine from configure as well, for a caller that skips the handshake", async () => {
+    const { client, worker } = await loadClient();
+
+    void client.configure(new Map(), new Map(), { machine: ARM64_MACHINE });
+    void client.disassemble(new Uint8Array(8), 0x140001000, true);
+
+    expect(worker.received[1].args.machine).toBe(ARM64_MACHINE);
+  });
+
+  it("leaves the machine alone on the second configure, which carries none", async () => {
+    // `configure` runs twice per file; the second time from the effect that
+    // re-sends the strings after extraction, which knows nothing about the
+    // machine type. It must not un-declare the image.
+    const { client, worker } = await loadClient();
+    client.setImage(ARM64_MACHINE);
+
+    void client.configure(new Map([[1, "hi"]]), new Map());
+    void client.disassemble(new Uint8Array(8), 0x140001000, true);
+
+    expect(worker.received[1].args.machine).toBe(ARM64_MACHINE);
+  });
+});
+
+/**
+ * The second half of peek-a-bin-x4o2: once a wrong-architecture answer had been
+ * computed it was cached under `${baseAddress}:${is64}`, which does not mention
+ * the architecture — so every later caller for that input got it too.
+ */
+describe("DisasmWorkerClient — the disassembly cache key names the architecture", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("gives two architectures two keys for the same address and pointer width", async () => {
+    const { mod } = await loadClient();
+
+    expect(mod.disasmCacheKey("arm64", "", 0x140001000, true)).not.toBe(
+      mod.disasmCacheKey("x86", "", 0x140001000, true),
+    );
+  });
+
+  it("still separates the linear sweep from the hybrid one, and the two x86 modes", async () => {
+    const { mod } = await loadClient();
+    const keys = new Set([
+      mod.disasmCacheKey("x86", "", 0x401000, false),
+      mod.disasmCacheKey("x86", "", 0x401000, true),
+      mod.disasmCacheKey("x86", "hybrid:", 0x401000, false),
+      mod.disasmCacheKey("arm64", "hybrid:", 0x401000, false),
+    ]);
+
+    expect(keys.size).toBe(4);
+  });
+
+  it("does not hand an ARM64 image the instructions cached for an x86 one", async () => {
+    // End to end through the client, where declaring an image also drops the
+    // caches: two defences, and this is the one a caller can observe.
+    const { client, worker } = await loadClient();
+    client.setImage(0x8664);
+    const first = client.disassemble(new Uint8Array(8), 0x140001000, true);
+    worker.reply(worker.posted[0].id, [{ address: 0x140001000, mnemonic: "x86-64", opStr: "" }]);
+    await first;
+
+    client.setImage(0xaa64);
+    void client.disassemble(new Uint8Array(8), 0x140001000, true);
+
+    // A second request, rather than the x86 answer served from cache.
+    expect(worker.posted).toHaveLength(2);
+    expect(worker.received[1].args.machine).toBe(0xaa64);
+  });
+
+  it("drops the jump tables and the decompile cache when a new image is declared", async () => {
+    // Both are keyed on bare addresses, which mean nothing across files: the
+    // previous image's table targets would be seeded into this one's recursive
+    // descent, and a decompiled function would be served for whatever sits at
+    // the same address here.
+    const { client, worker } = await loadClient();
+    const detected = client.detectFunctions(new Uint8Array(64), 0x401000, false);
+    worker.reply(worker.posted[0].id, { functions: [], jumpTables: [[0x40b8f0, [0x40b900]]] });
+    await detected;
+    expect(client.jumpTables.size).toBe(1);
+
+    client.setImage(0x8664);
+    void client.hybridDisassemble(new Uint8Array(8), 0x401000, false, [0x401000]);
+
+    expect(client.jumpTables.size).toBe(0);
+    expect(worker.received[1].args.seeds).toEqual([0x401000]);
+  });
+});
+
+/**
+ * peek-a-bin-ybv2: `DetectResult.omitted` names the passes detection could not
+ * run, and exists so that a narrower answer stops being shaped exactly like a
+ * complete one (peek-a-bin-4s9). The client typed the reply as
+ * `{ functions, jumpTables }` and returned `result.functions`, so the field
+ * reached the worker boundary and stopped there.
+ */
+describe("DisasmWorkerClient — detectFunctions reports what it could not run", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the omitted passes alongside the functions", async () => {
+    const { client, worker } = await loadClient();
+
+    const pending = client.detectFunctions(new Uint8Array(64), 0x401000, false);
+    worker.reply(worker.posted[0].id, {
+      functions: [{ name: "sub_401000", address: 0x401000, size: 16 }],
+      jumpTables: [],
+      // What a null Capstone handle produces: detection still answers from
+      // .pdata, exports, the entry point and unwind info, and says so.
+      omitted: ["call-targets", "jump-tables"],
+    });
+
+    await expect(pending).resolves.toEqual({
+      functions: [{ name: "sub_401000", address: 0x401000, size: 16 }],
+      omitted: ["call-targets", "jump-tables"],
+    });
+  });
+
+  it("reports nothing omitted for a complete answer", async () => {
+    const { client, worker } = await loadClient();
+
+    const pending = client.detectFunctions(new Uint8Array(64), 0x401000, false);
+    worker.reply(worker.posted[0].id, { functions: [], jumpTables: [], omitted: [] });
+
+    expect((await pending).omitted).toEqual([]);
+  });
+
+  it("treats a reply with no omitted field as complete", async () => {
+    const { client, worker } = await loadClient();
+
+    const pending = client.detectFunctions(new Uint8Array(64), 0x401000, false);
+    worker.reply(worker.posted[0].id, { functions: [], jumpTables: [] });
+
+    expect((await pending).omitted).toEqual([]);
+  });
+
+  it("still keeps the jump tables it was handed", async () => {
+    const { client, worker } = await loadClient();
+
+    const pending = client.detectFunctions(new Uint8Array(64), 0x401000, false);
+    worker.reply(worker.posted[0].id, {
+      functions: [],
+      jumpTables: [[0x40b8f0, [0x40b900]]],
+      omitted: ["thunk-names"],
+    });
+    await pending;
+
+    expect(client.jumpTables.get(0x40b8f0)).toEqual([0x40b900]);
+  });
+});
+
+/**
+ * The one link of the handshake no test can execute.
+ *
+ * Nothing in this repo renders a component, so `App.handleFile` cannot be run
+ * and the claim "the image is declared before the reducer sees the file" is
+ * unverifiable by behaviour. It is a straight-line pair of statements, though,
+ * and their order is the whole guarantee: a `setImage` that moved below the
+ * dispatch — or into an effect — would put the decode back in a race with it,
+ * with every test in this file still passing. So the source is read instead.
+ *
+ * Comments are stripped first, and the check is on relative position rather
+ * than on adjacency or indentation, so reformatting cannot break it (the same
+ * treatment as the drift guard in ./dispatch.test.ts).
+ */
+describe("App declares the loaded image before the reducer sees it", () => {
+  const source = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../../App.tsx"),
+    "utf-8",
+  )
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+  it("calls setImage with the COFF machine type", () => {
+    expect(source).toMatch(/disasmWorker\.setImage\(\s*pe\.coffHeader\.machine\s*\)/);
+  });
+
+  it("calls it above the SET_PE_FILE dispatch", () => {
+    const declared = source.indexOf("disasmWorker.setImage(");
+    const dispatched = source.indexOf('type: "SET_PE_FILE"');
+
+    expect(declared).toBeGreaterThan(-1);
+    expect(dispatched).toBeGreaterThan(-1);
+    // Below it, the disassembly effect of an already-mounted DisassemblyView
+    // can post a decode for the new file before its architecture is known.
+    expect(declared).toBeLessThan(dispatched);
   });
 });

@@ -10,19 +10,19 @@
  * bugs live.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   accidentalDismissAllowed,
-  FOCUSABLE_SELECTOR,
   FOCUS_CONTAINER,
+  FOCUSABLE_SELECTOR,
   lockBodyScroll,
   modalDialogClass,
   modalNameAttrs,
   modalWrapperClass,
   nextTrapIndex,
-  unlockBodyScroll,
-  UNLOCKED,
   type ScrollLockState,
+  UNLOCKED,
+  unlockBodyScroll,
 } from "../modalScaffold";
 
 describe("nextTrapIndex", () => {

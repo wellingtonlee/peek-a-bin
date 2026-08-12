@@ -13,13 +13,13 @@
  * mutation, and error propagation.
  */
 
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dispatch, createWorkerState, type WorkerMethod, type WorkerState } from "../dispatch";
+import { describe, expect, it } from "vitest";
 import { StructRegistry } from "../../disasm/decompile/structs";
 import type { Instruction } from "../../disasm/types";
+import { createWorkerState, dispatch, type WorkerMethod, type WorkerState } from "../dispatch";
 
 /** A ready-to-use state whose Capstone bootstrap has already resolved. */
 function state(overrides: Partial<WorkerState> = {}): WorkerState {
@@ -822,6 +822,142 @@ describe("dispatch — architecture routing", () => {
         s,
       );
       expect(s.cs64.seen).toEqual([0x401000]);
+    });
+  });
+
+  /**
+   * peek-a-bin-x4o2: session state cannot be the authority on the architecture,
+   * because the message that sets it and the messages that read it are posted
+   * from unrelated React effects and the worker services them in arrival order.
+   * A request that names its own COFF machine type is answered from that; only
+   * one that names none falls back to `state.arch`.
+   */
+  describe("a request that names its own machine type", () => {
+    const ARMNT_MACHINE = 0x01c4;
+
+    it("routes to ARM64 while the session still says x86", async () => {
+      const s = armState();
+      expect(s.arch).toBe("x86");
+
+      const insns = (await dispatch(
+        "disassemble",
+        { bytes: new Uint8Array(4), baseAddress: 0x140001000, is64: true, machine: ARM64_MACHINE },
+        s,
+      )) as Instruction[];
+
+      expect(insns.map((i) => i.mnemonic)).toEqual(["arm64"]);
+      expect(s.cs64.seen).toEqual([]);
+      // And it did not quietly rewrite the session either: the request speaks
+      // for itself and for nothing else.
+      expect(s.arch).toBe("x86");
+    });
+
+    it("routes to x86 while the session says ARM64", async () => {
+      // The second-file case: the worker is mid-ARM64 session when an x86
+      // image's decode arrives ahead of its own configure.
+      const s = armState();
+      await configureAs(s, ARM64_MACHINE);
+
+      const insns = (await dispatch(
+        "hybridDisassemble",
+        {
+          bytes: new Uint8Array(4),
+          baseAddress: 0x401000,
+          is64: true,
+          seeds: [0x401000],
+          machine: AMD64_MACHINE,
+        },
+        s,
+      )) as Instruction[];
+
+      expect(insns.map((i) => i.mnemonic)).toEqual(["x86-64"]);
+      expect(s.csArm64.seen).toEqual([]);
+    });
+
+    it("refuses an unsupported machine while the session says x86", async () => {
+      // The one that is not masked by a coverage signal: an x86 sweep decodes
+      // A32/T32 bytes into a screenful of plausible fiction.
+      const s = armState();
+
+      await expect(
+        dispatch(
+          "disassemble",
+          { bytes: new Uint8Array(64), baseAddress: 0x401000, is64: false, machine: ARMNT_MACHINE },
+          s,
+        ),
+      ).rejects.toThrow(/Disassembly is not supported for this image's machine type/);
+      expect(s.cs32.seen).toEqual([]);
+    });
+
+    it.each([
+      ["detectFunctions", { bytes: new Uint8Array(64), baseAddress: 0x140001000, is64: true }],
+      [
+        "buildAllXrefs",
+        {
+          bytes: new Uint8Array(64),
+          baseAddress: 0x140001000,
+          is64: true,
+          stringAddrs: [],
+          iatAddrs: [],
+        },
+      ],
+    ] as [WorkerMethod, Record<string, unknown>][])(
+      "keeps %s off the x86 handles too",
+      async (method, args) => {
+        // Every decode-fed method reads the request's machine, not the session.
+        // One left behind would keep the race, silently and only for itself.
+        const s = armState();
+
+        await dispatch(method, { ...args, machine: ARM64_MACHINE }, s);
+
+        expect(s.cs32.seen).toEqual([]);
+        expect(s.cs64.seen).toEqual([]);
+      },
+    );
+
+    it("refuses to decompile it without consulting the session either", async () => {
+      const s = armState();
+
+      await expect(
+        dispatch(
+          "decompileFunction",
+          {
+            func: { name: "sub_140001000", address: 0x140001000, size: 16 },
+            instructions: [],
+            is64: true,
+            machine: ARM64_MACHINE,
+          },
+          s,
+        ),
+      ).rejects.toThrow(/Decompilation is not supported for ARM64/);
+    });
+
+    it("falls back to the session for a request that names none", async () => {
+      // The pre-existing contract, and what every un-threaded caller relies on.
+      const s = armState();
+      await configureAs(s, ARM64_MACHINE);
+
+      const insns = (await dispatch(
+        "disassemble",
+        { bytes: new Uint8Array(4), baseAddress: 0x140001000, is64: true },
+        s,
+      )) as Instruction[];
+
+      expect(insns.map((i) => i.mnemonic)).toEqual(["arm64"]);
+    });
+
+    it("reads machine 0 as a machine type, not as an absent one", async () => {
+      // IMAGE_FILE_MACHINE_UNKNOWN is a value a file can really carry, and `0`
+      // is falsy — a truthiness test here would silently decode it as x86.
+      const s = armState();
+
+      await expect(
+        dispatch(
+          "disassemble",
+          { bytes: new Uint8Array(64), baseAddress: 0x401000, is64: false, machine: 0 },
+          s,
+        ),
+      ).rejects.toThrow(/not supported for this image's machine type/);
     });
   });
 });

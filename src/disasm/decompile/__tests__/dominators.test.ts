@@ -1,14 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
-import type { IRStmt, IRFieldAccess } from "../ir";
-import { irReg, irConst, irFieldAccess, irArrayAccess } from "../ir";
+import type { IRFieldAccess, IRStmt } from "../ir";
+import { irArrayAccess, irConst, irFieldAccess, irReg } from "../ir";
 import {
-  computeRPO,
-  computeDominators,
-  computeDomFrontier,
-  computeDomTree,
-  detectNaturalLoops,
   buildSSA,
+  computeDomFrontier,
+  computeDominators,
+  computeDomTree,
+  computeRPO,
+  detectNaturalLoops,
 } from "../ssa";
 import { destroySSA } from "../ssadestroy";
 

@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { RegState } from "../regstate";
-import { irBinary, irConst, irReg, irUnary } from "../ir";
+import { describe, expect, it } from "vitest";
 import type { BinaryOp, IRExpr } from "../ir";
+import { irBinary, irConst, irReg, irUnary } from "../ir";
+import { RegState } from "../regstate";
 
 describe("RegState definitions", () => {
   it("stores and retrieves a definition case-insensitively", () => {

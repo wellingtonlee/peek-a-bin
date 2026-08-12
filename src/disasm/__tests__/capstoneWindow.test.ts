@@ -19,10 +19,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CapstoneUnavailableError,
   CS_ARCH_ARM64,
   CS_MAX_INSNS_PER_CALL,
   CS_WINDOW_BYTES,
-  CapstoneUnavailableError,
   capstoneDecodes,
   createScan,
 } from "../capstoneWindow";

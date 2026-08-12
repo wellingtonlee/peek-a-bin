@@ -1,13 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { IRExpr, IRFunction, IRStmt } from "../ir";
+import { irBinary, irConst, irDeref, irReg, irUnary, irVar } from "../ir";
 import {
-  StructRegistry,
   buildFingerprint,
   decomposeAddress,
-  synthesizeStructs,
   type StructField,
+  StructRegistry,
+  synthesizeStructs,
 } from "../structs";
-import { irBinary, irConst, irDeref, irReg, irVar, irUnary } from "../ir";
-import type { IRExpr, IRStmt, IRFunction } from "../ir";
 import type { DecompType } from "../typeInfer";
 
 const UINT = (size: number): DecompType => ({ kind: "int", size, signed: false });
@@ -465,31 +465,59 @@ describe("synthesizeStructs — candidate selection", () => {
     expect(out.typedefs).toHaveLength(2);
   });
 
-  // `base - 8` used to stop decomposition dead, so a base reached through a
-  // mix of negative and positive displacements — the normal shape for a frame
-  // pointer, or for a header stored before the payload — looked like a single
-  // offset and never became a candidate.
-  it("synthesizes a struct from a negative and a positive offset on one base", () => {
-    const out = run([
+  // `decomposeAddress` still folds `base - 8` into a negative offset — that is
+  // what tells these two accesses apart at all — but a member of the object a
+  // base names is at a non-negative offset from it, so the access before the
+  // base is not one of its fields and does not count toward the two it takes to
+  // be a candidate (peek-a-bin-u3v). It is still emitted, as byte arithmetic.
+  it("does not count an access before the base as one of the base's fields", () => {
+    const func = fn([
       assign(irReg("eax", 4), irDeref(irBinary("-", RCX, irConst(8)), 4)),
       assign(irReg("ebx", 4), at(RCX, 0)),
     ]);
-    expect(out.typedefs).toHaveLength(1);
-    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([-8, 0]);
-    expect(out.body[0]).toMatchObject({
-      src: { kind: "field_access", base: RCX, fieldOffset: -8, size: 4 },
-    });
+    expect(synthesizeStructs(func, new StructRegistry())).toBe(func);
   });
 
-  it("names a negative-offset field with a valid C identifier", () => {
-    // `field_0x-8` is not an identifier, and this name is emitted verbatim.
+  it("keeps the fields at and after a base an access reaches behind", () => {
     const out = run([
       assign(irReg("eax", 4), irDeref(irBinary("-", RCX, irConst(8)), 4)),
       assign(irReg("ebx", 4), at(RCX, 0)),
+      assign(irReg("edx", 4), at(RCX, 8)),
     ]);
-    const names = out.typedefs?.[0].fields.map((f) => f.name);
-    expect(names).toEqual(["field_neg_0x8", "field_0x0"]);
-    for (const n of names ?? []) expect(n).toMatch(/^[A-Za-z_][A-Za-z0-9_]*$/);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+    // The negative access keeps its own spelling rather than becoming a member.
+    expect(out.body[0]).toMatchObject({ src: { kind: "deref" } });
+  });
+
+  it("does not make a field of a displacement that is an address", () => {
+    // `[rcx + 0x412620]` is a global table indexed by a register, not a field
+    // 4MB into an object — see MAX_FIELD_OFFSET.
+    const out = run([
+      assign(irReg("eax", 4), at(RCX, 0x412620)),
+      assign(irReg("ebx", 4), at(RCX, 0)),
+      assign(irReg("edx", 4), at(RCX, 8)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+    expect(out.body[0]).toMatchObject({ src: { kind: "deref" } });
+  });
+
+  it("does not make a second field of an access inside one already recovered", () => {
+    // 8 bytes at 0 and 2 bytes at 2 are two readings of the same bytes; at most
+    // one is a member, and C can spell neither pair.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0, 8)),
+      assign(irReg("dx", 2), at(RCX, 2, 2)),
+      assign(irReg("rbx", 8), at(RCX, 8, 8)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
+
+  it("does not synthesize a struct when the overlapping reading was the only other one", () => {
+    const func = fn([
+      assign(irReg("rax", 8), at(RCX, 0, 8)),
+      assign(irReg("dx", 2), at(RCX, 2, 2)),
+    ]);
+    expect(synthesizeStructs(func, new StructRegistry())).toBe(func);
   });
 
   it("treats a variable base like a register base", () => {
