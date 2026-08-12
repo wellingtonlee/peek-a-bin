@@ -19,7 +19,7 @@ export function destroySSA(ctx: SSAContext): void {
   // as such. Converting them to copies first would leave a phi destination
   // version with no definition anywhere, because the copies are written against
   // the *unversioned* register name.
-  splitStaleReads(ctx, spell);
+  const phiRepairs = splitStaleReads(ctx, spell);
 
   // Insert copies for phi operands at end of predecessor blocks
   for (const [, blockPhis] of ctx.phis) {
@@ -29,6 +29,14 @@ export function destroySSA(ctx: SSAContext): void {
         const srcCanon = canonReg(op.value.name);
         const predStmts = ctx.liftedBlocks.get(op.blockId);
         if (!predStmts) continue;
+
+        // The operand names a version the predecessor's register no longer
+        // holds, and `splitStaleReads` has parked that version in a variable at
+        // its own definition. Copy from the variable, not from the register.
+        const repair =
+          op.value.version === undefined
+            ? undefined
+            : phiRepairs.get(`${op.blockId}|${versionKey(srcCanon, op.value.version)}`);
 
         // An operand carrying a version a *call* handed out is the one case
         // where a same-register copy is not a no-op: the value arriving on this
@@ -43,7 +51,12 @@ export function destroySSA(ctx: SSAContext): void {
         // `rax = rax` — a no-op that only adds a line. (Reserving version 0 for
         // the entry value made these common: `rax_2 = phi(rax_0, rax_1)` at a
         // join whose other arm leaves rax alone is exactly this shape.)
-        if (destCanon === srcCanon && !clobber) continue;
+        //
+        // A repaired operand is never a self-copy even when the names match:
+        // `rax = rax` is a no-op precisely *because* the register still holds
+        // the version, which is the one thing staleness rules out. There the
+        // copy has to run, reading the variable.
+        if (destCanon === srcCanon && !clobber && !repair) continue;
 
         // Canonical is the *identity* of the register, not its spelling: a phi
         // is created and renamed under the 64-bit parent whatever the code
@@ -54,13 +67,15 @@ export function destroySSA(ctx: SSAContext): void {
         const copy: IRStmt = {
           kind: "assign",
           dest: { kind: "reg", name: destName, size: regSize(destName) },
-          src: clobber
-            ? {
-                kind: "var",
-                name: clobberedName(srcName, op.value.version as number),
-                size: op.value.size,
-              }
-            : { kind: "reg", name: srcName, size: regSize(srcName) },
+          src: repair
+            ? { kind: "var", name: repair, size: op.value.size }
+            : clobber
+              ? {
+                  kind: "var",
+                  name: clobberedName(srcName, op.value.version as number),
+                  size: op.value.size,
+                }
+              : { kind: "reg", name: srcName, size: regSize(srcName) },
         };
         predStmts.push(copy);
       }
@@ -203,9 +218,11 @@ function nameClobberedReads(ctx: SSAContext, spell: (canon: string) => string): 
  * case the bead was filed for and had to guess at block entry for anything
  * defined elsewhere (peek-a-bin-bld).
  */
-function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): void {
+function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map<string, string> {
+  /** `<predecessor block>|<version key>` → the variable holding that version. */
+  const phiRepairs = new Map<string, string>();
   const blockIds = ctx.blocks.map((b) => b.id);
-  if (blockIds.length === 0) return;
+  if (blockIds.length === 0) return phiRepairs;
   const known = new Set(blockIds);
 
   // ── Where each version is defined ──
@@ -287,6 +304,58 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): voi
     inBlockRedef: boolean;
   }
   const stale: Stale[] = [];
+
+  // ── A phi operand is a read, and it happens at the predecessor's exit ──
+  //
+  // `destroySSA` lowers the operand to a copy appended to that predecessor, so
+  // the version has to be the one reaching the *end of the predecessor*, not the
+  // one reaching the block holding the phi. Nothing else in this pass looks at
+  // an operand, and that was the whole of peek-a-bin-21ey: GVN forwarded
+  // `rdi_14 = 0` to an earlier `rbx_1 = 0` holding the same constant, which is
+  // sound in SSA and dominates the read — but EBX had been rewritten in between,
+  // so once the versions came off the lowered copy read `edi = ebx` where the
+  // machine says `edi = 0`. Valid C, ordinary-looking, and wrong.
+  //
+  // `index` is `PHI_OPERAND_INDEX`, past any statement, so the "does the
+  // definition come before the read" test below reads correctly for a definition
+  // in the predecessor itself: every statement in that block precedes the edge.
+  for (const b of ctx.blocks) {
+    for (const phi of ctx.phis.get(b.id) ?? []) {
+      for (const op of phi.operands) {
+        if (op.value.version === undefined || !known.has(op.blockId)) continue;
+        const canon = canonReg(op.value.name);
+        // RSP has no faithful definition chain here — `liftBlock` skips `push`
+        // and `pop`, and a `call` pushes a return address nothing models — so
+        // the version reaching a point is not evidence about the machine's
+        // stack pointer, and the repair would be a copy of a value taken at a
+        // program point the instruction never named (peek-a-bin-rt4, and
+        // `isStackPointer` in `ssaopt.ts`). Measured: without this, t32
+        // `sub_4045B1` alone gained ten `esp = rsp_N` lines that say nothing.
+        if (canon === "rsp") continue;
+        // A version a *call* handed out has no defining statement, so there is
+        // no program point at which to take a copy of it — and it does not need
+        // one: `destroySSA`'s own `clobber` branch already lowers such an
+        // operand to the indeterminate `clobbered_…` name. Claiming it here
+        // would park the *pre-call* value in a variable and call it the value
+        // the call left.
+        if (ctx.clobbered.has(ssaVersionKey(canon, op.value.version))) continue;
+        const live = exitState.get(op.blockId)?.get(canon);
+        if (live === undefined || live === op.value.version) continue;
+        stale.push({
+          block: op.blockId,
+          index: PHI_OPERAND_INDEX,
+          canon,
+          version: op.value.version,
+          size: op.value.size,
+          spelling: op.value.name.toLowerCase(),
+          inBlockRedef: (ctx.liftedBlocks.get(op.blockId) ?? []).some(
+            (s) => defOf(s)?.canon === canon,
+          ),
+        });
+      }
+    }
+  }
+
   for (const b of ctx.blocks) {
     const state = applyPhis(ctx, b.id, entryState(b));
     const definedHere = new Set<string>();
@@ -320,7 +389,7 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): voi
         }
     }
   }
-  if (stale.length === 0) return;
+  if (stale.length === 0) return phiRepairs;
 
   // ── Repair the ones whose definition dominates the read ──
   const dominates = (a: number, b: number): boolean => {
@@ -391,13 +460,21 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): voi
       inserts.set(site.block, byIndex);
     }
 
+    if (s.index === PHI_OPERAND_INDEX) {
+      // Not a statement, so there is nothing in this block to rewrite: the read
+      // is the phi operand, and `destroySSA` consults this map when it lowers
+      // the operand to a copy.
+      phiRepairs.set(`${s.block}|${key}`, renamed.get(key) as string);
+      continue;
+    }
+
     const byIndex = rewrite.get(s.block) ?? new Map<number, Set<string>>();
     const keys = byIndex.get(s.index) ?? new Set<string>();
     keys.add(key);
     byIndex.set(s.index, keys);
     rewrite.set(s.block, byIndex);
   }
-  if (renamed.size === 0) return;
+  if (renamed.size === 0) return phiRepairs;
 
   // ── Rebuild the affected blocks ──
   for (const id of new Set([...inserts.keys(), ...rewrite.keys()])) {
@@ -427,6 +504,8 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): voi
     }
     ctx.liftedBlocks.set(id, rebuilt);
   }
+
+  return phiRepairs;
 }
 
 /**
@@ -478,6 +557,12 @@ function staleName(spelling: string, version: number): string {
 
 /** No SSA version is negative, so no read can match this. */
 const NO_SURVIVING_VERSION = -1;
+
+/**
+ * A phi operand's `index`: past every statement, because the read it stands for
+ * happens on the edge, after the predecessor's last statement has run.
+ */
+const PHI_OPERAND_INDEX = Number.MAX_SAFE_INTEGER;
 
 /** `rcx` version 1 → `rcx_v1`; the emitted name drops the `v` (`rcx_1`). */
 function versionKey(canon: string, version: number): string {

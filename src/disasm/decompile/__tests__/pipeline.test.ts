@@ -4592,4 +4592,55 @@ describe("decompileFunction — a call's result", () => {
     expect(code).toMatch(/^\s*sub_408000\(\);$/m);
     expect(code).not.toMatch(/= sub_408000\(/);
   });
+
+  /**
+   * A zeroing idiom must not come out as a copy of a register that has since
+   * been written (peek-a-bin-21ey).
+   *
+   * GVN forwards the `xor edi, edi` to the earlier `xor ebx, ebx` — same value,
+   * and its definition dominates, so it is a sound rewrite *in SSA*. What makes
+   * it wrong is that `destroySSA` ends SSA by stripping versions rather than by
+   * splitting live ranges, and EBX has been reloaded in between: `ebx_1` and
+   * `ebx_2` collapse to one name, so the lowered phi operand read the reload.
+   * `splitStaleReads` exists to repair exactly that and did not look at phi
+   * operands, which is the one place GVN had put it.
+   *
+   * The shape is load-bearing in three ways and the bug hides if any is
+   * dropped: EBX must be *visibly* reassigned in the output, so its reload
+   * takes two uses and cannot be inlined away; the zeroing must sit in a
+   * conditional arm, so the value reaches its use through a phi rather than a
+   * statement; and the arm must be reached by a `jcc` whose fallthrough is the
+   * zeroing, so the join really has two incoming versions. The pre-fix output
+   * was `edi = ebx` under `ebx = var_18`, which is valid C reading the wrong
+   * value.
+   */
+  it("keeps a zeroed register zero when the value-numbering source is overwritten", () => {
+    const code = run(
+      seq(0x401000, [
+        ["xor", "ebx, ebx"],
+        ["mov", "dword ptr [ebp - 0x10], ebx"],
+        ["mov", "ebx, dword ptr [ebp - 0x18]"],
+        ["mov", "dword ptr [ebp - 0x1c], ebx"],
+        ["mov", "dword ptr [ebp - 0x24], ebx"],
+        ["test", "dword ptr [ebp - 0x14], 0x9000"],
+        ["mov", "edi, edx"],
+        ["jne", "0x401024"],
+        ["xor", "edi, edi"],
+        ["mov", "dword ptr [ebp - 0x20], edi"],
+        ["ret"],
+      ]),
+    );
+
+    // EBX really is reassigned in the emitted body — without this the test
+    // passes for the wrong reason, because `edi = ebx` would then read zero.
+    expect(code).toMatch(/^\s*ebx = var_18;$/m);
+    // The guarded arm must not read that reassigned register.
+    expect(code).not.toMatch(/^\s*edi = ebx;$/m);
+    // Whatever it does read has to be the zero: either the constant itself or
+    // the split live range holding it.
+    const arm = /\(var_14 & 0x9000\) == 0\) \{\s*\n\s*edi = ([^;]+);/.exec(code);
+    expect(arm).not.toBeNull();
+    const src = arm![1];
+    expect(src === "0" || new RegExp(`^\\s*${src} = 0;$`, "m").test(code)).toBe(true);
+  });
 });
