@@ -40,7 +40,7 @@ The server loads the Capstone WASM engine on startup and accepts MCP requests ov
 
 ## Tools Reference
 
-13 tools are available, defined in `src/mcp/tools.ts`:
+14 tools are available, defined in `src/mcp/tools.ts`:
 
 ### Analysis Tools
 
@@ -98,12 +98,57 @@ Get formatted assembly listing for a function (address, raw bytes, mnemonic, ope
 | `address` | number or string | Yes | Function address |
 
 #### `get_xrefs`
-Get cross-references to a given address — calls, jumps, branches, and data references.
+Everything the analysis knows about one address: what code points at it, what kind of thing it
+is, and both directions of the call graph.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `fileId` | string | Yes | ID of the loaded PE file |
 | `address` | number or string | Yes | Target address |
+
+Returns:
+
+| Field | Meaning |
+|-------|---------|
+| `xrefCount`, `xrefs` | The **per-instruction** references to this address — `{ from, type }`, where `type` is `call`, `jmp`, `branch` or `data`. Built by `buildTypedXrefMap` from decoded operands, so it answers "what points at this *code* address" |
+| `string` | The string literal at this address, if one was extracted |
+| `import` | `LIBRARY.dll!FunctionName`, if this is an IAT slot |
+| `stringRefs` | Addresses of the instructions that reference this string |
+| `importRefs` | Addresses of the call sites that use this IAT entry |
+| `dataRefs` | Addresses of the instructions that reference this data address |
+| `calls` | Call targets of the function starting at this address |
+| `calledBy` | Function entries that call this address |
+
+The last five come from the whole-image sweep (`buildXrefs` in `src/mcp/disasm.ts`, run once per
+file by `FileSession.loadFile`) rather than from the per-instruction map, and they are the reason
+a data address is answerable at all: `xrefs` is keyed by code target, so before those maps were
+wired in, asking about a string or an IAT slot returned `xrefCount: 0` and nothing else no matter
+how many instructions used it. `string`/`import` are reported alongside so a client that guessed
+an address out of a decompiled line does not have to ask three more tools what it found.
+
+On an ARM64 image the sweep is the A64 reader (`src/disasm/arm64Xref.ts`), not the x86 operand
+grammar. On an image whose machine type has no decoder all five are empty — honestly so, since
+there are no instructions to read a reference out of.
+
+#### `get_call_graph`
+The whole-image call graph, or the callers and callees of one function. Both ends of every edge
+are named, preferring an MCP rename over the detected name; a target that is not a detected
+function — an import thunk, a tail-called stub — is kept and named by its address rather than
+dropped.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `fileId` | string | Yes | ID of the loaded PE file |
+| `address` | number or string | No | Function address. Omit for the whole graph |
+
+With `address` omitted: `{ fileId, functionCount, edges }`, where each edge is
+`{ from, name, calls: [{ address, name }] }`. With an address:
+`{ address, name, calls, calledBy }`. A malformed `address` is an error, not a fall-through to
+the whole graph.
+
+Same source as `get_xrefs`'s `calls`/`calledBy`, so the same architecture caveats apply. The
+graph is also available as a resource — `pe://{fileId}/callgraph` — which returns the edge list
+without the tool-call round trip.
 
 #### `detect_anomalies`
 Get security anomalies with severity, title, and detail for each finding.
@@ -185,9 +230,10 @@ PE file data is exposed as MCP resources using the URI template `pe://{fileId}/<
 |----------|-----|-------------|
 | Headers | `pe://{fileId}/headers` | Image base, entry point, subsystem, DLL characteristics, machine type, timestamps |
 | Sections | `pe://{fileId}/sections` | Section table with names, addresses, sizes, and characteristic flags |
-| Imports | `pe://{fileId}/imports` | Import table — libraries and functions with IAT addresses |
+| Imports | `pe://{fileId}/imports` | Import table — libraries and functions with IAT addresses, plus `xrefCount`/`xrefs` per function: the call sites that actually use that IAT entry |
 | Exports | `pe://{fileId}/exports` | Export table — name, ordinal (Ordinal Base applied) and address per export, plus `byOrdinal: true` for nameless exports and `forwarder: "OTHERDLL.Func"` for forwarded ones. Both keys are omitted when they do not apply |
-| Strings | `pe://{fileId}/strings` | Extracted strings with addresses and encoding (ascii/utf16le) |
+| Strings | `pe://{fileId}/strings` | Extracted strings with addresses and encoding (ascii/utf16le), plus `xrefCount`/`xrefs` — which code addresses reference each one. An unreferenced string reads as `xrefCount: 0` |
+| Call graph | `pe://{fileId}/callgraph` | One entry per calling function — `{ address, name, calls: [{ address, name }] }` — with renames applied to both ends. The resource form of `get_call_graph` with no address |
 | Functions | `pe://{fileId}/functions` | Detected function list with names, addresses, sizes, thunk status |
 | Anomalies | `pe://{fileId}/anomalies` | Security anomalies with severity, title, and detail |
 | Driver | `pe://{fileId}/driver` | Driver analysis — detection status, kernel modules, WDM flag |
@@ -227,7 +273,7 @@ The MCP server supports loading multiple PE files. Each file is identified by an
 | `src/mcp/index.ts` | Entry point. Routes the `setup` subcommand, then starts the server over stdio |
 | `src/mcp/cli.ts` | The `setup` subcommand |
 | `src/mcp/clients.ts` | Registry of supported AI clients (see below) |
-| `src/mcp/tools.ts` | `registerTools()` — the 13 tools |
+| `src/mcp/tools.ts` | `registerTools()` — the 14 tools |
 | `src/mcp/resources.ts` | `registerResources()` — the `pe://` resources |
 | `src/mcp/paths.ts` | `parseAddr()` and `resolveExportPath()` — argument parsing and export-path confinement |
 | `src/mcp/session.ts` | Multi-file session state and the analysis pipeline |
@@ -276,5 +322,7 @@ Once configured, you can ask your AI agent:
 - *"What security anomalies were detected?"*
 - *"Show me the import table"*
 - *"Get cross-references to 0x140001000"*
+- *"Which functions reference the string at 0x140002000?"*
+- *"Who calls the function at 0x401000?"*
 - *"Add a comment at 0x401000 saying 'main loop starts here'"*
 - *"Export annotations to analysis.json"*
