@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { unsupportedArchMessage } from "../../disasm/arch";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
 // serially-servicing worker would see the messages — which is the only way to
@@ -46,6 +47,16 @@ class FakeWorker {
 
   reply(id: number, result: unknown) {
     this.onmessage?.({ data: { id, result } });
+  }
+
+  /**
+   * What `disasm.worker.ts` posts when `dispatch` rejects: a plain string, not
+   * the Error. Structured clone would carry an Error, but the worker
+   * deliberately flattens to `err?.message ?? String(err)` — so the reply the
+   * client parses is this shape and no other.
+   */
+  replyError(id: number, error: string) {
+    this.onmessage?.({ data: { id, error } });
   }
 }
 
@@ -111,6 +122,48 @@ describe("DisasmWorkerClient — a wedged worker cannot hang callers forever", (
     const pending = client.init();
     worker.onerror?.({ message: "load failed" });
     await expect(pending).rejects.toThrow(/load failed/);
+  });
+
+  /**
+   * peek-a-bin-8ru3. A rejecting stage's message is the whole content of the
+   * `"analysis-failed"` notice — `App`'s catch interpolates `err.message` into
+   * `SET_ERROR`, and `analysisNotice` puts that string in front of the user
+   * verbatim. Every test above drives `dispatch` directly and asserts
+   * `rejects.toThrow`, so the one link none of them crosses is this one: the
+   * worker flattening the Error to a string, and the client rebuilding one.
+   *
+   * Scoped honestly: this does *not* hold up the architecture refusal. That
+   * notice re-derives its text on the main thread from `coffHeader.machine`, so
+   * it survives total loss of the worker's message. What it holds up is every
+   * other failure the user is shown.
+   */
+  it("carries a rejecting stage's message across the wire intact", async () => {
+    const { client, worker } = await loadClient();
+    // The real sentence, from the real module, rather than a placeholder — a
+    // reply path that mangled punctuation or truncated would still pass a
+    // "some error" assertion.
+    const message = unsupportedArchMessage("Cross-reference analysis");
+    const pending = client.init();
+
+    worker.replyError(worker.posted[0].id, message);
+
+    await expect(pending).rejects.toThrow(message);
+    // And it is an Error, which is what App's `err instanceof Error` arm needs
+    // to reach `err.message` rather than printing "[object Object]".
+    await expect(pending).rejects.toBeInstanceOf(Error);
+  });
+
+  it("does not read a reply carrying an error as a successful result", async () => {
+    // `{ id, error }` has no `result`, so a client that only checked for one
+    // would resolve the caller with `undefined` — the same silent-success shape
+    // the unknown-method guard in dispatch.ts exists to prevent, arriving one
+    // hop later.
+    const { client, worker } = await loadClient();
+    const pending = client.init();
+
+    worker.replyError(worker.posted[0].id, "boom");
+
+    await expect(pending).rejects.toThrow("boom");
   });
 });
 

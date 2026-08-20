@@ -16,6 +16,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { detectAnomalies } from "../../analysis/anomalies";
 import {
   ANALYSIS_IN_PROGRESS,
   type AnalysisPhase,
@@ -24,7 +25,14 @@ import {
   type ViewTab,
 } from "../../hooks/usePEFile";
 import { buildMinimalPE32, buildMinimalPE64 } from "../../pe/__tests__/fixtures";
-import { parsePE } from "../../pe/parser";
+import {
+  IMAGE_SCN_CNT_CODE,
+  IMAGE_SCN_CNT_INITIALIZED_DATA,
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_READ,
+} from "../../pe/constants";
+import { computeImphash } from "../../pe/metadata";
+import { extractStrings, parsePE } from "../../pe/parser";
 import { findCodeSection } from "../../pe/sections";
 import {
   analysisNotice,
@@ -40,6 +48,8 @@ import {
 const ARMNT = 0x01c4;
 /** IMAGE_FILE_MACHINE_ARM — the original 32-bit little-endian ARM. */
 const ARM = 0x01c0;
+/** IMAGE_FILE_MACHINE_I386 — the control, an architecture that is supported. */
+const I386 = 0x014c;
 
 function machineOf(image: ArrayBuffer): number {
   return parsePE(image).coffHeader.machine;
@@ -481,6 +491,47 @@ describe("every surface that reports a failure uses the shared decision", () => 
     expect(source).not.toMatch(/phase !== "ready"/);
   });
 
+  /**
+   * Consuming the decision is not enough — the notice has to be reached.
+   *
+   * peek-a-bin-8ru3. Both surfaces below are chains of early returns, and in
+   * both of them the notice's branch is deliberately first. Move it down and
+   * the code still compiles, still imports `analysisNotice`, still satisfies
+   * every assertion above, and the user sees the wrong thing: in the status bar
+   * a green "Engine ready" or a spinner over a dead analysis, which is the
+   * defect that created this module; in the disassembly panel either a spinner
+   * that never resolves or — the case with no coverage signal at all — the
+   * worker's own decode of ARM bytes as x86, whichever way `configure` and the
+   * view's decode request happen to interleave.
+   *
+   * Positions rather than text: what is asserted is the order of two matches,
+   * so reformatting either file cannot break it.
+   */
+  it("the disassembly panel states the refusal ahead of every branch that waits on the worker", () => {
+    const source = readFileSync(join(SRC, "components", "DisassemblyView.tsx"), "utf8");
+    const notice = source.search(/archNotice\?\.kind\s*===/);
+    expect(notice).toBeGreaterThan(-1);
+
+    for (const later of [/if\s*\(\s*disassembling\s*\)/, /if\s*\(\s*disasmError\s*\)/]) {
+      const at = source.search(later);
+      expect(at).toBeGreaterThan(-1);
+      expect(notice).toBeLessThan(at);
+    }
+  });
+
+  it("the status bar states the notice ahead of the spinner and the green tick", () => {
+    const source = readFileSync(join(SRC, "components", "StatusBar.tsx"), "utf8");
+    const notice = source.search(/\{\s*notice\s*\?/);
+    const spinner = source.search(/:\s*isAnalyzing\s*\?/);
+    const ready = source.search(/:\s*phase\s*===\s*"ready"\s*\?/);
+
+    expect(notice).toBeGreaterThan(-1);
+    expect(spinner).toBeGreaterThan(-1);
+    expect(ready).toBeGreaterThan(-1);
+    expect(notice).toBeLessThan(spinner);
+    expect(spinner).toBeLessThan(ready);
+  });
+
   it("the status bar has no label for a phase it cannot render", () => {
     // The exact defect this replaces: `phaseLabels` carried `failed: "Analysis
     // failed"`, but its only render site sits behind `isAnalyzing`, which
@@ -494,5 +545,189 @@ describe("every surface that reports a failure uses the shared decision", () => 
     );
     expect(phaseMap.length).toBeGreaterThan(0);
     expect(phaseMap).not.toMatch(/failed/);
+  });
+});
+
+/**
+ * The notice's promise, checked against what the parser actually produced.
+ *
+ * peek-a-bin-8ru3, the half of it that is not about text on a screen. The
+ * notice tells the user that Headers, Sections, Imports, Exports, Hex, Strings,
+ * Resources and Anomalies are "still available" for an image whose machine type
+ * has no decoder — but `PARSER_DERIVED_TABS` is a hand-written list, so that
+ * sentence is a claim about *other modules* and nothing was checking it. If the
+ * refusal reached any of them, the notice would be confidently pointing the
+ * user at eight empty tabs, which is a worse answer than the bare failure it
+ * replaced. The MCP path needed an explicit `decodable` guard in
+ * `FileSession.loadFile` for exactly this, so the assumption is not free.
+ *
+ * The claim is really an *invariance*: the machine word must change what the
+ * disassembler does and nothing else. So the same image is built twice with
+ * that word as the only difference between the two buffers, and every
+ * parser-derived output has to come back identical. Invariance alone would also
+ * hold with both sides empty, so each output is separately required to be
+ * non-empty on the ARM32 side.
+ *
+ * What this cannot do is render any of it. See the guard above.
+ */
+describe("an image with no decoder keeps every parser-derived view", () => {
+  /** A string only this fixture contains, so finding it proves the scan ran. */
+  const DATA_STRING = "peek-a-bin-armnt-marker";
+
+  /**
+   * One image, parameterised only by its machine word.
+   *
+   * `.text` is executable so `findCodeSection` succeeds — otherwise the
+   * `"no-code"` phase would be doing this suite's work for it and the
+   * architecture would never be the reason for anything.
+   */
+  function image(machine: number): ArrayBuffer {
+    const data = new TextEncoder().encode(`${DATA_STRING}\0`);
+    return buildMinimalPE32({
+      machine,
+      sections: [
+        {
+          name: ".text",
+          virtualAddress: 0x1000,
+          virtualSize: 8,
+          data: new Uint8Array([0x55, 0x8b, 0xec, 0x33, 0xc0, 0x5d, 0xc3, 0x90]),
+          characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+        },
+        {
+          name: ".data",
+          virtualAddress: 0x2000,
+          virtualSize: data.length,
+          data,
+          characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+        },
+      ],
+      // Kept after `.data` so the section headers stay in ascending RVA order,
+      // which is what a linker emits.
+      directoryRVA: 0x3000,
+      directories: {
+        imports: [
+          {
+            libraryName: "KERNEL32.dll",
+            functions: [{ name: "CreateFileW" }, { name: "CloseHandle" }, { ordinal: 7 }],
+          },
+        ],
+        exports: {
+          dllName: "armnt.dll",
+          addresses: [0x1000, 0x1004],
+          names: [
+            { name: "DllMain", addressIndex: 0 },
+            { name: "Second", addressIndex: 1 },
+          ],
+        },
+      },
+    });
+  }
+
+  const armnt = parsePE(image(ARMNT));
+  const i386 = parsePE(image(I386));
+
+  it("is genuinely the refused case, and not a supported image in disguise", () => {
+    // Guards the whole suite against going vacuous: if `archForMachine` ever
+    // accepted 0x01C4, every assertion below would still pass while saying
+    // nothing at all about the refusal.
+    expect(
+      analysisNotice({ machine: armnt.coffHeader.machine, phase: "failed", error: null })?.kind,
+    ).toBe("unsupported-arch");
+    expect(analysisNotice({ machine: i386.coffHeader.machine, phase: "ready", error: null })).toBe(
+      null,
+    );
+    // And it is not the no-code case wearing the architecture's clothes.
+    expect(findCodeSection(armnt.sections)).toBeDefined();
+  });
+
+  it("reads the headers, and reads them the same way", () => {
+    expect(armnt.optionalHeader).toEqual(i386.optionalHeader);
+    expect(armnt.dosHeader).toEqual(i386.dosHeader);
+    // Everything in the COFF header except the one field that differs.
+    const { machine: _armMachine, ...armntCoff } = armnt.coffHeader;
+    const { machine: _x86Machine, ...i386Coff } = i386.coffHeader;
+    expect(armntCoff).toEqual(i386Coff);
+  });
+
+  it("reads the sections", () => {
+    expect(armnt.sections.map((s) => s.name)).toEqual([".text", ".data", ".rdata"]);
+    expect(armnt.sections).toEqual(i386.sections);
+  });
+
+  it("reads the imports, by name and by ordinal", () => {
+    expect(armnt.imports).toHaveLength(1);
+    expect(armnt.imports[0].libraryName).toBe("KERNEL32.dll");
+    expect(armnt.imports[0].functions).toEqual(["CreateFileW", "CloseHandle", "Ordinal_7"]);
+    expect(armnt.imports).toEqual(i386.imports);
+  });
+
+  it("reads the exports", () => {
+    expect(armnt.exports.map((e) => e.name)).toEqual(["DllMain", "Second"]);
+    expect(armnt.exports).toEqual(i386.exports);
+  });
+
+  it("computes the imphash, which is a format-level fact and not an x86 one", () => {
+    // The Headers tab shows it, and it is derived from the import table rather
+    // than from any instruction — an ARM32 sample must still be identifiable by
+    // the hash every corpus indexes on.
+    expect(computeImphash(armnt.imports)).toBeTruthy();
+    expect(computeImphash(armnt.imports)).toBe(computeImphash(i386.imports));
+  });
+
+  it("extracts strings — the one parser-derived tab fed by the refusing module", () => {
+    // Strings reach the UI through `extractStrings` on the *disasm worker*,
+    // which is also the module that refuses. It is a byte scan with no arch
+    // gate (`workers/dispatch.ts`), and this is what says so from outside.
+    const arm = extractStrings(armnt.buffer, armnt.sections, armnt.optionalHeader.imageBase, false);
+    const x86 = extractStrings(i386.buffer, i386.sections, i386.optionalHeader.imageBase, false);
+
+    expect([...arm.strings.values()]).toContain(DATA_STRING);
+    expect([...arm.strings.entries()]).toEqual([...x86.strings.entries()]);
+    expect([...arm.stringTypes.entries()]).toEqual([...x86.stringTypes.entries()]);
+  });
+
+  it("derives anomalies, which are read off the parsed image on the main thread", () => {
+    const arm = detectAnomalies(armnt);
+    expect(arm.length).toBeGreaterThan(0);
+    expect(arm).toEqual(detectAnomalies(i386));
+  });
+
+  it("hands the Hex view the whole file either way", () => {
+    // Hex renders `pe.buffer`, so what it needs is that nothing on the refusal
+    // path truncated or dropped it.
+    expect(armnt.buffer.byteLength).toBe(i386.buffer.byteLength);
+    expect(new Uint8Array(armnt.buffer)).toEqual(new Uint8Array(image(ARMNT)));
+  });
+
+  it("parses the resource directory to the same answer — here, absent from both", () => {
+    // The fixture builder cannot synthesize a resource tree, so this is the
+    // weakest assertion in the suite and says so: what it rules out is the
+    // refusal *changing* the answer, not an empty answer.
+    expect(armnt.resources).toBeUndefined();
+    expect(armnt.resources).toEqual(i386.resources);
+  });
+
+  it("covers every tab the notice offers", () => {
+    // The assertions above are only worth something if they are about the same
+    // list the user is pointed at. A tab added to PARSER_DERIVED_TABS with no
+    // assertion here fails, rather than quietly inheriting a promise nothing
+    // checks.
+    const asserted: readonly ViewTab[] = [
+      "headers",
+      "sections",
+      "imports",
+      "exports",
+      "hex",
+      "strings",
+      "resources",
+      "anomalies",
+    ];
+    const notice = analysisNotice({
+      machine: armnt.coffHeader.machine,
+      phase: "failed",
+      error: null,
+    });
+    expect([...(notice?.availableTabs ?? [])].sort()).toEqual([...asserted].sort());
+    expect([...PARSER_DERIVED_TABS].sort()).toEqual([...asserted].sort());
   });
 });

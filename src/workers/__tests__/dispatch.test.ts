@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { StructRegistry } from "../../disasm/decompile/structs";
 import type { Instruction } from "../../disasm/types";
+import { buildMinimalPE32 } from "../../pe/__tests__/fixtures";
+import { parsePE } from "../../pe/parser";
 import { createWorkerState, dispatch, type WorkerMethod, type WorkerState } from "../dispatch";
 
 /** A ready-to-use state whose Capstone bootstrap has already resolved. */
@@ -809,6 +811,52 @@ describe("dispatch — architecture routing", () => {
         await dispatch("buildTypedXrefMap", { instructions: [], imageBounds: undefined }, s),
       ).toEqual([]);
       expect(await dispatch("resetStructRegistry", {}, s)).toBe(true);
+    });
+
+    /**
+     * peek-a-bin-8ru3. Strings are the one *parser-derived* view whose content
+     * comes back over this RPC rather than off the main thread, so the notice's
+     * "Still available: … Strings …" is a claim about this very switch. An arch
+     * gate added here — the natural-looking symmetry with the four above — would
+     * empty the tab the user was just told to open, and no other test would
+     * notice: every assertion in the suite above is about a method that refuses.
+     */
+    it("extracts strings, which is the parser-derived view this RPC still owes", async () => {
+      const s = await armntState();
+      const marker = "peek-a-bin-armnt-marker";
+      const data = new TextEncoder().encode(`${marker}\0`);
+      const image = buildMinimalPE32({
+        machine: ARMNT_MACHINE,
+        sections: [
+          {
+            name: ".rdata",
+            virtualAddress: 0x1000,
+            virtualSize: data.length,
+            data,
+            // Not executable: the string scan reads data sections, and this
+            // fixture is about the scan rather than about code.
+            characteristics: 0x40000040,
+          },
+        ],
+      });
+      const pe = parsePE(image);
+
+      const result = (await dispatch(
+        "extractStrings",
+        {
+          buffer: pe.buffer,
+          sections: pe.sections,
+          imageBase: pe.optionalHeader.imageBase,
+          is64: false,
+        },
+        s,
+      )) as { strings: [number, string][]; stringTypes: [number, string][] };
+
+      expect(result.strings.map(([, v]) => v)).toContain(marker);
+      expect(result.stringTypes).not.toEqual([]);
+      // And it reached no decoder to do it.
+      expect(s.cs32.seen).toEqual([]);
+      expect(s.csArm64.seen).toEqual([]);
     });
 
     it("goes back to the x86 routes when an x86 image is loaded next", async () => {
