@@ -1136,6 +1136,44 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
   });
 
+  it("refuses a shift whose count masks to zero", () => {
+    // `shl eax, 0x20` shifts a 32-bit destination by `0x20 & 0x1f == 0`: it is
+    // a no-op that writes no flag, so the `jne` is reading whatever set them
+    // earlier. The backward walk asked only whether the count was a non-zero
+    // immediate and emitted `if (eax != 0)` — a test on a value the machine
+    // never derived flags from. `flagModel.ts` applies the mask, so the guard
+    // is refused instead (peek-a-bin-c33 stage 4).
+    const code = run(
+      seq(0x401000, [
+        ["shl", "eax, 0x20"],
+        ["jne", "0x401010"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/if \(__unrecovered_\d+ \/\* jne \*\/\)/);
+    expect(code).not.toMatch(/eax != 0/);
+  });
+
+  it("answers a 64-bit shift by the same count, which really does shift", () => {
+    const code = run(
+      seq(0x401000, [
+        ["shl", "rax, 0x20"],
+        ["jne", "0x401010"],
+        ["mov", "rbx, 1"],
+        ["ret"],
+        ["mov", "rbx, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("if (rax != 0)");
+  });
+
   it("keeps a result nothing else reads, so the condition survives DCE", () => {
     const code = run(
       seq(0x401000, [
@@ -1148,13 +1186,15 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    // The only reader of `ecx` here is the flags, and the flags are not in the
-    // IR — so dead-code elimination used to delete the decrement, and the guard
-    // it would have been read from went with it. That single cause accounted
-    // for 190 of the remaining unrecovered branches across the three reference
-    // binaries. `deadCodeElimination` now holds this definition live, keyed off
-    // the same `flagResultSetter` the structurer uses to decide it will name
-    // the register (peek-a-bin-pu06).
+    // The only reader of `ecx` here is the flags. When the flags were not in
+    // the IR, dead-code elimination deleted the decrement and the guard it
+    // would have been read from went with it — 190 of the remaining
+    // unrecovered branches across the three reference binaries had that one
+    // cause (peek-a-bin-pu06). It was fixed twice: first by `ssaopt.ts` holding
+    // the definition live by hand off `flagResultSetter`, and then properly, by
+    // `liftBlock` building an `IRBranch` whose condition reads `ecx` — so the
+    // decrement has an ordinary counted use and the hand-holding is gone
+    // (peek-a-bin-c33 stage 4).
     expect(code).toContain("ecx--");
     expect(code).toMatch(/if \(ecx != 0\)/);
     expect(code).not.toContain("__unrecovered_");
@@ -3030,6 +3070,42 @@ describe("decompileFunction — an instruction is lifted once, and reads what it
     );
 
     expect(code).not.toContain("eflags");
+  });
+
+  /**
+   * The `eflags` pseudo-register did not merely fail to be dropped — a real
+   * value could be rewritten *into* it and then deleted with it.
+   *
+   * `cmp ecx, edx` used to lift to `eflags = ecx - edx`, which is an ordinary
+   * IR expression, so global value numbering happily gave it and the `sub eax,
+   * edx` two lines above the same value number, copy propagation rewrote every
+   * reader of EAX to name `eflags`, and `ssaOptimize`'s end-of-fixpoint strip
+   * then deleted the only statement that assigned it. The result was C that
+   * returns a register nothing assigns and in which the subtraction the machine
+   * performs does not appear at all: **20 such reads across 14 functions of the
+   * four corpus binaries** at `f685b6d`.
+   *
+   * `liftBlock` emits no `eflags` statement now, so there is nothing for GVN to
+   * unify with (peek-a-bin-c33 stage 2b). This is the minimal reproduction;
+   * `assign` rather than `not.toContain` because the point is that the value is
+   * *present and named*, not merely that a token is absent.
+   */
+  it("does not rewrite a real value into the flag proxy and then delete it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ecx, edx"],
+        ["mov", "eax, ecx"],
+        ["sub", "eax, edx"],
+        ["jne", "0x401018"],
+        ["mov", "ebx, eax"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("eflags");
+    expect(code).toContain("eax = ecx - edx");
   });
 
   it("does not re-expand a subexpression the register no longer holds", () => {
@@ -5349,8 +5425,8 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
 
   // peek-a-bin-xe01. The flags ARE the cmp's, but the block's statements are
   // emitted above the `if`, so `eax = edx;` runs first and the guard would read
-  // the new EAX. `flagResultSetter`'s condition 6 had refused this shape on the
-  // arithmetic path since peek-a-bin-b531; the cmp path never asked.
+  // the new EAX. The arithmetic path had refused this shape since
+  // peek-a-bin-b531; the cmp path never asked.
   it("does not name a compared register a later instruction overwrote", () => {
     const code = run(
       seq(0x401000, [

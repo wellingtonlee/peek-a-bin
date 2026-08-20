@@ -3,9 +3,8 @@ import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import type { Instruction } from "../types";
-import { isFlagReadingJump } from "./flagModel";
-import { isFlagTransparent } from "./flagResult";
-import type { BinaryOp, IRCall, IRExpr, IRStmt } from "./ir";
+import { blockFlagOwner, canSpellCondition, isFlagTransparent } from "./flagModel";
+import type { BinaryOp, IRBranch, IRCall, IRExpr, IRStmt } from "./ir";
 import {
   canonReg,
   irBinary,
@@ -17,7 +16,7 @@ import {
   isKnownRegister,
   regSize,
 } from "./ir";
-import type { RegState } from "./regstate";
+import { RegState } from "./regstate";
 
 // ── Operand Parsing ──
 
@@ -296,6 +295,95 @@ const SSE_SCALAR = new Map<string, BinaryOp | null>([
  */
 const FLAG_MODELLED = new Set(["cmp", "test", "comiss", "comisd", "ucomiss", "ucomisd"]);
 
+/** Does this block contain a `cmp` or `test` before its final instruction? */
+function blockHasCompare(block: BasicBlock): boolean {
+  const insns = block.insns;
+  for (let i = 0; i < insns.length - 1; i++) {
+    const mn = insns[i].mnemonic.toLowerCase();
+    if (mn === "cmp" || mn === "test") return true;
+  }
+  return false;
+}
+
+/**
+ * The `IRBranch` a block's trailing jump becomes, or null when no condition can
+ * be spelled for it.
+ *
+ * **Which instruction the jump's flags belong to is `flagModel.ts`'s question**,
+ * and this is where its forward owner model is wired in. The lifter used to
+ * answer it with a single boolean — "did I pass a `cmp`/`test` that nothing has
+ * displaced" — which is the compare half of the same walk. The model answers
+ * the arithmetic half as well, and that is the point: `dec ecx / jnz` sets ZF
+ * from the decrement, so the guard is `ecx != 0`, and until now the only route
+ * to that was `flagResult.ts`'s backward walk re-deriving it from the
+ * instruction stream at structuring time, with `ssaopt.ts` holding the `dec`
+ * alive by hand so it would still be there (peek-a-bin-pu06). As a branch
+ * statement it is an ordinary IR
+ * reader: SSA binds it to the definition that reaches the jump and DCE counts
+ * it, so neither the re-derivation nor the hand-holding has anything left to do.
+ *
+ * Four refusals, each one a case where an answer would be a guess:
+ *
+ * 1. **A jump that reads no flags.** `blockFlagOwner` returns null for `jmp`
+ *    and for `jecxz`/`jrcxz`/`jcxz`, which test a *register*.
+ * 2. **An indirect or unresolved target.** There is no address to name, and
+ *    inventing one is the failure mode `parseBranchTarget`'s guard prevents.
+ * 3. **A result owner in a block that also contains a `cmp`/`test`.** The two
+ *    recovery paths are kept disjoint, exactly as the deleted backward walk's
+ *    condition 2 kept them: `cmp eax, 5 / sub ecx, edx / jne` really does
+ *    branch on
+ *    `ecx != 0`, but it is also the shape `corpus/staleGuards.ts` counts as a
+ *    superseded reading, and that gate reads *any* condition emitted at such a
+ *    jcc as the stale one. Recovering it is a deliberate decision to be taken
+ *    with the audit, not a side effect of this wiring.
+ * 4. **A result whose register no longer holds it.** `canSpellCondition` — the
+ *    forward model's equivalent of `clobberedAfter` over the result register.
+ *    A *compare* owner is deliberately not filtered on that: the guard's reads
+ *    are what keep the compared values alive through DCE, and the same veto is
+ *    applied against the machine text in `structure.ts`, which is where it has
+ *    to be asked (see the `conditionSpoiled` docstring — copy propagation has
+ *    rewritten the IR expression by then).
+ */
+function branchFor(
+  block: BasicBlock,
+  insn: Instruction,
+  jcc: string,
+  regState: RegState,
+): IRBranch | null {
+  const owned = blockFlagOwner(block);
+  if (!owned || owned.jcc !== jcc) return null;
+  const target = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+  if (!target) return null;
+
+  let condition: IRExpr;
+  if (owned.owner.kind === "compare") {
+    // Nothing between the compare and the jump wrote a flag — that is what
+    // makes it the owner — so `regState` still holds exactly this compare.
+    condition = regState.getCondition(jcc);
+  } else {
+    if (!canSpellCondition(owned.owner) || owned.owner.kind !== "result") return null;
+    if (blockHasCompare(block)) return null;
+    // x86 sets the flags from the *result*, so the value tested is the
+    // destination register read after the instruction ran. `setFlagsFromResult`
+    // states that, and `getCondition` answers only the Jcc forms ZF and SF
+    // determine — which is the judgement `RESULT_ANSWERABLE_JCC` was a second
+    // copy of (peek-a-bin-wf7t).
+    const state = new RegState();
+    const destText = owned.owner.destText;
+    state.setFlagsFromResult(irReg(destText, regSize(destText)));
+    condition = state.getCondition(jcc);
+  }
+  if (condition.kind === "unknown") return null;
+
+  return {
+    kind: "branch",
+    condition,
+    target: Number.parseInt(target[1], 16),
+    jcc,
+    addr: insn.address,
+  };
+}
+
 /**
  * Lift a single basic block's instructions to IR statements.
  *
@@ -328,19 +416,6 @@ export function liftBlock(
    */
   let flagsStale = false;
 
-  /**
-   * Are the flags currently described by a `cmp`/`test` this loop recorded?
-   *
-   * Narrower than "the flag state is known": `comiss`/`comisd` also call
-   * `setFlags`, so `getCondition` answers after one — which is what `setcc`
-   * and `cmovcc` have always read and is left exactly as it was. But
-   * `structure.ts` vetoes a guard whose compared operand was overwritten by
-   * asking `clobberedAfter` about the `cmp` it can see in the instruction
-   * stream, and it recognises `cmp`/`test` only. Building a branch statement
-   * from anything else would hand it a condition its own veto cannot judge.
-   */
-  let flagsFromCompare = false;
-
   for (const insn of block.insns) {
     const mn = insn.mnemonic.toLowerCase();
     const parts = splitOperands(insn.opStr);
@@ -360,7 +435,6 @@ export function liftBlock(
     // would answer every one of them `unknown`.
     if (flagsStale) {
       regState.clearFlags();
-      flagsFromCompare = false;
       flagsStale = false;
     }
     flagsStale = !isFlagTransparent(mn) && !FLAG_MODELLED.has(mn);
@@ -569,16 +643,24 @@ export function liftBlock(
       continue;
     }
 
-    // ── cmp / test → flag state + eflags IR assignment ──
+    // ── cmp / test → flag state, and no statement ──
+    //
+    // A compare writes only the flags, and the flags are now in the IR as the
+    // *condition* of the block's branch statement rather than as an `eflags =
+    // …` proxy. The proxy existed because a guard was not an IR reader: nothing
+    // else named the compared registers, so DCE deleted the instructions that
+    // produced them, and `ssaopt.ts` had to hold the proxy live by hand and
+    // then strip it again before emission so it did not reach the page
+    // (peek-a-bin-ua8, peek-a-bin-zsb). Since Stage 3 the branch counts those
+    // reads directly, so the proxy is a statement with no reader that every
+    // pass had to be taught to leave alone (peek-a-bin-c33).
     if (mn === "cmp" || mn === "test") {
       if (parts.length >= 2) {
-        const left = parseOperand(parts[0], insn, is64);
-        const right = parseOperand(parts[1], insn, is64);
-        regState.setFlags(mn as "cmp" | "test", left, right);
-        flagsFromCompare = true;
-        // Emit eflags definition for SSA cross-block propagation
-        const flagExpr = mn === "cmp" ? irBinary("-", left, right) : irBinary("&", left, right);
-        stmts.push({ kind: "assign", dest: irReg("eflags", 4), src: flagExpr, addr: insn.address });
+        regState.setFlags(
+          mn as "cmp" | "test",
+          parseOperand(parts[0], insn, is64),
+          parseOperand(parts[1], insn, is64),
+        );
       }
       continue;
     }
@@ -727,28 +809,12 @@ export function liftBlock(
     // `regState.getCondition()` to a register and that survives SSA renaming
     // untouched. This does for `jcc` what the lifter already does for `setcc`.
     //
-    // `isFlagReadingJump` rather than `startsWith("j")`: `jecxz`/`jrcxz`/`jcxz`
-    // test a *register* and read no flag, so a flag-derived condition would be
-    // a statement about something they do not do.
+    // Which instruction's flags the jump reads is `flagModel.ts`'s answer —
+    // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
-      if (
-        flagsFromCompare &&
-        isFlagReadingJump(mn) &&
-        insn === block.insns[block.insns.length - 1]
-      ) {
-        // Only a direct target is recorded. An indirect or unresolved jump has
-        // no address to name, and inventing one is the failure mode
-        // `parseBranchTarget`'s guard exists to prevent.
-        const target = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
-        if (target) {
-          stmts.push({
-            kind: "branch",
-            condition: regState.getCondition(mn),
-            target: Number.parseInt(target[1], 16),
-            jcc: mn,
-            addr: insn.address,
-          });
-        }
+      if (insn === block.insns[block.insns.length - 1]) {
+        const branch = branchFor(block, insn, mn, regState);
+        if (branch) stmts.push(branch);
       }
       continue;
     }
@@ -961,15 +1027,11 @@ export function liftBlock(
           if (dest.kind === "reg") regState.set(dest.name, src);
         }
       } else if (mn === "comiss" || mn === "comisd" || mn === "ucomiss" || mn === "ucomisd") {
-        // Comparison — sets eflags
+        // Sets the flags and writes nothing else, exactly as `cmp` does, and
+        // for the same reason emits no statement. `setcc`/`cmovcc` read the
+        // state it leaves; a *branch* is deliberately not built from it — see
+        // `branchFor`.
         regState.setFlags("cmp", parseOperand(parts[0], insn, is64), src);
-        flagsFromCompare = false;
-        stmts.push({
-          kind: "assign",
-          dest: irReg("eflags", 4),
-          src: irBinary("-", parseOperand(parts[0], insn, is64), src),
-          addr: insn.address,
-        });
       } else {
         // Arithmetic: addss/subss/mulss/divss
         const op = SSE_SCALAR.get(mn)!;

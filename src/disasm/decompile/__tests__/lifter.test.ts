@@ -524,22 +524,20 @@ describe("liftBlock — arithmetic", () => {
 });
 
 describe("liftBlock — flags and conditionals", () => {
-  it("emits an eflags definition for cmp", () => {
+  // A compare writes only the flags, and the flags reach the IR as the
+  // condition of the block's `branch` statement. The `eflags = ...` proxy this
+  // used to assert on had no reader of its own, so every pass had to be taught
+  // to leave it alone and `ssaOptimize` had to strip it again before emission
+  // (peek-a-bin-c33 stage 2b).
+  it("records the flag state for cmp and emits no statement", () => {
     const st = new RegState();
-    expect(liftOne("cmp", "eax, 0x0", { state: st })).toEqual({
-      kind: "assign",
-      dest: irReg("eflags", 4),
-      src: irBinary("-", irReg("eax", 4), irConst(0, 8)),
-      addr: START,
-    });
+    expect(lift([["cmp", "eax, 0x0"]], { state: st })).toEqual([]);
     expect(st.getCondition("je")).toEqual(irBinary("==", irReg("eax", 4), irConst(0, 8)));
   });
 
-  it("emits a bitwise-and eflags definition for test", () => {
+  it("records the flag state for test and emits no statement", () => {
     const st = new RegState();
-    expect(liftOne("test", "eax, eax", { state: st })).toMatchObject({
-      src: irBinary("&", irReg("eax", 4), irReg("eax", 4)),
-    });
+    expect(lift([["test", "eax, eax"]], { state: st })).toEqual([]);
     expect(st.getCondition("jne")).toEqual(irBinary("!=", irReg("eax", 4), irConst(0, 4)));
   });
 
@@ -552,7 +550,7 @@ describe("liftBlock — flags and conditionals", () => {
       ["cmp", "eax, 0x1"],
       ["sete", "al"],
     ]);
-    expect(stmts[1]).toEqual({
+    expect(stmts[0]).toEqual({
       kind: "assign",
       dest: irReg("al", 1),
       src: irBinary("==", irReg("eax", 4), irConst(1, 8)),
@@ -569,7 +567,7 @@ describe("liftBlock — flags and conditionals", () => {
       ["cmp", "eax, 0x1"],
       ["cmovne", "rbx, rcx"],
     ]);
-    expect(stmts[1]).toEqual({
+    expect(stmts[0]).toEqual({
       kind: "assign",
       dest: irReg("rbx", 8),
       src: {
@@ -1034,11 +1032,9 @@ describe("liftBlock — string, FPU and SSE", () => {
     });
   });
 
-  it("lifts an SSE comparison to an eflags definition", () => {
+  it("records the flag state for an SSE comparison and emits no statement", () => {
     const st = new RegState();
-    expect(liftOne("comisd", "xmm0, xmm1", { state: st })).toMatchObject({
-      dest: irReg("eflags", 4),
-    });
+    expect(lift([["comisd", "xmm0, xmm1"]], { state: st })).toEqual([]);
     expect(st.getCondition("ja")).toEqual(irBinary("u>", irReg("xmm0", 16), irReg("xmm1", 16)));
   });
 });

@@ -1,6 +1,6 @@
 import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
-import { clobberedAfter, flagResultSetter, isFlagTransparent } from "./flagResult";
+import { clobberedAfter, isFlagTransparent } from "./flagModel";
 import type { IRBranch, IRExpr, IRStmt } from "./ir";
 import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies, walkExpr } from "./ir";
 import { parseOperand } from "./lifter";
@@ -18,77 +18,20 @@ function labelNameFor(addr: number): string {
 }
 
 /**
- * The condition a Jcc reads in a block that sets its flags with something
- * other than `cmp`/`test`, or null when that cannot be answered exactly.
- *
- * `dec ecx / jnz`, `sub eax, ebx / je`, `and eax, 3 / je` and `or rax, rax /
- * je` are all ordinary compiler output, and to `extractCondition` they used to
- * look like a Jcc with no test at all — 606 blocks across the three reference
- * binaries, every one of them emitting `__unrecovered_N`.
- *
- * `flagResultSetter` answers which instruction set the flags and which register
- * holds its result; that grammar is shared with `ssaopt.ts` and documented in
- * `flagResult.ts`. What is left here is the one check that can only be made
- * against the final IR:
- *
- * **The emitted code still names that result.** The condition is spelled by
- * naming the destination register, which is only true of the result while that
- * register's last write in the block *is* this instruction. `stmts` is the
- * block's final IR, after SSA, dead-code elimination and folding, so this is
- * asked of the code that will actually be emitted: if the assignment was folded
- * into a later use, the register no longer holds the result and there is no
- * answer. Deletion by DCE used to be the other way this failed and was the
- * single largest cause — 190 blocks — until `deadCodeElimination` began holding
- * these definitions live (peek-a-bin-pu06). That protection is keyed off the
- * same `flagResultSetter`, so the two agree by construction rather than by
- * being maintained in step.
- *
- * The condition is then true at the `if`, which is where the block's
- * statements have already been emitted — that ordering is what makes naming
- * the *result* rather than the operands the correct reading.
- */
-function conditionFromFlagResult(block: BasicBlock, jcc: string, stmts: IRStmt[]): IRExpr | null {
-  const setter = flagResultSetter(block);
-  if (!setter || setter.jcc !== jcc) return null;
-
-  let lastWrite: IRStmt | null = null;
-  for (const s of stmts) {
-    if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === setter.destReg)
-      lastWrite = s;
-    else if (
-      s.kind === "call_stmt" &&
-      s.resultDest?.kind === "reg" &&
-      canonReg(s.resultDest.name) === setter.destReg
-    )
-      lastWrite = s;
-  }
-  if (lastWrite?.kind !== "assign" || lastWrite.addr !== setter.address) return null;
-  const dest = lastWrite.dest;
-  if (dest.kind !== "reg") return null;
-
-  const state = new RegState();
-  state.setFlagsFromResult(irReg(dest.name, dest.size));
-  const cond = state.getCondition(jcc);
-  // An unrecoverable Jcc is left to the caller to report the way it always
-  // has, so that the emitted `__unrecovered_N` comment still names the Jcc.
-  return cond.kind === "unknown" ? null : cond;
-}
-
-/**
  * Has anything between the flag-setting instruction and the block's Jcc written
  * over a name the recovered condition is spelled with?
  *
- * The guard is emitted *after* the block's statements — that ordering is stated
- * in `conditionFromFlagResult`'s docstring above and is what makes this a
- * question at all. So `cmp eax, 5 / mov eax, edx / je` emits `eax = edx;` and
- * then `if (eax != 5)`, which reads the new EAX where the machine compared the
- * old one: right operator, wrong operands (peek-a-bin-xe01).
+ * The guard is emitted *after* the block's statements, and that ordering is
+ * what makes this a question at all. So `cmp eax, 5 / mov eax, edx / je` emits
+ * `eax = edx;` and then `if (eax != 5)`, which reads the new EAX where the
+ * machine compared the old one: right operator, wrong operands
+ * (peek-a-bin-xe01).
  *
- * The scan is `flagResult.ts`'s `clobberedAfter`, the same one
- * `flagResultSetter`'s condition 6 makes of its *result* register. The two
- * paths in this file used to disagree about whether a later write mattered —
- * one refused to name a clobbered result, the other named a clobbered operand
- * without asking. There is now one predicate and they agree by construction.
+ * The scan is `flagModel.ts`'s `clobberedAfter`. Its forward twin is `spoils`
+ * in the same module, which `lifter.ts` asks of a *result* owner before
+ * building a branch from it — one grammar, asked at the two points where the
+ * question arises. It used to be asked here and by `flagResultSetter`, and
+ * those two paths had disagreed about whether a later write mattered at all.
  *
  * Refusing is the whole repair: the caller returns `unknown`, the emitter
  * prints `__unrecovered_N /* jcc *\/`, and the reader is told the condition was
@@ -362,17 +305,15 @@ export function structureCFG(
       // not a shift — so `cmp eax, 5 / … / sub ecx, edx / jne` emitted
       // `eax != 5` where the machine branches on `ecx - edx != 0`: the right
       // operator over operands belonging to a test that no longer holds
-      // (peek-a-bin-jitf). `isFlagTransparent` is `flagResult.ts`'s own table,
+      // (peek-a-bin-jitf). `isFlagTransparent` is `flagModel.ts`'s own table,
       // exported rather than copied, and anything not on it — including
       // anything unrecognised — ends the reading, which is the safe direction.
       const regState = new RegState();
-      let sawCmpTest = false;
       let flagSetterAddr: number | null = null;
       for (let i = 0; i < insns.length - 1; i++) {
         const insn = insns[i];
         const insnMn = insn.mnemonic.toLowerCase();
         if (insnMn === "cmp" || insnMn === "test") {
-          sawCmpTest = true;
           // A `cmp` this cannot parse still WRITES the flags, so the previous
           // one has stopped applying either way — clear first, then record only
           // what was actually read.
@@ -392,14 +333,6 @@ export function structureCFG(
           flagSetterAddr = null;
         }
       }
-      // A block with a `cmp`/`test` in it keeps exactly the reading it always
-      // had, whatever else it contains. Only a block with neither reaches the
-      // flag-result path, so nothing already recovered can change sense. That
-      // is also `flagResultSetter`'s condition 2, deliberately left in step: a
-      // block whose `cmp` has been superseded by later arithmetic now recovers
-      // nothing rather than being handed to the result path, because widening
-      // condition 2 would also widen the definitions `ssaopt.ts`'s DCE holds
-      // live off the same predicate.
       // ── The refusals, asked of the reading taken from the instructions ──
       //
       // Both are questions about the machine, not about the IR, and they must
@@ -430,17 +363,23 @@ export function structureCFG(
       // away and named registers whose assignments those same passes had
       // deleted (peek-a-bin-c33, peek-a-bin-f50k).
       //
-      // A block with no branch statement still reaches the old path, and so
-      // does one whose condition the lifter could not spell: an indirect or
-      // unresolved jump target records no branch at all, and `jecxz` and
-      // friends read a register rather than the flags.
+      // A block with no branch statement still reaches the `cmp`/`test`
+      // reading above, and so does one whose condition the lifter could not
+      // spell: an indirect or unresolved jump target records no branch at all,
+      // and `jecxz` and friends read a register rather than the flags.
+      //
+      // **A Jcc whose flags come from arithmetic is answered here too, and only
+      // here.** `dec ecx / jnz` used to take a second route — `flagResult.ts`'s
+      // backward walk, re-deriving the setter from the instruction stream with
+      // `ssaopt.ts` holding the `dec` alive by hand so it would still be there
+      // to name — and that route's last check, "is this still the register's
+      // last write", is what SSA answers by construction. `liftBlock` builds
+      // the branch from the same flag model, so the whole apparatus was
+      // measured dead on all four corpus binaries before it was removed
+      // (peek-a-bin-c33 stage 4, peek-a-bin-wf7t).
       const fromIR = branches.get(block.id)?.condition;
       if (fromIR && fromIR.kind !== "unknown") return fromIR;
 
-      if (!sawCmpTest) {
-        const fromResult = conditionFromFlagResult(block, mn, liftedBlocks.get(block.id) ?? []);
-        if (fromResult) return fromResult;
-      }
       return cond;
     }
 

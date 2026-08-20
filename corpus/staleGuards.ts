@@ -26,9 +26,8 @@
  *           cmp eax, 5  /  mov eax, edx  /  je L
  *
  *       The block's statements are emitted above the `if`, so `eax = edx;` runs
- *       first and `if (eax != 5)` reads the new EAX. `flagResultSetter`'s
- *       condition 6 had refused exactly this on the *arithmetic* path since
- *       peek-a-bin-b531; the `cmp` path never asked.
+ *       first and `if (eax != 5)` reads the new EAX. The *arithmetic* path had
+ *       refused exactly this since peek-a-bin-b531; the `cmp` path never asked.
  *
  * TWO COUNTS, and only the second is the defect:
  *
@@ -52,7 +51,7 @@
  *     so `named` is a LOWER bound. `shapes` has no such dependency.
  *   - It shares `isFlagTransparent` with the code under test. That table is a
  *     fact about x86 and is deliberately single-sourced — a second copy is the
- *     failure mode `flagResult.ts` exists to prevent — but it does mean this
+ *     failure mode `flagModel.ts` exists to prevent — but it does mean this
  *     audit cannot catch an error IN that table. The judgement built on top of
  *     it (which registers a compare names, what writes over them) is written
  *     here independently and reads only raw operand text.
@@ -63,7 +62,7 @@
  *     wrong for some other reason.
  */
 import type { BasicBlock } from "../src/disasm/cfg";
-import { isFlagTransparent } from "../src/disasm/decompile/flagResult";
+import { isFlagTransparent } from "../src/disasm/decompile/flagModel";
 import { canonReg, isKnownRegister } from "../src/disasm/decompile/ir";
 import type { Instruction } from "../src/disasm/types";
 
@@ -119,7 +118,7 @@ function regsNamed(text: string): Set<string> {
 /**
  * What one instruction writes, read off its operand text and nothing else.
  *
- * Deliberately NOT `flagResult.ts`'s `clobberedAfter`: that is the predicate the
+ * Deliberately NOT `flagModel.ts`'s `clobberedAfter`: that is the predicate the
  * fix is built on, and an audit that calls it agrees with the code under test by
  * construction. This is the same question asked again from the raw text.
  */

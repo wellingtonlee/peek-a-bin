@@ -1,10 +1,18 @@
 /**
- * A **forward** model of which instruction owns a block's flags.
+ * **The** model of what x86 does to the flags, and of which instruction owns
+ * the flags a block's Jcc reads.
  *
- * `flagResult.ts` answers the same question by walking *backwards* from a
- * block's trailing Jcc through an allowlist of flag-transparent mnemonics.
- * This module walks forwards, maintaining "who owns the flags right now" as it
- * goes, and it is preparation for peek-a-bin-c33 — nothing calls it yet.
+ * It walks a block *forwards*, maintaining "who owns the flags right now" as it
+ * goes. `lifter.ts` asks it, at the trailing Jcc, which instruction the jump
+ * reads, and builds the `IRBranch` whose condition becomes the guard.
+ *
+ * There used to be a second, *backward* answer to the same question, in
+ * `flagResult.ts`: an allowlist walk from the Jcc back to the setter, with
+ * `ssaopt.ts`'s DCE holding that setter's definition live by hand because the
+ * guard was not an IR reader and the use was invisible to it. Both are gone
+ * (peek-a-bin-c33 stage 4), and so is that module. What survived from it is the
+ * part that was never about ownership — `isFlagTransparent` and
+ * `clobberedAfter`, at the bottom of this file.
  *
  * **A forward model is not the backward one run the other way round, and the
  * difference is the whole safety property.** Backwards, the allowlist is a
@@ -27,21 +35,21 @@
  *    `cmp`/`test` determines all of them; `add`/`dec`/`and` determine ZF and SF
  *    from their result, and `inc`/`dec` do not write CF at all — so a consumer
  *    answering a CF- or OF-reading Jcc from a `"zf-sf"` owner would be wrong.
- *    That judgement is the caller's (today it is `RESULT_ANSWERABLE_JCC` in
- *    `flagResult.ts`) and is deliberately not made here.
+ *    That judgement is the caller's — `lifter.ts` makes it by asking
+ *    `RegState.getCondition`, whose `result` arm answers exactly the ZF/SF
+ *    forms and `unknown` for every other Jcc — and is deliberately not made
+ *    here. `flagResult.ts` stated it a second time, as `RESULT_ANSWERABLE_JCC`
+ *    (peek-a-bin-wf7t).
  * 3. **Whether the condition can still be spelled** (`spoiled`, `destReg`).
  *    Owning the flags and being nameable are different facts: `dec ecx / mov
  *    ecx, edx / jne` leaves ECX holding EDX where the guard would read it, and
  *    `dec dword ptr [rcx]` leaves its result where only a load could reach it.
  *    `canSpellCondition` is the single predicate for that.
  *
- * The mnemonic tables below duplicate `flagResult.ts`'s, which is exactly the
- * hand-synced-copy hazard CLAUDE.md warns about (`ripRelative.ts` and
- * `parseOperand` were each re-rolled most of a dozen times). They are not
- * imported because they are module-private there and this file was not
- * permitted to add an `export`; **when the two are wired together, one copy
- * must go.** Until then `__tests__/flagModel.test.ts` scrapes `flagResult.ts`
- * and fails if either set moves.
+ * The mnemonic tables below used to be duplicated in `flagResult.ts`, which is
+ * exactly the hand-synced-copy hazard CLAUDE.md warns about (`ripRelative.ts`
+ * and `parseOperand` were each re-rolled most of a dozen times). There is now
+ * one copy of each and this is it. Do not start a second.
  */
 import type { BasicBlock } from "../cfg";
 import type { Instruction } from "../types";
@@ -50,10 +58,8 @@ import { canonReg, isKnownRegister, regSize } from "./ir";
 /**
  * Instructions that leave every flag exactly as they found them.
  *
- * Identical membership to `flagResult.ts`'s `FLAG_TRANSPARENT`, and the test
- * suite pins that. "Provably writes no flag" is a direction-free property, so
- * the *set* is the same object; only what it licenses differs — there, another
- * step backwards; here, the standing owner survives.
+ * `isFlagTransparent` at the bottom of this file is the predicate form, for
+ * callers that want the grammar without the owner model.
  *
  * Deliberately **not** widened. `xchg`, `leave`, `setcc` and `cmovcc` all write
  * no flags either and could be added, but widening this set is the dangerous
@@ -85,10 +91,13 @@ export const NO_FLAG_WRITE: ReadonlySet<string> = new Set([
  * Instructions whose ZF and SF are the zero-ness and sign of the value they
  * wrote — every arithmetic and logical operation with a single destination.
  *
- * Identical membership to `flagResult.ts`'s `RESULT_FLAG_SETTERS`. Everything
- * absent from it is absent here for the same stated reason, and each of those
- * reasons appears below as a named clobber class rather than as silence, so the
- * model reports *why* it gave up.
+ * Everything absent is absent for a stated reason, and each reason appears
+ * below as a named clobber class rather than as silence, so the model reports
+ * *why* it gave up: `imul`/`mul`/`div`/`idiv` leave ZF and SF *undefined*;
+ * `rol`/`ror`/`rcl`/`rcr` and `bt`/`bts`/`btr`/`btc` write CF and OF only, so a
+ * Jcc after one reads an older test; `not` writes no flag at all and is in
+ * `NO_FLAG_WRITE`; `adc`/`sbb`/`xadd` have a perfectly good result that
+ * `lifter.ts` does not lift to an assignment, so it could not be named.
  */
 export const RESULT_OWNERS: ReadonlySet<string> = new Set([
   "add",
@@ -282,7 +291,7 @@ function immediateCount(text: string): number {
  *
  * `shl eax, cl` with `cl == 0` is a no-op that leaves the flags to an earlier
  * instruction, so a register count is never good enough — that much is
- * `flagResult.ts`'s rule and this keeps it. It adds the masking x86 applies to
+ * the backward walk's rule and this keeps it. It adds the masking x86 applies to
  * the count: 5 bits, or 6 under REX.W, so `shl eax, 0x20` shifts by zero and
  * writes nothing while `shl rax, 0x20` really shifts. A non-zero immediate is
  * therefore not by itself evidence that anything happened.
@@ -364,12 +373,12 @@ function writesMemory(insn: Instruction): boolean {
  * Would `insn`, executed after the owner, invalidate the *name* a condition
  * would be spelled from? The flags remain the owner's either way.
  *
- * For a result that is its destination register — the case `flagResult.ts`
- * documents (`dec ecx / mov ecx, edx / jne` leaves ECX holding EDX where the
- * guard would read it). For a compare it is the same argument applied to the
- * operands, which the backward walk never had to make because it declines any
- * block containing a compare: the block's statements are emitted *before* the
- * `if`, so `eax = edx; if (eax != 5)` reads the wrong value just as surely.
+ * For a result that is its destination register: `dec ecx / mov ecx, edx / jne`
+ * leaves ECX holding EDX where the guard would read it. For a compare it is the
+ * same argument applied to the operands — the block's statements are emitted
+ * *before* the `if`, so `eax = edx; if (eax != 5)` reads the wrong value just as
+ * surely. `clobberedAfter` below asks the same question from the other end, for
+ * `structure.ts`.
  */
 function spoils(insn: Instruction, owner: FlagOwnerCompare | FlagOwnerResult): boolean {
   if (owner.kind === "result") {
@@ -481,4 +490,100 @@ export function blockFlagOwner(block: BasicBlock): BlockFlagOwner | null {
 export function canSpellCondition(owner: FlagOwner): owner is SpellableFlagOwner {
   if (owner.kind === "none" || owner.spoiled) return false;
   return owner.kind === "compare" || owner.destReg !== null;
+}
+
+// ── The instruction-stream scan, asked after the fact ──
+
+/**
+ * Does this mnemonic leave every flag exactly as it found them?
+ *
+ * The predicate form of `NO_FLAG_WRITE`, for a caller that wants the grammar
+ * without the owner model: `structure.ts`'s `extractCondition` needs it to know
+ * when the `cmp` it just passed has stopped being the instruction its Jcc reads
+ * (peek-a-bin-jitf), `lifter.ts` to know when to clear `RegState`'s flags, and
+ * `corpus/staleGuards.ts` to find the same shape from the outside. Same
+ * asymmetry as the set's own docstring — a mnemonic wrongly answered `true`
+ * makes a condition come off the wrong instruction, one wrongly answered
+ * `false` only costs a recovery.
+ */
+export function isFlagTransparent(mnemonic: string): boolean {
+  return NO_FLAG_WRITE.has(mnemonic.toLowerCase());
+}
+
+/** What a block's instructions after some point overwrite. See `clobberedAfter`. */
+export interface ClobberScan {
+  /**
+   * Registers written, canonicalised to the 64-bit parent — so a write of `al`
+   * reports `rax`. Width-blind on purpose: a byte write really does change what
+   * a name spelled at any width denotes.
+   */
+  regs: Set<string>;
+  /**
+   * Something was written that this scan cannot attribute to a name — an
+   * instruction whose destination is implicit in the mnemonic, or a destination
+   * shape it does not recognise. A caller that must not be wrong treats this as
+   * "assume the worst"; encoding a second table of implicit destinations is
+   * exactly what `IMPLICIT_REG_WRITERS` exists to avoid.
+   */
+  opaque: boolean;
+  /** A store landed in memory, so any `deref` in a recovered expression may have moved under it. */
+  writesMemory: boolean;
+}
+
+/**
+ * What the instructions of `block` strictly after `afterAddress` — and before
+ * its final instruction — overwrite.
+ *
+ * A value recovered from an instruction is only still nameable at the block's
+ * Jcc if nothing in between has written over the names it is spelled with.
+ * `structure.ts`'s `extractCondition` asks this of a `cmp`/`test`'s *operands*:
+ * `cmp eax, 5 / mov eax, edx / je` emits the block's statements before the
+ * `if`, so `eax != 5` reads the new EAX where the machine compared the old one
+ * (peek-a-bin-xe01).
+ *
+ * It had a second caller — `flagResultSetter`, which asked the identical
+ * question of an arithmetic instruction's *result* register, and keeping them
+ * in one predicate is why they could not disagree. That caller is gone: a
+ * result-derived guard is an `IRBranch` now, so SSA answers "does this register
+ * still hold that value" by construction, and `spoils` above answers it
+ * forwards for the lifter (peek-a-bin-c33).
+ *
+ * The scan is over the *instruction stream*, which is the only version of the
+ * program that does not move: copy propagation will have rebound an overwritten
+ * register out of the IR condition entirely, which is why `extractCondition`
+ * asks this of the machine's own operand names and never of the expression it
+ * is about to emit.
+ *
+ * `push` is reported as a write of RSP rather than of memory. It stores below
+ * the stack pointer, where no operand of an instruction that already executed
+ * can live, so calling it a memory write would refuse ordinary code for
+ * nothing — but it does move RSP, and an `[esp + 0x10]` operand is spelled
+ * relative to that.
+ */
+export function clobberedAfter(block: BasicBlock, afterAddress: number): ClobberScan {
+  const regs = new Set<string>();
+  const scan: ClobberScan = { regs, opaque: false, writesMemory: false };
+  const insns = block.insns;
+  for (let i = 0; i < insns.length - 1; i++) {
+    if (insns[i].address <= afterAddress) continue;
+    const mn = insns[i].mnemonic.toLowerCase();
+    if (mn === "nop") continue;
+    if (IMPLICIT_REG_WRITERS.has(mn)) {
+      scan.opaque = true;
+      continue;
+    }
+    if (mn === "push") {
+      // Names a register it only reads; the write is RSP and the stack below it.
+      regs.add("rsp");
+      continue;
+    }
+    if (mn === "pop") regs.add("rsp");
+    // No x86 memory operand contains a comma, so a plain split is a correct
+    // operand split for the forms this reads.
+    const dst = insns[i].opStr.split(",")[0]?.trim().toLowerCase() ?? "";
+    if (isKnownRegister(dst)) regs.add(canonReg(dst));
+    else if (dst.includes("[")) scan.writesMemory = true;
+    else scan.opaque = true;
+  }
+  return scan;
 }

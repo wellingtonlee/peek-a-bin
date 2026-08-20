@@ -254,7 +254,7 @@ reads `NOT MEASURED` rather than scoring a perfect zero — verified in both dir
   The other 48 spoiled readings in this corpus were equally wrong on the page and merely
   unanchorable. `shapes` has no such dependency, which is the other reason to read both.
 - **It shares `isFlagTransparent` with the code under test.** That table is a fact about x86 and is
-  deliberately single-sourced — a second copy is the failure mode `flagResult.ts` exists to
+  deliberately single-sourced — a second copy is the failure mode `flagModel.ts` exists to
   prevent — so this audit cannot catch an error *in that table*. The judgement built on top of it,
   which registers a compare names and what writes over them, is written in `staleGuards.ts`
   independently and reads only raw operand text; it does **not** call `clobberedAfter`.

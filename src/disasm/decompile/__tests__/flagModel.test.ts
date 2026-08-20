@@ -7,23 +7,25 @@ import {
   blockFlagOwner,
   CARRY_IN_WRITERS,
   canSpellCondition,
+  clobberedAfter,
   flagEffect,
   flagOwnerBefore,
   IMPLICIT_REG_WRITERS,
   isFlagReadingJump,
+  isFlagTransparent,
   NO_FLAG_WRITE,
   PARTIAL_FLAG_WRITERS,
   RESULT_OWNERS,
   SHIFTS,
   UNDEFINED_RESULT_FLAGS,
 } from "../flagModel";
-import { flagResultSetter } from "../flagResult";
 
 /**
- * These tests were written before `flagModel.ts` existed, against the API the
- * two eventual consumers need (`structure.ts`'s `extractCondition` and
- * `flagResult.ts`'s `flagResultSetter`). The forward model is the half of
- * peek-a-bin-c33 most likely to go wrong silently: a wrong owner produces a
+ * These tests were written before anything called `flagModel.ts`, against the
+ * API its eventual consumer would need. `lifter.ts` is that consumer now: it
+ * asks `blockFlagOwner` which instruction a block's Jcc reads and builds the
+ * `IRBranch` from the answer. The forward model is the half of peek-a-bin-c33
+ * most likely to go wrong silently: a wrong owner produces a
  * guard that is valid, plausible C stating something the machine does not do,
  * which CLAUDE.md records as invisible to every stage-level gate in this repo.
  * So the clear-on-unknown default gets a test per mnemonic class, and the
@@ -340,8 +342,8 @@ describe("blockFlagOwner", () => {
   });
 
   it("marks a compare spoiled when a later instruction overwrites an operand", () => {
-    // The same argument `flagResult.ts` makes for a result's destination, made
-    // for a compare's operands: the block's statements are emitted before the
+    // The same argument made for a result's destination, made for a compare's
+    // operands: the block's statements are emitted before the
     // `if`, so `eax = edx; if (eax != 5)` reads the new value.
     const o = owner("cmp eax, 5", "mov eax, edx", "je 0x401800");
     expect(o.kind).toBe("compare");
@@ -385,60 +387,40 @@ describe("flagOwnerBefore", () => {
 });
 
 /**
- * The backward walk in `flagResult.ts` and this forward model answer different
- * questions — it declines any block containing a `cmp`/`test` and any Jcc
- * outside its ZF/SF set, both of which are gates on the *caller's* behalf
- * rather than facts about the flags. So the agreement that must hold is
- * one-directional: wherever it commits to an answer, this model must commit to
- * the same one. Any block where it answers and this model does not, or answers
- * differently, is a defect in one of the two.
+ * The shapes the deleted backward walk in `flagResult.ts` used to answer, and
+ * the ones it used to decline.
+ *
+ * These were an *agreement* suite: the backward walk committed to an
+ * instruction and this model had to commit to the same one. It is gone — a
+ * result-derived guard is an `IRBranch` built from this model now
+ * (peek-a-bin-c33 stage 4) — so what is left is the half that was ever a claim
+ * about x86 rather than about the two implementations matching. Every case
+ * below is now the *only* statement of what the lifter will do with the block.
  */
-describe("agreement with the backward walk in flagResult.ts", () => {
-  const cases: [string, string[]][] = [
-    ["plain dec", ["dec ecx", "jne 0x401800"]],
-    ["sub then je", ["sub eax, ebx", "je 0x401800"]],
-    ["and then jz", ["and eax, 3", "jz 0x401800"]],
-    ["or self then jne", ["or rax, rax", "jne 0x401800"]],
-    ["neg then js", ["neg eax", "js 0x401800"]],
-    ["shift by immediate", ["shl eax, 1", "jne 0x401800"]],
-    ["transparent after", ["dec ecx", "mov edx, eax", "jnz 0x401800"]],
-    ["transparent before", ["mov ecx, edx", "dec ecx", "jne 0x401800"]],
-    ["lea between", ["dec ecx", "lea eax, [ebx + 4]", "jne 0x401800"]],
-    ["result overwritten", ["dec ecx", "mov ecx, edx", "jne 0x401800"]],
-    ["memory destination", ["dec dword ptr [rcx]", "jne 0x401800"]],
-    ["shift by register", ["shl eax, cl", "jne 0x401800"]],
-    ["call between", ["dec ecx", "call 0x401500", "jne 0x401800"]],
-    ["unrecognised between", ["dec ecx", "xchg eax, edx", "jne 0x401800"]],
-    ["implicit writer after", ["dec eax", "cdq", "jne 0x401800"]],
-    ["nothing sets flags", ["mov eax, 1", "je 0x401800"]],
-    ["adc", ["adc eax, ecx", "je 0x401800"]],
-    ["imul", ["imul eax, ecx", "je 0x401800"]],
-    ["rol", ["rol eax, 1", "je 0x401800"]],
+describe("which instruction a result-derived guard is answered from", () => {
+  const answers: [string, string[], string][] = [
+    ["plain dec", ["dec ecx", "jne 0x401800"], "dec"],
+    ["sub then je", ["sub eax, ebx", "je 0x401800"], "sub"],
+    ["and then jz", ["and eax, 3", "jz 0x401800"], "and"],
+    ["or self then jne", ["or rax, rax", "jne 0x401800"], "or"],
+    ["neg then js", ["neg eax", "js 0x401800"], "neg"],
+    ["shift by immediate", ["shl eax, 1", "jne 0x401800"], "shl"],
+    ["transparent after", ["dec ecx", "mov edx, eax", "jnz 0x401800"], "dec"],
+    ["transparent before", ["mov ecx, edx", "dec ecx", "jne 0x401800"], "dec"],
+    ["lea between", ["dec ecx", "lea eax, [ebx + 4]", "jne 0x401800"], "dec"],
   ];
 
-  it("commits to the same instruction wherever the backward walk commits", () => {
-    let agreed = 0;
-    for (const [name, code] of cases) {
-      const b = block(...code);
-      const backward = flagResultSetter(b);
-      if (!backward) continue;
-      agreed++;
-      const o = blockFlagOwner(b)?.owner;
+  it("names the arithmetic instruction and can spell its result", () => {
+    for (const [name, code, mnemonic] of answers) {
+      const o = blockFlagOwner(block(...code))?.owner;
       expect(o?.kind, name).toBe("result");
       if (o?.kind !== "result") continue;
-      expect(o.address, name).toBe(backward.address);
-      expect(o.mnemonic, name).toBe(backward.mnemonic);
-      expect(o.destText, name).toBe(backward.destText);
-      expect(o.destReg, name).toBe(backward.destReg);
-      expect(o.spoiled, name).toBe(false);
+      expect(o.mnemonic, name).toBe(mnemonic);
       expect(canSpellCondition(o), name).toBe(true);
     }
-    // Guards the guard: a table that stopped exercising the backward walk at
-    // all would otherwise pass this vacuously.
-    expect(agreed).toBeGreaterThanOrEqual(8);
   });
 
-  it("declines wherever the backward walk declines for a reason about the flags", () => {
+  it("declines when something between the setter and the Jcc took the flags", () => {
     const declines: [string, string[]][] = [
       ["call between", ["dec ecx", "call 0x401500", "jne 0x401800"]],
       ["unrecognised between", ["dec ecx", "xchg eax, edx", "jne 0x401800"]],
@@ -449,176 +431,114 @@ describe("agreement with the backward walk in flagResult.ts", () => {
       ["nothing sets flags", ["mov eax, 1", "je 0x401800"]],
     ];
     for (const [name, code] of declines) {
-      const b = block(...code);
-      expect(flagResultSetter(b), name).toBeNull();
-      const o = blockFlagOwner(b)?.owner;
+      const o = blockFlagOwner(block(...code))?.owner;
       expect(o && canSpellCondition(o), name).toBeFalsy();
     }
   });
 
-  it("declines to *name* what the backward walk declines to name", () => {
-    // Both models own these flags; neither can spell a condition from them.
+  it("owns the flags but declines to NAME the result", () => {
+    // Ownership and nameability are different facts, and this is the pair that
+    // separates them: each of these really does leave the flags to the
+    // arithmetic, and in none of them does a register still hold its result.
     for (const [name, code] of [
       ["result overwritten", ["dec ecx", "mov ecx, edx", "jne 0x401800"]],
       ["memory destination", ["dec dword ptr [rcx]", "jne 0x401800"]],
       ["implicit writer after", ["dec eax", "cdq", "jne 0x401800"]],
     ] as [string, string[]][]) {
-      const b = block(...code);
-      expect(flagResultSetter(b), name).toBeNull();
-      const o = blockFlagOwner(b)?.owner;
+      const o = blockFlagOwner(block(...code))?.owner;
       expect(o?.kind, name).toBe("result");
       expect(o && canSpellCondition(o), name).toBe(false);
     }
   });
 
-  /**
-   * The enumerated cases above are the shapes that were reasoned about; this is
-   * the one that goes looking. Every block of one or two instructions drawn
-   * from an alphabet spanning each effect class, under four Jccs, checked
-   * against the same one-directional property. It is what would catch a
-   * disagreement nobody thought to write down.
-   *
-   * It cannot catch a *missing clear*, and that is worth knowing: the backward
-   * walk declines on precisely the instructions this model must clear on, so
-   * those blocks never enter the comparison. The per-class tests above carry
-   * that load alone.
-   */
-  it("commits to the same instruction on every block over an instruction alphabet", () => {
-    const alphabet = [
-      "mov ecx, edx",
-      "mov eax, 1",
-      "mov dword ptr [rdx], eax",
-      "push ecx",
-      "pop eax",
-      "lea eax, [ebx + 4]",
-      "cdq",
-      "nop",
-      "not eax",
-      "dec ecx",
-      "add eax, 1",
-      "sub ecx, edx",
-      "shl eax, 1",
-      // `shl eax, 0x20` is deliberately absent: the two models genuinely
-      // disagree there, and that divergence has its own test below.
-      "shl eax, cl",
-      "cmp eax, 5",
-      "test eax, eax",
-      "call 0x401500",
-      "xchg eax, edx",
-      "imul eax, ecx",
-      "rol eax, 1",
-      "adc eax, ecx",
-      "dec dword ptr [rcx]",
-      "movsb",
-    ];
-    const jccs = ["je", "jne", "js", "jns"];
-
-    let committed = 0;
-    const disagreements: string[] = [];
-    for (const jcc of jccs) {
-      for (const a of alphabet) {
-        for (const rest of [[], ...alphabet.map((b) => [b])]) {
-          const code = [a, ...rest, `${jcc} 0x401800`];
-          const b = block(...code);
-          const backward = flagResultSetter(b);
-          if (!backward) continue;
-          committed++;
-          const o = blockFlagOwner(b)?.owner;
-          const agrees =
-            o?.kind === "result" &&
-            o.address === backward.address &&
-            o.mnemonic === backward.mnemonic &&
-            o.destText === backward.destText &&
-            o.destReg === backward.destReg &&
-            !o.spoiled;
-          if (!agrees) disagreements.push(`${code.join(" ; ")} -> ${o?.kind}`);
-        }
-      }
-    }
-
-    expect(disagreements).toEqual([]);
-    expect(committed).toBeGreaterThan(100);
-  });
-
-  it("diverges on a shift count that masks to zero, and is the correct one", () => {
+  it("clears on a shift count that masks to zero", () => {
     // `shl eax, 0x20` shifts a 32-bit destination by 0x20 & 0x1f == 0, so it
-    // writes no flag and the Jcc is reading an older test. The backward walk
-    // asks only whether the count is a non-zero immediate and attributes the
-    // condition to the shift. This is a defect in `flagResult.ts` rather than a
-    // difference of policy — see the report on this task.
+    // writes no flag and the Jcc is reading an older test. The deleted backward
+    // walk asked only whether the count was a non-zero immediate and attributed
+    // the condition to the shift; that was a defect, and removing it removed
+    // the one place the two models disagreed.
     const masked = block("cmp eax, 5", "shl eax, 0x20", "jne 0x401800");
-    const wide = block("shl rax, 0x20", "jne 0x401800");
-
-    expect(flagResultSetter(block("shl eax, 0x20", "jne 0x401800"))).not.toBeNull();
     expect(blockFlagOwner(masked)?.owner).toMatchObject({ kind: "none", reason: "cleared" });
-    // The 64-bit form really does shift, and both models claim it.
-    expect(flagResultSetter(wide)).not.toBeNull();
+    // The 64-bit form really does shift.
+    const wide = block("shl rax, 0x20", "jne 0x401800");
     expect(blockFlagOwner(wide)?.owner).toMatchObject({ kind: "result", mnemonic: "shl" });
   });
 
   /**
-   * The deliberate divergences, enumerated rather than tuned away. Each is a
-   * block the backward walk declines and this model answers, and in every one
-   * the reason it declines is a gate on a caller's behalf.
+   * Three shapes the backward walk declined by construction and this model
+   * answers. Two of the three are consumed; the first is deliberately NOT, and
+   * the refusal lives in `lifter.ts`'s `branchFor` rather than here, because it
+   * is a decision about an audit rather than a fact about the flags.
    */
-  it("answers three shapes the backward walk declines by construction", () => {
-    // 1. A `cmp` in the block. `flagResultSetter` returns null on sight of one
-    //    so that the two recovery paths stay disjoint; the forward model has
-    //    no such split, and this is the peek-a-bin-jitf shape.
+  it("answers three shapes the backward walk declined by construction", () => {
+    // 1. A `cmp` in the block. The backward walk returned null on sight of one
+    //    so the two recovery paths stayed disjoint. This is peek-a-bin-jitf's
+    //    shape, and `corpus/staleGuards.ts` counts any condition emitted at
+    //    such a jcc as the stale reading — so `branchFor` still declines it.
     const jitf = block("cmp eax, 5", "sub ecx, edx", "jne 0x401800");
-    expect(flagResultSetter(jitf)).toBeNull();
     expect(blockFlagOwner(jitf)?.owner).toMatchObject({ kind: "result", mnemonic: "sub" });
 
     // 2. A Jcc outside ZF/SF. Which conditions a result can answer is a
-    //    property of the *Jcc*, so it belongs to the caller, not here.
+    //    property of the *Jcc*, so it belongs to the caller — `getCondition`
+    //    returns `unknown` and `branchFor` builds nothing.
     const carry = block("sub eax, ebx", "jb 0x401800");
-    expect(flagResultSetter(carry)).toBeNull();
     expect(blockFlagOwner(carry)?.owner).toMatchObject({ kind: "result", defines: "zf-sf" });
 
-    // 3. An ordinary compare, which the backward walk exists to sidestep.
+    // 3. An ordinary compare, which the backward walk existed to sidestep.
     const plain = block("cmp eax, 5", "je 0x401800");
-    expect(flagResultSetter(plain)).toBeNull();
     expect(blockFlagOwner(plain)?.owner).toMatchObject({ kind: "compare", mnemonic: "cmp" });
   });
 });
 
 /**
- * A drift guard of the kind CLAUDE.md documents — it scrapes `flagResult.ts`
- * rather than calling it, because the tables there are module-private and this
- * task may not add an `export`. Written so a reformat cannot break it: it
- * matches the declaration by name and pulls the quoted strings out of the
- * literal.
+ * A drift guard of the kind CLAUDE.md documents, inverted.
+ *
+ * It used to scrape `flagResult.ts` and fail if that module's private copies of
+ * these tables stopped matching this one's. There is no second copy any more —
+ * `flagResult.ts` is gone and its two survivors live at the bottom of
+ * `flagModel.ts` — so the thing to guard is that nobody starts a third. It
+ * scans every module that could plausibly want one and fails on a `Set` literal
+ * carrying a distinctive slice of either table's membership. Written so a
+ * reformat cannot break it: it matches quoted strings inside a `new Set([...])`
+ * and never the surrounding layout.
  */
-describe("mnemonic tables agree with flagResult.ts", () => {
-  const source = fs.readFileSync(
-    path.join(process.cwd(), "src/disasm/decompile/flagResult.ts"),
-    "utf8",
-  );
-
-  function setLiteral(name: string): Set<string> {
-    const decl = new RegExp(`${name}\\s*=\\s*new Set\\(\\s*\\[([\\s\\S]*?)\\]`).exec(source);
-    if (!decl) throw new Error(`${name} is no longer declared as a Set literal in flagResult.ts`);
-    return new Set(Array.from(decl[1].matchAll(/"([^"]+)"/g), (m) => m[1]));
+describe("nothing re-declares the flag tables", () => {
+  const roots = ["src/disasm/decompile", "corpus"];
+  const files: string[] = [];
+  for (const root of roots) {
+    const dir = path.join(process.cwd(), root);
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".ts") || name === "flagModel.ts") continue;
+      files.push(path.join(dir, name));
+    }
   }
 
-  it("has the same flag-transparent set", () => {
-    // Identical membership, deliberately. "Provably writes no flag" is
-    // direction-free; only the consequence differs.
-    expect([...NO_FLAG_WRITE].sort()).toEqual([...setLiteral("FLAG_TRANSPARENT")].sort());
+  // Three members apiece, chosen because no unrelated table would carry them
+  // together. `bswap` and `movsxd` do not co-occur outside a flag-transparency
+  // list; `sal` and `neg` do not co-occur outside a result-setter list.
+  const signatures: [string, string[]][] = [
+    ["NO_FLAG_WRITE", ["movsxd", "bswap", "cqo"]],
+    ["RESULT_OWNERS", ["sal", "neg", "sar"]],
+  ];
+
+  it("finds no second copy of NO_FLAG_WRITE or RESULT_OWNERS", () => {
+    expect(files.length).toBeGreaterThan(10);
+    const offenders: string[] = [];
+    for (const file of files) {
+      const text = fs.readFileSync(file, "utf8");
+      for (const literal of text.matchAll(/new Set\(\s*\[([\s\S]*?)\]/g)) {
+        const members = new Set(Array.from(literal[1].matchAll(/"([^"]+)"/g), (m) => m[1]));
+        for (const [table, signature] of signatures) {
+          if (signature.every((mn) => members.has(mn))) {
+            offenders.push(`${path.basename(file)} re-declares ${table}`);
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
-  it("has the same result-owner set", () => {
-    expect([...RESULT_OWNERS].sort()).toEqual([...setLiteral("RESULT_FLAG_SETTERS")].sort());
-  });
-
-  it("has the same shift and implicit-writer sets", () => {
-    expect([...SHIFTS].sort()).toEqual([...setLiteral("SHIFTS")].sort());
-    expect([...IMPLICIT_REG_WRITERS].sort()).toEqual(
-      [...setLiteral("IMPLICIT_REG_WRITERS")].sort(),
-    );
-  });
-
-  it("keeps the two classifications disjoint", () => {
+  it("keeps the classifications disjoint", () => {
     for (const mn of RESULT_OWNERS) expect(NO_FLAG_WRITE.has(mn), mn).toBe(false);
     for (const mn of SHIFTS) expect(RESULT_OWNERS.has(mn), mn).toBe(true);
     for (const mn of IMPLICIT_REG_WRITERS) expect(NO_FLAG_WRITE.has(mn), mn).toBe(true);
@@ -628,5 +548,13 @@ describe("mnemonic tables agree with flagResult.ts", () => {
         expect(NO_FLAG_WRITE.has(mn), mn).toBe(false);
       }
     }
+  });
+
+  it("still exports the two survivors of flagResult.ts", () => {
+    expect(isFlagTransparent("mov")).toBe(true);
+    expect(isFlagTransparent("dec")).toBe(false);
+    const scan = clobberedAfter(block("dec ecx", "mov ecx, edx", "jne 0x401800"), 0x401000);
+    expect(scan.regs.has("rcx")).toBe(true);
+    expect(scan.opaque).toBe(false);
   });
 });
