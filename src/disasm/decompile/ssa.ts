@@ -58,6 +58,15 @@ export function clobberedByCall(stmt: IRStmt): string[] {
     if (arg.kind === "reg" && canonReg(arg.name) === FASTCALL_ARG_REGS[i])
       out.push(FASTCALL_ARG_REGS[i]);
   }
+  // Anything the callee itself is known to write, from the interprocedural
+  // summary in `disasm/callSummary.ts` — see `IRCall.clobbers`. UNION, never
+  // substitution: the two are different evidence and neither implies the other.
+  // The argument set is what the decompiler read at the *call site*; the summary
+  // is what the *callee* does, and it is absent entirely on every path that does
+  // not build one. Adding only means a write this analysis has positive evidence
+  // for can be reported, while a write it missed leaves the site exactly as it
+  // was (peek-a-bin-hj1).
+  for (const canon of stmt.call.clobbers ?? []) if (!out.includes(canon)) out.push(canon);
   return out;
 }
 

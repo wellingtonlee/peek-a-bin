@@ -390,6 +390,43 @@ values (89 → 281 branches) and t64/w64/w32 from 85/67/85 to 220/186/241. `pola
 462 → 398 on t32 in the same run, and `npm run corpus` itself stays **green**, because none of
 this is gated in the run. `compare.mjs` reports 16 regressions and exits 1.
 
+**What a call destroys — `clobbered_<reg>_<n>` in the emitted C, counted beside the constructs
+emitted.** The emitter prints `clobbered_rcx_4` for a read of a register version a *call* handed
+out: nothing defines it, and naming it `rcx` would put the reader back where they started, because
+C's `rcx` still holds whatever the last `rcx = …` line put there. **Measured at `f685b6d`: 0, 11,
+11 and 0 reads (t32/t64/w64/w32) with the narrow model, and 0, 21, 21 and 0 once
+`src/disasm/callSummary.ts`'s per-callee summaries were wired in** — 17 distinct values across 7
+functions per x64 binary.
+
+**IT IS NOT A GATE IN EITHER DIRECTION, and that is the whole design of the row.** A rise is not a
+defect: a call that really does destroy a register *should* say so, and the entire point of
+`peek-a-bin-hj1` was to widen this honestly. A fall is not an improvement either — the narrow model
+reaches zero by saying nothing at all, which is how the ABI-set experiment could look like a
+regression when it was measured and how the narrow one could look like a triumph.
+
+**What makes a change here judgeable is the `if`/`while`/`for` counts printed beside it.** The ABI
+volatile set's measured harm was a guard **deleted** — `t64!sub_140004A9C` computes R10
+conditionally, calls, and stores through it, and clobbering took the `if` count 1925 → 1924 — so
+the construct counts are the row that turns a clobber count into a verdict. Read them together or
+read neither. On the run that took clobbered reads 11 → 21 they were **unchanged on all four
+binaries**, and `t64!sub_140004A9C` was byte-identical.
+
+Three further figures are instrument liveness for the summary pass, which would otherwise report
+the healthiest possible numbers if it quietly stopped resolving callees: `callee summaries`
+non-empty out of functions summarised, how many sit at the full volatile set (267/279 non-empty
+and 187 full on t64; 286/288 and **0** on t32, because 32-bit code can only write EAX/ECX/EDX), and
+`unclassified mnemonics` — instructions whose mnemonic `callSummary.ts`'s written-register table
+does not classify. That last one is **0 on all four binaries** and each one would be a write the
+scan cannot see, so `compare.mjs` treats a rise in it as a regression while every other row here is
+report-only.
+
+*Adjudicating a change.* The cost of the wiring measured here was entry-value copies: 103 → 153 on
+t64 and 96 → 144 on w64, both with `spoiled 0`, +111 and +106 emitted lines, and 66 of 279 and 61
+of 275 functions changed against **byte-identical PE32**. Six guards on t64 and five on w64 left the polarity audit's anchored set; every one was an
+entry-value copy inserted at the top of the guarded block, which moves the anchor while the guard
+text and the `if` count stay put. That is the shape to expect, and it is exactly why
+`polarity guards audited` falling means "read the emitted C" rather than "the change is wrong".
+
 **Call arity against `apitypes.ts`'s declared signatures** — `arity.ts`. For every emitted call
 whose callee `src/disasm/decompile/apitypes.ts` declares, the arguments the emitted C passes are
 counted against the parameters the table declares. **Measured on base `7082e66` with
@@ -824,7 +861,7 @@ remaining gap and is not implemented.
 |---|---|
 | `corpus.audit.ts` | The entry point. Preflight, the shared sweep, the gates, the report. |
 | `preflight.ts` | Where the corpus is, and whether this machine can run at all. |
-| `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values. |
+| `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values, clobbered reads. |
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
@@ -847,6 +884,14 @@ point in `pipeline.ts` at which one observer sees both. Every pass it calls is t
 export, in `pipeline.ts`'s order, so a stage inserted between `ssaOptimize` and `destroySSA` shows
 up as a divergence between the two — but nothing enforces that automatically. If you insert one,
 update the replica.
+
+**Its `liftBlock` arguments are part of that, and one of them has already been missed.** The
+replica must be handed everything the pipeline lifts with, including `calleeSavedFirstWrite` and
+`calleeClobbers`; the second was added to `pipeline.ts` and not to the replica, which would have
+left the stale-version-0 gate measuring the pre-summary lift while the sweep beside it measured the
+post-summary one. `calleeClobbers` in particular decides which registers a call destroys, which is
+the very subject of that audit. Nothing catches this: both sides typecheck, and the audit reports a
+confident number about a program the pipeline does not build.
 
 ### The one thing these audits need from `src/`
 

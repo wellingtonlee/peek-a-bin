@@ -167,6 +167,24 @@ Cooper-Harvey-Kennedy dominator algorithm (`ssa.ts`):
 - Per-register versioning and renaming. **Version 0 is reserved for a register's function-entry value; the definition counter starts at 1.** When both meant 0, `ssaopt`'s `sameReg`/`regKey` treated the incoming value and the first definition as one value, and every SSA pass propagated across the two (`peek-a-bin-swi`)
 - `detectNaturalLoops` — an edge `u → v` is a back edge only when `v` dominates `u`. This is the tree's **single** notion of "loop": `cfg.ts`'s `detectLoops` delegates to it and repackages the result as `Loop[]`, so the disassembly view's loop markers and the decompiler's loops can no longer disagree
 
+**A call defines the registers it destroys, and which those are is two pieces of evidence unioned**
+(`clobberedByCall`, `ssa.ts`). The first is the *call site*: the argument registers the lifter
+already said the call was given, which is the only clobber evidence available with nothing but one
+function's instructions in hand. The second is the *callee*: `IRCall.clobbers`, filled from
+`disasm/callSummary.ts`'s interprocedural written-register summary, which scans each detected
+function's destination operands plus a vetted implicit-write table, closes the result over the call
+graph to a fixpoint and intersects it with the Windows x64 volatile set.
+
+The union never becomes a substitution, and the summary is built to under-approximate — an
+unrecognised mnemonic writes nothing, a `pop r` matched by a `push r` is a save/restore, and an
+import, an indirect call or a jump into unrecovered code contributes nothing. That asymmetry is the
+lesson of `peek-a-bin-hj1`: modelling a call as destroying the *whole* volatile set is what the ABI
+permits and not what compiled code does, and it renamed 17 reads of a function's own parameters
+(because `__chkstk` preserves everything but RAX/R10/R11) and deleted a guard outright (because
+MSVC parks live values in R10 across calls to helpers it has analysed). A write the scan misses
+costs a clobber; a write it invents is that harm. See CLAUDE.md's gotcha of the same name for the
+three consequences, including why `RegState.invalidateCallerSaved` must not be narrowed with it.
+
 **Destruction spells a register at the image's own width** (`ssadestroy.ts`). `canonReg` maps
 every alias to the 64-bit parent because that is the register's *identity*, and SSA keys on
 identity — so `phi.dest.size` is 8 for **every** phi even in 32-bit code, and a width-based

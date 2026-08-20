@@ -70,6 +70,22 @@ export interface IRCall {
   target: string;
   args: IRExpr[];
   display?: string;
+  /**
+   * Canonical registers the *callee* is known to modify, from the interprocedural
+   * written-register summary in `disasm/callSummary.ts`. Undefined means no
+   * summary was supplied, which is every path that does not build one.
+   *
+   * Recorded on the call rather than looked up later because the only thing the
+   * statement otherwise carries about its callee is a display *name*: the
+   * address `resolveCallTarget` resolved is thrown away, and a name is neither
+   * unique nor stable under a rename. `clobberedByCall` unions this with the
+   * argument registers it already reports — it never replaces them, so a summary
+   * that missed a write costs a clobber rather than inventing one.
+   *
+   * RAX is deliberately never listed: `liftBlock` gives every `call_stmt` a
+   * `resultDest` of RAX/EAX, which is already a definition.
+   */
+  clobbers?: string[];
 }
 
 export interface IRCast {

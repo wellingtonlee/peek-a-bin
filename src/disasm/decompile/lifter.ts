@@ -1,3 +1,5 @@
+import type { CalleeClobbers } from "../callSummary";
+import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import type { Instruction } from "../types";
@@ -315,6 +317,7 @@ export function liftBlock(
   _stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
   calleeSavedFirstWrite?: Map<string, number>,
+  calleeClobbers?: CalleeClobbers,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -618,6 +621,7 @@ export function liftBlock(
         target: target.name,
         args,
         display: target.display,
+        clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
       };
       const retReg = is64 ? "rax" : "eax";
       stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
@@ -667,6 +671,7 @@ export function liftBlock(
           target: tail.name,
           args,
           display: tail.display,
+          clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
         };
         const retReg = is64 ? "rax" : "eax";
         stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
@@ -1031,6 +1036,43 @@ function resolveNamedTarget(
   }
 
   return null;
+}
+
+/**
+ * The registers this call site's callee is known to modify, or `undefined` when
+ * no summary was supplied.
+ *
+ * THREE RULES, and the third is the one that keeps this honest:
+ *
+ * - **x64 only.** On x86 `clobberedByCall` reports nothing at all — cdecl and
+ *   stdcall pass nothing in a register, so there is no call-site evidence to
+ *   union with — and every register this could add would be new. The 32-bit CRT
+ *   helpers are also the shape the summary is least sure about; see
+ *   `callSummary.ts`. The two PE32 binaries are the control for this change and
+ *   their emitted C must not move.
+ * - **RAX is dropped.** `liftBlock` gives every `call_stmt` a `resultDest` of
+ *   RAX/EAX, so it is already defined at this point and listing it again buys
+ *   nothing.
+ * - **A target with no summary gets `unresolved`, not silence.** An import, an
+ *   indirect call and a jump into unrecovered code are the same fact — a callee
+ *   whose body this analysis never read — and what they are worth is the
+ *   caller's policy, not this function's. `CalleeClobbers.unresolved` carries it.
+ */
+function calleeClobbersFor(
+  insn: Instruction,
+  is64: boolean,
+  iatMap: Map<number, { lib: string; func: string }>,
+  summaries: CalleeClobbers | undefined,
+): string[] | undefined {
+  if (!is64 || !summaries) return undefined;
+  const target = resolveBranchTargetAddr(insn);
+  let regs: readonly string[] = summaries.unresolved;
+  if (target && !(target.kind === "indirectMem" && iatMap.has(target.addr))) {
+    const known = summaries.byAddress.get(target.addr);
+    if (known) regs = known;
+  }
+  const out = regs.filter((r) => r !== "rax");
+  return out.length > 0 ? out : undefined;
 }
 
 function resolveCallTarget(

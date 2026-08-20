@@ -17,6 +17,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isCoveredMnemonic, X64_VOLATILE } from "../src/disasm/callSummary";
 import { buildCFG, detectLoops } from "../src/disasm/cfg";
 import type { IRStmt } from "../src/disasm/decompile/ir";
 import { decompileFunction, type StructuringTap } from "../src/disasm/decompile/pipeline";
@@ -398,6 +399,49 @@ export interface BinResult {
   /** Every unrecovered value, per site. Written as `unrecovered_<key>.jsonl`. */
   unrecoveredSites: UnrecoveredRec[];
   /**
+   * WHAT A CALL DESTROYS, counted from the emitted C — the measurement
+   * `peek-a-bin-hj1` lives or dies by.
+   *
+   * `clobbered_<reg>_<version>` is what the emitter prints for a read of a
+   * register version a *call* handed out: no statement defines it, so the value
+   * is indeterminate and naming it after the register would put the reader back
+   * where they started (C's `rcx` still holds whatever the last `rcx = …` line
+   * put there). Every occurrence in the emitted body is a READ — the `long
+   * clobbered_rcx_4;` line in the `.c` file is `emitAudits.ts`'s prelude, added
+   * after this runs — and `values` counts the distinct names behind them.
+   *
+   * IT IS NOT A GATE IN EITHER DIRECTION, and that is the point of recording
+   * it. A rise is not automatically a defect — a call that really does destroy
+   * a register *should* say so, and the whole of hj1 is about widening this
+   * honestly. A fall is not automatically an improvement either: the narrow
+   * model falls to zero by saying nothing at all. What makes a change here
+   * judgeable is reading it beside `ifs` below, which is where the harmful
+   * direction shows up: modelling a call as clobbering the full ABI volatile
+   * set deleted a guard outright in `t64!sub_140004A9C`.
+   *
+   * `summaryFuncs`/`summaryNonEmpty`/`summaryFull` are instrument liveness for
+   * `callSummary.ts` — a summary pass that quietly stopped resolving callees
+   * would report the healthiest possible numbers. `uncoveredMnemonics` counts
+   * instructions whose mnemonic that module's table does not classify: each one
+   * is a write it cannot see, so a rise means the summary is quietly
+   * under-approximating more than it was.
+   */
+  clobbered: {
+    occurrences: number;
+    values: number;
+    reads: number;
+    funcsAffected: number;
+    byRegister: Record<string, number>;
+    /** Emitted `if (`, `while (` and `for (` — the guard-deletion tell. */
+    ifs: number;
+    whiles: number;
+    fors: number;
+    summaryFuncs: number;
+    summaryNonEmpty: number;
+    summaryFull: number;
+    uncoveredMnemonics: number;
+  };
+  /**
    * A REGISTER NAMED IN THE EMITTED C THAT NO LONGER HOLDS WHAT THE SSA SAID.
    *
    * A GATE at 0, unlike the two audits above it, and `corpus/staleReads.ts`
@@ -548,6 +592,22 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       detail: [],
     },
     unrecoveredSites: [],
+    clobbered: {
+      occurrences: 0,
+      values: 0,
+      reads: 0,
+      funcsAffected: 0,
+      byRegister: {},
+      ifs: 0,
+      whiles: 0,
+      fors: 0,
+      summaryFuncs: af.calleeClobbers.byAddress.size,
+      summaryNonEmpty: [...af.calleeClobbers.byAddress.values()].filter((v) => v.length > 0).length,
+      summaryFull: [...af.calleeClobbers.byAddress.values()].filter(
+        (v) => v.length === X64_VOLATILE.length,
+      ).length,
+      uncoveredMnemonics: af.instructions.filter((i) => !isCoveredMnemonic(i.mnemonic)).length,
+    },
     staleV0: emptyStaleV0(),
     staleGuards: emptyStaleGuards(),
     funcs: [],
@@ -601,6 +661,10 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         af.structRegistry,
         af.pe.runtimeFunctions,
         (ev) => tapped.push(ev),
+        // Whole-image, closed over the call graph, and built by the session
+        // rather than here: the measurement must be of the same code the MCP
+        // decompile path runs, not of a summary the harness computed for itself.
+        af.calleeClobbers,
       );
       code = r.code;
       lineMap = r.lineMap;
@@ -663,10 +727,44 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       af.iatMap,
       af.stringMap,
       funcMap,
+      af.calleeClobbers,
     );
   }
 
+  auditClobbered(res);
   return res;
+}
+
+/**
+ * Count what the emitter admitted a call destroyed, plus the three construct
+ * counts that say whether a guard went missing while it did so.
+ *
+ * Read off the emitted text rather than the IR for the same reason
+ * `auditUnrecovered` is: what matters is the name that reached the page.
+ */
+function auditClobbered(res: BinResult): void {
+  const NAME = /\bclobbered_([a-z0-9]+)_(\d+)\b/g;
+  for (const f of res.funcs) {
+    if (f.code === "") continue;
+    res.clobbered.ifs += f.code.match(/\bif \(/g)?.length ?? 0;
+    res.clobbered.whiles += f.code.match(/\bwhile \(/g)?.length ?? 0;
+    res.clobbered.fors += f.code.match(/\bfor \(/g)?.length ?? 0;
+    const hits = [...f.code.matchAll(NAME)];
+    if (hits.length === 0) continue;
+    res.clobbered.funcsAffected++;
+    res.clobbered.occurrences += hits.length;
+    // Every occurrence in the emitted *body* is a read: the declaration is not
+    // the emitter's, it is `emitAudits.ts`'s prelude, which is added later and
+    // is not part of `code`. Distinct names are counted per function, since the
+    // name is scoped to one.
+    const distinct = new Set<string>();
+    for (const h of hits) {
+      distinct.add(h[0]);
+      res.clobbered.byRegister[h[1]] = (res.clobbered.byRegister[h[1]] ?? 0) + 1;
+    }
+    res.clobbered.values += distinct.size;
+  }
+  res.clobbered.reads = res.clobbered.occurrences;
 }
 
 type Af = Awaited<ReturnType<FileSession["loadFile"]>>;

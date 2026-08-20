@@ -240,6 +240,32 @@ for (const b of bins) {
     note("  arity over-count              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── What a call destroys (corpus/sweep.ts `auditClobbered`). ──────────────
+  //
+  // REPORT-ONLY, both directions, and deliberately. A rise means more reads were
+  // named as the indeterminate values they are, which is what `peek-a-bin-hj1`
+  // set out to achieve; a fall can equally mean the model went quiet. The row
+  // that turns this into a judgement is `if`/`while`/`for` beside it: the ABI
+  // volatile set's measured harm was a guard DELETED, and construct counts are
+  // where that shows up. Read them together or read neither.
+  if (B.clobbered && C.clobbered) {
+    row("clobbered reads", (x) => x.clobbered.reads);
+    row("  distinct clobbered values", (x) => x.clobbered.values);
+    row("  functions affected", (x) => x.clobbered.funcsAffected);
+    row("  if emitted", (x) => x.clobbered.ifs);
+    row("  while emitted", (x) => x.clobbered.whiles);
+    row("  for emitted", (x) => x.clobbered.fors);
+    row("  callee summaries non-empty", (x) => x.clobbered.summaryNonEmpty);
+    row(
+      "  unclassified mnemonics",
+      (x) => x.clobbered.uncoveredMnemonics,
+      (a, c) => c > a,
+      "MORE MNEMONICS THE WRITTEN-REGISTER TABLE DOES NOT CLASSIFY",
+    );
+  } else {
+    note("  clobbered reads               NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── Guards naming the wrong operands (corpus/staleGuards.ts). ──────────────
   //
   // The other dimension no other guard here can see. A wrong-operand guard has

@@ -1,4 +1,5 @@
 import type { RuntimeFunction } from "../../pe/types";
+import type { CalleeClobbers } from "../callSummary";
 import { buildCFG, detectLoops } from "../cfg";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
@@ -72,6 +73,16 @@ export function decompileFunction(
   registry?: StructRegistry,
   runtimeFunctions?: RuntimeFunction[],
   tap?: (ev: StructuringTap) => void,
+  /**
+   * What each callee is known to write, from `disasm/callSummary.ts`. Absent on
+   * every path that does not build one, and absent means exactly the behaviour
+   * this pipeline had before the summary existed — see `IRCall.clobbers`.
+   *
+   * Last, after `tap`, because it is the same kind of parameter: an optional
+   * extra piece of evidence that a caller either has or does not, and putting it
+   * anywhere else would renumber twelve existing call sites for nothing.
+   */
+  calleeClobbers?: CalleeClobbers,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -101,6 +112,7 @@ export function decompileFunction(
         stringMap,
         funcMap,
         calleeSavedFirstWrite,
+        calleeClobbers,
       );
       liftedBlocks.set(block.id, stmts);
     }

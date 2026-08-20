@@ -38,6 +38,8 @@
  * lowered statement list actually says, and which block actually writes the
  * register.
  */
+
+import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
 import { foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
@@ -300,6 +302,7 @@ export function auditStaleV0Reads(
   iatMap: Map<number, { lib: string; func: string }>,
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
+  calleeClobbers: CalleeClobbers | undefined,
 ): void {
   let ctx: SSAContext;
   try {
@@ -307,13 +310,24 @@ export function auditStaleV0Reads(
     if (blocks.length === 0) return;
     const lifted = new Map<number, IRStmt[]>();
     // Same arguments the pipeline lifts with, including the callee-saved write
-    // map: this audit re-lifts in order to measure the program the pipeline
-    // builds, so a divergence here would make it measure a different one.
+    // map and the per-callee clobber summaries: this audit re-lifts in order to
+    // measure the program the pipeline builds, so a divergence here would make
+    // it measure a different one. `calleeClobbers` in particular decides which
+    // registers a call destroys, which is the whole subject of this audit.
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
     for (const b of blocks)
       lifted.set(
         b.id,
-        liftBlock(b, new RegState(), is64, iatMap, stringMap, funcMap, calleeSavedFirstWrite),
+        liftBlock(
+          b,
+          new RegState(),
+          is64,
+          iatMap,
+          stringMap,
+          funcMap,
+          calleeSavedFirstWrite,
+          calleeClobbers,
+        ),
       );
     ctx = buildSSA(blocks, lifted);
     const natural = detectNaturalLoops(blocks, ctx.idom, ctx.domTree);

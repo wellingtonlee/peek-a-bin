@@ -576,6 +576,27 @@ function renderReport(): string {
     L.push("    NONE of them is in guards_<bin>.jsonl: an unrecovered condition has no top-level");
     L.push("    operator, so it is not a failing polarity row, it is not a row at all. A rise is");
     L.push("    judged in compare.mjs, beside polarity.checked FALLING. See README.md.");
+    const cb = r.clobbered;
+    const byReg = Object.entries(cb.byRegister)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ");
+    L.push(
+      `  BASELINE clobbered reads    ${cb.reads} of ${cb.values} distinct values ` +
+        `across ${cb.funcsAffected} functions — NOT a gate`,
+    );
+    L.push(
+      `    constructs emitted        ${cb.ifs} if, ${cb.whiles} while, ${cb.fors} for` +
+        (byReg ? `\n    by register:              ${byReg}` : ""),
+    );
+    L.push(
+      `    callee summaries          ${cb.summaryNonEmpty}/${cb.summaryFuncs} non-empty, ` +
+        `${cb.summaryFull} at the full volatile set, ${cb.uncoveredMnemonics} unclassified mnemonics`,
+    );
+    L.push("    What a call destroys. NOT gated in either direction: a call that really does");
+    L.push("    destroy a register SHOULD say so, and the narrow model reaches zero by saying");
+    L.push("    nothing. Judge it beside the construct counts — modelling a call as clobbering");
+    L.push("    the whole ABI volatile set DELETED a guard (peek-a-bin-hj1). See README.md.");
     const sv = r.staleV0;
     L.push(
       `  stale version-0 names       ${sv.wrong} wrong of ${sv.confirmed} confirmed, ` +

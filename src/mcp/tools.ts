@@ -234,6 +234,8 @@ export function registerTools(server: McpServer, session: FileSession): void {
           funcMap,
           af.structRegistry,
           af.pe.runtimeFunctions,
+          undefined,
+          af.calleeClobbers,
         );
 
         return json({

@@ -6,8 +6,10 @@
 import { type Anomaly, detectAnomalies } from "../analysis/anomalies";
 import { type DriverInfo, detectDriver } from "../analysis/driver";
 import { archForMachine, type ImageArch } from "../disasm/arch";
+import { buildCallSummaries, type CalleeClobbers } from "../disasm/callSummary";
 import { buildDataWindows } from "../disasm/dataWindows";
 import { StructRegistry } from "../disasm/decompile/structs";
+import { buildFuncInsnMap } from "../disasm/funcInsns";
 import { buildIATLookup } from "../disasm/operands";
 import { jumpTableTargets } from "../disasm/seeds";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -65,6 +67,17 @@ export interface AnalyzedFile {
    * that already reads `arch !== "x86"` covers it without change.
    */
   arch: ImageArch;
+  /**
+   * What each detected function is known to write, closed over the call graph —
+   * `disasm/callSummary.ts`. Handed to `decompileFunction`, where it is the
+   * evidence `clobberedByCall` unions with the argument registers it already
+   * reports.
+   *
+   * Empty on anything but `"x86"`: the scan reads x86 mnemonics, so on ARM64 it
+   * would recognise nothing and report nothing, and every stage that could use
+   * it declines on that architecture anyway.
+   */
+  calleeClobbers: CalleeClobbers;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
   structRegistry: StructRegistry;
@@ -248,6 +261,34 @@ export class FileSession {
           instructions,
         );
 
+    // 8b. Per-callee written-register summaries, closed over the call graph.
+    //
+    // Computed here rather than inside `decompileFunction` because it is
+    // interprocedural and that function is handed one function's instructions:
+    // the callee's body is not in scope there, which is the whole reason the
+    // ABI set was ever used as a stand-in (peek-a-bin-hj1). A whole-image pass
+    // over `funcInsnMap` costs one walk of the instruction stream.
+    //
+    // `unresolved` is deliberately empty. An import, an indirect call and a
+    // jump into unrecovered code are callees whose body this analysis never
+    // read, and the ABI's volatile set is what such a callee is *permitted* to
+    // destroy rather than an observation of what it does — which is precisely
+    // the assumption hj1's measurements refuted. Measured both ways over the
+    // corpus: the ABI answer moved the emitted C by 7 lines and 2 clobbered
+    // reads per x64 binary, so it buys nothing that would justify re-admitting
+    // it. See `corpus/README.md`.
+    const calleeClobbers: CalleeClobbers = {
+      byAddress:
+        arch === "x86"
+          ? buildCallSummaries({
+              functionAddresses: functions.map((f) => f.address),
+              funcInsnMap: buildFuncInsnMap(functions, instructions),
+              iatMap,
+            })
+          : new Map(),
+      unresolved: [],
+    };
+
     // 9. Detect anomalies
     const anomalies = detectAnomalies(pe);
 
@@ -270,6 +311,7 @@ export class FileSession {
       stringTypes,
       jumpTables,
       arch,
+      calleeClobbers,
       anomalies,
       driverInfo,
       structRegistry,
