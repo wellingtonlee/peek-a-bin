@@ -237,6 +237,17 @@ independently reports as `only in BASE` over the same pair of runs, with `CHANGE
 hand against `objdump`, including t64 `0x1400055a6` (`cmp %cx,(%r8) / mov $0x58,%ecx / jne`,
 emitted as `*(uint16_t*)(r8) != (uint16_t)ecx`).
 
+**In `compare.mjs`** (`peek-a-bin-x5lb`): `named` is gated on a rise, and `shapes`,
+`bySuperseded`, `byClobbered` and `blocks` are reported. `named` is already gated at 0 *in the run*,
+so a rise fails CI before `compare.mjs` is reached — it is repeated there because `compare.mjs` is
+what says **what moved** between two pinned commits, and a run that fails without naming the rows
+that came back is the failure mode `peek-a-bin-rl01` documented. `shapes` is deliberately **not**
+gated: it counts blocks whose trailing jcc reads flags the recovered compare does not describe,
+which is a property of the machine code and moves only when function detection or block
+construction moves, so a change in it is a signal about something else and is adjudicated rather
+than judged. Guarded with the `if (B.x && C.x)` idiom, so an artifact directory predating the audit
+reads `NOT MEASURED` rather than scoring a perfect zero — verified in both directions.
+
 **What it does not catch**, so the zero is read for what it is:
 
 - **`named` is a lower bound.** It counts only guards the polarity pass could **anchor** to a jcc.

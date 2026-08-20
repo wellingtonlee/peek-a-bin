@@ -240,6 +240,41 @@ for (const b of bins) {
     note("  arity over-count              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── Guards naming the wrong operands (corpus/staleGuards.ts). ──────────────
+  //
+  // The other dimension no other guard here can see. A wrong-operand guard has
+  // the RIGHT comparison operator — it is answered from a compare the flags have
+  // moved on from, or one whose operand a later instruction overwrote — so it
+  // passes `polarity inverted` unchanged, and it is not an unrecovered value
+  // either, so it is not a row in the branch-recovery count. Both `peek-a-bin-xe01`
+  // and `peek-a-bin-jitf` survived precisely because every standing gate was blind
+  // to them.
+  //
+  // NAMED is gated at 0 in the run itself, so a rise fails CI before this script
+  // is reached. It is repeated here because compare.mjs is what says *what moved*
+  // between two pinned commits, and a run that fails without saying which rows
+  // came back is the failure mode `peek-a-bin-rl01` documented for unrecovered
+  // values.
+  //
+  // SHAPES is deliberately NOT gated: it counts blocks whose trailing jcc reads
+  // flags the recovered compare does not describe, which is a property of the
+  // machine code and moves only when function detection or block construction
+  // moves. That makes a change in it a signal about something else entirely, so
+  // it is reported and adjudicated rather than judged here.
+  if (B.staleGuards && C.staleGuards) {
+    row(
+      "wrong-operand guards named",
+      (x) => x.staleGuards.named,
+      (a, c) => c > a,
+    );
+    row("  spoiled readings (machine shape)", (x) => x.staleGuards.shapes);
+    row("  of which superseded", (x) => x.staleGuards.bySuperseded);
+    row("  of which clobbered", (x) => x.staleGuards.byClobbered);
+    row("  jcc blocks examined", (x) => x.staleGuards.blocks);
+  } else {
+    note("  wrong-operand guards named    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —
