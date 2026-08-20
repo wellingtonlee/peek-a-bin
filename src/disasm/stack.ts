@@ -263,7 +263,7 @@ export function analyzeStackFrame(
     });
   }
 
-  return { frameSize, vars };
+  return { frameSize, vars, framed };
 }
 
 /** Stable identity for a stack slot: base register + signed operand offset. */

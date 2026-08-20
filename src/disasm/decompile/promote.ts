@@ -2,7 +2,7 @@ import type { FunctionSignature } from "../signatures";
 import { stackVarKey } from "../stack";
 import type { StackFrame } from "../types";
 import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir";
-import { irVar, walkStmts } from "./ir";
+import { bodiesOf, irVar, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 
@@ -143,6 +143,9 @@ function sizeToType(size: number): string {
 
 // ── Stack access pattern matching ──
 
+/** No frame-register alias is in play — see `frameRegisterAliases`. */
+const NO_ALIASES: ReadonlySet<string> = new Set<string>();
+
 interface StackAccess {
   /** Slot identity — see `stackVarKey`. `[rbp-0x10]` and `[rsp+0x10]` differ. */
   key: string;
@@ -152,34 +155,111 @@ interface StackAccess {
   isParam: boolean;
 }
 
-/** Check if expr is [rbp - const] or [rsp + const] and return the slot. */
-function matchStackAccess(expr: IRExpr, is64: boolean): StackAccess | null {
+/**
+ * Variables that provably hold the frame register's value, so that a slot
+ * addressed through one of them is the same slot as one addressed through the
+ * register itself.
+ *
+ * `splitStaleReads` parks a register version in a variable named after it
+ * (`ebp_1`) and rewrites the stale reads to that variable, so a frame slot can
+ * reach this pass addressed off `ebp_1` rather than off `ebp` — and it does, at
+ * a *subset* of the sites in a function whose other sites still say `ebp`. The
+ * frame register is the one register for which that split changes nothing about
+ * the address: a frame pointer is invariant for the whole body by construction,
+ * so every version of it denotes the same frame. Leaving the aliased sites
+ * unmatched therefore did not preserve a distinction, it printed one slot under
+ * two spellings — `arg_0` at one site and `*(int32_t*)(ebp_1 + 8)` at another
+ * (peek-a-bin-5zpo).
+ *
+ * ONLY under a verified prologue, and only for the frame register. Both limits
+ * are the point:
+ *
+ *  - Without `StackFrame.framed` the invariance is not established. RBP is then
+ *    an ordinary callee-saved register — usually an object pointer — and two
+ *    versions of it are two different objects, which is precisely what the
+ *    split exists to keep apart. It is also what `structs.ts` needs left alone:
+ *    `[rbp + 0x10]` in a frame-pointer-omitted function is a struct field
+ *    access, and this pass consuming it would take it out of struct synthesis's
+ *    reach before that pass's own gate could decline it.
+ *  - The stack pointer gets nothing here. It moves — that is the whole of what
+ *    it does — so no version of it is interchangeable with another, and
+ *    CLAUDE.md's standing rule is that no read of RSP may be reinterpreted at a
+ *    program point other than its own.
+ *
+ * The evidence is the body's own assignments, in either direction, because
+ * `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;` — the
+ * copy's source is the *stack* pointer, and only the second statement ties it
+ * to the frame register. Chains are resolved to a fixpoint so the order the
+ * statements appear in does not matter.
+ */
+function frameRegisterAliases(body: IRStmt[], is64: boolean, framed: boolean): Set<string> {
+  const alias = new Set<string>();
+  if (!framed) return alias;
+  const bp = is64 ? "rbp" : "ebp";
+  const isFrameReg = (e: IRExpr): boolean => e.kind === "reg" && e.name.toLowerCase() === bp;
+
+  // Collected first so the fixpoint below can see a chain written in any order.
+  const defs: { dest: IRExpr; src: IRExpr }[] = [];
+  const scan = (stmts: IRStmt[]): void => {
+    for (const s of stmts) {
+      if (s.kind === "assign") defs.push({ dest: s.dest, src: s.src });
+      // `bodiesOf` does not reach inside a `for`'s init and update — they are
+      // single statements, not lists — and a copy of the frame register can sit
+      // in either, so they are walked here.
+      if (s.kind === "for") scan([s.init, s.update]);
+      for (const nested of bodiesOf(s)) scan(nested);
+    }
+  };
+  scan(body);
+
+  const holdsFrame = (e: IRExpr): boolean =>
+    isFrameReg(e) || (e.kind === "var" && alias.has(e.name));
+  for (let pass = 0; pass <= defs.length; pass++) {
+    let changed = false;
+    for (const { dest, src } of defs) {
+      if (dest.kind === "var" && !alias.has(dest.name) && holdsFrame(src)) {
+        alias.add(dest.name);
+        changed = true;
+      }
+      if (isFrameReg(dest) && src.kind === "var" && !alias.has(src.name)) {
+        alias.add(src.name);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return alias;
+}
+
+/**
+ * Check if expr is [rbp - const] or [rsp + const] and return the slot.
+ *
+ * `bpAliases` names variables standing in for the frame register — see
+ * `frameRegisterAliases`. It is empty unless the frame-pointer prologue was
+ * verified, so the frame-pointer-omission reading of `[rbp + N]` is untouched.
+ */
+function matchStackAccess(
+  expr: IRExpr,
+  is64: boolean,
+  bpAliases: ReadonlySet<string>,
+): StackAccess | null {
   if (expr.kind !== "deref") return null;
   const addr = expr.address;
 
   const bp = is64 ? "rbp" : "ebp";
   const sp = is64 ? "rsp" : "esp";
+  const isBp = (e: IRExpr): boolean =>
+    (e.kind === "reg" && e.name.toLowerCase() === bp) ||
+    (e.kind === "var" && bpAliases.has(e.name));
 
   // [rbp - offset] → local
-  if (
-    addr.kind === "binary" &&
-    addr.op === "-" &&
-    addr.left.kind === "reg" &&
-    addr.left.name.toLowerCase() === bp &&
-    addr.right.kind === "const"
-  ) {
+  if (addr.kind === "binary" && addr.op === "-" && isBp(addr.left) && addr.right.kind === "const") {
     const offset = addr.right.value;
     return { key: stackVarKey("bp", -offset), base: "bp", offset, isParam: false };
   }
 
   // [rbp + offset] → param (if offset >= threshold)
-  if (
-    addr.kind === "binary" &&
-    addr.op === "+" &&
-    addr.left.kind === "reg" &&
-    addr.left.name.toLowerCase() === bp &&
-    addr.right.kind === "const"
-  ) {
+  if (addr.kind === "binary" && addr.op === "+" && isBp(addr.left) && addr.right.kind === "const") {
     const minParam = is64 ? 0x10 : 0x8;
     const offset = addr.right.value;
     if (offset >= minParam)
@@ -198,12 +278,10 @@ function matchStackAccess(expr: IRExpr, is64: boolean): StackAccess | null {
     return { key: stackVarKey("sp", offset), base: "sp", offset, isParam: false };
   }
 
-  // Direct register (rbp/rsp alone) with const
-  if (addr.kind === "reg") {
-    const name = addr.name.toLowerCase();
-    if (name === bp) return { key: stackVarKey("bp", 0), base: "bp", offset: 0, isParam: false };
-    if (name === sp) return { key: stackVarKey("sp", 0), base: "sp", offset: 0, isParam: false };
-  }
+  // Direct base (rbp/rsp, or a frame-register alias) with no displacement
+  if (isBp(addr)) return { key: stackVarKey("bp", 0), base: "bp", offset: 0, isParam: false };
+  if (addr.kind === "reg" && addr.name.toLowerCase() === sp)
+    return { key: stackVarKey("sp", 0), base: "sp", offset: 0, isParam: false };
 
   return null;
 }
@@ -215,9 +293,10 @@ function promoteExpr(
   is64: boolean,
   varLookup: Map<string, string>,
   paramLookup: Map<string, string>,
+  bpAliases: ReadonlySet<string>,
 ): IRExpr {
   // Check if this is a stack variable deref
-  const stackAccess = matchStackAccess(expr, is64);
+  const stackAccess = matchStackAccess(expr, is64, bpAliases);
   if (stackAccess) {
     const lookup = stackAccess.isParam ? paramLookup : varLookup;
     const name = lookup.get(stackAccess.key);
@@ -230,31 +309,43 @@ function promoteExpr(
     case "binary":
       return {
         ...expr,
-        left: promoteExpr(expr.left, is64, varLookup, paramLookup),
-        right: promoteExpr(expr.right, is64, varLookup, paramLookup),
+        left: promoteExpr(expr.left, is64, varLookup, paramLookup, bpAliases),
+        right: promoteExpr(expr.right, is64, varLookup, paramLookup, bpAliases),
       };
     case "unary":
-      return { ...expr, operand: promoteExpr(expr.operand, is64, varLookup, paramLookup) };
+      return {
+        ...expr,
+        operand: promoteExpr(expr.operand, is64, varLookup, paramLookup, bpAliases),
+      };
     case "deref":
-      return { ...expr, address: promoteExpr(expr.address, is64, varLookup, paramLookup) };
+      return {
+        ...expr,
+        address: promoteExpr(expr.address, is64, varLookup, paramLookup, bpAliases),
+      };
     case "call":
-      return { ...expr, args: expr.args.map((a) => promoteExpr(a, is64, varLookup, paramLookup)) };
+      return {
+        ...expr,
+        args: expr.args.map((a) => promoteExpr(a, is64, varLookup, paramLookup, bpAliases)),
+      };
     case "ternary":
       return {
         ...expr,
-        condition: promoteExpr(expr.condition, is64, varLookup, paramLookup),
-        then: promoteExpr(expr.then, is64, varLookup, paramLookup),
-        else: promoteExpr(expr.else, is64, varLookup, paramLookup),
+        condition: promoteExpr(expr.condition, is64, varLookup, paramLookup, bpAliases),
+        then: promoteExpr(expr.then, is64, varLookup, paramLookup, bpAliases),
+        else: promoteExpr(expr.else, is64, varLookup, paramLookup, bpAliases),
       };
     case "cast":
-      return { ...expr, operand: promoteExpr(expr.operand, is64, varLookup, paramLookup) };
+      return {
+        ...expr,
+        operand: promoteExpr(expr.operand, is64, varLookup, paramLookup, bpAliases),
+      };
     case "field_access":
-      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup) };
+      return { ...expr, base: promoteExpr(expr.base, is64, varLookup, paramLookup, bpAliases) };
     case "array_access":
       return {
         ...expr,
-        base: promoteExpr(expr.base, is64, varLookup, paramLookup),
-        index: promoteExpr(expr.index, is64, varLookup, paramLookup),
+        base: promoteExpr(expr.base, is64, varLookup, paramLookup, bpAliases),
+        index: promoteExpr(expr.index, is64, varLookup, paramLookup, bpAliases),
       };
     default:
       return expr;
@@ -266,11 +357,12 @@ function promoteStmt(
   is64: boolean,
   varLookup: Map<string, string>,
   paramLookup: Map<string, string>,
+  bpAliases: ReadonlySet<string>,
 ): IRStmt {
   switch (stmt.kind) {
     case "assign": {
-      const dest = promoteExpr(stmt.dest, is64, varLookup, paramLookup);
-      const src = promoteExpr(stmt.src, is64, varLookup, paramLookup);
+      const dest = promoteExpr(stmt.dest, is64, varLookup, paramLookup, bpAliases);
+      const src = promoteExpr(stmt.src, is64, varLookup, paramLookup, bpAliases);
       return { ...stmt, dest, src };
     }
     case "store": {
@@ -278,6 +370,7 @@ function promoteStmt(
       const stackAccess = matchStackAccess(
         { kind: "deref", address: stmt.address, size: stmt.size },
         is64,
+        bpAliases,
       );
       if (stackAccess) {
         const lookup = stackAccess.isParam ? paramLookup : varLookup;
@@ -287,70 +380,76 @@ function promoteStmt(
           return {
             kind: "assign",
             dest: irVar(name, stmt.size),
-            src: promoteExpr(stmt.value, is64, varLookup, paramLookup),
+            src: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases),
             addr: stmt.addr,
           };
         }
       }
       return {
         ...stmt,
-        address: promoteExpr(stmt.address, is64, varLookup, paramLookup),
-        value: promoteExpr(stmt.value, is64, varLookup, paramLookup),
+        address: promoteExpr(stmt.address, is64, varLookup, paramLookup, bpAliases),
+        value: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases),
       };
     }
     case "call_stmt":
       return {
         ...stmt,
-        call: promoteExpr(stmt.call, is64, varLookup, paramLookup) as IRExpr & { kind: "call" },
+        call: promoteExpr(stmt.call, is64, varLookup, paramLookup, bpAliases) as IRExpr & {
+          kind: "call";
+        },
       };
     case "return":
       return stmt.value
-        ? { ...stmt, value: promoteExpr(stmt.value, is64, varLookup, paramLookup) }
+        ? { ...stmt, value: promoteExpr(stmt.value, is64, varLookup, paramLookup, bpAliases) }
         : stmt;
     case "if":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        thenBody: stmt.thenBody.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
-        elseBody: stmt.elseBody?.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
+        thenBody: stmt.thenBody.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+        elseBody: stmt.elseBody?.map((s) =>
+          promoteStmt(s, is64, varLookup, paramLookup, bpAliases),
+        ),
       };
     case "while":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
       };
     case "do_while":
       return {
         ...stmt,
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
       };
     case "switch":
       return {
         ...stmt,
-        expr: promoteExpr(stmt.expr, is64, varLookup, paramLookup),
+        expr: promoteExpr(stmt.expr, is64, varLookup, paramLookup, bpAliases),
         cases: stmt.cases.map((c) => ({
           ...c,
-          body: c.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+          body: c.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
         })),
-        defaultBody: stmt.defaultBody?.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        defaultBody: stmt.defaultBody?.map((s) =>
+          promoteStmt(s, is64, varLookup, paramLookup, bpAliases),
+        ),
       };
     case "for":
       return {
         ...stmt,
-        init: promoteStmt(stmt.init, is64, varLookup, paramLookup),
-        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup),
-        update: promoteStmt(stmt.update, is64, varLookup, paramLookup),
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        init: promoteStmt(stmt.init, is64, varLookup, paramLookup, bpAliases),
+        condition: promoteExpr(stmt.condition, is64, varLookup, paramLookup, bpAliases),
+        update: promoteStmt(stmt.update, is64, varLookup, paramLookup, bpAliases),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
       };
     case "try":
       return {
         ...stmt,
-        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
-        handler: stmt.handler.map((s) => promoteStmt(s, is64, varLookup, paramLookup)),
+        body: stmt.body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+        handler: stmt.handler.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
         filterExpr: stmt.filterExpr
-          ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup)
+          ? promoteExpr(stmt.filterExpr, is64, varLookup, paramLookup, bpAliases)
           : undefined,
       };
     default:
@@ -390,6 +489,7 @@ function inferVarTypes(
   is64: boolean,
   varLookup: Map<string, string>,
   paramLookup: Map<string, string>,
+  bpAliases: ReadonlySet<string>,
 ): void {
   const localsByName = new Map<string, IRLocal>();
   for (const l of locals) localsByName.set(l.name, l);
@@ -401,7 +501,7 @@ function inferVarTypes(
     // Check for cast wrapping a stack deref: (int8_t)*(deref)
     if (expr.kind === "cast") {
       const inner = expr.operand;
-      const sa = matchStackAccess(inner, is64);
+      const sa = matchStackAccess(inner, is64, bpAliases);
       if (sa) {
         const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
@@ -417,7 +517,7 @@ function inferVarTypes(
     }
     // Track deref sizes for stack variables
     if (expr.kind === "deref") {
-      const sa = matchStackAccess(expr, is64);
+      const sa = matchStackAccess(expr, is64, bpAliases);
       if (sa) {
         const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
@@ -461,7 +561,9 @@ function synthesizeStackFrame(
   const accesses = new Map<string, Access>();
 
   walkStmts(body, (expr) => {
-    const sa = matchStackAccess(expr, is64);
+    // No `StackFrame` at all means nothing verified a prologue, so there is no
+    // frame-register alias to follow — see `frameRegisterAliases`.
+    const sa = matchStackAccess(expr, is64, NO_ALIASES);
     if (sa && !sa.isParam && expr.kind === "deref") {
       const existing = accesses.get(sa.key);
       if (!existing) {
@@ -540,6 +642,11 @@ export function promoteVars(
     synthesizeStackFrame(body, is64, varLookup, locals);
   }
 
+  // Variables standing in for the frame register, so a slot reached through one
+  // resolves to the same name as one reached through the register. Empty unless
+  // stack.ts verified the prologue — see `frameRegisterAliases`.
+  const bpAliases = frameRegisterAliases(body, is64, stackFrame?.framed ?? false);
+
   // For x64 fastcall: add register params
   if (is64 && signature && signature.paramCount > 0) {
     for (let i = 0; i < Math.min(signature.paramCount, 4); i++) {
@@ -552,7 +659,7 @@ export function promoteVars(
   }
 
   // Infer variable types from access patterns
-  inferVarTypes(body, locals, is64, varLookup, paramLookup);
+  inferVarTypes(body, locals, is64, varLookup, paramLookup, bpAliases);
 
   // Apply type inference results from SSA-level analysis
   if (typeCtx) {
@@ -571,7 +678,7 @@ export function promoteVars(
   }
 
   // Promote body
-  const promoted = body.map((s) => promoteStmt(s, is64, varLookup, paramLookup));
+  const promoted = body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases));
 
   // Type-based variable renaming
   const renameMap = new Map<string, string>();

@@ -37,7 +37,12 @@ function stackVar(over: Partial<StackVar> & { name: string }): StackVar {
 }
 
 function frameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars };
+  return { frameSize: 0x40, vars, framed: true };
+}
+
+/** A frame whose prologue stack.ts could NOT verify — frame-pointer omission. */
+function unframedFrameOf(...vars: StackVar[]): StackFrame {
+  return { frameSize: 0x40, vars, framed: false };
 }
 
 /** `[rbp - offset]` — a local slot. */
@@ -218,6 +223,136 @@ describe("promoteVars — stack access matching", () => {
     expect(promote([assign(irReg("eax", 4), scaled)], { frame }).body[0]).toEqual(
       assign(irReg("eax", 4), scaled),
     );
+  });
+});
+
+describe("promoteVars — frame-register aliases", () => {
+  // `splitStaleReads` parks a register version in a variable named after it and
+  // rewrites the stale reads to that variable, so a frame slot can arrive here
+  // addressed off `ebp_1` at some sites and off `ebp` at others in the same
+  // function. Under a verified prologue those are the same address, and this is
+  // what makes them the same *name* (peek-a-bin-5zpo).
+  const frame32 = () =>
+    frameOf(
+      stackVar({ name: "arg_0", offset: 8, key: stackVarKey("bp", 8) }),
+      stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) }),
+    );
+  /** `[<var> + offset]` — a slot reached through a split copy, which is a var. */
+  const viaVar = (name: string, op: "+" | "-", offset: number, size = 4): IRExpr =>
+    irDeref(irBinary(op, irVar(name, 4), irConst(offset)), size);
+  /** `mov ebp, esp` as `swapDefWithCopy` leaves it. */
+  const prologue: IRStmt[] = [
+    assign(irVar("ebp_1", 4), irReg("esp", 4)),
+    assign(irReg("ebp", 4), irVar("ebp_1", 4)),
+  ];
+
+  it("promotes a param slot addressed through a split copy of the frame register", () => {
+    const fn = promote([...prologue, assign(irReg("eax", 4), viaVar("ebp_1", "+", 8))], {
+      frame: frame32(),
+      is64: false,
+    });
+    expect(fn.body[2]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+  });
+
+  it("promotes a local slot addressed through a split copy", () => {
+    const fn = promote([...prologue, assign(irReg("eax", 4), viaVar("ebp_1", "-", 4))], {
+      frame: frame32(),
+      is64: false,
+    });
+    expect(fn.body[2]).toEqual(assign(irReg("eax", 4), irVar("var_4", 4)));
+  });
+
+  it("gives the same name to the copy and the register in one function", () => {
+    const fn = promote(
+      [
+        ...prologue,
+        assign(irReg("eax", 4), viaVar("ebp_1", "+", 8)),
+        assign(irReg("ecx", 4), bpParam(8, 4, "ebp")),
+      ],
+      { frame: frame32(), is64: false },
+    );
+    expect(fn.body[2]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+    expect(fn.body[3]).toEqual(assign(irReg("ecx", 4), irVar("arg_0", 4)));
+  });
+
+  it("follows a chain of copies", () => {
+    const fn = promote(
+      [
+        ...prologue,
+        assign(irVar("ebp_2", 4), irVar("ebp_1", 4)),
+        assign(irReg("eax", 4), viaVar("ebp_2", "+", 8)),
+      ],
+      { frame: frame32(), is64: false },
+    );
+    expect(fn.body[3]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+  });
+
+  it("accepts a copy taken directly from the frame register", () => {
+    const fn = promote(
+      [
+        assign(irVar("saved", 4), irReg("ebp", 4)),
+        assign(irReg("eax", 4), viaVar("saved", "+", 8)),
+      ],
+      { frame: frame32(), is64: false },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+  });
+
+  // The trap: without a verified prologue RBP is an ordinary callee-saved
+  // register, so two versions of it are two different objects and `[rbp+0x10]`
+  // is a struct field access `structs.ts` must still get to see.
+  it("does not follow a copy when the prologue was not verified", () => {
+    const unframed = unframedFrameOf(
+      stackVar({ name: "arg_0x10", offset: 0x10, key: stackVarKey("bp", 0x10) }),
+    );
+    const access = viaVar("rbp_1", "+", 0x10);
+    const fn = promote(
+      [assign(irVar("rbp_1", 8), irReg("rbp", 8)), assign(irReg("eax", 4), access)],
+      { frame: unframed },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
+  });
+
+  it("still promotes the literal frame register when the prologue was not verified", () => {
+    const unframed = unframedFrameOf(
+      stackVar({ name: "arg_0x10", offset: 0x10, key: stackVarKey("bp", 0x10) }),
+    );
+    const fn = promote([assign(irReg("eax", 4), bpParam(0x10))], { frame: unframed });
+    expect(fn.body[0]).toEqual(assign(irReg("eax", 4), irVar("arg_0x10", 4)));
+  });
+
+  // The stack pointer moves, so no version of it stands in for another —
+  // CLAUDE.md's rule that no read of RSP may be reinterpreted elsewhere.
+  it("never follows a copy of the stack pointer", () => {
+    const frame = frameOf(stackVar({ name: "var_20", offset: 0x20, key: stackVarKey("sp", 0x20) }));
+    const access = viaVar("rsp_1", "+", 0x20);
+    const fn = promote(
+      [assign(irVar("rsp_1", 8), irReg("rsp", 8)), assign(irReg("eax", 4), access)],
+      { frame },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
+  });
+
+  it("finds the alias wherever the assignment sits in the tree", () => {
+    const fn = promote(
+      [
+        {
+          kind: "if",
+          condition: irReg("eax", 4),
+          thenBody: prologue,
+        } as IRStmt,
+        assign(irReg("ecx", 4), viaVar("ebp_1", "+", 8)),
+      ],
+      { frame: frame32(), is64: false },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("ecx", 4), irVar("arg_0", 4)));
+  });
+
+  it("synthesizes no alias when there is no stack frame at all", () => {
+    const access = viaVar("ebp_1", "-", 4);
+    const fn = promote([...prologue, assign(irReg("eax", 4), access)], { is64: false });
+    expect(fn.body[2]).toEqual(assign(irReg("eax", 4), access));
+    expect(fn.locals).toEqual([]);
   });
 });
 

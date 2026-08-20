@@ -46,6 +46,20 @@ export interface StackVar {
 export interface StackFrame {
   frameSize: number;
   vars: StackVar[];
+  /**
+   * Did the function open with the canonical `push <fp>; mov <fp>, <sp>`
+   * prologue? Only then is the frame register a *frame* pointer — invariant for
+   * the whole body, and with `[<fp> + N]` addressing the caller's argument
+   * area. Under frame-pointer omission RBP is an ordinary callee-saved
+   * register, usually an object pointer, and neither of those holds.
+   *
+   * `arg_<N>` in a var's name already carries this — stack.ts spells a slot
+   * that way only when this is true (see `hasFramePointerPrologue`) — but only
+   * for a frame that *has* an argument slot. A framed function that takes no
+   * arguments says nothing through that channel, so the fact is published here
+   * as well rather than re-derived from the names.
+   */
+  framed: boolean;
 }
 
 export interface DataItem {
