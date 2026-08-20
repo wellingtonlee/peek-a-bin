@@ -527,6 +527,68 @@ Passing these is *not* the same as the change being verified — see **Verificat
 above. If the change touched a component, a modal, the CSP or the nginx headers, nothing you can
 run here exercised it.
 
+## Committing
+
+**This repository opts in to agents committing.** Commit a coherent unit of work yourself, once
+the gates below are green — do not finish a piece of work and then ask permission to record it.
+This is the repository-level opt-in that the **Team-maintainer** profile at the bottom of this
+file refers to, and it overrides the Conservative default's "do not commit unless explicitly
+asked". A current instruction not to commit still wins over this section.
+
+**Pushing is NOT included, and the distinction is deliberate.** `main` has run many commits ahead
+of `origin/main` for a while; that is the normal state here, not a backlog to clear. Ask before
+`git push`, before `git pull --rebase`, and before any Dolt remote sync. One practical
+consequence worth knowing: **tool-created subagent worktrees are cut from `origin/main`, not your
+local `main`**, so while main is unpushed every such worktree silently lacks your recent work.
+Create worktrees yourself from an explicit commit, or push (having asked) to make it go away.
+
+### Before you commit
+
+```sh
+npm run typecheck && npm test && npm run build
+npm run check        # the CI gate; expect exit 0, 71 warnings, 3 infos
+npm run corpus       # ONLY if the change could move emitted C — see below
+```
+
+`npm run corpus` is the one that is easy to skip and expensive to have skipped. Run it whenever
+the change touches `src/disasm/`, the decompiler pipeline, function detection or the emitter, and
+**confirm the report header names four binaries** — a missing corpus directory *skips* and still
+exits 0, so a green run is not always a run. Diff it against a base run pinned to one commit
+(`npm run corpus:compare -- <base> <change>`); byte-identical output is itself a result worth
+stating, since it proves a change was confined to the path you meant.
+
+### What a commit here looks like
+
+- **One logical change.** The documentation and `CHANGELOG.md` updates for that change belong in
+  the same commit, not a follow-up — see **Documentation** and **CHANGELOG Convention** below.
+- **Straight to `main`.** That is this project's history and there are no other branches; do not
+  invent a feature branch for a change you are about to commit anyway. Use a worktree when a
+  subagent needs isolation, not to stage a commit.
+- **The message carries the measurements**, in the style already in `git log`: a subject line in
+  the imperative, then what changed, *why*, the numbers before and after with the commit they
+  were taken at, and the bead id. A defect fixed says what the defect was and what would have
+  caught it. Prefer a long message to a short one — the log is the only place some of this is
+  written down.
+- **Stage only your own files.** `.beads/dolt-backup.json` is untracked, predates this work and is
+  not yours — leave it. `.beads/interactions.jsonl` moves as a side effect of using `bd`, and
+  history records it in its own commit ("Record this session's beads interactions") rather than
+  smuggling it into a code change.
+- **End the message with** `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`, as every
+  recent commit does.
+
+### Author identity
+
+**Not configured in git, deliberately unresolved, and it must be passed per command:**
+
+```sh
+GIT_AUTHOR_NAME=welly GIT_AUTHOR_EMAIL=wklee@m2.local \
+GIT_COMMITTER_NAME=welly GIT_COMMITTER_EMAIL=wklee@m2.local git commit -m "…"
+```
+
+That matches every existing commit. The user's own address is `mantis2406@wellingtonlee.io`; if
+they say to use it, amending is cheap while these commits are unpushed. Do not write either one
+into `git config` without being asked.
+
 ## Documentation
 
 Documentation lives in `docs/`. **`docs/README.md` is the canonical index and holds the
