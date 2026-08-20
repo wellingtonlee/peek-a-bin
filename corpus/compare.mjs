@@ -25,8 +25,15 @@
  * operator or verdict differs is the finding — new guards appearing is normal,
  * a pre-existing one changing is not.
  *
- * Plain node, no TypeScript: `tsx` does not work on this machine (Node 18,
- * ERR_REQUIRE_ESM), and this reads only the artifacts, never the repo's source.
+ * Plain node, no TypeScript, and the reason is that it reads only the artifacts
+ * and never the repo's source — so it can be pointed at two runs from different
+ * commits without itself being one of the things under comparison.
+ *
+ * The other reason once given here — "`tsx` does not work on this machine (Node
+ * 18, ERR_REQUIRE_ESM)" — is stale and was checked: this machine runs Node
+ * v22.22.1 and `npx tsx` works (verified 2026-08-20). Node 20+ is required
+ * anyway, per `engines.node`. Do not port this to TypeScript on that news
+ * though; the first reason is the load-bearing one.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
