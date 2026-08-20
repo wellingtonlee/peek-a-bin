@@ -713,6 +713,74 @@ describe("liftBlock — calls and returns", () => {
     expect((stmts[1] as { call: { args: IRExpr[] } }).call.args).toEqual([irConst(1, 4)]);
   });
 
+  // `call inner / push eax / call outer` — the inner call is an argument
+  // expression of the outer one, so the pushes ABOVE it are the outer call's.
+  // Verified on t32.exe at 0x40e08b (GetProcessHeap/HeapAlloc) and 0x402c4a
+  // (GetCurrentProcess/TerminateProcess). Note there is no call BETWEEN the
+  // pushes and the inner call: the marker is after it, which is why a
+  // "stop the walk at an intervening call" rule would never fire here.
+  it("gives no pushed arguments to a call whose result feeds a following call", () => {
+    const stmts = lift(
+      [
+        ["push", "ebx"],
+        ["push", "0x8"],
+        ["call", "0x402000"],
+        ["push", "eax"],
+        ["call", "0x403000"],
+      ],
+      { is64: false },
+    );
+    expect((stmts[0] as { call: { args: IRExpr[] } }).call.args).toEqual([]);
+  });
+
+  // The admitted under-count: the outer call keeps only what its own backwards
+  // walk reaches, which stops at the inner `call`. Re-attributing the inner
+  // call's pushes to it would be a guess in the over-count direction.
+  it("does not re-attribute the inner call's pushes to the outer call", () => {
+    const stmts = lift(
+      [
+        ["push", "ebx"],
+        ["push", "0x8"],
+        ["call", "0x402000"],
+        ["push", "eax"],
+        ["call", "0x403000"],
+      ],
+      { is64: false },
+    );
+    expect((stmts[1] as { call: { args: IRExpr[] } }).call.args).toEqual([irReg("eax", 4)]);
+  });
+
+  // Only the accumulator counts, and only as the very next instruction. A push
+  // of something else after the call is the next call's argument set-up, and
+  // says nothing about where this call's result went.
+  it("keeps pushed arguments when the following push is not the accumulator", () => {
+    const stmts = lift(
+      [
+        ["push", "0x8"],
+        ["call", "0x402000"],
+        ["push", "esi"],
+        ["call", "0x403000"],
+      ],
+      { is64: false },
+    );
+    expect((stmts[0] as { call: { args: IRExpr[] } }).call.args).toEqual([irConst(8, 4)]);
+  });
+
+  // `push eax` with no later call in the block is a stack store, not an
+  // argument to anything this scan can see.
+  it("keeps pushed arguments when no later call consumes the pushed result", () => {
+    const stmts = lift(
+      [
+        ["push", "0x8"],
+        ["call", "0x402000"],
+        ["push", "eax"],
+        ["mov", "esi, 0x1"],
+      ],
+      { is64: false },
+    );
+    expect((stmts[0] as { call: { args: IRExpr[] } }).call.args).toEqual([irConst(8, 4)]);
+  });
+
   it("invalidates caller-saved registers across the call", () => {
     const st = new RegState();
     const stmts = lift(

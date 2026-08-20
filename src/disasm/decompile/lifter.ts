@@ -1006,6 +1006,46 @@ function collectArgs64(regState: RegState): IRExpr[] {
   return args;
 }
 
+/**
+ * Is this call nested in a *later* call's argument list?
+ *
+ * The shape is `call inner` / `push eax` / … / `call outer`: the inner call's
+ * result is pushed, so the inner call is an argument expression of the outer
+ * one and the outer one's argument list is still being built around it. The
+ * pushes *before* the inner call therefore belong to the outer call, not to it.
+ *
+ * THE MARKER IS AFTER THE INNER CALL, NOT BEFORE IT, and that is the whole
+ * reason a simpler rule does not work. The tempting reading — "stop the
+ * backwards push-walk at an intervening call" — never fires, because in this
+ * shape there is no call between the pushes and the inner call. Verified on
+ * t32.exe at 0x40e08b:
+ *
+ *     53                 push ebx                ; 0x1000 → HeapAlloc's arg
+ *     6a 08              push 0x8                ;        → HeapAlloc's arg
+ *     ff 15 60 f0 40 00  call GetProcessHeap     ; declares 0, claimed both
+ *     50                 push eax
+ *     ff 15 70 f0 40 00  call HeapAlloc
+ *
+ * and at 0x402c4a with GetCurrentProcess/TerminateProcess.
+ *
+ * Only a push of the accumulator counts, and only as the very next instruction:
+ * that is the evidence that this call's *result* is what feeds the outer one.
+ * Everything from there to the outer call must be a push, i.e. the argument
+ * list is still under construction — anything else and the accumulator's route
+ * to the outer call is no longer something this scan can read.
+ */
+function nestedInLaterCallArgs(insns: Instruction[], callIdx: number, is64: boolean): boolean {
+  const acc = is64 ? "rax" : "eax";
+  const next = insns[callIdx + 1];
+  if (next === undefined || next.mnemonic !== "push") return false;
+  if (next.opStr.trim().toLowerCase() !== acc) return false;
+  for (let i = callIdx + 2; i < insns.length; i++) {
+    if (insns[i].mnemonic === "call") return true;
+    if (insns[i].mnemonic !== "push") return false;
+  }
+  return false;
+}
+
 function collectArgs32(block: BasicBlock, callInsn: Instruction, is64: boolean): IRExpr[] {
   // Scan backwards from call for consecutive push instructions
   const args: IRExpr[] = [];
@@ -1018,6 +1058,21 @@ function collectArgs32(block: BasicBlock, callInsn: Instruction, is64: boolean):
     }
   }
   if (callIdx < 0) return args;
+
+  // A call whose result is pushed into a following call's argument list gets no
+  // pushed arguments at all. The pushes above it are the OUTER call's, and
+  // attributing them here invents arguments the machine never passed —
+  // `GetProcessHeap(8, 0x1000)` for an API that declares none, which compiles
+  // clean and which `corpus/arity.ts` is the only oracle here able to see.
+  //
+  // This is deliberately an ADMITTED UNDER-COUNT rather than a re-attribution:
+  // handing the pushes to the outer call instead would be a guess in the
+  // over-count direction, and an invented argument is the one error this
+  // codebase will not trade for a recovered one. Where the inner call really
+  // does take pushed arguments they are dropped, and it becomes an `under` row
+  // — visible, and the benign direction. In this corpus every inner callee the
+  // rule fires on declares zero parameters, so all four sites land on `exact`.
+  if (nestedInLaterCallArgs(insns, callIdx, is64)) return args;
 
   // Walking backwards from the call already yields argument order: cdecl
   // pushes the last argument first, so the push nearest the call is argument 1.
