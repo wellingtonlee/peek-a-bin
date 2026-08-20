@@ -308,6 +308,13 @@ export function liftBlock(
     const mn = insn.mnemonic.toLowerCase();
     const parts = splitOperands(insn.opStr);
 
+    // A register this instruction uses as an address *index* has had its value
+    // spent on addressing — noted before the dispatch below, so that an
+    // instruction which indexes with a register and then rewrites it clears its
+    // own mark when it calls `regState.set`. `collectArgs64` is the only
+    // reader; see `noteIndexReads`.
+    noteIndexReads(regState, mn, parts);
+
     // ── nop / int3 / ud2 ──
     if (mn === "nop" || mn === "int3" || mn === "ud2") continue;
 
@@ -1012,15 +1019,122 @@ function resolveCallTarget(
  * *whether* an argument is emitted changes; what is emitted is still the plain
  * 64-bit register, and SSA already keys on the same canonical identity, so the
  * `rcx` read binds to the `ecx` def.
+ *
+ * A written register is not enough on its own, and that was the last x64
+ * over-count: a block that computes an index into RCX, addresses with it, and
+ * then calls `GetLastError` has written RCX for its own purposes, not for the
+ * call. So the scan also stops at the first register whose value the block has
+ * already *spent* as an address index — see `noteIndexReads` for why an index
+ * and not a base, and for the three widenings this corpus refutes.
  */
 function collectArgs64(regState: RegState): IRExpr[] {
   const args: IRExpr[] = [];
   for (const reg of FASTCALL_REGS_64) {
     if (!regState.wroteAnyAlias(reg)) break; // stop at first register this block never set
+    if (regState.readSinceWrite(reg)) break; // …or the first whose value is already spent
     args.push(irReg(reg, 8));
   }
   return args;
 }
+
+/**
+ * Registers this instruction spends as the *index* of a memory operand, fed to
+ * `RegState.noteRead`. `collectArgs64` stops at the first fastcall register
+ * whose value has been spent that way.
+ *
+ * BASE AND INDEX ARE NOT THE SAME EVIDENCE, and the rule turns on the
+ * distinction. The base of an effective address is routinely an object pointer
+ * the very next call also receives — `lea rdx, [rcx+0x10]` / `f(rcx, rdx)` — so
+ * a base read says nothing about whether the register is an argument. An index
+ * is a subscript: a value produced to address *with*, and once the access using
+ * it is emitted the value has been spent. Both x64 over-count shapes are that:
+ *
+ *   imul rcx, rcx, 0x58                     ; rcx becomes a table offset
+ *   and  BYTE PTR [rax+rcx*1+0x8], 0xfe     ; …spent addressing with it
+ *   call QWORD PTR [GetLastError]           ; which declares no parameters
+ *
+ *   imul rdx, rdx, 0x58
+ *   lea  rcx, [rax+rdx*1+0x10]              ; rdx spent, rcx is the argument
+ *   jmp  QWORD PTR [LeaveCriticalSection]   ; which declares one
+ *
+ * ONE EXEMPTION, and it is the prefix property rather than a patch. An index
+ * read does not spend the register when the instruction's destination is a
+ * fastcall register *later in the argument order* than it: `mov rdx,
+ * QWORD PTR [rdx+rcx*8]` is argument two being derived from argument one.
+ * `collectArgs64` counts a prefix, so if RDX is an argument then RCX is one
+ * too, and the index read cannot be evidence against it. The reverse direction
+ * carries no such implication — `lea rcx, [rax+rdx*1+0x10]` makes RCX argument
+ * one whether or not RDX is argument two — which is why the two `lea`s above
+ * are judged differently. Without this, t64!sub_14000FCE7 emits
+ * `sub_14000278C()` for a callee that reads both ECX and RDX, and the two
+ * statements computing them are then deleted as dead: the whole body becomes
+ * one bare call. That is `peek-a-bin-qb2x`'s failure mode.
+ *
+ * THREE SHAPES REFUTED by this same corpus, none of which may be re-tried as a
+ * widening — each drops a genuine argument:
+ *
+ * - *Any* read spends the register. t64 0x14000FAF0 `mov DWORD PTR [rsp+0x20],
+ *   r8d` spills R8 to the outgoing stack-argument area *because* it is also the
+ *   register argument; `CreateFileW(…)` loses two of its four.
+ * - Any read from inside a memory operand spends it. t64 0x14000BD6E
+ *   `lea edx, [r9+0x8]` is MSVC computing the constant 9 from the 1 it just put
+ *   in R9 — arithmetic wearing an address's clothes — and R9 is argument four
+ *   of the `MultiByteToWideChar` two instructions later. R9 is the *base* there,
+ *   which is why base and index are separated.
+ * - Distance, and dominance, from the write to the call. Both were the filed
+ *   hypothesis and both are refuted by every one of the six rows: `RegState` is
+ *   per-block so the write always dominates, and it is two instructions from
+ *   the call at t64 0x14000B35F and 0x14000369C.
+ *
+ * `call` and the `j`-prefixed mnemonics are exempt because they *are* the call
+ * site: `call QWORD PTR [rax+rcx*8]` finding its callee through a table is not
+ * the block spending RCX before the call. (x86/x64 only — no non-branch
+ * mnemonic starts with `j`. Do not copy that to A64, where `bfi` is not a
+ * branch.)
+ */
+function noteIndexReads(regState: RegState, mn: string, parts: string[]): void {
+  if (mn === "call" || mn.startsWith("j")) return;
+  // Intel syntax: the destination is the first operand, and only when there is
+  // a second one. `cmp`/`test`/`push` therefore report -1 and spend normally.
+  const destSlot = parts.length >= 2 ? fastcallSlot(parts[0]) : -1;
+  for (const part of parts) {
+    for (const mem of part.toLowerCase().matchAll(MEM_OPERAND)) {
+      let haveBase = false;
+      for (const tok of mem[1].matchAll(INDEXABLE_TOKEN)) {
+        const name = tok[1];
+        if (!isKnownRegister(name)) continue;
+        // The first register carrying no `*scale` is the base; anything after
+        // it, or anything scaled, is the index. Capstone omits `*1`, so the
+        // positional test is what fires on `[rax + rcx + 8]`.
+        if (!haveBase && !tok[2]) {
+          haveBase = true;
+          continue;
+        }
+        const slot = fastcallSlot(name);
+        if (destSlot >= 0 && slot >= 0 && slot < destSlot) continue;
+        regState.noteRead(name);
+      }
+    }
+  }
+}
+
+/** Position of `reg` in the Windows x64 fastcall order, or -1. */
+function fastcallSlot(reg: string): number {
+  const name = reg.trim().toLowerCase();
+  if (!isKnownRegister(name)) return -1;
+  return FASTCALL_REGS_64.indexOf(canonReg(name));
+}
+
+/** The `[…]` body of a memory operand. Capstone never nests them. */
+const MEM_OPERAND = /\[([^\]]*)\]/g;
+
+/**
+ * A bare identifier inside a memory operand, plus the `*` that would make it a
+ * scaled index. Anchored on a letter so a hex literal's `0x…` cannot match, and
+ * `\b`-delimited so `ptr`, `rip` and the rest are whole tokens
+ * `isKnownRegister` simply rejects.
+ */
+const INDEXABLE_TOKEN = /\b([a-z][a-z0-9]*)\b(\s*\*)?/g;
 
 /**
  * The x86 callee-saved registers, canonicalised (`canonReg` maps every alias to

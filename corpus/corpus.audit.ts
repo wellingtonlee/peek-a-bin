@@ -390,37 +390,56 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
-     * NOT A GATE ON THE ARITY COUNTS — and this one is the closest call in the
-     * file, so the reasoning is worth stating rather than assumed.
+     * THE OVER COUNT IS A GATE AT 0, since `peek-a-bin-7r1l`. Everything else
+     * this audit measures is reported and not asserted.
      *
-     * Every OVER row is *provably* wrong: no entry in `apitypes.ts` is variadic,
-     * so a call passing more arguments than the API takes passes one the machine
-     * never passed. That is `stale version-0 names`' character, not a baseline's
-     * — and that audit gates. The difference is only that this count is NOT
-     * zero: 3 per x64 binary and 8-10 per x86 one at `e22ba6e`, none of them
-     * introduced by the change this audit was rebuilt to certify. A gate would
-     * therefore have to be a threshold at today's absolute, and absolutes here
-     * move whenever function detection does — a newly detected function
-     * containing the same pre-existing defect would fail CI for a change that
-     * caused nothing. So a rise is judged where rises are judged, in
-     * `compare.mjs`, between two runs pinned to two commits.
+     * The upgrade this file recorded as a condition has been met, so it has been
+     * taken. Every OVER row is *provably* wrong: no entry in `apitypes.ts` is
+     * variadic, so a call passing more arguments than the API declares passes
+     * one the machine never passed — a store through the wrong pointer's worth
+     * of wrong, and it compiles clean, because gcc accepts an implicit
+     * declaration at any arity. That is `stale version-0 names`' character
+     * rather than a baseline's, and the only thing that had ever separated them
+     * was that this count was not zero: 24 corpus-wide at `e22ba6e`, 16 after
+     * `peek-a-bin-f51x`, 6 after `peek-a-bin-6lmh` took the x86 half to 0, and 0
+     * after `peek-a-bin-7r1l` retired the last shape (`collectArgs64`
+     * attributing a spent index register to the next call).
      *
-     * IF THE OVER COUNT IS EVER DRIVEN TO 0, MAKE IT A GATE AT 0. That is the
-     * honest upgrade and it is exactly the history of the stale-read audit.
+     * A gate at 0 is NOT a threshold on an absolute, which is what the earlier
+     * refusal was about: it does not move when function detection does, because
+     * a newly detected function either carries an invented argument or it does
+     * not. UNDER stays ungated for exactly the reason it always was — it is not
+     * zero, no threshold on it has been justified, and a fall in it is judged in
+     * `compare.mjs` between two pinned runs.
      *
-     * What is asserted here is instrument liveness, and it matters more than
-     * usual because both counts' *good* direction is downward: a scan that
-     * quietly stopped matching call sites would report `over 0, under 0` and
-     * look like the healthiest thing in the report.
+     * Liveness is asserted alongside, and it matters more than usual because
+     * both counts' *good* direction is downward: a scan that quietly stopped
+     * matching call sites would report `over 0, under 0` and look like the
+     * healthiest thing in the report. The gate would pass over the wreckage;
+     * the liveness floors are what stop it.
      */
-    it("reads call arity against the declared signatures (liveness, not a gate)", () => {
+    it("passes no argument the machine did not (arity OVER-count gate at 0)", () => {
       const blind = [...arResults.entries()]
         .filter(([, a]) => a.sites === 0 || a.scannedFuncs === 0)
         .map(([k, a]) => `${k} (${a.sites} sites, ${a.scannedFuncs} functions read)`);
       expect(`found no declared-API call site in: ${blind.join(", ")}`).toBe(
         "found no declared-API call site in: ",
       );
+      // THE GATE. Named per row, because an over-count is adjudicated against
+      // the real prototype: it is either an argument the emitter invented or a
+      // wrong entry in `apitypes.ts`, and the audit cannot tell you which.
+      const invented = [...arResults.entries()].flatMap(([k, a]) =>
+        a.rows
+          .filter((r) => r.verdict === "over")
+          .map(
+            (r) => `${k} ${r.fname} ${r.callee} passes ${r.emitted} of ${r.declared}: ${r.line}`,
+          ),
+      );
+      expect(`arguments the machine never passed:\n  ${invented.join("\n  ")}`).toBe(
+        "arguments the machine never passed:\n  ",
+      );
       for (const a of arResults.values()) {
+        expect(a.over).toBe(0);
         expect(a.sites).toBeGreaterThan(50);
         expect(a.distinctCallees).toBeGreaterThan(10);
         // The table itself. An `apitypes.ts` that stopped exporting its entries
@@ -494,14 +513,15 @@ function renderReport(): string {
     L.push(
       `  API call arity vs apitypes   ${ar.exact}/${ar.sites} exact (${pct(ar.exact, ar.sites)}), ` +
         `under ${ar.under} (${ar.underAtCeiling} at the ABI ceiling, ${ar.underBelowCeiling} below), ` +
-        `over ${ar.over} — NOT a gate`,
+        `over ${ar.over} — OVER is GATED at 0`,
     );
     L.push(
       "    The ONLY oracle here that can see arity: gcc accepts an implicit declaration at any",
     );
-    L.push("    arity. OVER is an argument the emitter invented and every row is provably wrong;");
-    L.push("    UNDER at the ceiling is the argument evidence running out (4 fastcall registers,");
-    L.push("    8 scanned pushes), UNDER below it is a recovery the evidence was there for.");
+    L.push("    arity. OVER is an argument the emitter invented and every row is provably wrong,");
+    L.push("    so it gates at 0 (peek-a-bin-7r1l). UNDER is NOT gated: at the ceiling it is the");
+    L.push("    argument evidence running out (4 fastcall registers, 8 scanned pushes), below it");
+    L.push("    a recovery the evidence was there for; a rise in either is judged in compare.mjs.");
     const overBy = ar.byCallee
       .filter((c) => c.over > 0)
       .map((c) => `${c.over} ${c.callee}`)

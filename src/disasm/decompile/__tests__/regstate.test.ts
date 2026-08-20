@@ -86,6 +86,59 @@ describe("RegState.wroteAnyAlias", () => {
   });
 });
 
+describe("RegState.noteRead / readSinceWrite", () => {
+  // The width-blind pair to `wroteAnyAlias`, and for the same reason: `and
+  // BYTE PTR [rax+rcx*1+8], 0xfe` reads RCX whatever width the write that
+  // produced it used. `collectArgs64` is the only caller (peek-a-bin-7r1l).
+  it("reports a read through any alias of the register", () => {
+    for (const alias of ["rcx", "ecx", "cx", "cl"]) {
+      const st = new RegState();
+      st.noteRead(alias);
+      expect(st.readSinceWrite("rcx")).toBe(true);
+    }
+  });
+
+  it("is false until something reads the register", () => {
+    const st = new RegState();
+    st.set("rcx", irConst(1));
+    expect(st.readSinceWrite("rcx")).toBe(false);
+  });
+
+  // A write starts a new value, and nothing has read *that* one yet. This is
+  // what makes a read-modify-write (`and edx, 0x1f`) clear its own mark: the
+  // lifter notes the reads before dispatching the instruction that writes.
+  it("clears the mark when the register is written again", () => {
+    const st = new RegState();
+    st.noteRead("ecx");
+    expect(st.readSinceWrite("rcx")).toBe(true);
+    st.set("rcx", irConst(1));
+    expect(st.readSinceWrite("rcx")).toBe(false);
+  });
+
+  // The defs are deleted, so their marks describe nothing; leaving them would
+  // let a read BEFORE the call suppress an argument set up after it.
+  it("forgets the caller-saved marks when a call invalidates them", () => {
+    const st = new RegState();
+    st.noteRead("rcx");
+    st.noteRead("rbx");
+    st.invalidateCallerSaved();
+    expect(st.readSinceWrite("rcx")).toBe(false);
+    expect(st.readSinceWrite("rbx")).toBe(true);
+  });
+
+  it("survives a clone, like every other part of the state", () => {
+    const st = new RegState();
+    st.noteRead("rdx");
+    expect(st.clone().readSinceWrite("rdx")).toBe(true);
+  });
+
+  it("is false for a name that is not a register", () => {
+    const st = new RegState();
+    st.noteRead("not_a_register");
+    expect(st.readSinceWrite("not_a_register")).toBe(false);
+  });
+});
+
 describe("RegState.getCondition — after cmp", () => {
   function afterCmp(jcc: string, left: IRExpr = irReg("eax", 4), right: IRExpr = irConst(5)) {
     const st = new RegState();

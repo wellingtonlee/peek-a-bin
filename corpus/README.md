@@ -268,6 +268,15 @@ Per-site detail is in `staleguards_<bin>.jsonl` — the block's jcc, which mecha
 operands the reading would have named, the instruction that took them away, and the emitted
 condition where one reached the page (`null` where the reading was refused).
 
+**Call arity OVER-count, against `apitypes.ts`'s declared signatures.** No entry in that table is
+variadic, so a call the emitted C passes more arguments to than the API declares passes one the
+machine never passed. *A failure means the emitted C states that the program hands a function a
+value it does not.* This is the **only** audit here that can see call arity at all — gcc accepts an
+implicit declaration at any arity, so `842/842 clean` cannot move on the dimension — and it gates
+only in this one direction. **UNDER is not gated**; see the full section under *Baselines* below
+for both counts, the ceiling split, and the three shapes this defect had. Gated at 0 since
+`peek-a-bin-7r1l` (`peek-a-bin-f51x` and `peek-a-bin-6lmh` cleared the x86 half first).
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures
@@ -383,19 +392,21 @@ this is gated in the run. `compare.mjs` reports 16 regressions and exits 1.
 
 **Call arity against `apitypes.ts`'s declared signatures** — `arity.ts`. For every emitted call
 whose callee `src/disasm/decompile/apitypes.ts` declares, the arguments the emitted C passes are
-counted against the parameters the table declares. **Measured on base `91cca4f` with
-`peek-a-bin-6lmh` applied:**
+counted against the parameters the table declares. **Measured on base `7082e66` with
+`peek-a-bin-7r1l` applied:**
 
 | | t32 | t64 | w64 | w32 |
 |---|---|---|---|---|
-| exact / sites | 79/105 | 90/127 | 96/133 | 85/111 |
+| exact / sites | 79/105 | 93/127 | 99/133 | 85/111 |
 | under (at the ABI ceiling / below it) | 26 (0/26) | 34 (26/8) | 34 (26/8) | 26 (0/26) |
-| **over** | 0 | 3 | 3 | 0 |
+| **over — GATED at 0** | 0 | 0 | 0 | 0 |
 
-The same base with `peek-a-bin-6lmh` **not** applied reads 75/105, 90/127, 96/133 and 79/111
-exact, under 26/34/34/26, and **over 4/3/3/6**. So the x86 fix moved 4 and 6 rows from `over`
-straight to `exact` with **the under counts and both ceiling splits unchanged**, and t64/w64
-byte-identical because `collectArgs32` is the x86 path only.
+The same base with `peek-a-bin-7r1l` **not** applied reads 79/105, 90/127, 96/133 and 85/111
+exact, the same under counts and ceiling splits, and **over 0/3/3/0**. So the x64 fix moved 3 rows
+per x64 binary from `over` straight to `exact` with **the under counts and both ceiling splits
+unchanged**, and t32/w32 byte-identical because `collectArgs64` is the x64 path only. One step
+earlier, base `91cca4f` without `peek-a-bin-6lmh` read 75/105, 90/127, 96/133 and 79/111 exact
+with **over 4/3/3/6**, the x86 half of the same story.
 
 **Part of the drift from the previous table in this file is the AUDIT being fixed, not the
 decompiler, and the two must not be conflated.** `maskLiteralsAndComments` blanked a string
@@ -414,8 +425,8 @@ At `78b6040` with `peek-a-bin-f51x` applied and the *old* oracle the table read 
 exact, under 27/36/38/28, over 4/3/3/6; at `e22ba6e` the exact counts were 70/88/92/73 and
 **over was 8/3/3/10**.
 
-**The x86 over-count was TWO SHAPES, and both are now fixed.** This matters more than the
-numbers, because the second was not a smaller version of the first:
+**The over-count was THREE SHAPES and all three are now fixed.** This matters more than the
+numbers, because none of them was a smaller version of another:
 
 - **Shape 1 — a nested call in argument position.** `call inner` / `push eax` / `call outer`:
   the inner call's result is pushed, so the pushes *above* the inner call belong to the outer
@@ -435,12 +446,23 @@ numbers, because the second was not a smaller version of the first:
   instructions in, or sunk to a mid-function block leader. What works is whether the pushed value
   is the register's **entry** value, i.e. whether the push precedes the register's first write in
   the function (`peek-a-bin-6lmh`).
+- **Shape 3 — a fastcall register the block had already SPENT as an address index.** The x64 path
+  does not walk pushes at all: `collectArgs64` asks `RegState` which of RCX/RDX/R8/R9 the block
+  wrote, which is equally true of a register the block computed for its own addressing. t64
+  0x14000B34B: `imul rcx, rcx, 0x58` / `and BYTE PTR [rax+rcx*1+8], 0xfe` / `call GetLastError`,
+  an API declaring none. **Fixed** — see the `collectArgs64` index gotcha in `CLAUDE.md`. Four
+  rules refuted by this same corpus, none of which may be re-tried: *distance* and *dominance*
+  from the write to the call (the filed hypothesis — `RegState` is per-block so the write always
+  dominates, and the write is two instructions from the call at both sites); *any* read spends the
+  register (t64 0x14000FAF0 spills R8 to the outgoing stack-argument area **because** it is also
+  the register argument, costing `CreateFileW` two of four); and any read from inside a memory
+  operand spends it (t64 0x14000BD6E `lea edx, [r9+0x8]` is MSVC computing the constant 9 from the
+  1 it just put in R9, and R9 is argument four of the call two instructions later — R9 is the
+  *base* there, which is why base and index are told apart) (`peek-a-bin-7r1l`).
 
-**So the upgrade path recorded below still has NOT triggered, and no threshold was invented at
-3.** Over is 0 on both x86 binaries and 6 corpus-wide: 3 on each x64 binary (`2 GetLastError`,
-`1 LeaveCriticalSection`). Those are `collectArgs64`'s, which reads arity out of `RegState`
-rather than walking pushes, so neither x86 fix reaches them — a third defect awaiting a third
-idea.
+**So the upgrade path recorded below HAS triggered and has been taken: over-count is now a gate
+at 0.** No threshold was invented at any residual — it reached zero on all four binaries and the
+gate is at zero. `npm run corpus` now exits 1 on an invented argument, naming each row.
 
 **This is the only oracle in the repo that can see call arity, and the gcc gate is blind to the
 dimension by construction.** `gcc -std=gnu89` accepts an implicit declaration at *any* arity, the
@@ -465,17 +487,20 @@ The two directions are not symmetric and must not be read as one number:
 | **over** | The call passes MORE arguments than the API takes. There is no reading of the machine on which that is right — the argument was invented. `GetLastError(rcx)`, `GetModuleHandleW("KERNEL32.DLL", edi)` (the second push is a prologue save), `SetFilePointer(…, 5 of 4)`. Every one of the 6 rows left in the corpus is provably wrong, and every one compiles clean. It was 24 before `peek-a-bin-f51x`, which retired the `GetProcessHeap(8, 0x1000)` shape — pushes that belonged to the *next* call — and 16 before `peek-a-bin-6lmh`, which retired the prologue-save shape and took the x86 half to 0. |
 | **under** | The call passes FEWER. Split in two, because only one half is a recoverable defect: `underAtCeiling` is the emitted count sitting exactly at the ABI evidence's ceiling — `collectArgs64`'s four fastcall registers, `collectArgs32`'s eight-push scan — where an API declaring five or more parameters is short *by construction*; `underBelowCeiling` is an argument the evidence was there for. All 26 of t64's ceiling rows are `CreateFileW`, `WriteFile`, `MultiByteToWideChar` and friends. |
 
-**NOT GATED IN THE RUN, and this is the closest call in the directory.** Every OVER row has the
+**THE OVER COUNT IS GATED AT 0 SINCE `peek-a-bin-7r1l`; UNDER IS NOT.** Every OVER row has the
 character that makes `stale version-0 names` a gate — provably wrong, not a count awaiting a
-threshold. The only thing separating them is that this count is *not zero*: 3 per x64 binary,
-and 0 per x86 one since `peek-a-bin-6lmh`, none of them introduced by the change the audit was
-rebuilt to certify. A gate
-would therefore have to pin today's absolute, and absolutes here move whenever detection does — a
-newly detected function carrying the same pre-existing defect would fail CI for a change that
-caused nothing. So a rise is judged where rises are judged: `compare.mjs` treats `arity
-over-count`, `arity under-count` and `under below the ceiling` rising as regressions, and `arity
-exact` is a ratio that must not fall. **If the OVER count is ever driven to 0, make it a gate at
-0** — that is the honest upgrade, and it is exactly the history of the stale-read audit.
+threshold — and the only thing that had ever separated them was that this count was not zero: 24
+corpus-wide at `e22ba6e`, 16 after `peek-a-bin-f51x`, 6 after `peek-a-bin-6lmh` took the x86 half
+to 0, and 0 once `peek-a-bin-7r1l` retired the last shape. **A gate at 0 is not a threshold on an
+absolute**, which was the whole of the earlier refusal: it does not move when detection does,
+because a newly detected function either carries an invented argument or it does not. That is
+exactly the history of the stale-read audit, and it is now this one's.
+
+UNDER stays ungated for the reason it always was — it is not zero and no threshold on it has been
+justified — so falls in it are judged where falls are judged: `compare.mjs` treats `arity
+under-count` and `under below the ceiling` rising as regressions, and `arity exact` is a ratio
+that must not fall. `arity over-count` rising is still reported there too; it is now caught by the
+run first.
 
 What the run itself asserts is instrument liveness, and it matters more than usual because the
 *good* direction of both counts is downward: a scan that quietly stopped matching call sites would
@@ -494,7 +519,10 @@ missed and arity stops there — takes t64 from **88/127 exact to 62/127** and w
 66/133**, with under 36 → 62 and 38 → 64 (below-ceiling 10 → 61 and 12 → 63) and **over unchanged
 at 3 on both**. `5 ExitProcess` and `4 Sleep` reappear among the under rows, which is the defect
 qb2x was filed for. `npm run corpus` stays green, because none of this is gated in the run;
-`compare.mjs` reports the six arity regressions and exits 1. Without the arity rows that same pair
+`compare.mjs` reports the six arity regressions and exits 1. (That control predates the gate;
+`npm run corpus` would stay green over it today too, because reverting qb2x moves UNDER, not
+OVER. The gate's own control is removing the one `readSinceWrite` line from `collectArgs64`, which
+makes the run exit 1 and name all six pre-`7r1l` rows.) Without the arity rows that same pair
 of runs moved nothing about arguments at all — the only other signal was `polarity guards audited`
 falling by 2 and 3, which is an instruction to go and read some guards, not a statement about
 calls.
@@ -504,7 +532,7 @@ often, and usually because a defect was fixed.
 
 ## What the standing set does NOT catch
 
-**None of the eight gates above catches a wrong-value defect** — a statement that is emitted, is
+**None of the nine gates above catches a wrong-value defect** — a statement that is emitted, is
 well-formed, and computes the wrong thing. `peek-a-bin-qzrl` is the worked example: a `xor edi, edi`
 (zeroing) emitted as `edi = ebx`, a copy of a live register. Every gate was green over it, and each
 for its own reason:
@@ -598,6 +626,12 @@ much larger reading than it earns.
   anchoring reason and never lands in that bucket, however unrecoverable its condition was.
 
 ### What the arity audit does not catch
+
+**The OVER-count gate inherits every one of these.** A gate at 0 says no *declared* API is passed
+an argument the machine did not; it says nothing about the callees below. Two of the three
+`peek-a-bin-7r1l` fixes landed on `sub_` callees (`sub_140007808` and `sub_140007908` on t64, the
+same shape on w64) and moved no number in this audit at all — they were adjudicated against
+`objdump`, which is the only instrument that can see them.
 
 - **Nothing about what an argument SAYS.** Arity is a count. `SearchPathW(0, rcx, rax, 0x400)` has
   exactly the right arity and a wrong second argument, and this audit calls it exact — that is the

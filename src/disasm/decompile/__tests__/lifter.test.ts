@@ -685,6 +685,103 @@ describe("liftBlock — calls and returns", () => {
     ]);
   });
 
+  // peek-a-bin-7r1l, the last x64 arity over-count. `collectArgs64` asked
+  // `RegState` only whether the block had *written* a fastcall register, which
+  // is also true of a register the block wrote for its own addressing and never
+  // meant to pass. t64 0x14000B34B, an over-count row against the real
+  // prototype: `GetLastError` declares no parameters.
+  it("does not pass an x64 register the block already spent as an address index", () => {
+    const stmts = lift([
+      ["imul", "rcx, rcx, 0x58"],
+      ["and", "byte ptr [rax + rcx + 8], 0xfe"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([]);
+  });
+
+  // t64 0x140003688: RDX is spent indexing, RCX — computed *from* it — is the
+  // one argument `LeaveCriticalSection` declares. Both registers are written,
+  // so the pre-fix answer was two arguments.
+  it("keeps the argument computed from a spent index, and drops the index", () => {
+    const stmts = lift([
+      ["imul", "rdx, rdx, 0x58"],
+      ["lea", "rcx, [rax + rdx + 0x10]"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([irReg("rcx", 8)]);
+  });
+
+  // THE PREFIX PROPERTY, not a patch: argument two derived from argument one.
+  // `collectArgs64` counts a prefix, so if RDX is an argument then RCX is one
+  // too and the index read cannot be evidence against it. t64 0x14000FCFE —
+  // without this the whole of sub_14000FCE7 emitted as one bare
+  // `sub_14000278C()` for a callee that reads both ECX and RDX, and the two
+  // statements computing them were then deleted as dead.
+  it("keeps an index register that a LATER argument register was derived from", () => {
+    const stmts = lift([
+      ["movsxd", "rcx, dword ptr [rbp + 0x20]"],
+      ["mov", "rdx, qword ptr [rdx + rcx*8]"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([
+      irReg("rcx", 8),
+      irReg("rdx", 8),
+    ]);
+  });
+
+  // REFUTED WIDENING #1 — "any read spends the register". t64 0x14000FAF0
+  // spills R8 to the outgoing stack-argument area *because* it is also the
+  // register argument; treating that as a read cost `CreateFileW` two of four.
+  it("does not spend an x64 argument register by copying its value elsewhere", () => {
+    const stmts = lift([
+      ["mov", "rcx, rbx"],
+      ["mov", "edx, 0x40000000"],
+      ["mov", "r8d, 0x3"],
+      ["xor", "r9d, r9d"],
+      ["mov", "dword ptr [rsp + 0x20], r8d"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[5] as { call: { args: IRExpr[] } }).call.args).toHaveLength(4);
+  });
+
+  // REFUTED WIDENING #2 — "any read from inside a memory operand spends it".
+  // t64 0x14000BD6E `lea edx, [r9+8]` is MSVC computing the constant 9 from the
+  // 1 it just put in R9: arithmetic wearing an address's clothes, and R9 is
+  // argument four of the MultiByteToWideChar two instructions later. R9 is the
+  // BASE, which is the whole reason base and index are told apart.
+  it("does not spend an x64 argument register used as an address BASE", () => {
+    const stmts = lift([
+      ["mov", "rcx, rbx"],
+      ["mov", "r9d, 0x1"],
+      ["lea", "edx, [r9 + 8]"],
+      ["mov", "r8, rdi"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[4] as { call: { args: IRExpr[] } }).call.args).toHaveLength(4);
+  });
+
+  // An index read is spent only until the register is written again — the
+  // write starts a new value with no reader. `mov rcx, [rax + rcx*8]` both
+  // spends RCX and replaces it.
+  it("un-spends an index register that the same instruction rewrites", () => {
+    const stmts = lift([
+      ["mov", "rcx, qword ptr [rax + rcx*8]"],
+      ["call", "0x402000"],
+    ]);
+    expect((stmts[1] as { call: { args: IRExpr[] } }).call.args).toEqual([irReg("rcx", 8)]);
+  });
+
+  // The call's OWN addressing is not the block spending a register before it:
+  // `call qword ptr [rax + rcx*8]` finds its callee through a table, and RCX
+  // may still be the first argument.
+  it("does not let a call's own indexed target suppress its arguments", () => {
+    const stmts = lift([
+      ["mov", "rcx, rbx"],
+      ["call", "qword ptr [rax + rcx*8]"],
+    ]);
+    expect((stmts[1] as { call: { args: IRExpr[] } }).call.args).toEqual([irReg("rcx", 8)]);
+  });
+
   it("collects x86 arguments from the pushes before the call", () => {
     const stmts = lift(
       [

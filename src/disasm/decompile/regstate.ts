@@ -17,8 +17,43 @@ export class RegState {
   flagRight: IRExpr | null = null;
   flagOp: "cmp" | "test" | "result" | null = null;
 
+  /**
+   * Canonical registers whose current value has already been *read* by a later
+   * instruction in this block — see `noteRead` and `readSinceWrite`.
+   */
+  consumed = new Set<string>();
+
   set(reg: string, expr: IRExpr): void {
     this.defs.set(reg.toLowerCase(), expr);
+    // A write starts a new value, and nothing has read it yet.
+    if (isKnownRegister(reg)) this.consumed.delete(canonReg(reg));
+  }
+
+  /**
+   * Record that this instruction read `reg`'s current value.
+   *
+   * Callers note every register an instruction mentions *before* dispatching
+   * it, so an instruction that reads and then rewrites the same register
+   * (`and edx, 0x1f`, `mov rcx, [rcx+8]`) ends with the mark cleared by `set`,
+   * which is the correct reading: the value that was read is gone and the one
+   * that replaced it has no reader yet.
+   */
+  noteRead(reg: string): void {
+    if (isKnownRegister(reg)) this.consumed.add(canonReg(reg));
+  }
+
+  /**
+   * Has `reg`'s current value already been consumed by an instruction in this
+   * block?
+   *
+   * Width-blind for the same reason `wroteAnyAlias` is: `and BYTE PTR
+   * [rax+rcx*1+8], 0xfe` reads RCX whatever width the write that produced it
+   * used. `collectArgs64` is the only caller — see its docstring for why a
+   * consumed register is not an argument.
+   */
+  readSinceWrite(reg: string): boolean {
+    if (!isKnownRegister(reg)) return false;
+    return this.consumed.has(canonReg(reg));
   }
 
   get(reg: string): IRExpr | undefined {
@@ -232,6 +267,9 @@ export class RegState {
     for (const key of [...this.defs.keys()]) {
       if (CALLER_SAVED.has(canonReg(key))) this.defs.delete(key);
     }
+    // The defs are gone, so their consumed-marks describe nothing. Leaving them
+    // would let a read *before* the call suppress an argument set up after it.
+    for (const canon of CALLER_SAVED) this.consumed.delete(canon);
     this.flagLeft = null;
     this.flagRight = null;
     this.flagOp = null;
@@ -240,6 +278,7 @@ export class RegState {
   clone(): RegState {
     const copy = new RegState();
     for (const [k, v] of this.defs) copy.defs.set(k, v);
+    for (const c of this.consumed) copy.consumed.add(c);
     copy.flagLeft = this.flagLeft;
     copy.flagRight = this.flagRight;
     copy.flagOp = this.flagOp;
