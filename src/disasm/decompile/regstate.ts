@@ -1,5 +1,5 @@
 import type { BinaryOp, IRExpr } from "./ir";
-import { canonReg, irBinary, irConst, irReg, irUnary } from "./ir";
+import { canonReg, irBinary, irConst, irReg, irUnary, isKnownRegister } from "./ir";
 
 /** Volatile registers under the Windows x64 ABI (a superset of the x86 ones). */
 const CALLER_SAVED = new Set(["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"]);
@@ -27,6 +27,35 @@ export class RegState {
 
   getOrReg(reg: string, size: number): IRExpr {
     return this.defs.get(reg.toLowerCase()) ?? irReg(reg, size);
+  }
+
+  /**
+   * Did this block write *any* alias of `reg` — `mov ecx, 1` as well as
+   * `mov rcx, 1`?
+   *
+   * `defs` is deliberately keyed by the literal operand text, because the value
+   * it stores has that operand's width: folding `mov cl, 2` into a key of `rcx`
+   * would record a one-byte value as if it were all eight, and on x86-64 a
+   * byte write does not even clear the upper bits the way a 32-bit one does.
+   * So the map must stay width-exact.
+   *
+   * Whether the block *touched* the register is a different question, and it is
+   * width-blind: `mov ecx, 1 / call f` passes an argument in RCX exactly as
+   * `mov rcx, 1` would. That question gets this method rather than a
+   * width-blind map — same shape as `invalidateCallerSaved` above, and for the
+   * same reason. Nothing here exposes the stored expression: the only caller
+   * (`collectArgs64`) wants arity, and substituting the expression is the
+   * defect `liftBlock`'s docstring warns about.
+   */
+  wroteAnyAlias(reg: string): boolean {
+    // `regSize()` would be the tempting test and is useless here — it falls
+    // back to 4 for any string, so every name looks like a register.
+    if (!isKnownRegister(reg)) return false;
+    const canon = canonReg(reg);
+    for (const key of this.defs.keys()) {
+      if (canonReg(key) === canon) return true;
+    }
+    return false;
   }
 
   setFlags(op: "cmp" | "test", left: IRExpr, right: IRExpr): void {

@@ -229,6 +229,13 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map
   // index -1 means "the top of the block": a phi destination, or the function's
   // entry value. Both are already in the register by the time the block runs.
   const defSite = new Map<string, { block: number; index: number }>();
+  /** Which blocks write each canonical register, in any version. */
+  const defBlocks = new Map<string, Set<number>>();
+  const noteDef = (canon: string, block: number): void => {
+    const seen = defBlocks.get(canon);
+    if (seen) seen.add(block);
+    else defBlocks.set(canon, new Set([block]));
+  };
   for (const b of ctx.blocks) {
     for (const phi of ctx.phis.get(b.id) ?? []) {
       if (phi.dest.version !== undefined)
@@ -236,11 +243,15 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map
           block: b.id,
           index: -1,
         });
+      noteDef(canonReg(phi.dest.name), b.id);
     }
     const stmts = ctx.liftedBlocks.get(b.id) ?? [];
     for (let i = 0; i < stmts.length; i++) {
       const def = defOf(stmts[i]);
-      if (def) defSite.set(versionKey(def.canon, def.version), { block: b.id, index: i });
+      if (def) {
+        defSite.set(versionKey(def.canon, def.version), { block: b.id, index: i });
+        noteDef(def.canon, b.id);
+      }
     }
   }
 
@@ -421,18 +432,67 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map
     else if (seen !== s.spelling) spellings.set(key, null);
   }
 
+  // ── Version 0, where a dominating definition has already overwritten it ──
+  //
+  // Version 0 is the register's *entry* value (`newVersion` in `ssa.ts` starts
+  // at 1), so no statement in the function defines it and `defSite` never holds
+  // it. The rule used to be a copy at the top of the *reading* block, taken only
+  // when an earlier statement in that same block was the overwriter. That is
+  // wrong in exactly one shape, and it is the shape that matters: when a block
+  // that **strictly dominates** the read has already written the register, the
+  // reading block's top is past the damage — so the copy preserves the wrong
+  // value and emits a `reg_0` that looks repaired. Reads with no repair at all
+  // were worse still: a bare `rcx` that by then holds something else, which is
+  // ordinary-looking C stating the opposite of the machine (peek-a-bin-dqpk).
+  //
+  // The one program point where the register is known to hold version 0 is the
+  // function's entry, before anything runs. So when a dominating definition
+  // exists, the copy is taken there and every stale read of that version is
+  // routed to it — one copy per register per function, and no second copy at a
+  // block top to spoil it again.
+  //
+  // The standing objection to an entry copy was t64's `wcslen`: a loop reading
+  // RAX_0 in a body that adds 2 to RAX every trip would be frozen at the entry
+  // address forever. That shape needs `renameVariables` to hand out an entry
+  // version the machine never had, which takes a block the *unwinder* enters —
+  // no predecessor, and so no `idom` entry either. `dominates` from the entry
+  // block returns false for such a block, so this path declines it structurally
+  // rather than by measurement. Measured too: 0 of 212 sites across the four
+  // distlib binaries sit in an unreachable or predecessor-less block, and the 6
+  // that sit in a loop with a dominating definition are all a genuine entry
+  // value parked in a callee-saved register (GVN collapses `r13`/`rsi` onto the
+  // entry RDX/RCX), which an entry copy names correctly.
+  const entryId = ctx.blocks[0].id;
+  const entryRepaired = new Set<string>();
+  for (const s of stale) {
+    if (s.version !== 0) continue;
+    // RSP has no faithful definition chain — see the phi loop above — and the
+    // flags register is not a value anyone reads by name (peek-a-bin-rt4).
+    if (s.canon === "rsp" || s.canon === "eflags") continue;
+    const writers = defBlocks.get(s.canon);
+    if (!writers) continue;
+    for (const w of writers) {
+      if (w !== s.block && dominates(w, s.block)) {
+        entryRepaired.add(versionKey(s.canon, 0));
+        break;
+      }
+    }
+  }
+
   for (const s of stale) {
     const key = versionKey(s.canon, s.version);
-    // A version with no defining statement is the register's entry value, and
-    // no statement in the function is its definition, so there is no point this
-    // pass can point at and call one. The function's own entry is not a stand-in:
-    // t64's `wcslen` loop reads RAX_0 in a body that adds 2 to RAX every trip,
-    // and a copy taken once at function entry would load the same address
-    // forever. So the entry value keeps exactly the rule this pass had before it
-    // could see across blocks — a copy at the top of the *reading* block, and
-    // only where an earlier statement in that same block is what overwrote the
-    // register. Anything else is left to bind to the register, as it did before.
-    const site = defSite.get(key) ?? (s.inBlockRedef ? { block: s.block, index: -1 } : null);
+    // Where no dominating definition put the entry value beyond reach, version 0
+    // keeps the rule this pass had before it could see across blocks — a copy at
+    // the top of the reading block, and only where an earlier statement in that
+    // same block is what overwrote the register. Anything else is left to bind
+    // to the register, as it did before.
+    const site =
+      defSite.get(key) ??
+      (entryRepaired.has(key)
+        ? { block: entryId, index: -1 }
+        : s.inBlockRedef
+          ? { block: s.block, index: -1 }
+          : null);
     if (!site) continue;
     const ok = site.block === s.block ? site.index < s.index : dominates(site.block, s.block);
     if (!ok) continue;

@@ -596,6 +596,40 @@ export function liftBlock(
         stmts.push({ kind: "return", value: irReg(retReg, is64 ? 8 : 4), addr: insn.address });
         continue;
       }
+
+      // The target has no name. Saying nothing and saying "a transfer happens
+      // here that I could not name" are different things, and the second is
+      // what this repo does everywhere else it fails to recover something
+      // (`__unrecovered_N`, `/* unlifted: … */`). t32!sub_402C5A is the case
+      // that shows the cost of the first: it decodes a pointer and then, in
+      // the emitted C, does nothing whatever with it — the call through the
+      // decoded pointer was simply absent (peek-a-bin-xerm).
+      //
+      // TWO SHAPES end a successorless block with an unnameable target, and
+      // only one of them is this one:
+      //
+      //   `jmp eax`                          — a genuine indirect transfer;
+      //   `jmp dword ptr [ecx*4 + 0x40b900]` — a jump table whose entries were
+      //                                        not recovered.
+      //
+      // A *recovered* table does not reach here at all: its case targets are
+      // block leaders, so the dispatch block has successors and `structureCFG`
+      // emits a `switch`. An unrecovered one is a gap in table recovery, not an
+      // indirect call, and calling it one would state something false about the
+      // program. So only a bare register operand is reported — measured at
+      // cee6f91 that is 4 sites (t32 0x402c70/0x404480, w32 0x402ec4/0x4046e0)
+      // against 14 table dispatches, and 0 sites on either x64 binary. A memory
+      // operand of any shape stays silent, deliberately: `jmp [eax]` cannot be
+      // told from an unrecovered table by looking at it.
+      //
+      // No call expression is synthesized. `resolveNamedTarget` exists because
+      // there is no name here, and an invented callee is worse than an admitted
+      // gap — the negative test in `pipeline.test.ts` pins that.
+      const operand = insn.opStr.trim().toLowerCase();
+      if (isKnownRegister(operand)) {
+        stmts.push({ kind: "raw", text: `indirect jmp through ${operand}`, addr: insn.address });
+        continue;
+      }
     }
 
     // ── Conditional / unconditional jumps: handled at structure level ──
@@ -923,11 +957,21 @@ function resolveCallTarget(
  * register — substituting the recorded expression re-expanded whatever computed
  * it (including another call) at the call site, and bound its leaves to the
  * wrong definitions once SSA renaming ran.
+ *
+ * The probe is `wroteAnyAlias`, not `get`, because argument setup is routinely
+ * sub-width: MSVC emits `mov ecx, 1` for an `int` argument, and `RegState`
+ * keys that def by the operand text, so asking for `rcx` missed it and stopped
+ * arity right there. `ExitProcess()` was emitted with no argument at all while
+ * the machine passed one, and with no reader in the IR the `ecx = 1` was then
+ * deleted as dead — the exit code vanished from the output entirely. Only
+ * *whether* an argument is emitted changes; what is emitted is still the plain
+ * 64-bit register, and SSA already keys on the same canonical identity, so the
+ * `rcx` read binds to the `ecx` def.
  */
 function collectArgs64(regState: RegState): IRExpr[] {
   const args: IRExpr[] = [];
   for (const reg of FASTCALL_REGS_64) {
-    if (!regState.get(reg)) break; // stop at first register this block never set
+    if (!regState.wroteAnyAlias(reg)) break; // stop at first register this block never set
     args.push(irReg(reg, 8));
   }
   return args;

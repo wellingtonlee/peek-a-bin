@@ -37,6 +37,55 @@ describe("RegState definitions", () => {
   });
 });
 
+describe("RegState.wroteAnyAlias", () => {
+  // The width-exact map above is right for *values*: `mov cl, 2` says nothing
+  // about the upper 56 bits of RCX, so folding it into an `rcx` key would
+  // record a byte as if it were a quadword. But "did this block touch RCX at
+  // all" is a different, width-blind question — it is what arity is made of —
+  // and it gets this method rather than a width-blind map (peek-a-bin-qb2x).
+  it("sees a write through any alias of the register", () => {
+    for (const alias of ["rcx", "ecx", "cx", "cl"]) {
+      const st = new RegState();
+      st.set(alias, irConst(1));
+      expect(st.wroteAnyAlias("rcx")).toBe(true);
+    }
+  });
+
+  it("sees the extended registers' aliases too", () => {
+    const st = new RegState();
+    st.set("r8d", irConst(0, 4));
+    expect(st.wroteAnyAlias("r8")).toBe(true);
+    expect(st.wroteAnyAlias("r9")).toBe(false);
+  });
+
+  it("answers about the register asked for and no other", () => {
+    const st = new RegState();
+    st.set("edx", irConst(1));
+    expect(st.wroteAnyAlias("rdx")).toBe(true);
+    expect(st.wroteAnyAlias("rcx")).toBe(false);
+  });
+
+  it("does not report the value, only that there was one", () => {
+    // Deliberate: the caller wants arity. Handing back the recorded expression
+    // is the re-expansion defect `parseOperand`'s docstring warns about.
+    const st = new RegState();
+    st.set("ecx", irConst(1));
+    expect(st.wroteAnyAlias("rcx")).toBe(true);
+  });
+
+  it("is false for a name that is not a register", () => {
+    // `regSize()` would say 4 for this and make the test meaningless; the guard
+    // is `isKnownRegister`.
+    const st = new RegState();
+    st.set("not_a_register", irConst(1));
+    expect(st.wroteAnyAlias("not_a_register")).toBe(false);
+  });
+
+  it("is false on an empty state", () => {
+    expect(new RegState().wroteAnyAlias("rcx")).toBe(false);
+  });
+});
+
 describe("RegState.getCondition — after cmp", () => {
   function afterCmp(jcc: string, left: IRExpr = irReg("eax", 4), right: IRExpr = irConst(5)) {
     const st = new RegState();

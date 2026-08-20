@@ -623,18 +623,24 @@ describe("liftBlock — calls and returns", () => {
     expect((stmts[1] as { call: { args: IRExpr[] } }).call.args).toEqual([]);
   });
 
-  // KNOWN BUG (reported, not fixed): collectArgs64 looks the arguments up under
-  // 'rcx'/'rdx'/'r8'/'r9', but the lifter keys definitions by the literal
-  // operand text. Setting up an argument with a 32-bit move — the normal way to
-  // pass an int — leaves the definition under 'ecx', so the call is emitted
-  // with no arguments at all.
-  it("misses x64 arguments set up through 32-bit sub-registers", () => {
+  // Was peek-a-bin-qb2x, and this test pinned the defect rather than the rule
+  // for as long as it stood: `collectArgs64` looked the arguments up under
+  // 'rcx'/'rdx'/'r8'/'r9' while the lifter keys definitions by the literal
+  // operand text, so setting up an argument with a 32-bit move — the normal way
+  // to pass an int — left the definition under 'ecx' and the call was emitted
+  // with no arguments at all. The probe is width-blind now (`wroteAnyAlias`).
+  // The arguments are still the plain 64-bit registers: only arity comes from
+  // `RegState`, never the recorded expression.
+  it("counts x64 arguments set up through 32-bit sub-registers", () => {
     const stmts = lift([
       ["mov", "ecx, 0x1"],
       ["mov", "edx, 0x2"],
       ["call", "0x402000"],
     ]);
-    expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([]); // should be [1, 2]
+    expect((stmts[2] as { call: { args: IRExpr[] } }).call.args).toEqual([
+      irReg("rcx", 8),
+      irReg("rdx", 8),
+    ]);
   });
 
   it("collects x86 arguments from the pushes before the call", () => {

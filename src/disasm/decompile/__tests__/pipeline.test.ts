@@ -1528,6 +1528,75 @@ describe("decompileFunction — a tail call is a call", () => {
     expect(code).not.toContain("(*eax)");
     expect(code).not.toMatch(/\beax\(/);
   });
+
+  /**
+   * …but it does say the transfer is there.
+   *
+   * Refusing to name the callee is right; emitting nothing at all is a
+   * different claim, and a false one. t32!sub_402C5A is the measured case: it
+   * decodes a pointer and the emitted C then does nothing whatever with it,
+   * because the `jmp eax` through the decoded pointer was absent. Four sites
+   * corpus-wide at cee6f91, all 32-bit (peek-a-bin-xerm).
+   */
+  it("says a transfer happens at an indirect tail jmp, naming the register", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 1"],
+        ["jmp", "eax"],
+      ]),
+    );
+
+    expect(code).toContain("indirect jmp through eax");
+    // Still no invented callee.
+    expect(code).not.toMatch(/\beax\(/);
+  });
+
+  it("reports the indirect transfer in the shape of t32!sub_402C5A", () => {
+    // `DecodePointer` is called, and the non-zero path jumps through the
+    // result. That path used to emit nothing at all.
+    const code = run(
+      seq(0x401000, [
+        ["call", "dword ptr [0x40f090]"], // 0x401000
+        ["test", "eax, eax"], // 0x401004
+        ["je", "0x401010"], // 0x401008
+        ["jmp", "eax"], // 0x40100c
+        ["call", "0x402c35"], // 0x401010
+        ["ret"], // 0x401014
+      ]),
+    );
+
+    expect(code).toContain("indirect jmp through eax");
+    expect(code).toContain("sub_402C35(");
+  });
+
+  it("stays silent at an unrecovered jump-table dispatch", () => {
+    // `jmp dword ptr [ecx*4 + 0x40b900]` — 14 of the 18 silent sites, and the
+    // property that separates them from the 4 above is the operand shape: a
+    // bare register versus a memory reference. A table whose entries WERE
+    // recovered never reaches this code, because its case targets are block
+    // leaders and the dispatch block then has successors.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 1"],
+        ["jmp", "dword ptr [ecx*4 + 0x40b900]"],
+      ]),
+    );
+
+    expect(code).not.toContain("indirect jmp through");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("leaves a nameable tail jmp as the call it already was", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 1"],
+        ["jmp", "0x401100"],
+      ]),
+    );
+
+    expect(code).toContain("sub_401100(");
+    expect(code).not.toContain("indirect jmp through");
+  });
 });
 
 /**
@@ -4499,6 +4568,96 @@ describe("decompileFunction — a value read after another block redefined its r
 });
 
 /**
+ * SSA version 0 is the register's *entry* value, and it is the one version no
+ * statement in the function defines — `newVersion` in `ssa.ts` starts at 1. So
+ * the repair `splitStaleReads` makes for every other version, a copy taken at
+ * the defining statement, has no site to be taken at.
+ *
+ * The old rule was a copy at the top of the *reading* block, and only when an
+ * earlier statement in that same block was the overwriter. Both halves of that
+ * are wrong when a block that STRICTLY DOMINATES the read has already written
+ * the register: the read gets no repair at all and binds to a name holding
+ * something else, or — worse — it gets one, taken past the damage, so the copy
+ * preserves the wrong value under a name that looks recovered (peek-a-bin-dqpk;
+ * 78 of the first kind and 19 spoiled copies of the second on t64 alone).
+ *
+ * The site that is always right for version 0 is the function's entry, before
+ * anything has run. The objection on record — a loop reading RAX_0 while the
+ * body adds to RAX would be frozen at the entry value — needs a block the
+ * unwinder enters, with no predecessor and so no `idom` entry, and `dominates`
+ * from the entry block declines those.
+ */
+describe("decompileFunction — a register's entry value outlives a write to the register", () => {
+  // ECX is the entry value (`this`, in MSVC's thiscall), parked in EDX and read
+  // back in a block the definition of ECX dominates. Both `return`s said `ecx`
+  // before the fix, and one of them meant the global.
+  const parked = () =>
+    seq(0x401000, [
+      ["mov", "edx, ecx"], // 0x401000 — park the entry ECX
+      ["mov", "ecx, dword ptr [0x412920]"], // 0x401004 — and overwrite it
+      ["test", "edx, edx"], // 0x401008
+      ["je", "0x401018"], // 0x40100c
+      ["mov", "eax, edx"], // 0x401010 — the entry value…
+      ["ret"], // 0x401014
+      ["mov", "eax, ecx"], // 0x401018 — …against the global
+      ["ret"], // 0x40101c
+    ]);
+
+  it("does not name the register for a value a dominating block overwrote", () => {
+    const code = run(parked());
+    const returns = code.split("\n").filter((l) => l.trim().startsWith("return"));
+    expect(returns).toHaveLength(2);
+    // One arm returns the global the machine loaded into ECX; the other returns
+    // the value ECX held on entry. Two `return ecx;` lines cannot be both.
+    expect(new Set(returns.map((l) => l.trim())).size).toBe(2);
+    expect(code).toMatch(/\becx_0\b/);
+    expect(code).toContain("ecx = *(int32_t*)(0x412920);");
+  });
+
+  it("takes the entry value's copy at the function's entry", () => {
+    const lines = run(parked())
+      .split("\n")
+      .map((l) => l.trim());
+    const copyAt = lines.indexOf("ecx_0 = ecx;");
+    const clobberAt = lines.indexOf("ecx = *(int32_t*)(0x412920);");
+    expect(copyAt).toBeGreaterThanOrEqual(0);
+    expect(clobberAt).toBeGreaterThanOrEqual(0);
+    expect(copyAt).toBeLessThan(clobberAt);
+    // One copy, not one per reading block: the entry dominates every read.
+    expect(lines.filter((l) => l === "ecx_0 = ecx;")).toHaveLength(1);
+  });
+
+  it("does not take the copy after a dominating block has already spoiled it", () => {
+    // The nastier form. The reading block redefines ECX itself, which is what
+    // used to buy it a copy at that block's top — but the entry block had
+    // already overwritten ECX, so the copy captured the global and `ecx_0`
+    // named it. Nothing on the page looks wrong.
+    const lines = run(
+      seq(0x401000, [
+        ["mov", "edx, ecx"], // 0x401000
+        ["mov", "ecx, dword ptr [0x412920]"], // 0x401004 — dominating write
+        ["test", "edx, edx"], // 0x401008
+        ["je", "0x401020"], // 0x40100c
+        ["mov", "ecx, dword ptr [0x412930]"], // 0x401010 — in-block redefinition
+        ["mov", "eax, edx"], // 0x401014 — reads the entry ECX
+        ["add", "eax, ecx"], // 0x401018
+        ["ret"], // 0x40101c
+        ["mov", "eax, ecx"], // 0x401020
+        ["ret"], // 0x401024
+      ]),
+    )
+      .split("\n")
+      .map((l) => l.trim());
+
+    const copyAt = lines.indexOf("ecx_0 = ecx;");
+    const clobberAt = lines.indexOf("ecx = *(int32_t*)(0x412920);");
+    expect(copyAt).toBeGreaterThanOrEqual(0);
+    expect(clobberAt).toBeGreaterThanOrEqual(0);
+    expect(copyAt).toBeLessThan(clobberAt);
+  });
+});
+
+/**
  * A call's result.
  *
  * `liftBlock` gives every `call_stmt` a `resultDest` of RAX/EAX, and SSA binds
@@ -4642,5 +4801,121 @@ describe("decompileFunction — a call's result", () => {
     expect(arm).not.toBeNull();
     const src = arm![1];
     expect(src === "0" || new RegExp(`^\\s*${src} = 0;$`, "m").test(code)).toBe(true);
+  });
+});
+
+/**
+ * Windows x64 argument setup is routinely sub-width, and it was invisible
+ * (peek-a-bin-qb2x).
+ *
+ * `collectArgs64` reads arity out of `RegState` — how many *leading* fastcall
+ * registers this block wrote — and `RegState` keys its defs by the literal
+ * operand text, so `mov ecx, 1` lands under `"ecx"`. Probing the 64-bit name
+ * missed it and broke out of the loop at that position, and since the argument
+ * never reached the IR, nothing read the `ecx = 1` and DCE deleted it: both the
+ * argument and the statement that set it were gone from the output.
+ *
+ * `mov ecx, 1 / call ExitProcess` is the shape at its smallest, and it occurred
+ * five times in each of the two real x64 binaries.
+ *
+ * What must *not* change is which expression is passed. `collectArgs64` pushes
+ * the plain `irReg(reg, 8)` on purpose — substituting `RegState`'s recorded
+ * expression re-expanded whatever computed it at the call site and rebound its
+ * leaves once SSA renaming ran (peek-a-bin-urs). Widening the probe changes
+ * only *whether* an argument is emitted.
+ */
+describe("decompileFunction — a sub-width write is still argument setup", () => {
+  /** As `run`, but 64-bit and with an import table, so the callee has a name. */
+  function run64(
+    instructions: Instruction[],
+    iat: Map<number, { lib: string; func: string }> = new Map(),
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_140001000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      true,
+      new Map(),
+      iat,
+      new Map(),
+      new Map(),
+    ).code;
+  }
+
+  it("passes an exit code set with a 32-bit mov", () => {
+    const code = run64(
+      seq(0x140001000, [["mov", "ecx, 1"], ["call", "qword ptr [0x140002000]"], ["ret"]]),
+      new Map([[0x140002000, { lib: "kernel32.dll", func: "ExitProcess" }]]),
+    );
+
+    // Before the fix this was `ExitProcess()` — no argument, and no `ecx = 1`
+    // anywhere either, because the write had no reader left to keep it alive.
+    expect(code).toMatch(/ExitProcess\(1\)/);
+    expect(code).not.toMatch(/ExitProcess\(\)/);
+  });
+
+  it("counts a sub-width write at every fastcall position", () => {
+    // RCX full width, RDX 32-bit, R8 32-bit (the xor idiom), R9 8-bit. The
+    // pre-fix output stopped at RCX and emitted `sub_140003E90(rbx)`.
+    const code = run64(
+      seq(0x140001000, [
+        ["mov", "rcx, rbx"],
+        ["mov", "edx, 0x400"],
+        ["xor", "r8d, r8d"],
+        ["mov", "r9b, 1"],
+        ["call", "0x140003e90"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/sub_140003E90\(rbx, 0x400, 0, 1\)/);
+  });
+
+  it("still stops at a fastcall register the block never wrote", () => {
+    // Arity is *leading* registers. Nothing sets RCX, so there is no evidence
+    // of a first argument and a second cannot be claimed over the gap — the
+    // wider probe must not turn this into a one- or two-argument call.
+    const code = run64(seq(0x140001000, [["mov", "edx, 7"], ["call", "0x140003e90"], ["ret"]]));
+
+    expect(code).toMatch(/sub_140003E90\(\)/);
+  });
+
+  it("passes the register, not the expression that computed it", () => {
+    // The peek-a-bin-urs guard, at the arity boundary this change moves. ECX is
+    // set from a call, so substituting `RegState`'s record would emit
+    // `sub_140003E90(GetLastError())` — the same machine call twice. What is
+    // lifted is the register; only SSA-aware propagation may rewrite it, and
+    // here it cannot, because the value came from a call rather than a constant.
+    const code = run64(
+      seq(0x140001000, [
+        ["call", "qword ptr [0x140002000]"],
+        ["mov", "ecx, eax"],
+        ["call", "0x140003e90"],
+        ["ret"],
+      ]),
+      new Map([[0x140002000, { lib: "kernel32.dll", func: "GetLastError" }]]),
+    );
+
+    expect(code).toMatch(/sub_140003E90\(\w+\)/);
+    expect(code).not.toMatch(/sub_140003E90\(GetLastError/);
+    // And exactly one call to it, not one per read of the register.
+    expect(code.match(/GetLastError\(/g)?.length).toBe(1);
+  });
+
+  it("is a 64-bit rule only — a 32-bit image still reads its pushes", () => {
+    // `collectArgs32` walks the instruction stream, not `RegState`, so a
+    // register write near a 32-bit call is not argument evidence at all.
+    const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
+
+    expect(code).toMatch(/sub_408000\(\)/);
   });
 });
