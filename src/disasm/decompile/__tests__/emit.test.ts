@@ -336,3 +336,46 @@ describe("emitFunction — a field no declaration can place is reported, not pla
     expect(outside).toContain("largest layout this states");
   });
 });
+
+/**
+ * The leak detector behind the `IRBranch` design (peek-a-bin-c33).
+ *
+ * A branch statement is confined to `liftedBlocks`, and `pipeline.ts` extracts
+ * every one of them before `structureCFG` runs — so one reaching the emitter
+ * means that extraction failed. `emitStmt` throws rather than no-oping, because
+ * `decompileFunction` catches it and the corpus sweep counts a throw, and
+ * `throws` is gated in `compare.mjs`. A silent arm would turn a structural
+ * failure into a guard that simply ceases to exist, with every audit green.
+ *
+ * These tests exist so that detector cannot go vacuous. Nothing constructs a
+ * branch today and the throw is unreachable through the pipeline by
+ * construction, which is exactly the condition under which an arm quietly stops
+ * doing anything — the repo has been bitten before by a suite that pinned a
+ * defect as the rule and failed for nobody as long as it stood.
+ */
+describe("emitFunction — a branch statement that escapes extraction is a hard failure", () => {
+  const escaped: IRStmt = {
+    kind: "branch",
+    condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+    target: 0x401234,
+    jcc: "je",
+    addr: 0x401010,
+  };
+
+  it("throws rather than dropping the guard", () => {
+    expect(() => emitFunction(fn([escaped]))).toThrow(/IRBranch reached the emitter/);
+  });
+
+  it("names the address and the jcc, so the escaped guard can be located", () => {
+    expect(() => emitFunction(fn([escaped]))).toThrow(/0x401010 \(je\)/);
+  });
+
+  it("throws from inside a nested body too, not only at the top level", () => {
+    const nested: IRStmt = {
+      kind: "if",
+      condition: irBinary("!=", irReg("ecx", 4), irConst(0, 4)),
+      thenBody: [escaped],
+    };
+    expect(() => emitFunction(fn([nested]))).toThrow(/IRBranch reached the emitter/);
+  });
+});

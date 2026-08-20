@@ -181,6 +181,13 @@ function readsOf(stmt: IRStmt): IRReg[] {
     case "return":
       if (stmt.value) regsIn(stmt.value, out);
       break;
+    // A guard's registers are reads like any other, and this audit gates at
+    // zero. Omitting the kind here would make the instrument blind to exactly
+    // the statement the branch kind was introduced to expose — the gate would
+    // keep printing 0 while a stale read sat inside a condition (peek-a-bin-c33).
+    case "branch":
+      regsIn(stmt.condition, out);
+      break;
   }
   return out;
 }
@@ -234,6 +241,11 @@ function varsIn(stmt: IRStmt, out: Set<string>): void {
       break;
     case "return":
       if (stmt.value) walk(stmt.value);
+      break;
+    // Same reasoning as `readsOf`: a repair spoiled inside a guard is still a
+    // spoiled repair, and this half of the audit is gated at zero too.
+    case "branch":
+      walk(stmt.condition);
       break;
   }
 }

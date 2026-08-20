@@ -1,5 +1,12 @@
 import type { IRExpr, IRReg, IRStmt } from "./ir";
-import { canonReg, isKnownRegister, regAtSize, regSize, walkStmts } from "./ir";
+import {
+  canonReg,
+  isKnownRegister,
+  pushBeforeTerminator,
+  regAtSize,
+  regSize,
+  walkStmts,
+} from "./ir";
 import type { SSAContext } from "./ssa";
 import { clobberedByCall, clobberedName, versionKey as ssaVersionKey } from "./ssa";
 
@@ -77,7 +84,9 @@ export function destroySSA(ctx: SSAContext): void {
                 }
               : { kind: "reg", name: srcName, size: regSize(srcName) },
         };
-        predStmts.push(copy);
+        // A phi's copy belongs on the edge, so it must precede the predecessor's
+        // terminator rather than follow it.
+        pushBeforeTerminator(predStmts, copy);
       }
     }
   }
@@ -659,9 +668,25 @@ function mapReads(stmt: IRStmt, f: (reg: IRReg) => IRExpr | null): IRStmt {
       return { ...stmt, call: { ...stmt.call, args: stmt.call.args.map(expr) } };
     case "return":
       return stmt.value ? { ...stmt, value: expr(stmt.value) } : stmt;
+    // NOTE: `branch` is deliberately NOT handled here, and this is the one place
+    // where that differs from `stripVersionsStmt` above.
+    //
+    // A guard's registers *are* reads, and `splitStaleReads` cannot see or
+    // repair one while this arm is missing — ~300 stale, unrepairable register
+    // reads per binary. That must be fixed, but it must be fixed AT THE SAME
+    // TIME as `extractCondition` starts consuming these conditions, not before:
+    // `pipeline.ts` step 4b discards every branch before structuring, so a
+    // repair taken for a read inside a condition serves a consumer that no
+    // longer exists. Measured — adding the arm on its own costs +116 emitted
+    // lines across 96 functions, all of them dead copies like `eax_29 = eax`,
+    // for no recovered value at all (peek-a-bin-c33).
+    //
+    // None of those ~300 reads is version 0, so `corpus/staleReads.ts` stays
+    // green through every one: teaching the audit the new kind was necessary
+    // and is not sufficient.
     default:
-      // Same set of kinds stripVersionsStmt leaves alone: structuring has not
-      // run yet, so nothing else carries a register.
+      // Every remaining kind carries no register: structuring has not run yet,
+      // so there are no nested bodies, and phis are handled separately.
       return stmt;
   }
 }
@@ -758,6 +783,8 @@ function stripVersionsStmt(stmt: IRStmt): IRStmt {
     }
     case "return":
       return stmt.value ? { ...stmt, value: stripVersionsExpr(stmt.value) } : stmt;
+    case "branch":
+      return { ...stmt, condition: stripVersionsExpr(stmt.condition) };
     // destroySSA runs before structuring, so no nested-body statements exist
     // yet; phis have already been converted to copies and cleared above.
     case "if":

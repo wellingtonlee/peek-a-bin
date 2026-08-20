@@ -935,6 +935,17 @@ function liveInStmt(stmt: IRStmt, liveOut: ReadonlySet<string>, ctx: LiveCtx): S
       return live;
     }
 
+    case "branch": {
+      // `pipeline.ts` extracts every branch before structuring, so one cannot
+      // reach this walk over the structured body. The rule is stated anyway
+      // because a *wrong* rule here is invisible: a branch reads its condition
+      // and kills nothing, and defaulting to `liveOut` would drop exactly the
+      // registers a guard reads.
+      const live = new Set(liveOut);
+      addReadRegs(stmt.condition, live);
+      return live;
+    }
+
     case "if": {
       const live = liveInList(stmt.thenBody, liveOut, ctx);
       const other = stmt.elseBody ? liveInList(stmt.elseBody, liveOut, ctx) : liveOut;
@@ -1103,6 +1114,8 @@ function collectAssignedRegs(
       case "raw":
       case "break":
       case "continue":
+      // A branch assigns no register — it only reads its condition.
+      case "branch":
         break;
       default: {
         const _exhaustive: never = stmt;
@@ -1546,6 +1559,24 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       const dest = `${stmt.dest.name}${stmt.dest.version !== undefined ? `_${stmt.dest.version}` : ""}`;
       push(`${pad}/* unresolved phi: ${dest} = phi(${ops}) */`, addr);
       break;
+    }
+
+    case "branch": {
+      // A branch statement is confined to `liftedBlocks`, and `pipeline.ts`
+      // extracts every one of them before `structureCFG` runs. Reaching the
+      // emitter means that extraction failed.
+      //
+      // Throwing is deliberate and is the leak detector for the whole design.
+      // `decompileFunction` catches this, so an escaped branch becomes a
+      // counted `throws` in the corpus sweep — and `throws` is gated in
+      // `compare.mjs`. Emitting a comment instead, as the unresolved-phi arm
+      // above does, would turn a structural failure into a line nobody reads;
+      // dropping it silently is worse still, since the guard would simply cease
+      // to exist with every audit reporting green.
+      throw new Error(
+        `IRBranch reached the emitter at 0x${(stmt.addr ?? 0).toString(16)} (${stmt.jcc}): ` +
+          "branch extraction failed before structureCFG",
+      );
     }
 
     default: {

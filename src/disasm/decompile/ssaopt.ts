@@ -4,7 +4,7 @@
 import { flagResultSetter } from "./flagResult";
 import { hasSideEffects } from "./fold";
 import type { IRExpr, IRPhi, IRReg, IRStmt } from "./ir";
-import { canonReg } from "./ir";
+import { canonReg, pushBeforeTerminator } from "./ir";
 import type { SSAContext } from "./ssa";
 
 function sameReg(a: IRReg, b: IRReg): boolean {
@@ -616,7 +616,11 @@ export function loopInvariantCodeMotion(ctx: SSAContext, loops: Map<number, Set<
       for (const s of stmts) {
         if (s.kind === "assign" && s.dest.kind === "reg" && isInvariant(s.src)) {
           // Move to preheader
-          preheaderStmts.push(s);
+          // Ahead of the preheader's terminator, not after it: the preheader is
+          // `ctx.idom.get(header)`, i.e. the block deciding whether the loop is
+          // entered, so it is the likeliest block in the function to end in a
+          // branch that reads what was just hoisted.
+          pushBeforeTerminator(preheaderStmts, s);
           changed = true;
         } else {
           newStmts.push(s);

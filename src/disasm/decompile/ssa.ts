@@ -621,6 +621,12 @@ export function renameVariables(
         }
         case "return":
           return stmt.value ? { ...stmt, value: renameExpr(stmt.value) } : stmt;
+        // A branch reads its condition and defines nothing. Renaming it here is
+        // the entire point of the kind: it is what gives a guard's registers an
+        // SSA version, so a reaching definition can be found for them and no
+        // pass can silently bind the guard to a value the machine never tested.
+        case "branch":
+          return { ...stmt, condition: renameExpr(stmt.condition) };
         // Renaming runs before structuring, so these kinds carry no registers to
         // rename here (phi destinations/operands are handled separately above).
         case "if":

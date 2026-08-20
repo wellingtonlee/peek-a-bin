@@ -733,6 +733,10 @@ function collectStmtIdentities(stmts: IRStmt[], into: Set<IRStmt>): void {
       case "break":
       case "continue":
       case "phi":
+      // A branch carries no nested body, and it is extracted before structuring
+      // in any case — so one appearing on either side of this audit is itself
+      // the finding, which `emit.ts` turns into a counted throw.
+      case "branch":
         break;
       default: {
         const _exhaustive: never = s;

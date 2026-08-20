@@ -233,6 +233,45 @@ export interface IRTry {
   filterExpr?: IRExpr; // __except(expr) filter
 }
 
+/**
+ * A block's trailing conditional jump, as a statement, so its condition
+ * participates in SSA renaming and dataflow like every other expression.
+ *
+ * **This statement is confined to `liftedBlocks`.** `pipeline.ts` lifts it into
+ * a side map keyed by block id immediately before `structureCFG`, so no
+ * structured tree ever contains one: `cfgpatterns.ts`, `cleanup.ts`,
+ * `promote.ts`, `structs.ts`, `typeInfer.ts` and `emit.ts` never see it. That
+ * confinement is not tidiness, it is the design — `detectForLoop` skips any
+ * body block whose last statement is not an `assign`, so a branch left in the
+ * tree would take for-loop recognition to zero corpus-wide, silently and with
+ * no failing test (peek-a-bin-c33 records the reasoning in full).
+ *
+ * `emit.ts` therefore **throws** on one rather than ignoring it: a branch that
+ * escapes the extraction point is a defect, and `decompileFunction`'s catch
+ * turns a throw into a counted failure that `corpus/compare.mjs` gates on. A
+ * silent no-op there would make the same defect invisible.
+ *
+ * The precedent is already in the lifter: `setcc` calls `regState.getCondition()`
+ * and assigns the resulting `IRExpr` to a register, and that survives SSA
+ * renaming untouched. This does for `jcc` what the lifter already does for
+ * `setcc`.
+ */
+export interface IRBranch {
+  kind: "branch";
+  /**
+   * The condition under which the jump is TAKEN — the same polarity every entry
+   * in `regstate.ts`'s `condMap` uses, and the same one `extractCondition`
+   * returns. Getting this backwards once inverted every `if` and `while` the
+   * decompiler emitted, so the polarity convention is stated at every hop.
+   */
+  condition: IRExpr;
+  /** Virtual address of the taken target. */
+  target: number;
+  /** The originating jump's mnemonic, lowercased, e.g. `jne`. */
+  jcc: string;
+  addr?: number;
+}
+
 export type IRStmt =
   | IRAssign
   | IRStore
@@ -250,7 +289,8 @@ export type IRStmt =
   | IRBreak
   | IRContinue
   | IRPhi
-  | IRTry;
+  | IRTry
+  | IRBranch;
 
 // ── Function Container ──
 
@@ -500,6 +540,41 @@ export function walkExpr(expr: IRExpr, fn: (e: IRExpr) => void): void {
   }
 }
 
+/**
+ * Whether this statement ends its block's straight-line code.
+ *
+ * Only `IRBranch` does, and only inside `liftedBlocks` — the structured tree
+ * has no terminators, because `pipeline.ts` extracts every branch before
+ * `structureCFG`. `return` is deliberately **not** one: nothing appends to a
+ * block after lifting on the strength of it, and widening this predicate would
+ * change where existing passes insert.
+ */
+export function isBlockTerminator(stmt: IRStmt): boolean {
+  return stmt.kind === "branch";
+}
+
+/**
+ * Append a statement to a block's lifted list, keeping it ahead of any
+ * terminator.
+ *
+ * Two passes add a statement to the *end* of another block's list — `destroySSA`
+ * lowering a phi to a copy in the predecessor, and `loopInvariantCodeMotion`
+ * hoisting into the preheader. Both are correct only while no terminator exists
+ * in the IR, because "end of the statement list" and "end of the block's
+ * straight-line code" are then the same place. A branch statement makes them
+ * different, and a plain `push` would land the definition *after* the branch
+ * that reads it — a read preceding its own definition, in the block that decides
+ * whether a loop is even entered.
+ *
+ * The preheader case is the live one: it is `ctx.idom.get(header)`, so it very
+ * often ends in exactly such a branch (peek-a-bin-c33).
+ */
+export function pushBeforeTerminator(stmts: IRStmt[], stmt: IRStmt): void {
+  const last = stmts[stmts.length - 1];
+  if (last && isBlockTerminator(last)) stmts.splice(stmts.length - 1, 0, stmt);
+  else stmts.push(stmt);
+}
+
 /** Walk all expressions inside a statement tree. */
 export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
   for (const s of stmts) {
@@ -549,6 +624,9 @@ export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
         walkStmts(s.body, fn);
         walkStmts(s.handler, fn);
         if (s.filterExpr) walkExpr(s.filterExpr, fn);
+        break;
+      case "branch":
+        walkExpr(s.condition, fn);
         break;
     }
   }
