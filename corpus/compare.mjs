@@ -83,12 +83,12 @@ for (const b of bins) {
   const C = readSummary(chgDir, b);
   note(`\n═══ ${b} ${"═".repeat(60)}`);
 
-  const row = (name, get, worseIf) => {
+  const row = (name, get, worseIf, why = "REGRESSION") => {
     const a = get(B);
     const c = get(C);
     const worse = worseIf ? worseIf(a, c) : false;
     if (worse) regressions++;
-    const mark = worse ? "   <<< REGRESSION" : a === c ? "" : "   (moved)";
+    const mark = worse ? `   <<< ${why}` : a === c ? "" : "   (moved)";
     note(`  ${name.padEnd(30)}${String(a).padStart(10)} -> ${String(c).padStart(10)}${mark}`);
   };
 
@@ -124,6 +124,113 @@ for (const b of bins) {
     (x) => x.callees.lost,
     (a, c) => c > a,
   );
+  // Statements liftBlock produced that structureCFG put nowhere, by object
+  // identity. The absolute is NOT gated in the run itself — see the README —
+  // but a rise between two pinned commits is a regression on its own terms:
+  // whatever the baseline is, a change that loses more statements than the
+  // commit before it has lost statements. Nothing downstream can notice.
+  //
+  // An artifact directory produced before this audit existed has no such field,
+  // and "absent" must not read as "zero" — that would score a run that never
+  // measured as the best possible result.
+  if (B.stmtDrops && C.stmtDrops) {
+    row(
+      "statements dropped",
+      (x) => x.stmtDrops.dropped,
+      (a, c) => c > a,
+    );
+    row("statements lifted (denom)", (x) => x.stmtDrops.tracked);
+  } else {
+    note("  statements dropped            NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // A register named for a value it no longer holds. GATED AT 0 in the run
+  // itself, so a rise here can only mean the gate was not run — but it is
+  // compared anyway, because a comparison is how a run at an older commit is
+  // read, and those predate the gate entirely. Absent on either side must not
+  // read as zero: a run that never measured would otherwise score as the best
+  // possible result.
+  if (B.staleV0 && C.staleV0) {
+    row(
+      "stale version-0 names",
+      (x) => x.staleV0.wrong,
+      (a, c) => c > a,
+    );
+    row(
+      "  spoiled entry copies",
+      (x) => x.staleV0.copiesCorrupted,
+      (a, c) => c > a,
+    );
+    row("  entry copies taken", (x) => x.staleV0.copies);
+    row("  sites of the shape", (x) => x.staleV0.sites);
+  } else {
+    note("  stale version-0 names         NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // ── Branch and value recovery. ─────────────────────────────────────────
+  //
+  // `__unrecovered_N` is what the emitter prints when it cannot name a value,
+  // most often the condition of a Jcc. Until `peek-a-bin-rl01` nothing counted
+  // them, and NOTHING IN THIS FILE COULD SEE THEM: an unrecovered condition has
+  // no top-level comparison operator, so the polarity audit does not record a
+  // failing row for it — it records no row at all. A change turning recovered
+  // guards into unrecovered ones therefore moved `polarity.checked` down while
+  // leaving `ok/checked` at 1.00, and this script called that no regression.
+  //
+  // A rise is a regression on its own terms, whatever the baseline: the change
+  // hands the reader fewer machine facts than the commit before it did. The
+  // denominator moving underneath (a function appearing or disappearing) can
+  // raise it innocently, exactly as it can raise `throws` or `callees lost`;
+  // the function count is printed above, and a rise is adjudicated, not
+  // assumed. Absent on either side must not read as zero.
+  if (B.unrecovered && C.unrecovered) {
+    row(
+      "unrecovered values",
+      (x) => x.unrecovered.values,
+      (a, c) => c > a,
+    );
+    row(
+      "  of which branch guards",
+      (x) => x.unrecovered.branches,
+      (a, c) => c > a,
+    );
+    row("  branches with a jcc", (x) => x.unrecovered.branchesWithJcc);
+    row("  token occurrences", (x) => x.unrecovered.occurrences);
+  } else {
+    note("  unrecovered values            NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
+  // is ok/checked, and a guard that stops being anchorable — or stops having a
+  // single comparison operator, which is what an unrecovered condition is —
+  // leaves BOTH sides of that fraction. The ratio stays at 1.00 and says
+  // nothing. So the denominator is judged in its own right.
+  //
+  // THIS IS THE ONE GATE HERE THAT IS NOT "the change is wrong". It means
+  // guards left the audited set and a human has to read them: the README
+  // records a legitimate instance (41 guards left t32 at `4a4ec70`, every one
+  // in a function that had gained a `switch`). What it will no longer do is
+  // happen in silence.
+  row(
+    "polarity guards audited",
+    (x) => x.polarity.checked,
+    (a, c) => c < a,
+    "FEWER GUARDS AUDITED — adjudicate, see README",
+  );
+  // The skip bucket an unrecovered condition lands in when the auditor COULD
+  // anchor it. Summed over if/while/for/do_while, since the bucket key carries
+  // the construct. It is a lower bound on the traffic across that boundary:
+  // a guard whose body could not be anchored never reaches `judge` and is
+  // skipped for an anchoring reason instead, so it is not counted here.
+  if (B.skipReasons && C.skipReasons) {
+    const notSingle = (x) =>
+      Object.entries(x.skipReasons)
+        .filter(([k]) => k.endsWith(":cond-not-single-comparison"))
+        .reduce((n, [, v]) => n + v, 0);
+    row("guards w/o single compare", notSingle, (a, c) => c > a, "MORE GUARDS UNJUDGEABLE");
+  } else {
+    note("  guards w/o single compare     NOT MEASURED on both sides (a run predating the audit)");
+  }
 
   // Ratios. A denominator moving is fine; the fraction falling is not.
   const ratio = (name, num, den) => {
@@ -226,10 +333,56 @@ for (const b of bins) {
     if (a !== c) changed.push({ jcc: k, fname: gb.get(k)[0].fname, a, c });
   }
 
+  // ── What the join gates, and what it deliberately does not. ────────────
+  //
+  // The join was report-only: `changed`, `onlyBase` and `onlyChange` never
+  // touched `regressions`, so this script exited 0 whatever it found here.
+  //
+  // Making CHANGED itself a regression would be wrong, and the reason is worth
+  // stating. `shapeOf` includes `cond`, which is the emitted condition TEXT, so
+  // it moves whenever any spelling improves — a type inference that turns
+  // `*(int32_t*)(rbp - 0x64)` into `var_64` changes hundreds of guards without
+  // touching a single one's meaning. Gating that would make "regression" mean
+  // "something changed" and the verdict would stop meaning anything.
+  //
+  // What IS gated is the one dimension with a bad direction: a guard at a jcc
+  // present on both sides whose ANCHOR-A verdict got worse. The aggregate
+  // `polarity inverted` / `mismatch` rows already catch the count going up;
+  // this catches the swap they cannot see, one guard fixed and another broken
+  // in the same run. Anchor A only, matching the gate in `corpus.audit.ts` —
+  // A2 carries two long-standing INVERTED verdicts on t64 and w64.
+  const badA = (gs) => gs.filter((g) => g.anchor === "A" && g.verdict !== "OK").length;
+  const worsened = common.filter((k) => badA(gc.get(k)) > badA(gb.get(k)));
+  if (worsened.length > 0) {
+    regressions++;
+    note(`  *** ${worsened.length} guard(s) at a shared jcc got a WORSE anchor-A verdict:`);
+    for (const k of worsened.slice(0, 20)) {
+      note(
+        `      <<< REGRESSION 0x${k.toString(16)} ${gc.get(k)[0].fname}: ` +
+          `${gb
+            .get(k)
+            .map((g) => g.verdict)
+            .join(",")} -> ${gc
+            .get(k)
+            .map((g) => g.verdict)
+            .join(",")}`,
+      );
+    }
+  }
+
   note(
     `  guards: ${gb.size} -> ${gc.size} distinct jccs; in both ${common.length}, ` +
       `CHANGED ${changed.length}, only-base ${onlyBase.length}, only-change ${onlyChange.length}`,
   );
+  if (changed.length > 0) {
+    note(
+      `  ${"!".repeat(66)}\n` +
+        `  !! ${changed.length} guard(s) SHARE A JCC ADDRESS AND SAY SOMETHING DIFFERENT.\n` +
+        "  !! Not counted as a regression — the condition text moves for benign reasons\n" +
+        "  !! (a better spelling of the same operand). READ THEM. This is report-only\n" +
+        `  !! and the verdict line below does not account for it.\n  ${"!".repeat(66)}`,
+    );
+  }
   for (const c of changed.slice(0, 40)) {
     note(`    CHANGED 0x${c.jcc.toString(16)} ${c.fname}`);
     note(`      base: ${c.a}`);
@@ -264,6 +417,12 @@ out.push(
 );
 out.push("A guard leaving the audited set is NOT automatically a regression — it can mean the");
 out.push("function was restructured (a cascade becoming a switch, say) or that the auditor could");
-out.push("no longer anchor it. Read the emitted C for those functions before judging.");
+out.push("no longer anchor it. It is nevertheless FLAGGED now, by `polarity guards audited` and");
+out.push("`guards w/o single compare`, because the alternative was silence: guards leaving that");
+out.push("set used to move no number at all, while `polarity correct` sat at 1.00. Read the");
+out.push("emitted C for those functions before judging.");
+out.push("");
+out.push("NOT accounted for in the verdict: CHANGED guards at a shared jcc (report-only, see the");
+out.push('banner), and every defect class in README.md\'s "What the standing set does NOT catch".');
 process.stdout.write(`${out.join("\n")}\n`);
 process.exit(regressions === 0 ? 0 : 1);

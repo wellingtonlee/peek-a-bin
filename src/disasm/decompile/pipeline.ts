@@ -22,6 +22,37 @@ export interface DecompileResult {
 }
 
 /**
+ * The two sides of the structuring step, handed to an instrument that asks to
+ * watch it.
+ *
+ * This exists for ONE reason: the statements `liftBlock` produced and the
+ * statements `structureCFG` returned are the same objects, so a statement the
+ * structurer drops can be identified **by object identity** and by nothing
+ * else. Both sides are internal to `decompileFunction` and neither is
+ * recoverable from its return value — the emitted C says nothing about a
+ * statement that never entered the tree, which is precisely what makes that
+ * class of defect invisible (see `structureCFG`'s leftover pass, and
+ * `peek-a-bin-cb2`, where 6% of every statement the front end produced was
+ * silently deleted).
+ *
+ * `corpus/sweep.ts` is the only caller. Passing no tap costs one `undefined`
+ * check and changes no value the pipeline computes, which is the point: an
+ * instrument that alters what it measures is worse than no instrument.
+ */
+export interface StructuringTap {
+  func: DisasmFunction;
+  /**
+   * The per-block lifted statements as `structureCFG` was handed them — after
+   * SSA and `foldBlock`, so a statement inlined into a later use is already
+   * gone from here and is not a drop. The arrays are copies; the statement
+   * objects in them are the originals, because identity is the whole point.
+   */
+  lifted: Map<number, IRStmt[]>;
+  /** `structureCFG`'s output, before `cleanupStructured` touches it. */
+  structured: IRStmt[];
+}
+
+/**
  * Full decompilation pipeline: instructions → pseudocode string + line map.
  *
  * buildCFG → liftBlock → [buildSSA → ssaOptimize → destroySSA] → foldBlock
@@ -40,6 +71,7 @@ export function decompileFunction(
   funcMap: Map<number, { name: string; address: number }>,
   registry?: StructRegistry,
   runtimeFunctions?: RuntimeFunction[],
+  tap?: (ev: StructuringTap) => void,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -70,7 +102,15 @@ export function decompileFunction(
     }
 
     // 5. Structure CFG → structured IR statements
+    //
+    // The lifted lists are copied BEFORE the call so a tap sees what
+    // `structureCFG` was handed rather than whatever it left behind. Nothing
+    // here runs, and no copy is made, unless somebody is watching.
+    const liftedBefore = tap
+      ? new Map([...liftedBlocks].map(([id, stmts]) => [id, [...stmts]]))
+      : null;
     const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables, is64);
+    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured });
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
     let cleaned = cleanupStructured(structured);

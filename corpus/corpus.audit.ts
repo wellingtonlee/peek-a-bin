@@ -89,16 +89,48 @@ if (!pre.haveBins || !pre.haveCc) {
           join(artifactDir, `funcs_${key}.jsonl`),
           `${r.funcs.map((f) => JSON.stringify(f)).join("\n")}\n`,
         );
+        // Every statement the structurer dropped, per site. Written even when
+        // empty, so its absence means the audit did not run rather than that
+        // it found nothing.
+        writeFileSync(
+          join(artifactDir, `drops_${key}.jsonl`),
+          r.drops.map((d) => JSON.stringify(d)).join("\n") + (r.drops.length > 0 ? "\n" : ""),
+        );
+        // Every `__unrecovered_N` in the emitted C, per site. NONE of these
+        // appear in guards_<key>.jsonl — an unrecovered condition is not a
+        // failing polarity row, it is not a row at all — which is exactly why
+        // they get a file of their own.
+        writeFileSync(
+          join(artifactDir, `unrecovered_${key}.jsonl`),
+          r.unrecoveredSites.map((s) => JSON.stringify(s)).join("\n") +
+            (r.unrecoveredSites.length > 0 ? "\n" : ""),
+        );
         // The recovered tables, so a run at another commit can be handed them
         // with PEEK_CORPUS_TABLES. See preflight.ts on what that isolates.
+        // Every version-0 read the lowering left naming a register that holds
+        // something else, and every entry-value copy taken after the damage.
+        // Written even when empty — the standing expectation is that both are,
+        // and an absent file has to mean the audit did not run.
+        writeFileSync(
+          join(artifactDir, `stalev0_${key}.jsonl`),
+          [...r.staleV0.rows, ...r.staleV0.corrupt].map((x) => JSON.stringify(x)).join("\n") +
+            (r.staleV0.rows.length + r.staleV0.corrupt.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
           JSON.stringify(
             {
               ...r,
+              staleV0: {
+                ...r.staleV0,
+                rows: r.staleV0.rows.length,
+                corrupt: r.staleV0.corrupt.length,
+              },
               guards: r.guards.length,
               funcs: r.funcs.length,
+              drops: r.drops.length,
+              unrecoveredSites: r.unrecoveredSites.length,
               jumpTablesJson: undefined,
               cc: ccResults.get(key),
               offsetof: ozResults.get(key),
@@ -168,6 +200,43 @@ if (!pre.haveBins || !pre.haveCc) {
       }
     });
 
+    /**
+     * A GATE, and the one audit in this file whose count was moved to zero by a
+     * fix rather than found there. `corpus/staleReads.ts` argues why it is a
+     * gate when the two BASELINE audits below are not: every row is a register
+     * name the emitted C applies to a value the SSA says it does not hold, so
+     * a non-zero count is a wrong answer, not a threshold judgement.
+     *
+     * Both liveness assertions matter. `sites` non-zero says the audit still
+     * finds the *shape* — a version-0 read a dominating definition overwrote —
+     * which is common and is not itself a defect once the value is preserved.
+     * `copies` non-zero says it can still see the preservation; that check
+     * depends on `ssadestroy.ts` spelling a preserved entry value `<reg>_0`,
+     * and a spelling change would otherwise turn every repaired site back into
+     * a reported defect.
+     */
+    it("never names a register for a value it no longer holds", () => {
+      for (const r of results.values()) {
+        const v = r.staleV0;
+        expect(
+          `${r.key} stale: ${v.rows
+            .slice(0, 5)
+            .map((x) => `${x.func}@0x${(x.addr ?? 0).toString(16)} ${x.reg} ${x.verdict}`)
+            .join("; ")}`,
+        ).toBe(`${r.key} stale: `);
+        expect(v.wrong).toBe(0);
+        expect(
+          `${r.key} spoiled repairs: ${v.corrupt
+            .slice(0, 5)
+            .map((x) => `${x.func} blk${x.block} ${x.name}`)
+            .join("; ")}`,
+        ).toBe(`${r.key} spoiled repairs: `);
+        expect(v.copiesCorrupted).toBe(0);
+        expect(v.sites).toBeGreaterThan(0);
+        expect(v.copies).toBeGreaterThan(0);
+      }
+    });
+
     it("resolves every goto to a label the same function defines", () => {
       const g = gotoCheck(over(auditedKeys(), results).map((r) => ({ funcs: r.funcs })));
       expect(g.dangling).toBe(0);
@@ -182,6 +251,67 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(r.clean).toBe(r.compiled);
         expect(r.compiled).toBeGreaterThan(0);
       }
+    });
+
+    /**
+     * NOT A GATE ON THE DROP COUNT — read this before "tightening" it.
+     *
+     * All it asserts is that the instrument is alive: that the tap fired and
+     * statements were examined. A statement-drop audit that quietly stopped
+     * observing anything would report `0 dropped` forever and look like the
+     * healthiest number in the report, which is the one failure mode a
+     * measurement of absence has that the others do not.
+     *
+     * The count itself is reported and never asserted. It measured 0/7002,
+     * 0/7331, 0/6519 and 0/6500 at `cee6f91`, but one commit's measurement is
+     * not evidence that zero is an invariant of the design: `structureCFG` has
+     * a path that legitimately consumes a block without emitting it (the
+     * short-circuit fold), and it is only true today that such blocks lift to
+     * nothing. Pinning 0 here would assert something nobody has established.
+     * A *rise* is judged where regressions are actually judged — `compare.mjs`,
+     * between two runs pinned to two commits, where it counts as one.
+     */
+    it("observes the structuring step at all (instrument liveness, not a gate)", () => {
+      const dead = [...results.values()].filter((r) => r.stmtDrops.tracked === 0).map((r) => r.key);
+      expect(`observed no lifted statement for: ${dead.join(", ")}`).toBe(
+        "observed no lifted statement for: ",
+      );
+      for (const r of results.values()) expect(r.stmtDrops.tracked).toBeGreaterThan(1000);
+    });
+
+    /**
+     * NOT A GATE ON THE UNRECOVERED COUNT — same reasoning as the drop audit.
+     *
+     * Two things are asserted, and neither is a threshold on how much the
+     * decompiler recovers:
+     *
+     * 1. The scan read emitted C at all. A count of `__unrecovered_N` is a
+     *    measurement whose *good* direction is downward, so an instrument that
+     *    quietly stopped looking reports the best number in the report.
+     * 2. Every value it found was also DECLARED in a form this file could
+     *    parse. `emit.ts` declares each one exactly once, so `declsParsed`
+     *    below `values` means the declaration spelling moved and the note —
+     *    the only record of what was lost, and what `byMnemonic` and `branches`
+     *    are derived from — is being read from somewhere less reliable. That is
+     *    a broken instrument, not a decompiler defect, and it should say so
+     *    rather than silently reclassifying every site.
+     *
+     * The count itself is reported and never asserted: it is not zero, no
+     * threshold on it has been established, and a rise is judged in
+     * `compare.mjs` between two pinned runs.
+     */
+    it("reads the emitted C for unrecovered values (instrument liveness, not a gate)", () => {
+      const blind = [...results.values()]
+        .filter((r) => r.unrecovered.scannedFuncs === 0)
+        .map((r) => r.key);
+      expect(`scanned no emitted C for: ${blind.join(", ")}`).toBe("scanned no emitted C for: ");
+      const unparsed = [...results.values()]
+        .filter((r) => r.unrecovered.declsParsed !== r.unrecovered.values)
+        .map((r) => `${r.key} ${r.unrecovered.declsParsed}/${r.unrecovered.values}`);
+      expect(`declarations parsed of values found: ${unparsed.join(", ")}`).toBe(
+        "declarations parsed of values found: ",
+      );
+      for (const r of results.values()) expect(r.unrecovered.scannedFuncs).toBeGreaterThan(100);
     });
 
     it("lays every struct field out at the offset its name records", () => {
@@ -249,6 +379,51 @@ function renderReport(): string {
     );
     L.push("    lost coverage means no address mapped: folded into a use, relocated, OR dropped.");
     L.push("    Telling those apart needs the emitted C read beside the machine text.");
+    const sd = r.stmtDrops;
+    const kinds = Object.entries(sd.byKind)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ");
+    L.push(
+      `  BASELINE statements dropped ${sd.dropped}/${sd.tracked} lifted ` +
+        `(${pct(sd.dropped, sd.tracked)}) across ${sd.funcsAffected} functions — NOT a gate` +
+        (kinds ? `\n    kinds: ${kinds}` : ""),
+    );
+    L.push("    liftBlock -> structureCFG, by OBJECT IDENTITY. A drop is a statement nothing");
+    L.push("    downstream can know existed. Sites in drops_<bin>.jsonl; see README.md.");
+    const un = r.unrecovered;
+    const sites = Object.entries(un.bySite)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ");
+    const mnems = Object.entries(un.byMnemonic)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ");
+    L.push(
+      `  BASELINE unrecovered values ${un.values} across ${un.funcsAffected} functions ` +
+        `(${un.occurrences} occurrences of the token) — NOT a gate`,
+    );
+    L.push(
+      `    of which BRANCH conditions ${un.branches}, ${un.branchesWithJcc} with a named jcc` +
+        (sites ? `\n    sites: ${sites}` : "") +
+        (mnems ? `\n    jcc:   ${mnems}` : ""),
+    );
+    L.push("    An unrecovered value is a machine fact the emitter names instead of guessing.");
+    L.push("    NONE of them is in guards_<bin>.jsonl: an unrecovered condition has no top-level");
+    L.push("    operator, so it is not a failing polarity row, it is not a row at all. A rise is");
+    L.push("    judged in compare.mjs, beside polarity.checked FALLING. See README.md.");
+    const sv = r.staleV0;
+    L.push(
+      `  stale version-0 names       ${sv.wrong} wrong of ${sv.confirmed} confirmed, ` +
+        `${sv.sites} sites over ${sv.v0Reads} version-0 reads`,
+    );
+    L.push(
+      `    entry-value copies        ${sv.copies}, of which ${sv.copiesCorrupted} spoiled ` +
+        `(${sv.readsOfCorrupted} reads, ${sv.funcsCorrupted} functions)`,
+    );
+    L.push("    A GATE at 0 on both, unlike the two BASELINEs above: each row is a register the");
+    L.push("    emitted C names for a value it does not hold. Sites in stalev0_<bin>.jsonl.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

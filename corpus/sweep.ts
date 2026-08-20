@@ -18,13 +18,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildCFG, detectLoops } from "../src/disasm/cfg";
-import { decompileFunction } from "../src/disasm/decompile/pipeline";
+import type { IRStmt } from "../src/disasm/decompile/ir";
+import { decompileFunction, type StructuringTap } from "../src/disasm/decompile/pipeline";
 import { buildFuncInsnMap } from "../src/disasm/funcInsns";
 import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
+import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
 
 // ── Condition polarity ─────────────────────────────────────────────────────
 //
@@ -175,6 +177,67 @@ export interface LoopShortRec {
   exits: string[];
 }
 
+/**
+ * One statement `liftBlock` produced that `structureCFG` did not put anywhere
+ * in its output, identified BY OBJECT IDENTITY.
+ *
+ * `addr` is the machine address the statement carries, which most lifted
+ * statements do; `blockAddr` is its CFG block's start address, which every one
+ * of them has. Between the two and `kind` there is enough to find the thing in
+ * the disassembly and decide whether its absence is a defect.
+ */
+export interface StmtDropRec {
+  fn: number;
+  fname: string;
+  blockId: number;
+  blockAddr: number;
+  /** The statement's own machine address, or null for one that carries none. */
+  addr: number | null;
+  kind: string;
+  /** Where it sat in its block's lifted list, and how long that list was. */
+  index: number;
+  of: number;
+  /** The assignment's destination, when it is a plain register or variable. */
+  dest: string | null;
+}
+
+/**
+ * One `__unrecovered_N` in the emitted C — one machine fact the emitter names
+ * instead of guessing at.
+ *
+ * `jcc` is a LOCATOR — the conditional jump guarding the arm this value's
+ * condition governs — and it is null far more often than it is set. That is
+ * deliberate rather than a gap to close: the `if (…)` header line carries no
+ * line-map address (`emit.ts` pushes it without one), so the only route to an
+ * address is the same body-anchoring the polarity audit does, and that fails on
+ * roughly two thirds of all guards. `jccFrom` says which happened.
+ *
+ * `note` is the authority on WHICH branch was unrecovered; `jcc` is not.
+ * Anchoring names the jump that guards the arm, and in a short-circuited
+ * condition — `if (!__unrecovered_1 /* jle *\/ && edi <= 0x7FFFFFF0)` — that is
+ * the LAST test in the chain, while the unrecovered value came from the first.
+ * Measured over the corpus, the note and the anchored jump name the same
+ * mnemonic 123 times in 125, and both exceptions are exactly that shape.
+ */
+export interface UnrecoveredRec {
+  fn: number;
+  fname: string;
+  /** `__unrecovered_7`. Unique within its function, not across the binary. */
+  name: string;
+  /** The text the emitter could not recover: a jcc mnemonic, or an operand. */
+  note: string;
+  /** "branch" when `note` names a conditional jump, else "value". */
+  cause: "branch" | "value";
+  /** Where the value is USED, from the emitted line it appears on. */
+  site: string;
+  /** The originating jcc, when the polarity anchoring named one. */
+  jcc: number | null;
+  /** That jcc's mnemonic, as the disassembly spells it. */
+  mnem: string | null;
+  /** How `jcc` was determined, or why it could not be. */
+  jccFrom: string;
+}
+
 /** One decompiled function, as the emitted-text audits consume it. */
 export interface FuncRec {
   addr: number;
@@ -253,6 +316,96 @@ export interface BinResult {
   };
   /** A callee the disassembly names that the emitted C never applies. Expect 0. */
   callees: { pairs: number; lost: number; funcsAffected: number; detail: string[] };
+  /**
+   * STATEMENT DROPS ACROSS `structureCFG`, BY OBJECT IDENTITY.
+   *
+   * The complement of line map coverage, and a strictly sharper question. That
+   * metric asks whether an *address* reached the emitted line map, and cannot
+   * tell "folded into a use" from "relocated" from "genuinely gone". This one
+   * asks whether the *statement object* the front end built is anywhere in the
+   * tree the structurer returned, so folding and relocation cannot register:
+   * folding happens in `foldBlock`, before the snapshot, and a relocated
+   * statement is still the same object somewhere in the tree.
+   *
+   * A drop here means nothing downstream can know the statement existed. It
+   * never enters the tree, so there is no dangling reference, no comment and no
+   * missing label — the reader simply concludes the code does not exist. That
+   * is the class `peek-a-bin-cb2` was (6% of every statement, from the leftover
+   * pass requiring reachability) and the class `peek-a-bin-hu7` is.
+   *
+   * NOT A GATE, and deliberately so: the count at the commit this was built on
+   * is not zero, and a threshold nobody has justified is worse than a number
+   * that moves. Read `drops` and `corpus/README.md` before acting on a change.
+   *
+   * WHAT IT DOES NOT COVER: everything after `structureCFG`. `cleanupStructured`,
+   * `wrapExceptionRegions`, `inferTypes`, `promoteVars`, `synthesizeStructs` and
+   * `emitFunction` all run afterwards, and a statement any of them discards is
+   * counted as kept here.
+   */
+  stmtDrops: {
+    /** Lifted statements examined — the denominator. */
+    tracked: number;
+    dropped: number;
+    byKind: Record<string, number>;
+    funcsAffected: number;
+    detail: string[];
+  };
+  /** Every drop, per site. Written out as `drops_<key>.jsonl`. */
+  drops: StmtDropRec[];
+  /**
+   * BRANCH AND VALUE RECOVERY, counted from the emitted C.
+   *
+   * `__unrecovered_N` is what the emitter prints when it cannot name a value —
+   * most often the condition of a Jcc whose flags nothing in the IR explains.
+   * It is the honest spelling and it is why so much of the corpus compiles
+   * clean, but it is also an admitted gap, and until this existed NOTHING
+   * COUNTED THEM.
+   *
+   * WHY THIS IS NOT COVERED BY THE POLARITY AUDIT, which is the trap it was
+   * built for. `judge` needs `topOp(cond)` to name exactly one comparison
+   * operator, and `__unrecovered_7 /* jne *\/` has none — so an unrecovered
+   * guard is not a failing polarity row, IT IS NOT A ROW AT ALL. It leaves the
+   * audited set silently. `polarity.ok / polarity.checked` then stays at 1.00
+   * while `checked` falls, and a change that turned 400 recovered guards into
+   * `__unrecovered_N` moved no number in a bad direction anywhere in this
+   * harness (`peek-a-bin-rl01`). Both directions cross that boundary in
+   * silence: recovery getting worse, and conditions getting richer.
+   *
+   * NOT A GATE, for the same reason the statement-drop count is not: the value
+   * today is not zero and no threshold on it has been established. A RISE
+   * between two pinned runs is judged in `compare.mjs`, which is also where
+   * `polarity.checked` falling is now judged.
+   */
+  unrecovered: {
+    /** Occurrences of the token in emitted C, declaration and use. Greppable. */
+    occurrences: number;
+    /** Distinct names, i.e. distinct machine facts given up on. */
+    values: number;
+    /** Values whose note names a conditional jump — an unrecovered GUARD. */
+    branches: number;
+    /** Of those, the ones whose originating jcc address could be named. */
+    branchesWithJcc: number;
+    funcsAffected: number;
+    /** Functions of emitted C the scan actually read. Instrument liveness. */
+    scannedFuncs: number;
+    /** Declaration lines parsed, i.e. notes read from the header. Liveness. */
+    declsParsed: number;
+    bySite: Record<string, number>;
+    byMnemonic: Record<string, number>;
+    detail: string[];
+  };
+  /** Every unrecovered value, per site. Written as `unrecovered_<key>.jsonl`. */
+  unrecoveredSites: UnrecoveredRec[];
+  /**
+   * A REGISTER NAMED IN THE EMITTED C THAT NO LONGER HOLDS WHAT THE SSA SAID.
+   *
+   * A GATE at 0, unlike the two audits above it, and `corpus/staleReads.ts`
+   * says why: every row is a *provably* wrong name, which is the polarity
+   * audit's character rather than the drop count's. `wrong` is the bare
+   * register a dominating write has already changed; `copiesCorrupted` is the
+   * repair spoiled, which is worse because the output looks recovered.
+   */
+  staleV0: StaleV0Result;
   funcs: FuncRec[];
 }
 
@@ -370,6 +523,22 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       detail: [],
     },
     callees: { pairs: 0, lost: 0, funcsAffected: 0, detail: [] },
+    stmtDrops: { tracked: 0, dropped: 0, byKind: {}, funcsAffected: 0, detail: [] },
+    drops: [],
+    unrecovered: {
+      occurrences: 0,
+      values: 0,
+      branches: 0,
+      branchesWithJcc: 0,
+      funcsAffected: 0,
+      scannedFuncs: 0,
+      declsParsed: 0,
+      bySite: {},
+      byMnemonic: {},
+      detail: [],
+    },
+    unrecoveredSites: [],
+    staleV0: emptyStaleV0(),
     funcs: [],
   };
 
@@ -400,6 +569,12 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     let code = "";
     let lineMap: [number, number][] = [];
     let threw: string | null = null;
+    // The structuring step's two sides, for the statement-drop audit. An array
+    // rather than a nullable, because a `let` assigned only inside a callback
+    // is not narrowed by the typechecker afterwards. Empty when the pipeline
+    // returned before structuring (no blocks, or an internal throw), which is
+    // the honest reading: nothing was structured, so nothing was dropped.
+    const tapped: StructuringTap[] = [];
     try {
       const r = decompileFunction(
         func,
@@ -414,6 +589,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         funcMap,
         af.structRegistry,
         af.pe.runtimeFunctions,
+        (ev) => tapped.push(ev),
       );
       code = r.code;
       lineMap = r.lineMap;
@@ -433,9 +609,32 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     });
     if (threw !== null) continue;
 
+    if (tapped.length > 0) {
+      auditStatementDrops(res, func, insns, tapped[0], jumpTables, af);
+    }
     auditLineMapCoverage(res, func, insns, lineMap, jumpTables, af);
     auditCallees(res, func, insns, code, funcMap);
-    auditGuardsAndLoops(res, func, insns, code, lineMap, jumpTables, af);
+    // The guard pass is what can name a jcc for an unrecovered condition — it
+    // is the only thing here that anchors an emitted arm to a machine block —
+    // so it runs first and hands over what it resolved.
+    const jccOf = auditGuardsAndLoops(res, func, insns, code, lineMap, jumpTables, af);
+    auditUnrecovered(res, func, code, jccOf);
+    // Runs AFTER `decompileFunction`, so the shared `StructRegistry` has
+    // already evolved exactly as production's pass evolves it. This one drives
+    // its own replica of pipeline stages 1-3 — see `staleReads.ts` on why
+    // neither side of the question is recoverable from the return value.
+    auditStaleV0Reads(
+      res.staleV0,
+      key,
+      func,
+      insns,
+      af.xrefMap,
+      jumpTables,
+      af.pe.is64,
+      af.iatMap,
+      af.stringMap,
+      funcMap,
+    );
   }
 
   return res;
@@ -488,6 +687,141 @@ function auditLineMapCoverage(
 }
 
 /**
+ * Every statement object reachable in a structured tree.
+ *
+ * The switch is exhaustive against `IRStmt` on purpose. A new statement kind
+ * that carries a nested body and is not listed here would make this audit
+ * under-count silently — it would report the body's statements as dropped when
+ * they are merely nested inside something the walker does not descend into —
+ * and a *quiet wrong answer from the instrument* is worse than no instrument.
+ * The `never` binding makes `npm run typecheck` fail instead. CLAUDE.md's
+ * "Adding new IRExpr / IRStmt kinds" table lists the compiler-caught switches;
+ * this is one more.
+ */
+function collectStmtIdentities(stmts: IRStmt[], into: Set<IRStmt>): void {
+  for (const s of stmts) {
+    into.add(s);
+    switch (s.kind) {
+      case "if":
+        collectStmtIdentities(s.thenBody, into);
+        if (s.elseBody) collectStmtIdentities(s.elseBody, into);
+        break;
+      case "while":
+      case "do_while":
+        collectStmtIdentities(s.body, into);
+        break;
+      case "for":
+        collectStmtIdentities([s.init, s.update], into);
+        collectStmtIdentities(s.body, into);
+        break;
+      case "switch":
+        for (const c of s.cases) collectStmtIdentities(c.body, into);
+        if (s.defaultBody) collectStmtIdentities(s.defaultBody, into);
+        break;
+      case "try":
+        collectStmtIdentities(s.body, into);
+        collectStmtIdentities(s.handler, into);
+        break;
+      case "assign":
+      case "store":
+      case "call_stmt":
+      case "return":
+      case "goto":
+      case "label":
+      case "comment":
+      case "raw":
+      case "break":
+      case "continue":
+      case "phi":
+        break;
+      default: {
+        const _exhaustive: never = s;
+        throw new Error(`unhandled IRStmt kind: ${JSON.stringify(_exhaustive)}`);
+      }
+    }
+  }
+}
+
+/** The destination of an assignment, when it has a name worth printing. */
+function destName(s: IRStmt): string | null {
+  if (s.kind !== "assign") return null;
+  if (s.dest.kind === "reg" || s.dest.kind === "var") return s.dest.name;
+  return null;
+}
+
+/**
+ * STATEMENT DROPS ACROSS THE STRUCTURER, BY OBJECT IDENTITY.
+ *
+ * `liftBlock` builds a statement; `structureCFG` either puts that same object
+ * somewhere in the tree it returns, or it does not. There is no third outcome
+ * and no ambiguity to interpret, which is what makes this a sharper instrument
+ * than line map coverage: the two other things lost coverage can mean —
+ * folded into a use, relocated — cannot register here. Folding happened in
+ * `foldBlock`, before the snapshot the tap takes, and a relocated statement is
+ * the same object at another place in the same tree.
+ *
+ * WHY IT NEEDED A TAP IN `pipeline.ts`. Neither side is recoverable from
+ * `decompileFunction`'s return value, and re-running the front half here
+ * instead would be a second copy of the pipeline prefix that drifts the moment
+ * a stage is inserted between `foldBlock` and `structureCFG` — measuring a
+ * different program while looking like it measures this one.
+ *
+ * This is NOT a gate. See `BinResult.stmtDrops` and README.md.
+ */
+function auditStatementDrops(
+  res: BinResult,
+  func: Func,
+  insns: Instruction[],
+  ev: StructuringTap,
+  jumpTables: Map<number, number[]>,
+  af: Af,
+): void {
+  const kept = new Set<IRStmt>();
+  collectStmtIdentities(ev.structured, kept);
+
+  const here: { blockId: number; index: number; of: number; stmt: IRStmt }[] = [];
+  for (const [blockId, stmts] of ev.lifted) {
+    res.stmtDrops.tracked += stmts.length;
+    for (let i = 0; i < stmts.length; i++) {
+      if (kept.has(stmts[i])) continue;
+      here.push({ blockId, index: i, of: stmts.length, stmt: stmts[i] });
+    }
+  }
+  if (here.length === 0) return;
+
+  // Only now is a CFG worth building: the block start address is what makes a
+  // drop findable in the disassembly, and the overwhelmingly common case is
+  // that there is nothing to find.
+  const startOf = new Map(
+    buildCFG(func, insns, af.xrefMap, jumpTables).map((b) => [b.id, b.startAddr]),
+  );
+
+  res.stmtDrops.dropped += here.length;
+  res.stmtDrops.funcsAffected++;
+  for (const d of here) {
+    const k = d.stmt.kind;
+    res.stmtDrops.byKind[k] = (res.stmtDrops.byKind[k] ?? 0) + 1;
+    res.drops.push({
+      fn: func.address,
+      fname: func.name,
+      blockId: d.blockId,
+      blockAddr: startOf.get(d.blockId) ?? 0,
+      addr: "addr" in d.stmt && d.stmt.addr !== undefined ? d.stmt.addr : null,
+      kind: k,
+      index: d.index,
+      of: d.of,
+      dest: destName(d.stmt),
+    });
+  }
+  if (res.stmtDrops.detail.length < 40) {
+    const kinds = here.map((d) => d.stmt.kind).join(",");
+    res.stmtDrops.detail.push(
+      `0x${func.address.toString(16)} ${func.name}: ${here.length} dropped (${kinds})`,
+    );
+  }
+}
+
+/**
  * The callees the DISASSEMBLY names — direct `call <imm>` through the function
  * map, indirect `call [mem]` through the IAT — against the identifiers the
  * emitted C applies. A name in the first set and not the second is a call the
@@ -527,7 +861,143 @@ function auditCallees(
   }
 }
 
-/** Condition polarity over if/while/for/do-while, plus loop exit coverage. */
+// ── Branch and value recovery ──────────────────────────────────────────────
+//
+// See `BinResult.unrecovered`. The short version: `__unrecovered_N` is an
+// admitted gap in the output, there are hundreds of them, and every gate in
+// this harness was structurally blind to all of them — the polarity audit
+// because `topOp` finds no operator in one, gcc because the emitter declares it
+// and the C is therefore valid.
+
+/** The declaration the emitter puts in the function header for each one. */
+const UNREC_DECL = /^\s*\w+\s+(__unrecovered_\d+)\s*;\s*\/\*\s*not recovered(?::\s*(.*?))?\s*\*\//;
+/**
+ * A use, with the note the emitter attaches to it inline. The comment group is
+ * optional and must be ADJACENT: a value whose note was empty is emitted as a
+ * bare name, and an unrelated comment later on the same line is not its note.
+ */
+const UNREC_USE = /(__unrecovered_\d+)(?:\s\/\*\s*(.*?)\s*\*\/)?/g;
+
+/**
+ * What an emitted line uses the value FOR.
+ *
+ * The buckets are descriptive, not load-bearing: `values`, `branches` and the
+ * mnemonic breakdown are all derived from the note rather than from this, so a
+ * re-spelling in the emitter moves sites between buckets without changing any
+ * gated number. "call-target" is the one bucket that encodes a spelling — the
+ * function-pointer cast around an indirect call whose target has no name — and
+ * it degrades into "other" rather than disappearing.
+ */
+function siteOf(trimmed: string): string {
+  if (/^(?:\}\s*else\s+)?if\s*\(/.test(trimmed)) return "if";
+  if (/^(?:\}\s*else\s+)?while\s*\(/.test(trimmed)) return "while";
+  if (/^for\s*\(/.test(trimmed)) return "for";
+  if (/^\}\s*while\s*\(/.test(trimmed)) return "do_while";
+  if (/^switch\s*\(/.test(trimmed)) return "switch";
+  if (/^return\b/.test(trimmed)) return "return";
+  if (/\(\*\)\s*\(\s*\)\s*\)\s*__unrecovered_/.test(trimmed)) return "call-target";
+  return "other";
+}
+
+/**
+ * EVERY `__unrecovered_N` IN ONE FUNCTION'S EMITTED C, and what it stood for.
+ *
+ * Counted from the text because that is where the fact lives: the value exists
+ * precisely when the IR had nothing to give, so there is no expression, no
+ * statement kind and no line-map entry to count instead. The note the emitter
+ * writes beside it — the Jcc mnemonic, or the operand it could not read — is
+ * the only record of what was lost, and `TAKEN` (this file's own, independently
+ * written Jcc table) is what decides whether that note names a branch.
+ *
+ * `jccOf` comes from the guard pass and is the only route to a machine address:
+ * the emitted `if (…)` line carries none of its own. Most entries end up null,
+ * and null is recorded rather than omitted.
+ */
+function auditUnrecovered(
+  res: BinResult,
+  func: Func,
+  code: string,
+  jccOf: Map<string, UnrecAnchor>,
+): void {
+  if (code === "") return;
+  const u = res.unrecovered;
+  u.scannedFuncs++;
+  if (!code.includes("__unrecovered_")) return;
+
+  // Keyed by name, in declaration order — the header is written after the body
+  // but printed before it, so the declarations come first in the text.
+  const seen = new Map<string, { note: string; site: string | null }>();
+  for (const line of code.split("\n")) {
+    const decl = UNREC_DECL.exec(line);
+    if (decl !== null) {
+      u.occurrences++;
+      u.declsParsed++;
+      const rec = seen.get(decl[1]) ?? { note: "", site: null };
+      if (rec.note === "") rec.note = decl[2] ?? "";
+      seen.set(decl[1], rec);
+      continue;
+    }
+    const trimmed = line.trim();
+    UNREC_USE.lastIndex = 0;
+    let m = UNREC_USE.exec(line);
+    while (m !== null) {
+      u.occurrences++;
+      const rec = seen.get(m[1]) ?? { note: "", site: null };
+      if (rec.note === "") rec.note = m[2] ?? "";
+      if (rec.site === null) rec.site = siteOf(trimmed);
+      seen.set(m[1], rec);
+      m = UNREC_USE.exec(line);
+    }
+  }
+  if (seen.size === 0) return;
+
+  u.funcsAffected++;
+  const branchesHere: string[] = [];
+  for (const [name, rec] of seen) {
+    const mnem = rec.note.split(/\s/)[0];
+    // A branch is one this file's own Jcc table recognises, not anything that
+    // merely looks like a mnemonic.
+    const isBranch = TAKEN[mnem] !== undefined;
+    const at = jccOf.get(name) ?? { jcc: null, mnem: null, jccFrom: "not-in-an-audited-guard" };
+    u.values++;
+    const site = rec.site ?? "unused";
+    u.bySite[site] = (u.bySite[site] ?? 0) + 1;
+    if (isBranch) {
+      u.branches++;
+      u.byMnemonic[mnem] = (u.byMnemonic[mnem] ?? 0) + 1;
+      if (at.jcc !== null) u.branchesWithJcc++;
+      branchesHere.push(mnem);
+    }
+    res.unrecoveredSites.push({
+      fn: func.address,
+      fname: func.name,
+      name,
+      note: rec.note,
+      cause: isBranch ? "branch" : "value",
+      site,
+      jcc: at.jcc,
+      mnem: at.mnem,
+      jccFrom: at.jccFrom,
+    });
+  }
+  if (u.detail.length < 40) {
+    const b =
+      branchesHere.length > 0 ? ` (${branchesHere.length} branch: ${branchesHere.join(",")})` : "";
+    u.detail.push(`0x${func.address.toString(16)} ${func.name}: ${seen.size} unrecovered${b}`);
+  }
+}
+
+/** What the guard pass could resolve about one `__unrecovered_N` in a condition. */
+type UnrecAnchor = { jcc: number | null; mnem: string | null; jccFrom: string };
+
+/**
+ * Condition polarity over if/while/for/do-while, plus loop exit coverage.
+ *
+ * Returns, per `__unrecovered_N` name appearing in an audited guard's
+ * condition, the jcc that guard was anchored to — the one channel through
+ * which an unrecovered condition can be given a machine address, since the
+ * emitted `if (…)` line carries none of its own.
+ */
 function auditGuardsAndLoops(
   res: BinResult,
   func: Func,
@@ -536,7 +1006,8 @@ function auditGuardsAndLoops(
   lineMap: [number, number][],
   jumpTables: Map<number, number[]>,
   af: Af,
-): void {
+): Map<string, UnrecAnchor> {
+  const unrecAnchors = new Map<string, UnrecAnchor>();
   const jccs: Jcc[] = [];
   for (let i = 0; i < insns.length; i++) {
     const ins = insns[i];
@@ -547,7 +1018,7 @@ function auditGuardsAndLoops(
     if (fall === undefined) continue;
     jccs.push({ insn: ins, target: Number.parseInt(m[1], 16), fall });
   }
-  if (jccs.length === 0) return;
+  if (jccs.length === 0) return unrecAnchors;
 
   // The same CFG the pipeline builds. An emitted line carries the address of
   // the *instruction* it came from, which is the block's start address only
@@ -719,7 +1190,36 @@ function auditGuardsAndLoops(
     };
   };
 
+  /**
+   * Hand an unrecovered condition the jcc this guard was anchored to.
+   *
+   * Every top-tested guard and every `do/while` funnels through `reconcile`,
+   * whether or not it goes on to be judged — and an unrecovered one never is,
+   * because `topOp` finds no operator in it. That is the whole point: this
+   * records the address on the way past, so a guard invisible to the polarity
+   * audit is still locatable in the disassembly.
+   *
+   * A guard neither anchor could resolve is recorded with a null address and
+   * the reason. Recording it as absent would be the mistake the audit exists to
+   * prevent — "not measured" reading as "nothing there".
+   */
+  const noteUnrecovered = (cond: string, a: Anchored, b: Anchored) => {
+    const names = cond.match(/__unrecovered_\d+/g);
+    if (names === null) return;
+    const src = !("why" in a) ? a : !("why" in b) ? b : null;
+    const at: UnrecAnchor =
+      src === null
+        ? {
+            jcc: null,
+            mnem: null,
+            jccFrom: `unanchored:${(a as { why: string }).why}`,
+          }
+        : { jcc: src.jc.insn.address, mnem: src.jc.insn.mnemonic, jccFrom: `anchor:${src.sense}` };
+    for (const n of names) unrecAnchors.set(n, at);
+  };
+
   const reconcile = (kind: string, cond: string, a: Anchored, b: Anchored) => {
+    noteUnrecovered(cond, a, b);
     const aOk = !("why" in a);
     const bOk = !("why" in b);
     if (aOk && bOk) {
@@ -828,6 +1328,7 @@ function auditGuardsAndLoops(
   }
 
   auditLoopExits(res, func, lines, lineAddr, jccs, machineLoops, landing, closingBrace);
+  return unrecAnchors;
 }
 
 /**

@@ -100,7 +100,8 @@ from gcc's own complaints, because the decompiler deliberately does not declare 
 
 > **"Clean" is not "recovered."** A large share of these functions compile precisely because the
 > emitter *names* what it failed to recover — `__unrecovered_N`, an "unlifted" comment — instead of
-> printing something plausible. Do not read "all of them compile" as "all of them are right".
+> printing something plausible. Do not read "all of them compile" as "all of them are right". The
+> `__unrecovered_N` half of that is now counted: see **Unrecovered values** below.
 
 **Struct layout, by a compiled and *run* `offsetof` program.** Field names record the offsets
 recovery found (`field_0x18`), so a declaration C would not lay out that way states something
@@ -109,6 +110,35 @@ the declaration is not enough; this compiles and executes it. *A failure means t
 declarations and the emitted field accesses disagree about where the data is.*
 
 **Throws.** `decompileFunction` raising on any real function.
+
+**Stale version-0 names.** SSA version 0 is a register's *entry* value — no statement in the
+function defines it — so a surviving read of it is the decompiler saying "the value this register
+was given on the way in". If a block that **strictly dominates** the read has since written that
+register, the name in the output denotes something else. *A failure means the emitted C names a
+register for a value it does not hold*: a store through the wrong pointer, a call passed the wrong
+argument, a `return` of the wrong value. It compiles clean, which is why nothing caught it
+(`peek-a-bin-dqpk` — 78 such reads on t64 and 28 on t32 before the fix).
+
+Two counts, and the second is the worse one:
+
+| Count | What it is |
+|---|---|
+| `wrong` | The read emitted as a bare register a dominating write has already changed. At least visibly a register name, so a reader has the disassembly to check against. |
+| `copiesCorrupted` | The *repair* spoiled. `destroySSA` preserves version 0 with a copy `rcx_0 = rcx`; taken past a dominating write, the copy captures the wrong value and every use of `rcx_0` reads as recovered output. Nothing on the page looks wrong. |
+
+**Why this gates when the two baselines below do not.** Those report a count that is not zero and
+for which no threshold has been justified, so a gate on them would assert something nobody has
+established. This one is zero, and every non-zero row is a *provably* wrong name — the same
+character as `polarity inverted`, which gates for the same reason.
+
+Two liveness assertions sit beside it and both matter. `sites > 0` says the audit still finds the
+*shape* — a version-0 read a dominating definition overwrote — which is common (28/159/28/158) and
+is not itself a defect once the value is preserved. `copies > 0` says it can still see the
+preservation, and that check depends on `ssadestroy.ts` spelling a preserved entry value
+`<reg>_0`; a spelling change would otherwise turn every repaired site back into a reported defect.
+It is the one place the audit has to know anything about how the code under test writes its answer.
+
+Per-site detail is in `stalev0_<bin>.jsonl` — the wrong reads first, then the spoiled copies.
 
 ### Baselines — reported, never gated
 
@@ -141,6 +171,88 @@ be — alignment padding and blocks that lift to no statements land here legitim
 reads a brief for these audits as "expect 0 drops" is chasing a number this harness has never
 produced.
 
+**Statement drops across `structureCFG`, by object identity.** Every statement `liftBlock`
+produced is either somewhere in the tree `structureCFG` returned or it is not, and the test is
+`Set<IRStmt>.has` on the object itself. **Measured 0/7002, 0/7331, 0/6519 and 0/6500 lifted
+statements at `cee6f91`** (t32/t64/w64/w32).
+
+This is the metric line map coverage is not. Of the three things lost coverage can mean, two
+cannot register here at all:
+
+| Cause | Line map coverage | This |
+|---|---|---|
+| folded into a use | lost | not a drop — folding is `foldBlock`, which runs *before* the snapshot |
+| relocated / re-addressed | lost | not a drop — same object, elsewhere in the same tree |
+| genuinely dropped | lost | **this, and only this** |
+
+*A non-zero result means a statement nothing downstream can know existed.* It never enters the
+tree, so there is no dangling `goto`, no missing label, no comment — the reader simply concludes
+the code does not exist. That is what `peek-a-bin-cb2` was (6% of every statement the front end
+produced, from the leftover pass requiring reachability from the entry) and what `peek-a-bin-hu7`
+describes (4/8/8 assignments on t32/t64/w64, "always exactly 2 per function").
+
+**It is reported, not gated, and that is deliberate.** Zero is what it measures today, but one
+commit's measurement is not evidence that zero is an invariant of the design: `structureCFG`'s
+short-circuit fold legitimately consumes the blocks between two tests without emitting anything
+for them, and it is only true *today* that such blocks lift to no statements. Asserting 0 in the
+run would pin something nobody has established — the same mistake as briefing an agent to "expect
+0 drops" against a harness that had never produced 0. A **rise** is judged where regressions are
+actually judged: `compare.mjs` treats `statements dropped` going up between two pinned runs as a
+regression, on its own terms, whatever the baseline is.
+
+Per-site detail is in `drops_<bin>.jsonl` — function, block address, the statement's own machine
+address, its kind, its position in its block, and an assignment's destination register. The
+report prints the count, the affected function count and a breakdown by statement kind.
+
+*The instrument was validated by negative control, not by trusting its zero.* Disabling
+`structureCFG`'s leftover pass — restoring the pre-`peek-a-bin-d3z` behaviour — makes it report
+**1380/7002 dropped across 41 functions on t32** (612 assign, 577 store, 113 call_stmt, 49 raw,
+29 return), and the `callees lost` gate goes red beside it. A measurement of *absence* can fail by
+quietly observing nothing, so `corpus.audit.ts` also asserts that the tap fired and statements
+were examined. That assertion is instrument liveness; it is not a threshold on the count.
+
+**Unrecovered values — `__unrecovered_N` in the emitted C, counted and located.** This is the
+audit for the sentence two sections up: *"clean" is not "recovered."* The emitter prints
+`__unrecovered_N` when it cannot name a value — most often the condition of a Jcc whose flags
+nothing in the IR explains — and declares it at the top of the function, which is exactly why the
+C compiles. **Measured 108, 85, 67 and 85 values at `cee6f91`** (t32/t64/w64/w32; 216/170/134/170
+occurrences of the token, since each value is declared once and used once). Of those, 89/85/67/67
+stand in for a *branch*, and 32/37/31/25 of the branches could be given the address of the jcc
+they came from.
+
+**Until this existed, every gate here was structurally blind to all of them, and one of them was
+actively misleading.** `guards_<bin>.jsonl` contains **zero** unrecovered guards, and not because
+none exist:
+
+| Audit | Why it is silent |
+|---|---|
+| polarity | `topOp(cond)` must find exactly one comparison operator. `__unrecovered_7 /* jne */` has none, so an unrecovered guard is **not a failing row — it is not a row at all**. |
+| gcc | The value is declared. `if (__unrecovered_7)` is valid C. |
+| callees lost / loop exits / offsetof / gotos | None of them reads a condition. |
+
+The misleading part is the ratio. Polarity is reported as `ok/checked`, and a guard that falls
+**out** of the audited set reduces `checked` while leaving the fraction at 1.00. So a change that
+turned 400 correctly recovered guards into `__unrecovered_N` moved no number in a bad direction
+anywhere in this harness, and `compare.mjs` called it no regression. That is not hypothetical —
+it is the negative control below, and the **`compare.mjs` of `cee6f91` prints "VERDICT: no
+regression" and exits 0** over it (`peek-a-bin-rl01`).
+
+Both directions cross that boundary in silence, which is why the *denominator* is now judged in
+its own right: recovery getting worse moves guards out of the audited set, and conditions getting
+richer (a comparison cascade folding into `&&`) moves them out too.
+
+Per-site detail is in `unrecovered_<bin>.jsonl` — function, the name, the note the emitter wrote
+beside it, whether that note names a branch, what the value is used *for*, and the originating jcc
+where one could be named. The report prints the count, the branch subset, a breakdown by site and
+one by jcc mnemonic.
+
+*Validated by negative control.* Disabling `conditionFromFlagResult` in `structure.ts` — restoring
+the pre-`peek-a-bin-pu06` behaviour, where a Jcc whose flags were set by `dec`/`sub`/`and`/`or`
+rather than `cmp`/`test` had no recoverable condition — takes t32 from **108 to 300** unrecovered
+values (89 → 281 branches) and t64/w64/w32 from 85/67/85 to 220/186/241. `polarity.checked` falls
+462 → 398 on t32 in the same run, and `npm run corpus` itself stays **green**, because none of
+this is gated in the run. `compare.mjs` reports 16 regressions and exits 1.
+
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
@@ -166,6 +278,98 @@ useful claim but a narrower one than "the output is right". Wrong values are fou
 emitted C against the machine text, and the instruments for that are per-instruction line map
 coverage (above) and cross-substitution (below) — neither of which is a gate, because neither has
 a threshold that means anything on its own.
+
+**A green polarity ratio is not evidence of a recovery rate, and never was.** `1490/1490 correct`
+says every guard the auditor *could judge* states its jcc's sense. It says nothing whatever about
+how many guards there were to judge: the denominator is what survived anchoring **and** had a
+single top-level comparison operator, and roughly two thirds of every emitted guard fails one of
+those two tests. 1257 skips against 462 judged on t32 is the actual shape of it. An unrecovered
+condition fails the second test by construction, so the number that ought to fall when recovery
+gets worse — `polarity.ok` — cannot, because the guard leaves the fraction entirely. Read
+`polarity guards audited` and `unrecovered values` beside the ratio, or the ratio will tell you a
+shrinking audited set is a perfect score.
+
+Two distinct failures hide in a green number, and it is worth keeping them apart:
+
+- **A ratio at 1.00 over a shrinking denominator is not evidence.** Whatever left the denominator
+  left without being judged, and the fraction cannot report it. Always read the denominator.
+- **A gate that is green on the dimension it measures says nothing about the dimension it does
+  not.** This is not a hypothetical either. `peek-a-bin-qb2x` was verified against an oracle that
+  sees call **arity**, shipped green on every gate here, and four of the arguments it recovered
+  name a **stale register** — `SearchPathW(0, rcx, rax, 0x400)` has exactly the right arity and a
+  wrong second argument, because nothing in the standing set reads argument *naming*. The same
+  shape as this section's own subject, one dimension over. Before quoting a green run, say which
+  dimension it was green on.
+
+### What the statement-drop audit does not catch
+
+Its zero is a narrow claim and worth stating precisely, because "0 statements dropped" invites a
+much larger reading than it earns.
+
+- **It watches one step.** `cleanupStructured`, `wrapExceptionRegions`, `inferTypes`,
+  `promoteVars`, `synthesizeStructs` and `emitFunction` all run after `structureCFG`, and a
+  statement any of them discards is counted as **kept**. `cleanupStructured` in particular exists
+  to remove statements. The audit says the structurer did not lose anything; it says nothing about
+  the back half of the pipeline.
+- **It watches one direction.** A statement that reaches the tree *twice* — the `for`-header
+  double-emission the structurer guards against, where `x = f()` would run twice — is not a drop
+  and does not register.
+- **Kept is not correct.** A statement present in the tree but computing the wrong thing passes,
+  exactly as it passes every gate above (`peek-a-bin-qzrl`).
+- **It cannot see what was never lifted.** An instruction the lifter declines to model produces no
+  statement, so there is nothing for the structurer to drop and nothing here to count. That gap
+  shows up as `/* unlifted: … */` in the emitted C, not as a drop.
+- **A block that lifts to no statements is invisible on both sides**, which is intended — that is
+  how alignment padding stays out of the number — but it means a *lifting* regression that emptied
+  a block would read as clean here.
+
+### What the unrecovered-value audit does not catch
+
+- **It counts admissions, not errors.** A `__unrecovered_N` is the emitter being honest. A guard
+  that recovers *and states the wrong thing* is not counted here at all — that is the polarity
+  audit's job, and the two are complements: this one watches the set polarity cannot see, and
+  polarity watches the set this one cannot judge.
+- **It cannot name the jcc for most branches.** 32 of 89 on t32, and the ceiling is not a bug in
+  the scan. The emitted `if (…)` line carries **no line-map address** (`emit.ts` pushes the header
+  without one), so the only route to a machine address is the same body-anchoring the polarity
+  audit does, and that fails on roughly two thirds of all guards for reasons that have nothing to
+  do with recovery. `jccFrom` in the jsonl says which happened for each one; `not-in-an-audited-guard`
+  means the value was not in a guard at all.
+- **`jcc` is a locator, not the identity of the unrecovered branch.** Anchoring names the jump
+  that guards the *arm*, which in a short-circuited condition —
+  `if (!__unrecovered_1 /* jle */ && edi <= 0x7FFFFFF0)` — is the last test in the chain, not the
+  first, which is the one that was unrecovered. `note` is the authority on which branch it was.
+  Over the corpus the two name the same mnemonic **123 times in 125**, and both exceptions are
+  that shape; the agreement is worth something on its own, since the note comes from `structure.ts`
+  and the anchor from the auditor's own reading of the CFG.
+- **`/* unlifted: … */` is a different admission and is not counted here.** An instruction the
+  lifter declines to model produces no expression and therefore no `__unrecovered_N`.
+- **It does not know what a value was worth.** 300 unrecovered values in one function and 300
+  spread over 60 are the same number.
+- **`guards w/o single compare` is a lower bound on traffic across the audited-set boundary.** A
+  guard whose *body* could not be anchored never reaches the judging step, so it is skipped for an
+  anchoring reason and never lands in that bucket, however unrecoverable its condition was.
+
+### What the stale-version-0 audit does not catch
+
+- **Only version 0.** A read of any *other* version that a later write has spoiled is a defect of
+  the same family, and `splitStaleReads` repairs those from the version's own defining statement.
+  Nothing here re-checks that it did.
+- **Only a definition that dominates.** A write on *some* path to the read makes the name wrong on
+  that path, and this audit does not count it — the site set requires a strictly dominating block,
+  because that is the case where the name is wrong on every path and therefore provable.
+- **A loop header that writes the register after the read is not a site.** The block does not
+  strictly dominate itself, so a read at index 0 of a block whose index 5 redefines the register is
+  invisible here even though the second trip through reaches it with the new value.
+- **It reads the lifted statement list, not the emitted C.** `structureCFG`, `cleanupStructured`,
+  `inferTypes`, `promoteVars`, `synthesizeStructs` and `emitFunction` all run afterwards, and any
+  renaming they do is outside this measurement. `foldBlock` is included, because it is what decides
+  whether the read and the write reach the page at all — stopping at `destroySSA` doubles the count
+  (151 against 78 on t64) by counting writes that fold into their single use.
+- **One address, one verdict.** A repaired read and a stale read of the same register at the same
+  instruction cannot be told apart: an instruction can name a register twice
+  (`lea r9, [rdx + rsi + 0x1d]`, where RSI holds the entry RDX), and the audit treats the address
+  as repaired if any preserved entry value of that register is named there.
 
 ## Reading the numbers
 
@@ -208,11 +412,25 @@ git worktree remove /tmp/base && git worktree remove /tmp/chg
 detection changes, instruction addresses do not. It exits non-zero if an invariant rose or a ratio
 fell, and prints every guard that changed.
 
-**A guard leaving the audited set is not automatically a regression.** It can mean the function was
-restructured — a comparison cascade becoming a `switch`, say — or that the auditor could no longer
-anchor it. Read the emitted C for those functions before judging. That is exactly what happened at
-`4a4ec70`, where 41 guards left t32's audited set and every one of them belonged to a function that
-had gained a `switch`.
+**A guard leaving the audited set is not automatically a regression, but it is no longer silent.**
+It can mean the function was restructured — a comparison cascade becoming a `switch`, say — or
+that the auditor could no longer anchor it. That is exactly what happened at `4a4ec70`, where 41
+guards left t32's audited set and every one of them belonged to a function that had gained a
+`switch`. It can equally mean the guard stopped being recoverable, which *is* a regression, and
+the two were indistinguishable because neither moved a number. So `polarity guards audited`
+falling now counts as a regression, marked `FEWER GUARDS AUDITED — adjudicate`, and it means
+**"read the emitted C for these functions"** rather than "the change is wrong". `guards w/o
+single compare` rising is marked the same way. Both sit beside `unrecovered values`, which is the
+one of the three that says the guards left because recovery got worse.
+
+**Three findings in the per-guard join are report-only, and one is not.** `changed`, `onlyBase`
+and `onlyChange` do not affect the verdict — `shapeOf` includes the emitted condition *text*, so
+it moves whenever a spelling improves (`*(int32_t*)(rbp - 0x64)` becoming `var_64` changes
+hundreds of guards without changing what any of them means), and gating that would make
+"regression" mean "something changed". A non-zero `CHANGED` now prints a banner saying it is not
+in the verdict; read it. What **is** gated is a guard at a jcc present on both sides whose
+**anchor-A verdict got worse** — the swap that the aggregate `polarity inverted` and `mismatch`
+rows cannot see, because one guard fixed and another broken leaves the total flat.
 
 ## Did my change *cause* that, or merely reveal it?
 
@@ -264,11 +482,41 @@ remaining gap and is not implemented.
 |---|---|
 | `corpus.audit.ts` | The entry point. Preflight, the shared sweep, the gates, the report. |
 | `preflight.ts` | Where the corpus is, and whether this machine can run at all. |
-| `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, drops. |
+| `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values. |
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
+| `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
+| `artifacts/<label>/unrecovered_<key>.jsonl` | Every `__unrecovered_N`, per site: note, cause, use site, originating jcc where one could be named. |
+| `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
+
+### The two audits that re-run the pipeline prefix, and why one of them has to
+
+`staleReads.ts` drives its own `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA →
+foldBlock` and is the one place in this directory that does. It is exactly the second copy the tap
+below exists to avoid, and it is accepted here for a reason the tap cannot serve: the question
+needs the SSA **before** it is lowered and the statement list **after**, and there is no single
+point in `pipeline.ts` at which one observer sees both. Every pass it calls is the repo's own
+export, in `pipeline.ts`'s order, so a stage inserted between `ssaOptimize` and `destroySSA` shows
+up as a divergence between the two — but nothing enforces that automatically. If you insert one,
+update the replica.
+
+### The one thing these audits need from `src/`
+
+`decompileFunction` takes an optional last argument, `tap`, and the statement-drop audit is its
+only caller. It fires once, between `structureCFG` being handed the lifted blocks and its result
+being passed on, and hands both sides over.
+
+It exists because **neither side is recoverable from the return value** — the emitted C says
+nothing whatever about a statement that never entered the tree — and because the alternative was
+worse. Re-running `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA → foldBlock →
+structureCFG` here instead would be a second copy of the pipeline prefix, and the day a stage is
+inserted between `foldBlock` and `structureCFG` that copy measures a different program while
+looking exactly like it measures this one. `typecheck` would not notice.
+
+Passing no tap costs one `undefined` check and copies nothing. **Keep it that way**: an
+instrument that alters what it measures is worse than no instrument.
 
 **Everything reads one sweep per binary, and that is a correctness requirement rather than an
 optimisation.** `StructRegistry` is cross-function state shared for the lifetime of a loaded file,
