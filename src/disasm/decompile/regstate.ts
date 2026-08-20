@@ -171,26 +171,78 @@ export class RegState {
       }
     }
 
-    // test reg, reg → flags set based on AND result
-    // test + je → result == 0 → left == 0
-    // test + jne → result != 0 → left != 0
+    // `test a, b` computes `a & b`, discards it, and sets ZF and SF from it —
+    // and, unlike `cmp`, **clears OF and CF**. That second half is what makes
+    // the signed and unsigned forms below exact rather than guesses, and it is
+    // why this arm answers strictly more Jcc forms than the `result` arm above:
+    // there, OF and CF depend on which arithmetic ran and are not a function of
+    // the result, so only ZF/SF forms are answerable. Here every flag a Jcc can
+    // read is either a function of `a & b` or a known constant:
+    //
+    //   jl   SF≠OF, OF=0  → SF=1        → (a&b) <  0   (identical to js)
+    //   jge  SF=OF,  OF=0 → SF=0        → (a&b) >= 0   (identical to jns)
+    //   jle  ZF=1 or SF≠OF → ZF or SF   → (a&b) <= 0
+    //   jg   ZF=0 and SF=OF            → (a&b) >  0
+    //   jbe  CF=1 or ZF=1, CF=0 → ZF=1  → (a&b) == 0   (identical to je)
+    //   ja   CF=0 and ZF=0             → (a&b) != 0   (identical to jne)
+    //
+    // Deliberately still unknown: `jb`/`jae` and `jo`/`jno` read only a flag
+    // `test` clears, so each is a *constant* — and this is not hypothetical.
+    // MSVC really emits the shape, 12 sites in this corpus, all `jae`:
+    //
+    //     404ded: jg   0x404e06      ; t32.exe, the 64-bit negate idiom
+    //     404def: jl   0x404df5
+    //     404df1: test eax, eax
+    //     404df3: jae  0x404e06      ; CF=0 after test, so ALWAYS taken
+    //
+    // The flag owner is correctly identified there — the `test` really is what
+    // the `jae` reads — so this is not evidence of a misattribution, and an
+    // earlier version of this comment claiming so was wrong. What stops us
+    // emitting the exact answer is that the exact answer is `if (1)`, and a
+    // constant guard is a control-flow claim, not a value claim: `structureCFG`
+    // would be entitled to treat the arm as unconditional, no gate here models a
+    // constant condition, and the polarity auditor has no operator to check
+    // against the jcc. `unknown` keeps it an admitted gap instead of silently
+    // restructuring control flow (peek-a-bin-x72e).
+    //
+    // `jp`/`jnp` read PF, which is a real function of `a & b` (parity of its low
+    // byte) but has no cheap spelling.
+    //
+    // Before this, all six forms above fell to the `default` arm and became an
+    // `__unrecovered_N` guard: 70 sites across the four corpus binaries measured
+    // at 177ada8 (t64 25, w64 21, t32 36, w32 21), the single largest
+    // unrecovered category there (peek-a-bin-92yy).
     if (this.flagOp === "test") {
-      // test X, X is a common idiom for checking zero
-      const isTestSelf = exprEq(left, right);
-      const testTarget = isTestSelf ? left : irBinary("&", left, right);
+      // `test X, X` is the zero check idiom, and `X & X` is `X` — so the AND is
+      // not built at all rather than being built and folded later.
+      const testTarget = exprEq(left, right) ? left : irBinary("&", left, right);
       const zero = irConst(0, 4);
 
       switch (jcc) {
         case "je":
         case "jz":
-          return isTestSelf ? irBinary("==", left, zero) : irBinary("==", testTarget, zero);
+        case "jbe":
+        case "jna":
+          return irBinary("==", testTarget, zero);
         case "jne":
         case "jnz":
-          return isTestSelf ? irBinary("!=", left, zero) : irBinary("!=", testTarget, zero);
+        case "ja":
+        case "jnbe":
+          return irBinary("!=", testTarget, zero);
         case "js":
+        case "jl":
+        case "jnge":
           return irBinary("<", testTarget, zero);
         case "jns":
+        case "jge":
+        case "jnl":
           return irBinary(">=", testTarget, zero);
+        case "jle":
+        case "jng":
+          return irBinary("<=", testTarget, zero);
+        case "jg":
+        case "jnle":
+          return irBinary(">", testTarget, zero);
         default:
           return { kind: "unknown", text: `${jcc} after test` };
       }

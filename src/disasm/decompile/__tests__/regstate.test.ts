@@ -257,11 +257,75 @@ describe("RegState.getCondition — after test", () => {
     );
   });
 
-  it("returns unknown for a jcc with no meaning after test", () => {
-    // jle depends on SF/OF, which `test` clears — there is no sound translation.
-    const cond = afterTest("jle", irReg("eax", 4), irReg("eax", 4));
-    expect(cond).toEqual({ kind: "unknown", text: "jle after test" });
+  /**
+   * The signed forms, which this suite used to assert were unanswerable.
+   *
+   * The test that stood here read:
+   *
+   *     // jle depends on SF/OF, which `test` clears — there is no sound translation.
+   *     expect(afterTest("jle", eax, eax)).toEqual({kind:"unknown", text:"jle after test"});
+   *
+   * and it is wrong about the machine. `test` does **not** clear SF: per the
+   * Intel SDM, "the OF and CF flags are set to 0. The SF, ZF, and PF flags are
+   * set according to the result." Clearing OF is precisely what makes the signed
+   * forms exact, because `jle` is `ZF=1 or SF≠OF`, and with OF pinned to 0 that
+   * collapses to `ZF=1 or SF=1` — which is `(a & b) <= 0`.
+   *
+   * The neighbouring "maps js/jns to a sign test" case refutes the old comment
+   * on its own: `js` reads SF and nothing else, so if `test` really cleared SF
+   * then `js` would be unanswerable too. The suite had pinned a defect as the
+   * rule, which is why nothing failed while 70 guards across the four corpus
+   * binaries went unrecovered for want of these six lines (peek-a-bin-92yy) —
+   * the same shape as the `collectArgs64` KNOWN BUG assertion in
+   * peek-a-bin-qb2x.
+   */
+  it.each([
+    ["jle", "<="],
+    ["jng", "<="],
+    ["jg", ">"],
+    ["jnle", ">"],
+    ["jl", "<"],
+    ["jnge", "<"],
+    ["jge", ">="],
+    ["jnl", ">="],
+  ] as const)("answers %s after test, because test clears OF", (jcc, op) => {
+    const eax = irReg("eax", 4);
+    expect(afterTest(jcc, eax, irReg("eax", 4))).toEqual(irBinary(op, eax, irConst(0, 4)));
   });
+
+  it.each([
+    ["jbe", "=="],
+    ["jna", "=="],
+    ["ja", "!="],
+    ["jnbe", "!="],
+  ] as const)("answers %s after test, because test clears CF too", (jcc, op) => {
+    // CF=0 makes `jbe` (CF or ZF) exactly ZF, i.e. the same test `je` makes,
+    // and `ja` (not CF and not ZF) exactly `jne`. Compilers do emit these:
+    // an unsigned comparison against zero reached by a mask is natural.
+    const eax = irReg("eax", 4);
+    expect(afterTest(jcc, eax, irReg("eax", 4))).toEqual(irBinary(op, eax, irConst(0, 4)));
+  });
+
+  it.each(["jb", "jnae", "jae", "jnb", "jo", "jno", "jp", "jnp"])(
+    "still returns unknown for %s, which reads no flag test leaves meaningful",
+    (jcc) => {
+      // `jb`/`jae` read only CF and `jo`/`jno` only OF, both pinned to 0 by
+      // `test` — so each is a constant, and the shape is real rather than
+      // theoretical: 12 sites in the corpus, all `jae`, in MSVC's 64-bit negate
+      // idiom (t32 0x404df1 `test eax, eax` / `jae`, reached after a `jg`/`jl`
+      // pair, so the `jae` is always taken). The flag owner there is correctly
+      // identified, so this is NOT a misattribution signal.
+      //
+      // We decline anyway because the exact answer is `if (1)`, and that is a
+      // control-flow claim rather than a value claim: `structureCFG` would be
+      // entitled to treat the arm as unconditional, no gate here models a
+      // constant guard, and polarity has no operator to check against the jcc.
+      // `jp`/`jnp` read PF, a real function of the result with no cheap
+      // spelling. Unknown keeps all of it an admitted gap (peek-a-bin-x72e).
+      const cond = afterTest(jcc, irReg("eax", 4), irReg("eax", 4));
+      expect(cond).toEqual({ kind: "unknown", text: `${jcc} after test` });
+    },
+  );
 });
 
 describe("RegState.negate", () => {
