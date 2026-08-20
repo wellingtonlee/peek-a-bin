@@ -1613,3 +1613,185 @@ describe("dispatch — hybridDisassemble is told which bytes are jump tables", (
     expect(addrs).toEqual([0x401000, 0x40100c]);
   });
 });
+
+/**
+ * peek-a-bin-s2ws — the browser gets the per-callee clobber summary.
+ *
+ * `callSummary.ts` and `IRCall.clobbers` landed with only the MCP/FileSession
+ * path wired (`mcp/session.ts` builds it, `mcp/tools.ts` passes it) and
+ * `corpus/sweep.ts` measuring it, so the feature was committed and documented
+ * while no user could reach it. The argument is optional and absent means
+ * byte-identical output, which is exactly what made it invisible.
+ *
+ * The bead filed it as needing a browser to verify, on the premise that
+ * `decompileFunction` "is handed one function's instructions" so a summary must
+ * arrive out of band and would race the first decompile. That premise is true of
+ * the MCP path and false of this one: `useDecompileTabs` passes the *whole*
+ * section's `Instruction[]` — the array `hybridDisassemble` returned — plus every
+ * detected function, on every decompile call. So the summary is derived from the
+ * same message that consumes it. There is no sender to race, no ordering
+ * dependency on `configureDecompileMaps`, and no way for the client's decompile
+ * cache to hold an answer computed before the summary existed.
+ *
+ * Which also makes it testable here rather than only in a browser: the pipeline
+ * takes instructions, not bytes, so none of this needs Capstone.
+ */
+describe("dispatch — decompileFunction builds the callee-clobber summary", () => {
+  /** `mov r10, rcx` / `call sub_401100` / `mov [rsi], r10` / `ret`. */
+  const CALLER = 0x401000;
+  /** `xor r10d, r10d` / `ret` — provably leaves R10 destroyed. */
+  const CALLEE = 0x401100;
+
+  const caller = { name: "sub_401000", address: CALLER, size: 0x10 };
+  const callee = { name: "sub_401100", address: CALLEE, size: 0x8 };
+
+  /** Address-ascending, as `hybridDisassemble` returns and `funcInsns` needs. */
+  const instructions = (): Instruction[] => [
+    insn(CALLER, "mov", "r10, rcx", 3),
+    insn(CALLER + 3, "call", `0x${CALLEE.toString(16)}`, 5),
+    insn(CALLER + 8, "mov", "qword ptr [rsi], r10", 4),
+    insn(CALLER + 12, "ret", "", 1),
+    insn(CALLEE, "xor", "r10d, r10d", 3),
+    insn(CALLEE + 3, "ret", "", 1),
+  ];
+
+  const EXTENTS_BOTH: [number, number][] = [
+    [caller.address, caller.size],
+    [callee.address, callee.size],
+  ];
+  /** The caller only: the callee's body is then outside the summary's reach. */
+  const EXTENTS_CALLER_ONLY: [number, number][] = [[caller.address, caller.size]];
+
+  async function decompile(s: WorkerState, extra: Record<string, unknown> = {}): Promise<string> {
+    const r = (await dispatch(
+      "decompileFunction",
+      {
+        func: caller,
+        instructions: instructions(),
+        stackFrame: null,
+        signature: null,
+        is64: true,
+        funcEntries: [
+          [caller.address, { name: caller.name, address: caller.address }],
+          [callee.address, { name: callee.name, address: callee.address }],
+        ],
+        ...extra,
+      },
+      s,
+    )) as { code: string };
+    return r.code;
+  }
+
+  /** The line that stores R10 through RSI — the one read that is at issue. */
+  const storeLine = (code: string) => code.split("\n").find((l) => l.includes("(rsi)"));
+
+  it("names what the callee destroys, not the value the caller left in R10", async () => {
+    // R10 is volatile under the ABI and is NOT an argument register, so the
+    // narrow model deliberately lets it survive a call — MSVC parks live values
+    // there across helpers it has analysed, and clobbering the whole volatile
+    // set deleted a guard outright (peek-a-bin-hj1). What makes R10 a clobber
+    // *here* is evidence rather than the ABI: sub_401100 contains `xor r10d,
+    // r10d`, so the value RCX had is provably gone by the time RSI is stored to.
+    // Without the summary this same store is emitted as `= rcx` — see below.
+    const code = await decompile(state(), {
+      funcExtents: EXTENTS_BOTH,
+      insnsToken: 1,
+    });
+
+    expect(storeLine(code)).toMatch(/clobbered_r10_\d+/);
+    // The pre-call value must not be what the store claims to write.
+    expect(storeLine(code)).not.toMatch(/=\s*r10\s*;/);
+  });
+
+  it("leaves the answer exactly as it was when no extents are sent", async () => {
+    // The pre-summary behaviour, and the reason the wiring could be landed at
+    // all: a caller that sends no extents gets byte-identical output.
+    //
+    // Worth recording what that output *is*, because it is worse than a stale
+    // register name and it is what the test above repairs. R10 survives the call
+    // under the narrow model, so copy propagation is entitled to forward `mov
+    // r10, rcx` straight through it, and the store is emitted as `= rcx` — C
+    // that names the caller's incoming RCX at a point where the callee has
+    // provably zeroed the register holding it. The value is not merely unnamed,
+    // it is confidently wrong; with the summary it becomes an admitted
+    // `clobbered_r10_N`. "Clean is not recovered" in both directions.
+    const code = await decompile(state());
+
+    expect(storeLine(code)).toMatch(/=\s*rcx\s*;/);
+    expect(code).not.toContain("clobbered_");
+  });
+
+  it("builds nothing for a 32-bit image, whose lift could not consult it", async () => {
+    // `calleeClobbersFor` returns undefined unless `is64`: on x86 nothing is
+    // passed in a register, so every register a summary could add would be new
+    // evidence the narrow model never had. Building it there is pure cost, and
+    // the two PE32 corpus binaries are the control that stays byte-identical.
+    const s = state();
+    const code = (
+      (await dispatch(
+        "decompileFunction",
+        {
+          func: caller,
+          instructions: instructions(),
+          stackFrame: null,
+          signature: null,
+          is64: false,
+          funcExtents: EXTENTS_BOTH,
+          insnsToken: 1,
+        },
+        s,
+      )) as { code: string }
+    ).code;
+
+    expect(code).not.toContain("clobbered_");
+    // Nothing was cached either, so a later 64-bit request under the same token
+    // is answered from a real build rather than from a PE32 leftover.
+    expect(await decompile(s, { funcExtents: EXTENTS_BOTH, insnsToken: 1 })).toMatch(
+      /clobbered_r10_\d+/,
+    );
+  });
+
+  it("builds the summary once per instruction array, not once per request", async () => {
+    // The summary is a property of the whole image — it is closed over the call
+    // graph — while a request is about one function, so rebuilding it per
+    // request costs a whole-image walk per click. Measured at ~18 ms over 16.8k
+    // instructions and linear in instruction count, on a worker that services
+    // messages serially.
+    //
+    // Observed behaviourally rather than by counting calls: the second request
+    // reuses the token but withdraws the callee's extents. A rebuild would then
+    // have no body for sub_401100 and no clobber to report, so the clobber
+    // surviving *is* the cache hit.
+    const s = state();
+    await decompile(s, { funcExtents: EXTENTS_BOTH, insnsToken: 7 });
+
+    const again = await decompile(s, { funcExtents: EXTENTS_CALLER_ONLY, insnsToken: 7 });
+
+    expect(again).toMatch(/clobbered_r10_\d+/);
+  });
+
+  it("keys the cache on the token, so a new disassembly is not answered from the old one", async () => {
+    // The other half of the test above: same withdrawn extents, fresh token, and
+    // the answer changes. Without this the previous test would also pass on a
+    // cache that never looked at its key at all.
+    const s = state();
+    await decompile(s, { funcExtents: EXTENTS_BOTH, insnsToken: 7 });
+
+    const other = await decompile(s, { funcExtents: EXTENTS_CALLER_ONLY, insnsToken: 8 });
+
+    expect(other).not.toContain("clobbered_r10");
+  });
+
+  it("drops the held summary when configure names a machine", async () => {
+    // Hygiene rather than correctness — the client's token counter never resets,
+    // so a hit for a different image cannot arise — but it must not keep one
+    // file's summaries alive across a load of the next.
+    const s = state();
+    await decompile(s, { funcExtents: EXTENTS_BOTH, insnsToken: 7 });
+
+    await dispatch("configure", { stringEntries: [], iatEntries: [], machine: 0x8664 }, s);
+    const after = await decompile(s, { funcExtents: EXTENTS_CALLER_ONLY, insnsToken: 7 });
+
+    expect(after).not.toContain("clobbered_r10");
+  });
+});

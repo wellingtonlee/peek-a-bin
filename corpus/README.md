@@ -895,8 +895,10 @@ confident number about a program the pipeline does not build.
 
 ### The one thing these audits need from `src/`
 
-`decompileFunction` takes an optional last argument, `tap`, and the statement-drop audit is its
-only caller. It fires once, between `structureCFG` being handed the lifted blocks and its result
+`decompileFunction` takes an optional `tap` argument — its second-to-last, since
+`calleeClobbers` was appended after it in `df50c3f`; a call site passing only `tap` therefore
+reads `…, runtimeFunctions, tap)` while one passing both ends `…, tap, calleeClobbers)`, and the
+worker's passes `undefined` in the `tap` slot. The statement-drop audit is `tap`'s only caller. It fires once, between `structureCFG` being handed the lifted blocks and its result
 being passed on, and hands both sides over.
 
 It exists because **neither side is recoverable from the return value** — the emitted C says

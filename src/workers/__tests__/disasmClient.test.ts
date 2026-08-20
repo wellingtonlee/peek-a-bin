@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
+import type { Instruction } from "../../disasm/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
 // serially-servicing worker would see the messages — which is the only way to
@@ -963,5 +964,134 @@ describe("DisasmWorkerClient — jump-table spans are carried to the sweep", () 
     void client.hybridDisassemble(new Uint8Array(64), 0x400000, true, []);
 
     expect(worker.received[1].args.jumpTableSpans).toEqual([]);
+  });
+});
+
+/**
+ * peek-a-bin-s2ws — the client hands the worker what the callee-clobber summary
+ * needs, and the round trip actually produces one.
+ *
+ * `dispatch.test.ts` pins the worker's half. What it cannot see is the wire: the
+ * summary needs function *extents*, and the payload that already crosses carries
+ * `funcEntries` — display names, rebuilt on every rename — which have no sizes in
+ * them. This block asserts the two halves meet, by posting through the real
+ * client and answering with the real dispatch, so the message under test is the
+ * post-`structuredClone` one a worker would actually receive.
+ *
+ * That combination is why this needed no browser in the end. The bead assumed a
+ * summary had to arrive out of band and would race the first decompile; in fact
+ * the decompile request already carries the whole section's instructions, so the
+ * summary is derived from the same message that consumes it.
+ */
+describe("DisasmWorkerClient — the decompile request carries the callee-clobber inputs", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const CALLER = 0x401000;
+  const CALLEE = 0x401100;
+  const caller = { name: "sub_401000", address: CALLER, size: 0x10 };
+  const callee = { name: "sub_401100", address: CALLEE, size: 0x8 };
+
+  const insn = (address: number, mnemonic: string, opStr: string, size: number): Instruction => ({
+    address,
+    mnemonic,
+    opStr,
+    size,
+    bytes: new Uint8Array(size),
+  });
+
+  /** `mov r10, rcx` / `call sub_401100` / `mov [rsi], r10` / `ret`, then the
+   *  callee's `xor r10d, r10d` / `ret`. Address-ascending. */
+  const instructions = () => [
+    insn(CALLER, "mov", "r10, rcx", 3),
+    insn(CALLER + 3, "call", `0x${CALLEE.toString(16)}`, 5),
+    insn(CALLER + 8, "mov", "qword ptr [rsi], r10", 4),
+    insn(CALLER + 12, "ret", "", 1),
+    insn(CALLEE, "xor", "r10d, r10d", 3),
+    insn(CALLEE + 3, "ret", "", 1),
+  ];
+
+  function post(client: DisasmClient, insns: Instruction[], withFuncs: boolean) {
+    void client.decompileFunction(
+      caller,
+      insns,
+      new Map(),
+      null,
+      null,
+      true,
+      new Map([
+        [caller.address, { name: caller.name, address: caller.address }],
+        [callee.address, { name: callee.name, address: callee.address }],
+      ]),
+      undefined,
+      withFuncs ? [caller, callee] : undefined,
+    );
+  }
+
+  it("sends every function's extents, which funcEntries cannot supply", async () => {
+    const { client, worker } = await loadClient();
+
+    post(client, instructions(), true);
+
+    const args = worker.received[0].args;
+    expect(args.funcExtents).toEqual([
+      [CALLER, 0x10],
+      [CALLEE, 0x8],
+    ]);
+    // The names still travel separately: they carry renames, so they cannot be
+    // cached against the instruction array the way the extents are.
+    expect(args.funcEntries).toHaveLength(2);
+    expect(typeof args.insnsToken).toBe("number");
+  });
+
+  it("produces a clobber when the real dispatch answers the real message", async () => {
+    // End to end across the hop: post through the client, then hand the
+    // *received* args — everything having survived structured clone — to the
+    // dispatch. Nothing here is a mock of the thing under test.
+    const { client, worker } = await loadClient();
+
+    post(client, instructions(), true);
+    const code = (
+      (await dispatch(
+        "decompileFunction",
+        worker.received[0].args,
+        createWorkerState(Promise.resolve()),
+      )) as { code: string }
+    ).code;
+
+    const store = code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toMatch(/clobbered_r10_\d+/);
+    // Without the extents this same store reads `= rcx`: a value the callee has
+    // provably zeroed, stated with no marker at all.
+    expect(store).not.toMatch(/=\s*rcx\s*;/);
+  });
+
+  it("omits both fields when the caller has no extents, keeping the old behaviour", async () => {
+    // Absent must mean byte-identical to the pre-summary path, which is what let
+    // the worker side land before the client side did.
+    const { client, worker } = await loadClient();
+
+    post(client, instructions(), false);
+
+    expect(worker.received[0].args.funcExtents).toBeUndefined();
+    expect(worker.received[0].args.insnsToken).toBeUndefined();
+  });
+
+  it("gives one instruction array one token, and a different array a different one", async () => {
+    // The token stands in for array identity, which structured clone destroys.
+    // Reusing it across two different disassemblies would serve one image's
+    // summary for another; minting a fresh one per request would defeat the
+    // cache entirely and pay a whole-image walk per click.
+    const { client, worker } = await loadClient();
+    const insns = instructions();
+
+    post(client, insns, true);
+    post(client, insns, true);
+    post(client, instructions(), true);
+
+    const tokens = worker.received.map((m) => m.args.insnsToken);
+    expect(tokens[0]).toBe(tokens[1]);
+    expect(tokens[2]).not.toBe(tokens[0]);
   });
 });

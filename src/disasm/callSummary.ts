@@ -39,6 +39,7 @@
  */
 
 import { canonReg, isKnownRegister } from "./decompile/ir";
+import { buildFuncInsnMap, type FuncExtent } from "./funcInsns";
 import { resolveRipTarget } from "./ripRelative";
 import type { Instruction } from "./types";
 
@@ -557,4 +558,65 @@ export function buildCallSummaries(args: BuildCallSummariesArgs): Map<number, st
     );
   }
   return out;
+}
+
+/**
+ * One image's summaries, remembered across the decompile RPCs of a file load.
+ *
+ * The summary is a property of the *whole* image — it is closed over the call
+ * graph — while a decompile request is about one function, so a worker that
+ * rebuilt it per request would pay a whole-image cost on every click. Measured
+ * on the corpus at 16.8k instructions: ~18 ms to build, ~1.07 us/instruction
+ * and linear, of which two thirds is the per-instruction {@link writtenRegs}
+ * scan rather than the call-graph fixpoint. Invisible once; pure waste per
+ * request, and the worker is serial, so that waste is latency the user sees.
+ *
+ * Keyed on a caller-supplied token standing for the instruction array, NOT on
+ * the array itself. Structured clone gives the worker a fresh copy per message,
+ * so identity does not survive the hop and content hashing an instruction array
+ * costs about what the build does. The client mints the token from the array's
+ * identity instead (a `WeakMap` plus a counter that never resets), which is
+ * exact where a cheap content key would not be: an in-place hex patch can leave
+ * the instruction count and the end addresses alone while changing a mnemonic,
+ * and a stale summary is a clobber the machine does not perform — the one
+ * direction `callSummary.ts` is built never to guess in.
+ *
+ * A monotonic token also means {@link clear} is memory hygiene rather than
+ * correctness, exactly as it is for `Arm64SweepCache`: a token is never reused,
+ * so a hit for the wrong image cannot arise in the first place.
+ */
+export class CallSummaryCache {
+  private entry?: { token: number; clobbers: CalleeClobbers };
+
+  /**
+   * The summaries for the instruction array `token` stands for, building them
+   * on the first request that names it.
+   *
+   * `unresolved` is left empty, matching `mcp/session.ts`: the ABI reading at an
+   * unidentifiable callee is a separate policy that was measured separately.
+   */
+  forToken(
+    token: number,
+    funcExtents: readonly FuncExtent[],
+    instructions: Instruction[],
+    iatMap: Map<number, { lib: string; func: string }>,
+  ): CalleeClobbers {
+    const hit = this.entry;
+    if (hit && hit.token === token) return hit.clobbers;
+    const clobbers: CalleeClobbers = {
+      byAddress: buildCallSummaries({
+        functionAddresses: funcExtents.map((f) => f.address),
+        funcInsnMap: buildFuncInsnMap(funcExtents, instructions),
+        iatMap,
+      }),
+      unresolved: [],
+    };
+    this.entry = { token, clobbers };
+    return clobbers;
+  }
+
+  /** Forget the held image, so one file's summaries do not outlive it. */
+  clear(): void {
+    this.entry = undefined;
+  }
 }

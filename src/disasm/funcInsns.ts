@@ -1,6 +1,18 @@
 import type { DisasmFunction, Instruction } from "./types";
 
 /**
+ * All either function below reads of a function: where it starts and how long
+ * it is. Widened from {@link DisasmFunction} so a caller holding nothing but
+ * extents — the worker's decompile RPC, which is sent `[address, size]` pairs
+ * rather than whole records — can group instructions without synthesising a
+ * name and a set of flags it does not have. `DisasmFunction` satisfies it.
+ */
+export interface FuncExtent {
+  address: number;
+  size: number;
+}
+
+/**
  * "Collect the instructions belonging to a function" — previously duplicated
  * byte-for-byte in cfg.ts, stack.ts and signatures.ts, each scanning from index
  * 0 of the *global* instruction array. Analysing every function was therefore
@@ -81,7 +93,7 @@ function lowerBound(addresses: Float64Array, addr: number): number {
  * Instructions inside `[func.address, func.address + func.size)`, in array
  * order. Returns a fresh array; callers may keep it.
  */
-export function collectFuncInsns(func: DisasmFunction, instructions: Instruction[]): Instruction[] {
+export function collectFuncInsns(func: FuncExtent, instructions: Instruction[]): Instruction[] {
   const endAddr = func.address + func.size;
   const index = getAddrIndex(instructions);
 
@@ -108,7 +120,7 @@ export function collectFuncInsns(func: DisasmFunction, instructions: Instruction
  * many functions over the same instruction array.
  */
 export function buildFuncInsnMap(
-  functions: DisasmFunction[],
+  functions: readonly FuncExtent[],
   instructions: Instruction[],
 ): Map<number, Instruction[]> {
   const map = new Map<number, Instruction[]>();

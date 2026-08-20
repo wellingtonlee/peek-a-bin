@@ -26,6 +26,7 @@ import {
   disassembleArm64,
 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
+import { CallSummaryCache } from "../disasm/callSummary";
 import { unpackDataWindows } from "../disasm/dataWindows";
 import { decompileFunction } from "../disasm/decompile/pipeline";
 import { StructRegistry } from "../disasm/decompile/structs";
@@ -120,6 +121,22 @@ export interface WorkerState {
    * {@link Arm64SweepCache}. Never consulted on the x86 path.
    */
   arm64Sweep: Arm64SweepCache;
+  /**
+   * Per-callee written-register summaries for the loaded image, built on the
+   * first `decompileFunction` that asks for them.
+   *
+   * Not built by `hybridDisassemble`, which is where the instructions are
+   * produced, and that is the point: the decompile request already carries the
+   * whole-image `Instruction[]` and every function's extents, so the summary is
+   * derived from the same message that consumes it and there is no sender to
+   * race. Building it at disassembly time instead would reintroduce
+   * peek-a-bin-x4o2's shape — a decompile serviced before the message that
+   * announced its file — and the client's decompile cache would then serve a
+   * summary-less answer for the rest of the session (peek-a-bin-s2ws).
+   *
+   * Keyed on the client's instruction-array token; see {@link CallSummaryCache}.
+   */
+  callSummaries: CallSummaryCache;
   /** Resolves once Capstone is ready; awaited by the `init` method. */
   ready: Promise<void>;
 }
@@ -138,6 +155,7 @@ export function createWorkerState(ready: Promise<void>): WorkerState {
     jumpTableMap: new Map(),
     structRegistry: new StructRegistry(),
     arm64Sweep: new Arm64SweepCache(),
+    callSummaries: new CallSummaryCache(),
     ready,
   };
 }
@@ -213,7 +231,14 @@ export async function dispatch(
       // decode can be serviced *before* the `configure` that announces its file
       // (peek-a-bin-x4o2). Dropping it late costs a re-sweep; it can never
       // produce a wrong answer.
-      if (args.machine !== undefined) state.arm64Sweep.clear();
+      if (args.machine !== undefined) {
+        state.arm64Sweep.clear();
+        // Same guard, same reason: `configure` is sent twice per file and only
+        // the first names a machine, so clearing unconditionally would drop a
+        // summary the second call has no reason to invalidate. Hygiene only —
+        // the token key already makes a hit for another image impossible.
+        state.callSummaries.clear();
+      }
       return true;
 
     case "configureDecompileMaps": {
@@ -422,9 +447,30 @@ export async function dispatch(
       // Use per-call funcMap if provided (includes renames), else fall back to stored
       const fEntries: [number, { name: string; address: number }][] | undefined = args.funcEntries;
       const fMap = fEntries ? new Map(fEntries) : state.funcMap;
+      const insns = args.instructions as Instruction[];
+      // What each callee writes, so a call clobbers that rather than the whole
+      // ABI volatile set — see `clobberedByCall` in decompile/ssa.ts for why the
+      // wide answer is worse. Two gates, and both mean "exactly the behaviour
+      // this path had before the summary existed":
+      //
+      //   * no extents sent — an older client, or a caller that never had them;
+      //   * not a 64-bit image — `calleeClobbersFor` returns undefined unless
+      //     `is64`, because on x86 nothing is passed in a register, so building
+      //     a summary a PE32 lift cannot consult is pure cost.
+      const extents = args.funcExtents as [number, number][] | undefined;
+      const token = args.insnsToken as number | undefined;
+      const calleeClobbers =
+        extents && token !== undefined && args.is64
+          ? state.callSummaries.forToken(
+              token,
+              extents.map(([address, size]) => ({ address, size })),
+              insns,
+              state.iatMap,
+            )
+          : undefined;
       return decompileFunction(
         args.func as DisasmFunction,
-        args.instructions as Instruction[],
+        insns,
         xMap,
         args.stackFrame as StackFrame | null,
         args.signature as FunctionSignature | null,
@@ -435,6 +481,8 @@ export async function dispatch(
         fMap,
         state.structRegistry,
         args.runtimeFunctions,
+        undefined,
+        calleeClobbers,
       );
     }
 

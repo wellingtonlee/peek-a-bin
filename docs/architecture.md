@@ -212,7 +212,7 @@ incomplete. `error` retains the first failure message from the run.
 RPC-style communication in `src/workers/disasmClient.ts`:
 
 - Heavy operations run off-thread: disassembly, function detection, xref building, decompilation
-- Client caches results (disasm cache, xref cache, decompile cache)
+- Client caches results (disasm cache, xref cache, decompile cache), and mints the instruction-array tokens the worker's derived caches are keyed on (`insnsTokens`, a `WeakMap` plus a counter that never resets — a reused token would serve one image's derived answer for another)
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`) — first load fetches, subsequent loads read from cache
 
 ### Binary arguments: slice, then transfer
@@ -264,6 +264,17 @@ silently regress.
 Worker state (`cs32`/`cs64`, the string/IAT/function/jump-table maps, `driverMode`, and the
 cross-function `StructRegistry`) lives on a `WorkerState` object owned by the worker module
 rather than in module-level `let` bindings, so the dispatch itself holds nothing between calls.
+
+Two of its fields are **derived caches** rather than configuration, and both exist because one
+file load asks for the same expensive thing more than once. `arm64Sweep` holds a code section's
+A64 decode across the three RPCs that each need it (above). `callSummaries` holds the per-callee
+written-register summary an x64 decompile consults — a whole-image, call-graph-closed answer that
+a per-request rebuild would recompute on every click, measured at ~18 ms over 16.8k instructions
+and linear in instruction count on a worker that services messages serially. Neither is keyed on
+session state, deliberately: a request can be serviced before the `configure` that announces its
+file (`peek-a-bin-x4o2`), so the sweep is keyed on the section's bytes and the summary on a token
+the client mints from instruction-array identity. Both `clear()` methods are therefore memory
+hygiene rather than correctness.
 
 ### The metrics worker
 

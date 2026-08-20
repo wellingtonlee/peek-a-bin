@@ -3,6 +3,7 @@ import type { IRPDispatchEntry } from "../analysis/driver";
 // nothing itself, so it adds no edge to Capstone either.
 import { archForMachine, type ImageArch } from "../disasm/arch";
 import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
+import type { FuncExtent } from "../disasm/funcInsns";
 // Type-only: erased at compile time, so this adds no runtime edge to
 // functionDetect (and none to Capstone through it).
 import type { DetectPass, ImageBounds } from "../disasm/functionDetect";
@@ -74,6 +75,23 @@ class DisasmWorkerClient {
    */
   private xrefCache = new WeakMap<Instruction[], { boundsKey: string; map: Map<number, Xref[]> }>();
   private decompileCache = new Map<number, { code: string; lineMap: Map<number, number> }>();
+  /**
+   * Serial numbers standing for whole instruction arrays, so the worker can
+   * cache what it derives from one across the many requests that name it.
+   *
+   * The array itself cannot be the key on the far side: structured clone hands
+   * the worker a fresh copy per message, so identity does not survive the hop,
+   * and content-hashing an instruction array costs about what the derivation
+   * does. Identity *here* is exact, which is the property that matters — a
+   * different array means a different disassembly, and the same array means the
+   * same instructions.
+   *
+   * The counter deliberately never resets, not even on `setImage`. A token is
+   * then unique for the client's whole lifetime, so a worker-side hit for a
+   * different image cannot arise even if a reply crosses a file load.
+   */
+  private insnsTokens = new WeakMap<Instruction[], number>();
+  private nextInsnsToken = 1;
   jumpTables = new Map<number, number[]>(); // jmp addr → target VAs
   /**
    * `[start, end)` of the bytes those tables occupy, from the same detection
@@ -464,9 +482,19 @@ class DisasmWorkerClient {
     is64: boolean,
     funcMap: Map<number, { name: string; address: number }>,
     runtimeFunctions?: import("../pe/types").RuntimeFunction[],
+    functions?: readonly FuncExtent[],
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
     const cached = this.decompileCache.get(func.address);
     if (cached) return cached;
+    // Extents, not the whole records: the worker needs only where each function
+    // starts and ends to group `instructions` by owning function, which is what
+    // the per-callee clobber summary is built from. `funcEntries` above carries
+    // the names and is rebuilt per call because it reflects renames; extents do
+    // not change under a rename, which is why the summary can be cached against
+    // the instruction token while `funcEntries` cannot.
+    //
+    // Sent only when the caller has them, so an older caller gets exactly the
+    // pre-summary behaviour rather than a half-built one (peek-a-bin-s2ws).
     const result: { code: string; lineMap: [number, number][] } = await this.send(
       "decompileFunction",
       this.decoded({
@@ -478,11 +506,22 @@ class DisasmWorkerClient {
         is64,
         funcEntries: Array.from(funcMap.entries()),
         runtimeFunctions,
+        funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
+        insnsToken: functions ? this.insnsToken(instructions) : undefined,
       }),
     );
     const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
     this.decompileCache.set(func.address, parsed);
     return parsed;
+  }
+
+  /** The stable token for this instruction array, minting one on first sight. */
+  private insnsToken(instructions: Instruction[]): number {
+    const seen = this.insnsTokens.get(instructions);
+    if (seen !== undefined) return seen;
+    const token = this.nextInsnsToken++;
+    this.insnsTokens.set(instructions, token);
+    return token;
   }
 
   invalidateDecompileCache(): void {

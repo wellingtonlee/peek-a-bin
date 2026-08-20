@@ -261,7 +261,7 @@ export class FileSession {
           instructions,
         );
 
-    // 8b. Per-callee written-register summaries, closed over the call graph.
+    // 8c. Per-callee written-register summaries, closed over the call graph.
     //
     // Computed here rather than inside `decompileFunction` because it is
     // interprocedural and that function is handed one function's instructions:

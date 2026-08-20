@@ -185,6 +185,20 @@ MSVC parks live values in R10 across calls to helpers it has analysed). A write 
 costs a clobber; a write it invents is that harm. See CLAUDE.md's gotcha of the same name for the
 three consequences, including why `RegState.invalidateCallerSaved` must not be narrowed with it.
 
+**Where the summary is built differs by path, and that is a property of what each path is handed**
+(`peek-a-bin-s2ws`). It is interprocedural, so it needs the callee's body — which `decompileFunction`
+itself never has, being given one function. On the **MCP** path `mcp/session.ts` builds it at load
+time (step 8c) and `mcp/tools.ts` passes it; `corpus/sweep.ts` reuses the session's rather than
+computing its own, so the measurement is of the same code the tool runs. On the **browser** path the
+worker's `decompileFunction` RPC builds it, because that request already carries the whole section's
+`Instruction[]` — `useDecompileTabs` passes the array `hybridDisassemble` returned, not one
+function's slice — plus every detected function's extents. Deriving it from the same message that
+consumes it is what avoids an out-of-band sender racing the first decompile and the client's
+address-keyed decompile cache. `CallSummaryCache` holds one image's answer against a token the
+client mints from instruction-array identity, since the summary is a whole-image property while a
+request is about one function. Both gates — no extents, or a 32-bit image — mean exactly the
+pre-summary behaviour.
+
 **Destruction spells a register at the image's own width** (`ssadestroy.ts`). `canonReg` maps
 every alias to the 64-bit parent because that is the register's *identity*, and SSA keys on
 identity — so `phi.dest.size` is 8 for **every** phi even in 32-bit code, and a width-based
@@ -397,4 +411,5 @@ record.
 - `fold.ts` has a `castTypeSize` helper using regex to extract bit width from type strings like `int32_t`
 - `cleanup.ts` runs after `structureCFG`, before `inferTypes` — guard clause flattening is single-level only
 - `StructRegistry` persists across decompilation calls in the worker — this is intentional for cross-function struct propagation
+- `WorkerState.callSummaries` persists too, and for a different reason: it is a *derived cache*, not shared analysis state. The per-callee clobber summary is closed over the call graph, so it describes the whole image while a decompile request describes one function; rebuilding it per request would pay a whole-image walk per click on a worker that services messages serially. Keyed on a token the client mints from instruction-array identity, so it cannot answer for a different disassembly — which makes `clear()` hygiene rather than correctness, exactly as for `WorkerState.arm64Sweep`
 - All expression walkers must handle every `IRExpr` kind — missing cases cause silent data loss

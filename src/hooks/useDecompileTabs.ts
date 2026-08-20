@@ -107,6 +107,12 @@ export function useDecompileTabs({
         pe.is64,
         new Map(funcEntries),
         pe.runtimeFunctions,
+        // Extents for every detected function, which is what the worker builds
+        // the per-callee clobber summary from. `funcEntries` above cannot serve:
+        // it carries display names, so it is rebuilt on every rename, while the
+        // summary is a property of the image and is cached against the
+        // instruction array (peek-a-bin-s2ws).
+        functions,
       );
       lowCache.current.set(addr, result);
       dispatch({ type: "LOAD_OK", tab: "low", code: result.code, lineMap: result.lineMap });
