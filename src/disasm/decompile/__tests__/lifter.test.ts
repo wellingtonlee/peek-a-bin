@@ -177,14 +177,56 @@ describe("liftBlock — data movement", () => {
     ).toEqual([]);
   });
 
-  it("drops jumps — control flow is handled by the structurer", () => {
+  /**
+   * Unconditional and interior jumps carry no value, so the structurer still
+   * owns them entirely. A block's TRAILING conditional jump is different: it
+   * becomes an `IRBranch` so its condition is a real IR reader with an SSA
+   * version and a place in every use count (peek-a-bin-c33). `pipeline.ts`
+   * extracts it again before `structureCFG`, so the structured tree is
+   * unchanged — which is why this contract is pinned here, at the only stage
+   * that can observe it.
+   */
+  it("drops an unconditional jump — control flow is handled by the structurer", () => {
+    // Not last in the block: a trailing `jmp` out of a successor-less block is
+    // a TAIL CALL and is lifted as one, which is a different contract.
     expect(
       lift([
         ["jmp", "0x401100"],
-        ["je", "0x401100"],
-        ["jne", "0x401100"],
+        ["mov", "rax, rbx"],
       ]),
-    ).toEqual([]);
+    ).toHaveLength(1);
+  });
+
+  it("drops a conditional jump that is not the block's last instruction", () => {
+    // Only a block's terminator can be its branch; an interior jcc is one the
+    // CFG has already split on, so lifting it would invent a second terminator.
+    expect(
+      lift([
+        ["je", "0x401100"],
+        ["mov", "rax, rbx"],
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("lifts the block's trailing conditional jump to a branch statement", () => {
+    const stmts = lift([
+      ["cmp", "eax, 0x5"],
+      ["jne", "0x401100"],
+    ]);
+    const branch = stmts.find((s) => s.kind === "branch");
+    expect(branch).toBeDefined();
+    expect(branch).toMatchObject({ kind: "branch", jcc: "jne", target: 0x401100 });
+  });
+
+  /**
+   * `jecxz`/`jrcxz`/`jcxz` test a register and read no flag, so a flag-derived
+   * condition would state something they do not do. `isFlagReadingJump` is what
+   * keeps them out; `startsWith("j")` — the habit the rest of x86 encourages —
+   * would let them through.
+   */
+  it("does not lift a branch for a jump that reads no flag", () => {
+    expect(lift([["jecxz", "0x401100"]])).toEqual([]);
+    expect(lift([["jrcxz", "0x401100"]])).toEqual([]);
   });
 
   it("lifts a register move and records the definition", () => {

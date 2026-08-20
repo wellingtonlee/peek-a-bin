@@ -101,6 +101,34 @@ export function decompileFunction(
       liftedBlocks.set(blockId, foldBlock(stmts));
     }
 
+    // 4b. Extract the branch statements again.
+    //
+    // They existed for the dataflow stages above — SSA renaming, propagation,
+    // DCE's use counts and `foldBlock`'s inlining all saw each guard's registers
+    // as real reads. From here they would only do harm: `detectForLoop` skips
+    // any body block whose last statement is not an `assign`, so a branch left
+    // in place takes for-loop recognition to zero corpus-wide, silently
+    // (peek-a-bin-c33).
+    //
+    // This runs BEFORE the tap snapshot below, and that ordering is load-bearing
+    // rather than incidental: the statement-drop audit compares the lifted
+    // statements against the structured ones by object identity, so a branch
+    // still present in `lifted` would be reported as a dropped statement in
+    // every block that ends in a conditional jump.
+    //
+    // Nothing consumes the extracted branches yet — `extractCondition` still
+    // re-reads the instruction. Wiring it to these is a later stage, and doing
+    // it here would move guard text corpus-wide before the cost of the change
+    // has been measured on its own.
+    for (const [blockId, stmts] of liftedBlocks) {
+      if (stmts.some((s) => s.kind === "branch")) {
+        liftedBlocks.set(
+          blockId,
+          stmts.filter((s) => s.kind !== "branch"),
+        );
+      }
+    }
+
     // 5. Structure CFG → structured IR statements
     //
     // The lifted lists are copied BEFORE the call so a tap sees what

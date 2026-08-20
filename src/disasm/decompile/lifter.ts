@@ -1,6 +1,7 @@
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import type { Instruction } from "../types";
+import { isFlagReadingJump } from "./flagModel";
 import type { BinaryOp, IRCall, IRExpr, IRStmt } from "./ir";
 import {
   irBinary,
@@ -632,8 +633,36 @@ export function liftBlock(
       }
     }
 
-    // ── Conditional / unconditional jumps: handled at structure level ──
+    // ── Conditional / unconditional jumps ──
+    //
+    // A conditional jump becomes an `IRBranch` so its condition is a real IR
+    // reader: it gets an SSA version, a reaching definition, and a place in
+    // every use count. `pipeline.ts` extracts it again before `structureCFG`,
+    // so no structured tree ever contains one (peek-a-bin-c33).
+    //
+    // The precedent is a few lines up: `setcc` already assigns
+    // `regState.getCondition()` to a register and that survives SSA renaming
+    // untouched. This does for `jcc` what the lifter already does for `setcc`.
+    //
+    // `isFlagReadingJump` rather than `startsWith("j")`: `jecxz`/`jrcxz`/`jcxz`
+    // test a *register* and read no flag, so a flag-derived condition would be
+    // a statement about something they do not do.
     if (mn === "jmp" || mn.startsWith("j")) {
+      if (isFlagReadingJump(mn) && insn === block.insns[block.insns.length - 1]) {
+        // Only a direct target is recorded. An indirect or unresolved jump has
+        // no address to name, and inventing one is the failure mode
+        // `parseBranchTarget`'s guard exists to prevent.
+        const target = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+        if (target) {
+          stmts.push({
+            kind: "branch",
+            condition: regState.getCondition(mn),
+            target: Number.parseInt(target[1], 16),
+            jcc: mn,
+            addr: insn.address,
+          });
+        }
+      }
       continue;
     }
 
