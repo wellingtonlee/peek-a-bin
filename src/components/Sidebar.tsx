@@ -4,7 +4,12 @@ import type { DisasmFunction } from "../disasm/types";
 import { useContainingFunc } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { useGraphOverview } from "../hooks/useGraphOverview";
-import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
+import {
+  ANALYSIS_IN_PROGRESS,
+  getDisplayName,
+  useAppDispatch,
+  useAppState,
+} from "../hooks/usePEFile";
 import { generateMarkdownReport } from "../utils/exportSchema";
 import { focusOnMount } from "./focusOnMount";
 import { SkeletonRows } from "./Skeleton";
@@ -276,6 +281,14 @@ export function Sidebar() {
   }, [activeIndex, filter, virtualizer]);
 
   if (!pe) return null;
+
+  // An empty list with analysis still running is a skeleton; an empty list with
+  // analysis over is an empty list. Read from the exhaustive record rather than
+  // the `!== "idle" && !== "ready" && !== "failed"` chain this replaces, which
+  // would have shown these rows forever for any phase added later — see
+  // ANALYSIS_IN_PROGRESS in usePEFile.ts (peek-a-bin-bo3b).
+  const awaitingFunctions =
+    state.functions.length === 0 && ANALYSIS_IN_PROGRESS[state.analysisPhase];
 
   if (collapsed) {
     return (
@@ -595,18 +608,12 @@ export function Sidebar() {
       </div>
 
       {/* Virtualized functions list */}
-      {state.functions.length === 0 &&
-      state.analysisPhase !== "idle" &&
-      state.analysisPhase !== "ready" &&
-      state.analysisPhase !== "failed" ? (
+      {awaitingFunctions ? (
         <div className="flex-1 overflow-hidden">
           <SkeletonRows count={20} />
         </div>
       ) : null}
-      <div
-        ref={listRef}
-        className={`flex-1 overflow-auto${state.functions.length === 0 && state.analysisPhase !== "idle" && state.analysisPhase !== "ready" && state.analysisPhase !== "failed" ? " hidden" : ""}`}
-      >
+      <div ref={listRef} className={`flex-1 overflow-auto${awaitingFunctions ? " hidden" : ""}`}>
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,

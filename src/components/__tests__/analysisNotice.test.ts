@@ -16,9 +16,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseViewTab, VIEW_TABS, type ViewTab } from "../../hooks/usePEFile";
+import {
+  ANALYSIS_IN_PROGRESS,
+  type AnalysisPhase,
+  parseViewTab,
+  VIEW_TABS,
+  type ViewTab,
+} from "../../hooks/usePEFile";
 import { buildMinimalPE32, buildMinimalPE64 } from "../../pe/__tests__/fixtures";
 import { parsePE } from "../../pe/parser";
+import { findCodeSection } from "../../pe/sections";
 import {
   analysisNotice,
   DECODER_DERIVED_TABS,
@@ -255,6 +262,118 @@ describe("analysisNotice — a function list that is short rather than wrong", (
   });
 });
 
+/**
+ * peek-a-bin-bo3b. A PE with no executable section — a resource-only DLL, i.e.
+ * an ordinary satellite/MUI file — made App's analysis effect return before it
+ * dispatched any phase at all, so `analysisPhase` stayed on "extracting-strings"
+ * forever and the status bar spun with nothing said. The terminal phase is
+ * `"no-code"`, deliberately not `"failed"`: the parse succeeded.
+ */
+describe("analysisNotice — a file that parsed fine and simply has no code", () => {
+  const healthy = () => machineOf(buildMinimalPE32());
+
+  it("is reachable: a resource-only image really has no code section", () => {
+    // The premise of the whole notice. `findCodeSection` matches `.text` by name
+    // or IMAGE_SCN_MEM_EXECUTE by flag, and a resource-only DLL has neither.
+    const image = buildMinimalPE32({
+      sections: [
+        {
+          name: ".rsrc",
+          virtualAddress: 0x1000,
+          virtualSize: 4,
+          data: new Uint8Array([0, 0, 0, 0]),
+          // INITIALIZED_DATA | MEM_READ. No MEM_EXECUTE.
+          characteristics: 0x00000040 | 0x40000000,
+        },
+      ],
+    });
+    expect(findCodeSection(parsePE(image).sections)).toBeUndefined();
+  });
+
+  it("says what happened, and says nothing failed", () => {
+    const notice = analysisNotice({ machine: healthy(), phase: "no-code", error: null });
+    expect(notice?.kind).toBe("no-code-section");
+    expect(notice?.label).toBe("No code section");
+    expect(notice?.detail).toMatch(/no executable section/i);
+    expect(notice?.detail).toMatch(/nothing failed/i);
+    // The word that must not appear: this is not a fault, and calling it one
+    // sends the user looking for a problem with the tool or the file.
+    expect(notice?.detail).not.toMatch(/error|failed to|corrupt/i);
+  });
+
+  it("names the case that makes this ordinary rather than adversarial", () => {
+    const notice = analysisNotice({ machine: healthy(), phase: "no-code", error: null });
+    expect(notice?.detail).toMatch(/resource-only/i);
+  });
+
+  it("names the views that are populated, and withholds only the disassembly", () => {
+    const notice = analysisNotice({ machine: healthy(), phase: "no-code", error: null });
+    expect(notice?.availableTabs).toBe(PARSER_DERIVED_TABS);
+    expect(notice?.unavailableTabs).toEqual(["disassembly"]);
+    // Derived from the same list the banner renders buttons from, so the prose
+    // and the buttons cannot disagree.
+    expect(notice?.detail).toContain(formatTabList(PARSER_DERIVED_TABS));
+  });
+
+  it("does not borrow the failure's message, even when one is sitting in state", () => {
+    // `state.error` survives from an earlier load; nothing here went wrong.
+    const notice = analysisNotice({
+      machine: healthy(),
+      phase: "no-code",
+      error: "Analysis failed: worker terminated",
+    });
+    expect(notice?.kind).toBe("no-code-section");
+    expect(notice?.detail).not.toMatch(/worker terminated/);
+  });
+
+  it("ranks below the architecture — the machine type is the more useful fact", () => {
+    // An ARM32 resource-only DLL is both. "No decoder for this machine type"
+    // is true of every such file; "no executable section" only of this one.
+    const notice = analysisNotice({
+      machine: machineOf(buildMinimalPE32({ machine: ARMNT })),
+      phase: "no-code",
+      error: null,
+    });
+    expect(notice?.kind).toBe("unsupported-arch");
+  });
+
+  it("is terminal — nothing may still read as analysis in flight", () => {
+    // The defect was a spinner that could never resolve, so the phase being
+    // terminal is half the fix and the notice is the other half.
+    expect(ANALYSIS_IN_PROGRESS["no-code"]).toBe(false);
+  });
+});
+
+describe("ANALYSIS_IN_PROGRESS covers every phase", () => {
+  it("is exhaustive, so no phase silently reads as still-analysing", () => {
+    // Typed Record<AnalysisPhase, boolean>, so this is really a check that the
+    // record has not been widened to a partial/index-signature type — which is
+    // how `phaseLabels` in StatusBar quietly stopped covering the union.
+    const keys = Object.keys(ANALYSIS_IN_PROGRESS);
+    expect(keys.length).toBe(10);
+    for (const phase of keys) {
+      expect(typeof ANALYSIS_IN_PROGRESS[phase as AnalysisPhase]).toBe("boolean");
+    }
+  });
+
+  it("treats exactly the terminal phases as done", () => {
+    expect(ANALYSIS_IN_PROGRESS.idle).toBe(false);
+    expect(ANALYSIS_IN_PROGRESS.ready).toBe(false);
+    expect(ANALYSIS_IN_PROGRESS.failed).toBe(false);
+    expect(ANALYSIS_IN_PROGRESS["no-code"]).toBe(false);
+    for (const phase of [
+      "parsing",
+      "detecting-functions",
+      "recursive-descent",
+      "gap-filling",
+      "building-xrefs",
+      "extracting-strings",
+    ] as const) {
+      expect(ANALYSIS_IN_PROGRESS[phase]).toBe(true);
+    }
+  });
+});
+
 describe("the tab split accounts for every view", () => {
   it("partitions the whole tab set, so no view is silently unclassified", () => {
     const all = Object.keys(VIEW_TAB_LABELS) as ViewTab[];
@@ -335,6 +454,31 @@ describe("every surface that reports a failure uses the shared decision", () => 
     const source = readFileSync(join(SRC, "components", "AddressBar.tsx"), "utf8");
     expect(source).toMatch(/VIEW_TAB_LABELS/);
     expect(source).not.toMatch(/label:\s*"/);
+  });
+
+  // peek-a-bin-bo3b. The notice above is unreachable unless App's analysis
+  // effect actually dispatches the phase at the `findCodeSection` bail-out —
+  // and a bare `return` there is what caused the defect. Matched on the phase
+  // literal, which survives a reformat; the absence assertion catches a revert.
+  it("App dispatches the terminal phase where it used to return silently", () => {
+    const source = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(source).toMatch(/phase:\s*"no-code"/);
+    expect(source).not.toMatch(/if \(!textSection\) return;/);
+  });
+
+  // The other half: a terminal phase is only terminal if the spinner sites
+  // agree. Both read the exhaustive record now, so a phase added later cannot
+  // default to "still analysing" the way this one did.
+  it.each([
+    ["StatusBar.tsx", join(SRC, "components", "StatusBar.tsx")],
+    ["Sidebar.tsx", join(SRC, "components", "Sidebar.tsx")],
+  ])("%s decides 'still analysing' from the exhaustive record", (_label, path) => {
+    const source = readFileSync(path, "utf8");
+    expect(source).toMatch(/ANALYSIS_IN_PROGRESS\[/);
+    // The hand-written chain this replaces. Re-adding it would compile, pass
+    // every other test, and silently re-open the class of defect.
+    expect(source).not.toMatch(/analysisPhase !== "ready"/);
+    expect(source).not.toMatch(/phase !== "ready"/);
   });
 
   it("the status bar has no label for a phase it cannot render", () => {

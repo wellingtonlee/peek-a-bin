@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
-import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
+import {
+  ANALYSIS_IN_PROGRESS,
+  getDisplayName,
+  useAppDispatch,
+  useAppState,
+} from "../hooks/usePEFile";
 import {
   getActiveProfile,
   type LLMProfileStore,
@@ -125,7 +130,10 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
   const funcName = containingFunc ? getDisplayName(containingFunc, state.renames) : "---";
 
   const phase = state.analysisPhase;
-  const isAnalyzing = phase !== "idle" && phase !== "ready" && phase !== "failed";
+  // Not a hand-written `!== "idle" && !== "ready" && !== "failed"` chain: that
+  // shape defaults every phase added later to "still analysing", which is a
+  // spinner that never resolves. The record is exhaustive over AnalysisPhase.
+  const isAnalyzing = ANALYSIS_IN_PROGRESS[phase];
   const phaseLabel = phaseLabels[phase];
 
   const insnBytesStr = state.currentInstruction

@@ -250,7 +250,16 @@ export default function App() {
     analyzedBufferRef.current = buffer;
 
     const textSection = findCodeSection(pe.sections);
-    if (!textSection) return;
+    // A bare `return` here left the phase on "extracting-strings" — the last
+    // value `handleFile` dispatched — with every later SET_ANALYSIS_PHASE in
+    // this effect downstream of the return, so nothing could ever move it and
+    // the status bar spun for good. A resource-only DLL genuinely has no
+    // executable section, so this is an ordinary file, not malformed input:
+    // the phase is terminal but is *not* "failed" (peek-a-bin-bo3b).
+    if (!textSection) {
+      dispatch({ type: "SET_ANALYSIS_PHASE", phase: "no-code" });
+      return;
+    }
 
     const sectionBytes = new Uint8Array(
       buffer,

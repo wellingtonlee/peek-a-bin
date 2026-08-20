@@ -45,6 +45,16 @@ phase moves to `"failed"` and the status bar reports it, rather than leaving the
 the last phase it reached. An exhausted Capstone decoder (`CapstoneUnavailableError`) reaches
 the user through this path — see the decoder section below.
 
+A second terminal value, `"no-code"`, covers the file that has no executable section at all —
+`findCodeSection` returns undefined for a resource-only DLL, of which a satellite/MUI file is
+the ordinary case. It is deliberately *not* `"failed"`: the parse succeeded and every
+parser-derived tab is populated, so `analysisNotice()`'s `"no-code-section"` kind says exactly
+that and lists them. Whether a phase means "still working" is `ANALYSIS_IN_PROGRESS` in
+`usePEFile.ts`, a `Record<AnalysisPhase, boolean>` the status bar and the sidebar both read;
+it is a record rather than a `!== "ready" && !== "failed"` chain because that shape defaults a
+newly added phase to "still analysing", i.e. to a spinner that can never resolve — which is
+what `"no-code"` was before it existed (peek-a-bin-bo3b).
+
 ### Target architecture
 
 The decoder is selected from `coffHeader.machine` via `archForMachine()` in

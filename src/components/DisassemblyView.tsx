@@ -966,7 +966,14 @@ export function DisassemblyView() {
     phase: state.analysisPhase,
     error: state.error,
   });
-  if (archNotice?.kind === "unsupported-arch") {
+  // "No executable section" joins it: both are permanent properties of the file
+  // rather than faults, both withhold exactly this panel and nothing else, and
+  // the heading below states both correctly. Without this arm the tab the user
+  // is actually looking at fell through to "Address 0x… is not within any
+  // section", which is true and explains nothing (peek-a-bin-bo3b). The failure
+  // and partial-detection kinds are still deliberately excluded — neither is a
+  // reason to replace the panel.
+  if (archNotice?.kind === "unsupported-arch" || archNotice?.kind === "no-code-section") {
     return (
       <div className="p-6 max-w-2xl text-sm">
         <h2 className="text-amber-400 font-semibold mb-2">No disassembly for this image</h2>

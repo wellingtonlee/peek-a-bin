@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
 import type { PEFile } from "../../pe/types";
-import { type AppAction, type AppState, appReducer, initialState } from "../usePEFile";
+import {
+  ANALYSIS_IN_PROGRESS,
+  type AppAction,
+  type AppState,
+  appReducer,
+  initialState,
+} from "../usePEFile";
 
 /**
  * Reducer-level coverage for `appReducer`.
@@ -485,6 +491,28 @@ describe("appReducer — analysis results", () => {
   it("SET_ANALYSIS_PHASE reaches the failed state, so a bad parse cannot spin forever", () => {
     const next = appReducer(initialState, { type: "SET_ANALYSIS_PHASE", phase: "failed" });
     expect(next.analysisPhase).toBe("failed");
+  });
+
+  // peek-a-bin-bo3b. Same class, different cause: an image with no executable
+  // section left the phase on "extracting-strings" because App's analysis
+  // effect returned before dispatching anything. "no-code" is the terminal
+  // phase for it, and is not "failed" — the parse succeeded.
+  it("SET_ANALYSIS_PHASE reaches the no-code state without going through failed", () => {
+    const next = appReducer(initialState, { type: "SET_ANALYSIS_PHASE", phase: "no-code" });
+    expect(next.analysisPhase).toBe("no-code");
+    expect(ANALYSIS_IN_PROGRESS[next.analysisPhase]).toBe(false);
+  });
+
+  it("a no-code image keeps everything the parser recovered", () => {
+    // The whole point of the state: headers, sections, imports, exports,
+    // resources and strings are all read normally for a resource-only DLL, so a
+    // branch that cleared `peFile` would blank the very tabs the notice sends
+    // the user to.
+    const loaded = run([{ type: "SET_PE_FILE", peFile: peFile(), fileName: "res.dll" }]);
+    const next = appReducer(loaded, { type: "SET_ANALYSIS_PHASE", phase: "no-code" });
+    expect(next.peFile).toBe(loaded.peFile);
+    expect(next.fileName).toBe("res.dll");
+    expect(next.error).toBeNull();
   });
 
   // peek-a-bin-8ru3 / peek-a-bin-x7b. The engine refuses to disassemble an

@@ -65,7 +65,44 @@ export type AnalysisPhase =
   | "building-xrefs"
   | "extracting-strings"
   | "ready"
-  | "failed";
+  | "failed"
+  /**
+   * Terminal, and not a failure: the image has no executable section, so there
+   * was never anything to disassemble.
+   *
+   * `findCodeSection` returns undefined for a resource-only DLL — a satellite
+   * or MUI file is the ordinary case, not malformed input — and App's analysis
+   * effect returns at that point, *before* the first phase it dispatches. So
+   * the phase stayed on whatever preceded it ("extracting-strings") forever and
+   * the status bar spun with no explanation (peek-a-bin-bo3b). "failed" is the
+   * wrong word for it: the parse succeeded, nothing went wrong, and every
+   * parser-derived tab is populated — see `analysisNotice`'s
+   * `"no-code-section"` kind for what the user is told.
+   */
+  | "no-code";
+
+/**
+ * Whether a phase means analysis is still in flight.
+ *
+ * Typed `Record<AnalysisPhase, boolean>` on purpose. Three surfaces — the
+ * status bar and the sidebar's two — spelled this out as a hand-written
+ * `phase !== "idle" && phase !== "ready" && phase !== "failed"` chain, which
+ * defaults *any* new phase to "still analysing" and so pins a spinner that can
+ * never resolve. That is exactly the defect peek-a-bin-bo3b was, one phase
+ * earlier in the chain; adding a phase now fails the build here instead.
+ */
+export const ANALYSIS_IN_PROGRESS: Record<AnalysisPhase, boolean> = {
+  idle: false,
+  parsing: true,
+  "detecting-functions": true,
+  "recursive-descent": true,
+  "gap-filling": true,
+  "building-xrefs": true,
+  "extracting-strings": true,
+  ready: false,
+  failed: false,
+  "no-code": false,
+};
 
 export interface AppState {
   peFile: PEFile | null;

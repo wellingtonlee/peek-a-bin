@@ -80,16 +80,22 @@ export const DETECT_PASS_LABELS: Record<DetectPass, string> = {
 };
 
 /**
- * Which of the three situations this is.
+ * Which of the four situations this is.
  *
  * They are kept apart because the remedies differ: `"unsupported-arch"` is a
- * permanent property of the file and nothing is wrong; `"analysis-failed"` is a
- * genuine fault whose message is worth reading; `"partial-detection"` is
- * neither — the analysis finished and the disassembly is there, but the
+ * permanent property of the file and nothing is wrong; `"no-code-section"` is
+ * likewise a property of the file and likewise not a fault, but a different
+ * one — the architecture is fine and there is simply no code; `"analysis-failed"`
+ * is a genuine fault whose message is worth reading; `"partial-detection"` is
+ * none of those — the analysis finished and the disassembly is there, but the
  * function list is short, which is the one state that looks entirely healthy
  * on screen.
  */
-export type AnalysisNoticeKind = "unsupported-arch" | "analysis-failed" | "partial-detection";
+export type AnalysisNoticeKind =
+  | "unsupported-arch"
+  | "no-code-section"
+  | "analysis-failed"
+  | "partial-detection";
 
 export interface AnalysisNotice {
   kind: AnalysisNoticeKind;
@@ -149,7 +155,16 @@ function omittedPassSentence(omitted: readonly DetectPass[]): string {
  * dies in `buildAllXrefs` for such an image, so `phase` is `"failed"` shortly
  * after. Reporting the cause rather than the symptom is the difference.
  *
- * `omitted` ranks below both, and for the same reason: it is a *consequence* of
+ * `"no-code-section"` ranks directly below the architecture and above the rest.
+ * Below it because an image that is both — an ARM32 resource-only DLL — should
+ * be told about its machine type: that is the more informative fact, since it
+ * withholds the disassembly for *every* such file, whereas "no executable
+ * section" is a property this one file would still have on a supported
+ * architecture. Above the failure for tidiness only; the two cannot coincide,
+ * as `phase` holds one value and App dispatches `"no-code"` in place of
+ * reaching any stage that could fail (peek-a-bin-bo3b).
+ *
+ * `omitted` ranks below all three, and for the same reason: it is a *consequence* of
  * either one, so an image with no decoder would otherwise be told about twice.
  * It stands alone only when the analysis is otherwise healthy — the case that
  * has no other signal at all, a dead Capstone under a supported architecture,
@@ -174,6 +189,27 @@ export function analysisNotice(input: {
       detail: unsupportedArchMessage(REFUSING_STAGES),
       availableTabs: PARSER_DERIVED_TABS,
       unavailableTabs: DECODER_DERIVED_TABS,
+      omittedPasses: omitted,
+    };
+  }
+  if (input.phase === "no-code") {
+    return {
+      kind: "no-code-section",
+      label: "No code section",
+      // Says the three things the failure banner cannot: that this is a
+      // property of the file, that nothing went wrong, and that the rest of the
+      // file is there. The tab list is derived rather than spelled out, so it
+      // cannot disagree with the buttons the banner renders from
+      // `availableTabs`.
+      detail:
+        `This image has no executable section, so there is nothing to disassemble — ` +
+        `a resource-only DLL, such as a satellite or MUI resource file, is the ordinary ` +
+        `case. Nothing failed: the file parsed normally, and ${formatTabList(PARSER_DERIVED_TABS)} ` +
+        `are all populated.`,
+      availableTabs: PARSER_DERIVED_TABS,
+      unavailableTabs: DECODER_DERIVED_TABS,
+      // Detection never ran, so there is nothing to report here — but carried
+      // rather than hardcoded empty, since the caller is the authority on it.
       omittedPasses: omitted,
     };
   }
