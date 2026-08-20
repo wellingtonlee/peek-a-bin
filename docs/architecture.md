@@ -261,6 +261,23 @@ for file metrics — stay synchronous and spawn no worker, so an ordinary binary
 loading state. `asyncMetricState.ts` also holds `asyncMetricReducer`, the pure state machine
 behind `useFileMetrics`, kept as a leaf module because there is no React renderer here.
 
+**How many blocks the strip asks for is a pixel budget, and the pixels are *device* pixels**
+(`ENTROPY_STRIP_BLOCK_DEVICE_PX`, two of them per bar). It was CSS pixels until
+`peek-a-bin-424o`, which asked for half the bars a 2x display has room to draw. Widening it
+cannot move work onto the main thread, because the budget only raises cost by lowering
+`entropyBlockSizeFor`'s block size toward its 256-byte floor and the 256 KiB threshold above was
+calibrated at exactly that floor — the sync worst case is the same at any budget, and the 4096
+blocks the cap allows need a section of 1 MiB, four times past the threshold. In the worker the
+marginal cost falls away as the O(n) byte walk takes over: 512 → 4096 blocks is +176% at 1 MiB,
++46% at 16 MiB and +4.7% at 253 MiB (471 → 493 ms, Node 22, `e22ba6e`). On every section of
+every binary in `corpus/` it changes nothing at all — they are all under 128 KiB, where the
+block size is already at its floor.
+
+Because the budget is in device pixels, so is the width `HexView` stores and the comparison
+`nextStripWidth` makes; a `ResizeObserver` reports CSS pixels and `devicePixelRatio` is not
+observable except through a `(resolution: Xdppx)` query that stops matching, so the strip arms
+one of those alongside the observer and re-arms it each time it fires.
+
 ## Rendering
 
 - **Virtual scrolling** via `@tanstack/react-virtual` — handles large binaries without DOM bloat

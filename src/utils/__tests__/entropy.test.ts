@@ -14,7 +14,7 @@ import {
   computeSectionEntropies,
   computeSectionEntropy,
   dprMediaQuery,
-  ENTROPY_STRIP_BLOCK_PX,
+  ENTROPY_STRIP_BLOCK_DEVICE_PX,
   ENTROPY_STRIP_HEIGHT_PX,
   ENTROPY_WIDTH_QUANTUM,
   entropyBlockAtX,
@@ -24,6 +24,7 @@ import {
   MAX_ENTROPY_BLOCKS,
   MIN_ENTROPY_BLOCKS,
   nextStripWidth,
+  stripDeviceWidth,
 } from "../entropy";
 
 /** `count` bytes, all `value`. */
@@ -299,27 +300,44 @@ describe("entropyBlocksForWidth", () => {
       const blocks = entropyBlocksForWidth(width);
       // The quantum is what lets this exceed width/2 slightly; bound it by the
       // step rather than pretending it is exact.
-      expect(blocks).toBeLessThanOrEqual(width / ENTROPY_STRIP_BLOCK_PX + ENTROPY_WIDTH_QUANTUM);
+      expect(blocks).toBeLessThanOrEqual(
+        width / ENTROPY_STRIP_BLOCK_DEVICE_PX + ENTROPY_WIDTH_QUANTUM,
+      );
       expect(blocks).toBeGreaterThanOrEqual(
-        Math.min(width / ENTROPY_STRIP_BLOCK_PX, MAX_ENTROPY_BLOCKS),
+        Math.min(width / ENTROPY_STRIP_BLOCK_DEVICE_PX, MAX_ENTROPY_BLOCKS),
       );
     }
   });
 
   it("is unchanged by a resize smaller than the quantum, so nothing needs debouncing", () => {
     const base = entropyBlocksForWidth(1024);
-    for (let dx = -ENTROPY_STRIP_BLOCK_PX; dx <= 0; dx++) {
+    for (let dx = -ENTROPY_STRIP_BLOCK_DEVICE_PX; dx <= 0; dx++) {
       expect(entropyBlocksForWidth(1024 + dx)).toBe(base);
     }
     // And it does move once the width crosses a whole step.
-    expect(entropyBlocksForWidth(1024 + ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_PX)).toBe(
-      base + ENTROPY_WIDTH_QUANTUM,
-    );
+    expect(
+      entropyBlocksForWidth(1024 + ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_DEVICE_PX),
+    ).toBe(base + ENTROPY_WIDTH_QUANTUM);
   });
 
   it("returns a whole number of quantum steps", () => {
     for (let w = 1; w < 4000; w += 7) {
       expect(entropyBlocksForWidth(w) % ENTROPY_WIDTH_QUANTUM).toBe(0);
+    }
+  });
+
+  it("gives a 2x display twice the blocks of a 1x one at the same CSS width", () => {
+    // The bug (peek-a-bin-424o): the budget was computed from the CSS width, so
+    // a HiDPI strip drew ~1000 bars onto ~2000 device pixels of backing store —
+    // half the detail it had room for. The unit is now device pixels, and the
+    // doubling is the whole point of the change. The widths are multiples of
+    // 128 so that quantization is a no-op at both ratios and the doubling can be
+    // asserted exactly; at 900 CSS px it is 512 vs 960, because rounding 450 up
+    // to a whole quantum step already gave the 1x strip blocks it cannot draw.
+    for (const css of [640, 1024, 1280, 1920]) {
+      expect(entropyBlocksForWidth(stripDeviceWidth(css, 2))).toBe(
+        2 * entropyBlocksForWidth(stripDeviceWidth(css, 1)),
+      );
     }
   });
 
@@ -366,7 +384,7 @@ describe("nextStripWidth", () => {
   });
 
   it("takes the new width once the budget moves, in either direction", () => {
-    const step = ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_PX;
+    const step = ENTROPY_WIDTH_QUANTUM * ENTROPY_STRIP_BLOCK_DEVICE_PX;
     for (const width of [1100 - step, 1100 + step]) {
       expect(entropyBlocksForWidth(width)).not.toBe(entropyBlocksForWidth(1100));
       expect(nextStripWidth(1100, width)).toBe(width);
@@ -398,6 +416,64 @@ describe("nextStripWidth", () => {
     const once = nextStripWidth(0, 1337);
     expect(nextStripWidth(once, 1337)).toBe(once);
   });
+
+  it("compares in device pixels, so a 2x resize that moves the budget is not swallowed", () => {
+    // 900 and 1024 CSS px share a budget when the comparison is made in CSS
+    // pixels — the step is 128 CSS px there — but not when it is made in device
+    // pixels on a 2x display, where the step is 64. Comparing the CSS widths
+    // would keep `prev` and leave the block count stale at the old, coarser
+    // granularity for as long as the pane stayed inside the CSS-pixel step.
+    expect(entropyBlocksForWidth(900)).toBe(entropyBlocksForWidth(1024));
+    const prev = stripDeviceWidth(900, 2);
+    const next = stripDeviceWidth(1024, 2);
+    expect(entropyBlocksForWidth(prev)).not.toBe(entropyBlocksForWidth(next));
+    expect(nextStripWidth(prev, next)).toBe(next);
+  });
+
+  it("is idempotent at a fractional ratio, so the product must not be rounded", () => {
+    // A 150%-scaled display reports 1.5. `stripDeviceWidth` deliberately does
+    // not round, so the same measurement produces the same number every time and
+    // the setState stays a no-op by identity.
+    const measured = stripDeviceWidth(1001, 1.5);
+    const once = nextStripWidth(0, measured);
+    expect(nextStripWidth(once, measured)).toBe(once);
+  });
+});
+
+describe("stripDeviceWidth", () => {
+  it("is the CSS width times the ratio", () => {
+    expect(stripDeviceWidth(1000, 2)).toBe(2000);
+    expect(stripDeviceWidth(1000, 1)).toBe(1000);
+    expect(stripDeviceWidth(1001, 1.5)).toBe(1501.5);
+  });
+
+  it.each([0, -2, Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number])(
+    "falls back to 1x for a ratio of %s",
+    (dpr) => {
+      // Same fallback as dprMediaQuery and entropyStripGeometry: a 0 or absent
+      // ratio is what some embedded webviews report, and a NaN device width
+      // reaches entropyBlockSizeFor as a NaN block size.
+      expect(stripDeviceWidth(800, dpr)).toBe(800);
+    },
+  );
+
+  it("agrees with the backing store entropyStripGeometry sizes", () => {
+    // The budget and the canvas have to be measuring the same strip, or the
+    // block count is computed for a width the draw never has.
+    for (const dpr of [1, 1.5, 2, 3]) {
+      const { deviceWidth } = entropyStripGeometry(1000, ENTROPY_STRIP_HEIGHT_PX, 500, dpr);
+      expect(deviceWidth).toBe(Math.round(stripDeviceWidth(1000, dpr)));
+    }
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    "passes a nonsense width (%s) through for nextStripWidth to discard",
+    (cssWidth) => {
+      // Collapsing it to 0 here would make it a *valid* width that switches the
+      // strip off, which is what 0 already means (`showEntropy && stripDevicePx > 0`).
+      expect(nextStripWidth(1024, stripDeviceWidth(cssWidth, 2))).toBe(1024);
+    },
+  );
 });
 
 describe("dprMediaQuery", () => {

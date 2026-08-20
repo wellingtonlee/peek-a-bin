@@ -10,6 +10,7 @@ import {
   entropyBlocksForWidth,
   entropyStripGeometry,
   nextStripWidth,
+  stripDeviceWidth,
 } from "../utils/entropy";
 import { DataInspector } from "./DataInspector";
 import { focusOnMount } from "./focusOnMount";
@@ -84,15 +85,23 @@ export function HexView() {
   const [editValue, setEditValue] = useState("");
   const [showEntropy, setShowEntropy] = useState(false);
   /**
-   * Width of the entropy strip in CSS pixels, 0 until it has been measured.
+   * Width of the entropy strip in **device** pixels, 0 until it has been
+   * measured.
    *
-   * The block count follows this: a strip has ~1000 px and the cap used to be
-   * 4096 blocks, so four to eight of every ten blocks were computed and then
+   * The block count follows this: a strip has ~1000 CSS px and the cap used to
+   * be 4096 blocks, so four to eight of every ten blocks were computed and then
    * drawn outside the canvas. Quantized in `entropyBlocksForWidth`, so a drag
    * that moves the width by a few pixels does not change the value and there is
    * nothing to debounce.
+   *
+   * Device pixels rather than CSS pixels, because the canvas backing store is
+   * sized in device pixels and a CSS-pixel budget therefore asked for half the
+   * bars a 2x display can show (`peek-a-bin-424o`). Two consequences: the
+   * `ResizeObserver` alone is not enough — a ratio change moves no CSS
+   * dimension and fires nothing — and the value stored here has to be the
+   * product, not the CSS width, or `nextStripWidth` compares at the wrong step.
    */
-  const [stripWidth, setStripWidth] = useState(0);
+  const [stripDevicePx, setStripDevicePx] = useState(0);
   const stripRef = useRef<HTMLDivElement>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [hexCtxMenu, setHexCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -149,13 +158,13 @@ export function HexView() {
   // Hex tab open regardless, which on a 200 MiB `.text` was seconds of frozen
   // main thread for a bar the user never asked for. Above a size threshold it
   // runs in a worker; see hooks/useFileMetrics.ts.
-  // Nothing is requested until the strip has been measured (`stripWidth > 0`):
-  // asking at a default width first and at the real one a frame later would
-  // compute the whole section twice.
+  // Nothing is requested until the strip has been measured
+  // (`stripDevicePx > 0`): asking at a default width first and at the real one a
+  // frame later would compute the whole section twice.
   const entropyStrip = useEntropyStrip(
     sectionBytes,
-    showEntropy && stripWidth > 0,
-    entropyBlocksForWidth(stripWidth),
+    showEntropy && stripDevicePx > 0,
+    entropyBlocksForWidth(stripDevicePx),
   );
   const entropyBlocks = entropyStrip.value?.blocks ?? NO_BLOCKS;
   const entropyBlockSize = entropyStrip.value?.blockSize ?? 256;
@@ -211,25 +220,55 @@ export function HexView() {
     setMatchCount(offsets.length);
   }, [sectionBytes, byteSearch]);
 
-  // Track the strip's width so the block count can follow it.
+  // Track the strip's width *in device pixels* so the block count can follow it.
+  //
+  // Two inputs, because the product is what the budget is in: the element's CSS
+  // width, and `devicePixelRatio`. A ratio change moves no CSS dimension, so the
+  // `ResizeObserver` cannot see one and a `(resolution: Xdppx)` listener has to
+  // be armed alongside it — the same single-use, re-armed query the draw effect
+  // uses, and for the same reason (`dprMediaQuery`, peek-a-bin-oqp). The draw
+  // effect keeps its own: it repaints on ratio changes that do not move the
+  // budget at all, and this one re-renders on budget changes that need no
+  // repaint of the old blocks.
   useEffect(() => {
     const el = stripRef.current;
     if (!showEntropy || !el) {
-      setStripWidth(0);
+      setStripDevicePx(0);
       return;
     }
-    // Fires once on observe, so the first width arrives without a resize.
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? el.clientWidth;
+    const measure = (cssWidth: number) => {
       // `nextStripWidth` returns `prev` whenever the block budget is unchanged,
       // so this setState is a no-op by identity for small changes and a drag
       // does not re-render on every frame. It is only about the block *count* —
       // repainting the canvas at the new size is the draw effect's job, and it
       // observes the canvas itself for exactly the resizes this one swallows.
-      setStripWidth((prev) => nextStripWidth(prev, width));
+      const device = stripDeviceWidth(cssWidth, window.devicePixelRatio);
+      setStripDevicePx((prev) => nextStripWidth(prev, device));
+    };
+    // Fires once on observe, so the first width arrives without a resize.
+    const observer = new ResizeObserver((entries) => {
+      measure(entries[0]?.contentRect.width ?? el.clientWidth);
     });
     observer.observe(el);
-    return () => observer.disconnect();
+
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      armDprQuery();
+      measure(el.clientWidth);
+    };
+    // Hoisted, because it and `onDprChange` refer to each other. Nothing calls
+    // it before the `const` above is initialised.
+    function armDprQuery() {
+      dprQuery?.removeEventListener("change", onDprChange);
+      dprQuery = window.matchMedia(dprMediaQuery(window.devicePixelRatio));
+      dprQuery.addEventListener("change", onDprChange);
+    }
+    armDprQuery();
+
+    return () => {
+      observer.disconnect();
+      dprQuery?.removeEventListener("change", onDprChange);
+    };
   }, [showEntropy]);
 
   // Draw entropy canvas.
@@ -240,7 +279,7 @@ export function HexView() {
   // it without a render per animation frame.
   //
   //  * The element's **CSS width**, which moves on every frame of a pane drag,
-  //    while `stripWidth` above only moves when the drag crosses a whole
+  //    while `stripDevicePx` above only moves when the drag crosses a whole
   //    `ENTROPY_WIDTH_QUANTUM`. In between, the backing store kept its old size
   //    and the browser stretched the strip to fit.
   //  * **`window.devicePixelRatio`**, which changes when the window is dragged
@@ -249,8 +288,11 @@ export function HexView() {
   //    cannot see it; `dprMediaQuery` explains why the listener is re-armed
   //    (peek-a-bin-oqp).
   //
-  // Neither goes through state, so a resize repaints without re-rendering the
-  // hex view. Resizing the backing store cannot re-trigger the observer: the
+  // Neither *value* goes through state, so a resize repaints without
+  // re-rendering the hex view. The effect above watches the same two inputs, but
+  // it is asking a different question — whether the *block budget* moved, which
+  // is quantized and answers "no" for almost every event either observer sees.
+  // Resizing the backing store cannot re-trigger the observer: the
   // element's layout size is fixed by CSS (`w-full` plus an inline height), so
   // the width/height *attributes* have no effect on it — which is the same
   // property that made the HiDPI sizing safe to do without a renderer.
