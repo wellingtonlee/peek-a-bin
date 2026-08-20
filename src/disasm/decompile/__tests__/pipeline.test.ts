@@ -5634,3 +5634,230 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
     expect(guardTexts(code)).toEqual(["ecx != 0"]);
   });
 });
+
+/**
+ * A Jcc alone in its basic block reads flags set in the block before it, and
+ * until peek-a-bin-suql no condition path crossed that edge: `blockFlagOwner`
+ * read `block.insns` only, so for a one-instruction block the forward walk ran
+ * zero iterations and reported `{kind: "none", reason: "no-owner"}`, and
+ * `extractCondition`'s fallback looped over the same single block. **88 such
+ * blocks across the four corpus binaries**, every one of them emitting
+ * `__unrecovered_N` however good the predecessor's test was — while the sibling
+ * Jcc reading the *same* flags one block earlier was recovered two lines up.
+ *
+ * The dominant machine shape is MSVC's three-way dispatch, and t32.exe 0x40490B
+ * is it verbatim: `cmp eax, 0x64 / jg` then a lone `je`, then `cmp eax, 0x53 /
+ * jg` then a lone `je`. That is what the first test below is.
+ *
+ * Three things make the recovery sound rather than a guess, and each has a test
+ * here because each is a way to get it wrong that no stage-level test would
+ * catch:
+ *
+ * - **The predecessor's terminator must be skipped explicitly.** `jmp` and every
+ *   Jcc are absent from `NO_FLAG_WRITE`, so `flagEffect` classes them as a
+ *   clobber and a walk that reads them clears the very owner it came for. That
+ *   is not a lost optimisation: it recovers **0** guards on all four binaries,
+ *   which is a false negative the first measurement pass actually produced.
+ * - **The taken edge is as safe as the fallthrough.** A Jcc writes no flags, so
+ *   entry flags are the owner's flags on either edge; the predecessor's own
+ *   condition being true rather than false on that path is a fact about values.
+ *   Restricting to fallthrough leaves 17 of the 69 recoverable guards unclaimed
+ *   and over half the x64 win.
+ * - **More than one predecessor is a phi of conditions, and one block-local
+ *   condition cannot state it.** All 12 corpus cases have exactly two
+ *   predecessors, each with a perfectly spellable owner, and they are *different
+ *   instructions* — t64 0x140002AFD is `test rbx, rbx` against `test rbp, rbp`.
+ *   Answering from either would be a guard the machine does not always make.
+ */
+describe("decompileFunction — a Jcc alone in its block reads its predecessor's flags", () => {
+  /** The emitted guards, or ["<unrecovered>"] where the condition was admitted. */
+  function guardTexts(code: string): string[] {
+    return guardConditions(code).map((c) => (/__unrecovered_\d+/.test(c) ? "<unrecovered>" : c));
+  }
+
+  // MSVC's three-way dispatch, the shape 56 of the 88 corpus blocks have:
+  // `cmp` + `jcc` in the predecessor, a second `jcc` alone in the fallthrough.
+  // Both guards must be real. This is also the terminator-skip test — the
+  // predecessor's last instruction is the `jg`, and reading it as a flag writer
+  // takes the second guard back to `<unrecovered>`.
+  it("recovers a lone jcc from the compare in its fallthrough predecessor", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["jg", "0x401018"],
+        ["je", "0x401020"],
+        ["mov", "ecx, 1"],
+        ["mov", "eax, ecx"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax > 0x53", "eax == 0x53"]);
+    expect(code).not.toContain("__unrecovered");
+  });
+
+  // `test reg, reg` is the other half of the corpus population (34 of the 76
+  // single-predecessor blocks), and on x64 it is the majority.
+  it("recovers a lone jcc from a test in its predecessor", () => {
+    const code = run(
+      seq(0x401000, [
+        ["test", "eax, eax"],
+        ["js", "0x401018"],
+        ["jle", "0x401020"],
+        ["mov", "ecx, 1"],
+        ["mov", "eax, ecx"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax < 0", "eax <= 0"]);
+  });
+
+  // The taken edge. The lone `je` at 0x401010 is reached only by the `jg`
+  // JUMPING there, and it is still the `cmp`'s flags that it reads — a Jcc
+  // writes none. Worth 17 of the 69 corpus recoveries, and 6 of t64's 13.
+  it("recovers a lone jcc reached by its predecessor's taken edge", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["jg", "0x401010"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["je", "0x40101c"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax <= 0x53", "eax == 0x53"]);
+    expect(code).not.toContain("__unrecovered");
+  });
+
+  // Two predecessors, each with its own spellable owner, and they are different
+  // instructions: `cmp eax, 0x53` on one edge, `test ecx, ecx` on the other. The
+  // `je` reads whichever ran, which no single condition states, so it must stay
+  // admitted. Refusing this is what keeps the recovery from being a guess, and
+  // it is 12 of the 19 corpus refusals.
+  it("refuses a lone jcc whose block has two predecessors", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["jg", "0x401010"],
+        ["test", "ecx, ecx"],
+        ["jmp", "0x401010"],
+        ["je", "0x40101c"],
+        ["mov", "edx, 1"],
+        ["ret"],
+        ["mov", "edx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toContain("<unrecovered>");
+    expect(code).not.toContain("eax == 0x53");
+    expect(code).not.toContain("ecx == 0");
+  });
+
+  // The predecessor's compare is spoiled by a store in its own tail, which is
+  // the `staleGuards` class exactly: `cmp dword ptr [ebp - 0x18], 0` followed by
+  // `mov dword ptr [ebp - 0x18], edx` compares the OLD slot, and the store is
+  // emitted above the guard. 3 of the 19 corpus refusals, and emitting them
+  // would take `corpus/staleGuards.ts` — a gate at 0 named — red.
+  it("refuses a predecessor's compare that the predecessor's own tail spoiled", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "dword ptr [ebp - 0x18], 0"],
+        ["mov", "dword ptr [ebp - 0x18], edx"],
+        ["jg", "0x401020"],
+        ["je", "0x401028"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code).filter((g) => g !== "<unrecovered>")).toEqual([]);
+  });
+
+  // …and spoiled from the OTHER side of the edge. The block need not hold only
+  // the Jcc — a block whose instructions are all flag-transparent reads its
+  // predecessor's flags just as surely — but one of them can overwrite what the
+  // condition is spelled with, and the guard is emitted below it. The walk
+  // continues through both sides of the edge for exactly this, so `spoiled` is
+  // already set by the time the caller asks.
+  it("refuses a predecessor's compare that the reading block overwrote", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["jg", "0x401018"],
+        ["mov", "eax, edx"],
+        ["je", "0x401020"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax > 0x53", "<unrecovered>"]);
+  });
+
+  // The predecessor has no owner at all: `sbb` is `{clobber, carry-in}`, so
+  // clearing is correct and the `jg` is a signed 64-bit comparison over a
+  // register pair this model has no expression for. 4 of the 19 refusals, all
+  // this one shape — MSVC's 64-bit subtract.
+  it("refuses a lone jcc whose predecessor's flags were clobbered", () => {
+    const code = run(
+      seq(0x401000, [
+        ["sub", "esi, eax"],
+        ["sbb", "edi, edx"],
+        ["js", "0x401010"],
+        ["jg", "0x401018"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code).filter((g) => g !== "<unrecovered>")).toEqual([]);
+  });
+
+  // Control. A flag-transparent write to a register the condition does not name
+  // must not refuse the crossing — the refusals above are asked of the operands,
+  // not of the edge.
+  it("still crosses the edge when the predecessor's tail writes an unrelated register", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["mov", "edx, ecx"],
+        ["jg", "0x40101c"],
+        ["je", "0x401024"],
+        ["mov", "ecx, 1"],
+        ["mov", "eax, ecx"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+        ["mov", "ecx, 3"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax > 0x53", "eax == 0x53"]);
+  });
+});

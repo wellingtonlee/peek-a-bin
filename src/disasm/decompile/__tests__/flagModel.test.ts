@@ -10,6 +10,7 @@ import {
   clobberedAfter,
   flagEffect,
   flagOwnerBefore,
+  flagScanStream,
   IMPLICIT_REG_WRITERS,
   isFlagReadingJump,
   isFlagTransparent,
@@ -17,6 +18,7 @@ import {
   PARTIAL_FLAG_WRITERS,
   RESULT_OWNERS,
   SHIFTS,
+  solePredecessor,
   UNDEFINED_RESULT_FLAGS,
 } from "../flagModel";
 
@@ -556,5 +558,120 @@ describe("nothing re-declares the flag tables", () => {
     const scan = clobberedAfter(block("dec ecx", "mov ecx, edx", "jne 0x401800"), 0x401000);
     expect(scan.regs.has("rcx")).toBe(true);
     expect(scan.opaque).toBe(false);
+  });
+});
+
+/**
+ * The cross-block reading (peek-a-bin-suql). A block whose own instructions
+ * write no flag was entered with its predecessor's, and where exactly one block
+ * can have set them the owner is knowable — which is the difference between a
+ * real guard and `__unrecovered_N` for 69 guards across the four corpus
+ * binaries.
+ *
+ * The load-bearing assertion in here is the terminator skip. `jmp`, `ret` and
+ * every Jcc are absent from `NO_FLAG_WRITE` — deliberately, since the set is
+ * narrow on purpose — so `flagEffect` classes them `{clobber, unrecognised}`,
+ * and a walk that reads the predecessor's last instruction clears the very owner
+ * it went there for. Measured over the corpus: without the skip the recovery is
+ * **0 on all four binaries**, which is exactly the false negative the first
+ * measurement pass produced.
+ */
+describe("flagScanStream — flags carried across one edge", () => {
+  /** Two blocks, `pred` falling into `succ`, wired as each other's edge. */
+  function pair(predCode: string[], succCode: string[]): [BasicBlock, BasicBlock] {
+    const pred = block(...predCode);
+    const succ = block(...succCode);
+    succ.id = 1;
+    succ.startAddr = pred.endAddr;
+    succ.endAddr = succ.startAddr + succ.insns.length * 4;
+    succ.insns.forEach((i, n) => {
+      i.address = succ.startAddr + n * 4;
+    });
+    pred.succs = [1];
+    succ.preds = [0];
+    return [pred, succ];
+  }
+
+  it("reads the block alone when the block sets its own flags", () => {
+    const [pred, succ] = pair(["cmp eax, 5", "jg 0x401800"], ["cmp ecx, 7", "je 0x401800"]);
+    const scan = flagScanStream(succ, pred);
+    expect(scan.fromPredecessor).toBe(false);
+    expect(scan.insns.map((i) => i.mnemonic)).toEqual(["cmp"]);
+  });
+
+  it("reads the predecessor when the block writes no flag at all", () => {
+    const [pred, succ] = pair(["cmp eax, 5", "jg 0x401800"], ["je 0x401800"]);
+    const scan = flagScanStream(succ, pred);
+    expect(scan.fromPredecessor).toBe(true);
+    expect(scan.insns.map((i) => i.mnemonic)).toEqual(["cmp"]);
+  });
+
+  // THE test in this describe. The predecessor's `jg` must not be walked: it is
+  // unrecognised, so it clobbers, and the owner this whole path exists to find
+  // is gone. 0 recovered on all four corpus binaries without it.
+  it("does not walk the predecessor's own terminator", () => {
+    const [pred, succ] = pair(["cmp eax, 5", "jg 0x401800"], ["je 0x401800"]);
+    expect(flagScanStream(succ, pred).insns.map((i) => i.mnemonic)).not.toContain("jg");
+    expect(blockFlagOwner(succ, pred)?.owner).toMatchObject({ kind: "compare", mnemonic: "cmp" });
+  });
+
+  it("does not walk a predecessor ending in jmp either", () => {
+    const [pred, succ] = pair(["test ecx, ecx", "jmp 0x401800"], ["jne 0x401800"]);
+    expect(blockFlagOwner(succ, pred)?.owner).toMatchObject({ kind: "compare", mnemonic: "test" });
+  });
+
+  // The predecessor's tail still spoils, because the walk continues rather than
+  // stopping at the block boundary — and so does the reading block's own tail.
+  it("spoils a predecessor's compare its own tail overwrote", () => {
+    const [pred, succ] = pair(["cmp eax, 5", "mov eax, edx", "jg 0x401800"], ["je 0x401800"]);
+    const owner = blockFlagOwner(succ, pred)?.owner;
+    expect(owner).toMatchObject({ kind: "compare", spoiled: true });
+    expect(owner && canSpellCondition(owner)).toBe(false);
+  });
+
+  it("spoils a predecessor's compare the reading block overwrote", () => {
+    const [pred, succ] = pair(["cmp eax, 5", "jg 0x401800"], ["mov eax, edx", "je 0x401800"]);
+    const owner = blockFlagOwner(succ, pred)?.owner;
+    expect(owner).toMatchObject({ kind: "compare", spoiled: true });
+    expect(owner && canSpellCondition(owner)).toBe(false);
+  });
+
+  it("reports no owner when the predecessor cleared the flags", () => {
+    const [pred, succ] = pair(["sub esi, eax", "sbb edi, edx", "js 0x401800"], ["jg 0x401800"]);
+    expect(blockFlagOwner(succ, pred)?.owner).toMatchObject({ kind: "none", reason: "cleared" });
+  });
+
+  it("is the pre-existing answer with no predecessor given", () => {
+    const [, succ] = pair(["cmp eax, 5", "jg 0x401800"], ["je 0x401800"]);
+    expect(blockFlagOwner(succ)?.owner).toEqual({ kind: "none", reason: "no-owner" });
+    expect(blockFlagOwner(succ)?.fromPredecessor).toBe(false);
+  });
+});
+
+describe("solePredecessor", () => {
+  function bare(id: number, preds: number[]): BasicBlock {
+    return { id, startAddr: 0, endAddr: 0, insns: [], succs: [], preds };
+  }
+
+  it("answers only when there is exactly one", () => {
+    const a = bare(0, []);
+    const b = bare(1, [0]);
+    const c = bare(2, [0, 1]);
+    const map = new Map([a, b, c].map((x) => [x.id, x]));
+    expect(solePredecessor(b, map)).toBe(a);
+    expect(solePredecessor(a, map)).toBeUndefined();
+    // A phi of conditions: 12 of the corpus's 19 refusals are this, and every
+    // one has two predecessors whose owners are DIFFERENT instructions.
+    expect(solePredecessor(c, map)).toBeUndefined();
+  });
+
+  it("declines a self-loop, which is the question rather than an answer to it", () => {
+    const s = bare(0, [0]);
+    expect(solePredecessor(s, new Map([[0, s]]))).toBeUndefined();
+  });
+
+  it("declines a predecessor id no block answers to", () => {
+    const b = bare(1, [99]);
+    expect(solePredecessor(b, new Map([[1, b]]))).toBeUndefined();
   });
 });

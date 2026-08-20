@@ -1,9 +1,10 @@
 import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
-import { clobberedAfter, isFlagTransparent } from "./flagModel";
+import type { ClobberScan } from "./flagModel";
+import { clobberedAfter, flagScanStream, isFlagTransparent, solePredecessor } from "./flagModel";
 import type { IRBranch, IRExpr, IRStmt } from "./ir";
 import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies, walkExpr } from "./ir";
-import { parseOperand } from "./lifter";
+import { parseOperand, setFlagsFromCompare } from "./lifter";
 import { RegState } from "./regstate";
 import { computeDominators, computeRPO } from "./ssa";
 
@@ -15,6 +16,15 @@ import { computeDominators, computeRPO } from "./ssa";
  */
 function labelNameFor(addr: number): string {
   return `loc_${addr.toString(16).toUpperCase()}`;
+}
+
+/** The union of two `clobberedAfter` scans: written by either, opaque to either. */
+function mergeClobberScans(a: ClobberScan, b: ClobberScan): ClobberScan {
+  return {
+    regs: new Set([...a.regs, ...b.regs]),
+    opaque: a.opaque || b.opaque,
+    writesMemory: a.writesMemory || b.writesMemory,
+  };
 }
 
 /**
@@ -38,9 +48,30 @@ function labelNameFor(addr: number): string {
  * not recovered instead of being told a test the machine does not make. Naming
  * the *old* value instead would mean materialising a temporary before the
  * clobber, which is a lifter change and not this one.
+ *
+ * `predBlock` widens the scan across one edge, and is passed exactly when the
+ * setter was found in the block's sole predecessor (see `flagScanStream`). Two
+ * scans are then unioned and each covers a different stretch. The predecessor's
+ * is `clobberedAfter(predBlock, flagSetterAddr)`, which already means "after the
+ * setter and before the block's final instruction" — the predecessor's tail
+ * minus its own terminator, which is exactly the right stretch with no new
+ * grammar. The block's own is taken from `-1` rather than from the setter's
+ * address, because the setter is in *another* block and `clobberedAfter` filters
+ * by address: a predecessor reached by a backward jump sits at a *higher*
+ * address than the block it feeds, so passing the setter's address there would
+ * silently skip the block's instructions and under-scan. From `-1` it reads all
+ * of them, which is the whole stretch between the setter and the guard on this
+ * side of the edge (peek-a-bin-suql).
  */
-function conditionSpoiled(block: BasicBlock, flagSetterAddr: number, cond: IRExpr): boolean {
-  const clobbered = clobberedAfter(block, flagSetterAddr);
+function conditionSpoiled(
+  block: BasicBlock,
+  flagSetterAddr: number,
+  cond: IRExpr,
+  predBlock?: BasicBlock,
+): boolean {
+  const clobbered = predBlock
+    ? mergeClobberScans(clobberedAfter(predBlock, flagSetterAddr), clobberedAfter(block, -1))
+    : clobberedAfter(block, flagSetterAddr);
   if (clobbered.opaque) return true;
   if (clobbered.regs.size === 0 && !clobbered.writesMemory) return false;
   let spoiled = false;
@@ -308,26 +339,26 @@ export function structureCFG(
       // (peek-a-bin-jitf). `isFlagTransparent` is `flagModel.ts`'s own table,
       // exported rather than copied, and anything not on it — including
       // anything unrecognised — ends the reading, which is the safe direction.
+      //
+      // What the walk reads is `flagModel.ts`'s `flagScanStream`, not the block
+      // alone. A Jcc whose block writes no flag reads the flags of the block
+      // before it, and where there is exactly one such block the stream starts
+      // in it — the same rule, from the same declaration, that `lifter.ts` uses
+      // to build the `IRBranch`, so the reading this refuses over and the
+      // reading the IR offers below cannot come off different instructions
+      // (peek-a-bin-suql).
+      const solePred = solePredecessor(block, blockById);
+      const scan = flagScanStream(block, solePred);
       const regState = new RegState();
       let flagSetterAddr: number | null = null;
-      for (let i = 0; i < insns.length - 1; i++) {
-        const insn = insns[i];
+      for (const insn of scan.insns) {
         const insnMn = insn.mnemonic.toLowerCase();
         if (insnMn === "cmp" || insnMn === "test") {
           // A `cmp` this cannot parse still WRITES the flags, so the previous
           // one has stopped applying either way — clear first, then record only
           // what was actually read.
           regState.clearFlags();
-          flagSetterAddr = null;
-          // No x86 memory operand contains a comma, so a plain split is a
-          // correct operand split for the two-operand forms this reads.
-          const parts = insn.opStr.split(",").map((s) => s.trim());
-          if (parts.length >= 2) {
-            const left = parseOperand(parts[0], insn, is64);
-            const right = parseOperand(parts[1], insn, is64);
-            regState.setFlags(insnMn as "cmp" | "test", left, right);
-            flagSetterAddr = insn.address;
-          }
+          flagSetterAddr = setFlagsFromCompare(regState, insn, insnMn, is64) ? insn.address : null;
         } else if (!isFlagTransparent(insnMn)) {
           regState.clearFlags();
           flagSetterAddr = null;
@@ -346,7 +377,7 @@ export function structureCFG(
       if (
         flagSetterAddr !== null &&
         cond.kind !== "unknown" &&
-        conditionSpoiled(block, flagSetterAddr, cond)
+        conditionSpoiled(block, flagSetterAddr, cond, scan.fromPredecessor ? solePred : undefined)
       )
         return { kind: "unknown", text: mn };
 

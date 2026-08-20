@@ -306,6 +306,34 @@ function blockHasCompare(block: BasicBlock): boolean {
 }
 
 /**
+ * Record a `cmp`/`test`'s comparison into `state`'s flags, or report that its
+ * operand text does not split into two.
+ *
+ * The one declaration of "turn this compare into flag state", asked at the two
+ * points where the question arises: `branchFor` below, for a compare owner
+ * `flagScanStream` found in the block's predecessor and which this block's own
+ * `RegState` therefore never saw, and `structure.ts`'s `extractCondition`, for
+ * its forward re-read of the machine text. It went through a private
+ * `parseSimpleOperand` in `structure.ts` once, and that copy hardcoded a width
+ * of 4 and never resolved a `[rip + …]` operand — CLAUDE.md's tenth hand-rolled
+ * operand parse (peek-a-bin-w6f). Keeping the split here means the two callers
+ * cannot disagree about it either.
+ */
+export function setFlagsFromCompare(
+  state: RegState,
+  insn: Instruction,
+  mn: "cmp" | "test",
+  is64: boolean,
+): boolean {
+  // No x86 memory operand contains a comma, so a plain split is a correct
+  // operand split for the two-operand forms this reads.
+  const parts = insn.opStr.split(",").map((part) => part.trim());
+  if (parts.length < 2) return false;
+  state.setFlags(mn, parseOperand(parts[0], insn, is64), parseOperand(parts[1], insn, is64));
+  return true;
+}
+
+/**
  * The `IRBranch` a block's trailing jump becomes, or null when no condition can
  * be spelled for it.
  *
@@ -343,26 +371,55 @@ function blockHasCompare(block: BasicBlock): boolean {
  *    applied against the machine text in `structure.ts`, which is where it has
  *    to be asked (see the `conditionSpoiled` docstring — copy propagation has
  *    rewritten the IR expression by then).
+ *
+ * **A Jcc alone in its block owns none of this and is answered from its
+ * predecessor**, which `flagScanStream` decides and `solePred` opts into. Three
+ * things change on that path and each is a judgement:
+ *
+ * - The condition cannot come from `regState`. That state is what walking *this*
+ *   block left behind, and this block never executed the compare, so the flags
+ *   are re-read from the owning instruction through `setFlagsFromCompare` — the
+ *   same call `structure.ts` makes, so the two readings cannot disagree.
+ * - Refusal 4 applies to a **compare** owner too. Block-locally it deliberately
+ *   does not, because `structure.ts` re-asks it of the machine text; across the
+ *   edge the spoiling can happen in the predecessor's tail, and
+ *   `flagScanStream` continues the walk through both sides so `spoiled` already
+ *   states it. Three predecessors in the corpus are spoiled this way — a `cmp
+ *   dword ptr [ebp-0x218], 0` followed by a store — and emitting them is
+ *   precisely what `corpus/staleGuards.ts` gates at 0.
+ * - Refusal 3 is asked of the **owner's** block. Keeping the compare and result
+ *   paths disjoint is a property of the block the flags were set in, not of the
+ *   one that reads them.
  */
 function branchFor(
   block: BasicBlock,
   insn: Instruction,
   jcc: string,
   regState: RegState,
+  is64: boolean,
+  solePred?: BasicBlock,
 ): IRBranch | null {
-  const owned = blockFlagOwner(block);
+  const owned = blockFlagOwner(block, solePred);
   if (!owned || owned.jcc !== jcc) return null;
   const target = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
   if (!target) return null;
+  const ownerBlock = owned.fromPredecessor && solePred ? solePred : block;
 
   let condition: IRExpr;
   if (owned.owner.kind === "compare") {
-    // Nothing between the compare and the jump wrote a flag — that is what
-    // makes it the owner — so `regState` still holds exactly this compare.
-    condition = regState.getCondition(jcc);
+    if (owned.fromPredecessor) {
+      if (!canSpellCondition(owned.owner)) return null;
+      const state = new RegState();
+      if (!setFlagsFromCompare(state, owned.owner.insn, owned.owner.mnemonic, is64)) return null;
+      condition = state.getCondition(jcc);
+    } else {
+      // Nothing between the compare and the jump wrote a flag — that is what
+      // makes it the owner — so `regState` still holds exactly this compare.
+      condition = regState.getCondition(jcc);
+    }
   } else {
     if (!canSpellCondition(owned.owner) || owned.owner.kind !== "result") return null;
-    if (blockHasCompare(block)) return null;
+    if (blockHasCompare(ownerBlock)) return null;
     // x86 sets the flags from the *result*, so the value tested is the
     // destination register read after the instruction ran. `setFlagsFromResult`
     // states that, and `getCondition` answers only the Jcc forms ZF and SF
@@ -396,6 +453,14 @@ function branchFor(
  * block. It is optional and means nothing on the x64 path, where arguments
  * come from registers rather than pushes; omitting it keeps the pre-existing
  * behaviour, which is deliberately not the same claim as "there are no writes".
+ *
+ * `solePred` is the second, and is the block's only predecessor when it has
+ * exactly one (`solePredecessor`). A Jcc whose block writes no flag at all reads
+ * flags set before the block was entered, so without it `branchFor` has nothing
+ * to answer from and the guard emits as `__unrecovered_N` — 88 blocks across the
+ * four corpus binaries, of which 69 are recoverable (peek-a-bin-suql). Omitting
+ * it is the pre-existing behaviour for the same reason as above: "nobody told me
+ * which block ran first" is not "the flags started here".
  */
 export function liftBlock(
   block: BasicBlock,
@@ -406,6 +471,7 @@ export function liftBlock(
   funcMap: Map<number, { name: string; address: number }>,
   calleeSavedFirstWrite?: Map<string, number>,
   calleeClobbers?: CalleeClobbers,
+  solePred?: BasicBlock,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -813,7 +879,7 @@ export function liftBlock(
     // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
       if (insn === block.insns[block.insns.length - 1]) {
-        const branch = branchFor(block, insn, mn, regState);
+        const branch = branchFor(block, insn, mn, regState, is64, solePred);
         if (branch) stmts.push(branch);
       }
       continue;

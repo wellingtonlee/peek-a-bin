@@ -259,6 +259,15 @@ export interface BlockFlagOwner {
   /** The block's trailing conditional jump, lowercased. */
   jcc: string;
   owner: FlagOwner;
+  /**
+   * Whether the owner was found in the block's sole *predecessor* rather than
+   * in the block itself — see `flagScanStream`. It matters to a consumer for
+   * two reasons: a `RegState` built by walking this block never saw the
+   * compare, and being a block away is a fresh way for the reading to have gone
+   * stale, so a compare owner has to be filtered on `canSpellCondition` here
+   * where a block-local one deliberately is not.
+   */
+  fromPredecessor: boolean;
 }
 
 /** Everything before the first space — Capstone spells prefixes into the mnemonic. */
@@ -464,19 +473,125 @@ export function isFlagReadingJump(mnemonic: string): boolean {
 }
 
 /**
+ * The block's only predecessor, or undefined when it has none, more than one,
+ * or only itself.
+ *
+ * This lives beside `flagScanStream` because it is that rule's other half: the
+ * flags a block is *entered* with are knowable exactly when one block can have
+ * set them, and "one predecessor" is what makes that true. Self-loops are
+ * excluded because the block would then be its own flag source, which is the
+ * question rather than an answer to it.
+ *
+ * **Either edge counts, and that is a deliberate widening.** A Jcc writes no
+ * flags — the `{clobber, unrecognised}` classification `flagEffect` gives it is
+ * an artifact of `NO_FLAG_WRITE`'s deliberate narrowness, not hardware — so a
+ * predecessor's exit flags reach its successor on the taken edge exactly as
+ * they do on the fallthrough. The predecessor's own condition being true rather
+ * than false on that path is a fact about *values*, not about flags. Restricting
+ * to fallthrough was measured to leave 17 of 69 recoverable guards unclaimed,
+ * and on the x64 pair the taken edge is the majority of them — 6 of 13 on t64
+ * and 4 of 9 on w64 (peek-a-bin-suql).
+ */
+export function solePredecessor(
+  block: BasicBlock,
+  blockById: Map<number, BasicBlock>,
+): BasicBlock | undefined {
+  if (block.preds.length !== 1) return undefined;
+  const pred = blockById.get(block.preds[0]);
+  return pred && pred.id !== block.id ? pred : undefined;
+}
+
+/** An instruction stream for the forward flag walk, and where it came from. */
+export interface FlagScan {
+  /** Everything the walk reads, in execution order, ending before the Jcc. */
+  insns: Instruction[];
+  /** Whether `solePredecessor`'s instructions were prepended. */
+  fromPredecessor: boolean;
+}
+
+/**
+ * How much of a block the forward flag walk reads when the block's *exit* flags
+ * are the question.
+ *
+ * The terminator has to be skipped explicitly, and this is the whole reason the
+ * cross-block reading works at all. `jmp`, `ret` and every Jcc are absent from
+ * `NO_FLAG_WRITE` — correctly, since that set is narrow on purpose — so
+ * `flagEffect` classes them `{kind: "clobber", why: "unrecognised"}` and a walk
+ * that reads them clears the very owner it came for. Measured: without this
+ * skip the change below recovers **0** guards on all four corpus binaries,
+ * which is exactly the false negative the first measurement pass produced
+ * (peek-a-bin-suql). It is not an optimisation.
+ */
+function flagWalkEnd(insns: Instruction[]): number {
+  const last = insns[insns.length - 1];
+  if (!last) return 0;
+  const mn = last.mnemonic.toLowerCase();
+  return isFlagReadingJump(mn) || mn === "jmp" ? insns.length - 1 : insns.length;
+}
+
+/**
+ * The instruction stream whose forward walk determines the flags a block's
+ * trailing jump reads. `block`'s last instruction is assumed to be that jump.
+ *
+ * Normally it is the block's own instructions up to but excluding the jump.
+ * When *none* of those writes a flag — `flagOwnerBefore` reporting
+ * `{kind: "none", reason: "no-owner"}`, which for a block holding nothing but
+ * the Jcc is a walk of zero iterations — the flags were set before the block
+ * was entered, and a block with exactly one predecessor was entered with that
+ * predecessor's exit flags by construction. So the predecessor's instructions,
+ * minus its own terminator, are prepended and the walk continues into the
+ * block's.
+ *
+ * Continuing the walk rather than stopping at the block boundary is what makes
+ * the general case safe: the block's instructions cannot displace the owner
+ * (they are all flag-transparent, which is the precondition), but they can
+ * overwrite what names its value, and `spoils` sets `spoiled` on exactly that.
+ * A caller filtering on `canSpellCondition` therefore refuses a predecessor's
+ * compare that anything on either side of the edge has spoiled, with no second
+ * grammar (peek-a-bin-suql).
+ *
+ * Both consumers read this: `lifter.ts`'s `branchFor`, which builds the
+ * `IRBranch`, and `structure.ts`'s `extractCondition`, which re-reads the
+ * `cmp`/`test` operands off the machine text for its refusals. One declaration
+ * of the rule, because two would drift about which edge and which terminator.
+ */
+export function flagScanStream(block: BasicBlock, solePred?: BasicBlock): FlagScan {
+  const own = block.insns.slice(0, Math.max(0, block.insns.length - 1));
+  if (!solePred || solePred.id === block.id) return { insns: own, fromPredecessor: false };
+  const scanned = flagOwnerBefore(own, own.length);
+  if (scanned.kind !== "none" || scanned.reason !== "no-owner") {
+    return { insns: own, fromPredecessor: false };
+  }
+  const tail = solePred.insns.slice(0, flagWalkEnd(solePred.insns));
+  if (tail.length === 0) return { insns: own, fromPredecessor: false };
+  return { insns: [...tail, ...own], fromPredecessor: true };
+}
+
+/**
  * Which instruction's flags the block's trailing conditional jump reads, or
  * null when the block does not end in one.
  *
  * Null is "you asked the wrong question" — the block's last instruction reads
  * no flags. Nothing-known is `owner.kind === "none"`.
+ *
+ * `solePred` is optional and opts the block into the cross-block reading
+ * `flagScanStream` describes: a Jcc alone in its basic block has its flags set
+ * in the block before, and without a predecessor to look at, its guard cannot
+ * be recovered at all. Omitting it is exactly the pre-existing behaviour, which
+ * is deliberately not the same claim as "the flags started here".
  */
-export function blockFlagOwner(block: BasicBlock): BlockFlagOwner | null {
+export function blockFlagOwner(block: BasicBlock, solePred?: BasicBlock): BlockFlagOwner | null {
   const insns = block.insns;
   const last = insns[insns.length - 1];
   if (!last) return null;
   const jcc = last.mnemonic.toLowerCase();
   if (!isFlagReadingJump(jcc)) return null;
-  return { jcc, owner: flagOwnerBefore(insns, insns.length - 1) };
+  const scan = flagScanStream(block, solePred);
+  return {
+    jcc,
+    owner: flagOwnerBefore(scan.insns, scan.insns.length),
+    fromPredecessor: scan.fromPredecessor,
+  };
 }
 
 /**

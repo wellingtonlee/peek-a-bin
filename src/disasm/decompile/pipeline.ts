@@ -5,6 +5,7 @@ import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
 import { emitFunction } from "./emit";
+import { solePredecessor } from "./flagModel";
 import { foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
 import { firstCalleeSavedWrites, liftBlock } from "./lifter";
@@ -101,6 +102,11 @@ export function decompileFunction(
     // registers, so the map is not built there.
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
     const liftedBlocks = new Map<number, import("./ir").IRStmt[]>();
+    // The second piece of non-block-local context, and it is a *flag* fact: a
+    // block that writes no flag at all reads the ones its predecessor left, so a
+    // Jcc alone in its block can only be answered from the block before it. See
+    // `flagScanStream` (peek-a-bin-suql).
+    const blockById = new Map(blocks.map((b) => [b.id, b]));
 
     for (const block of blocks) {
       const regState = new RegState();
@@ -113,6 +119,7 @@ export function decompileFunction(
         funcMap,
         calleeSavedFirstWrite,
         calleeClobbers,
+        solePredecessor(block, blockById),
       );
       liftedBlocks.set(block.id, stmts);
     }

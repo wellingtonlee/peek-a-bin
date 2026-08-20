@@ -41,6 +41,7 @@
 
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
+import { solePredecessor } from "../src/disasm/decompile/flagModel";
 import { foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg, isKnownRegister, regSize } from "../src/disasm/decompile/ir";
@@ -315,6 +316,7 @@ export function auditStaleV0Reads(
     // it measure a different one. `calleeClobbers` in particular decides which
     // registers a call destroys, which is the whole subject of this audit.
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
+    const blockById = new Map(blocks.map((b) => [b.id, b]));
     for (const b of blocks)
       lifted.set(
         b.id,
@@ -327,6 +329,7 @@ export function auditStaleV0Reads(
           funcMap,
           calleeSavedFirstWrite,
           calleeClobbers,
+          solePredecessor(b, blockById),
         ),
       );
     ctx = buildSSA(blocks, lifted);
