@@ -717,19 +717,40 @@ const HIGH_BYTE_REGS = new Set(["ah", "bh", "ch", "dh"]);
  * different program that compiles. Callers pass `signed` for the operands of a
  * signed comparison and for the value an arithmetic shift right shifts.
  *
- * Only 8- and 16-bit names are respelled. `eax` is the whole register in 32-bit
- * code and a sub-register of RAX in 64-bit code, and emit is not told which it
- * is looking at — so treating it as partial would be a guess. The byte and word
- * names are sub-registers under either reading, which is the whole set this is
- * about. The alias chosen is the *narrowest* one wider than the read, because
- * that is the least the spelling has to claim.
+ * 8-, 16- and 32-bit names are respelled; only the 64-bit ones are excluded,
+ * because nothing is wider for them to be a sub-register of.
+ *
+ * 32-bit names used to be excluded too, on the reasoning that `eax` is the whole
+ * register in 32-bit code and a sub-register of RAX in 64-bit code and emit is
+ * not told which it is looking at, so treating it as partial would be a guess.
+ * **Emit does not need to be told — the alias search below already answers it.**
+ * A read is respelled only if the function assigns a *strictly wider* alias of
+ * the same machine register, and on a PE32 image nothing ever does: measured over
+ * both 32-bit corpus binaries, **0 functions assign any bare 64-bit register
+ * name**, so every 32-bit read finds no alias and returns its own name. The
+ * exclusion was doing no work that the search was not already doing, while
+ * costing the largest population of the defect this function exists to fix —
+ * 214 reads over 88 distinct (function, name) pairs on t64 and 211 over 85 on
+ * w64, almost all of them a 32-bit read of an accumulator a *call* assigned as
+ * RAX (`rax = GetFileType(); if (eax != 0)`, where nothing assigns `eax`)
+ * (`peek-a-bin-k8i`).
+ *
+ * That does leave a standing dependency: if some pass ever emits a bare 64-bit
+ * register assignment into a 32-bit function, PE32 output starts being respelled
+ * too. `peek-a-bin-0s6e` is the near miss — `simplifyPhis` substitutes a phi
+ * operand carrying the canonical 64-bit name into ordinary statements, which
+ * reaches t32 as `rcx_18 = rcx` — and it is harmless here only because the
+ * *assigned* side is a variable, so `_assignedRegs` never sees `rcx`.
+ *
+ * The alias chosen is the *narrowest* one wider than the read, because that is
+ * the least the spelling has to claim.
  */
 function registerText(expr: IRExpr & { kind: "reg" }, signed: boolean): string {
   const lower = expr.name.toLowerCase();
   if (_assignedRegs.has(lower)) return expr.name;
   if (!isKnownRegister(lower) || HIGH_BYTE_REGS.has(lower)) return expr.name;
   const width = regSize(lower);
-  if (width > 2) return expr.name;
+  if (width > 4) return expr.name;
   const spelling = signed ? SIGNED_TYPE[width] : UNSIGNED_TYPE[width];
   if (!spelling) return expr.name;
 

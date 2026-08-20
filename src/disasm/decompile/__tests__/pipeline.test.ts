@@ -4804,6 +4804,65 @@ describe("decompileFunction — a call's result", () => {
   });
 
   /**
+   * The same rule at 32 bits, which is where nearly all of it lives
+   * (`peek-a-bin-k8i`).
+   *
+   * `registerText` used to respell only 8- and 16-bit reads, on the reasoning
+   * that `eax` is the whole register in 32-bit code and a sub-register of RAX in
+   * 64-bit code and emit is not told which. But the alias search answers that
+   * without being told: a read is respelled only if the function assigns a
+   * *strictly wider* alias, and on a PE32 image nothing ever assigns a bare
+   * 64-bit name — 0 functions across both 32-bit corpus binaries. So the
+   * exclusion did no work the search was not already doing, and it cost the
+   * largest population of this defect: 214 reads over 88 distinct (function,
+   * name) pairs on t64 and 211 over 85 on w64 at `177ada8`, almost all of them
+   * exactly the shape below — a 32-bit read of an accumulator a *call* assigned
+   * as RAX, so the emitted guard tested a name the function never assigns.
+   */
+  it("respells a 32-bit read of an accumulator only the call assigned", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"],
+        ["test", "eax, eax"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toMatch(/rax = sub_401100\(\);/);
+    // The guard reads the call's result, narrowed — not a bare `eax` that
+    // nothing in the emitted function ever assigns.
+    expect(code).toContain("(uint32_t)rax");
+    expect(code).not.toMatch(/\beax\b\s*[!=]=/);
+  });
+
+  it("leaves a 32-bit image's own accumulator alone, having nothing wider", () => {
+    // The other half of the rule, and the reason widening to 32 bits is safe
+    // rather than merely measured: on a PE32 image the call's `resultDest` is
+    // EAX, so the widest assigned alias of the read IS the read, the alias
+    // search finds nothing wider, and the name stands. A cast here would be
+    // inventing a register the image has no encoding for — `peek-a-bin-1k4`'s
+    // defect arriving from the other direction.
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x401100"],
+        ["test", "eax, eax"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/eax = sub_401100\(\);/);
+    expect(code).not.toContain("rax");
+    expect(code).not.toContain("(uint32_t)");
+  });
+
+  /**
    * The call clobber (`clobberedByCall` in `ssa.ts`) and this are two halves of
    * one account of what a call does, and they cover disjoint registers: the
    * result is assigned because the call produced it, and an argument register
@@ -4991,7 +5050,15 @@ describe("decompileFunction — a sub-width write is still argument setup", () =
       new Map([[0x140002000, { lib: "kernel32.dll", func: "GetLastError" }]]),
     );
 
-    expect(code).toMatch(/sub_140003E90\(\w+\)/);
+    // A narrowing cast is allowed here and is the expected spelling: the value
+    // read is ECX, the widest alias the function assigns is RAX (the call's
+    // result), so `registerText` ties the read to it as `(uint32_t)rax` rather
+    // than printing an `ecx` nothing assigns (peek-a-bin-k8i). What this case
+    // guards is unaffected by that — the argument is still the *register*, not
+    // the call expression. Before k8i widened it to 32-bit names the assertion
+    // read `/sub_140003E90\(\w+\)/`, which pinned the spelling rather than the
+    // property and failed on the cast.
+    expect(code).toMatch(/sub_140003E90\((\((?:u?int\d+_t)\))?\w+\)/);
     expect(code).not.toMatch(/sub_140003E90\(GetLastError/);
     // And exactly one call to it, not one per read of the register.
     expect(code.match(/GetLastError\(/g)?.length).toBe(1);
