@@ -1,4 +1,5 @@
 import type { IRStmt } from "./ir";
+import { rewriteBodies } from "./ir";
 import { RegState } from "./regstate";
 
 /**
@@ -64,28 +65,6 @@ function gotoToBreak(stmts: IRStmt[], label: string): IRStmt[] {
   });
 }
 
-/** Rebuild `stmt` with `f` applied to each of its nested statement lists. */
-function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
-  switch (stmt.kind) {
-    case "if":
-      return { ...stmt, thenBody: f(stmt.thenBody), elseBody: stmt.elseBody && f(stmt.elseBody) };
-    case "while":
-    case "do_while":
-    case "for":
-      return { ...stmt, body: f(stmt.body) };
-    case "switch":
-      return {
-        ...stmt,
-        cases: stmt.cases.map((c) => ({ ...c, body: f(c.body) })),
-        defaultBody: stmt.defaultBody && f(stmt.defaultBody),
-      };
-    case "try":
-      return { ...stmt, body: f(stmt.body), handler: f(stmt.handler) };
-    default:
-      return stmt;
-  }
-}
-
 /**
  * A label at the end of a block needs something to label.
  *
@@ -97,38 +76,9 @@ function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
  * Dropping the label instead would strand every `goto` aimed at it.
  */
 function giveTrailingLabelsAStatement(stmts: IRStmt[]): IRStmt[] {
-  const out = stmts.map((s) => repairStmt(s));
+  const out = stmts.map((s) => rewriteBodies(s, giveTrailingLabelsAStatement));
   if (out.length > 0 && out[out.length - 1].kind === "label") out.push({ kind: "raw", text: "" });
   return out;
-}
-
-function repairStmt(stmt: IRStmt): IRStmt {
-  switch (stmt.kind) {
-    case "if":
-      return {
-        ...stmt,
-        thenBody: giveTrailingLabelsAStatement(stmt.thenBody),
-        elseBody: stmt.elseBody ? giveTrailingLabelsAStatement(stmt.elseBody) : undefined,
-      };
-    case "while":
-    case "do_while":
-    case "for":
-      return { ...stmt, body: giveTrailingLabelsAStatement(stmt.body) };
-    case "switch":
-      return {
-        ...stmt,
-        cases: stmt.cases.map((c) => ({ ...c, body: giveTrailingLabelsAStatement(c.body) })),
-        defaultBody: stmt.defaultBody ? giveTrailingLabelsAStatement(stmt.defaultBody) : undefined,
-      };
-    case "try":
-      return {
-        ...stmt,
-        body: giveTrailingLabelsAStatement(stmt.body),
-        handler: giveTrailingLabelsAStatement(stmt.handler),
-      };
-    default:
-      return stmt;
-  }
 }
 
 function cleanupPass(stmts: IRStmt[]): IRStmt[] {
@@ -156,7 +106,7 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
     }
 
     // Recurse into compound statements
-    result.push(cleanupStmt(stmt));
+    result.push(rewriteBodies(stmt, cleanupPass));
   }
 
   return result;
@@ -211,31 +161,4 @@ function endsWithTerminator(stmts: IRStmt[]): boolean {
     last.kind === "continue" ||
     last.kind === "goto"
   );
-}
-
-function cleanupStmt(stmt: IRStmt): IRStmt {
-  switch (stmt.kind) {
-    case "if":
-      return {
-        ...stmt,
-        thenBody: cleanupPass(stmt.thenBody),
-        elseBody: stmt.elseBody ? cleanupPass(stmt.elseBody) : undefined,
-      };
-    case "while":
-      return { ...stmt, body: cleanupPass(stmt.body) };
-    case "do_while":
-      return { ...stmt, body: cleanupPass(stmt.body) };
-    case "for":
-      return { ...stmt, body: cleanupPass(stmt.body) };
-    case "switch":
-      return {
-        ...stmt,
-        cases: stmt.cases.map((c) => ({ ...c, body: cleanupPass(c.body) })),
-        defaultBody: stmt.defaultBody ? cleanupPass(stmt.defaultBody) : undefined,
-      };
-    case "try":
-      return { ...stmt, body: cleanupPass(stmt.body), handler: cleanupPass(stmt.handler) };
-    default:
-      return stmt;
-  }
 }

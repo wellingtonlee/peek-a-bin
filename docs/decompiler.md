@@ -99,11 +99,12 @@ matters. The switches fall into three groups.
 
 ### 1. The compiler catches these
 
-Eleven switches end in a `const _exhaustive: never = …` binding, so a new union member is a
+Thirteen switches end in a `const _exhaustive: never = …` binding, so a new union member is a
 build error until it is handled. `npm run typecheck` finds them for you:
 
 | File | Functions |
 |------|-----------|
+| `ir.ts` | `bodiesOf` / `rewriteBodies` — the one declaration of the structured-tree body traversal, exhaustive on purpose (see below) |
 | `ssa.ts` | `renameExpr` / `renameStmt` (nested in `renameVariables`) |
 | `ssadestroy.ts` | `mapRegs`, `stripVersionsExpr` / `stripVersionsStmt` |
 | `emit.ts` | `emitExpr` / `emitStmt`, plus `liveInStmt` and `collectAssignedRegs` — the backward liveness and the assigned-register set behind a call's result assignment. Four `never`-terminated switches in this one file, two of them over every `IRStmt` kind |
@@ -118,7 +119,10 @@ build error until it is handled. `npm run typecheck` finds them for you:
 | `ssaopt.ts` | `replaceRegInExpr`, `replaceRegInStmt` |
 | `structs.ts` | `exprKey`, `rewriteExpr`, `rewriteStmt` |
 | `promote.ts` | `renameVarsInExpr`, `renameVarsInStmt`, `promoteExpr`, `promoteStmt` |
-| `cleanup.ts` | `cleanupStmt` |
+
+`cleanup.ts` was in this table for `cleanupStmt` and is no longer. `cleanupStmt` was
+`rewriteBodies` with `cleanupPass` as the callback, and its neighbour `repairStmt` was the same
+thing with `giveTrailingLabelsAStatement`; both are now that call.
 
 ### 3. No `default:` and no exhaustiveness check — the worst case
 
@@ -127,7 +131,7 @@ no compile error:
 
 | File | Functions |
 |------|-----------|
-| `ir.ts` | `walkExpr`, `walkStmts` |
+| `ir.ts` | `walkExpr`, `walkStmts` — only these two; `bodiesOf`/`rewriteBodies` are in group 1 |
 | `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
 | `structs.ts` | `walkExprs` and the stmt walker in `collectAccessPatterns` (both nested) |
 
@@ -138,6 +142,18 @@ if-chains on `expr.kind`. Grep the function name rather than looking for `case`.
 
 New `IRStmt` kinds additionally need control flow handling in `structure.ts`, and
 `typeInfer.ts`'s `parseCastType` matters only if the kind gets a cast spelling.
+
+### Recursing into nested bodies
+
+A pass that walks the structured tree without caring what the statements *are* — `structure.ts`'s
+label pruning and free-`continue` search, `cleanup.ts`'s `goto`-to-`break` rewriting, its
+trailing-label repair and its main cleanup pass — is `ir.ts`'s `bodiesOf` (read the nested lists)
+or `rewriteBodies` (replace each with a callback's result) plus a callback. Do not write a fifth
+switch: `rewriteBodies` existed as a verbatim copy in `structure.ts` and `cleanup.ts` plus two
+more specialisations in `cleanup.ts`, all four ending in `default:`, so a new body-carrying kind
+would have been dropped silently in each. Both are exhaustive now, which makes that a build error.
+`for`'s `init` and `update` are single statements rather than lists, so neither reaches inside
+them.
 
 > Extending `IRExpr` also means extending `DisplayRow` consumers if the kind surfaces in the UI.
 > `DisplayRow` has exactly one declaration — the exported union in `useDisassemblyRows.ts` — and

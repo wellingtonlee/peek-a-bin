@@ -279,20 +279,33 @@ than failing. The tables below are accurate about every site they name but do **
 all — roughly 30 are missing, so grep as well as reading. They split into two
 groups:
 
-**That 64 counts `IRExpr` and `IRStmt` sites together. For `IRStmt` alone the verified count is 91**,
+**That 64 counts `IRExpr` and `IRStmt` sites together. For `IRStmt` alone the count is 88**,
 across `src/disasm/decompile/{ir,ssa,ssaopt,ssadestroy,fold,cfgpatterns,structure,cleanup,typeInfer,promote,structs,emit}.ts`
-plus `corpus/{sweep,staleReads}.ts` — nothing else under `src/` imports `IRStmt` at all. **Only 8 are
-compiler-caught; the other 83 are silent.** Two beyond the tables below are worth knowing about because
+plus `corpus/{sweep,staleReads}.ts` — nothing else under `src/` imports `IRStmt` at all. It was 91
+before `bodiesOf`/`rewriteBodies` were merged into `ir.ts`, which removed five such switches and
+added two (peek-a-bin-svwt). **8 are compiler-caught; the other 80 are silent.**
+
+That 8 is *measured*, not counted by reading: add a throwaway `IRStmt` kind to the union, run
+`npm run typecheck`, count the `not assignable to type 'never'` errors. Doing that names exactly
+`ssa.ts:renameStmt`, `ssadestroy.ts:stripVersionsStmt`, `emit.ts`'s three (`emitStmt`,
+`liveInStmt`, `collectAssignedRegs`), `corpus/sweep.ts`, and `ir.ts`'s `bodiesOf` and
+`rewriteBodies`. **This paragraph previously also claimed 8 while `ir.ts`'s two did not exist**,
+because it credited `ssadestroy.ts:mapRegs` and `fold.ts:hasSideEffects` — both of which are
+`IRExpr` switches and catch nothing about a statement kind. Use the probe rather than the table
+if the number matters.
+
+Two beyond the tables below are worth knowing about because
 no table lists them and they are not dispatches at all: `cfgpatterns.ts`'s `detectForLoop` reads
 `stmts[len-1].kind !== "assign"` and `cleanup.ts`'s `endsWithTerminator` reads the last statement's
 kind — both are *predicates over a block's final statement*, so a new terminator-shaped kind changes
 loop shape rather than dropping data, which is the defect class no audit here models.
 
-**The compiler catches these.** Eleven switches end in a `const _exhaustive: never = …` binding,
+**The compiler catches these.** Thirteen switches end in a `const _exhaustive: never = …` binding,
 so adding a union member breaks the build until they are handled. Just run `npm run typecheck`:
 
 | File | Functions |
 |------|-----------|
+| `ir.ts` | `bodiesOf` / `rewriteBodies` — the **only** declaration of the structured-tree body traversal, and the reason these two are in this table rather than the `default:` one below. See the entry under **Gotchas** |
 | `ssa.ts` | `renameExpr` / `renameStmt` (inside `renameVariables`) |
 | `ssadestroy.ts` | `mapRegs`, `stripVersionsExpr` / `stripVersionsStmt` |
 | `emit.ts` | `emitExpr` / `emitStmt`, plus `liveInStmt` and `collectAssignedRegs` — the backward liveness and the assigned-register set behind a call's result assignment. Both are full `IRStmt` switches, so a new statement kind breaks the build in **three** places in this file — `emitStmt`, `liveInStmt` and `collectAssignedRegs`; `emitExpr` is an `IRExpr` switch and is not one of them |
@@ -309,14 +322,16 @@ so adding a union member breaks the build until they are handled. Just run `npm 
 | `ssaopt.ts` | `replaceRegInExpr`, `replaceRegInStmt` |
 | `structs.ts` | `exprKey`, `rewriteExpr`, `rewriteStmt` |
 | `promote.ts` | `renameVarsInExpr`, `renameVarsInStmt`, `promoteExpr`, `promoteStmt` |
-| `cleanup.ts` | `cleanupStmt` |
+
+(`cleanup.ts` used to be in this table, for `cleanupStmt`. It is gone — it was `rewriteBodies`
+with `cleanupPass` as the callback, as was its neighbour `repairStmt`, and both are now that call.)
 
 *Switches with neither `default:` nor a `never` assert* — control simply falls off the end, so
 the new kind is dropped with no trace at all. These are the dangerous ones:
 
 | File | Functions |
 |------|-----------|
-| `ir.ts` | `walkExpr`, `walkStmts` |
+| `ir.ts` | `walkExpr`, `walkStmts` — **only these two**; `bodiesOf` and `rewriteBodies` in the same file are exhaustive and belong to the compiler-caught table |
 | `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
 | `structs.ts` | `walkExprs` and the stmt walker in `collectAccessPatterns` (both nested functions) |
 
@@ -368,6 +383,7 @@ Both merge directions scan `fingerprintIndex` in insertion order and take the fi
 - **`liftBlock` emits plain register reads. It does not substitute `RegState`'s symbolic value at each read.** It used to, while still emitting the assignment that produced the value, so one machine `call` became three calls in the IR (`rax := call f(r9)`, `r9 = f(r9)`, `eflags = f(r9) & f(r9)`) and `sub rax,rcx / sar rax,1 / dec rax` emitted RCX subtracted three times. Measured fix: lines calling the same function twice 121/188/120 → 0 on t64/t32/w64, `eflags` lines 138/326/135 → 5/4/5. Propagation belongs to SSA, `ssaopt` and `foldBlock`, which have the version information that makes it sound; `RegState`'s symbolic values are still needed for `getCondition`/flag tracking (`peek-a-bin-urs`, `peek-a-bin-zsb`).
 - **No read of RSP may be moved to another program point.** `push`, `pop` and the return address a `call` pushes are not lifted, so RSP changes with nothing in the IR recording it — there is no faithful definition chain to reason over. Inlining `mov ebp, esp` across an unmodelled `push` printed `*(int32_t*)(esp + 8)` where the instruction said `[ebp + 8]`: a base register the instruction never named, one push off the value it did name. **Both** `ssaopt.ts`'s copy propagation and `fold.ts`'s single-use inlining guard this, and both are needed — the second re-introduced the defect the moment an unrelated fix made the frame-pointer copy single-use (`peek-a-bin-rt4`).
 - **`arg_N` in a stack frame means argument *position*, and only when the frame was verified.** `stack.ts` numbers a slot `arg_<index>` from its offset, but only after confirming a real `push rbp` / `mov rbp, rsp` prologue; otherwise the name is offset-based (`arg_0x10`). That distinction is load-bearing — under frame-pointer omission RBP is usually a callee-saved object pointer, so `[rbp+0x10]` is often a struct field access, and `structs.ts` keys struct provenance off `^arg_(\d+)$` precisely to exclude those. The name is the only channel between the two files (`IRParam` carries name and type and nothing else), so do not loosen it. On x64 the first slot is RCX's ABI home slot, which puts the fifth argument at `[rbp+0x30]`, past the shadow space.
+- **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf` / `rewriteBodies`, and there is exactly one declaration of each.** `rewriteBodies` was a *verbatim* copy — docstring included — in both `structure.ts` and `cleanup.ts`, and `cleanup.ts` held two more specialisations of it under other names (`repairStmt` = it with `giveTrailingLabelsAStatement`, `cleanupStmt` = it with `cleanupPass`): four hand-synced switches over `IRStmt` for one traversal, the shape `sections.ts`, `ripRelative.ts`, `funcInsns.ts` and `apiLists.ts` each exist to end. All four ended in `default:`, so a new statement kind carrying a body would be returned unrecursed in every one of them — silently, and the copy you had not noticed is the one that bites. Both now end in an exhaustive `never` instead, which is a deliberate second decision and not part of the de-duplication: it names all twelve body-less kinds explicitly so the *next* body-carrying kind is a build error. Verified both directions — the merge is output-neutral (all 1127 emitted functions byte-identical across t32/t64/w64/w32, `compare.mjs` CHANGED 0 of 3144 guards, at `e22ba6e`), and a probe kind added to the union does fail the build at both switches. **`for`'s `init` and `update` are single statements, not lists, so neither function reaches inside them** — true of the copies too, and a caller needing that wants `foldStmt`'s shape (peek-a-bin-svwt).
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`). This exact mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 - **`RegState.defs` is keyed by the literal operand text, and that is deliberate — ask `wroteAnyAlias` instead of canonicalising the map.** The map stores the *expression* last written, and that expression has the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as if it were eight; on x86-64 a byte write does not even clear the upper bits a 32-bit write does. But *arity* is a width-blind question — `mov ecx, 1 / call f` passes an argument in RCX exactly as `mov rcx, 1` does — and `collectArgs64` probed the literal 64-bit name, missed every sub-width setup, and broke out of the loop there. With no argument in the IR the write had no reader and DCE deleted it: `ExitProcess()` with the exit code gone, in valid well-typed C, 5 times in each x64 binary. `wroteAnyAlias` answers the width-blind question over the width-exact map (same shape as `invalidateCallerSaved`), and returns a boolean so the recorded expression can never be substituted at the call site — `peek-a-bin-urs` cannot come back through it. **The suite had pinned the defect as the rule** (`it("misses x64 arguments set up through 32-bit sub-registers")`, asserting `[]` under a KNOWN BUG comment), which is why nothing failed for as long as it stood. Measured: 156/279 t64 and 154/275 w64 functions changed emitted text, t32/w32 byte-identical (`collectArgs32` reads pushes, not `RegState`), and against `apitypes.ts`'s declared signatures — the only oracle here that can see arity, since `gcc -std=gnu89` accepts an implicit declaration at any arity — exact-arity calls went 64→90 and 70→96 with over-count unmoved at 3 (`peek-a-bin-qb2x`).
 - **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or `index.html` directly — `build/csp.test.ts` fails on drift. A meta CSP cannot be committed into `index.html` because it is also the dev entry point and Vite injects an inline React Refresh preamble there. Note the shipped `connect-src` omits non-localhost plain `http:`, so a LAN Ghidra server is blocked on the HTTP nginx deployment.

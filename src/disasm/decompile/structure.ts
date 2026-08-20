@@ -2,7 +2,7 @@ import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
 import { flagResultSetter } from "./flagResult";
 import type { IRExpr, IRStmt } from "./ir";
-import { canonReg, irReg, isKnownRegister } from "./ir";
+import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies } from "./ir";
 import { parseOperand } from "./lifter";
 import { RegState } from "./regstate";
 import { computeDominators, computeRPO } from "./ssa";
@@ -173,48 +173,6 @@ function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
     return out;
   };
   return rewrite(stmts);
-}
-
-/** Every statement list nested directly inside `stmt`. */
-function bodiesOf(stmt: IRStmt): IRStmt[][] {
-  switch (stmt.kind) {
-    case "if":
-      return stmt.elseBody ? [stmt.thenBody, stmt.elseBody] : [stmt.thenBody];
-    case "while":
-    case "do_while":
-    case "for":
-      return [stmt.body];
-    case "switch":
-      return stmt.defaultBody
-        ? [...stmt.cases.map((c) => c.body), stmt.defaultBody]
-        : stmt.cases.map((c) => c.body);
-    case "try":
-      return [stmt.body, stmt.handler];
-    default:
-      return [];
-  }
-}
-
-/** Rebuild `stmt` with `f` applied to each of its nested statement lists. */
-function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
-  switch (stmt.kind) {
-    case "if":
-      return { ...stmt, thenBody: f(stmt.thenBody), elseBody: stmt.elseBody && f(stmt.elseBody) };
-    case "while":
-    case "do_while":
-    case "for":
-      return { ...stmt, body: f(stmt.body) };
-    case "switch":
-      return {
-        ...stmt,
-        cases: stmt.cases.map((c) => ({ ...c, body: f(c.body) })),
-        defaultBody: stmt.defaultBody && f(stmt.defaultBody),
-      };
-    case "try":
-      return { ...stmt, body: f(stmt.body), handler: f(stmt.handler) };
-    default:
-      return stmt;
-  }
 }
 
 /**

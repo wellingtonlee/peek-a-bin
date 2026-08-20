@@ -632,6 +632,120 @@ export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
   }
 }
 
+// ── Structured-Tree Body Traversal ──
+
+/**
+ * Every statement list nested directly inside `stmt`.
+ *
+ * This and `rewriteBodies` below are the read and write halves of one
+ * traversal: `bodiesOf` reads the nested lists, `rewriteBodies` replaces each
+ * of them with `f`'s result and returns the rebuilt statement. Every pass that
+ * recurses through the structured tree without caring what the statements *are*
+ * — `structure.ts`'s label pruning and free-`continue` search, `cleanup.ts`'s
+ * `goto`-to-`break` rewriting, its trailing-label repair and its main cleanup
+ * pass — is one of these two plus a callback.
+ *
+ * They live here, beside `walkExpr`/`walkStmts`, because `rewriteBodies`
+ * existed as a verbatim copy in *each* of `structure.ts` and `cleanup.ts`, plus
+ * two further specialisations of it in `cleanup.ts` under other names
+ * (`repairStmt`, `cleanupStmt`) — four independent switches over `IRStmt` that
+ * had to be hand-synced. That is the shape `sections.ts`, `ripRelative.ts`,
+ * `funcInsns.ts` and `apiLists.ts` were each created to end (peek-a-bin-svwt).
+ *
+ * **Both end in an exhaustive `never` binding, deliberately.** A new `IRStmt`
+ * kind carrying a nested body is exactly the failure the duplication made
+ * likely: under a `default:` arm such a kind is reported as having no bodies and
+ * returned unrecursed — silently, with the typechecker saying nothing — so
+ * every pass above walks straight past everything inside it. Naming the
+ * body-less kinds explicitly costs twelve lines and turns that into a build
+ * failure, which moves these out of CLAUDE.md's "you must find these by hand"
+ * group and into the compiler-caught one.
+ *
+ * **`for`'s `init` and `update` are single statements, not lists**, so `f`
+ * cannot apply to them and neither function reaches inside them. That is
+ * unchanged from the copies these replace. In practice both are assignments —
+ * `detectForLoop` only recognises a loop whose candidate body block ends in one
+ * — and a caller that must reach a nested *statement* wants `foldStmt`'s shape
+ * rather than this one.
+ */
+export function bodiesOf(stmt: IRStmt): IRStmt[][] {
+  switch (stmt.kind) {
+    case "if":
+      return stmt.elseBody ? [stmt.thenBody, stmt.elseBody] : [stmt.thenBody];
+    case "while":
+    case "do_while":
+    case "for":
+      return [stmt.body];
+    case "switch":
+      return stmt.defaultBody
+        ? [...stmt.cases.map((c) => c.body), stmt.defaultBody]
+        : stmt.cases.map((c) => c.body);
+    case "try":
+      return [stmt.body, stmt.handler];
+    case "assign":
+    case "store":
+    case "call_stmt":
+    case "return":
+    case "goto":
+    case "label":
+    case "comment":
+    case "raw":
+    case "break":
+    case "continue":
+    case "phi":
+    case "branch":
+      return []; // no nested statement list
+    default: {
+      // Compile error if a new IRStmt kind is added without handling it here.
+      const _exhaustive: never = stmt;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * Rebuild `stmt` with `f` applied to each of its nested statement lists.
+ *
+ * The write half of `bodiesOf` — see its docstring for why both live here and
+ * why both are exhaustive.
+ */
+export function rewriteBodies(stmt: IRStmt, f: (list: IRStmt[]) => IRStmt[]): IRStmt {
+  switch (stmt.kind) {
+    case "if":
+      return { ...stmt, thenBody: f(stmt.thenBody), elseBody: stmt.elseBody && f(stmt.elseBody) };
+    case "while":
+    case "do_while":
+    case "for":
+      return { ...stmt, body: f(stmt.body) };
+    case "switch":
+      return {
+        ...stmt,
+        cases: stmt.cases.map((c) => ({ ...c, body: f(c.body) })),
+        defaultBody: stmt.defaultBody && f(stmt.defaultBody),
+      };
+    case "try":
+      return { ...stmt, body: f(stmt.body), handler: f(stmt.handler) };
+    case "assign":
+    case "store":
+    case "call_stmt":
+    case "return":
+    case "goto":
+    case "label":
+    case "comment":
+    case "raw":
+    case "break":
+    case "continue":
+    case "phi":
+    case "branch":
+      return stmt; // no nested statement list
+    default: {
+      // Compile error if a new IRStmt kind is added without handling it here.
+      const _exhaustive: never = stmt;
+      return _exhaustive;
+    }
+  }
+}
+
 /** Canonical 64-bit parent of any x86 register (e.g. al→rax, r8d→r8) */
 export function canonReg(name: string): string {
   const lower = name.toLowerCase();
