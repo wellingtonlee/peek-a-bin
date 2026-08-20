@@ -5861,3 +5861,181 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
     expect(guardTexts(code)).toEqual(["eax > 0x53", "eax == 0x53"]);
   });
 });
+
+/**
+ * MSVC spells a small constant `push <imm>` / `pop <reg>` — two bytes against
+ * the five of `mov reg, imm` — and until peek-a-bin-3axd `liftBlock` skipped
+ * both halves outright (`if (mn === "push" || mn === "pop") continue;`). The
+ * `pop` was therefore not a DEFINITION in SSA, so every later read of the
+ * register bound to the value it held BEFORE the pop, and nothing downstream
+ * was at fault: `ssaOptimize` is sound given that input.
+ *
+ * The damage is wrong values in C that compiles clean, and **no gate here can
+ * see any of it** — gcc compiles `edi = edi`, the operator is right so polarity
+ * and `corpus/staleGuards.ts` pass, it is not `__unrecovered_N`, and the
+ * statement-drop audit snapshots after `foldBlock` so a value folded away
+ * earlier is outside its comparison. Measured on the corpus at 896fa6f: 46
+ * idiom pops on t32 whose value is READ in the post-fold IR, 97 reads across 28
+ * functions, of which only 2 happened to land on a visible self-assignment.
+ *
+ * The three tests below are the three shapes that were hand-verified against
+ * `objdump -d -M intel t32.exe`, and the refusals are the fourth: the rule is
+ * `../../stackIdiom`'s `pushedImmediate`, shared with `functionDetect.ts`
+ * rather than re-derived, and anything it will not pair is left exactly as it
+ * was.
+ */
+describe("decompileFunction — push <imm> / pop <reg> is a move", () => {
+  // t32 0x40D23F, the site the bead was filed about: `push 0x8 / … / pop esi`
+  // sets ESI to 8 and `add edi, esi` is `edi += 8` — a varargs walker stepping
+  // over a 64-bit argument, corroborated by the `[edi-8]` and `[edi-4]` loads
+  // that follow. With the pop invisible, ESI folded to a zeroing definition
+  // that reaches a DIFFERENT block and the addend vanished: `edi = edi`.
+  //
+  // The `shr` between the push and the pop is in the machine text too, and it
+  // is why the pairing may not require adjacency. So are the two loads off
+  // `[edi-8]` and `[edi-4]`, and they earn their place in the fixture twice
+  // over: they are the semantic corroboration that the step is 8 rather than 4
+  // (this is a varargs walker reading the halves of a 64-bit argument), and
+  // they give EDI more than one surviving reader, without which `foldBlock`
+  // inlines the whole thing into the return and the compound-assignment shape
+  // never appears. The `var_21C = edi` spill is in the machine text at 0x40D247
+  // for the same reason it is here.
+  it("lifts a pop of a pushed immediate as an assignment", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "0x8"],
+        ["shr", "eax, 0x4"],
+        ["pop", "esi"],
+        ["add", "edi, esi"],
+        ["mov", "eax, dword ptr [edi - 8]"],
+        ["mov", "edx, dword ptr [edi - 4]"],
+        ["mov", "dword ptr [ebx], edi"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("edi += 8");
+    expect(code).not.toMatch(/edi = edi/);
+  });
+
+  // t32 0x40CD31: the same `push 0x8 / pop esi` feeds `cmp eax, esi / je`, and
+  // the guard read `eax == 0` because the folded-in ESI was a zero from
+  // elsewhere. The 8-case switch two instructions later is bounded by a second
+  // instance of the idiom, `push 0x7 / pop ecx / cmp eax, ecx / ja`, which
+  // `functionDetect.ts` ALREADY read correctly through the very same rule —
+  // that inconsistency, one file's answer invisible to another three files
+  // away, is why the rule is now a shared leaf module.
+  it("recovers a guard that compares against a pushed immediate", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "0x8"],
+        ["pop", "esi"],
+        ["cmp", "eax, esi"],
+        ["je", "0x401020"],
+        ["mov", "ecx, 1"],
+        ["mov", "eax, ecx"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardConditions(code)).toEqual(["eax == 8"]);
+    expect(code).not.toContain("eax == 0");
+  });
+
+  // t32!sub_401E71, the worst hand-verified site and the one with no
+  // self-assignment anywhere in it to give it away. `test esi, esi / jne` means
+  // the fallthrough path has PROVED ESI == 0; then `_errno()` is called and
+  // `push 0x16 / pop esi / mov [eax], esi` sets errno to 22 (EINVAL) and
+  // returns 22. With the pop skipped, ESI was still bound to the argument the
+  // guard had just proved zero, so the emitted C set errno to 0 and returned 0
+  // — an inverted success/failure path.
+  //
+  // The assertion that matters is the one on the STORE: a test that only
+  // checked for `0x16` appearing somewhere would pass on output that also still
+  // stored the stale zero.
+  it("does not store a value a guard proved zero where the machine stores an immediate", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "esi, dword ptr [ebp + 8]"],
+        ["test", "esi, esi"],
+        ["jne", "0x401028"],
+        ["call", "0x404127"],
+        ["push", "0x16"],
+        ["pop", "esi"],
+        ["mov", "dword ptr [eax], esi"],
+        ["mov", "eax, esi"],
+        ["ret"],
+        ["xor", "eax, eax"],
+        ["ret"],
+      ]),
+    );
+
+    const store = code.split("\n").find((l) => l.includes("*(int32_t*)(eax) ="));
+    expect(store).toBeDefined();
+    expect(store).toContain("0x16");
+    expect(store).not.toMatch(/=\s*(0|esi)\s*;/);
+  });
+
+  // Every refusal below leaves the pop unlifted, which is exactly the
+  // pre-existing behaviour — `pop` as a general stack operation is
+  // peek-a-bin-4ynk and deliberately out of scope, because modelling it needs a
+  // stack pseudo-slot and the alternative (refusing outright) would trade
+  // correct save/restore readings for admitted gaps.
+  //
+  // A pop with no `push <imm>` above it in its own block must therefore produce
+  // no assignment at all. Cross-block is the same case by construction: the
+  // rule is given `block.insns`, so running off the front is a refusal.
+  it("lifts nothing for a pop with no push above it", () => {
+    const code = run(
+      seq(0x401000, [["pop", "esi"], ["mov", "edi, esi"], ["mov", "eax, edi"], ["ret"]]),
+    );
+
+    expect(code).not.toMatch(/\besi\s*=/);
+  });
+
+  // `add esp, 4` between the two moves the stack pointer, so the pop takes
+  // something else entirely and the pairing would be one slot out. Neither a
+  // stack mnemonic nor a memory operand, which is why the operand text is
+  // scanned as well as the mnemonic set.
+  it("lifts nothing when the stack pointer moved between the push and the pop", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "0x8"],
+        ["add", "esp, 4"],
+        ["pop", "esi"],
+        ["mov", "eax, esi"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toMatch(/\besi\s*=/);
+    expect(code).not.toContain("= 8");
+  });
+
+  // A push of a REGISTER is a copy this rule cannot state, not a constant. It
+  // must not be read as an immediate, and it must not be read as a move either
+  // — that is the save/restore class, and `push esi / pop esi` around a body is
+  // the single most common `pop` in this corpus.
+  it("lifts nothing for a pop of a pushed register", () => {
+    const code = run(
+      seq(0x401000, [["push", "ebx"], ["pop", "esi"], ["mov", "eax, esi"], ["ret"]]),
+    );
+
+    expect(code).not.toMatch(/\besi\s*=/);
+  });
+
+  // Capstone prints a sign-extended `push imm8` as `push -2`, where objdump
+  // prints `push 0xfffffffe`. The signed spelling is a real push of a real
+  // constant and must lift: at t32 0x4022FA, refusing it left the two later
+  // `esi` reads naming `0x14`, the value ESI held before the pop, which is the
+  // same defect one refusal further along.
+  it("lifts a pop of a negative pushed immediate", () => {
+    const code = run(
+      seq(0x401000, [["push", "-2"], ["pop", "esi"], ["mov", "dword ptr [eax], esi"], ["ret"]]),
+    );
+
+    expect(code).toContain("*(int32_t*)(eax) = -2");
+  });
+});

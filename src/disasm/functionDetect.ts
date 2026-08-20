@@ -8,6 +8,7 @@ import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
 import { resolveRipTarget } from "./ripRelative";
+import { pushedImmediate, type StackInsn } from "./stackIdiom";
 import type { DisasmFunction, Instruction, Xref } from "./types";
 
 /** Context maps passed in instead of module-level state */
@@ -267,13 +268,6 @@ const CMP_LOOKBACK = 8;
 /** How far back the x64 chain walk looks. `lea`/load/`add`/`jmp` plus the check. */
 const MAX_RECENT = 16;
 
-interface RecentInsn {
-  address: number;
-  mnemonic: string;
-  opStr: string;
-  size: number;
-}
-
 /**
  * Every x86-64 general-register spelling Capstone prints, mapped to its 64-bit
  * name. The idiom mixes widths on purpose — the table load writes `ecx` and the
@@ -325,63 +319,6 @@ function cmpImmediate(opStr: string): number | null {
   return null;
 }
 
-/** A lone immediate operand, hex or decimal — the `7` of `push 7`. */
-function loneImmediate(opStr: string): number | null {
-  const t = opStr.trim();
-  const hexMatch = t.match(/^0x([0-9a-fA-F]+)$/);
-  if (hexMatch) return parseInt(hexMatch[1], 16);
-  const decMatch = t.match(/^(\d+)$/);
-  if (decMatch) return parseInt(decMatch[1], 10);
-  return null;
-}
-
-/** Mnemonics that move the stack pointer, so a `pop` cannot be paired past them. */
-const STACK_TRAFFIC = new Set([
-  "push",
-  "pop",
-  "pusha",
-  "pushad",
-  "popa",
-  "popad",
-  "pushf",
-  "pushfd",
-  "pushfq",
-  "popf",
-  "popfd",
-  "popfq",
-  "call",
-  "ret",
-  "retn",
-  "retf",
-  "leave",
-  "enter",
-  "int",
-  "int3",
-  "iret",
-  "iretd",
-]);
-
-/**
- * The immediate a `pop` at `popIndex` takes off the stack, or null.
- *
- * The pairing is only claimed where nothing between the two instructions can
- * have moved the stack pointer or written through it: the first thing found
- * going back must be the `push`, and any other stack traffic — including an
- * `add esp, N`, a memory operand naming `esp`, or a `call`, which is both — ends
- * the search with no answer. Being one slot out here would report a bound the
- * program never checked.
- */
-function pushedImmediate(recent: RecentInsn[], popIndex: number): number | null {
-  for (let ri = popIndex - 1; ri >= 0; ri--) {
-    const p = recent[ri];
-    const mn = p.mnemonic.toLowerCase();
-    if (mn === "push") return loneImmediate(p.opStr);
-    if (STACK_TRAFFIC.has(mn)) return null;
-    if (/\b[er]?sp\b/i.test(p.opStr)) return null;
-  }
-  return null;
-}
-
 /**
  * The constant a register holds at `before`, or null when it is not a constant.
  *
@@ -398,7 +335,7 @@ function pushedImmediate(recent: RecentInsn[], popIndex: number): number | null 
  * into the code window, but the *count* is the only statement of the table's
  * length there is.
  */
-function constantRegisterValue(reg: string, recent: RecentInsn[], before: number): number | null {
+function constantRegisterValue(reg: string, recent: StackInsn[], before: number): number | null {
   for (let ri = before - 1; ri >= 0; ri--) {
     const p = recent[ri];
     const mn = p.mnemonic.toLowerCase();
@@ -500,8 +437,8 @@ function parseScale4Load(opStr: string): { base: string; index: string; disp: nu
  * so the ceiling on how much is read stays in one place.
  */
 function recoverX64RvaChain(
-  jmpInsn: RecentInsn,
-  recent: RecentInsn[],
+  jmpInsn: StackInsn,
+  recent: StackInsn[],
 ): {
   table: number;
   base: number;
@@ -602,7 +539,7 @@ function recoverX64RvaChain(
  * destination is routinely the index register itself (`movsxd rax, [rdx +
  * rax*4]`), so a search from the jump meets it and reads it as a clobber.
  */
-function boundedCaseCount(indexReg: string, recent: RecentInsn[], before: number): number {
+function boundedCaseCount(indexReg: string, recent: StackInsn[], before: number): number {
   let sought = indexReg;
   for (let ri = before - 1; ri >= 0; ri--) {
     const p = recent[ri];
@@ -707,8 +644,8 @@ const noTable = (): TableRead => ({ targets: [], spans: [] });
  * code window — applies unchanged.
  */
 function readAbsoluteTable(
-  insn: RecentInsn,
-  recent: RecentInsn[],
+  insn: StackInsn,
+  recent: StackInsn[],
   reader: ImageReader,
   is64: boolean,
   codeStart: number,
@@ -785,7 +722,7 @@ function readAbsoluteTable(
  */
 function recoverDenseByteTable(
   chain: NonNullable<ReturnType<typeof recoverX64RvaChain>>,
-  recent: RecentInsn[],
+  recent: StackInsn[],
 ): { byteTable: number; caseReg: string; loadIndex: number } | null {
   for (let ri = chain.loadIndex - 1; ri >= 0; ri--) {
     const p = recent[ri];
@@ -834,8 +771,8 @@ function recoverDenseByteTable(
  * code returned an empty list.
  */
 function readRvaTable(
-  insn: RecentInsn,
-  recent: RecentInsn[],
+  insn: StackInsn,
+  recent: StackInsn[],
   reader: ImageReader,
   codeStart: number,
   codeEnd: number,
@@ -871,7 +808,7 @@ function readRvaTable(
  */
 function readDenseRvaTable(
   chain: NonNullable<ReturnType<typeof recoverX64RvaChain>>,
-  recent: RecentInsn[],
+  recent: StackInsn[],
   reader: ImageReader,
   codeStart: number,
   codeEnd: number,
@@ -1482,7 +1419,7 @@ export function detectFunctions(
     const scan = createScan(cs, "function detection");
     let offset = 0;
     let prevWasUnconditional = false;
-    const recentInsns: RecentInsn[] = [];
+    const recentInsns: StackInsn[] = [];
     while (offset < len) {
       const insns = scan.decode(bytes, offset, len, baseAddress + offset);
       for (const insn of insns) {

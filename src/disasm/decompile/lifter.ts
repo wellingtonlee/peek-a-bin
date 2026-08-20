@@ -2,6 +2,7 @@ import type { CalleeClobbers } from "../callSummary";
 import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
+import { pushedImmediate } from "../stackIdiom";
 import type { Instruction } from "../types";
 import { blockFlagOwner, canSpellCondition, isFlagTransparent } from "./flagModel";
 import type { BinaryOp, IRBranch, IRCall, IRExpr, IRStmt } from "./ir";
@@ -482,7 +483,11 @@ export function liftBlock(
    */
   let flagsStale = false;
 
-  for (const insn of block.insns) {
+  // Indexed rather than `for…of` so the `push <imm>` / `pop <reg>` rule below
+  // can look backwards from the instruction being lifted. Every `continue` in
+  // this loop is unconditional about the index, so it is bound at the top.
+  for (let insnIndex = 0; insnIndex < block.insns.length; insnIndex++) {
+    const insn = block.insns[insnIndex];
     const mn = insn.mnemonic.toLowerCase();
     const parts = splitOperands(insn.opStr);
 
@@ -515,8 +520,47 @@ export function liftBlock(
     // ── nop / int3 / ud2 ──
     if (mn === "nop" || mn === "int3" || mn === "ud2") continue;
 
-    // ── push / pop: handled implicitly, but we still track for x86 call args ──
-    if (mn === "push" || mn === "pop") continue;
+    // ── push / pop ──
+    //
+    // Neither is lifted in general, and that is deliberate: RSP moves with
+    // nothing in the IR recording it, so there is no faithful definition chain
+    // over the stack slot to reason about, and `collectArgs32` reads the pushes
+    // straight off the instruction stream instead.
+    //
+    // The one exception is MSVC's two-byte `mov reg, imm`, spelled
+    // `push <imm>` / `pop <reg>`. Skipping *that* pop left it out of SSA
+    // altogether, so it was not a definition and every later read of the
+    // register bound to the value it held BEFORE the pop: `add edi, esi`
+    // emitted as `edi = edi` where ESI is 8, `cmp eax, esi / je` emitted as
+    // `if (eax == 0)` where the machine tests 8, and — the worst of them —
+    // t32!sub_401E71's `push 0x16 / pop esi / mov [eax], esi` emitted as
+    // `*_errno() = 0` on the one path a guard directly above had just proved
+    // the old ESI was zero. An inverted success/failure return, in C that
+    // compiles clean, that no gate here can see (peek-a-bin-3axd).
+    //
+    // The pairing is `../stackIdiom`'s, shared with `functionDetect.ts` rather
+    // than re-derived — the same `push 7 / pop ecx` that sizes a jump table
+    // there is this idiom, and the two must not be able to disagree. Anything
+    // it refuses, including every save/restore pair and every `pop` whose
+    // `push` is in another block, is left exactly as it was (peek-a-bin-4ynk).
+    if (mn === "push" || mn === "pop") {
+      if (mn === "pop" && parts.length === 1) {
+        const name = parts[0].trim().toLowerCase();
+        // The stack pointer is excluded even though `push 8 / pop esp` really
+        // does set it: RSP/ESP is the one register no stage here models, so a
+        // definition of it in the IR would be read by the frame analysis as a
+        // value it can move, and no `pop esp` in this corpus is this idiom.
+        if (isKnownRegister(name) && canonReg(name) !== "rsp") {
+          const imm = pushedImmediate(block.insns, insnIndex);
+          if (imm !== null) {
+            const src = irConst(imm, regSize(name));
+            stmts.push({ kind: "assign", dest: irReg(name), src, addr: insn.address });
+            regState.set(name, src);
+          }
+        }
+      }
+      continue;
+    }
 
     // ── mov ──
     if (mn === "mov") {
