@@ -137,6 +137,16 @@ if (!pre.haveBins || !pre.haveCc) {
           join(artifactDir, `arity_${key}.jsonl`),
           arBad.map((x) => JSON.stringify(x)).join("\n") + (arBad.length > 0 ? "\n" : ""),
         );
+        // Every block whose trailing jcc reads flags the recovered compare does
+        // not describe, with the emitted condition where one reached the page.
+        // Written even when empty — the standing expectation is that `named` is
+        // 0 while `shapes` is not, and an absent file has to mean the audit did
+        // not run rather than that it found nothing.
+        writeFileSync(
+          join(artifactDir, `staleguards_${key}.jsonl`),
+          r.staleGuards.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.staleGuards.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -148,6 +158,7 @@ if (!pre.haveBins || !pre.haveCc) {
                 rows: r.staleV0.rows.length,
                 corrupt: r.staleV0.corrupt.length,
               },
+              staleGuards: { ...r.staleGuards, rows: r.staleGuards.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -257,6 +268,48 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(v.sites).toBeGreaterThan(0);
         expect(v.copies).toBeGreaterThan(0);
       }
+    });
+
+    /**
+     * A GATE at 0 on `named`, and it earns that on the same terms
+     * `staleV0` does rather than by analogy: every row is an emitted `if`
+     * stating a test the machine does not make — the right operator over
+     * operands a later instruction took away — which is a wrong answer, not a
+     * count awaiting a threshold. It reached 0 by a fix (peek-a-bin-jitf,
+     * peek-a-bin-xe01), not by being found there: with both fixes disabled it
+     * reports 29/5/3/21 named on t32/t64/w64/w32 at `e22ba6e`, and those 58
+     * are precisely the 58 guards `compare.mjs` independently reports leaving
+     * the audited set over the same pair of runs.
+     *
+     * Two liveness assertions, and they answer different questions. `blocks`
+     * says the audit examined this binary at all — it is thousands, so it is
+     * the robust "did it run" check. `shapes` says the audit can still FIND
+     * the shape it exists to watch, and is asserted over the corpus TOTAL
+     * rather than per binary: it is 6 on w64, thin enough that a legitimate
+     * detection change could take one binary to 0 without the instrument
+     * having gone blind.
+     *
+     * `named` is a LOWER bound — it counts only guards the polarity pass could
+     * anchor to a jcc. The other 48 spoiled readings in this corpus were
+     * equally wrong on the page and merely unanchorable. See
+     * `corpus/staleGuards.ts`.
+     */
+    it("never states a guard over operands the machine took away", () => {
+      let shapes = 0;
+      for (const r of results.values()) {
+        const sg = r.staleGuards;
+        shapes += sg.shapes;
+        expect(
+          `${r.key} wrong-operand: ${sg.rows
+            .filter((x) => x.emitted !== null)
+            .slice(0, 5)
+            .map((x) => `${x.func}@0x${x.jcc.toString(16)} ${x.kind} '${x.emitted}'`)
+            .join("; ")}`,
+        ).toBe(`${r.key} wrong-operand: `);
+        expect(sg.named).toBe(0);
+        expect(sg.blocks).toBeGreaterThan(0);
+      }
+      expect(shapes).toBeGreaterThan(0);
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -514,6 +567,15 @@ function renderReport(): string {
     );
     L.push("    A GATE at 0 on both, unlike the two BASELINEs above: each row is a register the");
     L.push("    emitted C names for a value it does not hold. Sites in stalev0_<bin>.jsonl.");
+    const sg = r.staleGuards;
+    L.push(
+      `  wrong-operand guards        ${sg.named} named of ${sg.shapes} spoiled readings ` +
+        `(${sg.bySuperseded} superseded, ${sg.byClobbered} clobbered) over ${sg.blocks} jcc blocks`,
+    );
+    L.push("    The right operator over the WRONG OPERANDS: polarity passes it, gcc compiles it,");
+    L.push("    it is not __unrecovered_N. `shapes` is machine-code shape and does not move with");
+    L.push("    a decompiler fix; `named` is the reading that reached the page. Sites in");
+    L.push("    staleguards_<bin>.jsonl. See corpus/README.md.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

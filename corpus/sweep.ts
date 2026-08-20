@@ -26,6 +26,7 @@ import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
+import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
 
 // ── Condition polarity ─────────────────────────────────────────────────────
@@ -406,6 +407,15 @@ export interface BinResult {
    * repair spoiled, which is worse because the output looks recovered.
    */
   staleV0: StaleV0Result;
+  /**
+   * A GUARD THAT NAMES THE RIGHT OPERATOR OVER THE WRONG OPERANDS.
+   *
+   * A GATE at 0 on `named`, for the same reason `staleV0` is one: every row is
+   * an emitted `if` stating a test the machine does not make. `shapes` is the
+   * population the machine code presents and does NOT move with a decompiler
+   * fix — it is the liveness number. See `corpus/staleGuards.ts`.
+   */
+  staleGuards: StaleGuardResult;
   funcs: FuncRec[];
 }
 
@@ -539,6 +549,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     },
     unrecoveredSites: [],
     staleV0: emptyStaleV0(),
+    staleGuards: emptyStaleGuards(),
     funcs: [],
   };
 
@@ -617,8 +628,26 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     // The guard pass is what can name a jcc for an unrecovered condition — it
     // is the only thing here that anchors an emitted arm to a machine block —
     // so it runs first and hands over what it resolved.
+    const guardsBefore = res.guards.length;
     const jccOf = auditGuardsAndLoops(res, func, insns, code, lineMap, jumpTables, af);
     auditUnrecovered(res, func, code, jccOf);
+    // A GUARD THAT NAMES THE RIGHT OPERATOR OVER THE WRONG OPERANDS. Runs after
+    // the guard pass because it needs what that pass anchored: an emitted
+    // condition at a jcc address is how "the wrong reading reached the page" is
+    // distinguished from "the wrong reading was refused". See staleGuards.ts.
+    const emittedAt = new Map<number, string>();
+    for (let gi = guardsBefore; gi < res.guards.length; gi++) {
+      const g = res.guards[gi];
+      if (!emittedAt.has(g.jcc)) emittedAt.set(g.jcc, g.cond);
+    }
+    auditStaleGuards(
+      res.staleGuards,
+      key,
+      func.name,
+      func.address,
+      buildCFG(func, insns, af.xrefMap, jumpTables),
+      emittedAt,
+    );
     // Runs AFTER `decompileFunction`, so the shared `StructRegistry` has
     // already evolved exactly as production's pass evolves it. This one drives
     // its own replica of pipeline stages 1-3 — see `staleReads.ts` on why

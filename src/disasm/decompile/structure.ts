@@ -1,8 +1,8 @@
 import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
-import { flagResultSetter } from "./flagResult";
+import { clobberedAfter, flagResultSetter, isFlagTransparent } from "./flagResult";
 import type { IRExpr, IRStmt } from "./ir";
-import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies } from "./ir";
+import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies, walkExpr } from "./ir";
 import { parseOperand } from "./lifter";
 import { RegState } from "./regstate";
 import { computeDominators, computeRPO } from "./ssa";
@@ -72,6 +72,41 @@ function conditionFromFlagResult(block: BasicBlock, jcc: string, stmts: IRStmt[]
   // An unrecoverable Jcc is left to the caller to report the way it always
   // has, so that the emitted `__unrecovered_N` comment still names the Jcc.
   return cond.kind === "unknown" ? null : cond;
+}
+
+/**
+ * Has anything between the flag-setting instruction and the block's Jcc written
+ * over a name the recovered condition is spelled with?
+ *
+ * The guard is emitted *after* the block's statements — that ordering is stated
+ * in `conditionFromFlagResult`'s docstring above and is what makes this a
+ * question at all. So `cmp eax, 5 / mov eax, edx / je` emits `eax = edx;` and
+ * then `if (eax != 5)`, which reads the new EAX where the machine compared the
+ * old one: right operator, wrong operands (peek-a-bin-xe01).
+ *
+ * The scan is `flagResult.ts`'s `clobberedAfter`, the same one
+ * `flagResultSetter`'s condition 6 makes of its *result* register. The two
+ * paths in this file used to disagree about whether a later write mattered —
+ * one refused to name a clobbered result, the other named a clobbered operand
+ * without asking. There is now one predicate and they agree by construction.
+ *
+ * Refusing is the whole repair: the caller returns `unknown`, the emitter
+ * prints `__unrecovered_N /* jcc *\/`, and the reader is told the condition was
+ * not recovered instead of being told a test the machine does not make. Naming
+ * the *old* value instead would mean materialising a temporary before the
+ * clobber, which is a lifter change and not this one.
+ */
+function conditionSpoiled(block: BasicBlock, flagSetterAddr: number, cond: IRExpr): boolean {
+  const clobbered = clobberedAfter(block, flagSetterAddr);
+  if (clobbered.opaque) return true;
+  if (clobbered.regs.size === 0 && !clobbered.writesMemory) return false;
+  let spoiled = false;
+  walkExpr(cond, (e) => {
+    if (e.kind === "reg") {
+      if (isKnownRegister(e.name) && clobbered.regs.has(canonReg(e.name))) spoiled = true;
+    } else if (e.kind === "deref" && clobbered.writesMemory) spoiled = true;
+  });
+  return spoiled;
 }
 
 /** Index of the first statement that is not a label, or -1 if there is none. */
@@ -318,14 +353,30 @@ export function structureCFG(
 
     // Conditional jump → build condition from cmp/test before it
     if (mn.startsWith("j") && mn !== "jmp") {
-      // Find the cmp/test before this jump
+      // Find the cmp/test before this jump.
+      //
+      // The walk is forward and LAST WRITER WINS, which is why it has to know
+      // what writes the flags. It used to call `setFlags` on each `cmp`/`test`
+      // it passed and nothing ever cleared them — not a call, not arithmetic,
+      // not a shift — so `cmp eax, 5 / … / sub ecx, edx / jne` emitted
+      // `eax != 5` where the machine branches on `ecx - edx != 0`: the right
+      // operator over operands belonging to a test that no longer holds
+      // (peek-a-bin-jitf). `isFlagTransparent` is `flagResult.ts`'s own table,
+      // exported rather than copied, and anything not on it — including
+      // anything unrecognised — ends the reading, which is the safe direction.
       const regState = new RegState();
       let sawCmpTest = false;
+      let flagSetterAddr: number | null = null;
       for (let i = 0; i < insns.length - 1; i++) {
         const insn = insns[i];
         const insnMn = insn.mnemonic.toLowerCase();
         if (insnMn === "cmp" || insnMn === "test") {
           sawCmpTest = true;
+          // A `cmp` this cannot parse still WRITES the flags, so the previous
+          // one has stopped applying either way — clear first, then record only
+          // what was actually read.
+          regState.clearFlags();
+          flagSetterAddr = null;
           // No x86 memory operand contains a comma, so a plain split is a
           // correct operand split for the two-operand forms this reads.
           const parts = insn.opStr.split(",").map((s) => s.trim());
@@ -333,17 +384,33 @@ export function structureCFG(
             const left = parseOperand(parts[0], insn, is64);
             const right = parseOperand(parts[1], insn, is64);
             regState.setFlags(insnMn as "cmp" | "test", left, right);
+            flagSetterAddr = insn.address;
           }
+        } else if (!isFlagTransparent(insnMn)) {
+          regState.clearFlags();
+          flagSetterAddr = null;
         }
       }
       // A block with a `cmp`/`test` in it keeps exactly the reading it always
       // had, whatever else it contains. Only a block with neither reaches the
-      // flag-result path, so nothing already recovered can change sense.
+      // flag-result path, so nothing already recovered can change sense. That
+      // is also `flagResultSetter`'s condition 2, deliberately left in step: a
+      // block whose `cmp` has been superseded by later arithmetic now recovers
+      // nothing rather than being handed to the result path, because widening
+      // condition 2 would also widen the definitions `ssaopt.ts`'s DCE holds
+      // live off the same predicate.
       if (!sawCmpTest) {
         const fromResult = conditionFromFlagResult(block, mn, liftedBlocks.get(block.id) ?? []);
         if (fromResult) return fromResult;
       }
-      return regState.getCondition(mn);
+      const cond = regState.getCondition(mn);
+      if (
+        flagSetterAddr !== null &&
+        cond.kind !== "unknown" &&
+        conditionSpoiled(block, flagSetterAddr, cond)
+      )
+        return { kind: "unknown", text: mn };
+      return cond;
     }
 
     return { kind: "unknown", text: `end: ${mn}` };

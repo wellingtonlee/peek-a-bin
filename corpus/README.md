@@ -203,6 +203,60 @@ It is the one place the audit has to know anything about how the code under test
 
 Per-site detail is in `stalev0_<bin>.jsonl` — the wrong reads first, then the spoiled copies.
 
+**Wrong-operand guards.** The right operator over the wrong operands — the class every other gate
+here is *structurally* blind to, which is why it survived to be found by reading. Polarity checks
+the emitted comparison **operator** against its jcc's taken sense, and a wrong-operand guard has
+the right operator, so it passes; it is not `__unrecovered_N`, so the recovery baseline does not
+count it; gcc compiles it; nothing in it is a version-0 read. *A failure means the emitted `if`
+asserts a test the program does not make.*
+
+Two mechanisms, both visible in the instruction stream alone:
+
+| | |
+|---|---|
+| **superseded** | A `cmp`/`test` in the block, then something else writes the flags before the jcc. `cmp eax, 5 / sub ecx, edx / jne` — the machine branches on `ecx - edx != 0` (`peek-a-bin-jitf`). |
+| **clobbered** | The flags really are the `cmp`'s, but an operand is overwritten before the jcc. `cmp eax, 5 / mov eax, edx / je` — the block's statements are emitted above the `if`, so the guard reads the new EAX (`peek-a-bin-xe01`). |
+
+Two counts, and only the second is a defect:
+
+| Count | What it is |
+|---|---|
+| `shapes` | Blocks whose compare reading one of the two mechanisms spoiled. A property of the **machine code**, so a decompiler fix does not move it. This is the liveness number: an audit that measures an absence and has quietly stopped looking reports the healthiest figure in the report. **53/9/6/38** (t32/t64/w64/w32) at `e22ba6e`. |
+| `named` | Of those, the ones the emitted C nonetheless states. **The defect, and the gate.** |
+
+**Why this gates when the baselines below do not**, on the same terms as stale version-0 rather
+than by analogy: every row is a provably false statement about the program, which is
+`polarity inverted`'s character, not a count awaiting a threshold. It is 0 because a fix put it
+there, not because it was found there.
+
+*Validated by negative control, and the control is unusually strong.* With both fixes disabled —
+the emitted C then **byte-identical to the true base on all four binaries**, checked by md5 — it
+reports **29/5/3/21, i.e. 58 named**. Those 58 are *precisely* the 58 guards `compare.mjs`
+independently reports as `only in BASE` over the same pair of runs, with `CHANGED 0` and
+`only-change 0`. Two instruments that share nothing agree row for row. Three were adjudicated by
+hand against `objdump`, including t64 `0x1400055a6` (`cmp %cx,(%r8) / mov $0x58,%ecx / jne`,
+emitted as `*(uint16_t*)(r8) != (uint16_t)ecx`).
+
+**What it does not catch**, so the zero is read for what it is:
+
+- **`named` is a lower bound.** It counts only guards the polarity pass could **anchor** to a jcc.
+  The other 48 spoiled readings in this corpus were equally wrong on the page and merely
+  unanchorable. `shapes` has no such dependency, which is the other reason to read both.
+- **It shares `isFlagTransparent` with the code under test.** That table is a fact about x86 and is
+  deliberately single-sourced — a second copy is the failure mode `flagResult.ts` exists to
+  prevent — so this audit cannot catch an error *in that table*. The judgement built on top of it,
+  which registers a compare names and what writes over them, is written in `staleGuards.ts`
+  independently and reads only raw operand text; it does **not** call `clobberedAfter`.
+- **A guard spoiled by a `call` is structurally reachable and counted, and the sub-class is
+  empty.** `buildCFG` does not split at a call, so the shape is available — MSVC simply never
+  emits a compare that a call then destroys, because that would be branching on garbage.
+- **Nothing about a guard whose operands are right and whose value is wrong** for some other
+  reason. That is the wrong-value class no gate here models.
+
+Per-site detail is in `staleguards_<bin>.jsonl` — the block's jcc, which mechanism, the `cmp` whose
+operands the reading would have named, the instruction that took them away, and the emitted
+condition where one reached the page (`null` where the reading was refused).
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures
@@ -706,12 +760,14 @@ remaining gap and is not implemented.
 | `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values. |
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
+| `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
 | `artifacts/<label>/unrecovered_<key>.jsonl` | Every `__unrecovered_N`, per site: note, cause, use site, originating jcc where one could be named. |
 | `artifacts/<label>/arity_<key>.jsonl` | Every declared-API call whose emitted arity is not the declared one, OVER rows first. Empty file = audit ran and found none. |
 | `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
+| `artifacts/<label>/staleguards_<key>.jsonl` | Every block whose trailing jcc reads flags the recovered compare does not describe, with the emitted condition where one reached the page. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
 ### The two audits that re-run the pipeline prefix, and why one of them has to

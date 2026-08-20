@@ -106,6 +106,98 @@ const SHIFTS = new Set(["shl", "sal", "shr", "sar"]);
 const IMPLICIT_REG_WRITERS = new Set(["cbw", "cwd", "cwde", "cdq", "cdqe", "cqo"]);
 
 /**
+ * Does this mnemonic leave every flag exactly as it found them?
+ *
+ * The exported form of `FLAG_TRANSPARENT`, for the caller walking a block
+ * *forward* rather than backward: `structure.ts`'s `extractCondition` needs the
+ * same grammar to know when the `cmp` it just passed has stopped being the
+ * instruction its Jcc reads (peek-a-bin-jitf). Same asymmetry as the set's own
+ * docstring — a mnemonic wrongly answered `true` here makes a condition come
+ * off the wrong instruction, one wrongly answered `false` only costs a
+ * recovery — and the same reason it is one table rather than two: the repo has
+ * been bitten by hand-synced copies of exactly this kind before.
+ */
+export function isFlagTransparent(mnemonic: string): boolean {
+  return FLAG_TRANSPARENT.has(mnemonic.toLowerCase());
+}
+
+/** What a block's instructions after some point overwrite. See `clobberedAfter`. */
+export interface ClobberScan {
+  /**
+   * Registers written, canonicalised to the 64-bit parent — so a write of `al`
+   * reports `rax`. Width-blind on purpose: a byte write really does change what
+   * a name spelled at any width denotes.
+   */
+  regs: Set<string>;
+  /**
+   * Something was written that this scan cannot attribute to a name — an
+   * instruction whose destination is implicit in the mnemonic, or a destination
+   * shape it does not recognise. A caller that must not be wrong treats this as
+   * "assume the worst"; encoding a second table of implicit destinations is
+   * exactly what `IMPLICIT_REG_WRITERS` exists to avoid.
+   */
+  opaque: boolean;
+  /** A store landed in memory, so any `deref` in a recovered expression may have moved under it. */
+  writesMemory: boolean;
+}
+
+/**
+ * What the instructions of `block` strictly after `afterAddress` — and before
+ * its final instruction — overwrite.
+ *
+ * **One predicate, two callers, and they are asking the same question.** A
+ * value recovered from an instruction is only still nameable at the block's Jcc
+ * if nothing in between has written over the names it is spelled with:
+ *
+ * - `flagResultSetter` below asks it of the *result* register. `dec ecx / mov
+ *   ecx, edx / jne` leaves ECX holding EDX where the guard would read it, so
+ *   naming it would state a different test entirely.
+ * - `structure.ts`'s `extractCondition` asks it of the `cmp`/`test` *operands*.
+ *   `cmp eax, 5 / mov eax, edx / je` is that sentence verbatim, one path over:
+ *   the block's statements are emitted before the `if`, so `eax != 5` reads the
+ *   new EAX where the machine compared the old one (peek-a-bin-xe01). The two
+ *   paths in the same function used to disagree about whether this matters.
+ *
+ * The scan is over the *instruction stream*, which is the only version of the
+ * program that does not move: the IR answer changes as passes run, so
+ * protection that depended on which pass asked would be protection decided by
+ * pass ordering.
+ *
+ * `push` is reported as a write of RSP rather than of memory. It stores below
+ * the stack pointer, where no operand of an instruction that already executed
+ * can live, so calling it a memory write would refuse ordinary code for
+ * nothing — but it does move RSP, and an `[esp + 0x10]` operand is spelled
+ * relative to that.
+ */
+export function clobberedAfter(block: BasicBlock, afterAddress: number): ClobberScan {
+  const regs = new Set<string>();
+  const scan: ClobberScan = { regs, opaque: false, writesMemory: false };
+  const insns = block.insns;
+  for (let i = 0; i < insns.length - 1; i++) {
+    if (insns[i].address <= afterAddress) continue;
+    const mn = insns[i].mnemonic.toLowerCase();
+    if (mn === "nop") continue;
+    if (IMPLICIT_REG_WRITERS.has(mn)) {
+      scan.opaque = true;
+      continue;
+    }
+    if (mn === "push") {
+      // Names a register it only reads; the write is RSP and the stack below it.
+      regs.add("rsp");
+      continue;
+    }
+    if (mn === "pop") regs.add("rsp");
+    // No x86 memory operand contains a comma, so a plain split is a correct
+    // operand split for the forms this reads.
+    const dst = insns[i].opStr.split(",")[0]?.trim().toLowerCase() ?? "";
+    if (isKnownRegister(dst)) regs.add(canonReg(dst));
+    else if (dst.includes("[")) scan.writesMemory = true;
+    else scan.opaque = true;
+  }
+  return scan;
+}
+
+/**
  * The Jcc forms answerable from a result alone — exactly those reading ZF or SF
  * and nothing else, matching `RegState.getCondition`'s `flagOp === "result"`
  * arm. Every other Jcc also reads CF or OF, neither of which is a function of
@@ -205,16 +297,12 @@ export function flagResultSetter(block: BasicBlock): FlagResultSetter | null {
   //    and the `dec` becomes the last write on the second. Protection that
   //    depended on which iteration asked would be protection decided by pass
   //    ordering. The instruction stream does not move.
-  for (let i = 0; i < insns.length - 1; i++) {
-    if (insns[i].address <= setter.address) continue;
-    const mid = insns[i].mnemonic.toLowerCase();
-    if (IMPLICIT_REG_WRITERS.has(mid)) return null;
-    // `push` names a register it only reads; everything else reaching here
-    // writes its first operand, and a memory destination names no register.
-    if (mid === "push" || mid === "nop") continue;
-    const dst = insns[i].opStr.split(",")[0]?.trim().toLowerCase() ?? "";
-    if (isKnownRegister(dst) && canonReg(dst) === destReg) return null;
-  }
+  //
+  //    `clobberedAfter` is that scan, shared with `extractCondition`, which
+  //    asks the identical question of a `cmp`'s operands. A memory write is not
+  //    consulted here because the result being named is a register.
+  const clobbered = clobberedAfter(block, setter.address);
+  if (clobbered.opaque || clobbered.regs.has(destReg)) return null;
 
   return { mnemonic: mn, address: setter.address, destReg, destText, jcc };
 }

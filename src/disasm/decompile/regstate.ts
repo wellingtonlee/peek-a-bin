@@ -58,6 +58,24 @@ export class RegState {
     return false;
   }
 
+  /**
+   * Forget the flags — nothing here can answer a Jcc until something sets them
+   * again.
+   *
+   * `getCondition` reads `flagLeft`/`flagRight` and returns `unknown` when
+   * either is null, so this is the state a fresh `RegState` is already in. It
+   * is spelled out as a method because *reaching* it again matters: an
+   * instruction that writes the flags in a way this class cannot model leaves
+   * whatever an earlier `cmp` recorded, and a Jcc after it would then be
+   * answered from a test the machine no longer holds (peek-a-bin-jitf).
+   * Callers walking a block forward call this on every such instruction.
+   */
+  clearFlags(): void {
+    this.flagOp = null;
+    this.flagLeft = null;
+    this.flagRight = null;
+  }
+
   setFlags(op: "cmp" | "test", left: IRExpr, right: IRExpr): void {
     this.flagOp = op;
     this.flagLeft = left;

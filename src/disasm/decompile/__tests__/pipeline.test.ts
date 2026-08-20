@@ -5118,3 +5118,219 @@ describe("decompileFunction — a guard names a value the body actually computed
     expect(staleGuardReads(code, ["eax", "ecx"])).toEqual([]);
   });
 });
+
+/**
+ * A GUARD THAT NAMES THE RIGHT OPERATOR OVER THE WRONG OPERANDS.
+ *
+ * The defect class no standing gate can see, which is why it survived. The
+ * emitted comparison matches its jcc's taken sense, so the corpus polarity
+ * audit passes it; it is not `__unrecovered_N`, so the recovery baseline does
+ * not count it; gcc compiles it. Only the operands are wrong, and only the
+ * machine text says so.
+ *
+ * Two mechanisms, filed and fixed separately because either could outlive the
+ * other. Both are pinned here end to end — instructions in, emitted C out —
+ * because a stage-level test asserts on the IR the buggy code produced.
+ *
+ * The correct output in every defect case is `__unrecovered_N`, not a repaired
+ * name: refusing to state a test the machine does not make is the whole fix.
+ * "Clean is not recovered", and an admission is the honest direction.
+ */
+describe("decompileFunction — a guard reads the flags the jcc actually reads", () => {
+  /** The emitted guards, or ["<unrecovered>"] where the condition was admitted. */
+  function guardTexts(code: string): string[] {
+    return guardConditions(code).map((c) => (/__unrecovered_\d+/.test(c) ? "<unrecovered>" : c));
+  }
+
+  // peek-a-bin-jitf. `sub ecx, edx` writes the flags `jne` reads; the `cmp` two
+  // instructions earlier no longer describes them. Base emitted `eax != 5`,
+  // where the machine branches on `ecx - edx != 0`.
+  it("does not answer a jcc from a cmp a later flag writer superseded", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["sub", "ecx, edx"],
+        ["jne", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    expect(code).not.toContain("eax != 5");
+  });
+
+  // The shape of the two real corpus occurrences, reduced. MSVC's branchless
+  // unsigned size check is `mov eax, 0x7fffffff / cmp eax, [ebp+0x10] / sbb
+  // eax, eax / inc eax / jne` (t32.exe 0x4078de, w32.exe 0x4070e3): the `cmp`
+  // sets CF, `sbb` turns it into -CF, and **`inc` sets the ZF the `jne`
+  // reads**. Base emitted `eax != arg_0x10`, naming a compare three
+  // instructions dead over a register that by then holds a one-bit flag.
+  //
+  // The full sequence does not survive reduction — with no predecessor block
+  // the constant folds to 0x80000000 and the branch disappears altogether — so
+  // what is pinned here is the load-bearing part, a one-operand flag writer
+  // superseding the compare. The idiom itself is pinned by
+  // `corpus/staleGuards.ts`, which reports it at both real addresses.
+  it("does not answer a jcc from a cmp a one-operand flag writer superseded", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, dword ptr [ebp + 0x10]"],
+        ["inc", "eax"],
+        ["jne", "0x401014"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  // peek-a-bin-xe01. The flags ARE the cmp's, but the block's statements are
+  // emitted above the `if`, so `eax = edx;` runs first and the guard would read
+  // the new EAX. `flagResultSetter`'s condition 6 had refused this shape on the
+  // arithmetic path since peek-a-bin-b531; the cmp path never asked.
+  it("does not name a compared register a later instruction overwrote", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["mov", "eax, edx"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    expect(code).not.toMatch(/eax [=!]= 5/);
+  });
+
+  // The overwrite question is width-blind, because a byte write really does
+  // change what the name denotes at any width. `mov al, 1` spoils `eax`.
+  it("counts a sub-register write as overwriting the register", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["mov", "al, 1"],
+        ["jne", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  // A compare against memory is spoiled by an intervening STORE, not only by a
+  // register write — the guard's deref is evaluated at the `if`, below it.
+  it("does not name a compared memory operand a later store overwrote", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "dword ptr [ecx], 5"],
+        ["mov", "dword ptr [ecx], edx"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  // …and by a write to the register the deref is spelled with.
+  it("does not name a deref whose base register was overwritten", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "dword ptr [ecx], 5"],
+        ["mov", "ecx, edx"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  // ── Controls. Every one of these must keep recovering, or the refusal is
+  // too wide and the cost is guards that were correct becoming admissions.
+
+  it("still recovers across a flag-transparent instruction", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["mov", "esi, edi"],
+        ["jne", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax != 5"]);
+  });
+
+  it("still recovers when the later write touches an unrelated register", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["mov", "edx, ecx"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["eax == 5"]);
+  });
+
+  // Last cmp wins, which the forward walk always got right — the defect was
+  // that nothing OTHER than a cmp could take the flags away.
+  it("still answers from the last of two compares", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["cmp", "ecx, 7"],
+        ["jne", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["ecx != 7"]);
+  });
+
+  // The arithmetic path is untouched: no cmp in the block, so
+  // `conditionFromFlagResult` answers it by naming the result, as before.
+  it("still recovers a condition from flag-setting arithmetic", () => {
+    const code = run(
+      seq(0x401000, [
+        ["dec", "ecx"],
+        ["jne", "0x401010"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["ecx != 0"]);
+  });
+});
