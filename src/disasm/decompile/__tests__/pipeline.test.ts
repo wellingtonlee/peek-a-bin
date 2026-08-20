@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeFunction } from "../../../pe/types";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
+import { isKnownRegister } from "../ir";
 import { decompileFunction } from "../pipeline";
 import { StructRegistry } from "../structs";
 
@@ -4917,5 +4918,203 @@ describe("decompileFunction — a sub-width write is still argument setup", () =
     const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
 
     expect(code).toMatch(/sub_408000\(\)/);
+  });
+});
+
+/**
+ * The `if (…)` / `while (…)` conditions in emitted code, as the text between
+ * each guard's outermost parentheses.
+ */
+function guardConditions(code: string): string[] {
+  const out: string[] = [];
+  for (const line of code.split("\n")) {
+    const t = line.trim();
+    if (!/^(\}\s*)?(else\s+)?(if|while)\s*\(/.test(t)) continue;
+    const open = t.indexOf("(");
+    const close = t.lastIndexOf(")");
+    if (open >= 0 && close > open) out.push(t.slice(open + 1, close));
+  }
+  return out;
+}
+
+/** Registers the emitted body assigns — `eax = …`, `eax += …`, `eax++`. */
+function assignedRegisters(code: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of code.split("\n")) {
+    const m = line.trim().match(/^(\w+)\s*(?:[-+*/|&^%]|<<|>>)?=(?!=)|^(\w+)\+\+/);
+    const name = m?.[1] ?? m?.[2];
+    if (name && isKnownRegister(name)) out.add(name.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Registers a guard reads that nothing in the emitted body ever assigns.
+ *
+ * `entryValues` names the registers holding an incoming value, which correctly
+ * appear with no assignment. Anything else in this list is a guard reading a
+ * value the emitted C never put there — the peek-a-bin-f50k defect. The check
+ * is deliberately spelling-agnostic: re-materialising the dropped assignment
+ * and re-spelling the guard to name the surviving register are both correct
+ * repairs, and both empty this list.
+ */
+function staleGuardReads(code: string, entryValues: string[]): string[] {
+  const assigned = assignedRegisters(code);
+  const entry = new Set(entryValues.map((r) => r.toLowerCase()));
+  const bad = new Set<string>();
+  for (const cond of guardConditions(code)) {
+    for (const word of cond.match(/[a-z][a-z0-9]*/gi) ?? []) {
+      const r = word.toLowerCase();
+      if (!isKnownRegister(r) || assigned.has(r) || entry.has(r)) continue;
+      bad.add(r);
+    }
+  }
+  return [...bad].sort();
+}
+
+/**
+ * peek-a-bin-f50k — a branch condition names a register the emitted body never
+ * assigns.
+ *
+ * `structure.ts`'s `extractCondition` re-parses the `cmp`/`test` operands off
+ * the raw `Instruction` through a fresh `RegState` that is fed *only* `cmp` and
+ * `test`. The condition is therefore not in `liftedBlocks` at all: it carries
+ * no SSA version, no reaching definition, and no use that any dataflow pass can
+ * count. So the register that computed the compared value is free to be
+ * propagated away, folded into a use, or deleted — while the guard goes on
+ * naming it. That is peek-a-bin-c33, and these three are its symptoms.
+ *
+ * Three *distinct* stages produce it, which is why there are three fixtures and
+ * not one. Confirmed by stepping the passes on each fixture (HEAD 069b016):
+ *
+ *   1. `copyPropagation` (ssaopt.ts) deletes **every** copy statement
+ *      unconditionally — `stmts.filter((s) => !isCopyStmt(s))` — after
+ *      rewriting its IR readers. The guard is not an IR reader.
+ *   2. `constantPropagation` + `deadCodeElimination` (ssaopt.ts). Nothing is
+ *      wrongly dropped here: every IR reader correctly receives the constant
+ *      and the now-dead def is correctly removed. The guard simply was never
+ *      part of the conversation, so it keeps the register and loses the value.
+ *   3. `foldBlock` (fold.ts) inlines a single-use def into its one remaining IR
+ *      use. The guard's read does not count towards that use total, and by then
+ *      `ssaOptimize`'s end-of-fixpoint `eflags` strip has removed the only IR
+ *      statement that mentioned the register.
+ *
+ * `deadCodeElimination` does hold a block's `eflags` definition live for
+ * exactly this reason (peek-a-bin-ua8), which is why a def that is neither a
+ * copy nor a constant nor single-use survives — see the two controls below.
+ * That protection preserves the *statement* but not the register names inside
+ * it, and propagation is free to rewrite those.
+ *
+ * Reproduced on t32.exe!sub_4045B1 at HEAD 069b016 (719 instructions, 702
+ * emitted lines). Case 1 is 0x404EC1 `mov eax, esi`, whose guard emits
+ * `} else if (*(uint8_t*)(eax) != 0x30) {` with `eax = esi` nowhere in the
+ * function. Case 2 is 0x404E34 `mov eax, 0x200`, whose guard emits
+ * `if (var_40C > eax)` where the machine compares against 0x200 — the constant
+ * reaches the neighbouring store and is lost from the compare.
+ *
+ * These are pinned with `it.fails` so the suite stays green while the defect
+ * stands. Each asserts the CORRECT output; when c33 lands, they start passing
+ * and the `.fails` comes off.
+ */
+describe("decompileFunction — a guard names a value the body actually computed", () => {
+  // peek-a-bin-f50k case 1. `mov eax, ecx` is a copy, so `copyPropagation`
+  // deletes it. Correct output: the guard dereferences the value ECX holds,
+  // either by naming `ecx` or by keeping `eax = ecx` above it.
+  it.fails("keeps the copy that computed the compared value", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, ecx"],
+        ["cmp", "byte ptr [eax], 0x30"],
+        ["je", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(staleGuardReads(code, ["ecx"])).toEqual([]);
+    expect(code).toMatch(/eax = ecx|\(uint8_t\*\)\(ecx\)/);
+  });
+
+  // peek-a-bin-f50k case 2. Nothing is wrongly deleted: `constantPropagation`
+  // correctly puts 0x200 into the store and `deadCodeElimination` correctly
+  // removes the dead def. Correct output: the guard compares against 0x200,
+  // exactly as the store does.
+  it.fails("compares against the constant, not the register that carried it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 0x200"],
+        ["cmp", "ecx, eax"],
+        ["jle", "0x401014"],
+        ["mov", "dword ptr [ebx], eax"],
+        ["ret"],
+        ["mov", "edx, 7"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardConditions(code).join(" | ")).toContain("0x200");
+    expect(staleGuardReads(code, ["ecx", "ebx"])).toEqual([]);
+  });
+
+  // peek-a-bin-f50k, third mechanism. The load is neither a copy nor a
+  // constant, so it survives `ssaOptimize` — but the store is its only
+  // remaining IR use once the `eflags` def is stripped, so `foldBlock` inlines
+  // it. Correct output: the guard and the store name the same machine value.
+  it.fails("does not fold away the only definition its guard reads", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [ecx]"],
+        ["mov", "dword ptr [ebx], eax"],
+        ["cmp", "byte ptr [eax], 0x30"],
+        ["jne", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(staleGuardReads(code, ["ecx", "ebx"])).toEqual([]);
+  });
+
+  // Control, and it must keep passing. A def that is neither a copy nor a
+  // constant and has no other IR use is held live by `deadCodeElimination`'s
+  // `eflags` protection, so the guard's register does have an assignment.
+  it("keeps a load whose only reader is the guard", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [ecx]"],
+        ["cmp", "byte ptr [eax], 0x30"],
+        ["je", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("eax = *(int32_t*)(ecx)");
+    expect(staleGuardReads(code, ["ecx"])).toEqual([]);
+  });
+
+  // The same control one step further out: arithmetic is not propagatable
+  // either, so `eax += ecx` survives and the guard is right.
+  it("keeps an arithmetic definition whose only reader is the guard", () => {
+    const code = run(
+      seq(0x401000, [
+        ["add", "eax, ecx"],
+        ["cmp", "byte ptr [eax], 0x30"],
+        ["je", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("eax += ecx");
+    expect(staleGuardReads(code, ["eax", "ecx"])).toEqual([]);
   });
 });
