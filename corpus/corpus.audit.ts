@@ -29,7 +29,7 @@ import {
   type OffsetofResult,
   offsetofCheck,
 } from "./emitAudits";
-import { type BinKey, corpusDir, DOC_BINS, preflight } from "./preflight";
+import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
 import { type BinResult, sweepBinary } from "./sweep";
 
 const pre = preflight();
@@ -53,13 +53,14 @@ function over<T>(keys: readonly BinKey[], m: Map<BinKey, T>): T[] {
 const sum = <T>(xs: T[], f: (x: T) => number) => xs.reduce((a, x) => a + f(x), 0);
 
 if (!pre.haveBins || !pre.haveCc) {
+  // `detail` is the discovery half: every directory that was probed, what was
+  // wrong with each, and the two ways to say where the binaries really are.
+  // "I found nothing" on its own is what let a wrong default sit unnoticed
+  // (`peek-a-bin-alx1`); the useful output is "here is how to tell me".
   process.stdout.write(
-    `\n${"═".repeat(78)}\nCORPUS AUDITS SKIPPED — nothing was verified.\n  ${pre.reason}\n` +
-      (pre.haveBins
-        ? ""
-        : "  The binaries are real PE files, deliberately not in the repo; point\n" +
-          "  PEEK_CORPUS_DIR at a copy if you have one.\n") +
-      `  See corpus/README.md.\n${"═".repeat(78)}\n\n`,
+    `\n${"═".repeat(78)}\nCORPUS AUDITS SKIPPED — nothing was verified.\n  ${pre.reason}\n\n` +
+      (pre.detail === "" ? "" : `${pre.detail}\n`) +
+      `${"═".repeat(78)}\n\n`,
   );
   describe("corpus audits", () => {
     // A dynamic test NAME, so the reason survives whatever the reporter prints:
@@ -397,7 +398,7 @@ function renderReport(): string {
   const pct = (n: number, d: number) => (d === 0 ? "n/a" : `${((100 * n) / d).toFixed(1)}%`);
 
   L.push(`corpus audit — label=${label}`);
-  L.push(`  corpus dir: ${corpusDir()}`);
+  L.push(`  corpus dir: ${corpusDir()}  [${corpusDirSource()}]`);
   L.push(`  compiler:   ${pre.cc}`);
   L.push(`  binaries:   ${keys.join(", ")}`);
   // Loud, because a substituted run is NOT a measurement of this commit and

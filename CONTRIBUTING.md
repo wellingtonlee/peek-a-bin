@@ -34,6 +34,25 @@ npm run build
 CI runs `lint`, `typecheck`, `test` and `build` on every push and PR to `main`, plus a separate
 `npm audit --audit-level=high` job.
 
+### Corpus audits — optional, not in CI
+
+`npm run corpus` is the separate harness that drives **real MSVC binaries** through the
+decompiler and checks the output against oracles outside the code (a C compiler, a run
+`offsetof` program, the originating `jcc` of every guard). It is not part of `npm test` and never
+runs in CI: it needs four third-party executables that are deliberately **not** in this repo.
+
+One-time setup, if you have them (`t32.exe`, `t64.exe`, `w64.exe`, `w32.exe` — pip's vendored
+`distlib` launchers): put them in `~/.local/share/peek-a-bin-corpus`, or record the directory
+once in a gitignored `.env` at the repo root:
+
+```bash
+echo 'PEEK_CORPUS_DIR=/path/to/them' >> .env
+```
+
+Without them every audit **skips** — naming every directory it looked in and how to point it
+somewhere else — and the run still exits 0. It never fails for want of a corpus. See
+[corpus/README.md](corpus/README.md) for what each audit proves and what a failure means.
+
 ## Code Style
 
 - **File naming:** Components = `PascalCase.tsx`, hooks = `useCamelCase.ts`, modules = `camelCase.ts`

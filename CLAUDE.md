@@ -199,6 +199,19 @@ diffs two runs guard-by-guard and is how a commit gets judged. Nothing here is r
 someone re-runs it. (They lived only in `/tmp` scratchpads until `peek-a-bin-dfae`, and were
 rebuilt from scratch twice in one day as a result — do not move them back.)
 
+**There is no default corpus directory, deliberately.** `preflight.ts` searches
+`PEEK_CORPUS_DIR` (environment), `PEEK_CORPUS_DIR` in a gitignored `.env` at the repo root, then
+`$XDG_DATA_HOME/peek-a-bin-corpus`, `~/.peek-a-bin-corpus` and `<repo>/corpus/binaries` — every
+candidate derived from `$XDG_DATA_HOME`, `$HOME` or the repo. An explicit setting is the *whole*
+search, so a wrong override is reported about the directory you named rather than quietly
+satisfied from elsewhere. On this machine the binaries are in
+`~/.local/share/peek-a-bin-corpus`, which the third candidate finds with nothing set.
+**Do not reintroduce an absolute default**: the old one pointed into a virtualenv that no longer
+exists, and because a missing corpus *skips* rather than fails, the default path silently became
+the skip path — the verification existed and was not being run (`peek-a-bin-alx1`).
+`build/corpusPreflight.test.ts` fails the ordinary suite if a candidate stops being
+`$HOME`/`$XDG_DATA_HOME`/repo-derived.
+
 **Measured against real binaries.** Each of these has an oracle outside the code under test:
 
 - **The PE parser holds**, differentially against an **independently written from-spec reader** — sections, imports, exports, imphash, resources, checksum and `.pdata` agree on every file, including 419/419 and 381/381 ARM64 `.pdata` entries on begin/end/unwind/handler. pefile is **not** installed here, so the reference is hand-written, not pefile.

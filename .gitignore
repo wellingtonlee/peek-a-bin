@@ -60,3 +60,7 @@ coverage/
 
 # Corpus audit output (npm run corpus)
 corpus/artifacts/
+
+# Corpus binaries, if kept in-repo. Third-party executables: NEVER commit them.
+# See corpus/README.md — the harness probes this path last.
+corpus/binaries/

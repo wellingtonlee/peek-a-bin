@@ -32,23 +32,79 @@ Two consequences worth preserving:
 | | |
 |---|---|
 | **Binaries** | `t32.exe`, `t64.exe`, `w64.exe`, `w32.exe` — pip's vendored `distlib` launchers. Real MSVC output: t32/w32 are PE32, t64/w64 are PE32+. Between them they cover both widths, SEH, jump tables and hot-patched prologues. |
-| **Default location** | `/home/jacob/silver-carnival-demo/.venv/lib/python3.12/site-packages/pip/_vendor/distlib` |
+| **Where they go** | Any of the locations below. **There is no default absolute path** — see "Finding the binaries". |
 | **Compiler** | `gcc` on PATH (or set `CC`). Needed by two audits. |
 
 **The binaries are deliberately not in the repo and must not be added.** They are third-party
 executables; a disassembler vendoring its own test corpus is the wrong trade. That is why every
 entry point has to answer "can I run?" first.
 
+### Finding the binaries
+
+`preflight.ts` searches, in this order, and the **first directory holding all four wins**:
+
+| | Location | |
+|---|---|---|
+| 1 | `PEEK_CORPUS_DIR` in the environment | this run only |
+| 2 | `PEEK_CORPUS_DIR` in `.env` at the repo root | this machine, durably; gitignored, and documented in `.env.example` |
+| 3 | `$XDG_DATA_HOME/peek-a-bin-corpus` | `$XDG_DATA_HOME` defaults to `~/.local/share` |
+| 4 | `~/.peek-a-bin-corpus` | |
+| 5 | `<repo>/corpus/binaries` | gitignored — **never commit what you put here** |
+
+**An explicit setting (1 or 2) is the whole search.** If you say where the binaries are and they
+are not there, the run reports that about *the directory you named* rather than quietly
+succeeding from somewhere else. Only when nothing is set are 3–5 probed.
+
+Setup, once per machine, is therefore either "put the four files in
+`~/.local/share/peek-a-bin-corpus`" or one line in `.env`:
+
+```sh
+echo 'PEEK_CORPUS_DIR=/path/to/them' >> .env
+```
+
+`.env` rather than an `export` because an export has to be retyped by the next shell, the next
+session and the next agent, and this harness's failure mode is precisely *not being run*.
+
+**There used to be a hardcoded default** — an absolute path inside a virtualenv on the machine
+this project was developed on. It stopped existing, and because a missing corpus **skips** rather
+than fails, nothing ever went red: the default path simply became the skip path, so
+`npm run corpus` with nothing set did nothing on the machine the project lives on, while the
+binaries sat two directories away. That is `peek-a-bin-dfae` one layer out — the verification
+existed and was not being run (`peek-a-bin-alx1`). `build/corpusPreflight.test.ts` now fails the
+ordinary suite if any candidate directory stops being derived from `$XDG_DATA_HOME`, `$HOME` or
+the repo, which is the property a personal absolute path violates.
+
+A skip names **every** directory it probed and what was wrong with each, plus the two ways to say
+where they really are:
+
+```
+CORPUS AUDITS SKIPPED — nothing was verified.
+  4 of 4 corpus binaries not found (t32, t64, w64, w32); looked in … [no such directory]; …
+
+  Looked for t32.exe, t64.exe, w64.exe, w32.exe in:
+    /home/you/.local/share/peek-a-bin-corpus  — no such directory  [$XDG_DATA_HOME]
+    /home/you/.peek-a-bin-corpus              — no such directory  [home directory]
+    /repo/corpus/binaries                     — no such directory  [this repo (gitignored)]
+  …
+    export PEEK_CORPUS_DIR=/path/to/them          # this shell only
+    echo 'PEEK_CORPUS_DIR=/path/to/them' >> /repo/.env   # this machine, durably
+```
+
 ### Environment variables
 
 | Variable | Meaning |
 |---|---|
-| `PEEK_CORPUS_DIR` | Directory holding the four `.exe` files. Point it at any copy. |
+| `PEEK_CORPUS_DIR` | Directory holding the four `.exe` files. Point it at any copy. Also read from `.env`; see "Finding the binaries". |
 | `PEEK_CORPUS_BINS` | Comma-separated subset, e.g. `t32,t64`. Default: all four. |
 | `PEEK_CORPUS_OUT` | Where artifacts go. Default `corpus/artifacts` (gitignored). |
 | `PEEK_CORPUS_LABEL` | Subdirectory under the output dir. Default `local`. Use it to keep two runs apart. |
 | `PEEK_CORPUS_TABLES` | Directory of another run's `jumpTables_<key>.json`, used instead of this commit's own. See "Did my change cause that". |
 | `CC` | Compiler to invoke. Default `gcc`. |
+
+All of these may also be set in `.env` at the repo root, with a shell setting taking precedence.
+`PEEK_CORPUS_OUT` and `PEEK_CORPUS_LABEL` are read straight from the environment in
+`corpus.audit.ts` and are the two that are **not** — they are per-run, and a per-run value has no
+business being recorded per-machine.
 
 ## The audits: what each one proves, and what a failure means
 
