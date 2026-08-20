@@ -188,7 +188,8 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-- **A register is never named for a value it no longer holds.** Every surviving read of a register's SSA *entry* value is checked against the writes that dominate it: 0 wrong names and 0 spoiled entry-value copies on all four binaries, from 28/78/28/78 and 13/19/13/18 at `cee6f91`. A gate, not a baseline — see `corpus/README.md` on why this one gates when the statement-drop and unrecovered-value counts do not.
+- **A register is never named for a value it no longer holds — *within the scope this gate actually covers*, which is narrower than that sentence.** Every surviving read of a register's SSA *entry* value is checked against the writes that dominate it: 0 wrong names and 0 spoiled entry-value copies on all four binaries, from 28/78/28/78 and 13/19/13/18 at `cee6f91`. A gate, not a baseline — see `corpus/README.md` on why this one gates when the statement-drop and unrecovered-value counts do not. **What is gated is every surviving *version-0* read whose register an *SSA-visible* dominating write has changed**, and both qualifiers are load-bearing: the audit's site filter attributes a phi's definition to the phi's own block, while `destroySSA` materialises the copy in each *predecessor* — and a predecessor routinely dominates blocks the phi block does not. Where the only dominating writer is a relocated phi copy the site is discarded before it is ever judged, so the gate prints 0 over 12 provably wrong reads (`peek-a-bin-fppy`; the fix is ~2 lines and turns the gate red at 12 until `peek-a-bin-pzws` is fixed). A *name* collision — `registerSpeller` giving one name to two live ranges of different widths — is a different class again that **no value-level audit can see**, because the SSA is correct and only the spelling is wrong (~147/139 candidate names on t64/w64 at `069b016`, an upper bound rather than a defect count).
+- **`gcc -fsyntax-only` is structurally blind to a wrong register *name*.** `corpus/emitAudits.ts`'s `preludeFor` declares every undeclared identifier as its own `long`, so `r13` and `r13d` compile cleanly as two unrelated variables. The 842/842 ratio **cannot move** on that defect class, and it stayed green across six functions that each assigned `rNN` and then read `rNNd`, a name nothing in them ever assigned. Do not read "all of them compile" as evidence about naming.
 
 **The harnesses live in `corpus/`. Run them with `npm run corpus`** — see `corpus/README.md`,
 which says what each audit proves and what a failure means. They are deliberately outside
@@ -259,7 +260,16 @@ When a UI or deployment change lands, the honest report says which of these it d
 present. The docstring at the top of `pipeline.ts` lists a shorter, outdated order — trust the
 code, not that comment.)
 
-**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (17 kinds including if/while/do_while/for/switch/break/continue/phi/try).
+**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (18 kinds including if/while/do_while/for/switch/break/continue/phi/try/**branch**).
+
+**`branch` is confined to `liftedBlocks` and never appears in a structured tree.** `liftBlock` turns a block's trailing conditional jump into an `IRBranch` so its condition is a real IR reader — an SSA version, a reaching definition, a place in every use count — and `pipeline.ts` step 4b extracts every one of them again *before* `structureCFG`. Two orderings are load-bearing and neither is obvious:
+
+- The extraction runs **before the tap snapshot**, or the statement-drop audit reports every branch as a dropped statement in each block ending in a conditional jump.
+- The branches must not survive into the tree: `detectForLoop` skips any body block whose last statement is not an `assign`, so one left in place takes **for-loop recognition to zero corpus-wide**, silently and with no failing test.
+
+`emit.ts` therefore *throws* on a branch rather than ignoring it — `decompileFunction`'s catch turns that into a counted `throws`, which `compare.mjs` gates on, where a silent arm would make a structural failure invisible. Anything that appends to the end of another block's statement list must go through **`pushBeforeTerminator`** (`ir.ts`): `destroySSA` lowering a phi into a predecessor and `loopInvariantCodeMotion` hoisting into a preheader both did a plain `push`, which was correct only while no terminator existed in the IR.
+
+**`ssadestroy.ts`'s `mapReads` deliberately has no `branch` arm, and that must change *with* the `extractCondition` flip, not before it.** A guard's registers are reads, so `splitStaleReads` can neither see nor repair one today (~300 stale, unrepairable reads per binary) — but while step 4b discards the conditions, adding the arm costs **+116 emitted lines across 96 functions** in dead repair copies for no recovered value. None of those reads is version 0, so the stale-read gate stays green through all of them (`peek-a-bin-c33`).
 
 ### Adding new IRExpr / IRStmt kinds
 
@@ -268,6 +278,15 @@ are **64** of them (44 switches and 20 if-chains), and a missed one silently dro
 than failing. The tables below are accurate about every site they name but do **not** name them
 all — roughly 30 are missing, so grep as well as reading. They split into two
 groups:
+
+**That 64 counts `IRExpr` and `IRStmt` sites together. For `IRStmt` alone the verified count is 91**,
+across `src/disasm/decompile/{ir,ssa,ssaopt,ssadestroy,fold,cfgpatterns,structure,cleanup,typeInfer,promote,structs,emit}.ts`
+plus `corpus/{sweep,staleReads}.ts` — nothing else under `src/` imports `IRStmt` at all. **Only 8 are
+compiler-caught; the other 83 are silent.** Two beyond the tables below are worth knowing about because
+no table lists them and they are not dispatches at all: `cfgpatterns.ts`'s `detectForLoop` reads
+`stmts[len-1].kind !== "assign"` and `cleanup.ts`'s `endsWithTerminator` reads the last statement's
+kind — both are *predicates over a block's final statement*, so a new terminator-shaped kind changes
+loop shape rather than dropping data, which is the defect class no audit here models.
 
 **The compiler catches these.** Eleven switches end in a `const _exhaustive: never = …` binding,
 so adding a union member breaks the build until they are handled. Just run `npm run typecheck`:
