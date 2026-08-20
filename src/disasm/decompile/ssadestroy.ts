@@ -68,9 +68,12 @@ export function destroySSA(ctx: SSAContext): void {
         // Canonical is the *identity* of the register, not its spelling: a phi
         // is created and renamed under the 64-bit parent whatever the code
         // said, so emitting that name puts `rdi = rax` inside a 32-bit function
-        // (peek-a-bin-1k4). `spell` gives it back the name the function uses.
-        const destName = spell(destCanon);
-        const srcName = spell(srcCanon);
+        // (peek-a-bin-1k4). `spell` gives it back the name the code uses — and
+        // it is asked about *this value*, not about the register in general,
+        // because a register carrying a 64-bit range and a 32-bit range at once
+        // cannot be served by one name (peek-a-bin-pzws).
+        const destName = spell(destCanon, phi.dest.version);
+        const srcName = spell(srcCanon, op.value.version);
         const copy: IRStmt = {
           kind: "assign",
           dest: { kind: "reg", name: destName, size: regSize(destName) },
@@ -132,32 +135,137 @@ const HIGH_BYTE = /^[abcd]h$/;
  * and not from a statement). For those the function's own width decides — a
  * function that mentions no 8-byte register is 32-bit code, because no 32-bit
  * image can name RSI and every other spelling would have been seen above.
+ *
+ * ── WIDEST-IN-THE-FUNCTION IS THE WRONG SCOPE WHEN TWO LIVE RANGES DISAGREE ──
+ *
+ * The paragraphs above answer "which width does this *image* use", and for that
+ * the function is the right scope. They do not answer "which width does *this
+ * value* have", and one name per canonical register cannot, because a register
+ * routinely carries two live ranges of different widths at once:
+ *
+ *     mov rbp, r9        ; RBP := R9's entry value, a POINTER — 64-bit
+ *     mov r9d, r14d      ; a 32-bit clobber of R9D. RBP is untouched.
+ *     ...
+ *     mov [rbp + 0x18], esi
+ *
+ * Copy propagation forwards `rbp` to `r9`, so the stores are emitted against a
+ * 64-bit read of R9's *entry* value while the 32-bit range gets a phi copy. Ask
+ * the function and both get `r9`, the widest alias it contains — so the copy
+ * lands *above* the stores and six of them, plus a `rax = r9`, go through a
+ * pointer the emitted C has already reassigned, while the two guards that read
+ * the 32-bit range say `r9d`, a name nothing then assigns. Both halves of the
+ * failure at once: a write through the wrong pointer and a read of an
+ * unassigned name, in C that compiles clean — `gcc` declares `r9` and `r9d` as
+ * two unrelated `long`s, so no compiler-based audit can ever see it
+ * (`peek-a-bin-pzws`, `peek-a-bin-fppy`).
+ *
+ * So the scope is the **live range**, and the function is only the fallback.
+ * Every register mention *except* a lowered phi copy already carries its own
+ * width — `stripVersionsExpr` drops the version and keeps the name — which is
+ * why the copy is the one statement that has to be told. A live range here is a
+ * *phi web*: the versions a phi ties together, transitively, restricted to one
+ * canonical register (after `ssaOptimize` an operand may name a different
+ * register entirely, and that is a genuine cross-register copy whose two sides
+ * are spelled from their own ranges). The web is spelled by the widest mention
+ * of any of its own members, which is exactly what its readers already say.
+ *
+ * Narrowing the evidence can only help: a web is named by a spelling its own
+ * members use, where the function-wide answer may be a spelling *no* member
+ * uses. Where a web has no surviving mention at all — `ssaOptimize` deleted
+ * every one — there is nothing to narrow to and the function-wide answer stands,
+ * which keeps `peek-a-bin-1k4` fixed.
  */
-function registerSpeller(ctx: SSAContext): (canon: string) => string {
-  const widest = new Map<string, string>();
+type Speller = (canon: string, version?: number) => string;
+
+function registerSpeller(ctx: SSAContext): Speller {
   const rank = (name: string) => regSize(name) * 2 - (HIGH_BYTE.test(name) ? 1 : 0);
-  const note = (raw: string) => {
+
+  /** Widest spelling anywhere in the function, per canonical register. */
+  const widest = new Map<string, string>();
+  /** Widest spelling of one *version*, per `canon_version`. */
+  const perVersion = new Map<string, string>();
+  const better = (into: Map<string, string>, key: string, name: string) => {
+    const cur = into.get(key);
+    if (cur === undefined || rank(name) > rank(cur)) into.set(key, name);
+  };
+  const note = (raw: string, version: number | undefined) => {
     const name = raw.toLowerCase();
     // `regSize` answers 4 for anything at all, so it is not a membership test.
     if (!isKnownRegister(name)) return;
     const canon = canonReg(name);
-    const cur = widest.get(canon);
-    if (cur === undefined || rank(name) > rank(cur)) widest.set(canon, name);
+    better(widest, canon, name);
+    if (version !== undefined) better(perVersion, versionKey(canon, version), name);
   };
   for (const [, stmts] of ctx.liftedBlocks) {
     walkStmts(stmts, (e) => {
-      if (e.kind === "reg") note(e.name);
+      if (e.kind === "reg") note(e.name, e.version);
     });
     // `walkStmts` walks a call's arguments but not the register its result
     // lands in, and in a 32-bit function that register — EAX — is often the
     // only mention of RAX above the phis.
     for (const s of stmts)
-      if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") note(s.resultDest.name);
+      if (s.kind === "call_stmt" && s.resultDest?.kind === "reg")
+        note(s.resultDest.name, s.resultDest.version);
   }
+
+  // ── The phi webs: versions of one register a phi ties into one live range ──
+  const parent = new Map<string, string>();
+  const find = (k: string): string => {
+    let root = k;
+    for (let hop = 0; hop < 64; hop++) {
+      const p = parent.get(root);
+      if (p === undefined || p === root) break;
+      root = p;
+    }
+    // Path compression, bounded the same way: these CFGs come from
+    // disassembling untrusted bytes, so no walk here may be open-ended.
+    let cur = k;
+    for (let hop = 0; hop < 64; hop++) {
+      const p = parent.get(cur);
+      if (p === undefined || p === cur) break;
+      parent.set(cur, root);
+      cur = p;
+    }
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+  for (const [, blockPhis] of ctx.phis) {
+    for (const phi of blockPhis) {
+      if (phi.dest.version === undefined) continue;
+      const destCanon = canonReg(phi.dest.name);
+      const destKey = versionKey(destCanon, phi.dest.version);
+      if (!parent.has(destKey)) parent.set(destKey, destKey);
+      for (const op of phi.operands) {
+        if (op.value.version === undefined) continue;
+        // A cross-register operand is a real copy between two values, not one
+        // range under two names, so the two sides keep their own spellings.
+        if (canonReg(op.value.name) !== destCanon) continue;
+        const opKey = versionKey(destCanon, op.value.version);
+        if (!parent.has(opKey)) parent.set(opKey, opKey);
+        union(destKey, opKey);
+      }
+    }
+  }
+  /** Widest spelling across a whole web, keyed by the web's root. */
+  const webName = new Map<string, string>();
+  for (const key of parent.keys()) {
+    const name = perVersion.get(key);
+    if (name !== undefined) better(webName, find(key), name);
+  }
+
   // Only rax..r15 are 8 bytes wide; XMM and x87 are wider still and exist in
   // both modes, so they say nothing about which one this is.
   const is64 = [...widest.values()].some((n) => regSize(n) === 8);
-  return (canon) => widest.get(canon) ?? (is64 ? canon : regAtSize(canon, 4));
+  const byFunction = (canon: string) => widest.get(canon) ?? (is64 ? canon : regAtSize(canon, 4));
+  return (canon, version) => {
+    if (version === undefined) return byFunction(canon);
+    const key = versionKey(canon, version);
+    return webName.get(find(key)) ?? perVersion.get(key) ?? byFunction(canon);
+  };
 }
 
 // ── Call clobbers ──
@@ -172,8 +280,12 @@ function registerSpeller(ctx: SSAContext): (canon: string) => string {
  * last `rcx = …` line assigned — which is precisely the pre-call value. So the
  * read becomes a variable that nothing assigns, which is what the machine says:
  * an indeterminate value, the same one at every read of that version.
+ *
+ * `destroySSA`'s own `clobber` branch builds the *same* name for a phi operand
+ * carrying such a version, so the two must ask `spell` the same question — both
+ * pass the version, and one value keeps one name.
  */
-function nameClobberedReads(ctx: SSAContext, spell: (canon: string) => string): void {
+function nameClobberedReads(ctx: SSAContext, spell: Speller): void {
   if (ctx.clobbered.size === 0) return;
   for (const [blockId, stmts] of ctx.liftedBlocks) {
     ctx.liftedBlocks.set(
@@ -186,7 +298,11 @@ function nameClobberedReads(ctx: SSAContext, spell: (canon: string) => string): 
           // Named from the canonical register, not from this read's own
           // spelling: two reads of the same clobbered version at different
           // widths are the same indeterminate value and must not get two names.
-          return { kind: "var", name: clobberedName(spell(canon), reg.version), size: reg.size };
+          return {
+            kind: "var",
+            name: clobberedName(spell(canon, reg.version), reg.version),
+            size: reg.size,
+          };
         }),
       ),
     );
@@ -227,7 +343,7 @@ function nameClobberedReads(ctx: SSAContext, spell: (canon: string) => string): 
  * case the bead was filed for and had to guess at block entry for anything
  * defined elsewhere (peek-a-bin-bld).
  */
-function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map<string, string> {
+function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
   /** `<predecessor block>|<version key>` → the variable holding that version. */
   const phiRepairs = new Map<string, string>();
   const blockIds = ctx.blocks.map((b) => b.id);
@@ -509,7 +625,7 @@ function splitStaleReads(ctx: SSAContext, spell: (canon: string) => string): Map
     const siteKey = `${key}@${site.block}`;
     if (!copied.has(siteKey)) {
       copied.add(siteKey);
-      const spelling = spellings.get(key) ?? spell(s.canon);
+      const spelling = spellings.get(key) ?? spell(s.canon, s.version);
       const name = renamed.get(key) ?? staleName(spelling, s.version);
       renamed.set(key, name);
       const byIndex = inserts.get(site.block) ?? new Map<number, IRStmt[]>();

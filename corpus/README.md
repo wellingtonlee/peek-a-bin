@@ -174,8 +174,10 @@ declarations and the emitted field accesses disagree about where the data is.*
 
 **Stale version-0 names.** SSA version 0 is a register's *entry* value — no statement in the
 function defines it — so a surviving read of it is the decompiler saying "the value this register
-was given on the way in". If a block that **strictly dominates** the read has since written that
-register, the name in the output denotes something else. *A failure means the emitted C names a
+was given on the way in". If a block that **strictly dominates** the read has since assigned the
+**name the read uses**, the name in the output denotes something else. The name, not the canonical
+register: a register split into two live ranges is correctly emitted as two identifiers, and only
+one of them is clobbered — see "Two things the site set and the verdict had to be taught" below. *A failure means the emitted C names a
 register for a value it does not hold*: a store through the wrong pointer, a call passed the wrong
 argument, a `return` of the wrong value. It compiles clean, which is why nothing caught it
 (`peek-a-bin-dqpk` — 78 such reads on t64 and 28 on t32 before the fix).
@@ -519,6 +521,46 @@ much larger reading than it earns.
   instruction cannot be told apart: an instruction can name a register twice
   (`lea r9, [rdx + rsi + 0x1d]`, where RSI holds the entry RDX), and the audit treats the address
   as repaired if any preserved entry value of that register is named there.
+- **Only a phi-operand read that a statement also makes.** Reads come from the post-`ssaOptimize`
+  statement lists, so a version read *only* as a phi operand is not in the read set at all — unlike
+  `splitStaleReads`, which does treat one as a read (`PHI_OPERAND_INDEX`).
+- **A name collision the SSA is right about.** An identifier read but never assigned, while a
+  sibling alias of the same register *is* assigned, is a spelling defect with correct SSA
+  underneath, and no value-level test can see it. A crude positional scan of the emitted text is
+  the only instrument here, it admits false positives (a legitimately-unassigned entry value looks
+  identical), and it is an upper bound rather than a count.
+
+### Two things the site set and the verdict had to be taught, and why
+
+Both were found together and each hid the other (`peek-a-bin-fppy`, `peek-a-bin-pzws`). Neither is
+a subtlety of the audit's *subject*; both were the audit describing a program nobody emits.
+
+**A phi's definition lands in its predecessors, not in its own block.** The site filter builds
+`defBlocks` from the SSA, where a phi is a definition of the block holding it — but `destroySSA`
+puts the copy at the end of each *predecessor*, and a predecessor routinely dominates blocks the
+phi block does not. Where the only dominating writer was a relocated phi copy the site was
+discarded before it was ever judged. Noting the phi at each operand's block as well is sound
+because it only widens which reads get *examined*; the verdict is still taken against the
+post-lowering statements. Measured at `82ed61e`: sites 28/159/158/28 → **33/182/181/34**, and the
+gate went red at **12** over correct-looking output.
+
+**The `writes` test asks about the identifier, not the canonical register.** What this audit judges
+is emitted C, and C's unit of identity is the name: `r9` and `r9d` are unrelated variables there —
+which is exactly why `cc -fsyntax-only` is blind to this family, and it cuts both ways. A register
+carrying a 64-bit and a 32-bit live range at once is *correctly* emitted as two names, and against
+a canonical test that correct output reads as a clobber that never happens. One emit rule has to be
+honoured or the name test would narrow: `registerText` re-ties a read of width <= 2 to a wider
+assigned alias, so for those a dominating write of any wider alias is a real clobber.
+
+That test was checked rather than argued, both ways, pinned to `82ed61e`:
+
+| | canonical `writes` | name-level `writes` |
+|---|---|---|
+| before per-live-range naming | 12 | **12** |
+| after per-live-range naming | 12 | **0** |
+
+Neither change alone is sufficient, and the name test provably hides nothing — with the naming fix
+reverted it still reports every one of the twelve rows.
 
 ## Reading the numbers
 

@@ -41,7 +41,7 @@
 import { buildCFG } from "../src/disasm/cfg";
 import { foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
-import { canonReg, isKnownRegister } from "../src/disasm/decompile/ir";
+import { canonReg, isKnownRegister, regSize } from "../src/disasm/decompile/ir";
 import { liftBlock } from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import type { SSAContext } from "../src/disasm/decompile/ssa";
@@ -256,11 +256,11 @@ function addrOf(stmt: IRStmt): number | undefined {
 }
 
 /** The register this statement defines, versioned or not. */
-function regDef(stmt: IRStmt): { canon: string; version: number | undefined } | null {
+function regDef(stmt: IRStmt): { name: string; canon: string; version: number | undefined } | null {
   const dest =
     stmt.kind === "assign" ? stmt.dest : stmt.kind === "call_stmt" ? stmt.resultDest : undefined;
   if (dest?.kind !== "reg") return null;
-  return { canon: canonReg(dest.name), version: dest.version };
+  return { name: dest.name, canon: canonReg(dest.name), version: dest.version };
 }
 
 /** `rcx_0` → `rcx`, but only when the prefix really is a register. */
@@ -421,7 +421,25 @@ export function auditStaleV0Reads(
     else defBlocks.set(canon, new Set([block]));
   };
   for (const b of ctx.blocks) {
-    for (const phi of ctx.phis.get(b.id) ?? []) noteDef(canonReg(phi.dest.name), b.id);
+    for (const phi of ctx.phis.get(b.id) ?? []) {
+      const canon = canonReg(phi.dest.name);
+      // A phi is a definition in its own block *in SSA*, but the program that
+      // gets judged is the lowered one, and `destroySSA` does not put the copy
+      // here — it puts one at the end of each PREDECESSOR (ssadestroy.ts, "a
+      // phi's copy belongs on the edge"). A predecessor routinely dominates
+      // blocks the phi block does not, so attributing the definition only to
+      // the phi block is sound but INCOMPLETE, and its incompleteness is
+      // exactly the blocks a phi-predecessor dominates: a site whose only
+      // dominating writer is a relocated phi copy was discarded before it was
+      // ever judged (peek-a-bin-fppy, 12 provably wrong reads printed as 0).
+      //
+      // Over-approximating here is safe. This map only decides which reads are
+      // *examined*; the verdict is taken against the post-lowering statement
+      // list, where the `writes` check below requires a strictly dominating
+      // block to actually assign the bare name.
+      noteDef(canon, b.id);
+      for (const op of phi.operands) noteDef(canon, op.blockId);
+    }
     for (const s of ctx.liftedBlocks.get(b.id) ?? []) {
       const d = regDef(s);
       if (d) noteDef(d.canon, b.id);
@@ -507,23 +525,59 @@ export function auditStaleV0Reads(
     // at the same address.
     let survives = false;
     let repaired = false;
+    /** How the surviving reads at this address actually spell the register. */
+    const readNames = new Set<string>();
     for (const [, stmts] of ctx.liftedBlocks)
       for (const st of stmts) {
         if (addrOf(st) !== s.addr) continue;
         for (const r of readsOf(st))
-          if (r.version === undefined && canonReg(r.name) === s.canon) survives = true;
+          if (r.version === undefined && canonReg(r.name) === s.canon) {
+            survives = true;
+            readNames.add(r.name.toLowerCase());
+          }
         const names = new Set<string>();
         varsIn(st, names);
         for (const n of names) if (preserved.get(n) === s.canon) repaired = true;
       }
     if (repaired) continue;
-    // The write: a strictly dominating block assigns the bare name.
+    // ── The write: a strictly dominating block assigns the name the read uses ──
+    //
+    // THE NAME, NOT THE CANONICAL REGISTER, and the distinction is the whole of
+    // `peek-a-bin-pzws`. What this audit judges is the emitted C, and C's unit
+    // of identity is the identifier: `r9` and `r9d` are two unrelated variables
+    // there — that is precisely why `gcc -fsyntax-only` cannot see this defect
+    // class, and it cuts both ways. A register carrying a 64-bit range and a
+    // 32-bit range at once is correctly emitted as two names (`ssadestroy.ts`,
+    // "widest-in-the-function is the wrong scope"), and against a canonical
+    // test that correct output reads as a clobber that never happens: the
+    // dominating statement says `r9d = …` and the read says `r9`, so nothing
+    // the reader sees has changed. Asking about the canonical register makes
+    // the gate permanently red on the output it exists to certify.
+    //
+    // NOT A NARROWING, and it was checked rather than argued: with the naming
+    // fix reverted and this test in place the same twelve rows come back, one
+    // per store, because the copy is then spelled `r9` — the same identifier
+    // the stores read. What the name test removes is the false positive, not
+    // the finding.
+    //
+    // One emit rule has to be honoured here or the test *would* narrow.
+    // `emit.ts`'s `registerText` re-ties a read of width <= 2 to a wider
+    // assigned alias, so for those the emitted identifier is the wider name and
+    // a dominating write of any wider alias is a real clobber of what the
+    // reader sees.
     let writes = false;
+    const clobbers = (name: string): boolean => {
+      const lower = name.toLowerCase();
+      if (readNames.has(lower)) return true;
+      const width = regSize(lower);
+      for (const r of readNames) if (regSize(r) <= 2 && width > regSize(r)) return true;
+      return false;
+    };
     for (const [id, stmts] of ctx.liftedBlocks) {
       if (!strictDom(id, s.block)) continue;
       for (const st of stmts) {
         const d = regDef(st);
-        if (d && d.version === undefined && d.canon === s.canon) writes = true;
+        if (d && d.version === undefined && d.canon === s.canon && clobbers(d.name)) writes = true;
       }
     }
     if (!(survives && writes)) continue;
