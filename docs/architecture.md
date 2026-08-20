@@ -143,6 +143,27 @@ checksum and entropy moved to the metrics worker (`peek-a-bin-7hg`; Headers+Sect
 structured-clone the whole file (`peek-a-bin-7mf`; a file load's five calls 1868 → 706 ms). Both
 sets of figures come from node's `structuredClone` and node timings, not from a browser.
 
+**ARM64 decodes its code section once per load, not three times.** The linear sweep is the only
+source of instructions on that architecture, and three RPCs of one file load each need them —
+`detectFunctions` (for `bl` targets and switch dispatches), `hybridDisassemble` (for the view)
+and `buildAllXrefs` (for the adrp pairs). None can be handed the previous one's array across the
+worker boundary: an `Instruction[]` carries a `bytes` view per element, which is exactly what
+`workers/transfer.ts` exists to keep out of a message. They share it *inside* the worker instead,
+through `WorkerState.arm64Sweep` (`Arm64SweepCache` in `disasm/arm64.ts`), keyed on the section's
+bytes. Measured at `7082e66` by replaying a load's RPCs against the real dispatch:
+
+| | `cs.disasm` calls | fed to Capstone | load, median of 3 |
+|---|---|---|---|
+| t64-arm.exe (110 KiB `.text`, 27428 insns) | 4083 → **1361** | 7.32 → **2.44 MiB** | 407 → **166 ms** |
+| w64-arm.exe (98 KiB `.text`, 24393 insns) | 3393 → **1131** | 6.51 → **2.17 MiB** | 328 → **129 ms** |
+
+Only the decode is shared. Comments and the `.pdata` `source` classification are reapplied per
+caller (~5 ms on 27428 instructions), so what each RPC returns is unchanged — verified
+element-by-element against an uncached run on both binaries, with real extracted strings, a real
+IAT map and driver mode on. The x86 path never consults it: `buildAllXrefs` and the two x86
+disassemblers own their decode inside `functionDetect.ts`, and the four x86 corpus binaries emit
+byte-identical C across the change.
+
 ### Export table
 
 `parseExports()` in `src/pe/parser.ts` walks the **Export Address Table**, not the name table,

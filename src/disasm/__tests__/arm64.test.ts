@@ -28,10 +28,13 @@ import {
   ARM64_MIN_MEASURED_WORDS,
   type Arm64Context,
   Arm64DecodeRateError,
+  Arm64SweepCache,
   classifyArm64Br,
+  decorateArm64Sweep,
   detectArm64Functions,
   disassembleArm64,
   findArm64JumpTables,
+  sweepArm64,
 } from "../arm64";
 import { CapstoneUnavailableError, CS_ARCH_ARM64 } from "../capstoneWindow";
 import type { Instruction } from "../types";
@@ -870,6 +873,223 @@ describe("findArm64JumpTables", () => {
         kind: "unrecognised",
       });
     });
+  });
+});
+
+/**
+ * peek-a-bin-kis. Three RPCs sweep the same `.text` on every ARM64 file load —
+ * `detectFunctions`, `hybridDisassemble` and `buildAllXrefs` — because each one
+ * needs instructions and none can be handed the previous one's array across the
+ * worker boundary (a per-element `bytes` view is the case `workers/transfer.ts`
+ * exists to keep out of a message). Measured on t64-arm.exe before this cache:
+ * 3 sweeps, 4083 `cs.disasm` calls, 2.44 MiB fed to Capstone three times.
+ *
+ * What makes it safe is that the key is the section's *bytes*. The two real
+ * ARM64 binaries in the corpus both base `.text` at 0x140001000, so an
+ * address-and-length key is not hypothetically unsound here, it is unsound on
+ * the only two files there are.
+ */
+describe("Arm64SweepCache", () => {
+  /** Distinct, decoder-irrelevant filler — the stub decodes on address, not
+   *  content, but the cache compares content, so each section needs its own. */
+  function section(bytes: number, fill: number): Uint8Array {
+    return new Uint8Array(bytes).fill(fill);
+  }
+
+  it("decodes once and answers the second ask from memory", () => {
+    const cs = fakeCs(code(8));
+    const cache = new Arm64SweepCache();
+    const bytes = section(32, 0x11);
+
+    const first = cache.sweep(bytes, BASE, cs);
+    const callsAfterFirst = cs.calls.length;
+    const second = cache.sweep(bytes, BASE, cs);
+
+    expect(first).toHaveLength(8);
+    expect(second).toBe(first);
+    expect(cs.calls.length).toBe(callsAfterFirst);
+    expect(callsAfterFirst).toBeGreaterThan(0);
+  });
+
+  it("answers a byte-identical copy, not just the same array object", () => {
+    // The worker never sees the caller's buffer twice: `prepareBinaryArgs`
+    // hands each RPC its own private slice, so identity would never hit.
+    const cs = fakeCs(code(8));
+    const cache = new Arm64SweepCache();
+
+    const first = cache.sweep(section(32, 0x11), BASE, cs);
+    const callsAfterFirst = cs.calls.length;
+    const second = cache.sweep(section(32, 0x11), BASE, cs);
+
+    expect(second).toBe(first);
+    expect(cs.calls.length).toBe(callsAfterFirst);
+  });
+
+  it("re-decodes when one byte differs, at the same address and length", () => {
+    const cs = fakeCs(code(8));
+    const cache = new Arm64SweepCache();
+    const a = section(32, 0x11);
+    const b = section(32, 0x11);
+    b[31] ^= 0xff;
+
+    cache.sweep(a, BASE, cs);
+    const callsAfterFirst = cs.calls.length;
+    cache.sweep(b, BASE, cs);
+
+    expect(cs.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("re-decodes when the same bytes load at a different address", () => {
+    const cs = fakeCs(new Map([...code(8), ...code(8, 0x1000)]));
+    const cache = new Arm64SweepCache();
+    const bytes = section(32, 0x11);
+
+    const first = cache.sweep(bytes, BASE, cs);
+    const second = cache.sweep(bytes, BASE + 0x1000, cs);
+
+    expect(second).not.toBe(first);
+    expect(second[0].address).toBe(BASE + 0x1000);
+  });
+
+  it("re-decodes after clear()", () => {
+    const cs = fakeCs(code(8));
+    const cache = new Arm64SweepCache();
+    const bytes = section(32, 0x11);
+
+    cache.sweep(bytes, BASE, cs);
+    const callsAfterFirst = cs.calls.length;
+    cache.clear();
+    cache.sweep(bytes, BASE, cs);
+
+    expect(cs.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it("stores nothing when the section fails the decode-rate floor", () => {
+    // The ARM64EC/ARM64X refusal must not become a cached empty answer: every
+    // ask has to throw, not just the first one (peek-a-bin-2t1).
+    const cs = fakeCs(code(1, 400));
+    const cache = new Arm64SweepCache();
+    const bytes = section(0x2000, 0x22);
+
+    expect(() => cache.sweep(bytes, BASE, cs)).toThrow(Arm64DecodeRateError);
+    expect(() => cache.sweep(bytes, BASE, cs)).toThrow(Arm64DecodeRateError);
+  });
+
+  it("caches the decode, never the decoration", () => {
+    // The cached array is undecorated, and each caller re-annotates. Two
+    // callers with different string maps must not see each other's comments.
+    const cs = fakeCs(new Map([[BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }]]));
+    const cache = new Arm64SweepCache();
+    const bytes = section(4, 0x33);
+
+    const bare = disassembleArm64(bytes, BASE, ctx(cs), undefined, cache);
+    const annotated = disassembleArm64(
+      bytes,
+      BASE,
+      { cs, stringMap: new Map([[0x140002000, "hello"]]), iatMap: new Map(), driverMode: false },
+      undefined,
+      cache,
+    );
+    const bareAgain = disassembleArm64(bytes, BASE, ctx(cs), undefined, cache);
+
+    expect(bare[0].comment).toBeUndefined();
+    expect(annotated[0].comment).toBe("hello");
+    expect(bareAgain[0].comment).toBeUndefined();
+  });
+
+  it("caches the decode, never the .pdata classification", () => {
+    const cs = fakeCs(code(2));
+    const cache = new Arm64SweepCache();
+    const bytes = section(8, 0x44);
+    const ranges = [{ beginAddress: BASE, endAddress: BASE + 4 }];
+
+    const marked = disassembleArm64(bytes, BASE, ctx(cs), ranges, cache);
+    const unmarked = disassembleArm64(bytes, BASE, ctx(cs), undefined, cache);
+
+    expect(marked.map((i) => i.source)).toEqual(["recursive", "gap-fill"]);
+    expect(unmarked.map((i) => i.source)).toEqual([undefined, undefined]);
+  });
+
+  it("gives disassembleArm64 the same answer with a cache as without one", () => {
+    const words = new Map([
+      [BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }],
+      [BASE + 4, { mnemonic: "bl", opStr: "#0x140001100" }],
+    ]);
+    const c = {
+      cs: fakeCs(words),
+      stringMap: new Map([[0x140002000, "s"]]),
+      iatMap: new Map(),
+      driverMode: false,
+    };
+    const ranges = [{ beginAddress: BASE, endAddress: BASE + 4 }];
+    const bytes = section(8, 0x55);
+
+    const withoutCache = disassembleArm64(bytes, BASE, c, ranges);
+    const withCache = disassembleArm64(bytes, BASE, c, ranges, new Arm64SweepCache());
+
+    expect(withCache).toEqual(withoutCache);
+  });
+
+  it("gives detectArm64Functions the same answer with a cache as without one", () => {
+    const words = new Map([
+      [BASE, { mnemonic: "bl", opStr: "#0x140001010" }],
+      [BASE + 4, { mnemonic: "ret", opStr: "" }],
+      [BASE + 16, { mnemonic: "ret", opStr: "" }],
+    ]);
+    const bytes = section(32, 0x66);
+    const opts = { entryPoint: BASE };
+
+    const withoutCache = detectArm64Functions(bytes, BASE, ctx(fakeCs(words)), opts);
+    const withCache = detectArm64Functions(
+      bytes,
+      BASE,
+      ctx(fakeCs(words)),
+      opts,
+      new Arm64SweepCache(),
+    );
+
+    expect(withCache).toEqual(withoutCache);
+    expect(withCache.functions.map((f) => f.address)).toContain(BASE + 0x10);
+  });
+
+  it("still degrades detection rather than throwing when the floor is missed", () => {
+    const bytes = section(0x2000, 0x77);
+
+    const r = detectArm64Functions(
+      bytes,
+      BASE,
+      ctx(fakeCs(code(1, 400))),
+      { entryPoint: BASE },
+      new Arm64SweepCache(),
+    );
+
+    expect(r.omitted).toEqual(["call-targets", "jump-tables"]);
+    expect(r.functions.map((f) => f.address)).toEqual([BASE]);
+  });
+});
+
+describe("sweepArm64 / decorateArm64Sweep", () => {
+  it("sweeps undecorated and decorates without touching the raw array", () => {
+    const cs = fakeCs(new Map([[BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }]]));
+    const raw = sweepArm64(new Uint8Array(4), BASE, cs);
+
+    const decorated = decorateArm64Sweep(
+      raw,
+      { cs, stringMap: new Map([[0x140002000, "abc"]]), iatMap: new Map(), driverMode: false },
+      [{ beginAddress: BASE, endAddress: BASE + 4 }],
+    );
+
+    expect(raw[0].comment).toBeUndefined();
+    expect(raw[0].source).toBeUndefined();
+    expect(decorated[0].comment).toBe("abc");
+    expect(decorated[0].source).toBe("recursive");
+    expect(decorated[0]).not.toBe(raw[0]);
+  });
+
+  it("throws the decode-rate error from the sweep, before any decoration", () => {
+    expect(() => sweepArm64(new Uint8Array(0x2000), BASE, fakeCs(code(1, 400)))).toThrow(
+      Arm64DecodeRateError,
+    );
   });
 });
 

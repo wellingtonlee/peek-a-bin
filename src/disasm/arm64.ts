@@ -17,7 +17,7 @@
  * `unsupportedOnArch` in ./arch.ts.
  */
 
-import { createScan, requireCapstone } from "./capstoneWindow";
+import { type CapstoneHandle, createScan, requireCapstone } from "./capstoneWindow";
 import { type DetectPass, type DetectResult, mapInsn } from "./functionDetect";
 import type { DisasmFunction, Instruction } from "./types";
 
@@ -155,36 +155,33 @@ function rangeTest(ranges: CodeRange[] | undefined): (addr: number) => boolean {
 }
 
 /**
- * Disassemble an ARM64 code section by linear sweep.
+ * The linear sweep itself, with no annotation and no `.pdata` classification.
  *
- * This is both the plain and the "hybrid" disassembly for ARM64: recursive
- * descent exists on x86 to find the instruction boundaries that a
- * variable-length encoding makes ambiguous, and A64 has no such ambiguity. Any
- * 4-byte-aligned word is either a valid instruction or it is not, and reading
- * it in isolation gives the same answer as reading it in context.
+ * Split out of {@link disassembleArm64} because the decode is the expensive
+ * half and the *only* half that depends on nothing but the bytes: `comment`
+ * comes from the session's string/IAT maps and `source` from the caller's
+ * `.pdata` ranges, so two callers wanting different decoration still want the
+ * same instructions. That is what makes {@link Arm64SweepCache} sound — see its
+ * docstring for the three callers that were each paying for a full sweep of the
+ * same section on every file load (peek-a-bin-kis).
  *
- * `pdataRanges`, when supplied, only classifies the result: a word inside a
- * linker-recorded function extent is code the image itself vouches for
- * (`source: "recursive"`), a word outside every extent is the sweep's own guess
- * (`source: "gap-fill"`, which the disassembly view dims). Nothing is decoded
- * differently because of it.
+ * Throws {@link Arm64DecodeRateError} exactly where the combined function used
+ * to, so the ARM64EC/ARM64X refusal is unmoved and a refused section never
+ * becomes a cached empty answer.
  */
-export function disassembleArm64(
+export function sweepArm64(
   bytes: Uint8Array,
   baseAddress: number,
-  ctx: Arm64Context,
-  pdataRanges?: CodeRange[],
+  cs: CapstoneHandle | null | undefined,
 ): Instruction[] {
   // Throw rather than return `[]`: this sweep *is* the ARM64 disassembly, so an
   // empty list is a complete-looking answer for a `.text` full of code
   // (peek-a-bin-cen). `detectArm64Functions` below keeps its own `if (ctx.cs)`
   // guard, because its other evidence does not come from the decoder.
-  const cs = requireCapstone(ctx.cs, "ARM64 sweep");
+  const handle = requireCapstone(cs, "ARM64 sweep");
   const out: Instruction[] = [];
 
-  const scan = createScan(cs, "ARM64 sweep", ARM64_DECODE_WINDOW);
-  const isKnownCode = rangeTest(pdataRanges);
-  const marks = pdataRanges !== undefined && pdataRanges.length > 0;
+  const scan = createScan(handle, "ARM64 sweep", ARM64_DECODE_WINDOW);
   // A trailing partial word cannot be an instruction.
   const len = bytes.length - (bytes.length % ARM64_INSN_SIZE);
   let offset = 0;
@@ -204,11 +201,10 @@ export function disassembleArm64(
     }
     probing = false;
 
-    for (const insn of insns) {
-      const mapped = mapInsn(insn, ctx.stringMap, ctx.iatMap, ctx.driverMode);
-      if (marks) mapped.source = isKnownCode(insn.address) ? "recursive" : "gap-fill";
-      out.push(mapped);
-    }
+    // Undecorated: `mapInsn` with empty maps is the identity copy of the five
+    // fields a decode produces, and it is the same constructor the decorated
+    // path uses, so the two cannot drift in what they copy.
+    for (const insn of insns) out.push(mapInsn(insn, EMPTY_STRINGS, EMPTY_IAT, false));
 
     const last = insns[insns.length - 1];
     const next = last.address + last.size - baseAddress;
@@ -225,6 +221,136 @@ export function disassembleArm64(
   }
 
   return out;
+}
+
+/** Shared empties for {@link sweepArm64}; `mapInsn` only ever reads their size. */
+const EMPTY_STRINGS: Map<number, string> = new Map();
+const EMPTY_IAT: Map<number, { lib: string; func: string }> = new Map();
+
+/**
+ * Annotate a raw sweep: string/IAT/IOCTL comments, and `.pdata` classification.
+ *
+ * Always builds fresh {@link Instruction} objects — `mapInsn` constructs rather
+ * than mutates — so a cached raw sweep can be decorated any number of times, by
+ * callers wanting different maps or different ranges, without any of them
+ * seeing another's annotations.
+ */
+export function decorateArm64Sweep(
+  raw: readonly Instruction[],
+  ctx: Arm64Context,
+  pdataRanges?: CodeRange[],
+): Instruction[] {
+  const isKnownCode = rangeTest(pdataRanges);
+  const marks = pdataRanges !== undefined && pdataRanges.length > 0;
+  const out: Instruction[] = new Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const mapped = mapInsn(raw[i], ctx.stringMap, ctx.iatMap, ctx.driverMode);
+    if (marks) mapped.source = isKnownCode(raw[i].address) ? "recursive" : "gap-fill";
+    out[i] = mapped;
+  }
+  return out;
+}
+
+/**
+ * One ARM64 code section's decode, remembered for the rest of the session.
+ *
+ * Three separate RPCs sweep the *same* `.text` on every ARM64 file load —
+ * `detectFunctions` (for `bl` targets and switch dispatches),
+ * `hybridDisassemble` (for the view) and `buildAllXrefs` (for the adrp pairs) —
+ * and measured on t64-arm.exe that was 3 x ~130 ms of Capstone for one answer.
+ * Re-decorating a remembered sweep costs ~6 ms instead (peek-a-bin-kis).
+ *
+ * **The key is the bytes themselves, not their address or their length.** A hit
+ * requires the same `baseAddress` and a byte-for-byte equal section, so there is
+ * no cross-file hazard to reason about: an entry can only be served to a request
+ * whose decode would be identical by construction. That matters because the
+ * worker cannot trust message *order* — a decode for the newly loaded file can
+ * be serviced before the `configure` that announces it (peek-a-bin-x4o2), so a
+ * key that leaned on "the session was reset in between" would be exactly the
+ * defect that bug was. Two different files with the same base and the same
+ * `.text` size collide on a length-and-address key and do not collide here; two
+ * files with genuinely identical code sections "collide" here and get the right
+ * answer anyway. The comparison short-circuits on the first differing byte, so a
+ * miss costs nothing and the full compare (0.2 ms on 110 KiB) is only paid when
+ * it is about to save a sweep.
+ *
+ * Only one section is held. The three callers ask about the same `.text` back to
+ * back, and keeping a map keyed by content would pin every section a session
+ * ever looked at.
+ *
+ * A section that fails the decode-rate floor throws out of {@link sweepArm64}
+ * before anything is stored, so the ARM64EC/ARM64X refusal cannot be turned into
+ * a cached empty answer.
+ */
+export class Arm64SweepCache {
+  private entry?: { bytes: Uint8Array; baseAddress: number; insns: Instruction[] };
+
+  /** The decode of exactly these bytes, from memory when possible. */
+  sweep(
+    bytes: Uint8Array,
+    baseAddress: number,
+    cs: CapstoneHandle | null | undefined,
+  ): Instruction[] {
+    const hit = this.entry;
+    if (hit && hit.baseAddress === baseAddress && sameBytes(hit.bytes, bytes)) return hit.insns;
+    const insns = sweepArm64(bytes, baseAddress, cs);
+    this.entry = { bytes, baseAddress, insns };
+    return insns;
+  }
+
+  /**
+   * Forget the held section.
+   *
+   * Memory hygiene, not correctness: the content key above already makes a
+   * stale hit impossible, so this only stops one file's instructions from
+   * outliving it in a session that goes on to load another.
+   */
+  clear(): void {
+    this.entry = undefined;
+  }
+}
+
+/** Byte-for-byte equality; short-circuits on the first difference. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Disassemble an ARM64 code section by linear sweep.
+ *
+ * This is both the plain and the "hybrid" disassembly for ARM64: recursive
+ * descent exists on x86 to find the instruction boundaries that a
+ * variable-length encoding makes ambiguous, and A64 has no such ambiguity. Any
+ * 4-byte-aligned word is either a valid instruction or it is not, and reading
+ * it in isolation gives the same answer as reading it in context.
+ *
+ * `pdataRanges`, when supplied, only classifies the result: a word inside a
+ * linker-recorded function extent is code the image itself vouches for
+ * (`source: "recursive"`), a word outside every extent is the sweep's own guess
+ * (`source: "gap-fill"`, which the disassembly view dims). Nothing is decoded
+ * differently because of it.
+ *
+ * `cache`, when supplied, may answer the decode from a previous call on the same
+ * bytes — see {@link Arm64SweepCache}. The annotation is redone either way, so
+ * the returned array is the same whether or not one is passed; omitting it is
+ * exactly the behaviour every caller had before the cache existed.
+ */
+export function disassembleArm64(
+  bytes: Uint8Array,
+  baseAddress: number,
+  ctx: Arm64Context,
+  pdataRanges?: CodeRange[],
+  cache?: Arm64SweepCache,
+): Instruction[] {
+  const raw = cache
+    ? cache.sweep(bytes, baseAddress, ctx.cs)
+    : sweepArm64(bytes, baseAddress, ctx.cs);
+  return decorateArm64Sweep(raw, ctx, pdataRanges);
 }
 
 /** `bl #0x140001018` — the only call form whose target is known statically. */
@@ -767,6 +893,13 @@ export function detectArm64Functions(
     pdataFunctions?: CodeRange[];
     handlerAddresses?: number[];
   },
+  /**
+   * The session's memo of this section's decode. Detection is the first of the
+   * three ARM64 RPCs to sweep `.text`, so passing one here is what fills it for
+   * the `hybridDisassemble` and `buildAllXrefs` that follow (peek-a-bin-kis).
+   * Omitting it sweeps unconditionally, as this always did.
+   */
+  cache?: Arm64SweepCache,
 ): DetectResult {
   const endAddress = baseAddress + bytes.length;
   const inSection = (addr: number) => addr >= baseAddress && addr < endAddress;
@@ -815,7 +948,14 @@ export function detectArm64Functions(
   if (ctx.cs) {
     try {
       const insidePdata = rangeTest(options?.pdataFunctions);
-      const insns = disassembleArm64(bytes, baseAddress, ctx);
+      // The undecorated sweep: nothing below reads `comment` or `source` —
+      // the `bl` scan reads `mnemonic`/`opStr` and `findArm64JumpTables` reads
+      // those plus `address`. Annotating here was work whose result was
+      // discarded, and skipping it is also what lets the result be shared with
+      // the two callers that decorate differently.
+      const insns = cache
+        ? cache.sweep(bytes, baseAddress, ctx.cs)
+        : sweepArm64(bytes, baseAddress, ctx.cs);
       for (const insn of insns) {
         if (insn.mnemonic !== "bl") continue;
         const m = insn.opStr.match(BL_TARGET);

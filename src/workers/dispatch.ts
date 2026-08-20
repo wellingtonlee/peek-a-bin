@@ -19,7 +19,12 @@ import {
   unsupportedArchMessage,
   unsupportedOnArch,
 } from "../disasm/arch";
-import { type Arm64Context, detectArm64Functions, disassembleArm64 } from "../disasm/arm64";
+import {
+  type Arm64Context,
+  Arm64SweepCache,
+  detectArm64Functions,
+  disassembleArm64,
+} from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
 import { unpackDataWindows } from "../disasm/dataWindows";
 import { decompileFunction } from "../disasm/decompile/pipeline";
@@ -100,6 +105,21 @@ export interface WorkerState {
   funcMap: Map<number, { name: string; address: number }>;
   jumpTableMap: Map<number, number[]>;
   structRegistry: StructRegistry;
+  /**
+   * The ARM64 linear sweep of one code section, remembered across RPCs.
+   *
+   * Three methods decode the same `.text` on every ARM64 file load —
+   * `detectFunctions`, `hybridDisassemble` and `buildAllXrefs` — because the
+   * sweep is the only way any of them gets instructions and none of them can be
+   * handed the previous one's array: an `Instruction[]` carries a `bytes` view
+   * per element, which is the case `./transfer.ts` exists to keep out of a
+   * message. Sharing it *inside* the worker costs nothing, and the worker is
+   * where all three run (peek-a-bin-kis).
+   *
+   * Keyed on the section's bytes, so it cannot answer for a different file; see
+   * {@link Arm64SweepCache}. Never consulted on the x86 path.
+   */
+  arm64Sweep: Arm64SweepCache;
   /** Resolves once Capstone is ready; awaited by the `init` method. */
   ready: Promise<void>;
 }
@@ -117,6 +137,7 @@ export function createWorkerState(ready: Promise<void>): WorkerState {
     funcMap: new Map(),
     jumpTableMap: new Map(),
     structRegistry: new StructRegistry(),
+    arm64Sweep: new Arm64SweepCache(),
     ready,
   };
 }
@@ -186,6 +207,13 @@ export async function dispatch(
       // assignment here would reset an ARM64 session to x86 mid-analysis.
       if (args.machine !== undefined) state.arch = archForMachine(args.machine);
       state.structRegistry = new StructRegistry();
+      // Memory hygiene only. A declared machine type is the load handshake, so
+      // this is where one file's instructions stop being worth holding — but
+      // the cache is keyed on the bytes, not on this, precisely because a
+      // decode can be serviced *before* the `configure` that announces its file
+      // (peek-a-bin-x4o2). Dropping it late costs a re-sweep; it can never
+      // produce a wrong answer.
+      if (args.machine !== undefined) state.arm64Sweep.clear();
       return true;
 
     case "configureDecompileMaps": {
@@ -208,6 +236,11 @@ export async function dispatch(
         throw new Error(unsupportedArchMessage("Disassembly"));
       }
       if (arch === "arm64") {
+        // Deliberately not routed through `state.arm64Sweep`. This method is
+        // the one that may be handed a *sub-range* — one function's bytes —
+        // and the cache holds a single section, so a small decode would evict
+        // the whole-`.text` entry the other three share. The client caches this
+        // answer on its own side anyway.
         return disassembleArm64(args.bytes, args.baseAddress, armCtx(state));
       }
       return _disassemble(args.bytes, args.baseAddress, args.is64, ctx(state));
@@ -225,7 +258,16 @@ export async function dispatch(
         // covers the whole section rather than only what a BFS could reach.
         // `pdataRanges` still arrives, and marks which words the image itself
         // vouches for.
-        return disassembleArm64(args.bytes, args.baseAddress, armCtx(state), args.pdataRanges);
+        // The annotation and the `.pdata` marking are redone here whether or
+        // not the sweep itself came from the cache, so what the view gets is
+        // byte-identical either way; only the Capstone pass is skipped.
+        return disassembleArm64(
+          args.bytes,
+          args.baseAddress,
+          armCtx(state),
+          args.pdataRanges,
+          state.arm64Sweep,
+        );
       }
       return _hybridDisassemble(
         args.bytes,
@@ -261,7 +303,13 @@ export async function dispatch(
       if (arch === "arm64") {
         // No jump-table reader on ARM64 — a `br` through a table is not the
         // pattern `readRvaTable` models — so the windows would go unread.
-        return detectArm64Functions(args.bytes, args.baseAddress, armCtx(state), args.options);
+        return detectArm64Functions(
+          args.bytes,
+          args.baseAddress,
+          armCtx(state),
+          args.options,
+          state.arm64Sweep,
+        );
       }
       // `.rdata` and friends arrive flattened (see ../disasm/dataWindows.ts):
       // one top-level buffer the client could transfer, plus its spans. Rebuilt
@@ -295,23 +343,17 @@ export async function dispatch(
         // not fail, it invents references. `buildArm64Xrefs` reads the real
         // thing: an adrp/add or adrp/ldr pair, plus `bl` for the call graph.
         //
-        // It takes decoded instructions rather than bytes, and the sweep is
-        // redone here from the bytes this call already carries — the same thing
-        // the x86 branch does, which re-decodes the section inside
-        // `buildAllXrefs`. Measured: 155 ms for t64-arm.exe's 110 KiB / 27428
-        // instructions. Shipping the caller's `Instruction[]` instead would put
-        // a per-instruction `bytes` view in every message, which is what
-        // ./transfer.ts exists to keep out.
+        // It takes decoded instructions rather than bytes. Shipping the
+        // caller's `Instruction[]` in the message is not the answer — every
+        // element carries a `bytes` view, which is what ./transfer.ts exists to
+        // keep out — so the sweep is shared through `state.arm64Sweep` instead,
+        // which the `detectFunctions` for this same section already filled.
+        // Measured on t64-arm.exe: 130 ms of Capstone, now 0 (peek-a-bin-kis).
         //
-        // The annotation maps are deliberately left empty for that sweep: they
-        // only ever set `Instruction.comment`, and xrefs read nothing but
-        // address, mnemonic and opStr.
-        const insns = disassembleArm64(args.bytes, args.baseAddress, {
-          cs: state.csArm64,
-          stringMap: new Map(),
-          iatMap: new Map(),
-          driverMode: false,
-        });
+        // Undecorated on purpose, and it does not matter which caller filled
+        // the cache: xrefs read nothing but address, mnemonic and opStr, and
+        // the annotation maps only ever set `Instruction.comment`.
+        const insns = state.arm64Sweep.sweep(args.bytes, args.baseAddress, state.csArm64);
         return buildArm64Xrefs(
           insns,
           args.stringAddrs,

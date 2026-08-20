@@ -1335,6 +1335,237 @@ describe("dispatch — buildAllXrefs routes ARM64 to the A64 reader", () => {
 });
 
 /**
+ * peek-a-bin-kis — the ARM64 linear sweep is shared across the RPCs of one file
+ * load instead of being redone by each.
+ *
+ * Three methods need instructions for the same `.text`: `detectFunctions` (for
+ * `bl` targets and switch dispatches), `hybridDisassemble` (for the view) and
+ * `buildAllXrefs` (for the adrp pairs). None can be handed the previous one's
+ * array — an `Instruction[]` carries a `bytes` view per element, which is what
+ * ../transfer.ts keeps out of a message — so the sharing happens inside the
+ * worker, through `WorkerState.arm64Sweep`. Measured on t64-arm.exe: 3 sweeps /
+ * 4083 `cs.disasm` calls / ~390 ms of Capstone, down to 1 / 1361 / ~130 ms.
+ *
+ * The key is the section's bytes. Both real ARM64 binaries in the corpus base
+ * `.text` at 0x140001000, so keying on the address would be unsound on the only
+ * two files that exist to test with.
+ */
+describe("dispatch — the ARM64 sweep is shared across one file's RPCs", () => {
+  const TEXT_BASE = 0x140001000;
+  const MACHINE_ARM64 = 0xaa64;
+  /** Inside the 0x40-byte section, so detection registers it as a function and
+   *  the call graph has somewhere to point. */
+  const CALLEE = 0x140001020;
+
+  /** An A64 decoder stub that counts how many times it is entered. */
+  function countingArm() {
+    const stub = {
+      calls: 0,
+      disasm(bytes: Uint8Array, options: { address: number }) {
+        stub.calls++;
+        const out: {
+          address: number;
+          mnemonic: string;
+          opStr: string;
+          size: number;
+          bytes: Uint8Array;
+        }[] = [];
+        for (let i = 0; i + 4 <= bytes.length; i += 4) {
+          out.push({
+            address: options.address + i,
+            mnemonic: i === 0 ? "bl" : "nop",
+            opStr: i === 0 ? `#0x${CALLEE.toString(16)}` : "",
+            size: 4,
+            bytes: bytes.subarray(i, i + 4),
+          });
+        }
+        return out;
+      },
+    };
+    return stub;
+  }
+
+  /** A fresh view of the same section, as `prepareBinaryArgs` gives each RPC. */
+  const section = () => new Uint8Array(0x40).fill(0x5a);
+
+  async function load(cs: ReturnType<typeof countingArm>, s: WorkerState) {
+    const common = { baseAddress: TEXT_BASE, is64: true, machine: MACHINE_ARM64 };
+    const det = (await dispatch(
+      "detectFunctions",
+      { ...common, bytes: section(), options: { entryPoint: TEXT_BASE } },
+      s,
+    )) as { functions: { address: number; size: number }[] };
+    const insns = (await dispatch(
+      "hybridDisassemble",
+      { ...common, bytes: section(), seeds: [] },
+      s,
+    )) as Instruction[];
+    const xr = (await dispatch(
+      "buildAllXrefs",
+      {
+        ...common,
+        bytes: section(),
+        stringAddrs: [],
+        iatAddrs: [],
+        funcEntries: det.functions.map((f) => [f.address, f.size]),
+      },
+      s,
+    )) as { callGraph: [number, number[]][] };
+    return { det, insns, xr, decodes: cs.calls };
+  }
+
+  /** Decodes one sweep of the section costs, via the one method that is
+   *  deliberately never cached. */
+  async function oneSweep(): Promise<number> {
+    const cs = countingArm();
+    await dispatch(
+      "disassemble",
+      { bytes: section(), baseAddress: TEXT_BASE, is64: true, machine: MACHINE_ARM64 },
+      state({ arch: "arm64", csArm64: cs }),
+    );
+    return cs.calls;
+  }
+
+  it("decodes the section once for detect, hybrid and xrefs together", async () => {
+    const cs = countingArm();
+
+    const shared = await load(cs, state({ arch: "arm64", csArm64: cs }));
+
+    // Three RPCs, one sweep — this was 3 x the sweep before the cache.
+    expect(shared.decodes).toBe(await oneSweep());
+  });
+
+  it("returns the same answers it did when each RPC swept for itself", async () => {
+    // The sweep is cached undecorated and every caller re-annotates, so nothing
+    // any of the three returns may change. The `hybridDisassemble` array is the
+    // one the view renders, and it is compared element by element.
+    const cs = countingArm();
+    const shared = await load(cs, state({ arch: "arm64", csArm64: cs }));
+
+    const csA = countingArm();
+    const detAlone = await dispatch(
+      "detectFunctions",
+      {
+        bytes: section(),
+        baseAddress: TEXT_BASE,
+        is64: true,
+        machine: MACHINE_ARM64,
+        options: { entryPoint: TEXT_BASE },
+      },
+      state({ arch: "arm64", csArm64: csA }),
+    );
+    const csB = countingArm();
+    const insnsAlone = await dispatch(
+      "hybridDisassemble",
+      { bytes: section(), baseAddress: TEXT_BASE, is64: true, machine: MACHINE_ARM64, seeds: [] },
+      state({ arch: "arm64", csArm64: csB }),
+    );
+
+    expect(shared.det).toEqual(detAlone);
+    expect(shared.insns).toEqual(insnsAlone);
+  });
+
+  it("still finds the call graph the shared sweep was needed for", async () => {
+    const cs = countingArm();
+    const { xr } = await load(cs, state({ arch: "arm64", csArm64: cs }));
+
+    expect(xr.callGraph).toEqual([[TEXT_BASE, [CALLEE]]]);
+  });
+
+  it("re-decodes for a second file whose section differs", async () => {
+    const cs = countingArm();
+    const s = state({ arch: "arm64", csArm64: cs });
+    const common = { baseAddress: TEXT_BASE, is64: true, machine: MACHINE_ARM64, seeds: [] };
+
+    await dispatch("hybridDisassemble", { ...common, bytes: new Uint8Array(0x40).fill(0x5a) }, s);
+    const afterFirst = cs.calls;
+    // Same base address and same length — both real ARM64 binaries are like
+    // this — but different bytes, so this must not be answered from memory.
+    await dispatch("hybridDisassemble", { ...common, bytes: new Uint8Array(0x40).fill(0xa5) }, s);
+
+    expect(cs.calls).toBeGreaterThan(afterFirst);
+  });
+
+  it("drops the held sweep when configure declares a machine type", async () => {
+    const cs = countingArm();
+    const s = state({ arch: "arm64", csArm64: cs });
+    const args = {
+      baseAddress: TEXT_BASE,
+      is64: true,
+      machine: MACHINE_ARM64,
+      seeds: [],
+      bytes: section(),
+    };
+
+    await dispatch("hybridDisassemble", args, s);
+    const afterFirst = cs.calls;
+    await dispatch("configure", { stringEntries: [], iatEntries: [], machine: MACHINE_ARM64 }, s);
+    await dispatch("hybridDisassemble", { ...args, bytes: section() }, s);
+
+    expect(cs.calls).toBeGreaterThan(afterFirst);
+  });
+
+  it("keeps the held sweep across a configure that declares no machine type", async () => {
+    // The second `configure` of a load re-sends the strings and knows nothing
+    // about the machine; it is not a new file and must not cost a re-sweep.
+    const cs = countingArm();
+    const s = state({ arch: "arm64", csArm64: cs });
+    const args = {
+      baseAddress: TEXT_BASE,
+      is64: true,
+      machine: MACHINE_ARM64,
+      seeds: [],
+      bytes: section(),
+    };
+
+    await dispatch("hybridDisassemble", args, s);
+    const afterFirst = cs.calls;
+    await dispatch("configure", { stringEntries: [], iatEntries: [] }, s);
+    await dispatch("hybridDisassemble", { ...args, bytes: section() }, s);
+
+    expect(cs.calls).toBe(afterFirst);
+  });
+
+  it("never consults the cache on the x86 path", async () => {
+    // The x86 branches decode inside functionDetect.ts and must be untouched.
+    const cs = countingArm();
+    const s = state({ arch: "x86", csArm64: cs, cs64: cs, cs32: cs });
+    let consulted = 0;
+    const real = s.arm64Sweep.sweep.bind(s.arm64Sweep);
+    s.arm64Sweep.sweep = (...a: Parameters<typeof real>) => {
+      consulted++;
+      return real(...a);
+    };
+    const common = { baseAddress: 0x401000, is64: true, bytes: new Uint8Array(0x40), seeds: [] };
+
+    await dispatch("hybridDisassemble", common, s);
+    await dispatch("buildAllXrefs", { ...common, stringAddrs: [], iatAddrs: [] }, s);
+    await dispatch("detectFunctions", { ...common, options: {} }, s);
+
+    expect(consulted).toBe(0);
+  });
+
+  it("does not put a single-function decode in the section's slot", async () => {
+    // `disassemble` is the one method that may be handed a sub-range. The cache
+    // holds one section, so caching a 16-byte decode would evict the whole
+    // `.text` the other three share.
+    const cs = countingArm();
+    const s = state({ arch: "arm64", csArm64: cs });
+    const common = { baseAddress: TEXT_BASE, is64: true, machine: MACHINE_ARM64 };
+
+    await dispatch("hybridDisassemble", { ...common, bytes: section(), seeds: [] }, s);
+    const afterSection = cs.calls;
+    await dispatch("disassemble", { ...common, bytes: new Uint8Array(0x10).fill(0x5a) }, s);
+    await dispatch("hybridDisassemble", { ...common, bytes: section(), seeds: [] }, s);
+
+    // The sub-range decoded (so it grew), but the section was still remembered
+    // (so the third call added nothing beyond that one decode).
+    expect(cs.calls).toBeGreaterThan(afterSection);
+    expect(cs.calls).toBe(afterSection + 1);
+  });
+});
+
+/**
  * peek-a-bin-y1di — the bytes of a recovered jump table are data, and the
  * worker is where that gets said: `detectFunctions` finds the spans, the client
  * carries them, and this dispatch hands them to the sweep. Dropped here, the
