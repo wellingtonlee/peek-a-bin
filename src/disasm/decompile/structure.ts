@@ -1,7 +1,7 @@
 import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
 import { clobberedAfter, flagResultSetter, isFlagTransparent } from "./flagResult";
-import type { IRExpr, IRStmt } from "./ir";
+import type { IRBranch, IRExpr, IRStmt } from "./ir";
 import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies, walkExpr } from "./ir";
 import { parseOperand } from "./lifter";
 import { RegState } from "./regstate";
@@ -269,6 +269,7 @@ export function structureCFG(
   liftedBlocks: Map<number, IRStmt[]>,
   jumpTables: Map<number, number[]>,
   is64 = false,
+  branches: Map<number, IRBranch> = new Map(),
 ): IRStmt[] {
   if (blocks.length === 0) return [];
 
@@ -399,10 +400,15 @@ export function structureCFG(
       // nothing rather than being handed to the result path, because widening
       // condition 2 would also widen the definitions `ssaopt.ts`'s DCE holds
       // live off the same predicate.
-      if (!sawCmpTest) {
-        const fromResult = conditionFromFlagResult(block, mn, liftedBlocks.get(block.id) ?? []);
-        if (fromResult) return fromResult;
-      }
+      // ── The refusals, asked of the reading taken from the instructions ──
+      //
+      // Both are questions about the machine, not about the IR, and they must
+      // be asked of the machine's own operand names. Asking them of the IR
+      // condition instead defeats them: `cmp eax, 5 / mov eax, edx / je` has
+      // its guard rebound to EDX by copy propagation, so by the time the
+      // expression reaches here the register that was overwritten is not in it
+      // and `conditionSpoiled` finds nothing to object to — while the emitted
+      // test is still the one the machine does not make (peek-a-bin-xe01).
       const cond = regState.getCondition(mn);
       if (
         flagSetterAddr !== null &&
@@ -410,6 +416,31 @@ export function structureCFG(
         conditionSpoiled(block, flagSetterAddr, cond)
       )
         return { kind: "unknown", text: mn };
+
+      // ── The IR's answer, where there is one ──
+      //
+      // `liftBlock` built this from the same `RegState` and the same forward
+      // walk, at the same program point, so it starts out the expression the
+      // lines below would have produced. What makes it a better answer is
+      // everything that has happened to it since: SSA renamed its registers to
+      // the definitions that reach the Jcc, copy and constant propagation
+      // rewrote them, `splitStaleReads` repaired the ones a later write had
+      // spoiled, and `foldBlock` inlined any definition whose only remaining
+      // reader is this guard. Re-parsing `insn.opStr` here threw all of that
+      // away and named registers whose assignments those same passes had
+      // deleted (peek-a-bin-c33, peek-a-bin-f50k).
+      //
+      // A block with no branch statement still reaches the old path, and so
+      // does one whose condition the lifter could not spell: an indirect or
+      // unresolved jump target records no branch at all, and `jecxz` and
+      // friends read a register rather than the flags.
+      const fromIR = branches.get(block.id)?.condition;
+      if (fromIR && fromIR.kind !== "unknown") return fromIR;
+
+      if (!sawCmpTest) {
+        const fromResult = conditionFromFlagResult(block, mn, liftedBlocks.get(block.id) ?? []);
+        if (fromResult) return fromResult;
+      }
       return cond;
     }
 

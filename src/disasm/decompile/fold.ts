@@ -549,6 +549,8 @@ function foldStmt(stmt: IRStmt): IRStmt {
         handler: stmt.handler.map(foldStmt),
         filterExpr: stmt.filterExpr ? foldExpr(stmt.filterExpr) : undefined,
       };
+    case "branch":
+      return { ...stmt, condition: foldExpr(stmt.condition) };
     default:
       return stmt;
   }
@@ -599,6 +601,12 @@ function countReadsInStmt(stmt: IRStmt, canon: string): number {
       return stmt.call.args.reduce((n, a) => n + countReads(a, canon), 0);
     case "return":
       return stmt.value ? countReads(stmt.value, canon) : 0;
+    // Counted, so a definition whose only remaining reader is the guard is
+    // *inlined into it* rather than left naming a register nothing assigns —
+    // and one read by the guard as well as by a real statement stops being
+    // single-use and keeps its own line (peek-a-bin-c33).
+    case "branch":
+      return countReads(stmt.condition, canon);
     default:
       return 0;
   }
@@ -670,6 +678,8 @@ function substituteRegInStmt(stmt: IRStmt, canon: string, replacement: IRExpr): 
       };
     case "return":
       return stmt.value ? { ...stmt, value: substituteReg(stmt.value, canon, replacement) } : stmt;
+    case "branch":
+      return { ...stmt, condition: substituteReg(stmt.condition, canon, replacement) };
     default:
       return stmt;
   }
@@ -883,7 +893,19 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
             }
           }
         }
-        if (!blocked && totalReads === 1 && firstReadIdx >= 0) {
+        // A guard's read counts towards `totalReads` — that is what stops a
+        // definition two statements read from being inlined into one of them
+        // and leaving the other naming nothing — but it is never the statement
+        // the value moves *into*. Inlining into a branch deletes the assignment
+        // and rewrites the guard, and both halves do damage: the register is
+        // frequently live out of the block (a loop counter always is), and the
+        // structurer matches loop shapes on the statements a block ends with,
+        // so `inc eax / cmp eax, 5 / jl` turned a `do { … } while (eax < 5)`
+        // into `while (eax + 1 < 5)` with the increment gone. Measured on the
+        // suite before the refusal existed: 8 structuring tests changed shape
+        // (peek-a-bin-c33).
+        const readerIsBranch = firstReadIdx >= 0 && result[firstReadIdx].kind === "branch";
+        if (!blocked && !readerIsBranch && totalReads === 1 && firstReadIdx >= 0) {
           // Inline: substitute into the statement that reads it
           result[firstReadIdx] = substituteRegInStmt(result[firstReadIdx], canon, stmt.src);
           changed = true;

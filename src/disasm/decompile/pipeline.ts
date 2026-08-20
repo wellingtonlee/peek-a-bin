@@ -5,7 +5,7 @@ import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
 import { emitFunction } from "./emit";
 import { foldBlock } from "./fold";
-import type { IRStmt, IRTry } from "./ir";
+import type { IRBranch, IRStmt, IRTry } from "./ir";
 import { firstCalleeSavedWrites, liftBlock } from "./lifter";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
@@ -131,17 +131,22 @@ export function decompileFunction(
     // still present in `lifted` would be reported as a dropped statement in
     // every block that ends in a conditional jump.
     //
-    // Nothing consumes the extracted branches yet — `extractCondition` still
-    // re-reads the instruction. Wiring it to these is a later stage, and doing
-    // it here would move guard text corpus-wide before the cost of the change
-    // has been measured on its own.
+    // The conditions are kept, keyed by block, and handed to `structureCFG`:
+    // `extractCondition` prefers this — the expression the dataflow stages
+    // renamed, propagated into, repaired and folded — over re-reading the
+    // `cmp`/`test` off the instruction. That is the whole point of the
+    // statement kind; the extraction is only about where it may *appear*.
+    const branches = new Map<number, IRBranch>();
     for (const [blockId, stmts] of liftedBlocks) {
-      if (stmts.some((s) => s.kind === "branch")) {
-        liftedBlocks.set(
-          blockId,
-          stmts.filter((s) => s.kind !== "branch"),
-        );
+      const kept: IRStmt[] = [];
+      let branch: IRBranch | null = null;
+      for (const s of stmts) {
+        if (s.kind === "branch") branch = s;
+        else kept.push(s);
       }
+      if (!branch) continue;
+      branches.set(blockId, branch);
+      liftedBlocks.set(blockId, kept);
     }
 
     // 5. Structure CFG → structured IR statements
@@ -152,7 +157,7 @@ export function decompileFunction(
     const liftedBefore = tap
       ? new Map([...liftedBlocks].map(([id, stmts]) => [id, [...stmts]]))
       : null;
-    const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables, is64);
+    const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables, is64, branches);
     if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured });
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)

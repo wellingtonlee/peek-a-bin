@@ -84,6 +84,11 @@ function replaceRegInStmt(stmt: IRStmt, oldReg: IRReg, newVal: IRExpr): IRStmt {
       };
     case "return":
       return stmt.value ? { ...stmt, value: replaceRegInExpr(stmt.value, oldReg, newVal) } : stmt;
+    // Copy propagation, constant propagation and GVN all rewrite through here.
+    // A guard left out of the rewrite keeps naming a register whose defining
+    // copy this same pass is about to delete (peek-a-bin-c33, peek-a-bin-f50k).
+    case "branch":
+      return { ...stmt, condition: replaceRegInExpr(stmt.condition, oldReg, newVal) };
     default:
       return stmt;
   }
@@ -280,6 +285,12 @@ export function deadCodeElimination(ctx: SSAContext): boolean {
         break;
       case "return":
         if (s.value) countExprUses(s.value);
+        break;
+      // The use `protectedFlagDefs` below was invented to stand in for. Now
+      // that the guard is a statement, its reads are counted directly and the
+      // definition they name is held live by the count rather than by hand.
+      case "branch":
+        countExprUses(s.condition);
         break;
     }
   }

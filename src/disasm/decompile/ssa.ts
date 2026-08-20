@@ -367,6 +367,12 @@ function stmtUses(s: IRStmt): Set<string> {
     case "return":
       if (s.value) walk(s.value);
       break;
+    // A guard's registers are reads like any others. Without this arm the
+    // block-terminating condition contributes nothing to the live-in set, and
+    // the value it names looks unused to everything downstream of here.
+    case "branch":
+      walk(s.condition);
+      break;
   }
   return uses;
 }

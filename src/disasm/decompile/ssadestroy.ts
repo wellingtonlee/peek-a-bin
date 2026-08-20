@@ -784,22 +784,19 @@ function mapReads(stmt: IRStmt, f: (reg: IRReg) => IRExpr | null): IRStmt {
       return { ...stmt, call: { ...stmt.call, args: stmt.call.args.map(expr) } };
     case "return":
       return stmt.value ? { ...stmt, value: expr(stmt.value) } : stmt;
-    // NOTE: `branch` is deliberately NOT handled here, and this is the one place
-    // where that differs from `stripVersionsStmt` above.
+    // A guard's registers are reads like any others, so `splitStaleReads` can
+    // both see and repair one — ~300 stale, unrepairable reads per binary
+    // before this arm existed.
     //
-    // A guard's registers *are* reads, and `splitStaleReads` cannot see or
-    // repair one while this arm is missing — ~300 stale, unrepairable register
-    // reads per binary. That must be fixed, but it must be fixed AT THE SAME
-    // TIME as `extractCondition` starts consuming these conditions, not before:
-    // `pipeline.ts` step 4b discards every branch before structuring, so a
-    // repair taken for a read inside a condition serves a consumer that no
-    // longer exists. Measured — adding the arm on its own costs +116 emitted
-    // lines across 96 functions, all of them dead copies like `eax_29 = eax`,
-    // for no recovered value at all (peek-a-bin-c33).
-    //
-    // None of those ~300 reads is version 0, so `corpus/staleReads.ts` stays
-    // green through every one: teaching the audit the new kind was necessary
-    // and is not sufficient.
+    // It had to land in the same change as `extractCondition` consuming these
+    // conditions, and not one commit earlier: while `pipeline.ts` step 4b threw
+    // the branches away, every repair taken for a read inside a condition
+    // served a consumer that no longer existed. Measured on its own it cost
+    // +116 emitted lines across 96 functions, all of them dead copies like
+    // `eax_29 = eax` (peek-a-bin-c33). None of those reads is version 0, so
+    // `corpus/staleReads.ts` would have stayed green through every one of them.
+    case "branch":
+      return { ...stmt, condition: expr(stmt.condition) };
     default:
       // Every remaining kind carries no register: structuring has not run yet,
       // so there are no nested bodies, and phis are handled separately.

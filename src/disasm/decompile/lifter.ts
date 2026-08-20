@@ -2,6 +2,7 @@ import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import type { Instruction } from "../types";
 import { isFlagReadingJump } from "./flagModel";
+import { isFlagTransparent } from "./flagResult";
 import type { BinaryOp, IRCall, IRExpr, IRStmt } from "./ir";
 import {
   canonReg,
@@ -281,6 +282,19 @@ const SSE_SCALAR = new Map<string, BinaryOp | null>([
 ]);
 
 /**
+ * Mnemonics whose flag effect this file records into `RegState`, so the state
+ * they leave behind is a description of what the machine did rather than a
+ * leftover.
+ *
+ * Everything else either leaves the flags untouched (`isFlagTransparent`) or
+ * writes them in a way nothing here models, and the second case must displace
+ * whatever an earlier compare recorded. Membership is deliberately narrow: a
+ * mnemonic wrongly *in* this set makes a Jcc answer from a test the machine no
+ * longer holds, while one wrongly left out only costs a recovery.
+ */
+const FLAG_MODELLED = new Set(["cmp", "test", "comiss", "comisd", "ucomiss", "ucomisd"]);
+
+/**
  * Lift a single basic block's instructions to IR statements.
  *
  * `calleeSavedFirstWrite` is the one piece of *function*-wide context this
@@ -304,9 +318,49 @@ export function liftBlock(
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
+  /**
+   * Did the *previous* instruction leave the flags somewhere this class cannot
+   * describe? See `FLAG_MODELLED` — the clear is deferred by one iteration so a
+   * flag *reader* still sees the state its own instruction reads.
+   */
+  let flagsStale = false;
+
+  /**
+   * Are the flags currently described by a `cmp`/`test` this loop recorded?
+   *
+   * Narrower than "the flag state is known": `comiss`/`comisd` also call
+   * `setFlags`, so `getCondition` answers after one — which is what `setcc`
+   * and `cmovcc` have always read and is left exactly as it was. But
+   * `structure.ts` vetoes a guard whose compared operand was overwritten by
+   * asking `clobberedAfter` about the `cmp` it can see in the instruction
+   * stream, and it recognises `cmp`/`test` only. Building a branch statement
+   * from anything else would hand it a condition its own veto cannot judge.
+   */
+  let flagsFromCompare = false;
+
   for (const insn of block.insns) {
     const mn = insn.mnemonic.toLowerCase();
     const parts = splitOperands(insn.opStr);
+
+    // ── Forward flag invalidation ──
+    //
+    // `RegState`'s flag fields survive until something overwrites them, and
+    // until now nothing in this loop ever did: `cmp eax, 5 / sub ecx, edx /
+    // jne` recorded the `cmp` and then answered the `jne` from it, which is
+    // the wrong test over the wrong operands (peek-a-bin-jitf). The same walk
+    // `structure.ts`'s `extractCondition` performs is performed here, off the
+    // same `isFlagTransparent` table, so the two cannot drift.
+    //
+    // The clear is applied at the top of the *next* iteration rather than at
+    // the end of this one because a `setcc`/`cmovcc`/`jcc` reads the flags its
+    // own instruction reads — the state as of *before* it. Clearing eagerly
+    // would answer every one of them `unknown`.
+    if (flagsStale) {
+      regState.clearFlags();
+      flagsFromCompare = false;
+      flagsStale = false;
+    }
+    flagsStale = !isFlagTransparent(mn) && !FLAG_MODELLED.has(mn);
 
     // A register this instruction uses as an address *index* has had its value
     // spent on addressing — noted before the dispatch below, so that an
@@ -518,6 +572,7 @@ export function liftBlock(
         const left = parseOperand(parts[0], insn, is64);
         const right = parseOperand(parts[1], insn, is64);
         regState.setFlags(mn as "cmp" | "test", left, right);
+        flagsFromCompare = true;
         // Emit eflags definition for SSA cross-block propagation
         const flagExpr = mn === "cmp" ? irBinary("-", left, right) : irBinary("&", left, right);
         stmts.push({ kind: "assign", dest: irReg("eflags", 4), src: flagExpr, addr: insn.address });
@@ -671,7 +726,11 @@ export function liftBlock(
     // test a *register* and read no flag, so a flag-derived condition would be
     // a statement about something they do not do.
     if (mn === "jmp" || mn.startsWith("j")) {
-      if (isFlagReadingJump(mn) && insn === block.insns[block.insns.length - 1]) {
+      if (
+        flagsFromCompare &&
+        isFlagReadingJump(mn) &&
+        insn === block.insns[block.insns.length - 1]
+      ) {
         // Only a direct target is recorded. An indirect or unresolved jump has
         // no address to name, and inventing one is the failure mode
         // `parseBranchTarget`'s guard exists to prevent.
@@ -899,6 +958,7 @@ export function liftBlock(
       } else if (mn === "comiss" || mn === "comisd" || mn === "ucomiss" || mn === "ucomisd") {
         // Comparison — sets eflags
         regState.setFlags("cmp", parseOperand(parts[0], insn, is64), src);
+        flagsFromCompare = false;
         stmts.push({
           kind: "assign",
           dest: irReg("eflags", 4),

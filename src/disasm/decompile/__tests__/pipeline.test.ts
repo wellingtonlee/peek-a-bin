@@ -5156,15 +5156,20 @@ function staleGuardReads(code: string, entryValues: string[]): string[] {
  * `if (var_40C > eax)` where the machine compares against 0x200 — the constant
  * reaches the neighbouring store and is lost from the compare.
  *
- * These are pinned with `it.fails` so the suite stays green while the defect
- * stands. Each asserts the CORRECT output; when c33 lands, they start passing
- * and the `.fails` comes off.
+ * All three PASS as of peek-a-bin-c33's Stage 3, which made the guard's
+ * registers real IR readers: the condition now goes through SSA renaming, copy
+ * and constant propagation and `foldBlock`'s use counting like every other
+ * expression, so mechanisms 1 and 2 rewrite it in step with the rest of the
+ * block and mechanism 3 no longer sees a single-use definition. They were
+ * pinned with `it.fails` while the defect stood; the `.fails` came off when it
+ * did. Do not put it back — a failure here now means the guard has stopped
+ * being an IR reader again.
  */
 describe("decompileFunction — a guard names a value the body actually computed", () => {
   // peek-a-bin-f50k case 1. `mov eax, ecx` is a copy, so `copyPropagation`
   // deletes it. Correct output: the guard dereferences the value ECX holds,
   // either by naming `ecx` or by keeping `eax = ecx` above it.
-  it.fails("keeps the copy that computed the compared value", () => {
+  it("keeps the copy that computed the compared value", () => {
     const code = run(
       seq(0x401000, [
         ["mov", "eax, ecx"],
@@ -5185,7 +5190,7 @@ describe("decompileFunction — a guard names a value the body actually computed
   // correctly puts 0x200 into the store and `deadCodeElimination` correctly
   // removes the dead def. Correct output: the guard compares against 0x200,
   // exactly as the store does.
-  it.fails("compares against the constant, not the register that carried it", () => {
+  it("compares against the constant, not the register that carried it", () => {
     const code = run(
       seq(0x401000, [
         ["mov", "eax, 0x200"],
@@ -5206,7 +5211,7 @@ describe("decompileFunction — a guard names a value the body actually computed
   // constant, so it survives `ssaOptimize` — but the store is its only
   // remaining IR use once the `eflags` def is stripped, so `foldBlock` inlines
   // it. Correct output: the guard and the store name the same machine value.
-  it.fails("does not fold away the only definition its guard reads", () => {
+  it("does not fold away the only definition its guard reads", () => {
     const code = run(
       seq(0x401000, [
         ["mov", "eax, dword ptr [ecx]"],
@@ -5223,9 +5228,16 @@ describe("decompileFunction — a guard names a value the body actually computed
     expect(staleGuardReads(code, ["ecx", "ebx"])).toEqual([]);
   });
 
-  // Control, and it must keep passing. A def that is neither a copy nor a
-  // constant and has no other IR use is held live by `deadCodeElimination`'s
-  // `eflags` protection, so the guard's register does have an assignment.
+  // Control, and it must keep passing — but the mechanism changed underneath
+  // it and the change is the point. It used to survive because
+  // `deadCodeElimination` holds a Jcc block's `eflags` definition live
+  // (peek-a-bin-ua8), which preserved the statement without the guard ever
+  // being a reader. Now the guard IS a reader, so the def has a real use — and
+  // `foldBlock` deliberately refuses to inline into a branch, or this would
+  // become `if (*(uint8_t*)(*(int32_t*)(ecx)) == 0x30)` with the assignment
+  // gone. That refusal is what keeps EAX assigned for any successor block that
+  // reads it, and what keeps `structureCFG` able to recognise a loop by the
+  // statement its body ends with (peek-a-bin-c33).
   it("keeps a load whose only reader is the guard", () => {
     const code = run(
       seq(0x401000, [
@@ -5243,8 +5255,9 @@ describe("decompileFunction — a guard names a value the body actually computed
     expect(staleGuardReads(code, ["ecx"])).toEqual([]);
   });
 
-  // The same control one step further out: arithmetic is not propagatable
-  // either, so `eax += ecx` survives and the guard is right.
+  // The same control one step further out, and the sharper one: `add eax, ecx`
+  // WRITES EAX, so inlining it into the guard would delete a machine effect
+  // rather than merely relocate an expression.
   it("keeps an arithmetic definition whose only reader is the guard", () => {
     const code = run(
       seq(0x401000, [

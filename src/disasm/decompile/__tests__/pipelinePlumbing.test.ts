@@ -22,6 +22,12 @@
  * dropping the argument again would be invisible to every other test in the
  * repo, including the end-to-end `pipeline.test.ts`.
  *
+ * The pattern ends at `is64` followed by a comma OR the closing paren, because
+ * `structureCFG` grew a sixth parameter — the extracted branch conditions
+ * (peek-a-bin-c33) — and pinning the paren would make the guard fail on a
+ * *correct* call. What it has to catch is `is64` going missing, and it still
+ * does: the argument is positional, so nothing else can occupy that slot.
+ *
  * Asserted against the source text because the argument has no observable
  * effect on `decompileFunction`'s return value; the behaviour it selects is
  * asserted directly against `structureCFG` below. `flatSource` strips comments
@@ -52,12 +58,12 @@ describe("pipeline.ts — is64 reaches structureCFG (peek-a-bin-h0us)", () => {
   it("passes is64 as structureCFG's fifth argument", () => {
     const text = flatSource("pipeline.ts");
     expect(
-      /structureCFG\(\s*blocks\s*,\s*loops\s*,\s*liftedBlocks\s*,\s*jumpTables\s*,\s*is64\s*\)/.test(
+      /structureCFG\(\s*blocks\s*,\s*loops\s*,\s*liftedBlocks\s*,\s*jumpTables\s*,\s*is64\s*[,)]/.test(
         text,
       ),
       "src/disasm/decompile/pipeline.ts must call " +
-        "structureCFG(blocks, loops, liftedBlocks, jumpTables, is64). The parameter defaults to " +
-        "false, so omitting it compiles and emits identical-looking C while describing every " +
+        "structureCFG(blocks, loops, liftedBlocks, jumpTables, is64, …). The parameter defaults " +
+        "to false, so omitting it compiles and emits identical-looking C while describing every " +
         "64-bit compare with 32-bit operand widths (peek-a-bin-h0us).",
     ).toBe(true);
   });
