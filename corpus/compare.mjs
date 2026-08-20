@@ -200,6 +200,46 @@ for (const b of bins) {
     note("  unrecovered values            NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── Call arity against apitypes.ts's declared signatures. ──────────────
+  //
+  // The dimension NOTHING ELSE HERE CAN SEE. `gcc -std=gnu89` accepts an
+  // implicit declaration at any arity and the emitter writes no prototypes, so
+  // the compiler gate is insensitive to call arity by construction: it could
+  // not have caught `peek-a-bin-qb2x` (x64 arguments set up through a 32-bit
+  // sub-register, ExitProcess() emitted with no argument at all) and cannot
+  // certify the fix. `apitypes.ts` is the only oracle in the repo that can.
+  //
+  // OVER is the direction with no benign reading: no entry in the table is
+  // variadic, so a call passing more arguments than the API takes passes one the
+  // machine never passed. It is not gated in the run only because its standing
+  // value is not zero and a threshold at today's absolute goes stale as
+  // detection moves; a RISE between two pinned commits is a regression on its
+  // own terms. UNDER is judged the same way with the caveat that a newly
+  // detected function can raise it innocently — the function count is printed
+  // above, and a rise is adjudicated, not assumed. Absent on either side must
+  // not read as zero: a run that never measured would otherwise score best.
+  if (B.arity && C.arity) {
+    row(
+      "arity over-count",
+      (x) => x.arity.over,
+      (a, c) => c > a,
+    );
+    row(
+      "arity under-count",
+      (x) => x.arity.under,
+      (a, c) => c > a,
+    );
+    row("  under at the ABI ceiling", (x) => x.arity.underAtCeiling);
+    row(
+      "  under below the ceiling",
+      (x) => x.arity.underBelowCeiling,
+      (a, c) => c > a,
+    );
+    row("  declared callees called", (x) => x.arity.distinctCallees);
+  } else {
+    note("  arity over-count              NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —
@@ -258,6 +298,17 @@ for (const b of bins) {
     (x) => x.polarity.ok,
     (x) => x.polarity.checked,
   );
+  // The share of declared-API calls whose emitted arity is the declared one —
+  // the figure `peek-a-bin-qb2x` moved, and the one a regression in argument
+  // recovery shows up in. The denominator moves with detection; the fraction
+  // falling is the finding.
+  if (B.arity && C.arity) {
+    ratio(
+      "arity exact",
+      (x) => x.arity.exact,
+      (x) => x.arity.sites,
+    );
+  }
 
   // A baseline, not a gate — see README. Reported because a move in it is worth
   // looking at even though a nonzero value is normal. LOST COVERAGE IS NOT A

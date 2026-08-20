@@ -21,6 +21,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { type ArityResult, auditApiArity } from "./arity";
 import {
   type CcResult,
   ccSyntaxCheck,
@@ -43,6 +44,7 @@ const artifactDir = join(
 const results = new Map<BinKey, BinResult>();
 const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
+const arResults = new Map<BinKey, ArityResult>();
 
 const auditedKeys = (): BinKey[] => [...results.keys()];
 function over<T>(keys: readonly BinKey[], m: Map<BinKey, T>): T[] {
@@ -78,6 +80,10 @@ if (!pre.haveBins || !pre.haveCc) {
         const sets = [{ tag: key, funcs: r.funcs }];
         ccResults.set(key, ccSyntaxCheck(pre.cc, join(artifactDir, "cc", key), sets));
         ozResults.set(key, offsetofCheck(pre.cc, join(artifactDir, "offsetof", key), sets));
+        // The ONE audit here with an oracle that can see call arity. gcc cannot:
+        // it accepts an implicit declaration at any arity, and `preludeFor`
+        // declares every undeclared identifier as its own `long`.
+        arResults.set(key, auditApiArity(r.funcs, r.is64));
 
         // Written per binary rather than at the end, so a run that dies on the
         // fourth binary still leaves the first three on disk.
@@ -116,6 +122,20 @@ if (!pre.haveBins || !pre.haveCc) {
           [...r.staleV0.rows, ...r.staleV0.corrupt].map((x) => JSON.stringify(x)).join("\n") +
             (r.staleV0.rows.length + r.staleV0.corrupt.length > 0 ? "\n" : ""),
         );
+        // Every emitted call to an API `apitypes.ts` declares whose arity does
+        // not match the declaration — the OVER rows first, since an over-count
+        // is an argument the emitter invented and there is no reading of the
+        // machine on which it is right. Written even when empty, so an absent
+        // file means the audit did not run rather than that it found nothing.
+        const ar = arResults.get(key) as ArityResult;
+        const arBad = [
+          ...ar.rows.filter((x) => x.verdict === "over"),
+          ...ar.rows.filter((x) => x.verdict === "under"),
+        ];
+        writeFileSync(
+          join(artifactDir, `arity_${key}.jsonl`),
+          arBad.map((x) => JSON.stringify(x)).join("\n") + (arBad.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -134,6 +154,7 @@ if (!pre.haveBins || !pre.haveCc) {
               jumpTablesJson: undefined,
               cc: ccResults.get(key),
               offsetof: ozResults.get(key),
+              arity: { ...ar, rows: ar.rows.length },
             },
             null,
             1,
@@ -314,6 +335,51 @@ if (!pre.haveBins || !pre.haveCc) {
       for (const r of results.values()) expect(r.unrecovered.scannedFuncs).toBeGreaterThan(100);
     });
 
+    /**
+     * NOT A GATE ON THE ARITY COUNTS — and this one is the closest call in the
+     * file, so the reasoning is worth stating rather than assumed.
+     *
+     * Every OVER row is *provably* wrong: no entry in `apitypes.ts` is variadic,
+     * so a call passing more arguments than the API takes passes one the machine
+     * never passed. That is `stale version-0 names`' character, not a baseline's
+     * — and that audit gates. The difference is only that this count is NOT
+     * zero: 3 per x64 binary and 8-10 per x86 one at `e22ba6e`, none of them
+     * introduced by the change this audit was rebuilt to certify. A gate would
+     * therefore have to be a threshold at today's absolute, and absolutes here
+     * move whenever function detection does — a newly detected function
+     * containing the same pre-existing defect would fail CI for a change that
+     * caused nothing. So a rise is judged where rises are judged, in
+     * `compare.mjs`, between two runs pinned to two commits.
+     *
+     * IF THE OVER COUNT IS EVER DRIVEN TO 0, MAKE IT A GATE AT 0. That is the
+     * honest upgrade and it is exactly the history of the stale-read audit.
+     *
+     * What is asserted here is instrument liveness, and it matters more than
+     * usual because both counts' *good* direction is downward: a scan that
+     * quietly stopped matching call sites would report `over 0, under 0` and
+     * look like the healthiest thing in the report.
+     */
+    it("reads call arity against the declared signatures (liveness, not a gate)", () => {
+      const blind = [...arResults.entries()]
+        .filter(([, a]) => a.sites === 0 || a.scannedFuncs === 0)
+        .map(([k, a]) => `${k} (${a.sites} sites, ${a.scannedFuncs} functions read)`);
+      expect(`found no declared-API call site in: ${blind.join(", ")}`).toBe(
+        "found no declared-API call site in: ",
+      );
+      for (const a of arResults.values()) {
+        expect(a.sites).toBeGreaterThan(50);
+        expect(a.distinctCallees).toBeGreaterThan(10);
+        // The table itself. An `apitypes.ts` that stopped exporting its entries
+        // would take every row with it and report a perfect score.
+        expect(a.declaredNames).toBeGreaterThan(100);
+        // Every site the scan counted produced a row, so the jsonl and the
+        // totals cannot disagree about what was measured.
+        expect(a.rows.length).toBe(a.sites);
+        expect(a.exact + a.under + a.over).toBe(a.sites);
+        expect(a.underAtCeiling + a.underBelowCeiling).toBe(a.under);
+      }
+    });
+
     it("lays every struct field out at the offset its name records", () => {
       for (const [key, r] of ozResults) {
         expect(`${key}: ${r.bad.join("; ")}`).toBe(`${key}: `);
@@ -370,6 +436,29 @@ function renderReport(): string {
       `  offsetof (compiled and run) ${o.fieldsCorrect}/${o.fields} fields, ` +
         `${o.distinctCorrect}/${o.distinctDefs} distinct definitions`,
     );
+    const ar = arResults.get(key) as ArityResult;
+    L.push(
+      `  API call arity vs apitypes   ${ar.exact}/${ar.sites} exact (${pct(ar.exact, ar.sites)}), ` +
+        `under ${ar.under} (${ar.underAtCeiling} at the ABI ceiling, ${ar.underBelowCeiling} below), ` +
+        `over ${ar.over} — NOT a gate`,
+    );
+    L.push(
+      "    The ONLY oracle here that can see arity: gcc accepts an implicit declaration at any",
+    );
+    L.push("    arity. OVER is an argument the emitter invented and every row is provably wrong;");
+    L.push("    UNDER at the ceiling is the argument evidence running out (4 fastcall registers,");
+    L.push("    8 scanned pushes), UNDER below it is a recovery the evidence was there for.");
+    const overBy = ar.byCallee
+      .filter((c) => c.over > 0)
+      .map((c) => `${c.over} ${c.callee}`)
+      .join(", ");
+    const underBy = ar.byCallee
+      .filter((c) => c.under > 0)
+      .slice(0, 8)
+      .map((c) => `${c.under} ${c.callee}`)
+      .join(", ");
+    if (overBy) L.push(`    over:  ${overBy}`);
+    if (underBy) L.push(`    under: ${underBy}`);
     const cov = r.lineMapCoverage;
     L.push(
       `  BASELINE line map coverage  ${cov.insnsCovered}/${cov.insnsTotal} instructions ` +

@@ -98,6 +98,11 @@ call the reader is told does not happen.*
 emitted something that is not C.* Registers, imported APIs and Win32 typedefs are declared for it
 from gcc's own complaints, because the decompiler deliberately does not declare them.
 
+> **It is blind to call arity, by construction.** An implicit declaration is accepted at any
+> arity, and `preludeFor` declares each undeclared identifier as its own `long`, so a call passing
+> two arguments to a no-argument API compiles clean. **Call arity** below is the audit for that,
+> and it is the only one in the repo that can see the dimension at all.
+
 > **"Clean" is not "recovered."** A large share of these functions compile precisely because the
 > emitter *names* what it failed to recover — `__unrecovered_N`, an "unlifted" comment — instead of
 > printing something plausible. Do not read "all of them compile" as "all of them are right". The
@@ -253,6 +258,72 @@ values (89 → 281 branches) and t64/w64/w32 from 85/67/85 to 220/186/241. `pola
 462 → 398 on t32 in the same run, and `npm run corpus` itself stays **green**, because none of
 this is gated in the run. `compare.mjs` reports 16 regressions and exits 1.
 
+**Call arity against `apitypes.ts`'s declared signatures** — `arity.ts`. For every emitted call
+whose callee `src/disasm/decompile/apitypes.ts` declares, the arguments the emitted C passes are
+counted against the parameters the table declares. **Measured at `e22ba6e`:**
+
+| | t32 | t64 | w64 | w32 |
+|---|---|---|---|---|
+| exact / sites | 70/105 | 88/127 | 92/133 | 73/111 |
+| under (at the ABI ceiling / below it) | 27 (0/27) | 36 (26/10) | 38 (26/12) | 28 (0/28) |
+| **over** | 8 | 3 | 3 | 10 |
+
+**This is the only oracle in the repo that can see call arity, and the gcc gate is blind to the
+dimension by construction.** `gcc -std=gnu89` accepts an implicit declaration at *any* arity, the
+emitter deliberately writes no callee prototypes, and `emitAudits.ts`'s `preludeFor` declares
+every undeclared identifier as its own `long`. So `842/842 clean` cannot move on an arity defect:
+it could not have caught `peek-a-bin-qb2x` — x64 arguments set up through a 32-bit sub-register,
+where `ExitProcess()` was emitted with no argument at all while the machine passed one, and the
+`mov ecx, 1` that set it up was then deleted as dead — and it cannot certify the fix. No entry in
+the table is variadic, so a declared count is exact rather than a minimum — 209 signatures at
+`e22ba6e`, 14 of which take no parameter at all (CLAUDE.md's "~130" for that table is stale).
+
+**Why the file exists at all**, and it is this directory's own lesson turned on its author:
+`peek-a-bin-qb2x` was verified against an instrument that lived in a scratch worktree and was
+deleted with it. The diff carried the fix; it did not carry the measurement, and the headline
+claim became unrepeatable until this was rebuilt (`peek-a-bin-02fa`). *When an agent builds an
+oracle to verify a change, landing the oracle is part of the change.*
+
+The two directions are not symmetric and must not be read as one number:
+
+| | |
+|---|---|
+| **over** | The call passes MORE arguments than the API takes. There is no reading of the machine on which that is right — the argument was invented. `GetLastError(rcx)`, `GetProcessHeap(8, 0x1000)` (the pushes belong to the *next* call), `SetFilePointer(…, 5 of 4)`. Every one of the 24 rows in the corpus is provably wrong, and every one compiles clean. |
+| **under** | The call passes FEWER. Split in two, because only one half is a recoverable defect: `underAtCeiling` is the emitted count sitting exactly at the ABI evidence's ceiling — `collectArgs64`'s four fastcall registers, `collectArgs32`'s eight-push scan — where an API declaring five or more parameters is short *by construction*; `underBelowCeiling` is an argument the evidence was there for. All 26 of t64's ceiling rows are `CreateFileW`, `WriteFile`, `MultiByteToWideChar` and friends. |
+
+**NOT GATED IN THE RUN, and this is the closest call in the directory.** Every OVER row has the
+character that makes `stale version-0 names` a gate — provably wrong, not a count awaiting a
+threshold. The only thing separating them is that this count is *not zero*: 3 per x64 binary and
+8–10 per x86 one, none of them introduced by the change the audit was rebuilt to certify. A gate
+would therefore have to pin today's absolute, and absolutes here move whenever detection does — a
+newly detected function carrying the same pre-existing defect would fail CI for a change that
+caused nothing. So a rise is judged where rises are judged: `compare.mjs` treats `arity
+over-count`, `arity under-count` and `under below the ceiling` rising as regressions, and `arity
+exact` is a ratio that must not fall. **If the OVER count is ever driven to 0, make it a gate at
+0** — that is the honest upgrade, and it is exactly the history of the stale-read audit.
+
+What the run itself asserts is instrument liveness, and it matters more than usual because the
+*good* direction of both counts is downward: a scan that quietly stopped matching call sites would
+report `over 0, under 0` and look like the healthiest thing in the report. So `sites`,
+`distinctCallees`, `declaredNames` (the table still exports its entries) and `scannedFuncs` all
+have floors, and `exact + under + over` must equal `sites`.
+
+Per-site detail is in `arity_<bin>.jsonl` — the OVER rows first, then the UNDER rows, each with
+the callee, both counts, the emitted argument texts and the emitted line. **Adjudicate an OVER row
+against the real prototype**: it is either an invented argument or a wrong entry in `apitypes.ts`,
+and the audit cannot tell you which.
+
+*Validated by negative control.* Reverting the `peek-a-bin-qb2x` fix — `collectArgs64` probing the
+width-exact `RegState.get(reg)` instead of `wroteAnyAlias(reg)`, so a sub-width argument setup is
+missed and arity stops there — takes t64 from **88/127 exact to 62/127** and w64 from **92/133 to
+66/133**, with under 36 → 62 and 38 → 64 (below-ceiling 10 → 61 and 12 → 63) and **over unchanged
+at 3 on both**. `5 ExitProcess` and `4 Sleep` reappear among the under rows, which is the defect
+qb2x was filed for. `npm run corpus` stays green, because none of this is gated in the run;
+`compare.mjs` reports the six arity regressions and exits 1. Without the arity rows that same pair
+of runs moved nothing about arguments at all — the only other signal was `polarity guards audited`
+falling by 2 and 3, which is an instruction to go and read some guards, not a statement about
+calls.
+
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
@@ -295,7 +366,8 @@ Two distinct failures hide in a green number, and it is worth keeping them apart
   left without being judged, and the fraction cannot report it. Always read the denominator.
 - **A gate that is green on the dimension it measures says nothing about the dimension it does
   not.** This is not a hypothetical either. `peek-a-bin-qb2x` was verified against an oracle that
-  sees call **arity**, shipped green on every gate here, and four of the arguments it recovered
+  sees call **arity** (which now lives here, as `arity.ts` — it did not at the time, and that is
+  `peek-a-bin-02fa`), shipped green on every gate here, and four of the arguments it recovered
   name a **stale register** — `SearchPathW(0, rcx, rax, 0x400)` has exactly the right arity and a
   wrong second argument, because nothing in the standing set reads argument *naming*. The same
   shape as this section's own subject, one dimension over. Before quoting a green run, say which
@@ -349,6 +421,27 @@ much larger reading than it earns.
 - **`guards w/o single compare` is a lower bound on traffic across the audited-set boundary.** A
   guard whose *body* could not be anchored never reaches the judging step, so it is skipped for an
   anchoring reason and never lands in that bucket, however unrecoverable its condition was.
+
+### What the arity audit does not catch
+
+- **Nothing about what an argument SAYS.** Arity is a count. `SearchPathW(0, rcx, rax, 0x400)` has
+  exactly the right arity and a wrong second argument, and this audit calls it exact — that is the
+  stale-read audit's dimension, and the worked example is two sections up.
+- **Only the 209 callees the table declares.** Every `sub_…`, every indirect call and every
+  imported API `apitypes.ts` does not know is outside the denominator entirely: 105–133 sites per
+  binary against 842–978 callee pairs the callee-loss audit sees. Adding a signature to the table
+  widens the audit, which is worth knowing before reading a moved denominator as a regression.
+- **It is only as good as the table.** An OVER row is either an invented argument or a wrong entry
+  in `apitypes.ts`. `src/disasm/decompile/__tests__/apitypes.test.ts` pins the arity of some
+  entries and the A/W pairs against each other, not the whole table against the SDK.
+- **An argument in the right *position* is not checked.** A call emitted with the declared count of
+  arguments in the wrong order is exact here.
+- **`underAtCeiling` is a classification, not a proof.** It says the emitted count equals the ABI
+  evidence's ceiling, which is *usually* why the call is short — but a call that would have been
+  short anyway lands in the same bucket, and the bucket is therefore a lower bound on the
+  structural half rather than a partition of blame.
+- **It reads the emitted text, so it cannot see a call that was never emitted.** A dropped call
+  is `distinct callees lost`' dimension.
 
 ### What the stale-version-0 audit does not catch
 
@@ -484,10 +577,12 @@ remaining gap and is not implemented.
 | `preflight.ts` | Where the corpus is, and whether this machine can run at all. |
 | `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values. |
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
+| `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
 | `artifacts/<label>/unrecovered_<key>.jsonl` | Every `__unrecovered_N`, per site: note, cause, use site, originating jcc where one could be named. |
+| `artifacts/<label>/arity_<key>.jsonl` | Every declared-API call whose emitted arity is not the declared one, OVER rows first. Empty file = audit ran and found none. |
 | `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
