@@ -729,6 +729,12 @@ describe("decompileFunction — IOCTL annotation", () => {
     // in the second argument, where DeviceIoControl takes its control code.
     const code = runWithStructs(
       seq(0x401000, [
+        // The handle argument has to be *loaded* into ESI, not assumed to be
+        // there: `collectArgs32` reads a push of a callee-saved register that
+        // this function has not written as a prologue save, because on cdecl
+        // and stdcall its entry value belongs to a caller further up and
+        // forwarding it would be meaningless (peek-a-bin-6lmh).
+        ["mov", "esi, dword ptr [0x403000]"],
         ["push", "0"],
         ["push", "0"],
         ["push", "0"],
@@ -751,6 +757,9 @@ describe("decompileFunction — IOCTL annotation", () => {
     // argument. Only argument 1 is a control code.
     const code = runWithStructs(
       seq(0x401000, [
+        // See above: ESI is loaded so the push of it is an argument rather
+        // than a register save.
+        ["mov", "esi, dword ptr [0x403000]"],
         ["push", "0"],
         ["push", "0"],
         ["push", "0"],
@@ -4918,6 +4927,141 @@ describe("decompileFunction — a sub-width write is still argument setup", () =
     const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
 
     expect(code).toMatch(/sub_408000\(\)/);
+  });
+});
+
+/**
+ * A `push` of a callee-saved register the function has not yet written is a
+ * REGISTER SAVE, not an argument.
+ *
+ * `collectArgs32` walks backwards from a call over consecutive pushes, and used
+ * to walk straight into the function's own prologue — emitting
+ * `GetModuleHandleW("KERNEL32.DLL", edi)` for an API declaring one parameter
+ * and `GetCommandLineW(edi, esi, ebx)` for one declaring none. Every shape
+ * below is a site in the real corpus; `gcc -fsyntax-only` cannot see any of it,
+ * because an implicit declaration is accepted at any arity (peek-a-bin-6lmh).
+ */
+describe("decompileFunction — a prologue register save is not an argument", () => {
+  /** The arguments of the one call in the emitted body, as written text. */
+  function argsOf(code: string, callee: string): string[] {
+    const open = code.indexOf(`${callee}(`);
+    if (open < 0) throw new Error(`no call to ${callee} in:\n${code}`);
+    let depth = 0;
+    let buf = "";
+    const args: string[] = [];
+    for (let i = open + callee.length; i < code.length; i++) {
+      const ch = code[i];
+      if (ch === "(") {
+        depth++;
+        if (depth === 1) continue;
+      }
+      if (ch === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+      if (ch === "," && depth === 1) {
+        args.push(buf.trim());
+        buf = "";
+        continue;
+      }
+      buf += ch;
+    }
+    if (buf.trim() !== "") args.push(buf.trim());
+    return args;
+  }
+
+  it("drops a save pushed before the register is ever written", () => {
+    // t32.exe 0x405F2F: mov edi, edi (hot-patch pad, i.e. the entry) /
+    // push edi (save) / push "KERNEL32.DLL" (the only argument) / call.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "edi, edi"],
+        ["push", "edi"],
+        ["push", "0x40F54C"],
+        ["call", "0x402000"],
+        ["ret"],
+      ]),
+    );
+
+    expect(argsOf(code, "sub_402000")).toHaveLength(1);
+  });
+
+  it("keeps a push of the same register after the function has written it", () => {
+    // t32.exe 0x402C35, the site that refutes "a push of ESI is a save": the
+    // same register in the same block is a save at 0x402C37 and an argument at
+    // 0x402C3F, and only the intervening `mov esi, 0xC0000417` separates them.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "edi, edi"],
+        ["push", "esi"],
+        ["push", "1"],
+        ["mov", "esi, 0xc0000417"],
+        ["push", "esi"],
+        ["push", "2"],
+        ["call", "0x402000"],
+        ["ret"],
+      ]),
+    );
+
+    // Two, and the second of them is the ESI the `mov` wrote — folded to its
+    // constant, which is the proof it was kept rather than read as a save.
+    //
+    // Not three: the walk collects *consecutive* pushes and the `mov` ends the
+    // run, so `push 1` is out of reach. That is pre-existing behaviour and an
+    // admitted under-count — the machine's own `add esp, 0xC` at 0x402C47 says
+    // three — and it is unrelated to the save rule, which is what this pins.
+    const args = argsOf(code, "sub_402000");
+    expect(args).toHaveLength(2);
+    expect(args).toContain("0xC0000417");
+  });
+
+  it("keeps an argument whose register was written in an EARLIER block", () => {
+    // w32.exe 0x40104D: `push esi / call FreeLibrary` at a block leader, with
+    // ESI written at 0x40100F in an earlier block. A block-local scope turns
+    // this genuine argument into an admitted under-count.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "esi, dword ptr [0x404000]"],
+        ["test", "esi, esi"],
+        ["je", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["push", "esi"],
+        ["call", "0x402000"],
+        ["ret"],
+      ]),
+    );
+
+    expect(argsOf(code, "sub_402000")).toHaveLength(1);
+  });
+
+  it("stops the walk at the save rather than skipping over it", () => {
+    // t32.exe 0x4086CC: a SUNK save — `push edi` leads a mid-function block
+    // reached by `jne`, ahead of the four genuine pushes. Reaching it ends the
+    // argument list; the four below it are still collected.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "edi, edi"],
+        ["push", "edi"],
+        ["push", "dword ptr [0x404000]"],
+        ["push", "0"],
+        ["push", "dword ptr [0x404004]"],
+        ["push", "eax"],
+        ["call", "0x402000"],
+        ["mov", "edi, eax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(argsOf(code, "sub_402000")).toHaveLength(4);
+  });
+
+  it("is restricted to the callee-saved registers", () => {
+    // EAX and ECX carry results and __fastcall arguments, so "this is still the
+    // entry value" says nothing about whether a push of one is an argument.
+    const code = run(seq(0x401000, [["push", "ecx"], ["call", "0x402000"], ["ret"]]));
+
+    expect(argsOf(code, "sub_402000")).toHaveLength(1);
   });
 });
 

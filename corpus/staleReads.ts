@@ -42,7 +42,7 @@ import { buildCFG } from "../src/disasm/cfg";
 import { foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg, isKnownRegister, regSize } from "../src/disasm/decompile/ir";
-import { liftBlock } from "../src/disasm/decompile/lifter";
+import { firstCalleeSavedWrites, liftBlock } from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import type { SSAContext } from "../src/disasm/decompile/ssa";
 import { buildSSA, clobberedByCall, detectNaturalLoops } from "../src/disasm/decompile/ssa";
@@ -306,8 +306,15 @@ export function auditStaleV0Reads(
     const blocks = buildCFG(func, insns, xrefMap, jumpTables);
     if (blocks.length === 0) return;
     const lifted = new Map<number, IRStmt[]>();
+    // Same arguments the pipeline lifts with, including the callee-saved write
+    // map: this audit re-lifts in order to measure the program the pipeline
+    // builds, so a divergence here would make it measure a different one.
+    const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
     for (const b of blocks)
-      lifted.set(b.id, liftBlock(b, new RegState(), is64, iatMap, stringMap, funcMap));
+      lifted.set(
+        b.id,
+        liftBlock(b, new RegState(), is64, iatMap, stringMap, funcMap, calleeSavedFirstWrite),
+      );
     ctx = buildSSA(blocks, lifted);
     const natural = detectNaturalLoops(blocks, ctx.idom, ctx.domTree);
     ssaOptimize(ctx, natural.size > 0 ? natural : undefined);

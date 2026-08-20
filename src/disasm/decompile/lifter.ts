@@ -4,6 +4,7 @@ import type { Instruction } from "../types";
 import { isFlagReadingJump } from "./flagModel";
 import type { BinaryOp, IRCall, IRExpr, IRStmt } from "./ir";
 import {
+  canonReg,
   irBinary,
   irConst,
   irDeref,
@@ -281,6 +282,16 @@ const SSE_SCALAR = new Map<string, BinaryOp | null>([
 
 /**
  * Lift a single basic block's instructions to IR statements.
+ *
+ * `calleeSavedFirstWrite` is the one piece of *function*-wide context this
+ * otherwise block-local pass takes: the lowest address at which each x86
+ * callee-saved register is written (`firstCalleeSavedWrites`). `collectArgs32`
+ * needs it to tell a prologue register save from a pushed argument, and that
+ * question cannot be answered inside a block — w32.exe 0x40104D is a genuine
+ * `push esi` argument at a block *leader*, with ESI written in an earlier
+ * block. It is optional and means nothing on the x64 path, where arguments
+ * come from registers rather than pushes; omitting it keeps the pre-existing
+ * behaviour, which is deliberately not the same claim as "there are no writes".
  */
 export function liftBlock(
   block: BasicBlock,
@@ -289,6 +300,7 @@ export function liftBlock(
   iatMap: Map<number, { lib: string; func: string }>,
   _stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
+  calleeSavedFirstWrite?: Map<string, number>,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -536,7 +548,9 @@ export function liftBlock(
     // ── call ──
     if (mn === "call") {
       const target = resolveCallTarget(insn, is64, iatMap, funcMap);
-      const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64);
+      const args = is64
+        ? collectArgs64(regState)
+        : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
       const call: IRCall = {
         kind: "call",
         target: target.name,
@@ -583,7 +597,9 @@ export function liftBlock(
     if (mn === "jmp" && block.succs.length === 0 && insn === block.insns[block.insns.length - 1]) {
       const tail = resolveNamedTarget(insn, iatMap, funcMap);
       if (tail) {
-        const args = is64 ? collectArgs64(regState) : collectArgs32(block, insn, is64);
+        const args = is64
+          ? collectArgs64(regState)
+          : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
         const call: IRCall = {
           kind: "call",
           target: tail.name,
@@ -1007,6 +1023,185 @@ function collectArgs64(regState: RegState): IRExpr[] {
 }
 
 /**
+ * The x86 callee-saved registers, canonicalised (`canonReg` maps every alias to
+ * its 64-bit parent, which is the register's *identity*).
+ *
+ * The restriction to these four is what makes `collectArgs32`'s save rule below
+ * sound rather than merely empirical. On x86 cdecl and stdcall every incoming
+ * argument arrives on the stack, so a callee-saved register's *entry* value is
+ * semantically opaque to the callee: it belongs to some caller further up and
+ * this function has no reading of it. Forwarding it as an argument is
+ * meaningless, so a `push` of one before anything has written it is a register
+ * save. The same statement about EAX or ECX would be false — those carry
+ * results and `__fastcall` arguments.
+ */
+const CALLEE_SAVED_CANON_32 = new Set(["rbx", "rsi", "rdi", "rbp"]);
+
+/**
+ * Mnemonics whose first operand is read, not written.
+ *
+ * Deliberately a DENY-list rather than an allow-list of writers, and the
+ * asymmetry is the reason. A mnemonic missing from here is treated as a write,
+ * which lowers the register's first-write address, which classifies *more*
+ * pushes as arguments — i.e. it degrades towards the behaviour that existed
+ * before this rule, and can invent nothing new. A wrongly *added* entry raises
+ * the first-write address and drops a genuine argument. So the failure mode of
+ * an incomplete list is the status quo, and the failure mode of an over-eager
+ * one is a new under-count; the list is kept to mnemonics that provably do not
+ * write their destination operand.
+ *
+ * Every conditional and unconditional jump is handled by the `j` prefix at the
+ * call site — this is the x86 path only, where no non-branch mnemonic starts
+ * with `j`. (Do not copy that shortcut to A64, where `bfi` is not a branch.)
+ */
+const NON_DEFINING_MNEMONICS = new Set([
+  "push",
+  "cmp",
+  "test",
+  "call",
+  "ret",
+  "retn",
+  "nop",
+  "int3",
+  "ud2",
+  "bt",
+  "hlt",
+  "leave", // handled separately: it writes EBP, but not its (absent) operand
+]);
+
+/** String-instruction mnemonics, which write ESI/EDI with no operand naming them. */
+const STRING_OP_MNEMONICS = new Set([
+  "movsb",
+  "movsw",
+  "movsd",
+  "movsq",
+  "stosb",
+  "stosw",
+  "stosd",
+  "stosq",
+  "lodsb",
+  "lodsw",
+  "lodsd",
+  "lodsq",
+  "scasb",
+  "scasw",
+  "scasd",
+  "scasq",
+  "cmpsb",
+  "cmpsw",
+  "cmpsd",
+  "cmpsq",
+]);
+
+const REP_PREFIXES = new Set(["rep", "repe", "repz", "repne", "repnz"]);
+
+/**
+ * The lowest address in a function at which each callee-saved register is
+ * written — the evidence `collectArgs32` needs to tell a register save from an
+ * argument.
+ *
+ * A `push ebx` before the function has written EBX pushes the value EBX held on
+ * entry; a `push ebx` after it pushes something this function computed. That is
+ * the ONLY thing that separates the two, and it separates them at a site where
+ * the same register in the same basic block is both. Verified on t32.exe at
+ * 0x402C35:
+ *
+ *     402c37: 56              push esi            ; SAVE — ESI not yet written
+ *     402c3a: be 17 04 00 c0  mov  esi, 0xc0000417 ; ESI defined here
+ *     402c3f: 56              push esi            ; ARGUMENT
+ *
+ * Three properties of this scan are load-bearing and were each established
+ * against a specific site in the corpus:
+ *
+ * - **Function-wide, not block-local.** w32.exe 0x40104D is `push esi` /
+ *   `call FreeLibrary` at a *block leader*, with ESI written at 0x40100F in an
+ *   earlier block. Scoped to the block, that genuine argument is dropped.
+ * - **`mov X, X` is not a definition.** MSVC's hot-patch pad is `mov edi, edi`
+ *   and it is the *entry instruction* of two of the four over-counting t32
+ *   sites (0x405D6D, 0x405F2F). Counting it as a write to EDI re-admits both.
+ * - **Address order, not CFG order.** This is an approximation, and its error
+ *   is one-directional by construction: a write laid out *after* a push that
+ *   dynamically precedes it makes the push look like a save, which drops an
+ *   argument. It can never invent one. The reverse — a write laid out before a
+ *   push it does not dominate — leaves the push classified as an argument, i.e.
+ *   exactly today's behaviour.
+ *
+ * The scan reads the instruction stream only. It must never consult
+ * `apitypes.ts`: `corpus/arity.ts` audits the emitted arity *against* that
+ * table, so a lifter that reads it measures its own input and blinds the only
+ * oracle in this repo that can see call arity at all.
+ */
+export function firstCalleeSavedWrites(blocks: BasicBlock[]): Map<string, number> {
+  const first = new Map<string, number>();
+
+  const note = (operand: string, addr: number): void => {
+    const name = operand.trim().toLowerCase();
+    if (!isKnownRegister(name)) return;
+    const canon = canonReg(name);
+    if (!CALLEE_SAVED_CANON_32.has(canon)) return;
+    const prev = first.get(canon);
+    if (prev === undefined || addr < prev) first.set(canon, addr);
+  };
+
+  for (const block of blocks) {
+    for (const insn of block.insns) {
+      const addr = insn.address;
+      const tokens = insn.mnemonic.toLowerCase().split(/\s+/).filter(Boolean);
+      const mn = tokens[tokens.length - 1] ?? "";
+      const repPrefixed = tokens.some((t) => REP_PREFIXES.has(t));
+      const parts = splitOperands(insn.opStr);
+
+      // `leave` is `mov esp, ebp` + `pop ebp`, and `enter` builds a frame:
+      // both write EBP while naming no operand that says so.
+      if (mn === "leave" || mn === "enter") {
+        note("ebp", addr);
+        continue;
+      }
+
+      // A string instruction advances ESI and/or EDI. Capstone spells the
+      // operands as `es:[edi]` / `[esi]` memory references, so the generic
+      // destination-operand path below cannot see the write. The guard keeps
+      // SSE `movsd xmm0, qword ptr [rax]` — the same mnemonic, a different
+      // instruction — out: that one names real operands and no `rep` prefix.
+      if (
+        STRING_OP_MNEMONICS.has(mn) &&
+        (repPrefixed || parts.length === 0 || /\bes:/i.test(insn.opStr))
+      ) {
+        note("esi", addr);
+        note("edi", addr);
+        continue;
+      }
+
+      if (NON_DEFINING_MNEMONICS.has(mn) || mn.startsWith("j")) continue;
+
+      // One-operand `mul` / `div` / `imul` / `idiv` READ their operand and
+      // write EDX:EAX. The two- and three-operand `imul` forms do write it.
+      if ((mn === "mul" || mn === "div" || mn === "imul" || mn === "idiv") && parts.length < 2) {
+        continue;
+      }
+
+      if (parts.length === 0) continue;
+
+      // `mov edi, edi` is MSVC's hot-patch pad, not a definition. Stated in the
+      // general form — `mov X, X` changes nothing whatever X is — but ONLY for
+      // `mov`: `xor esi, esi` has the same operand shape and is a zeroing, i.e.
+      // the most common definition there is. Generalising the test past `mov`
+      // withdrew the write at t32.exe 0x4068C6 and turned four real `Sleep(esi)`
+      // calls per x86 binary into `Sleep()`.
+      if (mn === "mov" && parts.length === 2 && parts[0].toLowerCase() === parts[1].toLowerCase()) {
+        continue;
+      }
+
+      note(parts[0], addr);
+      // `xchg` writes both of its operands.
+      if (mn === "xchg" && parts.length === 2) note(parts[1], addr);
+    }
+  }
+
+  return first;
+}
+
+/**
  * Is this call nested in a *later* call's argument list?
  *
  * The shape is `call inner` / `push eax` / … / `call outer`: the inner call's
@@ -1046,7 +1241,12 @@ function nestedInLaterCallArgs(insns: Instruction[], callIdx: number, is64: bool
   return false;
 }
 
-function collectArgs32(block: BasicBlock, callInsn: Instruction, is64: boolean): IRExpr[] {
+function collectArgs32(
+  block: BasicBlock,
+  callInsn: Instruction,
+  is64: boolean,
+  calleeSavedFirstWrite: Map<string, number> | undefined,
+): IRExpr[] {
   // Scan backwards from call for consecutive push instructions
   const args: IRExpr[] = [];
   const insns = block.insns;
@@ -1079,7 +1279,43 @@ function collectArgs32(block: BasicBlock, callInsn: Instruction, is64: boolean):
   for (let i = callIdx - 1; i >= 0 && args.length < 8; i--) {
     if (insns[i].mnemonic !== "push") break;
     const op = insns[i].opStr.trim();
+    if (isCalleeSavedSave(insns[i], op, calleeSavedFirstWrite)) break;
     args.push(parseOperand(op, insns[i], is64));
   }
   return args;
+}
+
+/**
+ * Is this `push` a callee-saved register SAVE rather than an argument?
+ *
+ * The whole discriminator is whether the pushed register still holds its
+ * function-entry value — see `firstCalleeSavedWrites` for the evidence and for
+ * why address order is a sound approximation here. Reaching one of these ends
+ * the backwards walk: a save sitting under an argument list means the walk has
+ * left the argument list.
+ *
+ * Without this the walk swallowed the function's own prologue saves and emitted
+ * them as arguments — `GetModuleHandleW("KERNEL32.DLL", edi)` for an API that
+ * declares one parameter, `GetCommandLineW(edi, esi, ebx)` for one that
+ * declares none. There is no reading of the machine on which those are right,
+ * and they compile clean, so only `corpus/arity.ts` could see them
+ * (peek-a-bin-6lmh).
+ *
+ * `calleeSavedFirstWrite === undefined` means nobody told us where the writes
+ * are, which is not the same as "there are none": the rule declines and the
+ * pre-existing behaviour stands.
+ */
+function isCalleeSavedSave(
+  pushInsn: Instruction,
+  operand: string,
+  calleeSavedFirstWrite: Map<string, number> | undefined,
+): boolean {
+  if (calleeSavedFirstWrite === undefined) return false;
+  const name = operand.toLowerCase();
+  if (!isKnownRegister(name)) return false;
+  const canon = canonReg(name);
+  if (!CALLEE_SAVED_CANON_32.has(canon)) return false;
+  const firstWrite = calleeSavedFirstWrite.get(canon);
+  // Never written in this function at all — every push of it is a save.
+  return firstWrite === undefined || pushInsn.address < firstWrite;
 }

@@ -372,22 +372,39 @@ this is gated in the run. `compare.mjs` reports 16 regressions and exits 1.
 
 **Call arity against `apitypes.ts`'s declared signatures** — `arity.ts`. For every emitted call
 whose callee `src/disasm/decompile/apitypes.ts` declares, the arguments the emitted C passes are
-counted against the parameters the table declares. **Measured against base `78b6040` with
-`peek-a-bin-f51x` applied:**
+counted against the parameters the table declares. **Measured on base `91cca4f` with
+`peek-a-bin-6lmh` applied:**
 
 | | t32 | t64 | w64 | w32 |
 |---|---|---|---|---|
-| exact / sites | 74/105 | 88/127 | 92/133 | 77/111 |
-| under (at the ABI ceiling / below it) | 27 (0/27) | 36 (26/10) | 38 (26/12) | 28 (0/28) |
-| **over** | 4 | 3 | 3 | 6 |
+| exact / sites | 79/105 | 90/127 | 96/133 | 85/111 |
+| under (at the ABI ceiling / below it) | 26 (0/26) | 34 (26/8) | 34 (26/8) | 26 (0/26) |
+| **over** | 0 | 3 | 3 | 0 |
 
-At `e22ba6e` the exact counts were 70/88/92/73 and **over was 8/3/3/10**. `peek-a-bin-f51x`
-took the x86 half of the over-count down by exactly the four rows it could reach, on each
-binary, moving nothing else in the table — the under counts and both ceiling splits are
-unchanged, and t64/w64 are byte-identical because `collectArgs32` is the x86 path only.
+The same base with `peek-a-bin-6lmh` **not** applied reads 75/105, 90/127, 96/133 and 79/111
+exact, under 26/34/34/26, and **over 4/3/3/6**. So the x86 fix moved 4 and 6 rows from `over`
+straight to `exact` with **the under counts and both ceiling splits unchanged**, and t64/w64
+byte-identical because `collectArgs32` is the x86 path only.
 
-**The x86 over-count is TWO SHAPES and only one of them is structurally fixable.** This matters
-more than the numbers, because the residual is not a smaller version of the same defect:
+**Part of the drift from the previous table in this file is the AUDIT being fixed, not the
+decompiler, and the two must not be conflated.** `maskLiteralsAndComments` blanked a string
+literal to spaces so its commas and parentheses could not mis-split the argument list — which
+also erased the argument, so `LoadLibraryA("user32.dll")`, a call whose *only* argument is a
+literal, read as a call with none. A literal is an argument and a comment is not, so they are now
+masked differently: literals to a digit filler that survives `splitArgs`' emptiness test,
+comments still to whitespace. The defect could only invent `under` rows, never hide an `over`
+one, which is why every historical over-count quoted here still stands; on the same base
+`91cca4f` with the decompiler untouched it moved exact 74→75, 88→90, 92→96 and 77→79 and under
+27→26, 36→34, 38→34 and 28→26, with over unmoved at 4/3/3/6. It surfaced only once the emitter
+stopped putting an invented second argument beside the literal. **Both sides of every
+before/after pair above are taken with the fixed oracle.**
+
+At `78b6040` with `peek-a-bin-f51x` applied and the *old* oracle the table read 74/88/92/77
+exact, under 27/36/38/28, over 4/3/3/6; at `e22ba6e` the exact counts were 70/88/92/73 and
+**over was 8/3/3/10**.
+
+**The x86 over-count was TWO SHAPES, and both are now fixed.** This matters more than the
+numbers, because the second was not a smaller version of the first:
 
 - **Shape 1 — a nested call in argument position.** `call inner` / `push eax` / `call outer`:
   the inner call's result is pushed, so the pushes *above* the inner call belong to the outer
@@ -396,19 +413,23 @@ more than the numbers, because the residual is not a smaller version of the same
   call between the pushes and it, so a "stop the walk at an intervening call" rule never fires.
 - **Shape 2 — over-reach into the function's own callee-saved prologue pushes.** At t32 0x405f2f:
   `mov edi, edi` (hotpatch pad, i.e. the function entry) / `push edi` (a register save) /
-  `push "KERNEL32.DLL"` (the only real argument) / `call GetModuleHandleW`. **This is the whole
-  residual**: 4 rows on t32 (`GetCommandLineW`, `GetLastError`, `GetModuleHandleW`,
-  `SetFilePointer`) and 6 on w32 (those four plus `LoadLibraryA` twice). **The tempting rule "a
-  push of ebx/esi/edi is a save" is refuted by this same corpus** — at t32 0x402c4a `push esi`
-  *is* a genuine argument to `TerminateProcess`. A save and an argument are the same instruction
-  and nothing in the basic block distinguishes them; stdcall imports pop their own arguments, so
-  there is no `add esp, N` to read back either. Untested hypothesis on record: a prologue save
-  may be identifiable by *position* plus a matching `pop` before the `ret` (0x402c58 has
-  `pop esi`) rather than by which register it is. Tracked as `peek-a-bin-6lmh`.
+  `push "KERNEL32.DLL"` (the only real argument) / `call GetModuleHandleW`. That was the whole
+  x86 residual: 4 rows on t32 (`GetCommandLineW`, `GetLastError`, `GetModuleHandleW`,
+  `SetFilePointer`) and 6 on w32 (those four plus `LoadLibraryA` twice). **Fixed** — see the
+  callee-saved-save gotcha in `CLAUDE.md`. Two rules that look right and are refuted by this same
+  corpus, neither of which may be re-tried: "a push of ebx/esi/edi is a save" (at t32 0x402c3f
+  `push esi` *is* a genuine argument), and "a save is identifiable by *position* plus a matching
+  `pop` before the `ret`" — `push imm8 / pop reg` is a pervasive MSVC size idiom, so in t32's
+  `sub_401A4E` every `pop ebx`/`pop edi` is `mov reg, imm`, and the saves are often six
+  instructions in, or sunk to a mid-function block leader. What works is whether the pushed value
+  is the register's **entry** value, i.e. whether the push precedes the register's first write in
+  the function (`peek-a-bin-6lmh`).
 
-**So the upgrade path recorded below did NOT trigger on `peek-a-bin-f51x`, and no threshold was
-invented at 4/6.** A structural fix reached Shape 1 only; over is still not zero, and the
-remaining rows are a different defect awaiting a different idea.
+**So the upgrade path recorded below still has NOT triggered, and no threshold was invented at
+3.** Over is 0 on both x86 binaries and 6 corpus-wide: 3 on each x64 binary (`2 GetLastError`,
+`1 LeaveCriticalSection`). Those are `collectArgs64`'s, which reads arity out of `RegState`
+rather than walking pushes, so neither x86 fix reaches them — a third defect awaiting a third
+idea.
 
 **This is the only oracle in the repo that can see call arity, and the gcc gate is blind to the
 dimension by construction.** `gcc -std=gnu89` accepts an implicit declaration at *any* arity, the
@@ -430,13 +451,14 @@ The two directions are not symmetric and must not be read as one number:
 
 | | |
 |---|---|
-| **over** | The call passes MORE arguments than the API takes. There is no reading of the machine on which that is right — the argument was invented. `GetLastError(rcx)`, `GetModuleHandleW("KERNEL32.DLL", edi)` (the second push is a prologue save), `SetFilePointer(…, 5 of 4)`. Every one of the 16 rows in the corpus is provably wrong, and every one compiles clean. It was 24 before `peek-a-bin-f51x`, which retired the `GetProcessHeap(8, 0x1000)` shape — pushes that belonged to the *next* call. |
+| **over** | The call passes MORE arguments than the API takes. There is no reading of the machine on which that is right — the argument was invented. `GetLastError(rcx)`, `GetModuleHandleW("KERNEL32.DLL", edi)` (the second push is a prologue save), `SetFilePointer(…, 5 of 4)`. Every one of the 6 rows left in the corpus is provably wrong, and every one compiles clean. It was 24 before `peek-a-bin-f51x`, which retired the `GetProcessHeap(8, 0x1000)` shape — pushes that belonged to the *next* call — and 16 before `peek-a-bin-6lmh`, which retired the prologue-save shape and took the x86 half to 0. |
 | **under** | The call passes FEWER. Split in two, because only one half is a recoverable defect: `underAtCeiling` is the emitted count sitting exactly at the ABI evidence's ceiling — `collectArgs64`'s four fastcall registers, `collectArgs32`'s eight-push scan — where an API declaring five or more parameters is short *by construction*; `underBelowCeiling` is an argument the evidence was there for. All 26 of t64's ceiling rows are `CreateFileW`, `WriteFile`, `MultiByteToWideChar` and friends. |
 
 **NOT GATED IN THE RUN, and this is the closest call in the directory.** Every OVER row has the
 character that makes `stale version-0 names` a gate — provably wrong, not a count awaiting a
-threshold. The only thing separating them is that this count is *not zero*: 3 per x64 binary and
-4–6 per x86 one, none of them introduced by the change the audit was rebuilt to certify. A gate
+threshold. The only thing separating them is that this count is *not zero*: 3 per x64 binary,
+and 0 per x86 one since `peek-a-bin-6lmh`, none of them introduced by the change the audit was
+rebuilt to certify. A gate
 would therefore have to pin today's absolute, and absolutes here move whenever detection does — a
 newly detected function carrying the same pre-existing defect would fail CI for a change that
 caused nothing. So a rise is judged where rises are judged: `compare.mjs` treats `arity

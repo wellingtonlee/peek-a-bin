@@ -3,7 +3,7 @@ import type { BasicBlock } from "../../cfg";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
-import { liftBlock, parseOperand } from "../lifter";
+import { firstCalleeSavedWrites, liftBlock, parseOperand } from "../lifter";
 import { RegState } from "../regstate";
 
 const START = 0x401000;
@@ -979,5 +979,112 @@ describe("liftBlock — fallback", () => {
   it("splits operands on commas outside brackets only", () => {
     // `[rax + rcx*4]` contains no comma, but SIB text with one must not split.
     expect(liftOne("mov", "qword ptr [rax + rcx*4], rbx")).toMatchObject({ kind: "store" });
+  });
+});
+
+/**
+ * The evidence behind `collectArgs32`'s save rule: the lowest address at which
+ * each x86 callee-saved register is written. Every case here is a shape the
+ * scan gets wrong in one of the two directions — a missed write drops a
+ * genuine argument, an invented one re-admits a prologue save as an argument.
+ */
+describe("firstCalleeSavedWrites", () => {
+  const writes = (list: [string, string][]) => firstCalleeSavedWrites([blockOf(list)]);
+
+  it("records the address of an ordinary destination write", () => {
+    expect(
+      writes([
+        ["push", "esi"],
+        ["mov", "esi, 1"],
+      ]).get("rsi"),
+    ).toBe(START + SIZE);
+  });
+
+  it("keeps the LOWEST address when a register is written more than once", () => {
+    expect(
+      writes([
+        ["mov", "esi, 1"],
+        ["mov", "esi, 2"],
+      ]).get("rsi"),
+    ).toBe(START);
+  });
+
+  it("does not read MSVC's `mov edi, edi` hot-patch pad as a definition", () => {
+    // It is the entry instruction of two of the four t32 over-counting sites.
+    expect(
+      writes([
+        ["mov", "edi, edi"],
+        ["push", "edi"],
+      ]).has("rdi"),
+    ).toBe(false);
+  });
+
+  it("reads `xor esi, esi` as the zeroing it is, not as a self-move", () => {
+    // The hot-patch exception is `mov`-only. Generalised to any two-operand
+    // instruction with equal operands it swallows the commonest definition
+    // there is, and t32.exe's four `Sleep(esi)` calls lose their argument.
+    expect(writes([["xor", "esi, esi"]]).get("rsi")).toBe(START);
+  });
+
+  it("records a write through a sub-register under the canonical name", () => {
+    expect(writes([["mov", "bl, 1"]]).get("rbx")).toBe(START);
+  });
+
+  it("does not treat a read-only first operand as a write", () => {
+    expect(
+      writes([
+        ["push", "esi"],
+        ["cmp", "esi, 1"],
+        ["test", "edi, edi"],
+      ]).size,
+    ).toBe(0);
+  });
+
+  it("does not treat one-operand `div` as a write of its operand", () => {
+    // `div ebx` reads EBX and writes EDX:EAX. `imul ebx, ecx` does write EBX.
+    expect(writes([["div", "ebx"]]).has("rbx")).toBe(false);
+    expect(writes([["imul", "ebx, ecx"]]).get("rbx")).toBe(START);
+  });
+
+  it("does not treat a store THROUGH a register as a write OF it", () => {
+    expect(writes([["mov", "dword ptr [esi], 1"]]).has("rsi")).toBe(false);
+  });
+
+  it("records `pop`, `lea` and `xchg`", () => {
+    expect(writes([["pop", "ebp"]]).get("rbp")).toBe(START);
+    expect(writes([["lea", "esi, [eax + 2]"]]).get("rsi")).toBe(START);
+    expect(writes([["xchg", "eax, ebx"]]).get("rbx")).toBe(START);
+  });
+
+  it("records the EBP write `leave` performs without naming an operand", () => {
+    expect(writes([["leave", ""]]).get("rbp")).toBe(START);
+  });
+
+  it("records the ESI/EDI a string instruction advances", () => {
+    const m = writes([["rep movsd", "dword ptr es:[edi], dword ptr [esi]"]]);
+    expect(m.get("rsi")).toBe(START);
+    expect(m.get("rdi")).toBe(START);
+  });
+
+  it("does not read SSE `movsd` as the string instruction of the same name", () => {
+    expect(writes([["movsd", "xmm0, qword ptr [eax]"]]).size).toBe(0);
+  });
+
+  it("ignores registers that are not callee-saved", () => {
+    // EAX and ECX carry results and __fastcall arguments; the entry-value
+    // argument for treating a push as a save does not hold for them.
+    expect(
+      writes([
+        ["mov", "eax, 1"],
+        ["mov", "ecx, 2"],
+      ]).size,
+    ).toBe(0);
+  });
+
+  it("spans every block of the function, not just one", () => {
+    const b0 = blockOf([["mov", "esi, 1"]]);
+    const b1 = { ...blockOf([["push", "esi"]]), id: 1, startAddr: 0x402000 };
+    b1.insns = [insn("push", "esi", 0x402000)];
+    expect(firstCalleeSavedWrites([b1, b0]).get("rsi")).toBe(START);
   });
 });

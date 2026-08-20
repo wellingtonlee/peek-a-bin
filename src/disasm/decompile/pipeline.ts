@@ -6,7 +6,7 @@ import { cleanupStructured } from "./cleanup";
 import { emitFunction } from "./emit";
 import { foldBlock } from "./fold";
 import type { IRStmt, IRTry } from "./ir";
-import { liftBlock } from "./lifter";
+import { firstCalleeSavedWrites, liftBlock } from "./lifter";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -82,11 +82,26 @@ export function decompileFunction(
     const loops = detectLoops(blocks);
 
     // 2. Lift each block (fresh RegState per block — SSA handles cross-block)
+    //
+    // The one exception to "block-local" is the callee-saved write map, which
+    // is a property of the whole function: `collectArgs32` uses it to tell a
+    // register save from a pushed argument, and the two are the same
+    // instruction inside any single block. x64 collects its arguments from
+    // registers, so the map is not built there.
+    const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
     const liftedBlocks = new Map<number, import("./ir").IRStmt[]>();
 
     for (const block of blocks) {
       const regState = new RegState();
-      const stmts = liftBlock(block, regState, is64, iatMap, stringMap, funcMap);
+      const stmts = liftBlock(
+        block,
+        regState,
+        is64,
+        iatMap,
+        stringMap,
+        funcMap,
+        calleeSavedFirstWrite,
+      );
       liftedBlocks.set(block.id, stmts);
     }
 

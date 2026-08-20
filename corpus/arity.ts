@@ -106,8 +106,9 @@ export function emptyArity(): ArityResult {
 }
 
 /**
- * The emitted code with every comment and string/char literal body replaced by
- * spaces, LENGTH PRESERVED so an index into it is an index into the original.
+ * The emitted code with every comment blanked and every string/char literal
+ * replaced by a filler of the same length, LENGTH PRESERVED so an index into it
+ * is an index into the original.
  *
  * Both are necessary and neither is hypothetical. `annotateIOCTLArg` writes
  * `0x22 /* IOCTL: … *\/` INSIDE an argument list, and a recovered string
@@ -115,13 +116,25 @@ export function emptyArity(): ArityResult {
  * parenthesis or an escaped quote. Counting commas over the raw text would
  * mis-split both. Neither hazard occurs in today's corpus, which is exactly why
  * it has to be handled here rather than noticed later.
+ *
+ * THE TWO ARE MASKED DIFFERENTLY, and the difference is load-bearing. A comment
+ * is not an argument, so it becomes whitespace; a literal IS one, so it becomes
+ * `0`s and stays visible to `splitArgs`' emptiness test. Blanking a literal to
+ * spaces made `LoadLibraryA("user32.dll")` read as a call with NO arguments —
+ * a spurious `under` row, and one that appeared only once the emitter stopped
+ * putting a second, invented argument beside the literal. The filler is a digit
+ * rather than an underscore so it can never be mistaken for a callee name by
+ * the `[A-Za-z_]\w*\s*\(` scan above.
  */
 function maskLiteralsAndComments(code: string): string {
   const out = code.split("");
   let i = 0;
-  const blank = (from: number, to: number) => {
-    for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
+  const fill = (from: number, to: number, ch: string) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = ch;
   };
+  const blank = (from: number, to: number) => fill(from, to, " ");
+  /** A literal is an argument, so it must not vanish — see the note above. */
+  const mask = (from: number, to: number) => fill(from, to, "0");
   while (i < code.length) {
     const c = code[i];
     const two = code.slice(i, i + 2);
@@ -140,7 +153,7 @@ function maskLiteralsAndComments(code: string): string {
         if (code[j] === "\\") j++;
         j++;
       }
-      blank(i, Math.min(j + 1, code.length));
+      mask(i, Math.min(j + 1, code.length));
       i = Math.min(j + 1, code.length);
     } else {
       i++;
