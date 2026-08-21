@@ -377,6 +377,92 @@ export function unencodableNames(sets: { funcs: FuncRec[]; is64: boolean }[]): U
   return out;
 }
 
+export interface OffsetArgResult {
+  /**
+   * Occurrences of an `arg_0x<N>` whose N divides evenly into an argument slot,
+   * i.e. a slot that WOULD have been given a positional name had the frame
+   * pointer been recognised. Every one is a repairable naming defect.
+   */
+  aligned: number;
+  /** Distinct such names, so one name used forty times is not forty defects. */
+  distinct: number;
+  funcsAffected: number;
+  /**
+   * Occurrences whose N does NOT divide evenly — the third byte of argument 0,
+   * say. These are correctly offset-named however good the frame recovery gets,
+   * and are reported apart so they cannot be mistaken for the repairable half.
+   */
+  subSlot: number;
+  /** Functions read. Instrument liveness: 0 here means the scan saw nothing. */
+  funcs: number;
+}
+
+/**
+ * An argument the emitted C names by its frame offset when its offset says
+ * outright which argument it is.
+ *
+ * `stack.ts` spells a parameter slot `arg_<index>` only once it has verified
+ * that the frame register really is a frame pointer, and `arg_0x<offset>`
+ * otherwise — because outside that verification the offset carries no index.
+ * So an `arg_0x<N>` whose `(N - firstOffset) % slotSize === 0` is a slot the
+ * naming would have indexed if the prologue had been recognised, and the
+ * offset spelling is down to the recognition and to nothing about the file.
+ * That makes the count a direct measure of how much of the argument area the
+ * frame recovery is still missing, which is why the sub-slot half is reported
+ * separately: those are correctly offset-named at any level of recovery.
+ *
+ * **REPORT-ONLY, and not gateable at 0 in either direction.** A residue is
+ * legitimate: where function detection over-produces and a prologue falls
+ * outside the detected range, the frame register belongs to the *enclosing*
+ * function and no index can be derived from the offset — the whole PE32
+ * residue is that case (`peek-a-bin-abv`, `peek-a-bin-emlv`). On x64 the
+ * population is a different thing again and mostly *phantom* rather than
+ * merely unnamed: RBP there is usually a callee-saved object pointer, so
+ * `[rbp + N]` is a struct field and `isParam` is wrong rather than the name
+ * (`peek-a-bin-ikd`).
+ *
+ * **Nothing else here can see it.** An offset-named argument is a well-typed
+ * identifier that gcc compiles, it states nothing false so polarity,
+ * `staleGuards` and `staleReads` are indifferent, it is not an admission so the
+ * unrecovered count does not move, and `offsetof` only checks layouts it was
+ * given — the point being that a slot named this way never reaches struct
+ * synthesis as a parameter at all, since `structs.ts` keys provenance off
+ * `^arg_(\d+)$` deliberately.
+ */
+export function offsetNamedArgs(sets: { funcs: FuncRec[]; is64: boolean }[]): OffsetArgResult {
+  const out: OffsetArgResult = {
+    aligned: 0,
+    distinct: 0,
+    funcsAffected: 0,
+    subSlot: 0,
+    funcs: 0,
+  };
+  const seen = new Set<string>();
+  for (const { funcs, is64 } of sets) {
+    // The same geometry `stack.ts`'s ARG_AREA states, written independently so
+    // the audit does not agree with the code under test by construction.
+    const firstOffset = is64 ? 0x10 : 0x08;
+    const slotSize = is64 ? 8 : 4;
+    for (const r of funcs) {
+      out.funcs++;
+      let hits = 0;
+      for (const m of (r.code ?? "").matchAll(/\barg_0x([0-9A-Fa-f]+)\b/g)) {
+        const offset = Number.parseInt(m[1], 16);
+        if ((offset - firstOffset) % slotSize === 0) {
+          hits++;
+          seen.add(`${is64 ? 64 : 32}:${m[0]}`);
+        } else {
+          out.subSlot++;
+        }
+      }
+      out.aligned += hits;
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  out.distinct = seen.size;
+  return out;
+}
+
 export interface GotoResult {
   gotos: number;
   labels: number;

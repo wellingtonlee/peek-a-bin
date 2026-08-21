@@ -27,6 +27,7 @@ import {
   ccSyntaxCheck,
   gotoCheck,
   type OffsetofResult,
+  offsetNamedArgs,
   offsetofCheck,
   unencodableNames,
 } from "./emitAudits";
@@ -210,6 +211,11 @@ if (!pre.haveBins || !pre.haveCc) {
               // `unencodableNames` on why the question is PE32-only — which is
               // why `funcs` is beside it as the liveness half.
               unencodable: unencodableNames([{ funcs: r.funcs, is64: r.is64 }]),
+              // How much of the argument area the frame recovery is still
+              // missing. Report-only in both directions — see `offsetNamedArgs`
+              // on why a residue is legitimate — and per binary so
+              // `compare.mjs` can name which one moved.
+              offsetArgs: offsetNamedArgs([{ funcs: r.funcs, is64: r.is64 }]),
             },
             null,
             1,
@@ -541,6 +547,19 @@ if (!pre.haveBins || !pre.haveCc) {
       );
       expect(u.names).toBe(0);
       expect(u.funcs).toBeGreaterThan(0);
+    });
+
+    /**
+     * Not a gate: a residue is legitimate (see `offsetNamedArgs`), so what is
+     * asserted is only that the scan READ something. A count of 0 for want of
+     * observation would otherwise be indistinguishable from a clean tree, and
+     * this is the only instrument here that sees the class at all.
+     */
+    it("reads the emitted C for offset-named argument slots (instrument liveness)", () => {
+      const o = offsetNamedArgs(
+        over(auditedKeys(), results).map((r) => ({ funcs: r.funcs, is64: r.is64 })),
+      );
+      expect(o.funcs).toBeGreaterThan(0);
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -910,6 +929,22 @@ function renderReport(): string {
     `  unencodable register names  ${un.names} mentions, ${un.distinct} distinct, over ` +
       `${un.funcsAffected} of ${un.funcs} PE32 functions`,
   );
+  for (const key of keys) {
+    const r = results.get(key) as BinResult;
+    const oa = offsetNamedArgs([{ funcs: r.funcs, is64: r.is64 }]);
+    L.push(
+      `  offset-named argument slots  ${key}: ${oa.aligned} occurrences over ` +
+        `${oa.funcsAffected} of ${oa.funcs} functions, ${oa.distinct} distinct` +
+        (oa.subSlot > 0 ? `, plus ${oa.subSlot} sub-slot (correctly offset-named)` : ""),
+    );
+  }
+  L.push("    An `arg_0xN` whose offset divides evenly into an argument slot: a slot the naming");
+  L.push("    would have INDEXED had the frame pointer been recognised. REPORT-ONLY in both");
+  L.push("    directions — the PE32 residue is detection over-production, where the prologue is");
+  L.push("    outside the range and the frame register is the enclosing function's, and the x64");
+  L.push("    population is phantom parameters rather than unnamed ones (peek-a-bin-ikd).");
+  L.push("    Nothing else here sees this class: it is a well-typed name gcc compiles.");
+  L.push("  unencodable register names — detail:");
   L.push("    A 64-bit name in the C of a PE32 image: `canonReg` maps every alias to the 64-bit");
   L.push("    parent, so any leak of that identity prints `rcx` where the image has no RCX. A");
   L.push(

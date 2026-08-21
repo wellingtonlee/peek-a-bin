@@ -455,6 +455,27 @@ for (const b of bins) {
     note("  unencodable register names    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── Offset-named argument slots (emitAudits.ts). ───────────────────────────
+  //
+  // How much of the argument area the frame recovery is still missing. NOT a
+  // gate in either direction: a fall is a recovery, and a rise can be function
+  // detection moving underneath rather than a naming regression — but either
+  // way it is a row rather than something the next agent has to think to count.
+  if (B.offsetArgs && C.offsetArgs) {
+    row("offset-named argument slots", (x) => x.offsetArgs.aligned);
+    row("  distinct such names", (x) => x.offsetArgs.distinct);
+    row("  functions affected", (x) => x.offsetArgs.funcsAffected);
+    row("  sub-slot (correctly named)", (x) => x.offsetArgs.subSlot);
+    row(
+      "  functions scanned",
+      (x) => x.offsetArgs.funcs,
+      (a, c) => c < a,
+      "THE SCAN STOPPED READING FUNCTIONS",
+    );
+  } else {
+    note("  offset-named argument slots    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

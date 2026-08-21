@@ -341,3 +341,155 @@ describe("signed offsets", () => {
     expect(frame!.vars.find((v) => v.offset === 0x10)?.signedOffset).toBe(0x10);
   });
 });
+
+describe("analyzeStackFrame — a frame established by a prologue helper", () => {
+  /**
+   * MSVC's `__SEH_prolog4`, verbatim from t32.exe 0x404170, and the caller shape
+   * from t32.exe 0x401DB3. The helper establishes exactly the geometry the
+   * inline prologue does: the caller pushes the frame size and the scope table,
+   * the `call` pushes the return address, the helper pushes the handler and the
+   * old `fs:[0]`, and `lea ebp, [esp + 0x10]` then lands on the slot holding the
+   * caller's saved EBP — `16 + (-5 * 4) === -4`. So `[ebp + 8]` is argument 0.
+   */
+  const HELPER_ADDR = 0x2000;
+  const SEH_PROLOG4: [string, string][] = [
+    ["push", "0x4041d0"],
+    ["push", "dword ptr fs:[0]"],
+    ["mov", "eax, dword ptr [esp + 0x10]"],
+    ["mov", "dword ptr [esp + 0x10], ebp"],
+    ["lea", "ebp, [esp + 0x10]"],
+    ["sub", "esp, eax"],
+    ["mov", "dword ptr [ebp - 0x18], esp"],
+    ["ret", ""],
+  ];
+
+  /** Caller at 0x1000 plus a helper at `HELPER_ADDR`, in one ascending array. */
+  function withHelper(
+    caller: [string, string][],
+    helper: [string, string][] = SEH_PROLOG4,
+  ): { func: DisasmFunction; instructions: Instruction[] } {
+    const callerInsns = caller.map(([mn, op], i) => insn(0x1000 + i * 4, mn, op));
+    const helperInsns = helper.map(([mn, op], i) => insn(HELPER_ADDR + i * 4, mn, op));
+    return {
+      func: { name: "sub_1000", address: 0x1000, size: caller.length * 4 },
+      instructions: [...callerInsns, ...helperInsns],
+    };
+  }
+
+  /** The real caller shape: `push <framesize> / push <scopetable> / call <helper>`. */
+  const HELPER_CALL: [string, string][] = [
+    ["push", "0xc"],
+    ["push", "0x411050"],
+    ["call", `0x${HELPER_ADDR.toString(16)}`],
+  ];
+
+  function argsOf(caller: [string, string][], helper?: [string, string][]): string[] {
+    const { func: f, instructions } = withHelper(caller, helper);
+    return argNames(analyzeStackFrame(f, instructions, false));
+  }
+
+  it("numbers the arguments of a function whose frame __SEH_prolog4 established", () => {
+    expect(
+      argsOf([
+        ...HELPER_CALL,
+        ["mov", "ebx, dword ptr [ebp + 0x8]"],
+        ["mov", "eax, dword ptr [ebp + 0xc]"],
+      ]),
+    ).toEqual(["arg_0", "arg_1"]);
+  });
+
+  it("refuses a helper whose lea lands one slot off the saved frame pointer", () => {
+    // The arithmetic IS the rule: `0xc + (-5 * 4) === -8`, not `-4`, so this
+    // helper points EBP one slot below the caller's saved EBP and every offset
+    // would be numbered one argument too high.
+    const offByOne = SEH_PROLOG4.map(
+      ([mn, op]) => (mn === "lea" ? [mn, "ebp, [esp + 0xc]"] : [mn, op]) as [string, string],
+    );
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], offByOne)).toEqual([
+      "arg_0x8",
+    ]);
+  });
+
+  it("refuses a helper that saves the frame pointer with a push", () => {
+    // `push ebp / lea ebp, [esp + 4]` after no caller pushes SATISFIES the
+    // arithmetic (`4 + (-2 * 4) === -4`), so the arithmetic alone does not
+    // refuse it — but the push is a callee-saved save with a `pop ebp` to come,
+    // so whatever it computes is undone before the caller sees it.
+    expect(
+      argsOf(
+        [
+          ["call", `0x${HELPER_ADDR.toString(16)}`],
+          ["mov", "ebx, dword ptr [ebp + 0x8]"],
+        ],
+        [
+          ["push", "ebp"],
+          ["lea", "ebp, [esp + 0x4]"],
+          ["ret", ""],
+        ],
+      ),
+    ).toEqual(["arg_0x8"]);
+  });
+
+  it("refuses an ordinary call: the caller may only push immediates", () => {
+    // `push <reg> / push <reg> / call` is what a two-argument call looks like,
+    // and it is not distinctive on its own. Only immediates — the frame size and
+    // the scope table — open the search at all.
+    expect(
+      argsOf([
+        ["push", "ebx"],
+        ["push", "esi"],
+        ["call", `0x${HELPER_ADDR.toString(16)}`],
+        ["mov", "ebx, dword ptr [ebp + 0x8]"],
+      ]),
+    ).toEqual(["arg_0x8"]);
+  });
+
+  it("refuses a helper that writes the frame pointer again before returning", () => {
+    const clobbers = SEH_PROLOG4.map(
+      ([mn, op]) =>
+        (mn === "sub" && op === "esp, eax" ? ["add", "ebp, 0x10"] : [mn, op]) as [string, string],
+    );
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], clobbers)).toEqual([
+      "arg_0x8",
+    ]);
+  });
+
+  it("refuses a helper whose return is never reached", () => {
+    // A helper whose `ret` was not seen has not been shown to preserve the
+    // value it computed, so the frame is not claimed.
+    const noRet = SEH_PROLOG4.filter(([mn]) => mn !== "ret");
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], noRet)).toEqual([
+      "arg_0x8",
+    ]);
+  });
+
+  it("refuses a call whose target is not in the instruction array", () => {
+    const { func: f, instructions } = withHelper([
+      ["push", "0xc"],
+      ["push", "0x411050"],
+      ["call", "0x9000"],
+      ["mov", "ebx, dword ptr [ebp + 0x8]"],
+    ]);
+    expect(argNames(analyzeStackFrame(f, instructions, false))).toEqual(["arg_0x8"]);
+  });
+
+  it("applies the same arithmetic on x64, where the slot is 8 bytes", () => {
+    // No x64 binary in the corpus uses a prologue helper — Windows x64 SEH is
+    // table-driven — so the rule's architecture-independence is pinned here
+    // rather than measured. One caller push, the return address and one helper
+    // push put RSP 3 slots below the caller's entry, so the frame is the
+    // caller's precisely at `0x10 + (-3 * 8) === -8`.
+    const callerInsns: [string, string][] = [
+      ["push", "0x20"],
+      ["call", `0x${HELPER_ADDR.toString(16)}`],
+      ["mov", "rax, qword ptr [rbp + 0x10]"],
+    ];
+    const helper: [string, string][] = [
+      ["push", "0x4041d0"],
+      ["lea", "rbp, [rsp + 0x10]"],
+      ["ret", ""],
+    ];
+    const { func: f, instructions } = withHelper(callerInsns, helper);
+    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_0"]);
+  });
+});
