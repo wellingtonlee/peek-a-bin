@@ -80,25 +80,36 @@ export const DETECT_PASS_LABELS: Record<DetectPass, string> = {
 };
 
 /**
- * Which of the four situations this is.
+ * Which of the five situations this is.
  *
  * They are kept apart because the remedies differ: `"unsupported-arch"` is a
  * permanent property of the file and nothing is wrong; `"no-code-section"` is
  * likewise a property of the file and likewise not a fault, but a different
- * one — the architecture is fine and there is simply no code; `"analysis-failed"`
- * is a genuine fault whose message is worth reading; `"partial-detection"` is
- * none of those — the analysis finished and the disassembly is there, but the
- * function list is short, which is the one state that looks entirely healthy
- * on screen.
+ * one — the architecture is fine and there is simply no code;
+ * `"engine-unavailable"` is a fault, and the only one that is not about this
+ * file at all — the decoder itself never loaded, so no file this tab opens will
+ * disassemble until the page is reloaded; `"analysis-failed"` is a genuine
+ * fault whose message is worth reading; `"partial-detection"` is none of those
+ * — the analysis finished and the disassembly is there, but the function list
+ * is short, which is the one state that looks entirely healthy on screen.
  */
 export type AnalysisNoticeKind =
   | "unsupported-arch"
   | "no-code-section"
+  | "engine-unavailable"
   | "analysis-failed"
   | "partial-detection";
 
 export interface AnalysisNotice {
   kind: AnalysisNoticeKind;
+  /**
+   * Whether something went wrong, as opposed to the file simply being what it
+   * is. Carried here rather than re-derived from `kind` at each render site: the
+   * banner tested `kind === "analysis-failed"` in four places to pick red over
+   * amber, which is a hand-written predicate that a new kind silently joins on
+   * the wrong side of — and `"engine-unavailable"` is exactly such a kind.
+   */
+  isFault: boolean;
   /** A few words, for the status bar. */
   label: string;
   /** The full statement of why there is no disassembly, or why it is short. */
@@ -164,7 +175,15 @@ function omittedPassSentence(omitted: readonly DetectPass[]): string {
  * as `phase` holds one value and App dispatches `"no-code"` in place of
  * reaching any stage that could fail (peek-a-bin-bo3b).
  *
- * `omitted` ranks below all three, and for the same reason: it is a *consequence* of
+ * `"engine-unavailable"` ranks below both of those and above the failure. Below
+ * them because each is a *sufficient* explanation that survives the engine being
+ * fixed — an ARM32 image, or one with no executable section, has no disassembly
+ * on a healthy engine either, so naming the engine would send the user to
+ * reload the page for nothing. Above the failure because a chain that died with
+ * no decoder loaded died *of* that: `"analysis-failed"` would report the first
+ * stage to throw, which is the symptom (peek-a-bin-b3jn).
+ *
+ * `omitted` ranks below all four, and for the same reason: it is a *consequence* of
  * either one, so an image with no decoder would otherwise be told about twice.
  * It stands alone only when the analysis is otherwise healthy — the case that
  * has no other signal at all, a dead Capstone under a supported architecture,
@@ -177,12 +196,19 @@ export function analysisNotice(input: {
   error: string | null;
   /** `DetectResult.omitted`, once detection has answered. Absent = nothing known yet. */
   omitted?: readonly DetectPass[];
+  /**
+   * `AppState.disasmFailed` — why the decode engine never loaded, or null/absent
+   * while it is loading or once it is ready. Absent is deliberately the same as
+   * null, so a caller that predates this argument keeps its exact behaviour.
+   */
+  engineError?: string | null;
 }): AnalysisNotice | null {
   const omitted = input.omitted ?? [];
   if (archForMachine(input.machine) === "unsupported") {
     return {
       kind: "unsupported-arch",
       label: "Unsupported architecture",
+      isFault: false,
       // Not extended with the omitted passes, though detection will have
       // reported all of them: "no decoder for this image" already implies every
       // decoder-fed pass, and naming them would bury the one fact that matters.
@@ -196,6 +222,7 @@ export function analysisNotice(input: {
     return {
       kind: "no-code-section",
       label: "No code section",
+      isFault: false,
       // Says the three things the failure banner cannot: that this is a
       // property of the file, that nothing went wrong, and that the rest of the
       // file is there. The tab list is derived rather than spelled out, so it
@@ -213,6 +240,27 @@ export function analysisNotice(input: {
       omittedPasses: omitted,
     };
   }
+  if (input.engineError) {
+    return {
+      kind: "engine-unavailable",
+      label: "Engine unavailable",
+      isFault: true,
+      // Says the three things this state needs and the failure kind cannot: that
+      // the fault is the decoder rather than this file, that it is therefore the
+      // same for every file until the page is reloaded, and that the format-level
+      // views are unaffected — none of them decodes an instruction.
+      detail:
+        `The disassembly engine did not load, so nothing can be decoded: ${input.engineError}. ` +
+        `This is not a property of this file — no file will disassemble in this tab until ` +
+        `the page is reloaded. The parse itself is unaffected, and ` +
+        `${formatTabList(PARSER_DERIVED_TABS)} are all populated.`,
+      availableTabs: PARSER_DERIVED_TABS,
+      unavailableTabs: DECODER_DERIVED_TABS,
+      // Detection cannot have run, so whatever the caller holds here is from an
+      // earlier file or is empty; carried rather than invented, as above.
+      omittedPasses: omitted,
+    };
+  }
   if (input.phase === "failed") {
     // The chain's own message when it has one. It is the only description of
     // what actually went wrong, and it had no render site at all before this.
@@ -222,6 +270,7 @@ export function analysisNotice(input: {
     return {
       kind: "analysis-failed",
       label: "Analysis failed",
+      isFault: true,
       // Appended rather than replaced: which stage threw and how much of the
       // function list survived are different facts, and the second one is not
       // recoverable from the first.
@@ -235,6 +284,7 @@ export function analysisNotice(input: {
     return {
       kind: "partial-detection",
       label: "Partial function list",
+      isFault: false,
       detail: omittedPassSentence(omitted),
       // Nothing is withheld here: the analysis ran, the disassembly is real,
       // and every tab is populated. Only the function list is short.

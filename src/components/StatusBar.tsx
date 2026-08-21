@@ -120,8 +120,9 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
         phase: state.analysisPhase,
         error: state.error,
         omitted: state.omittedPasses,
+        engineError: state.disasmFailed,
       }),
-    [machine, state.analysisPhase, state.error, state.omittedPasses],
+    [machine, state.analysisPhase, state.error, state.omittedPasses, state.disasmFailed],
   );
 
   if (!pe) return null;

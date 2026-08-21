@@ -118,9 +118,12 @@ working" is `ANALYSIS_IN_PROGRESS`**, a `Record<AnalysisPhase, boolean>` in `use
 defaults any phase added later to "still analysing", which is a spinner that can never resolve,
 so a new phase must fail the build here instead (peek-a-bin-bo3b).
 
-**`analysisNotice()` (`components/analysisNotice.ts`) has four kinds, and they are ranked**:
-`"unsupported-arch"`, then `"no-code-section"`, then `"analysis-failed"`, then
-`"partial-detection"`. `"no-code-section"` is the `"no-code"` phase's notice and sits below the
+**`analysisNotice()` (`components/analysisNotice.ts`) has five kinds, and they are ranked**:
+`"unsupported-arch"`, then `"no-code-section"`, then `"engine-unavailable"`, then
+`"analysis-failed"`, then `"partial-detection"`. Each carries **`isFault`**, and the four render
+sites in `App.tsx` read that rather than testing the kind — they each spelled
+`kind === "analysis-failed"` to pick red over amber, which is a hand-written predicate a new
+kind joins on the wrong side of silently. `"no-code-section"` is the `"no-code"` phase's notice and sits below the
 architecture deliberately — an ARM32 resource-only DLL should report the machine type, which
 withholds the disassembly for every such file, where "no executable section" is a property this
 one file would still have on a supported architecture. Its detail lists the populated tabs from
@@ -135,6 +138,30 @@ top of it; on a failure its sentence is *appended* rather than substituted, beca
 threw and how much of the list survived are different facts. `DETECT_PASS_LABELS` is
 `Record<DetectPass, string>`, so wire values like `call-targets` cannot reach the screen and a
 fifth pass fails the build.
+
+**`"engine-unavailable"` is the one kind that is not about the file at all, and the whole class
+of defect behind it is a terminal state that is never entered.** `disasmWorker.init()` rejecting
+used to dispatch a bare `SET_ERROR`, and `state.error` renders only in `FileLoader`, which is
+unmounted whenever a PE is open — so an engine that died under a loaded file said *nothing*,
+while three separate surfaces (`StatusBar`, `AddressBar`, `DisassemblyView`) each spun
+"Loading engine..." off `!state.disasmReady`, which a rejection never clears. The rejection is
+now its own session-level fact, **`AppState.disasmFailed`** (`SET_DISASM_FAILED`, which sets
+`error` too so the pre-file case is unchanged), and `RESET` carries it across a load exactly as
+it carries `disasmReady`: Capstone is initialised once per tab, so a dead engine is still dead
+for the next file. Three things are load-bearing. The notice **ranks below the two no-fault
+properties of the file** — an ARM32 image and a resource-only DLL have no disassembly on a
+healthy engine either, so each is a sufficient explanation that survives the engine being fixed
+and naming the engine would send the user to reload for nothing — and **above
+`"analysis-failed"`**, which in this state reports whichever stage first asked the worker for an
+instruction, i.e. the symptom. App's detection effect must dispatch a **terminal phase** for it,
+above `analyzedBufferRef`, or the phase stays on whatever `handleFile` last dispatched and
+`ANALYSIS_IN_PROGRESS` keeps the sidebar skeleton and the status bar spinner going for the rest
+of the session — the exact shape of `peek-a-bin-bo3b`'s silent return, and it must fire for
+*both* orders (a file opened after the engine died, and an engine that dies with one open, which
+is why `state.disasmFailed` is in that effect's dependency array). And the two surfaces that
+cannot reach the notice — the tab bar renders beside it, the panel's arm is an early return —
+are told directly, or they keep claiming the engine is loading while the banner says it failed
+(peek-a-bin-b3jn).
 
 **Worker**: RPC-style communication in `src/workers/disasmClient.ts`. Heavy work (disassembly, function detection, xref building, decompilation) runs off-thread. Client caches results (disasm, xref, decompile caches) and mints the instruction-array tokens the worker's derived caches key on (`insnsTokens`; the counter never resets, so a token cannot be reused across files). Whole-file checksum and entropy go to the separate metrics worker via `metricsClient.ts`; inputs under the thresholds in `asyncMetricState.ts` (256 KiB for the entropy strip, 1 MiB for file metrics) stay synchronous and spawn no worker, so ordinary binaries never show a loading state.
 

@@ -664,6 +664,34 @@ describe("appReducer — analysis results", () => {
     const ready = appReducer(initialState, { type: "SET_DISASM_READY" });
     expect(appReducer(ready, { type: "SET_DISASM_READY" }).disasmReady).toBe(true);
   });
+
+  // peek-a-bin-b3jn. Both fields, in one action: `error` is what FileLoader
+  // renders when the engine dies before any file was opened, and `disasmFailed`
+  // is what every surface behind a loaded file reads — FileLoader is unmounted
+  // by then, so `error` alone reached nothing at all.
+  it("SET_DISASM_FAILED records the reason and sets the error with it", () => {
+    const dead = appReducer(initialState, {
+      type: "SET_DISASM_FAILED",
+      error: "Failed to load disassembly engine",
+    });
+    expect(dead.disasmFailed).toBe("Failed to load disassembly engine");
+    expect(dead.error).toBe("Failed to load disassembly engine");
+    // Not a substitute for readiness: nothing may read a dead engine as ready.
+    expect(dead.disasmReady).toBe(false);
+  });
+
+  it("a dead engine survives loading another file, exactly as a live one does", () => {
+    const dead = appReducer(initialState, { type: "SET_DISASM_FAILED", error: "dead" });
+    const withFile = appReducer(dead, {
+      type: "SET_PE_FILE",
+      peFile: peFile(),
+      fileName: "a.exe",
+    });
+    // Capstone is initialised once per tab, so the rejection is a property of
+    // the session and not of the file. Dropping it here put the permanent
+    // "Loading engine..." spinner back for every subsequent file.
+    expect(appReducer(withFile, { type: "RESET" }).disasmFailed).toBe("dead");
+  });
 });
 
 describe("appReducer — batch rename", () => {
@@ -870,6 +898,7 @@ describe("appReducer — no branch mutates its input", () => {
     { type: "SET_ADDRESS", address: 0x403000 },
     { type: "SET_FUNCTIONS", functions: [] },
     { type: "SET_DISASM_READY" },
+    { type: "SET_DISASM_FAILED", error: "engine died" },
     { type: "NAV_BACK" },
     { type: "NAV_FORWARD" },
     { type: "TOGGLE_BOOKMARK", address: 0x401000 },

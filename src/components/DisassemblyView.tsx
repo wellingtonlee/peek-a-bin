@@ -965,6 +965,7 @@ export function DisassemblyView() {
     machine: pe.coffHeader.machine,
     phase: state.analysisPhase,
     error: state.error,
+    engineError: state.disasmFailed,
   });
   // "No executable section" joins it: both are permanent properties of the file
   // rather than faults, both withhold exactly this panel and nothing else, and
@@ -973,10 +974,25 @@ export function DisassemblyView() {
   // section", which is true and explains nothing (peek-a-bin-bo3b). The failure
   // and partial-detection kinds are still deliberately excluded — neither is a
   // reason to replace the panel.
-  if (archNotice?.kind === "unsupported-arch" || archNotice?.kind === "no-code-section") {
+  // "Engine unavailable" joins the two file properties for the same reason they
+  // joined each other: this panel can never populate in that state either, and
+  // the alternative was the `!state.disasmReady` spinner three branches down,
+  // which says "Loading engine..." forever (peek-a-bin-b3jn). The heading has to
+  // move with it — the engine failing is not a property of the image.
+  if (
+    archNotice?.kind === "unsupported-arch" ||
+    archNotice?.kind === "no-code-section" ||
+    archNotice?.kind === "engine-unavailable"
+  ) {
     return (
       <div className="p-6 max-w-2xl text-sm">
-        <h2 className="text-amber-400 font-semibold mb-2">No disassembly for this image</h2>
+        <h2
+          className={`font-semibold mb-2 ${archNotice.isFault ? "text-red-400" : "text-amber-400"}`}
+        >
+          {archNotice.kind === "engine-unavailable"
+            ? "No disassembly: the engine did not load"
+            : "No disassembly for this image"}
+        </h2>
         <p className="text-gray-300 mb-4">{archNotice.detail}</p>
         <p className="text-gray-500 mb-2">Still available:</p>
         <div className="flex flex-wrap gap-2">

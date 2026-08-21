@@ -113,6 +113,14 @@ export interface AppState {
   currentAddress: number;
   functions: DisasmFunction[];
   disasmReady: boolean;
+  /**
+   * Why the decode engine is unavailable, or null while it is still loading or
+   * once it is ready. A *session*-level fact, not a per-file one: Capstone is
+   * initialised once, so a rejection here withholds the disassembly for every
+   * file this tab will ever open — which is why `RESET` carries it across a
+   * load exactly as it carries `disasmReady` (peek-a-bin-b3jn).
+   */
+  disasmFailed: string | null;
   addressHistory: number[];
   historyIndex: number;
   bookmarks: Bookmark[];
@@ -214,6 +222,7 @@ export type AppAction =
   | { type: "SET_FUNCTIONS"; functions: DisasmFunction[] }
   | { type: "SET_OMITTED_PASSES"; omitted: DetectPass[] }
   | { type: "SET_DISASM_READY" }
+  | { type: "SET_DISASM_FAILED"; error: string }
   | { type: "NAV_BACK" }
   | { type: "NAV_FORWARD" }
   | { type: "TOGGLE_BOOKMARK"; address?: number }
@@ -316,6 +325,7 @@ export const initialState: AppState = {
   currentAddress: 0,
   functions: [],
   disasmReady: false,
+  disasmFailed: null,
   addressHistory: [],
   historyIndex: -1,
   bookmarks: [],
@@ -419,6 +429,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case "SET_DISASM_READY":
       return { ...state, disasmReady: true };
+    // Sets `error` too, in the same action rather than as a second dispatch
+    // beside it: the two are one fact, and `error` is what FileLoader renders
+    // when the engine dies before any file was opened.
+    case "SET_DISASM_FAILED":
+      return { ...state, disasmFailed: action.error, error: action.error };
     case "NAV_BACK": {
       if (state.historyIndex <= 0) return state;
       const idx = state.historyIndex - 1;
@@ -706,6 +721,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...initialState,
         disasmReady: state.disasmReady,
+        // Both halves of the engine's status survive a load. A dead engine is
+        // still dead for the next file, and dropping this here put the spinner
+        // back for the rest of the session.
+        disasmFailed: state.disasmFailed,
         callGraph: null,
         dataXrefs: null,
         anomalies: [],

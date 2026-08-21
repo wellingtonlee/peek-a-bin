@@ -152,9 +152,16 @@ export default function App() {
     disasmWorker
       .init()
       .then(() => dispatch({ type: "SET_DISASM_READY" }))
+      // Not a bare SET_ERROR. `state.error` renders only in FileLoader, which
+      // unmounts the moment a PE parses, so an engine that died under an open
+      // file said nothing at all — and every surface keyed on `!disasmReady`
+      // spun "Loading engine..." for the rest of the session. This action sets
+      // `error` as well, so the pre-file case is unchanged, and records the
+      // failure as its own session-level fact for the notice to report
+      // (peek-a-bin-b3jn).
       .catch((e) =>
         dispatch({
-          type: "SET_ERROR",
+          type: "SET_DISASM_FAILED",
           error: e instanceof Error ? e.message : "Failed to load disassembly engine",
         }),
       );
@@ -242,7 +249,20 @@ export default function App() {
 
   // Run function detection when both PE file and disasm engine are ready
   useEffect(() => {
-    if (!state.peFile || !state.disasmReady) return;
+    if (!state.peFile) return;
+    if (!state.disasmReady) {
+      // The engine is either still loading — in which case this effect re-runs
+      // when it lands — or it is never going to. The second case has to reach a
+      // *terminal* phase here, above `analyzedBufferRef`, or the phase stays on
+      // whatever `handleFile` last dispatched and ANALYSIS_IN_PROGRESS keeps the
+      // sidebar skeleton and the status bar spinner going for good. Exactly the
+      // shape of peek-a-bin-bo3b's silent return, and reached by both orders: a
+      // file opened after the engine died, and an engine that died with one open
+      // (peek-a-bin-b3jn). `analysisNotice` outranks the failure with the
+      // engine's own message, so "failed" here is not what the user is told.
+      if (state.disasmFailed) dispatch({ type: "SET_ANALYSIS_PHASE", phase: "failed" });
+      return;
+    }
     const pe = state.peFile;
     const buffer = bufferRef.current;
     if (!buffer) return;
@@ -414,7 +434,10 @@ export default function App() {
           error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}`,
         });
       });
-  }, [state.peFile, state.disasmReady]);
+    // `disasmFailed` is listed because the early return above reads it: the
+    // engine can reject *after* a file is open, and without it this effect never
+    // re-runs to dispatch the terminal phase for that order.
+  }, [state.peFile, state.disasmReady, state.disasmFailed]);
 
   // Re-configure worker when strings arrive (they load asynchronously after PE parse)
   const stringsConfiguredRef = useRef(false);
@@ -696,8 +719,9 @@ export default function App() {
         phase: state.analysisPhase,
         error: state.error,
         omitted: state.omittedPasses,
+        engineError: state.disasmFailed,
       }),
-    [machine, state.analysisPhase, state.error, state.omittedPasses],
+    [machine, state.analysisPhase, state.error, state.omittedPasses, state.disasmFailed],
   );
 
   const renderMainView = () => {
@@ -769,14 +793,14 @@ export default function App() {
               <div
                 role="status"
                 className={`border-b px-4 py-1.5 flex items-start gap-3 text-xs shrink-0 ${
-                  notice.kind === "analysis-failed"
+                  notice.isFault
                     ? "bg-red-900/40 border-red-700/50"
                     : "bg-amber-900/40 border-amber-700/50"
                 }`}
               >
                 <span
                   className={`font-bold tracking-wide shrink-0 ${
-                    notice.kind === "analysis-failed" ? "text-red-400" : "text-amber-400"
+                    notice.isFault ? "text-red-400" : "text-amber-400"
                   }`}
                 >
                   {notice.label.toUpperCase()}
@@ -801,7 +825,7 @@ export default function App() {
                   onClick={() => setNoticeDismissed(true)}
                   aria-label="Dismiss this notice"
                   className={`text-sm leading-none shrink-0 ${
-                    notice.kind === "analysis-failed"
+                    notice.isFault
                       ? "text-red-500 hover:text-red-300"
                       : "text-amber-500 hover:text-amber-300"
                   }`}

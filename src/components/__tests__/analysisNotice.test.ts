@@ -35,6 +35,7 @@ import { computeImphash } from "../../pe/metadata";
 import { extractStrings, parsePE } from "../../pe/parser";
 import { findCodeSection } from "../../pe/sections";
 import {
+  type AnalysisNoticeKind,
   analysisNotice,
   DECODER_DERIVED_TABS,
   DETECT_PASS_LABELS,
@@ -354,6 +355,140 @@ describe("analysisNotice — a file that parsed fine and simply has no code", ()
   });
 });
 
+describe("analysisNotice — the decode engine itself never loaded", () => {
+  const ENGINE = "Failed to load disassembly engine";
+
+  it("says the engine is the fault, and carries its message", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "detecting-functions",
+      error: ENGINE,
+      engineError: ENGINE,
+    });
+    expect(notice?.kind).toBe("engine-unavailable");
+    expect(notice?.label).toBe("Engine unavailable");
+    expect(notice?.detail).toContain(ENGINE);
+  });
+
+  it("is a fault, unlike the two properties of the file", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "detecting-functions",
+      error: null,
+      engineError: ENGINE,
+    });
+    expect(notice?.isFault).toBe(true);
+  });
+
+  // The distinction that makes this its own kind rather than a message inside
+  // the failure kind: reloading the page is a remedy, and nothing about the file
+  // is at issue. Both halves are stated in prose, so both are asserted.
+  it("says the fault is not this file, and that a reload is the remedy", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "failed",
+      error: null,
+      engineError: ENGINE,
+    });
+    expect(notice?.detail).toMatch(/not a property of this file/i);
+    expect(notice?.detail).toMatch(/reload/i);
+  });
+
+  it("keeps every parser-derived view available and withholds only the disassembly", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "failed",
+      error: null,
+      engineError: ENGINE,
+    });
+    expect(notice?.availableTabs).toEqual(PARSER_DERIVED_TABS);
+    expect(notice?.unavailableTabs).toEqual(DECODER_DERIVED_TABS);
+  });
+
+  // Ranked below both no-fault properties of the file, because each is a
+  // sufficient explanation that survives the engine being fixed: an ARM32 image
+  // and a resource-only DLL have no disassembly on a healthy engine either, and
+  // naming the engine would send the user to reload the page for nothing.
+  it.each([
+    ["an unsupported architecture", ARMNT, "detecting-functions", "unsupported-arch"],
+    ["no code section", I386, "no-code", "no-code-section"],
+  ] as const)("ranks below %s", (_label, machine, phase, kind) => {
+    const notice = analysisNotice({
+      machine,
+      phase: phase as AnalysisPhase,
+      error: null,
+      engineError: ENGINE,
+    });
+    expect(notice?.kind).toBe(kind);
+  });
+
+  // And above the failure, which in this state is the symptom: the chain died
+  // at whichever stage first asked the worker for an instruction.
+  it("ranks above the analysis failure, whose message is the symptom", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "failed",
+      error: "Analysis failed: engine not ready",
+      engineError: ENGINE,
+    });
+    expect(notice?.kind).toBe("engine-unavailable");
+    expect(notice?.detail).toContain(ENGINE);
+  });
+
+  // `engineError` is optional so that a caller predating it keeps its exact
+  // behaviour. Absent and null must therefore be the same as "the engine is
+  // fine", and neither may invent a notice for a healthy file.
+  it.each([
+    ["absent", undefined],
+    ["null", null],
+  ])("says nothing when the engine error is %s", (_label, engineError) => {
+    expect(analysisNotice({ machine: I386, phase: "ready", error: null, engineError })).toBeNull();
+  });
+
+  it("does not fire merely because the analysis failed", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "failed",
+      error: "Analysis failed: something else",
+      engineError: null,
+    });
+    expect(notice?.kind).toBe("analysis-failed");
+  });
+});
+
+describe("isFault separates what went wrong from what the file simply is", () => {
+  // A table over every kind, so a sixth kind cannot be added without deciding
+  // which side of the banner's red/amber split it belongs on. The four render
+  // sites in App.tsx read this field rather than testing the kind, which is the
+  // hand-written predicate a new kind used to join on the wrong side of.
+  // Typed Record, not an array: a sixth kind fails the build here rather than
+  // going untested, the same reason VIEW_TAB_LABELS and DETECT_PASS_LABELS are
+  // Records.
+  const EXPECTED: Record<AnalysisNoticeKind, boolean> = {
+    "unsupported-arch": false,
+    "no-code-section": false,
+    "engine-unavailable": true,
+    "analysis-failed": true,
+    "partial-detection": false,
+  };
+
+  const REACHED: Record<AnalysisNoticeKind, Parameters<typeof analysisNotice>[0]> = {
+    "unsupported-arch": { machine: ARMNT, phase: "failed", error: null },
+    "no-code-section": { machine: I386, phase: "no-code", error: null },
+    "engine-unavailable": { machine: I386, phase: "failed", error: null, engineError: "dead" },
+    "analysis-failed": { machine: I386, phase: "failed", error: "boom" },
+    "partial-detection": { machine: I386, phase: "ready", error: null, omitted: ["call-targets"] },
+  };
+
+  it.each(Object.keys(EXPECTED) as AnalysisNoticeKind[])("%s", (kind) => {
+    const notice = analysisNotice(REACHED[kind]);
+    // Both halves matter: the input has to actually reach the kind it claims to,
+    // or the fault assertion below is about some other branch entirely.
+    expect(notice?.kind).toBe(kind);
+    expect(notice?.isFault).toBe(EXPECTED[kind]);
+  });
+});
+
 describe("ANALYSIS_IN_PROGRESS covers every phase", () => {
   it("is exhaustive, so no phase silently reads as still-analysing", () => {
     // Typed Record<AnalysisPhase, boolean>, so this is really a check that the
@@ -530,6 +665,64 @@ describe("every surface that reports a failure uses the shared decision", () => 
     expect(ready).toBeGreaterThan(-1);
     expect(notice).toBeLessThan(spinner);
     expect(spinner).toBeLessThan(ready);
+  });
+
+  /**
+   * peek-a-bin-b3jn, and the same shape as the bo3b guard above.
+   *
+   * Three separate surfaces key a spinner on `!state.disasmReady`, which a
+   * rejected `init()` never clears — so the whole class of defect is a *terminal
+   * state that is never entered*. The engine's rejection has to be recorded as
+   * its own fact (a bare SET_ERROR renders only in FileLoader, which is
+   * unmounted whenever a PE is open), and the analysis effect has to reach a
+   * terminal phase for it, or ANALYSIS_IN_PROGRESS keeps the sidebar skeleton
+   * and the status bar spinner going for the rest of the session.
+   */
+  it("App records the engine's rejection rather than only setting the error", () => {
+    const source = readFileSync(join(SRC, "App.tsx"), "utf8");
+    // Scoped to the init effect, so this is about the action that rejection
+    // dispatches and not about SET_ERROR anywhere else in a 900-line file. The
+    // bare SET_ERROR it replaces compiles, and says nothing to a user with a
+    // file open.
+    const from = source.indexOf(".init()");
+    expect(from).toBeGreaterThan(-1);
+    const region = source.slice(from, source.indexOf("}, []);", from));
+    expect(region).toMatch(/type:\s*"SET_DISASM_FAILED"/);
+    // The dispatch shape, not the bare token: a comment in this effect names
+    // the action it replaces, and a scraper that cannot tell prose from code
+    // fails on its own explanation.
+    expect(region).not.toMatch(/type:\s*"SET_ERROR"/);
+  });
+
+  it("App reaches a terminal phase when the engine is never going to arrive", () => {
+    const source = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(source).toMatch(/state\.disasmFailed/);
+    // The silent return this replaces — the exact shape of bo3b's defect, one
+    // guard earlier in the same effect.
+    expect(source).not.toMatch(
+      /if \(!state\.peFile \|\| !state\.disasmReady\) return;\n\s+const pe =/,
+    );
+  });
+
+  // The other two spinner sites. Neither can reach the notice — the tab bar
+  // renders beside it and the panel's own branch is an early return — so each
+  // has to be told about the failed engine directly, and each used to claim the
+  // engine was still loading while the banner said it had failed.
+  it("the tab bar stops claiming the engine is loading once it has failed", () => {
+    const source = readFileSync(join(SRC, "components", "AddressBar.tsx"), "utf8");
+    const spinner = source.search(/!state\.disasmReady && !state\.disasmFailed/);
+    expect(spinner).toBeGreaterThan(-1);
+    // The unguarded form, which is what made "Loading engine..." permanent.
+    expect(source).not.toMatch(/\{!state\.disasmReady && \(/);
+  });
+
+  it("the disassembly panel states the dead engine ahead of its own spinner", () => {
+    const source = readFileSync(join(SRC, "components", "DisassemblyView.tsx"), "utf8");
+    const notice = source.search(/"engine-unavailable"/);
+    const spinner = source.search(/if \(!state\.disasmReady\)/);
+    expect(notice).toBeGreaterThan(-1);
+    expect(spinner).toBeGreaterThan(-1);
+    expect(notice).toBeLessThan(spinner);
   });
 
   it("the status bar has no label for a phase it cannot render", () => {
