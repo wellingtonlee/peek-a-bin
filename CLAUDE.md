@@ -845,8 +845,10 @@ stating, since it proves a change was confined to the path you meant.
   were taken at, and the bead id. A defect fixed says what the defect was and what would have
   caught it. Prefer a long message to a short one — the log is the only place some of this is
   written down.
-- **Stage only your own files.** `.beads/dolt-backup.json` is untracked, predates this work and is
-  not yours — leave it. `.beads/interactions.jsonl` moves as a side effect of using `bd`, and
+- **Stage only your own files.** `.beads/dolt-backup.json` is not yours — leave it. It predates
+  this work, and note it **is tracked**, not untracked as this said until 2026-08-21: it was swept
+  into `b7c69df` by a commit that did not mean to take it, which is the exact failure this bullet
+  exists to prevent. It is unmodified, so there is nothing to undo; just do not stage it again. `.beads/interactions.jsonl` moves as a side effect of using `bd`, and
   history records it in its own commit ("Record this session's beads interactions") rather than
   smuggling it into a code change.
 - **End the message with** `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`, as every
