@@ -403,3 +403,63 @@ describe("destroySSA", () => {
     expect(retStmt).toBeDefined();
   });
 });
+
+/**
+ * `simplifyPhis` substitutes a phi OPERAND into every reader of the phi's
+ * destination, and a phi operand is the register's 64-bit *identity* rather than
+ * a spelling: `insertPhis` mints every phi as `irReg(canonReg(...))` and the
+ * operand fill copies that name and width verbatim (peek-a-bin-1k4,
+ * peek-a-bin-pzws, peek-a-bin-0s6e). `destroySSA` corrects that for a lowered
+ * phi copy, via `registerSpeller`; a substituted operand becomes an ordinary
+ * read with no lowering step left to correct it.
+ *
+ * Found while landing peek-a-bin-6f3v, which made an RSI phi trivial in one
+ * function per 32-bit corpus binary and took `unencodableNames` from 0 to 34
+ * mentions — 9 reads of `rsi_1` and 9 of `rdi_1` in a PE32 image that has no
+ * such register. Output-neutral on its own: byte-identical emitted C on all 1127
+ * functions of all four binaries at `bd73798`.
+ */
+describe("simplifyPhis spelling", () => {
+  /**
+   * The phi is built by hand rather than by `insertPhis`, deliberately: which of
+   * a trivial phi's operands is `nonSelf[0]` depends on predecessor order, and
+   * in the corpus one operand carries the canonical name while the other has
+   * been rewritten to a real spelling by copy propagation. Pinning the bad one
+   * as the survivor is what makes the assertion mean something in both orders.
+   */
+  it("spells a substituted phi operand the way the value's own mentions spell it", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [], [0])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    // A deref, so neither constant nor copy propagation can fold the value away
+    // and the read below really is a register read.
+    liftedBlocks.set(0, [
+      { kind: "assign", dest: irReg("esi", 4), src: irDeref(irReg("ebx", 4), 4) },
+    ]);
+    liftedBlocks.set(1, []);
+    const ctx = buildSSA(blocks, liftedBlocks);
+
+    // One phi, at block 1, whose single operand is the version block 0 defines —
+    // named the way `insertPhis` and the operand fill name it, i.e. the 64-bit
+    // parent at the 64-bit width.
+    const def = ctx.liftedBlocks.get(0)?.[0];
+    if (def?.kind !== "assign" || def.dest.kind !== "reg") throw new Error("no definition");
+    const version = def.dest.version as number;
+    ctx.phis.set(1, [
+      {
+        kind: "phi",
+        dest: irReg("rsi", 8, version + 1),
+        operands: [{ blockId: 0, value: irReg("rsi", 8, version) }],
+      },
+    ]);
+    ctx.liftedBlocks.set(1, [{ kind: "return", value: irReg("rsi", 8, version + 1) }]);
+
+    ssaOptimize(ctx);
+    destroySSA(ctx);
+
+    const ret = ctx.liftedBlocks.get(1)?.find((st) => st.kind === "return");
+    if (ret?.kind !== "return" || ret.value?.kind !== "reg") throw new Error("no return");
+    // `rsi` is the register's IDENTITY, which is what SSA keys on and not a name
+    // this function ever mentions.
+    expect(ret.value.name).toBe("esi");
+  });
+});

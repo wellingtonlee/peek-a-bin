@@ -2,7 +2,7 @@ import type { CalleeClobbers } from "../callSummary";
 import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
-import { pushedImmediate } from "../stackIdiom";
+import { pushedImmediate, STACK_TRAFFIC } from "../stackIdiom";
 import type { Instruction } from "../types";
 import {
   blockFlagOwner,
@@ -517,6 +517,13 @@ function branchFor(
  * four corpus binaries, of which 69 are recoverable (peek-a-bin-suql). Omitting
  * it is the pre-existing behaviour for the same reason as above: "nobody told me
  * which block ran first" is not "the flags started here".
+ *
+ * `stackSlots` is the third, and the same rule applies: it is `matchedStackSlots`'
+ * answer to "which `push` does this `pop` take its value from", computed over the
+ * whole CFG because a save and its restore are routinely in different blocks with
+ * a loop nest between them. Omitting it leaves every save/restore pair exactly as
+ * it was — the pop defines nothing, and a later read of the register names the
+ * value it held before it (peek-a-bin-6f3v).
  */
 export function liftBlock(
   block: BasicBlock,
@@ -528,6 +535,7 @@ export function liftBlock(
   calleeSavedFirstWrite?: Map<string, number>,
   calleeClobbers?: CalleeClobbers,
   solePred?: BasicBlock,
+  stackSlots?: StackSlotPairs,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -630,8 +638,17 @@ export function liftBlock(
     // A `pop` whose `push` is in a PREDECESSOR is refused here and picked up by
     // `crossBlockPopImmediates` below, which is `pipeline.ts` step 2b: the
     // definition has to land in each predecessor for `buildSSA` to build a phi,
-    // and this function returns one block's statements. Every save/restore pair
-    // is still left exactly as it was, and that residue is peek-a-bin-6f3v.
+    // and this function returns one block's statements.
+    //
+    // A MATCHED `push <reg>` / `pop <reg>` pair is the third case and is
+    // `matchedStackSlots`', threaded in as `stackSlots`. It gets a statement at
+    // BOTH program points — `stk_<pushaddr> = <reg>` at the push,
+    // `<reg> = stk_<pushaddr>` at the pop — because that is what puts the read
+    // of the saved register where the machine reads it, with no RSP-relative
+    // expression anywhere. The two rules cannot both claim one `pop`: the
+    // immediate rules answer only for an immediate push, and this one pairs only
+    // a register push. The immediate rule is asked first anyway, so which of
+    // them wins is not left to that argument (peek-a-bin-6f3v).
     if (mn === "push" || mn === "pop") {
       if (mn === "pop" && parts.length === 1) {
         const name = parts[0].trim().toLowerCase();
@@ -645,8 +662,33 @@ export function liftBlock(
             const src = irConst(imm, regSize(name));
             stmts.push({ kind: "assign", dest: irReg(name), src, addr: insn.address });
             regState.set(name, src);
+          } else {
+            const slot = stackSlots?.pops.get(insn.address);
+            // `regState` is deliberately NOT told about this write, which is the
+            // one asymmetry with the immediate rule above. `RegState` is what
+            // `collectArgs64` reads through `wroteAnyAlias`, so recording a
+            // `pop rcx` there would turn a stack restore into an invented
+            // argument at the next call — and the arity OVER-count is a gate at
+            // 0 (peek-a-bin-7r1l). Leaving it alone keeps the pre-existing
+            // behaviour for a pop, which is what every other pop still has.
+            if (slot)
+              stmts.push({
+                kind: "assign",
+                dest: irReg(name),
+                src: irReg(slot.slot, slot.size),
+                addr: insn.address,
+              });
           }
         }
+      } else if (mn === "push") {
+        const def = stackSlots?.pushes.get(insn.address);
+        if (def)
+          stmts.push({
+            kind: "assign",
+            dest: irReg(def.slot, def.size),
+            src: irReg(def.reg, regSize(def.reg)),
+            addr: insn.address,
+          });
       }
       continue;
     }
@@ -2054,4 +2096,296 @@ export function liftCrossBlockPops(blocks: BasicBlock[], lifted: Map<number, IRS
       addr: def.addr,
     });
   }
+}
+
+// ── A matched `push <reg>` / `pop <reg>` pair, as a stack slot ──────────────
+
+/**
+ * The slot a matched `push <reg>` defines, and the slot a matched `pop <reg>`
+ * reads. Keyed by machine address, exactly as `crossBlockPopImmediates` keys
+ * its definitions on the POP's address, so `corpus/popReads.ts` needs no second
+ * notion of "the lifter handled this pop".
+ */
+export interface StackSlotPairs {
+  /** push address → the slot it defines. Only pushes some `pop` actually reads. */
+  pushes: Map<number, { slot: string; reg: string; size: number }>;
+  /** pop address → the slot it reads. */
+  pops: Map<number, { slot: string; size: number }>;
+}
+
+/**
+ * The abstract stack, as a three-level lattice.
+ *
+ * `undefined` is TOP: this program point imposes no constraint, which is what an
+ * unreached block contributes at a join and what every block starts as. `null`
+ * is BOTTOM: something happened that the model cannot account for. In between is
+ * the known suffix of the stack, bottom-to-top, where a `null` ELEMENT is a slot
+ * whose value is not claimed (an immediate, a memory push, two different pushes
+ * meeting at a join) while its DEPTH is still accounted for.
+ *
+ * TOP is not a convenience. Seeding an unreached block with the EMPTY stack
+ * instead makes it contribute a concrete depth of 0 at any join it flows into,
+ * which is a claim it has no basis for: `t32!sub_40D99A` carries a one-
+ * instruction alignment NOP at 0x40DA40 that nothing branches to, and its
+ * `jmp`-to-0x40DA43 edge then met a real two-slot shape against `[]`, took the
+ * whole region to BOTTOM and lost the `pop eax` / `ret` this rule exists for.
+ * Treating an unreachable predecessor as unconstraining is the textbook meet and
+ * is what makes the dead code inert rather than poisonous.
+ */
+type StackShape = (string | null)[] | null | undefined;
+
+/** The slot id a `push` mints. The address makes it unique and traceable. */
+function slotIdOf(insn: Instruction): string {
+  return `stk_${insn.address.toString(16)}`;
+}
+
+function mentionsSp(text: string): boolean {
+  return /\b[er]?sp\b/i.test(text);
+}
+
+/** A sub-slot-width operand: `push cx` moves ESP by 2, not by 4. */
+function narrowOperand(op: string): boolean {
+  return /\b(byte|word)\s+ptr\b/i.test(op);
+}
+
+/** `[esp]` / `[esp + 8]` / `[rsp - 0x10]` → the displacement; anything else null. */
+function spDisplacement(op: string): number | null {
+  const m = op
+    .trim()
+    .toLowerCase()
+    .match(/^(?:[a-z]+\s+ptr\s+)?\[\s*[er]sp\s*(?:([+-])\s*(0x[0-9a-f]+|\d+)\s*)?\]$/);
+  if (!m) return null;
+  if (!m[1]) return 0;
+  const v = m[2].startsWith("0x") ? Number.parseInt(m[2], 16) : Number.parseInt(m[2], 10);
+  return m[1] === "-" ? -v : v;
+}
+
+/** A lone unsigned immediate operand. */
+function loneUnsignedImm(op: string): number | null {
+  const t = op.trim().toLowerCase();
+  if (/^0x[0-9a-f]+$/.test(t)) return Number.parseInt(t, 16);
+  if (/^\d+$/.test(t)) return Number.parseInt(t, 10);
+  return null;
+}
+
+/** What one instruction does to the abstract stack, plus any pairing it makes. */
+interface StackStep {
+  shape: StackShape;
+  /** The slot a register `push` minted. */
+  pushed?: string;
+  /** The slot a register `pop` took, when the model knows which one it is. */
+  popped?: string;
+}
+
+/**
+ * The transfer function: how one instruction moves the abstract stack.
+ *
+ * Everything not recognised as stack traffic is decided from the DESTINATION
+ * operand, which is the same crude-in-the-safe-direction shape
+ * `corpus/popReads.ts`'s `machineWrites` uses and rests on the same fact: an
+ * x86 instruction writes its first operand, and the ones that touch ESP
+ * implicitly are exactly `STACK_TRAFFIC`. A destination that mentions the stack
+ * pointer at all — the register itself, or memory addressed through it — ends
+ * the model unless it is an `add`/`sub`/`lea` by a constant, because a store
+ * through ESP writes the very slots this is tracking.
+ */
+function stepStack(shape: StackShape, insn: Instruction, slotBytes: number): StackStep {
+  if (shape === null) return { shape: null };
+  const mn = withoutLockPrefix(insn.mnemonic.toLowerCase());
+  const parts = splitOperands(insn.opStr);
+  /** TOP: no constraint yet. A `push` is what turns it into a concrete shape. */
+  const known = shape ?? [];
+
+  if (mn === "push" || mn === "pop") {
+    if (parts.length !== 1) return { shape: null };
+    const op = parts[0].trim().toLowerCase();
+    // `pop esp` really does set it, and ESP is the one register no stage here
+    // models — the same exclusion the `push <imm>` rule above makes.
+    if (mentionsSp(op) || narrowOperand(op)) return { shape: null };
+    // A register narrower than a slot moves ESP by its own width, so the depth
+    // accounting below would be wrong by the difference.
+    const wholeSlotReg = isKnownRegister(op) && regSize(op) === slotBytes;
+    if (mn === "push") {
+      if (!wholeSlotReg) return { shape: [...known, null] };
+      const slot = slotIdOf(insn);
+      return { shape: [...known, slot], pushed: slot };
+    }
+    // Popping with nothing known on top is a pop below the region's base, whose
+    // contents belong to whatever entered it. Both a TOP shape and an empty
+    // concrete one answer the same way, and it is the same answer either way:
+    // nothing after this is accounted for.
+    if (known.length === 0) return { shape: null };
+    const top = known[known.length - 1];
+    const next = known.slice(0, -1);
+    if (top !== null && wholeSlotReg) return { shape: next, popped: top };
+    return { shape: next };
+  }
+
+  // A `call` is the one that costs the most and cannot be modelled: whether the
+  // callee popped the arguments (stdcall, every Win32 import) or the caller will
+  // (cdecl, an `add esp, N` below) is not a fact about this instruction, and
+  // guessing either way mis-pairs every `pop` after it.
+  if (STACK_TRAFFIC.has(mn)) return { shape: null };
+
+  const dest = parts[0]?.trim().toLowerCase() ?? "";
+  if (!mentionsSp(dest)) {
+    // `xchg` writes both operands, so its second one is a destination too.
+    if (mn === "xchg" && parts.some((p) => mentionsSp(p))) return { shape: null };
+    // An instruction that does not touch the stack leaves TOP as TOP, which is
+    // what keeps an unreachable one-NOP block from claiming a depth.
+    return { shape };
+  }
+
+  // ESP itself, moved by a constant. `lea esp, [esp]` is MSVC's multi-byte NOP
+  // and appears inside the very loop this rule has to survive (t32 0x40D9FC).
+  let espDelta: number | null = null;
+  if (dest === "esp" || dest === "rsp") {
+    const rhs = parts[1]?.trim().toLowerCase() ?? "";
+    if (mn === "add") espDelta = loneUnsignedImm(rhs);
+    else if (mn === "sub") {
+      const v = loneUnsignedImm(rhs);
+      espDelta = v === null ? null : -v;
+    } else if (mn === "lea") espDelta = spDisplacement(rhs);
+  }
+  if (espDelta === null) return { shape: null };
+  if (espDelta % slotBytes !== 0) return { shape: null };
+  const slotDelta = -espDelta / slotBytes;
+  if (slotDelta === 0) return { shape };
+  if (slotDelta > 0) return { shape: [...known, ...new Array<null>(slotDelta).fill(null)] };
+  if (-slotDelta > known.length) return { shape: null };
+  return { shape: known.slice(0, known.length + slotDelta) };
+}
+
+/** The meet: TOP is the identity, BOTTOM absorbs, otherwise depth and slots must agree. */
+function meetShapes(a: StackShape, b: StackShape): StackShape {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  if (a === null || b === null) return null;
+  if (a.length !== b.length) return null;
+  return a.map((s, i) => (s === b[i] ? s : null));
+}
+
+function sameShape(a: StackShape, b: StackShape): boolean {
+  if (a === undefined || b === undefined || a === null || b === null) return a === b;
+  return a.length === b.length && a.every((s, i) => s === b[i]);
+}
+
+/**
+ * Pair every `push <reg>` with the `pop <reg>` that takes it off the stack.
+ *
+ * A `pop` that is not lifted is not a DEFINITION in SSA, so every later read of
+ * the register binds to the value it held BEFORE the pop. For the `push <imm>`
+ * idiom that is peek-a-bin-3axd and peek-a-bin-6ilz; for a genuine save and
+ * restore it is peek-a-bin-6f3v, and the emitted C then reads a scratch value
+ * where the machine reads the saved one — t32!sub_40D99A's memset restores its
+ * remaining byte count at 0x40DA97 and the C reads the inner loop's decremented
+ * counter, which is 0 at loop exit, while its `pop eax` / `ret` returns that
+ * counter where the machine returns the destination pointer.
+ *
+ * **The slot is identified by the PAIRING, never by an address.** CLAUDE.md's
+ * standing rule is that no read of RSP may be moved to another program point:
+ * `push`, `pop` and a `call`'s return address are not lifted, so RSP changes
+ * with nothing in the IR recording it and there is no definition chain over a
+ * stack ADDRESS to reason about. What this computes is which push a pop takes
+ * its value from, by depth, and `liftBlock` then spells that as one assignment
+ * at each of the two program points — `stk_<pushaddr> = <reg>` where the push
+ * is, `<reg> = stk_<pushaddr>` where the pop is. No RSP-relative expression is
+ * built and nothing is moved.
+ *
+ * The slot is spelled as a pseudo-REGISTER rather than an `IRVar` deliberately,
+ * and it is why this costs nothing where it recovers nothing: the definition is
+ * `stk_x = <reg>`, which `isCopyStmt` recognises, so `copyPropagation` deletes
+ * it and rewrites the pop's readers to the pushed register's own SSA version.
+ * A save/restore the emitted C already read correctly therefore comes out
+ * byte-identical — `ebx = ebx_0` is a copy too, and DCE takes the pair — while a
+ * restore of a value the C had overwritten now names the version it saved. An
+ * `IRVar` would have survived both passes (DCE only deletes a versioned `reg`
+ * destination) and put a dead `slot_N = ebx` in every function with a prologue.
+ *
+ * WHY THE BASE DEPTH DOES NOT MATTER, which is what makes a region the CFG
+ * cannot see the entry of safe: a slot id is a push's own address, so a pairing
+ * survives the meet only where every path into the pop pushed *that
+ * instruction's* value and has not popped it. The claim is entirely relative to
+ * the push, so an MSVC funclet, or a merged-in function like the memset above
+ * whose block follows a `ret` and has no predecessor at all, is paired correctly
+ * without knowing how deep the stack was when it was entered. Nothing is seeded
+ * with a depth: every block starts at TOP and the first `push` is what makes a
+ * shape concrete, so a `pop` with nothing known on top is refused — the same
+ * answer as "the base is opaque". The stated limitation is the mirror of it: a
+ * block only an EXTERNAL transfer can reach contributes TOP, so if such a
+ * transfer really happens and reaches a pop, the pairing below it is not the
+ * machine's. That is the same assumption every stage here makes about a detected
+ * function's boundaries.
+ *
+ * WHAT IT REFUSES, and each is a case where an answer would be a guess: a
+ * `call` (the callee may have popped the arguments); a store through ESP; any
+ * other write of ESP than an `add`/`sub`/`lea` by a whole number of slots;
+ * `leave`, `enter` and the flag/GPR block forms; a push or pop narrower than a
+ * slot; a join whose predecessors disagree about the depth or about which push
+ * is at a position; and a `pop` below the region's base. An immediate or memory
+ * `push` keeps its DEPTH but claims no value — the immediate forms are
+ * `stackIdiom.ts`'s and must stay there, and a memory push would move a load
+ * across every intervening store.
+ */
+export function matchedStackSlots(blocks: BasicBlock[], is64: boolean): StackSlotPairs {
+  const empty: StackSlotPairs = { pushes: new Map(), pops: new Map() };
+  if (blocks.length === 0) return empty;
+  const slotBytes = is64 ? 8 : 4;
+  const byId = new Map(blocks.map((b) => [b.id, b]));
+
+  // ── Forward dataflow to a fixpoint ──
+  //
+  // Every block starts at TOP and every block is on the worklist, so no block
+  // has to be identified as an entry: the function's own entry and each region
+  // the CFG shows no way into are treated alike, and each becomes concrete at
+  // its own first `push`. An unreachable block that touches the stack still
+  // degrades its successors, which is the conservative direction.
+  const inShape = new Map<number, StackShape>();
+  const queue: number[] = blocks.map((b) => b.id);
+  // Bounded because these CFGs come from disassembling untrusted bytes. The meet
+  // only ever descends TOP -> concrete -> BOTTOM, so a real fixpoint is reached
+  // long before this; hitting it means claiming nothing at all.
+  const limit = blocks.length * 8 + 64;
+  let steps = 0;
+  while (queue.length > 0) {
+    if (steps++ > limit) return empty;
+    const id = queue.shift() as number;
+    const blk = byId.get(id);
+    if (!blk) continue;
+    let shape = inShape.get(id);
+    for (const insn of blk.insns) shape = stepStack(shape, insn, slotBytes).shape;
+    for (const sid of blk.succs) {
+      if (!byId.has(sid)) continue;
+      const prev = inShape.get(sid);
+      const merged = meetShapes(prev, shape);
+      if (!sameShape(prev, merged)) {
+        inShape.set(sid, merged);
+        queue.push(sid);
+      }
+    }
+  }
+  // ── One final pass to read the pairings off the stable shapes ──
+  const pops: StackSlotPairs["pops"] = new Map();
+  const pushed = new Map<string, { insn: Instruction; reg: string }>();
+  for (const blk of blocks) {
+    let shape = inShape.get(blk.id);
+    for (const insn of blk.insns) {
+      const step = stepStack(shape, insn, slotBytes);
+      if (step.pushed !== undefined)
+        pushed.set(step.pushed, {
+          insn,
+          reg: splitOperands(insn.opStr)[0].trim().toLowerCase(),
+        });
+      if (step.popped !== undefined) pops.set(insn.address, { slot: step.popped, size: slotBytes });
+      shape = step.shape;
+    }
+  }
+  // A push no pop reads defines nothing: emitting the assignment anyway would
+  // put a statement with no reader in front of every prologue.
+  const pushes: StackSlotPairs["pushes"] = new Map();
+  for (const { slot } of pops.values()) {
+    const p = pushed.get(slot);
+    if (p) pushes.set(p.insn.address, { slot, reg: p.reg, size: slotBytes });
+  }
+  return { pushes, pops };
 }

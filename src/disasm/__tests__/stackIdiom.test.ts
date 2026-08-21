@@ -185,7 +185,7 @@ describe("stackIdiom is a leaf, and the decompiler has no Capstone edge", () => 
  * the whole point of it, is not something a text scan can check and is pinned
  * end to end by `decompile/__tests__/pipeline.test.ts` instead.
  */
-describe("every caller of liftBlock also runs the cross-block pop pairing", () => {
+describe("every caller of liftBlock also runs the whole-CFG pop pairing", () => {
   const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
   /** Every non-test `.ts` under `src/` and `corpus/` that calls `liftBlock(`. */
@@ -219,6 +219,27 @@ describe("every caller of liftBlock also runs the cross-block pop pairing", () =
   it("leaves none of them without the pairing call", () => {
     const offenders = liftBlockCallers().filter(
       (f) => !/\bliftCrossBlockPops\s*\(/.test(readFileSync(f, "utf-8")),
+    );
+
+    expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
+  });
+
+  /**
+   * The same guard for `matchedStackSlots`, and it is here rather than in a
+   * second describe block because it is the same defect in the same direction:
+   * a replica that lifts blocks without the matched `push <reg>` / `pop <reg>`
+   * pairing measures a program the emitter never sees, and `corpus/popReads.ts`
+   * keeps reporting the rows peek-a-bin-6f3v fixed.
+   *
+   * It is a *separate* assertion from the one above because the two facts reach
+   * `liftBlock` differently — `liftCrossBlockPops` is a pass over the lifted
+   * blocks, `matchedStackSlots` is an argument — so a half-finished edit can
+   * carry one and not the other. The argument being optional is what makes the
+   * text scan necessary at all: were it required, the typechecker would say so.
+   */
+  it("leaves none of them without the matched-slot pairing", () => {
+    const offenders = liftBlockCallers().filter(
+      (f) => !/\bmatchedStackSlots\s*\(/.test(readFileSync(f, "utf-8")),
     );
 
     expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);

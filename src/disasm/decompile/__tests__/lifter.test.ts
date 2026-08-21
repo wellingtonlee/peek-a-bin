@@ -8,6 +8,7 @@ import {
   firstCalleeSavedWrites,
   liftBlock,
   liftCrossBlockPops,
+  matchedStackSlots,
   parseOperand,
 } from "../lifter";
 import { RegState } from "../regstate";
@@ -1514,5 +1515,406 @@ describe("liftCrossBlockPops", () => {
     expect(stmts).toHaveLength(2);
     expect(stmts[0].kind).toBe("assign");
     expect(stmts[1]).toBe(branch);
+  });
+});
+
+describe("matchedStackSlots", () => {
+  /** A block at an explicit id/address, with explicit edges. */
+  function blk(
+    id: number,
+    addr: number,
+    list: [string, string?][],
+    edges: { succs?: number[]; preds?: number[] } = {},
+  ): BasicBlock {
+    return {
+      id,
+      startAddr: addr,
+      endAddr: addr + list.length * SIZE,
+      insns: list.map(([m, o], i) => insn(m, o ?? "", addr + i * SIZE)),
+      succs: edges.succs ?? [],
+      preds: edges.preds ?? [],
+    };
+  }
+
+  /** One straight-line block, so the depth model is the only thing under test. */
+  function straight(list: [string, string?][]): BasicBlock[] {
+    return [blk(0, 0x401000, list)];
+  }
+
+  const at = (i: number) => 0x401000 + i * SIZE;
+
+  it("pairs a save with its restore and names the slot after the push", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ecx"],
+        ["and", "ecx, 0xf"],
+        ["pop", "ecx"],
+      ]),
+      false,
+    );
+    expect(s.pops.get(at(2))).toEqual({ slot: `stk_${at(0).toString(16)}`, size: 4 });
+    expect(s.pushes.get(at(0))).toEqual({
+      slot: `stk_${at(0).toString(16)}`,
+      reg: "ecx",
+      size: 4,
+    });
+  });
+
+  it("pairs by depth, so a restore into a different register still resolves", () => {
+    // MSVC's memset returns its destination pointer exactly this way:
+    // `push ecx` on entry, `pop eax` before the `ret` (t32 0x40D9E7/0x40DA6F).
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ecx"],
+        ["push", "ebx"],
+        ["xor", "ebx, ebx"],
+        ["pop", "ebx"],
+        ["pop", "eax"],
+      ]),
+      false,
+    );
+    expect(s.pops.get(at(3))?.slot).toBe(`stk_${at(1).toString(16)}`);
+    expect(s.pops.get(at(4))?.slot).toBe(`stk_${at(0).toString(16)}`);
+  });
+
+  it("leaves a push no pop reads without a definition", () => {
+    // Emitting `stk_N = ebp` anyway would put a statement with no reader in
+    // front of every prologue in the image.
+    const s = matchedStackSlots(straight([["push", "ebp"]]), false);
+    expect(s.pushes.size).toBe(0);
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("claims no value for an immediate or memory push, but keeps its depth", () => {
+    // The immediate forms are `stackIdiom.ts`'s and must stay there, and a
+    // memory push would move a load across every intervening store. The DEPTH
+    // still has to be right or the `pop ebx` below pairs with the wrong push.
+    for (const pushed of ["7", "dword ptr [eax]"]) {
+      const s = matchedStackSlots(
+        straight([
+          ["push", "ebx"],
+          ["push", pushed],
+          ["pop", "ecx"],
+          ["pop", "ebx"],
+        ]),
+        false,
+      );
+      expect(s.pops.get(at(2))).toBeUndefined();
+      expect(s.pops.get(at(3))?.slot).toBe(`stk_${at(0).toString(16)}`);
+    }
+  });
+
+  it("refuses across a call, because the callee may have popped the arguments", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ebx"],
+        ["call", "0x402000"],
+        ["pop", "ebx"],
+      ]),
+      false,
+    );
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("follows `add esp` and `sub esp` by a whole number of slots", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ebx"],
+        ["sub", "esp, 8"],
+        ["add", "esp, 8"],
+        ["pop", "ebx"],
+      ]),
+      false,
+    );
+    expect(s.pops.get(at(3))?.slot).toBe(`stk_${at(0).toString(16)}`);
+  });
+
+  it("refuses an `add esp` that is not a whole number of slots", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ebx"],
+        ["add", "esp, 2"],
+        ["pop", "ebx"],
+      ]),
+      false,
+    );
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("survives `lea esp, [esp]`, MSVC's multi-byte NOP", () => {
+    // t32 0x40D9FC sits inside the very loop the memset pairing has to cross.
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ecx"],
+        ["lea", "esp, [esp]"],
+        ["mov", "ecx, 1"],
+        ["pop", "ecx"],
+      ]),
+      false,
+    );
+    expect(s.pops.get(at(3))?.slot).toBe(`stk_${at(0).toString(16)}`);
+  });
+
+  it("refuses a store through the stack pointer, which writes the slots themselves", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ebx"],
+        ["mov", "dword ptr [esp], eax"],
+        ["pop", "ebx"],
+      ]),
+      false,
+    );
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("allows a READ through the stack pointer, which changes nothing", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "ebx"],
+        ["lea", "ecx, [esp + 8]"],
+        ["pop", "ebx"],
+      ]),
+      false,
+    );
+    expect(s.pops.get(at(2))?.slot).toBe(`stk_${at(0).toString(16)}`);
+  });
+
+  it("refuses `pop esp` and every other write of the stack pointer", () => {
+    for (const [mn, ops] of [
+      ["pop", "esp"],
+      ["mov", "esp, ebp"],
+      ["leave", ""],
+    ] as [string, string][]) {
+      const s = matchedStackSlots(
+        straight([
+          ["push", "ebx"],
+          [mn, ops],
+          ["pop", "ebx"],
+        ]),
+        false,
+      );
+      expect(s.pops.size, `${mn} ${ops}`).toBe(0);
+    }
+  });
+
+  it("refuses a push or pop narrower than a slot, which moves ESP by its own width", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "cx"],
+        ["pop", "cx"],
+      ]),
+      false,
+    );
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("uses the pointer width for the slot, so an x64 pair is 8 bytes", () => {
+    const s = matchedStackSlots(
+      straight([
+        ["push", "rbx"],
+        ["xor", "rbx, rbx"],
+        ["pop", "rbx"],
+      ]),
+      true,
+    );
+    expect(s.pops.get(at(2))).toEqual({ slot: `stk_${at(0).toString(16)}`, size: 8 });
+  });
+
+  it("refuses a pop below the region's base, whose contents belong to the caller", () => {
+    const s = matchedStackSlots(straight([["pop", "ebx"]]), false);
+    expect(s.pops.size).toBe(0);
+  });
+
+  it("pairs across blocks, including a loop between the push and the pop", () => {
+    // t32!sub_40D99A 0x40DA7C/0x40DA97 in miniature: push, a self-looping body
+    // that overwrites the register, then the restore.
+    const blocks = [
+      blk(0, 0x401000, [["push", "edx"]], { succs: [1] }),
+      blk(
+        1,
+        0x401100,
+        [
+          ["dec", "edx"],
+          ["jne", "0x401100"],
+        ],
+        { preds: [0, 1], succs: [1, 2] },
+      ),
+      blk(2, 0x401200, [["pop", "edx"]], { preds: [1] }),
+    ];
+    const s = matchedStackSlots(blocks, false);
+    expect(s.pops.get(0x401200)?.slot).toBe("stk_401000");
+  });
+
+  it("refuses a join whose predecessors disagree about which push is on top", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "ecx"],
+          ["jmp", "0x401200"],
+        ],
+        { succs: [2] },
+      ),
+      blk(1, 0x401100, [["push", "edx"]], { succs: [2] }),
+      blk(2, 0x401200, [["pop", "eax"]], { preds: [0, 1] }),
+    ];
+    expect(matchedStackSlots(blocks, false).pops.size).toBe(0);
+  });
+
+  it("refuses a join whose predecessors disagree about the DEPTH", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "ecx"],
+          ["push", "ebx"],
+          ["jmp", "0x401200"],
+        ],
+        { succs: [2] },
+      ),
+      blk(1, 0x401100, [["push", "ebx"]], { succs: [2] }),
+      blk(2, 0x401200, [["pop", "eax"]], { preds: [0, 1] }),
+    ];
+    expect(matchedStackSlots(blocks, false).pops.size).toBe(0);
+  });
+
+  /**
+   * The lattice's TOP element, and the reason it exists.
+   *
+   * `t32!sub_40D99A` carries a one-instruction alignment NOP at 0x40DA40 that
+   * nothing branches to and that falls into the middle of the memset body.
+   * Seeding such a block with the EMPTY stack makes it contribute a concrete
+   * depth of 0 at that join, which met against the real two-slot shape and took
+   * the whole region — including the `pop eax` / `ret` this rule exists for — to
+   * BOTTOM. An unreached predecessor has to be unconstraining.
+   */
+  it("is not poisoned by an unreachable predecessor that touches nothing", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "ecx"],
+          ["mov", "ecx, 1"],
+        ],
+        { succs: [2] },
+      ),
+      blk(1, 0x401100, [["lea", "ebx, [ebx]"]], { succs: [2] }),
+      blk(2, 0x401200, [["pop", "eax"]], { preds: [0, 1] }),
+    ];
+    expect(matchedStackSlots(blocks, false).pops.get(0x401200)?.slot).toBe("stk_401000");
+  });
+
+  it("…but an unreachable predecessor that DOES touch the stack still refuses", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "ecx"],
+          ["mov", "ecx, 1"],
+        ],
+        { succs: [2] },
+      ),
+      blk(1, 0x401100, [["push", "ebx"]], { succs: [2] }),
+      blk(2, 0x401200, [["pop", "eax"]], { preds: [0, 1] }),
+    ];
+    expect(matchedStackSlots(blocks, false).pops.size).toBe(0);
+  });
+
+  it("pairs a region the CFG shows no way into, from its own first push", () => {
+    // The memset body of t32!sub_40D99A follows a `ret` and nothing in the
+    // function branches to it. The claim is relative to the push, so the
+    // unknown entry depth costs nothing.
+    const blocks = [
+      blk(0, 0x401000, [["ret", ""]], {}),
+      blk(
+        1,
+        0x401100,
+        [
+          ["push", "ecx"],
+          ["mov", "ecx, 1"],
+          ["pop", "eax"],
+        ],
+        {},
+      ),
+    ];
+    expect(matchedStackSlots(blocks, false).pops.get(0x401108)?.slot).toBe("stk_401100");
+  });
+
+  it("answers nothing for an empty block list", () => {
+    expect(matchedStackSlots([], false)).toEqual({ pushes: new Map(), pops: new Map() });
+  });
+});
+
+describe("liftBlock — matched stack slots", () => {
+  function liftWithSlots(list: [string, string][], is64 = false): IRStmt[] {
+    const block = blockOf(list);
+    return liftBlock(
+      block,
+      new RegState(),
+      is64,
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      undefined,
+      undefined,
+      matchedStackSlots([block], is64),
+    );
+  }
+
+  it("gives the push and the pop one statement each", () => {
+    const stmts = liftWithSlots([
+      ["push", "ecx"],
+      ["and", "ecx, 0xf"],
+      ["pop", "ecx"],
+    ]);
+    expect(stmts).toEqual([
+      { kind: "assign", dest: irReg("stk_401000", 4), src: irReg("ecx", 4), addr: 0x401000 },
+      {
+        kind: "assign",
+        dest: irReg("ecx"),
+        src: irBinary("&", irReg("ecx", 4), irConst(0xf, 4)),
+        addr: 0x401004,
+      },
+      { kind: "assign", dest: irReg("ecx"), src: irReg("stk_401000", 4), addr: 0x401008 },
+    ]);
+  });
+
+  it("leaves both alone when no pairing was handed in", () => {
+    // Omitting the argument is the pre-existing behaviour, which is what every
+    // caller that has not been threaded through still gets.
+    expect(
+      lift([
+        ["push", "ecx"],
+        ["pop", "ecx"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("lets the push-imm rule answer first, so the two cannot both claim a pop", () => {
+    // They are disjoint by construction — the immediate rules answer only for an
+    // immediate push and this one pairs only a register push — but the order
+    // means that is not the only thing keeping them apart.
+    const stmts = liftWithSlots([
+      ["push", "7"],
+      ["pop", "ecx"],
+    ]);
+    expect(stmts).toEqual([
+      { kind: "assign", dest: irReg("ecx"), src: irConst(7, 4), addr: 0x401004 },
+    ]);
+  });
+
+  it("still emits nothing for a pop the pairing refused", () => {
+    expect(
+      liftWithSlots([
+        ["push", "ebx"],
+        ["call", "0x402000"],
+        ["pop", "ebx"],
+      ]).filter((s) => s.kind === "assign" && s.dest.kind === "reg" && s.dest.name === "ebx"),
+    ).toEqual([]);
   });
 });

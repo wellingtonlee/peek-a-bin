@@ -56,6 +56,7 @@ import {
   firstCalleeSavedWrites,
   liftBlock,
   liftCrossBlockPops,
+  matchedStackSlots,
 } from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import { buildSSA, detectNaturalLoops } from "../src/disasm/decompile/ssa";
@@ -303,6 +304,10 @@ export function auditLostDefs(
     if (blocks.length === 0) return;
     const lifted = new Map<number, IRStmt[]>();
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
+    // `pipeline.ts`'s third function-wide fact: which `push <reg>` a `pop <reg>`
+    // takes its value from (peek-a-bin-6f3v). A replica missing it measures a
+    // program the emitter never sees, and fails in the QUIET direction.
+    const stackSlots = matchedStackSlots(blocks, is64);
     const blockById = new Map(blocks.map((b) => [b.id, b]));
     for (const b of blocks)
       lifted.set(
@@ -317,6 +322,7 @@ export function auditLostDefs(
           calleeSavedFirstWrite,
           calleeClobbers,
           solePredecessor(b, blockById),
+          stackSlots,
         ),
       );
     // `pipeline.ts` step 2b (peek-a-bin-6ilz).

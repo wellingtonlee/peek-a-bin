@@ -3,7 +3,7 @@
 // cast-of-call def was deleted along with the call.
 import { hasSideEffects } from "./fold";
 import type { IRExpr, IRPhi, IRReg, IRStmt } from "./ir";
-import { canonReg, pushBeforeTerminator } from "./ir";
+import { canonReg, isKnownRegister, pushBeforeTerminator, regSize, walkStmts } from "./ir";
 import type { SSAContext } from "./ssa";
 
 function sameReg(a: IRReg, b: IRReg): boolean {
@@ -113,9 +113,50 @@ function replaceRegInCtx(ctx: SSAContext, oldReg: IRReg, newVal: IRExpr): void {
 
 // ── SSA Optimization Passes ──
 
+/**
+ * The widest spelling each register VERSION carries in a real statement.
+ *
+ * A phi operand is not a spelling. `insertPhis` mints every phi as
+ * `irReg(canonReg(...))` and the operand fill copies that name and width
+ * verbatim, so a phi operand names the register's 64-bit *identity* — which is
+ * what SSA keys on and is not a name the image necessarily has an encoding for
+ * (peek-a-bin-1k4, peek-a-bin-pzws, peek-a-bin-0s6e). `destroySSA` handles that
+ * for a lowered phi copy, via `registerSpeller`; `simplifyPhis` is the other
+ * place a phi operand can reach the page, and it reaches it as an ordinary read
+ * with no lowering step to correct it.
+ *
+ * So the substitution below spells the operand the way the value's own mentions
+ * spell it, which is `registerSpeller`'s `perVersion` rule one pass earlier. The
+ * width follows the name, because `IRReg.size` means the width of the name it
+ * carries. A version with no mention at all keeps the operand as it is, which is
+ * the pre-existing behaviour.
+ */
+function versionSpellings(ctx: SSAContext): Map<string, string> {
+  const rank = (n: string) => regSize(n) * 2 - (/^[abcd]h$/i.test(n) ? 1 : 0);
+  const out = new Map<string, string>();
+  const note = (r: IRReg) => {
+    if (r.version === undefined || !isKnownRegister(r.name)) return;
+    const name = r.name.toLowerCase();
+    const key = regKey(r);
+    const cur = out.get(key);
+    if (cur === undefined || rank(name) > rank(cur)) out.set(key, name);
+  };
+  for (const [, stmts] of ctx.liftedBlocks) {
+    walkStmts(stmts, (e) => {
+      if (e.kind === "reg") note(e);
+    });
+    for (const st of stmts) {
+      if (st.kind === "assign" && st.dest.kind === "reg") note(st.dest);
+      if (st.kind === "call_stmt" && st.resultDest?.kind === "reg") note(st.resultDest);
+    }
+  }
+  return out;
+}
+
 /** Remove trivial phis (all operands identical, or single unique non-self operand). */
 export function simplifyPhis(ctx: SSAContext): boolean {
   let changed = false;
+  const spellings = versionSpellings(ctx);
   for (const [blockId, blockPhis] of ctx.phis) {
     const newPhis: IRPhi[] = [];
     for (const phi of blockPhis) {
@@ -127,7 +168,15 @@ export function simplifyPhis(ctx: SSAContext): boolean {
       const first = nonSelf[0].value;
       const allSame = nonSelf.every((op) => sameReg(op.value, first));
       if (allSame) {
-        replaceRegInCtx(ctx, phi.dest, first);
+        // See `versionSpellings`: the operand carries the canonical identity, and
+        // substituting it into real readers is the one path by which that name
+        // becomes emitted C with nothing downstream to respell it.
+        const spelling = spellings.get(regKey(first));
+        const value =
+          spelling !== undefined && spelling !== first.name.toLowerCase()
+            ? { ...first, name: spelling, size: regSize(spelling) }
+            : first;
+        replaceRegInCtx(ctx, phi.dest, value);
         changed = true;
         continue;
       }

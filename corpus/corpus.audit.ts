@@ -356,24 +356,43 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
-     * NOT A GATE ON THE COUNT — read `corpus/popReads.ts` before tightening it.
+     * A GATE at 0, and it became one the moment a fix got it there.
      *
      * A register a `pop` wrote and the emitted C still names under its previous
-     * value is a provably wrong name, so this has a gate's character rather
-     * than a baseline's. It is not one yet only because the count is not zero:
-     * 7/6/0/0 on t32/w32/t64/w64 at `6952d53`, over 5/4/0/0 pops, plus 2/2/0/0
-     * implicit `ret` reads. When a fix takes it to 0, gate it here.
+     * value is a provably wrong name — a store through the wrong pointer, a
+     * `return` of a loop counter where the machine returns a pointer — so this
+     * always had `polarity inverted`'s character rather than a baseline's, and
+     * the standing instruction here, in `popReads.ts` and in CLAUDE.md was to
+     * gate it at 0 as soon as the count reached 0. It was 7/6/0/0 on
+     * t32/w32/t64/w64 at `6952d53` over 5/4/0/0 pops plus 2/2/0/0 implicit
+     * `ret` reads; peek-a-bin-3axd, peek-a-bin-6ilz and peek-a-bin-6f3v took
+     * the three shapes to **0 on all four**.
      *
-     * What IS asserted is that the instrument is alive, and both halves matter.
-     * `pops` non-zero says pops were examined at all. `popsLifted` non-zero on
-     * the 32-bit binaries says `stackIdiom.ts`'s `push <imm>` / `pop <reg>`
-     * pairing still fires — the one part of this class that IS fixed
-     * (peek-a-bin-3axd) — and a regression there would otherwise show up only
-     * as this count RISING, which nothing gates.
+     * BOTH counts are gated. `wrong` is a read of the register in a statement;
+     * `retWrong` is the implicit read a `ret` makes of the return register, and
+     * it is the same defect said differently — two of the four x86 rows it
+     * carried were `memset`/`memcpy` returning a loop counter instead of the
+     * destination pointer.
+     *
+     * The liveness half matters as much as the gate, because a lifted pop LEAVES
+     * this audit's population: `popsLifted` counts the pops the lifter defines
+     * and the scan skips them, so a rule that started claiming every pop would
+     * drive `wrong` to 0 by no longer looking. Both are therefore asserted —
+     * `pops` non-zero says pops were examined at all, and the ratio is reported
+     * beside the gate so the denominator is visible rather than implied.
      */
-    it("examines every pop, and the push-imm pairing still fires", () => {
+    it("never reads a register a pop wrote under its previous value", () => {
       let lifted = 0;
       for (const r of results.values()) {
+        expect(
+          `${r.key} pop-restored: ${r.popReads.rows
+            .filter((x) => x.verdict !== "ret-benign")
+            .slice(0, 5)
+            .map((x) => `${x.func}@0x${x.readAddr.toString(16)} ${x.reg} '${x.insn}'`)
+            .join("; ")}`,
+        ).toBe(`${r.key} pop-restored: `);
+        expect(r.popReads.wrong).toBe(0);
+        expect(r.popReads.retWrong).toBe(0);
         expect(r.popReads.pops).toBeGreaterThan(0);
         expect(r.popReads.functionsScanned).toBeGreaterThan(0);
         lifted += r.popReads.popsLifted;
@@ -834,16 +853,18 @@ function renderReport(): string {
     L.push(
       `  pop-restored reads          ${pr.wrong} wrong over ${pr.popsWrong} pops ` +
         `(${pr.funcsWrong} functions), ${pr.benign} benign restores, ` +
-        `${pr.popsLifted}/${pr.pops} pops lifted as push-imm`,
+        `${pr.popsLifted}/${pr.pops} pops paired by the lifter`,
     );
     L.push(
       `    implicit \`ret\` reads      ${pr.retWrong} wrong, ${pr.retBenign} benign ` +
-        `— the benign ones are what refusing EVERY pop would cost`,
+        `— a benign row is one where emitting NOTHING is what makes the C right`,
     );
-    L.push("    A register a `pop` wrote, read in the C under its PREVIOUS value: `pop` is not");
-    L.push("    lifted, so it is no definition in SSA. Reported, NOT gated — the count is not 0");
-    L.push("    and no fix has been taken, but every row is a provably wrong name, so gate it at");
-    L.push("    0 the moment it gets there. Sites in popreads_<bin>.jsonl. See popReads.ts.");
+    L.push("    A register a `pop` wrote, read in the C under its PREVIOUS value. GATED at 0 on");
+    L.push("    both counts (3axd, 6ilz, 6f3v): every row is a provably wrong name, and two of");
+    L.push("    the last four were memset/memcpy returning a loop counter for their destination");
+    L.push("    pointer. A PAIRED pop leaves this population, so read the ratio beside the gate —");
+    L.push("    a rule claiming every pop would reach 0 by no longer looking. Sites in");
+    L.push("    popreads_<bin>.jsonl. See popReads.ts.");
     const ld = r.lostDefs;
     L.push(
       `  fold-lost definitions       ${ld.lostReads} reads over ${ld.lostSites} sites ` +

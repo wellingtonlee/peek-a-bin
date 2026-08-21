@@ -49,6 +49,7 @@ import {
   firstCalleeSavedWrites,
   liftBlock,
   liftCrossBlockPops,
+  matchedStackSlots,
 } from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import type { SSAContext } from "../src/disasm/decompile/ssa";
@@ -320,6 +321,10 @@ export function auditStaleV0Reads(
     // it measure a different one. `calleeClobbers` in particular decides which
     // registers a call destroys, which is the whole subject of this audit.
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
+    // `pipeline.ts`'s third function-wide fact: which `push <reg>` a `pop <reg>`
+    // takes its value from (peek-a-bin-6f3v). A replica missing it measures a
+    // program the emitter never sees, and fails in the QUIET direction.
+    const stackSlots = matchedStackSlots(blocks, is64);
     const blockById = new Map(blocks.map((b) => [b.id, b]));
     for (const b of blocks)
       lifted.set(
@@ -334,6 +339,7 @@ export function auditStaleV0Reads(
           calleeSavedFirstWrite,
           calleeClobbers,
           solePredecessor(b, blockById),
+          stackSlots,
         ),
       );
     // `pipeline.ts` step 2b (peek-a-bin-6ilz).

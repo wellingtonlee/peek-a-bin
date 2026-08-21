@@ -111,8 +111,14 @@ export const STACK_TRAFFIC = new Set([
  * PREDECESSOR's tail — `pushedImmediate(pred.insns, pred.insns.length)` — and
  * puts a definition in each one so `buildSSA` builds the phi, because MSVC
  * routinely splits the idiom across an `if`/`else if` chain and the immediates
- * then differ per arm (peek-a-bin-6ilz). Every save/restore pair is still left
- * alone, and that residue is peek-a-bin-6f3v.
+ * then differ per arm (peek-a-bin-6ilz).
+ *
+ * A save/restore pair is not left alone either, and it is NOT this module's
+ * question: `lifter.ts`'s `matchedStackSlots` runs a balanced-depth model over
+ * the whole CFG and pairs a `push <reg>` with the `pop` that takes it off the
+ * stack, whatever register that pop names (peek-a-bin-6f3v). The two rules are
+ * disjoint by construction — this one answers only for an IMMEDIATE push, that
+ * one pairs only a REGISTER push — so no `pop` can be claimed by both.
  */
 export function pushedImmediate(insns: StackInsn[], popIndex: number): number | null {
   for (let ri = popIndex - 1; ri >= 0; ri--) {

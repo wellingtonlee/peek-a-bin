@@ -411,6 +411,91 @@ only in this one direction. **UNDER is not gated**; see the full section under *
 for both counts, the ceiling split, and the three shapes this defect had. Gated at 0 since
 `peek-a-bin-7r1l` (`peek-a-bin-f51x` and `peek-a-bin-6lmh` cleared the x86 half first).
 
+**A register a `pop` wrote, read under its previous value** (`popReads.ts`). **A GATE at 0 on
+both counts**, and it became one the moment a fix got there. Every row it prints is a provably
+wrong name, which always gave it the character of `polarity inverted` rather than of a baseline;
+the standing instruction was to gate it at 0, and `peek-a-bin-6f3v` did. **0 wrong, 0 `ret`-wrong
+and 0 benign on all four binaries** at `bd73798` + `peek-a-bin-6f3v`, over **151/5/5/146 of
+1095/350/328/1043 pops paired by the lifter** (t32/t64/w64/w32). The history, because three
+numbers from it are still quoted: 7/6/0/0 wrong over 5/4/0/0 pops with 67/63/0/0 lifted at
+`6952d53`; `peek-a-bin-6ilz` took the 3 t32 and 2 w32 `push-imm` rows to 4/4/0/0 over 2/2/0/0 by
+pairing a `push <imm>` in a PREDECESSOR; `peek-a-bin-6f3v` took the rest — a matched
+`push <reg>` / `pop <reg>` in two functions per binary, plus the 2 `ret` rows in the same
+functions — with `matchedStackSlots`' balanced-depth model over the whole CFG.
+
+> **A PAIRED pop leaves this audit's population, so read the ratio beside the gate.** The scan
+> skips any pop the lifter defines — it has to, because its test for "wrong" is that the register
+> is read at all after the pop, which is a *shape* test that only means something while the pop is
+> not a definition. So a rule that started claiming every pop would drive the gate to 0 by no
+> longer looking, and `popsLifted`/`pops` is what makes that visible: 151 of 1095 on t32 leaves
+> 944 pops still examined. That is why the liveness assertions sit in the same `it` as the gate.
+
+`liftBlock` does not lift a `pop` it cannot pair, so it is no definition in SSA and a later read
+of the register binds to the value it held *before* the pop. The audit walks forward from each
+`pop <reg>` over the CFG to the first instruction that writes that register **on the machine**, and
+reports every read of it in the post-fold IR on the way.
+
+> **The write test has to be the machine's, not the IR's**, and that single choice is the
+> difference between 7 rows and 54 on t32. An IR-level "first write" attributes other classes'
+> defects to the pop: t32!`sub_40D99A` does `pop ecx` (cdecl argument cleanup) and then
+> `mov ecx, [ebp+8]`, whose IR definition `foldBlock` inlines into its single in-block use while
+> ECX is live out — so eleven reads two blocks later name an ECX nothing ever assigns, and against
+> an IR test they read as the pop's fault. They are not: the popped value is dead there. The same
+> choice is why the count on both x64 binaries is **0** rather than 6: every x64 row is the
+> epilogue `mov rax, rbx` / `pop rbx` / `ret`, where the emitted `return rbx` names a value
+> copied *before* the pop that the C never reassigns — correct output.
+
+Two counts beside `wrong`, and both were about the cost of the obvious fix. `benign` is reads where
+the paired push pushed the *same* register with nothing written in between, so the pop restores a
+value the C never reassigned and emitting nothing is **correct**; refusing every pop (lifting it as
+`reg = <unknown>`) would trade each one for an `__unrecovered_N`. That count was 0 anyway, because
+an epilogue restore is followed by `ret` and not by a read — *except* for the implicit read `ret`
+itself makes of the return register, counted separately as `retBenign` and **1 per x86 binary**
+until `peek-a-bin-6f3v` (t32!`sub_40A925`, `push eax` / `pop eax` / `ret 4`).
+
+> **Both benign counts now read 0, and that is the population leaving rather than the fact
+> changing.** `sub_40A925`'s pop is paired, so the scan skips it; its emitted C is **byte-identical**
+> before and after, which is the direct evidence the count was standing in for — the `return eax` is
+> right because the pop assigns the same value back, not because nothing was emitted. A 0 here
+> therefore no longer argues against a blanket refusal of every pop. `peek-a-bin-4ynk`'s measured
+> table does, and it is on the bead: +119 unrecovered values across 66 changed functions to buy 25
+> wrong readings.
+
+`retWrong` was **2 per x86 binary** and is now 0: a `return` of a value the machine popped, named
+from before the pop — both of them MSVC's `memset`/`memcpy` returning its destination pointer,
+where the emitted `return eax` returned the loop counter instead (0 at loop exit).
+
+> **The "is this pop already lifted" test is asked of the LIFT, not of the lowered program.**
+> `push 0x1a / pop eax / ret` *is* lifted, copy propagation folds the constant into the `return`
+> and DCE then deletes the assignment — so nothing survives at the pop's address, and a post-fold
+> test called the pop unlifted and printed **four false `ret-wrong` rows per x86 binary**, each one
+> a function returning a constant the emitted C states correctly.
+
+> **This audit replicates `pipeline.ts` stages 1–3 plus `foldBlock`, and the replica must include
+> step 2b.** `liftCrossBlockPops` runs *before* `liftedPops` is collected, because the cross-block
+> definition carries the **pop's** address precisely so that scan finds it — the same reason
+> `liftBlock`'s block-local form does. A replica that skips it fails in the quiet direction: this
+> audit keeps reporting rows a landed fix already removed, so a green tree reads as a red one.
+> `src/disasm/__tests__/stackIdiom.test.ts` fails if any file calling `liftBlock(` does not also
+> call `liftCrossBlockPops(` — `staleReads.ts` and `lostDefs.ts` replicate the same loop. It fails
+> on a missing `matchedStackSlots(` too, as a **separate** assertion: that one reaches `liftBlock`
+> as an argument rather than as a pass over the lifted blocks, so a half-finished edit can carry
+> one and not the other.
+
+*Validated by negative control, in both directions.* Reverting `peek-a-bin-6f3v` — i.e. handing
+`liftBlock` no `stackSlots` — takes the gate red at exactly the 4/0/0/4 wrong and 2/0/0/2
+`ret`-wrong it reported at `bd73798`. Disabling `stackIdiom.ts`'s block-local
+`push <imm>` / `pop <reg>` pairing (`peek-a-bin-3axd`) takes t32 from
+7 to **78** wrong over 44 pops and w32 from 6 to **61** over 38, and fails the run's liveness
+assertion on `popsLifted`. Lifting every unpaired `pop` as `reg = <unknown>` takes all four
+binaries to **0** — which is the measured cost of that fix, not a recommendation: it moves
+`unrecovered values` 106 → 166 on t32 and 87 → 146 on w32 (+229 token occurrences corpus-wide),
+changes 66 functions of emitted text, loses one struct field on each x86 binary
+(`offsetof` 353/353 → 352/352 and 408/408 → 407/407, ratio unmoved), destroys the one correct
+`retBenign` read per binary, and leaves both x64 binaries byte-identical. Every gate stays green
+over it.
+
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures
@@ -697,69 +782,6 @@ makes the run exit 1 and name all six pre-`7r1l` rows.) Without the arity rows t
 of runs moved nothing about arguments at all — the only other signal was `polarity guards audited`
 falling by 2 and 3, which is an instruction to go and read some guards, not a statement about
 calls.
-
-**A register a `pop` wrote, read under its previous value** (`popReads.ts`). Reported, never
-gated — *for now*, and only because the count is not zero. Every row it prints is a provably
-wrong name, which gives it the character of `polarity inverted` rather than of a baseline: **gate
-it at 0 the moment a fix gets it there.** Currently **4 wrong over 2 pops on t32, 4 over 2 on
-w32, 0 on both x64 binaries** at `6d5ae92` + `peek-a-bin-6ilz`, plus 2/2/0/0 implicit `ret` reads
-and 73/68/0/0 pops lifted by the two `stackIdiom.ts`-based pairings. It was 7/6/0/0 wrong over
-5/4/0/0 pops with 67/63/0/0 lifted at `6952d53`; `peek-a-bin-6ilz` took the 3 t32 and 2 w32
-`push-imm` rows by pairing a `push <imm>` in a PREDECESSOR (`crossBlockPopImmediates`, and note it
-lifts 6 and 5 pops of which only those 5 had a read to fix). **The whole residue is one shape** —
-`pushKind: push-same-reg`, a matched save/restore in two functions per binary — which is
-`peek-a-bin-6f3v` and needs a stack slot rather than a constant.
-
-`liftBlock` does not lift `pop`, so it is no definition in SSA and a later read of the register
-binds to the value it held *before* the pop. The audit walks forward from each `pop <reg>` over
-the CFG to the first instruction that writes that register **on the machine**, and reports every
-read of it in the post-fold IR on the way.
-
-> **The write test has to be the machine's, not the IR's**, and that single choice is the
-> difference between 7 rows and 54 on t32. An IR-level "first write" attributes other classes'
-> defects to the pop: t32!`sub_40D99A` does `pop ecx` (cdecl argument cleanup) and then
-> `mov ecx, [ebp+8]`, whose IR definition `foldBlock` inlines into its single in-block use while
-> ECX is live out — so eleven reads two blocks later name an ECX nothing ever assigns, and against
-> an IR test they read as the pop's fault. They are not: the popped value is dead there. The same
-> choice is why the count on both x64 binaries is **0** rather than 6: every x64 row is the
-> epilogue `mov rax, rbx` / `pop rbx` / `ret`, where the emitted `return rbx` names a value
-> copied *before* the pop that the C never reassigns — correct output.
-
-Two counts beside `wrong`, and both are about the cost of the obvious fix. `benign` is reads where
-the paired push pushed the *same* register with nothing written in between, so the pop restores a
-value the C never reassigned and emitting nothing is **correct**; refusing every pop (lifting it as
-`reg = <unknown>`) would trade each one for an `__unrecovered_N`. That count is 0 in this corpus,
-because an epilogue restore is followed by `ret` and not by a read — *except* for the implicit read
-`ret` itself makes of the return register, which is counted separately as `retBenign` and is **1 per
-x86 binary** (t32!`sub_40A925` is `push eax` / `pop eax` / `ret 4`, and its `return eax` is right
-only because the pop emits nothing). `retWrong` is **2 per x86 binary**: a `return` of a value the
-machine popped, named from before the pop — both of them MSVC's `memset` returning its destination
-pointer, where the emitted `return eax` returns the loop counter instead.
-
-> **The "is this pop already lifted" test is asked of the LIFT, not of the lowered program.**
-> `push 0x1a / pop eax / ret` *is* lifted, copy propagation folds the constant into the `return`
-> and DCE then deletes the assignment — so nothing survives at the pop's address, and a post-fold
-> test called the pop unlifted and printed **four false `ret-wrong` rows per x86 binary**, each one
-> a function returning a constant the emitted C states correctly.
-
-> **This audit replicates `pipeline.ts` stages 1–3 plus `foldBlock`, and the replica must include
-> step 2b.** `liftCrossBlockPops` runs *before* `liftedPops` is collected, because the cross-block
-> definition carries the **pop's** address precisely so that scan finds it — the same reason
-> `liftBlock`'s block-local form does. A replica that skips it fails in the quiet direction: this
-> audit keeps reporting rows a landed fix already removed, so a green tree reads as a red one.
-> `src/disasm/__tests__/stackIdiom.test.ts` fails if any file calling `liftBlock(` does not also
-> call `liftCrossBlockPops(` — `staleReads.ts` and `lostDefs.ts` replicate the same loop.
-
-*Validated by negative control, in both directions.* Disabling `stackIdiom.ts`'s block-local
-`push <imm>` / `pop <reg>` pairing (`peek-a-bin-3axd`) takes t32 from
-7 to **78** wrong over 44 pops and w32 from 6 to **61** over 38, and fails the run's liveness
-assertion on `popsLifted`. Lifting every unpaired `pop` as `reg = <unknown>` takes all four
-binaries to **0** — which is the measured cost of that fix, not a recommendation: it moves
-`unrecovered values` 106 → 166 on t32 and 87 → 146 on w32 (+229 token occurrences corpus-wide),
-changes 66 functions of emitted text, loses one struct field on each x86 binary
-(`offsetof` 353/353 → 352/352 and 408/408 → 407/407, ratio unmoved), destroys the one correct
-`retBenign` read per binary, and leaves both x64 binaries byte-identical. Every gate stays green
-over it.
 
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
@@ -1092,7 +1114,7 @@ remaining gap and is not implemented.
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
-| `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Machine-level write test — see the baseline entry. |
+| `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Gated at 0 on both counts; machine-level write test, and a paired pop leaves the population — see the gate entry. |
 | `lostDefs.ts` | A read whose reaching definition `foldBlock` deleted. Brackets that one pass; see the gate entry. |
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |

@@ -8,7 +8,7 @@ import { emitFunction } from "./emit";
 import { solePredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
-import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops } from "./lifter";
+import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -113,6 +113,12 @@ export function decompileFunction(
     // instruction inside any single block. x64 collects its arguments from
     // registers, so the map is not built there.
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
+    // The third, and the only one that is a property of the whole CFG rather
+    // than of the instruction stream: which `push <reg>` a `pop <reg>` takes its
+    // value from. A save and its restore are routinely in different blocks with
+    // a loop nest between them, so the pairing cannot be answered inside
+    // `liftBlock` at all (peek-a-bin-6f3v).
+    const stackSlots = matchedStackSlots(blocks, is64);
     const liftedBlocks = new Map<number, import("./ir").IRStmt[]>();
     // The second piece of non-block-local context, and it is a *flag* fact: a
     // block that writes no flag at all reads the ones its predecessor left, so a
@@ -132,6 +138,7 @@ export function decompileFunction(
         calleeSavedFirstWrite,
         calleeClobbers,
         solePredecessor(block, blockById),
+        stackSlots,
       );
       liftedBlocks.set(block.id, stmts);
     }

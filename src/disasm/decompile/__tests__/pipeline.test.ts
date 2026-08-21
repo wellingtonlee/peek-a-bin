@@ -6982,3 +6982,118 @@ describe("a 32-bit self-move", () => {
     }
   });
 });
+
+describe("a matched push/pop restores the value the machine saved", () => {
+  /**
+   * peek-a-bin-6f3v, reduced from `t32!sub_40D99A` — MSVC's SSE memset.
+   *
+   * `push edx` saves the remaining byte count, the loop reuses EDX as a scratch
+   * and decrements it to zero, `pop edx` restores the count and the code below
+   * reads it. Without the pairing the `pop` is no definition in SSA, so the read
+   * binds to the loop's decremented scratch — which is 0 at loop exit.
+   */
+  it("reads the saved value after the restore, not the scratch the loop left", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "edx"],
+        ["mov", "edx, ebx"],
+        ["dec", "edx"],
+        ["jne", "0x401008"],
+        ["pop", "edx"],
+        ["mov", "eax, edx"],
+        ["ret"],
+      ]),
+    );
+    // The whole body, because what matters is that the value read after the
+    // loop is the one pushed BEFORE it. `stk_401000 = edx` / `edx = stk_401000`
+    // is what `liftBlock` emits; here the region is reachable, so SSA sees it,
+    // `copyPropagation` folds both copies away and `splitStaleReads` parks the
+    // entry value in `edx_0` at the function's entry — which is the same value
+    // and one statement fewer.
+    expect(code).toBe(
+      [
+        "int sub_401000() {",
+        "    edx_0 = edx;",
+        "    edx = ebx;",
+        "    do {",
+        "        edx--;",
+        "    } while (edx != 0);",
+        "    return edx_0;",
+        "}",
+      ].join("\n"),
+    );
+    // The scratch the loop left is 0, and nothing reads it after the restore.
+    expect(code).not.toMatch(/return edx;/);
+  });
+
+  /**
+   * The `ret` half, from the same function at 0x40D9E7 / 0x40DA6F: memset
+   * returns its destination pointer, saved on entry and popped into EAX. `pop`
+   * pairs by DEPTH, so the restore into a different register still resolves.
+   */
+  it("returns the pointer a differently-named pop took off the stack", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "ecx"],
+        ["mov", "ecx, 0"],
+        ["mov", "eax, 1"],
+        ["pop", "eax"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toBe(["int sub_401000() {", "    return ecx;", "}"].join("\n"));
+  });
+
+  /**
+   * The shape the corpus actually has, and the one where the slot survives to
+   * the page. Both t32 sites sit in a region that follows a `ret` and that
+   * nothing in the function branches to — MSVC's memset merged into its
+   * neighbour by function detection — so `renameVariables` never reaches it,
+   * there are no SSA versions there and no pass folds the two copies away. The
+   * slot is then the only thing that can name the saved value at all.
+   */
+  it("names the slot outright in a region SSA never renames", () => {
+    const code = run(
+      seq(0x401000, [["ret"], ["push", "ecx"], ["mov", "ecx, 0"], ["pop", "eax"], ["ret"]]),
+    );
+    expect(code).toMatch(/stk_401004 = ecx;/);
+    expect(code).toMatch(/return stk_401004;/);
+  });
+
+  /**
+   * The other direction, and the reason this costs nothing where it recovers
+   * nothing: a save/restore the emitted C already read correctly must not grow
+   * two statements. `stk = ebx` is a copy, so `copyPropagation` deletes it and
+   * rewrites the pop's readers to the pushed version; `ebx = ebx_0` is a copy
+   * too and DCE takes the pair.
+   */
+  it("adds nothing to a save/restore whose register was never overwritten", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "ebx"],
+        ["mov", "eax, 1"],
+        ["pop", "ebx"],
+        ["mov", "eax, ebx"],
+        ["ret"],
+      ]),
+    );
+    expect(code).not.toMatch(/stk_/);
+    expect(code).toMatch(/return ebx/);
+  });
+
+  it("says nothing at a pop whose pairing the depth model refused", () => {
+    // A `call` between the two: the callee may have popped the arguments, so
+    // which push this `pop` takes is not a fact about the instruction stream.
+    const code = run(
+      seq(0x401000, [
+        ["push", "ebx"],
+        ["call", "0x408000"],
+        ["mov", "ebx, 2"],
+        ["pop", "ebx"],
+        ["mov", "eax, ebx"],
+        ["ret"],
+      ]),
+    );
+    expect(code).not.toMatch(/stk_/);
+  });
+});

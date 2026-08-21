@@ -1,17 +1,21 @@
 /**
  * A REGISTER A `pop` WROTE, READ IN THE EMITTED C UNDER ITS PREVIOUS VALUE.
  *
- * `liftBlock` skips `push` and `pop` — RSP moves with nothing in the IR
- * recording it, so there is no faithful definition chain over the stack slot
- * (CLAUDE.md, "No read of RSP may be moved to another program point"). The one
- * exception is MSVC's two-byte `mov reg, imm`, spelled `push <imm>` /
- * `pop <reg>`, which `stackIdiom.ts` pairs and the lifter turns into an
- * assignment — block-locally since peek-a-bin-3axd, and across a branch since
- * peek-a-bin-6ilz, where the definition lands in each PREDECESSOR and
- * `buildSSA` builds the phi. Every other `pop <reg>` is therefore **not a
- * definition in SSA**, so a later read of that register binds to the value it
- * held BEFORE the pop, and the emitted C names something the machine no longer
- * has there.
+ * `liftBlock` skips `push` and `pop` in general — RSP moves with nothing in the
+ * IR recording it, so there is no faithful definition chain over a stack
+ * ADDRESS (CLAUDE.md, "No read of RSP may be moved to another program point").
+ * Three rules carve exceptions out of that, and all three identify the slot by
+ * the PAIRING rather than by an address: MSVC's two-byte `mov reg, imm`,
+ * spelled `push <imm>` / `pop <reg>`, block-locally since peek-a-bin-3axd and
+ * across a branch since peek-a-bin-6ilz (the definition lands in each
+ * PREDECESSOR and `buildSSA` builds the phi); and a matched `push <reg>` /
+ * `pop <reg>` since peek-a-bin-6f3v, where `matchedStackSlots` runs a
+ * balanced-depth model over the whole CFG and `liftBlock` spells the pair as
+ * `stk_<pushaddr> = <reg>` at the push and `<reg> = stk_<pushaddr>` at the pop.
+ * Every OTHER `pop <reg>` — one across a `call`, one whose depth no path
+ * agrees on — is still **not a definition in SSA**, so a later read of that
+ * register binds to the value it held BEFORE the pop, and the emitted C names
+ * something the machine no longer has there.
  *
  * WHAT THIS AUDIT ASKS, and the one thing it must not get wrong: for each
  * `pop <reg>`, walk forward over the CFG to the first instruction that WRITES
@@ -37,6 +41,15 @@
  *               `reg = <unknown>`) is not free: it would trade these for an
  *               `__unrecovered_N`.
  *
+ * BOTH benign counts read 0 since peek-a-bin-6f3v, and that is the population
+ * leaving rather than the population changing. A pop the lifter PAIRS is skipped
+ * below, and the one benign row per x86 binary — t32!sub_40A925's
+ * `push eax / pop eax / ret 4` — is now paired. Its emitted C is byte-identical
+ * either way, which is the direct evidence the count was standing in for: the
+ * `return eax` is right because the pop assigns the same value back, not because
+ * nothing was emitted. So a 0 here no longer argues against a blanket refusal;
+ * peek-a-bin-4ynk's measured table does, and it is on the bead.
+ *
  * The `benign` split is decided from the instruction stream by a balanced-depth
  * backward scan in ADDRESS order, which is an approximation of path order: it
  * can only move a row from `wrong` to `benign`, so the defect count it reports
@@ -54,6 +67,7 @@ import {
   firstCalleeSavedWrites,
   liftBlock,
   liftCrossBlockPops,
+  matchedStackSlots,
 } from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import type { SSAContext } from "../src/disasm/decompile/ssa";
@@ -402,6 +416,10 @@ export function auditPopReads(
     if (blocks.length === 0) return;
     const lifted = new Map<number, IRStmt[]>();
     const calleeSavedFirstWrite = is64 ? undefined : firstCalleeSavedWrites(blocks);
+    // `pipeline.ts`'s third function-wide fact: which `push <reg>` a `pop <reg>`
+    // takes its value from (peek-a-bin-6f3v). A replica missing it measures a
+    // program the emitter never sees, and fails in the QUIET direction.
+    const stackSlots = matchedStackSlots(blocks, is64);
     const blockById0 = new Map(blocks.map((b) => [b.id, b]));
     for (const b of blocks)
       lifted.set(
@@ -416,6 +434,7 @@ export function auditPopReads(
           calleeSavedFirstWrite,
           calleeClobbers,
           solePredecessor(b, blockById0),
+          stackSlots,
         ),
       );
     // `pipeline.ts` step 2b, and it must run BEFORE `liftedPops` is collected:
