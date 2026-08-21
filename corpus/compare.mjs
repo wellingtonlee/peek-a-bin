@@ -385,6 +385,26 @@ for (const b of bins) {
     note("  switch-arm false breaks       NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A register name the image has no encoding for (emitAudits.ts). ─────────
+  //
+  // Gated at 0 in the run, so a rise here names which binary. PE32 ONLY: on the
+  // x64 pair `rcx` is an ordinary correct spelling and the counts are
+  // structurally 0, so a green row there says nothing at all — `funcs` beside it
+  // is the liveness half, and a FALL in it is a scan that stopped observing.
+  if (B.unencodable && C.unencodable) {
+    row(
+      "unencodable register names",
+      (x) => x.unencodable.names,
+      (a, c) => c > a,
+      "THE C NAMES A REGISTER THIS IMAGE HAS NO ENCODING FOR",
+    );
+    row("  distinct such names", (x) => x.unencodable.distinct);
+    row("  functions affected", (x) => x.unencodable.funcsAffected);
+    row("  PE32 functions scanned", (x) => x.unencodable.funcs);
+  } else {
+    note("  unencodable register names    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

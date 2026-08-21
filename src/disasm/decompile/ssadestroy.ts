@@ -436,6 +436,23 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
     size: number;
     /** How the read spelled the register — `esi` in 32-bit code, not `rsi`. */
     spelling: string;
+    /**
+     * Is `spelling` a spelling the *code* used, or only the canonical parent a
+     * phi was minted under?
+     *
+     * A statement's register mention always carries its own spelling and width,
+     * so a read is evidence. A **phi operand** is not: `insertPhis` mints it as
+     * `irReg(canonReg(...))`, so its name is the 64-bit parent and its size is
+     * `regSize` of that parent — 8 for every phi in every function, PE32
+     * included. Treating that as a spelling is what put `rcx_3 = rcx` inside a
+     * 32-bit function whose every other line says `ecx` (peek-a-bin-0s6e).
+     *
+     * It is `true` when a later pass has substituted a real value into the
+     * operand — `replaceRegInCtx` rewrites phi operands from copy propagation
+     * and GVN, and those carry a statement's spelling — which is exactly the
+     * case where the operand name is no longer the canonical one.
+     */
+    spelled: boolean;
     /** Did an earlier statement in this same block redefine the register? */
     inBlockRedef: boolean;
   }
@@ -484,6 +501,9 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
           version: op.value.version,
           size: op.value.size,
           spelling: op.value.name.toLowerCase(),
+          // See `Stale.spelled`: the canonical name on a phi operand is the
+          // register's identity, not a width the code ever wrote.
+          spelled: op.value.name.toLowerCase() !== canon,
           inBlockRedef: (ctx.liftedBlocks.get(op.blockId) ?? []).some(
             (s) => defOf(s)?.canon === canon,
           ),
@@ -510,6 +530,7 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
           version: reg.version,
           size: reg.size,
           spelling: reg.name.toLowerCase(),
+          spelled: true,
           inBlockRedef: definedHere.has(canon),
         });
       });
@@ -549,8 +570,17 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
   // disassembly never mentions. Disagreement — reads of both `esi` and `si` —
   // falls back to `spell`, i.e. the widest spelling the *function* uses, because
   // either read's own spelling would claim a width the other one does not have.
+  //
+  // A row whose `spelled` is false contributes NOTHING here, in either
+  // direction — it neither names the version nor counts as disagreement. That is
+  // the whole of peek-a-bin-0s6e: a phi operand's name is the canonical parent
+  // `insertPhis` minted, so admitting it as evidence spells the repair `rcx_3`
+  // and its source `rcx` in a function that only ever says `ecx`, and admitting
+  // it as *disagreement* would be no better — it would push a version two real
+  // reads agree about onto the `spell` fallback for a name neither of them used.
   const spellings = new Map<string, string | null>();
   for (const s of stale) {
+    if (!s.spelled) continue;
     const key = versionKey(s.canon, s.version);
     const seen = spellings.get(key);
     if (seen === undefined) spellings.set(key, s.spelling);
@@ -626,6 +656,13 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
     if (!copied.has(siteKey)) {
       copied.add(siteKey);
       const spelling = spellings.get(key) ?? spell(s.canon, s.version);
+      // The width follows the spelling, because `IRReg.size` means the width of
+      // the name it carries — that is the invariant the lifter maintains and the
+      // one `emit.ts`'s `operandWidth` and `fold.ts`'s `knownWidth` both read.
+      // A no-op for every row that spelled itself (`s.size` is `regSize` of that
+      // same name), and the reason a phi-only row does not now emit `ecx` at
+      // eight bytes: `phi.dest.size` is `regSize` of the canonical parent.
+      const size = isKnownRegister(spelling) ? regSize(spelling) : s.size;
       const name = renamed.get(key) ?? staleName(spelling, s.version);
       renamed.set(key, name);
       const byIndex = inserts.get(site.block) ?? new Map<number, IRStmt[]>();
@@ -636,10 +673,10 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
       // no longer holds this value further down.
       list.push({
         kind: "assign",
-        dest: { kind: "var", name, size: s.size },
+        dest: { kind: "var", name, size },
         // Spelled as the reads spell it, so a 32-bit function does not get a
         // copy `eax_1 = rax` naming a register half of which it never mentions.
-        src: { kind: "reg", name: spelling, size: s.size },
+        src: { kind: "reg", name: spelling, size },
       });
       byIndex.set(site.index, list);
       inserts.set(site.block, byIndex);

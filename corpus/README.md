@@ -150,6 +150,29 @@ call the reader is told does not happen.*
 
 **Dangling gotos.** Every `goto` must name a label its own function defines.
 
+**A register name the image has no encoding for** (`unencodableNames` in `emitAudits.ts`). *A
+failure means the emitted C names a register no instruction in the file can have written and no
+reader can mean.* `canonReg` maps every alias to the 64-bit parent because that is the register's
+*identity* and SSA keys on it, so any path that lets a canonical name reach the page prints `rcx`
+in a function whose every other line says `ecx`. **124 mentions, 18 distinct names, over 19 of 573
+PE32 functions at `d514274`; 0 now** (`peek-a-bin-1k4`'s residue, closed by `peek-a-bin-0s6e`).
+
+**It is asked of PE32 only, and that restriction is what makes it an oracle rather than a
+heuristic.** In a 32-bit image the instruction set has no RCX, so every occurrence is provably
+wrong — `polarity inverted`'s character, hence a gate at 0. On x64 `rcx` is an ordinary correct
+spelling, and telling a canonical name apart from a real 64-bit read needs the *live range's* own
+width, which is `registerSpeller`'s question and is not recorded in the emitted text. So the x64
+pair contributes structurally 0 and a green row there says nothing; `funcs` beside it is the
+liveness half, and a fall in it is a scan that stopped observing.
+
+**Two other gates are structurally blind to this and one of them by design.** `gcc` cannot see it
+because `preludeFor` declares every undeclared identifier as its own `long`, so `rcx` and `ecx`
+compile cleanly as two unrelated variables. `staleReads.ts` cannot either: it compares the *name* a
+read uses rather than the canonical register, deliberately, because a correct live-range split
+emits two names for one register — so a canonical name reads to it as a legitimate second live
+range and passes. Negative-controlled: restore the phi operand's spelling evidence in
+`splitStaleReads` and `npm run corpus` exits 1 naming exactly 124.
+
 **`cc -std=gnu89 -fsyntax-only` over every emitted function.** *A failure means the decompiler
 emitted something that is not C.* Registers, imported APIs and Win32 typedefs are declared for it
 from gcc's own complaints, because the decompiler deliberately does not declare them.

@@ -28,6 +28,7 @@ import {
   gotoCheck,
   type OffsetofResult,
   offsetofCheck,
+  unencodableNames,
 } from "./emitAudits";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
 import { type BinResult, sweepBinary } from "./sweep";
@@ -195,6 +196,11 @@ if (!pre.haveBins || !pre.haveCc) {
               cc: ccResults.get(key),
               offsetof: ozResults.get(key),
               arity: { ...ar, rows: ar.rows.length },
+              // Per binary rather than only in the totals, so `compare.mjs` can
+              // judge it. Structurally 0 on the x64 pair — see
+              // `unencodableNames` on why the question is PE32-only — which is
+              // why `funcs` is beside it as the liveness half.
+              unencodable: unencodableNames([{ funcs: r.funcs, is64: r.is64 }]),
             },
             null,
             1,
@@ -444,6 +450,34 @@ if (!pre.haveBins || !pre.haveCc) {
         arms += ae.arms;
       }
       expect(arms).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, and the only oracle here that can see a wrong register NAME.
+     *
+     * `canonReg` maps every alias to the 64-bit parent because that is the
+     * register's identity, so any path that lets a canonical name reach the page
+     * prints `rcx` in a function whose every other line says `ecx`. In a PE32
+     * image the instruction set has no RCX, so every occurrence is provably a
+     * name no statement wrote and no reader can mean — a defect, not a count
+     * awaiting a threshold. It was 71 mentions over 18 distinct names on t32 and
+     * 53 over 13 on w32 at `d514274` (peek-a-bin-1k4's residue, closed by
+     * peek-a-bin-0s6e).
+     *
+     * gcc cannot see it — `preludeFor` declares every undeclared identifier as
+     * its own `long`, so `rcx` and `ecx` are two unrelated variables — and
+     * `corpus/staleReads.ts` cannot either, since it compares the name a read
+     * uses and therefore reads a canonical one as a legitimate live-range split.
+     *
+     * The liveness half matters as much as the gate: `funcs` must be non-zero,
+     * or a scan that stopped reading anything reads green.
+     */
+    it("never names a register the image has no encoding for", () => {
+      const u = unencodableNames(
+        over(auditedKeys(), results).map((r) => ({ funcs: r.funcs, is64: r.is64 })),
+      );
+      expect(u.names).toBe(0);
+      expect(u.funcs).toBeGreaterThan(0);
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -795,9 +829,21 @@ function renderReport(): string {
   }
 
   const g = gotoCheck(over(keys, results).map((r) => ({ funcs: r.funcs })));
+  const un = unencodableNames(over(keys, results).map((r) => ({ funcs: r.funcs, is64: r.is64 })));
   L.push("");
   L.push(`── totals ${"─".repeat(54)}`);
   L.push(`  gotos ${g.gotos}, labels ${g.labels}, dangling ${g.dangling}`);
+  L.push(
+    `  unencodable register names  ${un.names} mentions, ${un.distinct} distinct, over ` +
+      `${un.funcsAffected} of ${un.funcs} PE32 functions`,
+  );
+  L.push("    A 64-bit name in the C of a PE32 image: `canonReg` maps every alias to the 64-bit");
+  L.push("    parent, so any leak of that identity prints `rcx` where the image has no RCX. A");
+  L.push(
+    "    GATE at 0, from 124 mentions / 18 distinct over 19 functions at `d514274` (0s6e). ASKED",
+  );
+  L.push("    OF PE32 ONLY — on x64 `rcx` is an ordinary correct spelling and this says nothing,");
+  L.push("    so `funcs` is the liveness check. gcc and staleReads are both blind to it.");
 
   // The subset CLAUDE.md's documented gcc and offsetof figures are measured
   // over. Reporting it separately is what makes a claim in that file checkable

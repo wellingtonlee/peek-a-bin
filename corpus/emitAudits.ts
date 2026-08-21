@@ -315,6 +315,68 @@ export function offsetofCheck(
   };
 }
 
+export interface UnencodableResult {
+  /** Mentions of a 64-bit register name in the C of a PE32 image. Expect 0. */
+  names: number;
+  /** Distinct such names, so one name used forty times is not forty defects. */
+  distinct: number;
+  funcsAffected: number;
+  /** Functions read. Instrument liveness: 0 here means the scan saw nothing. */
+  funcs: number;
+}
+
+/** The 64-bit register names, which are exactly `canonReg`'s range. */
+const SIXTY_FOUR_BIT =
+  /\b(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15)(_\d+)?\b/g;
+
+/**
+ * A register name the image has no encoding for.
+ *
+ * This is the only oracle here that can see the defect class `peek-a-bin-1k4`
+ * and `peek-a-bin-0s6e` are both instances of, and it is available *only* for a
+ * PE32 image — which is what makes it usable at all. `canonReg` maps every alias
+ * to the 64-bit parent because that is the register's identity and SSA keys on
+ * it, so anything that lets a canonical name reach the page prints `rcx` in a
+ * function whose every other line says `ecx`. In a 32-bit image that name is
+ * provably wrong: the instruction set has no RCX, so no statement can have
+ * written one and no reader can mean one. Every occurrence is therefore
+ * `polarity inverted`'s character rather than a baseline's, and it gates at 0.
+ *
+ * **It cannot be asked of a 64-bit image**, deliberately: there `rcx` is an
+ * ordinary correct spelling, and telling a canonical name apart from a real
+ * 64-bit read needs the live range's own width, which is the question
+ * `ssadestroy.ts`'s `registerSpeller` answers and not something the emitted text
+ * records. So a green result on t64/w64 would say nothing, and the audit
+ * reports those two as `funcs` scanned with the counts structurally 0.
+ *
+ * **`gcc` is blind to this** for the reason recorded in CLAUDE.md: `preludeFor`
+ * declares every undeclared identifier as its own `long`, so `rcx` and `ecx`
+ * compile cleanly as two unrelated variables. So is `corpus/staleReads.ts`,
+ * which compares the *name* a read uses — by design, since a correct live-range
+ * split emits two names for one register — and therefore reads a canonical name
+ * as a legitimate second live range.
+ */
+export function unencodableNames(sets: { funcs: FuncRec[]; is64: boolean }[]): UnencodableResult {
+  const out: UnencodableResult = { names: 0, distinct: 0, funcsAffected: 0, funcs: 0 };
+  const seen = new Set<string>();
+  for (const { funcs, is64 } of sets) {
+    if (is64) continue;
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      out.funcs++;
+      let hits = 0;
+      for (const m of code.matchAll(SIXTY_FOUR_BIT)) {
+        hits++;
+        seen.add(m[0]);
+      }
+      out.names += hits;
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  out.distinct = seen.size;
+  return out;
+}
+
 export interface GotoResult {
   gotos: number;
   labels: number;
