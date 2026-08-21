@@ -3024,6 +3024,84 @@ describe("decompileFunction — a switch states what it switches on", () => {
     // case does nothing"; none of these six cases does nothing.
     expect(code).not.toMatch(/case [^\n]*:\s*\n\s*break;/);
   });
+
+  /**
+   * An arm whose own block ends in a test (peek-a-bin-pqs5).
+   *
+   * `armBody` claims one block and closed it with `break` however the block
+   * ends — and `break` is a claim about control flow. For an arm block ending
+   * in a conditional jump it is false, and the condition disappears with it:
+   * step 4b has already hoisted the `IRBranch` out of `liftedBlocks`, and
+   * nothing else ever asks the block what it tested. On t32's `sub_4045B1`,
+   * `case 7:` was `eax = (uint16_t)ecx; break;` for a block whose next two
+   * instructions are `cmp eax, 0x64 / jg 0x404B46`, with `eax > 0x64` nowhere
+   * in the function and no `goto` naming either successor.
+   */
+  const armThatTests = (): Instruction[] =>
+    seq(0x401000, [
+      ["cmp", "eax, 2"], // 401000
+      ["ja", "0x401030"], // 401004 out of range → default
+      ["jmp", "dword ptr [eax*4 + 0x403000]"], // 401008 the table
+      ["call", "0x402004"], // 40100c case 0 — and it goes on to test
+      ["cmp", "ecx, 5"], // 401010
+      ["jne", "0x401038"], // 401014 taken → 401038, else falls into case 1
+      ["call", "0x402008"], // 401018 case 1
+      ["ret"], // 40101c
+      ["nop"], // 401020
+      ["call", "0x40200c"], // 401024 case 2
+      ["ret"], // 401028
+      ["nop"], // 40102c
+      ["call", "0x402010"], // 401030 default
+      ["ret"], // 401034
+      ["call", "0x402014"], // 401038 where the arm's test goes
+      ["ret"], // 40103c
+    ]);
+
+  const armTable = new Map([[0x401008, [0x40100c, 0x401018, 0x401024]]]);
+
+  it("states the test an arm block ends in, and where each side goes", () => {
+    const code = runTables(armThatTests(), armTable);
+
+    expect(code).toContain("switch (eax)");
+    // The arm's own statements, then its test — not a `break` in between.
+    expect(code).toMatch(
+      /case (0|VAL_0x0):\s*\n\s*(eax = )?sub_402004\(\);\s*\n\s*if \(ecx != 5\)\s*\{\s*\n\s*goto loc_401038;/,
+    );
+    // Both sides of the test are named: the taken edge and the fallthrough.
+    expect(code).toContain("goto loc_401018;");
+    // And the region the test jumps to is emitted under the label named.
+    expect(code).toContain("loc_401038:");
+    expect(code).toContain("sub_402014();");
+  });
+
+  it("sends an arm that jumps into another arm there rather than out of the switch", () => {
+    // `case 0` ends in `jmp` to the default body. `break` skips it; the
+    // machine runs it. 10 arm blocks on t32 and 5 on w32 are this shape.
+    const code = runTables(
+      seq(0x401000, [
+        ["cmp", "eax, 2"], // 401000
+        ["ja", "0x401030"], // 401004 → default
+        ["jmp", "dword ptr [eax*4 + 0x403000]"], // 401008 the table
+        ["call", "0x402004"], // 40100c case 0
+        ["jmp", "0x401030"], // 401010 → the default body
+        ["nop"], // 401014
+        ["call", "0x402008"], // 401018 case 1
+        ["ret"], // 40101c
+        ["nop"], // 401020
+        ["call", "0x40200c"], // 401024 case 2
+        ["ret"], // 401028
+        ["nop"], // 40102c
+        ["call", "0x402010"], // 401030 default
+        ["ret"], // 401034
+      ]),
+      armTable,
+    );
+
+    expect(code).toMatch(
+      /case (0|VAL_0x0):\s*\n\s*(eax = )?sub_402004\(\);\s*\n\s*goto loc_401030;/,
+    );
+    expect(code).toContain("sub_402010();");
+  });
 });
 
 describe("decompileFunction — an instruction is lifted once, and reads what it reads", () => {

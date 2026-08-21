@@ -1417,6 +1417,68 @@ export function structureCFG(
     for (const succId of block.succs) switchStopAt.add(succId);
 
     /**
+     * How control really leaves the arm's *own* block.
+     *
+     * `armBody` claims one block and nothing else — it does not walk successors,
+     * deliberately, since the switch's convergence scan below is what decides
+     * where the region after the switch begins. But it used to close every arm
+     * with `break` regardless of how the block ends, and `break` is a statement
+     * about control flow: it says the switch is over. For an arm block that ends
+     * in a conditional jump that is false twice over, and the **condition goes
+     * with it** — `pipeline.ts` step 4b has already hoisted the `IRBranch` out of
+     * `liftedBlocks`, so the statements pushed above are all there is, and
+     * nothing else in the function ever asks what the block tested.
+     *
+     * t32's `sub_4045B1` case 7 is the shape: block 0x40490B is
+     * `movzx eax, cx / cmp eax, 0x64 / jg 0x404B46`, and it emitted
+     * `eax = (uint16_t)ecx; break;` — with `eax > 0x64` nowhere in its 698 lines
+     * and **no `goto` anywhere naming either successor**, so `loc_404917` and
+     * `loc_404B46` sat in the output as regions the emitted C can never reach.
+     * 25 arm blocks on t32 and 12 on w32 end in a conditional jump this way, and
+     * a further 10 and 5 end in a `jmp` — of which 6 and 2 go to another arm or
+     * to the `default` body, where `break` skips code the machine runs, the rest
+     * to the block that follows the switch, where it did not (peek-a-bin-pqs5).
+     * x64 recovers no jump tables, so none of it happens there.
+     *
+     * The transfer is spelled as a `goto` rather than followed, which is
+     * `armFrom`'s doctrine — "a `goto` to the target's label is faithful whatever
+     * the target is" — and it keeps this out of the convergence scan's way: no
+     * extra block is claimed, so which region the code after the switch belongs
+     * to is exactly what it was. Where the successor is the block that follows
+     * the switch anyway the `goto` says the same thing `break` did, at the cost
+     * of a label; where it is not, it is the difference between the output
+     * stating the machine's control flow and contradicting it. The label is
+     * always available: `structureCFG`'s second leftover pass emits any block a
+     * `goto` names and the walk never reached.
+     *
+     * `break` remains the answer for a block with no successors — an arm ending
+     * in `ret` or a tail call — and for one whose branch the CFG has no two
+     * edges for, where there is nothing truthful to name.
+     */
+    function armExit(block: BasicBlock): IRStmt[] {
+      if (block.succs.length === 2 && endsWithCondJmp(block)) {
+        const [branchTarget, fallthrough] = identifyBranches(block);
+        const taken = branchTarget !== null ? blockById.get(branchTarget) : undefined;
+        const notTaken = fallthrough !== null ? blockById.get(fallthrough) : undefined;
+        if (taken && notTaken) {
+          return [
+            {
+              kind: "if",
+              condition: extractCondition(block),
+              thenBody: [{ kind: "goto", label: labelNameFor(taken.startAddr) }],
+            },
+            { kind: "goto", label: labelNameFor(notTaken.startAddr) },
+          ];
+        }
+      }
+      if (block.succs.length === 1) {
+        const only = blockById.get(block.succs[0]);
+        if (only) return [{ kind: "goto", label: labelNameFor(only.startAddr) }];
+      }
+      return [{ kind: "break" }];
+    }
+
+    /**
      * The body for one arm of the switch.
      *
      * A block is emitted once, so an arm whose target another region already
@@ -1437,7 +1499,7 @@ export function structureCFG(
         visited.add(targetBlock.id);
         const body: IRStmt[] = [];
         pushLabel(body, targetBlock);
-        body.push(...(liftedBlocks.get(targetBlock.id) ?? []), { kind: "break" });
+        body.push(...(liftedBlocks.get(targetBlock.id) ?? []), ...armExit(targetBlock));
         return body;
       }
       if (targetBlock && labelled.has(targetBlock.id)) {

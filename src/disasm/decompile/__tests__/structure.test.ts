@@ -873,9 +873,19 @@ describe("structureCFG — switches", () => {
       jumpTable(blocks, [2, 3]),
     );
     const sw = findStmt(out, "switch") as { cases: { values: number[]; body: IRStmt[] }[] };
+    // Each arm block here ends in `jmp` to block 5, so each arm says so.
+    //
+    // `break` would say the same thing at *this* fixture, because block 5 is
+    // the join and nothing sits between the switch and it — but the arm cannot
+    // know that, and `armBody` claims one block without walking to find out.
+    // 8 of the 15 single-successor arm blocks in the corpus jump to another
+    // arm or to the `default` body instead, where `break` skips code the
+    // machine runs, so the transfer is spelled wherever there is one
+    // (peek-a-bin-pqs5). The cost is a `goto` at the other 7, where `break`
+    // was already right — a line of noise rather than a claim.
     expect(sw.cases).toEqual([
-      { values: [0], body: [mark(2), { kind: "break" }] },
-      { values: [1], body: [mark(3), { kind: "break" }] },
+      { values: [0], body: [mark(2), { kind: "goto", label: "loc_401500" }] },
+      { values: [1], body: [mark(3), { kind: "goto", label: "loc_401500" }] },
     ]);
   });
 
