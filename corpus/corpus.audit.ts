@@ -147,6 +147,14 @@ if (!pre.haveBins || !pre.haveCc) {
           r.staleGuards.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.staleGuards.rows.length > 0 ? "\n" : ""),
         );
+        // Every read of a register a `pop` wrote that the emitted C still names
+        // under its previous value. Written even when empty, so an absent file
+        // means the audit did not run rather than that it found nothing.
+        writeFileSync(
+          join(artifactDir, `popreads_${key}.jsonl`),
+          r.popReads.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.popReads.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -159,6 +167,7 @@ if (!pre.haveBins || !pre.haveCc) {
                 corrupt: r.staleV0.corrupt.length,
               },
               staleGuards: { ...r.staleGuards, rows: r.staleGuards.rows.length },
+              popReads: { ...r.popReads, rows: r.popReads.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -310,6 +319,32 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(sg.blocks).toBeGreaterThan(0);
       }
       expect(shapes).toBeGreaterThan(0);
+    });
+
+    /**
+     * NOT A GATE ON THE COUNT — read `corpus/popReads.ts` before tightening it.
+     *
+     * A register a `pop` wrote and the emitted C still names under its previous
+     * value is a provably wrong name, so this has a gate's character rather
+     * than a baseline's. It is not one yet only because the count is not zero:
+     * 7/6/0/0 on t32/w32/t64/w64 at `6952d53`, over 5/4/0/0 pops, plus 2/2/0/0
+     * implicit `ret` reads. When a fix takes it to 0, gate it here.
+     *
+     * What IS asserted is that the instrument is alive, and both halves matter.
+     * `pops` non-zero says pops were examined at all. `popsLifted` non-zero on
+     * the 32-bit binaries says `stackIdiom.ts`'s `push <imm>` / `pop <reg>`
+     * pairing still fires — the one part of this class that IS fixed
+     * (peek-a-bin-3axd) — and a regression there would otherwise show up only
+     * as this count RISING, which nothing gates.
+     */
+    it("examines every pop, and the push-imm pairing still fires", () => {
+      let lifted = 0;
+      for (const r of results.values()) {
+        expect(r.popReads.pops).toBeGreaterThan(0);
+        expect(r.popReads.functionsScanned).toBeGreaterThan(0);
+        lifted += r.popReads.popsLifted;
+      }
+      expect(lifted).toBeGreaterThan(0);
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -617,6 +652,20 @@ function renderReport(): string {
     L.push("    it is not __unrecovered_N. `shapes` is machine-code shape and does not move with");
     L.push("    a decompiler fix; `named` is the reading that reached the page. Sites in");
     L.push("    staleguards_<bin>.jsonl. See corpus/README.md.");
+    const pr = r.popReads;
+    L.push(
+      `  pop-restored reads          ${pr.wrong} wrong over ${pr.popsWrong} pops ` +
+        `(${pr.funcsWrong} functions), ${pr.benign} benign restores, ` +
+        `${pr.popsLifted}/${pr.pops} pops lifted as push-imm`,
+    );
+    L.push(
+      `    implicit \`ret\` reads      ${pr.retWrong} wrong, ${pr.retBenign} benign ` +
+        `— the benign ones are what refusing EVERY pop would cost`,
+    );
+    L.push("    A register a `pop` wrote, read in the C under its PREVIOUS value: `pop` is not");
+    L.push("    lifted, so it is no definition in SSA. Reported, NOT gated — the count is not 0");
+    L.push("    and no fix has been taken, but every row is a provably wrong name, so gate it at");
+    L.push("    0 the moment it gets there. Sites in popreads_<bin>.jsonl. See popReads.ts.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

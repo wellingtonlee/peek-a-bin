@@ -564,6 +564,56 @@ of runs moved nothing about arguments at all — the only other signal was `pola
 falling by 2 and 3, which is an instruction to go and read some guards, not a statement about
 calls.
 
+**A register a `pop` wrote, read under its previous value** (`popReads.ts`). Reported, never
+gated — *for now*, and only because the count is not zero. Every row it prints is a provably
+wrong name, which gives it the character of `polarity inverted` rather than of a baseline: **gate
+it at 0 the moment a fix gets it there.** `6952d53`: **7 wrong over 5 pops on t32, 6 over 4 on
+w32, 0 on both x64 binaries**, plus 2/2/0/0 implicit `ret` reads and 67/63/0/0 pops lifted by
+`stackIdiom.ts`'s pairing.
+
+`liftBlock` does not lift `pop`, so it is no definition in SSA and a later read of the register
+binds to the value it held *before* the pop. The audit walks forward from each `pop <reg>` over
+the CFG to the first instruction that writes that register **on the machine**, and reports every
+read of it in the post-fold IR on the way.
+
+> **The write test has to be the machine's, not the IR's**, and that single choice is the
+> difference between 7 rows and 54 on t32. An IR-level "first write" attributes other classes'
+> defects to the pop: t32!`sub_40D99A` does `pop ecx` (cdecl argument cleanup) and then
+> `mov ecx, [ebp+8]`, whose IR definition `foldBlock` inlines into its single in-block use while
+> ECX is live out — so eleven reads two blocks later name an ECX nothing ever assigns, and against
+> an IR test they read as the pop's fault. They are not: the popped value is dead there. The same
+> choice is why the count on both x64 binaries is **0** rather than 6: every x64 row is the
+> epilogue `mov rax, rbx` / `pop rbx` / `ret`, where the emitted `return rbx` names a value
+> copied *before* the pop that the C never reassigns — correct output.
+
+Two counts beside `wrong`, and both are about the cost of the obvious fix. `benign` is reads where
+the paired push pushed the *same* register with nothing written in between, so the pop restores a
+value the C never reassigned and emitting nothing is **correct**; refusing every pop (lifting it as
+`reg = <unknown>`) would trade each one for an `__unrecovered_N`. That count is 0 in this corpus,
+because an epilogue restore is followed by `ret` and not by a read — *except* for the implicit read
+`ret` itself makes of the return register, which is counted separately as `retBenign` and is **1 per
+x86 binary** (t32!`sub_40A925` is `push eax` / `pop eax` / `ret 4`, and its `return eax` is right
+only because the pop emits nothing). `retWrong` is **2 per x86 binary**: a `return` of a value the
+machine popped, named from before the pop — both of them MSVC's `memset` returning its destination
+pointer, where the emitted `return eax` returns the loop counter instead.
+
+> **The "is this pop already lifted" test is asked of the LIFT, not of the lowered program.**
+> `push 0x1a / pop eax / ret` *is* lifted, copy propagation folds the constant into the `return`
+> and DCE then deletes the assignment — so nothing survives at the pop's address, and a post-fold
+> test called the pop unlifted and printed **four false `ret-wrong` rows per x86 binary**, each one
+> a function returning a constant the emitted C states correctly.
+
+*Validated by negative control, in both directions.* Disabling `stackIdiom.ts`'s `push <imm>` /
+`pop <reg>` pairing — the half of this class that **is** fixed (`peek-a-bin-3axd`) — takes t32 from
+7 to **78** wrong over 44 pops and w32 from 6 to **61** over 38, and fails the run's liveness
+assertion on `popsLifted`. Lifting every unpaired `pop` as `reg = <unknown>` takes all four
+binaries to **0** — which is the measured cost of that fix, not a recommendation: it moves
+`unrecovered values` 106 → 166 on t32 and 87 → 146 on w32 (+229 token occurrences corpus-wide),
+changes 66 functions of emitted text, loses one struct field on each x86 binary
+(`offsetof` 353/353 → 352/352 and 408/408 → 407/407, ratio unmoved), destroys the one correct
+`retBenign` read per binary, and leaves both x64 binaries byte-identical. Every gate stays green
+over it.
+
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
@@ -865,6 +915,7 @@ remaining gap and is not implemented.
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
+| `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Machine-level write test — see the baseline entry. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -872,20 +923,23 @@ remaining gap and is not implemented.
 | `artifacts/<label>/arity_<key>.jsonl` | Every declared-API call whose emitted arity is not the declared one, OVER rows first. Empty file = audit ran and found none. |
 | `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
 | `artifacts/<label>/staleguards_<key>.jsonl` | Every block whose trailing jcc reads flags the recovered compare does not describe, with the emitted condition where one reached the page. Empty file = audit ran and found none. |
+| `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
-### The two audits that re-run the pipeline prefix, and why one of them has to
+### The audits that re-run the pipeline prefix, and why they have to
 
-`staleReads.ts` drives its own `buildCFG → liftBlock → buildSSA → ssaOptimize → destroySSA →
-foldBlock` and is the one place in this directory that does. It is exactly the second copy the tap
-below exists to avoid, and it is accepted here for a reason the tap cannot serve: the question
-needs the SSA **before** it is lowered and the statement list **after**, and there is no single
-point in `pipeline.ts` at which one observer sees both. Every pass it calls is the repo's own
-export, in `pipeline.ts`'s order, so a stage inserted between `ssaOptimize` and `destroySSA` shows
-up as a divergence between the two — but nothing enforces that automatically. If you insert one,
-update the replica.
+`staleReads.ts` and `popReads.ts` each drive their own `buildCFG → liftBlock → buildSSA →
+ssaOptimize → destroySSA → foldBlock`, and they are the only two places in this directory that do.
+That is exactly the second copy the tap below exists to avoid, and it is accepted here for a
+reason the tap cannot serve: both questions need the SSA **before** it is lowered and the
+statement list **after**, and there is no single point in `pipeline.ts` at which one observer sees
+both. `popReads.ts` needs a third thing on top — the machine instruction at each read, to ask
+whether the register is read *there* rather than named by a value propagated from earlier. Every
+pass they call is the repo's own export, in `pipeline.ts`'s order, so a stage inserted between
+`ssaOptimize` and `destroySSA` shows up as a divergence — but nothing enforces that
+automatically. If you insert one, update **both** replicas.
 
-**Its `liftBlock` arguments are part of that, and one of them has already been missed.** The
+**The `liftBlock` arguments are part of that, and one of them has already been missed.** The
 replica must be handed everything the pipeline lifts with, including `calleeSavedFirstWrite` and
 `calleeClobbers`; the second was added to `pipeline.ts` and not to the replica, which would have
 left the stale-version-0 gate measuring the pre-summary lift while the sweep beside it measured the

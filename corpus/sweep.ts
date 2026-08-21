@@ -26,6 +26,7 @@ import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
+import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
@@ -460,6 +461,17 @@ export interface BinResult {
    * fix — it is the liveness number. See `corpus/staleGuards.ts`.
    */
   staleGuards: StaleGuardResult;
+  /**
+   * A REGISTER A `pop` WROTE, READ IN THE EMITTED C UNDER ITS PREVIOUS VALUE.
+   *
+   * REPORTED, NOT GATED, and `corpus/popReads.ts` says why: the count is not
+   * zero (7/6/0/0 at `6952d53`) and no fix has been taken. Every row is a
+   * provably wrong name, so it has the gate's character and none of a
+   * baseline's — the moment it reaches 0 it should become one. `pops` and
+   * `popsLifted` are the liveness numbers; `benign` is the population a
+   * blanket refusal would cost.
+   */
+  popReads: PopReadResult;
   funcs: FuncRec[];
 }
 
@@ -610,6 +622,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     },
     staleV0: emptyStaleV0(),
     staleGuards: emptyStaleGuards(),
+    popReads: emptyPopReads(),
     funcs: [],
   };
 
@@ -713,9 +726,28 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       emittedAt,
     );
     // Runs AFTER `decompileFunction`, so the shared `StructRegistry` has
-    // already evolved exactly as production's pass evolves it. This one drives
-    // its own replica of pipeline stages 1-3 — see `staleReads.ts` on why
-    // neither side of the question is recoverable from the return value.
+    // already evolved exactly as production's pass evolves it. Both of the two
+    // below drive their own replica of pipeline stages 1-3 — see
+    // `staleReads.ts` on why neither side of either question is recoverable
+    // from the return value.
+    //
+    // They are two audits rather than one because they disagree about what a
+    // "write" is: this one asks the MACHINE, which is the whole of
+    // `corpus/popReads.ts`.
+    auditPopReads(
+      res.popReads,
+      key,
+      func,
+      insns,
+      af.xrefMap,
+      jumpTables,
+      af.pe.is64,
+      af.iatMap,
+      af.stringMap,
+      funcMap,
+      af.calleeClobbers,
+    );
+    // Version-0 reads a dominating definition has overwritten.
     auditStaleV0Reads(
       res.staleV0,
       key,

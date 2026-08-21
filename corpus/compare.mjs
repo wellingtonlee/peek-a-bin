@@ -308,6 +308,36 @@ for (const b of bins) {
     note("  wrong-operand guards named    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A register a `pop` wrote, read under its previous value (popReads.ts). ──
+  //
+  // Not gated in the run — the count is not zero and no fix has been taken —
+  // so this is the only place a change in it is judged. A RISE is a regression:
+  // every row is a name the emitted C applies to a value the machine replaced.
+  // A FALL is the fix, and `benign` is what a blanket refusal of every pop
+  // would cost, so it is reported beside it rather than gated in either
+  // direction: it moves with function detection like any machine-shape count.
+  if (B.popReads && C.popReads) {
+    row(
+      "pop-restored stale reads",
+      (x) => x.popReads.wrong,
+      (a, c) => c > a,
+      "MORE READS NAMING A VALUE A POP REPLACED",
+    );
+    row("  pops accounted for", (x) => x.popReads.popsWrong);
+    row("  benign restores (would cost)", (x) => x.popReads.benign);
+    row("  implicit ret reads wrong", (x) => x.popReads.retWrong);
+    row("  implicit ret reads benign", (x) => x.popReads.retBenign);
+    row(
+      "  pops lifted as push-imm",
+      (x) => x.popReads.popsLifted,
+      (a, c) => c < a,
+      "THE push-imm/pop PAIRING STOPPED FIRING",
+    );
+    row("  pops examined", (x) => x.popReads.pops);
+  } else {
+    note("  pop-restored stale reads      NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —
