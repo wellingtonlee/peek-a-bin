@@ -352,6 +352,13 @@ if (!pre.haveBins || !pre.haveCc) {
      * anchor to a jcc. The other 48 spoiled readings in this corpus were
      * equally wrong on the page and merely unanchorable. See
      * `corpus/staleGuards.ts`.
+     *
+     * Since peek-a-bin-xskz `named` is no longer "a guard is emitted here at
+     * all": the lifter can materialise a spoiled compare's operands, so a guard
+     * at a spoiled jcc is routinely correct and the count now asks whether the
+     * emitted condition MENTIONS something the spoiler could have written. The
+     * old number is `emittedAtShape`, reported beside it and deliberately not
+     * gated — it is the recovery.
      */
     it("never states a guard over operands the machine took away", () => {
       let shapes = 0;
@@ -360,9 +367,9 @@ if (!pre.haveBins || !pre.haveCc) {
         shapes += sg.shapes;
         expect(
           `${r.key} wrong-operand: ${sg.rows
-            .filter((x) => x.emitted !== null)
+            .filter((x) => x.why !== null)
             .slice(0, 5)
-            .map((x) => `${x.func}@0x${x.jcc.toString(16)} ${x.kind} '${x.emitted}'`)
+            .map((x) => `${x.func}@0x${x.jcc.toString(16)} ${x.kind} ${x.why} '${x.emitted}'`)
             .join("; ")}`,
         ).toBe(`${r.key} wrong-operand: `);
         expect(sg.named).toBe(0);
@@ -935,10 +942,15 @@ function renderReport(): string {
       `  wrong-operand guards        ${sg.named} named of ${sg.shapes} spoiled readings ` +
         `(${sg.bySuperseded} superseded, ${sg.byClobbered} clobbered) over ${sg.blocks} jcc blocks`,
     );
+    L.push(
+      `    guards emitted at a shape ${sg.emittedAtShape} — the RECOVERY, not the defect; not gated`,
+    );
     L.push("    The right operator over the WRONG OPERANDS: polarity passes it, gcc compiles it,");
     L.push("    it is not __unrecovered_N. `shapes` is machine-code shape and does not move with");
-    L.push("    a decompiler fix; `named` is the reading that reached the page. Sites in");
-    L.push("    staleguards_<bin>.jsonl. See corpus/README.md.");
+    L.push("    a decompiler fix. `named` asks whether the emitted condition MENTIONS something");
+    L.push("    the spoiler could have written — since peek-a-bin-xskz the lifter materialises a");
+    L.push("    spoiled compare's operands, so a guard being present is no longer the question.");
+    L.push("    Sites in staleguards_<bin>.jsonl. See corpus/README.md.");
     const pr = r.popReads;
     L.push(
       `  pop-restored reads          ${pr.wrong} wrong over ${pr.popsWrong} pops ` +

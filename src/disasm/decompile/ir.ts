@@ -286,6 +286,22 @@ export interface IRBranch {
   /** The originating jump's mnemonic, lowercased, e.g. `jne`. */
   jcc: string;
   addr?: number;
+  /**
+   * Address of the `cmp`/`test` whose operands the lifter *materialised* into
+   * pseudo-registers at that instruction's own program point, because something
+   * between it and this jump overwrote them (`spoiledCompareCapture` in
+   * `lifter.ts`). Absent means the condition names the compared operands
+   * directly, which is the ordinary case.
+   *
+   * It exists so `structure.ts` can tell one from the other, and it carries the
+   * **address** rather than a boolean deliberately: `conditionSpoiled` decides
+   * from its own forward walk over the machine text which instruction set the
+   * flags, and only a capture taken at *that* instruction answers its
+   * objection. Comparing the two is a positive agreement check — if the two
+   * walks ever disagree the refusal stands, which is the safe direction
+   * (peek-a-bin-xskz).
+   */
+  capturedAt?: number;
 }
 
 export type IRStmt =

@@ -523,7 +523,33 @@ export function structureCFG(
       // and `conditionSpoiled` finds nothing to object to — while the emitted
       // test is still the one the machine does not make (peek-a-bin-xe01).
       const cond = regState.getCondition(mn);
+      // ── …except where the lifter materialised the compared values ──
+      //
+      // `conditionSpoiled` objects that the clobber is emitted *above* the
+      // `if`. Where `liftBlock` has put a statement holding each compared value
+      // at the compare's own program point, that objection no longer applies:
+      // the guard reads those statements, and the clobber is emitted between
+      // them and the `if` without touching either. See
+      // `spoiledCompareCapture` in `lifter.ts`.
+      //
+      // Three things make the bypass narrow rather than a hole in the refusal.
+      // The signal comes from the LIFTER and not from the IR condition — asking
+      // `conditionSpoiled` of that expression is what peek-a-bin-xe01 records as
+      // defeating it outright, since copy propagation has rebound the
+      // overwritten register out of it. The addresses must AGREE: this walk and
+      // `flagOwnerBefore` are two forward readings of the same stream and a
+      // capture taken at some other instruction answers nothing here, so a
+      // disagreement leaves the refusal standing. And there must be a usable IR
+      // condition to fall through to, or the bypass would hand back `cond` — the
+      // raw reading this refusal exists to suppress.
+      const fromIR = branches.get(block.id)?.condition;
+      const usableIR = fromIR && fromIR.kind !== "unknown" ? fromIR : undefined;
+      const captured =
+        usableIR !== undefined &&
+        flagSetterAddr !== null &&
+        branches.get(block.id)?.capturedAt === flagSetterAddr;
       if (
+        !captured &&
         flagSetterAddr !== null &&
         cond.kind !== "unknown" &&
         conditionSpoiled(block, flagSetterAddr, cond, scan.fromPredecessor ? solePred : undefined)
@@ -557,8 +583,7 @@ export function structureCFG(
       // the branch from the same flag model, so the whole apparatus was
       // measured dead on all four corpus binaries before it was removed
       // (peek-a-bin-c33 stage 4, peek-a-bin-wf7t).
-      const fromIR = branches.get(block.id)?.condition;
-      if (fromIR && fromIR.kind !== "unknown") return fromIR;
+      if (usableIR !== undefined) return usableIR;
 
       return cond;
     }

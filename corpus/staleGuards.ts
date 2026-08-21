@@ -38,17 +38,42 @@
  *              that has quietly stopped looking reports the healthiest number
  *              in the report. `shapes > 0` says the shape is still found.
  *
- *   `named`  — of those, the ones where the emitted C nonetheless carries a
- *              recovered guard at that jcc. THAT is the wrong-operand guard.
- *              Zero means every spoiled reading was refused and admitted as
- *              `__unrecovered_N` instead — "clean is not recovered", which is
- *              the honest direction.
+ *   `named`  — of those, the ones whose emitted condition does not read the
+ *              value the machine compared. THAT is the wrong-operand guard.
+ *              Zero means every spoiled reading was either refused and admitted
+ *              as `__unrecovered_N`, or recovered through a capture taken at the
+ *              compare itself.
+ *
+ * `named` used to be "a guard is emitted at this jcc at all", and that was the
+ * right question only while refusing was the only sound answer. Since
+ * peek-a-bin-xskz the lifter *materialises* a spoiled compare's operands into
+ * `flg_<compare address>_<operand index>` variables at the compare's own program
+ * point, so a guard at a spoiled `clobbered` jcc is now routinely correct and
+ * counting those would take the gate red on ~104 of them. The sharper question
+ * is whether the emitted condition READS THAT CAPTURE, which is a property of
+ * the text and of the machine address the shape scan already found — see
+ * `wrongOperand`, including why the rule this looks like it should be ("names a
+ * register the spoiler wrote") is refuted by its own negative control.
+ *
+ * `emittedAtShape` keeps the old count beside the new one, report-only, so the
+ * refinement is legible rather than silent — and so a collapse in the recovery
+ * shows up as a row rather than as silence.
  *
  * WHAT IT DOES NOT CATCH, stated so the zero is read for what it is:
  *
  *   - `named` counts only guards the polarity pass could ANCHOR to their jcc.
  *     A spoiled guard in an arm the auditor could not anchor is invisible here,
  *     so `named` is a LOWER bound. `shapes` has no such dependency.
+ *   - It says NOTHING about whether the captured value is the right one. What it
+ *     checks is that the guard reads a value materialised at the compare; that
+ *     the materialised value is what the compare compared is a property of
+ *     WHERE the statement sits, and only reading `spoiledCompareCapture` (or
+ *     hand-reading a site against `objdump`) establishes it.
+ *   - A `clobbered` row whose capture the lifter DECLINED for a reason of its
+ *     own — a cross-block owner, an unresolvable jump target — is a row where no
+ *     guard is emitted either, so it leaves through `emitted === null` rather
+ *     than being judged. The count is therefore about guards that ARE on the
+ *     page, which is what it has always been about.
  *   - It shares `isFlagTransparent` with the code under test. That table is a
  *     fact about x86 and is deliberately single-sourced — a second copy is the
  *     failure mode `flagModel.ts` exists to prevent — but it does mean this
@@ -84,10 +109,26 @@ export interface StaleGuardRec {
   bySpoilerText: string;
   /**
    * The emitted condition found at this jcc, when the polarity pass anchored a
-   * guard there. Present means the emitted C states a test the machine does not
-   * make; absent means the reading was refused.
+   * guard there. Absent means the reading was refused and admitted as
+   * `__unrecovered_N`. Present is NOT on its own a defect — see `wrongOperand`.
    */
   emitted: string | null;
+  /**
+   * Why that condition is a wrong-operand guard, or null when it is not one.
+   * `"reg:<name>"` names the identifier whose register the spoiler wrote;
+   * `"mem:<token>"` the memory mention in a guard whose compare read memory
+   * across a store.
+   */
+  why: string | null;
+  /** Registers written between the compare and the jcc, canonicalised. Sorted. */
+  clobbers: string[];
+  /**
+   * Whether anything in that stretch wrote memory, or wrote somewhere `writesOf`
+   * cannot attribute. Recorded rather than judged: it is what makes a compare
+   * over memory a spoiled shape, and 77 of the 104 `clobbered` rows at
+   * `97249dc` are exactly that.
+   */
+  clobbersMemory: boolean;
 }
 
 export interface StaleGuardResult {
@@ -95,15 +136,33 @@ export interface StaleGuardResult {
   blocks: number;
   /** Of those, the ones whose compare reading is spoiled. Expected non-zero. */
   shapes: number;
-  /** Of those, the ones an emitted guard nonetheless names. THE DEFECT. Expect 0. */
+  /**
+   * Of those, the ones whose emitted condition mentions something the spoiler
+   * could have written. THE DEFECT. Expect 0.
+   */
   named: number;
+  /**
+   * Of those, the ones an emitted guard names AT ALL — `named`'s definition
+   * before peek-a-bin-xskz. Report-only, and expected to be LARGE: it is the
+   * recovery, not the defect. Kept beside `named` so the sharpening is visible
+   * and so a collapse in the recovery shows up as a row rather than as silence.
+   */
+  emittedAtShape: number;
   bySuperseded: number;
   byClobbered: number;
   rows: StaleGuardRec[];
 }
 
 export function emptyStaleGuards(): StaleGuardResult {
-  return { blocks: 0, shapes: 0, named: 0, bySuperseded: 0, byClobbered: 0, rows: [] };
+  return {
+    blocks: 0,
+    shapes: 0,
+    named: 0,
+    emittedAtShape: 0,
+    bySuperseded: 0,
+    byClobbered: 0,
+    rows: [],
+  };
 }
 
 /** Registers an operand text names, base and index included, canonicalised. */
@@ -143,6 +202,58 @@ function writesOf(insn: Instruction): { regs: Set<string>; mem: boolean; opaque:
   }
   if (dst.includes("[")) return { regs, mem: true, opaque: false };
   return { regs, mem: false, opaque: dst.length > 0 };
+}
+
+/**
+ * Does the emitted condition at a spoiled jcc fail to state the machine's test?
+ * The reason if so, null if not.
+ *
+ * THE RULE IS "IT DOES NOT READ THE CAPTURE", and that is the whole of it for a
+ * `clobbered` row. Since peek-a-bin-xskz the lifter materialises a spoiled
+ * compare's operands into `flg_<compare address>_<operand index>` variables at
+ * the compare's own program point, so a correct guard reads those and nothing
+ * else that can have moved. The name is derived here from the row's own
+ * `cmpAddr` — the same address `flagOwnerBefore` reports and the same one the
+ * lifter names the variable after — so this is a property of the emitted text,
+ * checked against the machine, and not a call into any predicate the fix is
+ * built on.
+ *
+ * A `superseded` row has no capture and cannot have one: its flags belong to an
+ * instruction the compare's operands say nothing about, so ANY guard there
+ * states a test the machine does not make and the old rule is still the right
+ * one (peek-a-bin-jitf).
+ *
+ * WHY NOT "NAMES A CLOBBERED REGISTER", which is the rule this looks like it
+ * should be. Because copy propagation has rebound the overwritten register out
+ * of the expression before it reaches the page — peek-a-bin-xe01's central
+ * finding — so the defect does not name the clobbered register at all. Measured
+ * against the negative control (bypass the refusal, capture nothing):
+ * `cmp eax, 5 / mov eax, edx / je` emits `edx == 5`, naming the register the
+ * spoiler READ; `cmp dword ptr [ecx], 5 / mov ecx, edx / je` emits
+ * `*(int32_t*)(edx) == 5`, over a register in neither the compare nor the
+ * clobber set. A clobbered-register scan reports 0 on both. The clobber set is
+ * still recorded on the row, because it is what identifies the shape to a
+ * reader, and a register mention is still reported as a SECOND trigger — it
+ * costs nothing and it is the direct form of the defect where it does occur.
+ *
+ * WHY WHOLE IDENTIFIERS. Tokens are maximal `[A-Za-z_][A-Za-z0-9_]*` runs, so
+ * `flg_401000_0` is one token rather than the register `flg` plus noise, and
+ * `eax_3` — the variable `splitStaleReads` parks a pre-clobber value in — is not
+ * mistaken for `eax`. A word-boundary match on register names would report every
+ * such repair as a defect, which is the "reads emitted text, encodes formatting
+ * by accident" trap CLAUDE.md warns about.
+ */
+function wrongOperand(emitted: string, cmpAddr: number, clobbers: Set<string>): string | null {
+  const tokens = emitted.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  // `capturedOperandName`'s spelling, derived independently from the address the
+  // shape scan found. Any operand index, because which operands were captured is
+  // the lifter's business and only "the guard reads one of them" is asked here.
+  const capture = `flg_${cmpAddr.toString(16)}_`;
+  if (!tokens.some((t) => t.startsWith(capture))) return `no-capture:${capture}`;
+  for (const token of tokens) {
+    if (isKnownRegister(token) && clobbers.has(canonReg(token))) return `reg:${token}`;
+  }
+  return null;
 }
 
 /**
@@ -187,6 +298,13 @@ export function auditStaleGuards(
 
     let kind: StaleGuardRec["kind"] | null = null;
     let spoiler: Instruction | null = null;
+    // Everything written between the compare and the jcc, not just the first
+    // offender. The row names the first, because that is what identifies the
+    // shape to a reader; judging the emitted condition needs the whole set — a
+    // guard is a wrong-operand guard if it mentions ANY of them.
+    const clobbers = new Set<string>();
+    let clobbersMemory = false;
+    const readsMemory = lastCmpTest.opStr.includes("[");
 
     if (winner !== lastCmpTest) {
       // peek-a-bin-jitf. `winner` cannot be null here: it is at least the
@@ -197,15 +315,15 @@ export function auditStaleGuards(
       // peek-a-bin-xe01. The flags are the compare's; are its operands still
       // the values it compared by the time the guard is evaluated?
       const named = regsNamed(lastCmpTest.opStr);
-      const readsMemory = lastCmpTest.opStr.includes("[");
       for (let i = 0; i < insns.length - 1; i++) {
         if (insns[i].address <= lastCmpTest.address) continue;
         const w = writesOf(insns[i]);
+        for (const r of w.regs) clobbers.add(r);
+        if (w.mem || w.opaque) clobbersMemory = true;
         const hitsReg = [...w.regs].some((r) => named.has(r));
-        if (w.opaque || hitsReg || (w.mem && readsMemory)) {
+        if (!spoiler && (w.opaque || hitsReg || (w.mem && readsMemory))) {
           kind = "clobbered";
           spoiler = insns[i];
-          break;
         }
       }
     }
@@ -215,7 +333,19 @@ export function auditStaleGuards(
     if (kind === "superseded") out.bySuperseded++;
     else out.byClobbered++;
     const emitted = emittedAt.get(last.address) ?? null;
-    if (emitted !== null) out.named++;
+    if (emitted !== null) out.emittedAtShape++;
+    // A `superseded` row's flags belong to an instruction the compare's
+    // operands say nothing about, so any guard here reads the wrong test
+    // whatever it names — there is no set of "safe" operands to check against.
+    // `clobbers` is not even collected for one (the walk above is the
+    // clobbered arm's), so the whole-set test would answer vacuously.
+    const why =
+      emitted === null
+        ? null
+        : kind === "superseded"
+          ? "superseded"
+          : wrongOperand(emitted, lastCmpTest.address, clobbers);
+    if (why !== null) out.named++;
     out.rows.push({
       bin,
       func: funcName,
@@ -228,6 +358,9 @@ export function auditStaleGuards(
       bySpoilerAddr: spoiler.address,
       bySpoilerText: `${spoiler.mnemonic} ${spoiler.opStr}`.trim(),
       emitted,
+      why,
+      clobbers: [...clobbers].sort(),
+      clobbersMemory,
     });
   }
 }

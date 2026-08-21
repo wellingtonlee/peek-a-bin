@@ -329,6 +329,15 @@ for (const b of bins) {
     row("  of which superseded", (x) => x.staleGuards.bySuperseded);
     row("  of which clobbered", (x) => x.staleGuards.byClobbered);
     row("  jcc blocks examined", (x) => x.staleGuards.blocks);
+    // The recovery, not the defect: guards emitted at a spoiled jcc at all,
+    // which is what `named` counted before peek-a-bin-xskz. A FALL is what
+    // matters here — it means the lifter stopped materialising a spoiled
+    // compare's operands — so it is reported and adjudicated, not judged.
+    if (B.staleGuards.emittedAtShape !== undefined && C.staleGuards.emittedAtShape !== undefined) {
+      row("  guards emitted at a shape", (x) => x.staleGuards.emittedAtShape);
+    } else {
+      note("  guards emitted at a shape     NOT MEASURED on both sides (a run predating xskz)");
+    }
   } else {
     note("  wrong-operand guards named    NOT MEASURED on both sides (a run predating the audit)");
   }

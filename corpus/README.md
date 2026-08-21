@@ -257,20 +257,53 @@ Two counts, and only the second is a defect:
 | Count | What it is |
 |---|---|
 | `shapes` | Blocks whose compare reading one of the two mechanisms spoiled. A property of the **machine code**, so a decompiler fix does not move it. This is the liveness number: an audit that measures an absence and has quietly stopped looking reports the healthiest figure in the report. **53/9/6/38** (t32/t64/w64/w32) at `e22ba6e`. |
-| `named` | Of those, the ones the emitted C nonetheless states. **The defect, and the gate.** |
+| `named` | Of those, the ones whose emitted condition does **not read the value the machine compared**. **The defect, and the gate.** |
+| `emittedAtShape` | Of those, the ones an emitted guard names *at all*. `named`'s definition before `peek-a-bin-xskz`; now the **recovery**, and report-only. **29/5/3/21** at `97249dc` + xskz. |
+
+**`named` changed its question in `peek-a-bin-xskz`, and the old one had become the wrong one.**
+It used to be "is a guard emitted at this jcc at all", which is right only while *refusing* is the
+only sound answer. The lifter now **materialises** a spoiled compare's operands into
+`flg_<compare address>_<operand index>` variables at the compare's own program point
+(`spoiledCompareCapture`), so ~104 guards at spoiled jccs are recovered and correct, and the old
+count would have gated red on every one of them. The question now is whether the emitted condition
+**reads that capture** — a property of the text, checked against the compare address the shape scan
+itself found, and the name is derived in `staleGuards.ts` from that address rather than imported
+from the lifter.
+
+**The rule this looks like it should be — "the condition names a register the spoiler wrote" — is
+refuted by its own negative control, and that is worth knowing before anyone tries to sharpen it
+again.** Copy propagation rebinds the overwritten register *out* of the expression before it
+reaches the page, which is `peek-a-bin-xe01`'s central finding, so the defect does not name the
+clobbered register at all: bypassing the refusal with no capture emits `edx == 5` for
+`cmp eax, 5 / mov eax, edx / je` — the register the spoiler *read* — and
+`*(int32_t*)(edx) == 5` for `cmp dword ptr [ecx], 5 / mov ecx, edx / je`, over a register in
+neither the compare nor the clobber set. A clobbered-register scan reports **0** on both. A
+register mention is still reported as a second trigger, because it costs nothing and it is the
+direct form of the defect where it does occur.
 
 **Why this gates when the baselines below do not**, on the same terms as stale version-0 rather
 than by analogy: every row is a provably false statement about the program, which is
 `polarity inverted`'s character, not a count awaiting a threshold. It is 0 because a fix put it
 there, not because it was found there.
 
-*Validated by negative control, and the control is unusually strong.* With both fixes disabled —
-the emitted C then **byte-identical to the true base on all four binaries**, checked by md5 — it
-reports **29/5/3/21, i.e. 58 named**. Those 58 are *precisely* the 58 guards `compare.mjs`
-independently reports as `only in BASE` over the same pair of runs, with `CHANGED 0` and
-`only-change 0`. Two instruments that share nothing agree row for row. Three were adjudicated by
-hand against `objdump`, including t64 `0x1400055a6` (`cmp %cx,(%r8) / mov $0x58,%ecx / jne`,
-emitted as `*(uint16_t*)(r8) != (uint16_t)ecx`).
+*Validated by negative control, twice, in opposite directions.*
+
+- **Bypass the refusal without capturing** (`peek-a-bin-xskz`): `npm run corpus` exits 1 with
+  `named` **29/5/3/21 = 58**, which is *every* guard in `emittedAtShape` — the control recovers the
+  same 104 guards and the gate flags 100% of the anchorable ones. It emits the same unrecovered-value
+  counts as the fix (39/12/11/35), so the recovery number alone cannot tell the two apart; only this
+  gate can. Two of its rows were adjudicated against `objdump`: t64 `0x140005752` is
+  `mov ecx,0x30 / cmp eax,ecx / mov ecx,0x58 / jne`, and the control emits `eax_6 == 0x58` where the
+  machine compares against **0x30**.
+- **Base code with the refined audit** (i.e. the refinement alone): `named` **0** and
+  `emittedAtShape` **0**, with `shapes` and every other figure unmoved — so the sharpening does not
+  itself change the reading of a tree that refuses everything.
+
+The historical control for the two original fixes still stands: with `peek-a-bin-xe01` and
+`peek-a-bin-jitf` disabled — the emitted C then **byte-identical to the true base on all four
+binaries**, checked by md5 — the *old* `named` reported **29/5/3/21, i.e. 58**, precisely the 58
+guards `compare.mjs` independently reported as `only in BASE` over the same pair of runs, with
+`CHANGED 0` and `only-change 0`. Two instruments that share nothing agreed row for row.
 
 **In `compare.mjs`** (`peek-a-bin-x5lb`): `named` is gated on a rise, and `shapes`,
 `bySuperseded`, `byClobbered` and `blocks` are reported. `named` is already gated at 0 *in the run*,
@@ -288,6 +321,13 @@ reads `NOT MEASURED` rather than scoring a perfect zero — verified in both dir
 - **`named` is a lower bound.** It counts only guards the polarity pass could **anchor** to a jcc.
   The other 48 spoiled readings in this corpus were equally wrong on the page and merely
   unanchorable. `shapes` has no such dependency, which is the other reason to read both.
+- **It says nothing about whether the captured value is the *right* one.** What it checks is that
+  the guard reads a value materialised at the compare; that the materialised value is what the
+  compare compared is a property of **where the statement sits**, established by reading
+  `spoiledCompareCapture` and by hand-reading sites against `objdump` — five were, for
+  `peek-a-bin-xskz`.
+- **A `clobbered` row the lifter declined to capture** — a cross-block owner, an unresolvable jump
+  target — emits no guard either, so it leaves through `emitted === null` rather than being judged.
 - **It shares `isFlagTransparent` with the code under test.** That table is a fact about x86 and is
   deliberately single-sourced — a second copy is the failure mode `flagModel.ts` exists to
   prevent — so this audit cannot catch an error *in that table*. The judgement built on top of it,
@@ -301,7 +341,9 @@ reads `NOT MEASURED` rather than scoring a perfect zero — verified in both dir
 
 Per-site detail is in `staleguards_<bin>.jsonl` — the block's jcc, which mechanism, the `cmp` whose
 operands the reading would have named, the instruction that took them away, and the emitted
-condition where one reached the page (`null` where the reading was refused).
+condition where one reached the page (`null` where the reading was refused), plus `why` (the
+reason it is a defect, or `null`), the canonicalised registers written between the compare and the
+jcc, and whether that stretch wrote memory.
 
 **A read whose definition the fold deleted** (`lostDefs.ts`). *A failure means the emitted C reads
 a register that nothing in the function assigns.* `foldBlock` inlines a definition read exactly

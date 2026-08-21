@@ -5725,11 +5725,17 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
     expect(guardTexts(code)).toEqual(["<unrecovered>"]);
   });
 
-  // peek-a-bin-xe01. The flags ARE the cmp's, but the block's statements are
-  // emitted above the `if`, so `eax = edx;` runs first and the guard would read
-  // the new EAX. The arithmetic path had refused this shape since
-  // peek-a-bin-b531; the cmp path never asked.
-  it("does not name a compared register a later instruction overwrote", () => {
+  // peek-a-bin-xe01, then peek-a-bin-xskz. The flags ARE the cmp's, but the
+  // block's statements are emitted above the `if`, so `eax = edx;` runs first
+  // and a guard naming EAX would read the new value. That was refused outright
+  // until the lifter learned to MATERIALISE the compared value at the compare's
+  // own program point; the guard now reads the capture, and the assertion is
+  // that it names neither the old register (whose value has moved) nor EDX (the
+  // value the spoiler put there, which is what the same jcc emits when the
+  // refusal is bypassed WITHOUT a capture — measured, and the reason
+  // `corpus/staleGuards.ts` cannot judge this by looking for a clobbered
+  // register name).
+  it("materialises a compared register a later instruction overwrote", () => {
     const code = run(
       seq(0x401000, [
         ["cmp", "eax, 5"],
@@ -5742,12 +5748,41 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
       ]),
     );
 
-    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
-    expect(code).not.toMatch(/eax [=!]= 5/);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 == 5"]);
+    expect(code).toContain("flg_401000_0 = eax;");
+    expect(code).not.toMatch(/\beax [=!]= 5/);
+    expect(code).not.toMatch(/\bedx [=!]= 5/);
+  });
+
+  // The capture is taken BEFORE the clobber, which is the whole claim, and the
+  // shape above cannot demonstrate it: DCE deletes `mov eax, edx` there, so a
+  // guard naming a bare `eax` would be correct by accident. Here the clobbered
+  // value is read in two successors, so it escapes the block and stays on the
+  // page — and the capture's source must still be the value from BEFORE it.
+  it("captures the value from before a clobber that survives to the page", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, esi"],
+        ["cmp", "eax, 5"],
+        ["mov", "eax, edx"],
+        ["je", "0x40101c"],
+        ["mov", "dword ptr [ebx], eax"],
+        ["ret"],
+        ["mov", "dword ptr [ecx], eax"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["flg_401004_0 == 5"]);
+    expect(code).toContain("flg_401004_0 = esi;");
+    expect(code).not.toMatch(/\bedx [=!]= 5/);
   });
 
   // The overwrite question is width-blind, because a byte write really does
-  // change what the name denotes at any width. `mov al, 1` spoils `eax`.
+  // change what the name denotes at any width. `mov al, 1` spoils `eax`, so the
+  // capture fires — and bypassing the refusal with no capture emits `if (1)`
+  // here, a control-flow claim rather than a test, which is why this shape is
+  // worth pinning rather than merely counting.
   it("counts a sub-register write as overwriting the register", () => {
     const code = run(
       seq(0x401000, [
@@ -5761,12 +5796,16 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
       ]),
     );
 
-    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 != 5"]);
+    expect(code).toContain("flg_401000_0 = eax;");
   });
 
   // A compare against memory is spoiled by an intervening STORE, not only by a
-  // register write — the guard's deref is evaluated at the `if`, below it.
-  it("does not name a compared memory operand a later store overwrote", () => {
+  // register write — the guard's deref would be evaluated at the `if`, below it.
+  // This is the majority shape in the corpus (77 of 104 at `97249dc`), and the
+  // capture is a real load rather than a copy: the value is in memory and no
+  // name in the emitted C holds it.
+  it("materialises a compared memory operand a later store overwrote", () => {
     const code = run(
       seq(0x401000, [
         ["cmp", "dword ptr [ecx], 5"],
@@ -5779,11 +5818,19 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
       ]),
     );
 
-    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 == 5"]);
+    // The load is above the store, which is the entire point.
+    expect(code.indexOf("flg_401000_0 = *(int32_t*)(ecx)")).toBeGreaterThan(-1);
+    expect(code.indexOf("flg_401000_0 = *(int32_t*)(ecx)")).toBeLessThan(
+      code.indexOf("*(int32_t*)(ecx) = edx"),
+    );
   });
 
-  // …and by a write to the register the deref is spelled with.
-  it("does not name a deref whose base register was overwritten", () => {
+  // …and by a write to the register the deref is spelled with. Bypassing the
+  // refusal here emits `*(int32_t*)(edx) == 5` — a load through the register the
+  // spoiler wrote INTO ecx, which is neither the compare's base nor a member of
+  // the clobber set, so no text scan over register names can see it.
+  it("materialises a deref whose base register was overwritten", () => {
     const code = run(
       seq(0x401000, [
         ["cmp", "dword ptr [ecx], 5"],
@@ -5796,7 +5843,32 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
       ]),
     );
 
-    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 == 5"]);
+    expect(code).toContain("flg_401000_0 = *(int32_t*)(ecx);");
+    expect(code).not.toContain("*(int32_t*)(edx) == 5");
+  });
+
+  // A CONSTANT OPERAND IS NOT CAPTURED, and a repeated one is captured once.
+  // `test eax, eax` names the same register twice, so one statement holds it and
+  // the condition reads it on both sides — two statements saying the same thing
+  // would be noise, and an `IRConst` has nothing to preserve.
+  it("captures each distinct non-constant operand exactly once", () => {
+    const code = run(
+      seq(0x401000, [
+        ["test", "eax, eax"],
+        ["mov", "eax, edx"],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    // A trailing space, so `flg_… == 0` in the guard is not counted as an
+    // assignment: the point is one capture STATEMENT, read twice.
+    expect(code.match(/flg_401000_\d+ = /g)).toEqual(["flg_401000_0 = "]);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 == 0"]);
   });
 
   // ── Controls. Every one of these must keep recovering, or the refusal is
@@ -6006,8 +6078,15 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
   // The predecessor's compare is spoiled by a store in its own tail, which is
   // the `staleGuards` class exactly: `cmp dword ptr [ebp - 0x18], 0` followed by
   // `mov dword ptr [ebp - 0x18], edx` compares the OLD slot, and the store is
-  // emitted above the guard. 3 of the 19 corpus refusals, and emitting them
-  // would take `corpus/staleGuards.ts` — a gate at 0 named — red.
+  // emitted above the guard. 3 of the 19 corpus refusals.
+  //
+  // The `jg` is in the compare's OWN block, so peek-a-bin-xskz materialises the
+  // slot for it and that guard is recovered. The `je` — the one this test is
+  // about — is a block away, and the capture is deliberately NOT extended across
+  // the edge: `liftBlock` returns one block's statements and has no predecessor
+  // list to place a statement in, so a cross-block owner stays refused by
+  // `branchFor`'s `canSpellCondition` filter. 2/0/0/1 spoiled owners are
+  // cross-block at `97249dc`, against 52/9/6/37 block-local.
   it("refuses a predecessor's compare that the predecessor's own tail spoiled", () => {
     const code = run(
       seq(0x401000, [
@@ -6024,7 +6103,14 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
       ]),
     );
 
-    expect(guardTexts(code).filter((g) => g !== "<unrecovered>")).toEqual([]);
+    // Two jccs, and only the block-local one is answered. Neither guard may
+    // name the slot itself, which is the value the store replaced.
+    expect(guardTexts(code)).toEqual(["flg_401000_0 > 0", "<unrecovered>"]);
+    // The load of the slot is emitted ABOVE the store that replaces it, which is
+    // the whole claim; neither guard names the slot itself.
+    expect(code.indexOf("flg_401000_0 = var_18;")).toBeGreaterThan(-1);
+    expect(code.indexOf("flg_401000_0 = var_18;")).toBeLessThan(code.indexOf("var_18 = edx;"));
+    expect(code).not.toContain("if (var_18");
   });
 
   // …and spoiled from the OTHER side of the edge. The block need not hold only

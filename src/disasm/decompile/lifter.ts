@@ -20,6 +20,7 @@ import {
   irReg,
   irUnary,
   irUnknown,
+  irVar,
   isKnownRegister,
   pushBeforeTerminator,
   regSize,
@@ -413,6 +414,149 @@ export function setFlagsFromCompare(
 }
 
 /**
+ * The compared values a spoiled block-local `cmp`/`test` will be read through,
+ * materialised at the compare's own program point — or null when there is
+ * nothing to materialise.
+ *
+ * **The defect this exists to remove is a refusal, not a wrong answer.** A
+ * block's statements are emitted *above* the `if` it closes with, so
+ * `cmp eax, 5 / mov eax, edx / je` would print `eax = edx; if (eax != 5)` — the
+ * right operator over the wrong operands — and both `flagModel.ts`'s `spoils`
+ * and `structure.ts`'s `conditionSpoiled` therefore give up on it
+ * (peek-a-bin-xe01). Giving up was the whole of that repair and it is honest,
+ * but it is not the only sound answer: `conditionSpoiled`'s own docstring names
+ * the better one, and this is it. A statement at the compare's address holds
+ * each compared value, and the guard reads *that*, so the clobber can no longer
+ * reach it however far the emitted statements move.
+ *
+ * **The destination is an `IRVar`, and it is deliberately a form that no pass
+ * can move or delete.** A pseudo-*register* was tried first, on
+ * `matchedStackSlots`' argument that `flg_x = eax` is a copy by `isCopyStmt`'s
+ * reckoning, so `copyPropagation` would delete it, rebind the guard to the
+ * pre-clobber SSA version, and let `splitStaleReads` repair that as it repairs
+ * every other stale read — free where it recovers nothing, and a natural
+ * register name on the page where it does. It works, and it was **measured and
+ * rejected**, for two reasons that are the same reason:
+ *
+ * - **It leaves the class ungateable.** `corpus/staleGuards.ts` reads emitted
+ *   text, and after copy propagation the recovered guard and the *defective*
+ *   one are both bare register names with no way to tell which value each
+ *   denotes: `cmp eax, 5 / mov eax, edx / je` recovers as `eax == 5` and the
+ *   same jcc without a capture emits `edx == 5` — the register the spoiler
+ *   READ, which is peek-a-bin-xe01's whole point about copy propagation
+ *   rebinding the overwritten name out of the expression. `cmp [ecx], 5 /
+ *   mov ecx, edx / je` is worse still: the defect emits `*(int32_t*)(edx) == 5`
+ *   over a register in neither the clobber set nor the compare. A gate that
+ *   cannot see its own negative control is not a gate.
+ * - **Its correctness is a chain of passes rather than a property.** With the
+ *   register form the guard is right only because copy propagation, DCE and
+ *   `splitStaleReads` between them happen to leave it naming a version that
+ *   still reaches the jcc — and in the shape where DCE deletes the clobber
+ *   outright the guard is a bare `eax` that is correct *for that reason alone*.
+ *   An `IRVar` is written once, at the compare, by a statement `copyPropagation`
+ *   (register destinations only), `foldBlock`'s single-use inlining (likewise)
+ *   and `deadCodeElimination` (versioned register destinations only) all leave
+ *   alone by construction. So the value on the page is the compared value
+ *   because of where the statement is, and nothing else has to hold.
+ *
+ * The price is one statement and one temporary per site — 104 of each over the
+ * four corpus binaries at `97249dc` — including the 27 where a register would
+ * have been folded away. That is what a gate at 0 costs here, and it is worth
+ * it: `named` becomes "the emitted guard does not read the capture", which the
+ * control drives to 104 and the fix to 0.
+ *
+ * Four things bound it, and each is a case where a capture would be a guess or
+ * a cost with no recovery:
+ *
+ * 1. **Block-local only.** `blockFlagOwner` will answer from a sole
+ *    *predecessor*, and a capture for that owner would have to be placed in the
+ *    predecessor's statement list, which `liftBlock` does not have. Such an
+ *    owner is already refused outright by `branchFor`'s `canSpellCondition`
+ *    filter and stays refused. Measured over the four corpus binaries at
+ *    `97249dc`: 2/0/0/1 spoiled owners are cross-block against 52/9/6/37
+ *    block-local, so the scope costs 3 of 107.
+ * 2. **A compare owner only.** A `result` or `bittest` owner already refuses on
+ *    `spoiled` inside `canSpellCondition`, and its value is the instruction's
+ *    own destination rather than an operand — capturing it would mean reading
+ *    the destination at a point the instruction has not yet written.
+ * 3. **A resolvable direct target**, because `branchFor` refuses anything else
+ *    and the captures would then be statements with no reader.
+ * 4. **A constant operand is not captured.** There is nothing to preserve, and
+ *    an `IRConst` in the condition is what every unspoiled compare already
+ *    emits. Two operands with identical text share one capture, so `test eax,
+ *    eax` produces one statement rather than two of the same thing.
+ *
+ * The name is `flg_<compare address>_<operand index>`, and the *compare's*
+ * address is what makes it checkable from outside: `corpus/staleGuards.ts`
+ * derives the same name from the same address and asks whether the emitted
+ * guard reads it.
+ */
+interface SpoiledCompareCapture {
+  /** The spoiled compare's address — where the captures are placed. */
+  at: number;
+  mnemonic: "cmp" | "test";
+  /** One assignment per distinct non-constant operand, in operand order. */
+  captures: IRStmt[];
+  /** What the condition is built over: a capture variable, or a const. */
+  left: IRExpr;
+  right: IRExpr;
+}
+
+/** The name a captured operand is held under. One declaration; the audit derives it too. */
+export function capturedOperandName(compareAddr: number, operandIndex: number): string {
+  return `flg_${compareAddr.toString(16)}_${operandIndex}`;
+}
+
+/**
+ * The width a captured operand's variable carries.
+ *
+ * `IRVar.size` means the width of the value it holds, which is what `emit.ts`'s
+ * `operandWidth` reads. Every operand shape in the corpus population is a
+ * register or a memory operand, and both carry their own width; the CPU width is
+ * the fallback for a shape `parseOperand` renders as neither, where claiming
+ * anything narrower would be inventing one.
+ */
+function capturedWidth(expr: IRExpr, is64: boolean): number {
+  if (expr.kind === "reg" || expr.kind === "deref" || expr.kind === "const") return expr.size;
+  return is64 ? 8 : 4;
+}
+
+function spoiledCompareCapture(
+  block: BasicBlock,
+  is64: boolean,
+  solePred?: BasicBlock,
+): SpoiledCompareCapture | null {
+  const last = block.insns[block.insns.length - 1];
+  if (!last || !/^0x[0-9a-fA-F]+$/.test(last.opStr.trim())) return null;
+  const owned = blockFlagOwner(block, solePred);
+  if (!owned || owned.fromPredecessor) return null;
+  const owner = owned.owner;
+  if (owner.kind !== "compare" || !owner.spoiled) return null;
+  // No x86 memory operand contains a comma — the same split `setFlagsFromCompare`
+  // makes, of the same text, so the two cannot disagree about the operands.
+  const parts = owner.insn.opStr.split(",").map((part) => part.trim());
+  if (parts.length < 2) return null;
+
+  const captures: IRStmt[] = [];
+  const byText = new Map<string, IRExpr>();
+  const capture = (index: number): IRExpr => {
+    const text = parts[index].toLowerCase();
+    const already = byText.get(text);
+    if (already) return already;
+    const src = parseOperand(parts[index], owner.insn, is64);
+    if (src.kind === "const") return src;
+    const dest = irVar(capturedOperandName(owner.address, index), capturedWidth(src, is64));
+    captures.push({ kind: "assign", dest, src, addr: owner.address });
+    byText.set(text, dest);
+    return dest;
+  };
+  const left = capture(0);
+  const right = capture(1);
+  if (captures.length === 0) return null;
+  return { at: owner.address, mnemonic: owner.mnemonic, captures, left, right };
+}
+
+/**
  * The `IRBranch` a block's trailing jump becomes, or null when no condition can
  * be spelled for it.
  *
@@ -485,6 +629,7 @@ function branchFor(
   regState: RegState,
   is64: boolean,
   solePred?: BasicBlock,
+  capture?: SpoiledCompareCapture | null,
 ): IRBranch | null {
   const owned = blockFlagOwner(block, solePred);
   if (!owned || owned.jcc !== jcc) return null;
@@ -493,12 +638,26 @@ function branchFor(
   const ownerBlock = owned.fromPredecessor && solePred ? solePred : block;
 
   let condition: IRExpr;
+  let capturedAt: number | undefined;
   if (owned.owner.kind === "compare") {
     if (owned.fromPredecessor) {
       if (!canSpellCondition(owned.owner)) return null;
       const state = new RegState();
       if (!setFlagsFromCompare(state, owned.owner.insn, owned.owner.mnemonic, is64)) return null;
       condition = state.getCondition(jcc);
+    } else if (capture && capture.at === owned.owner.address) {
+      // Something overwrote an operand between the compare and this jump, and
+      // `liftBlock` has put a statement holding each compared value at the
+      // compare's own address. The condition reads those, so the clobber cannot
+      // reach it — see `spoiledCompareCapture` for why that is sound and where
+      // its bounds are. The state is built fresh from the captured expressions
+      // rather than from `regState`, which holds the raw operand names: the same
+      // shape the cross-block arm above uses, so `getCondition` sees exactly one
+      // kind of input either way (peek-a-bin-xskz).
+      const state = new RegState();
+      state.setFlags(owned.owner.mnemonic, capture.left, capture.right);
+      condition = state.getCondition(jcc);
+      capturedAt = capture.at;
     } else {
       // Nothing between the compare and the jump wrote a flag — that is what
       // makes it the owner — so `regState` still holds exactly this compare.
@@ -559,6 +718,7 @@ function branchFor(
     target: Number.parseInt(target[1], 16),
     jcc,
     addr: insn.address,
+    ...(capturedAt === undefined ? {} : { capturedAt }),
   };
 }
 
@@ -603,6 +763,16 @@ export function liftBlock(
   stackSlots?: StackSlotPairs,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
+
+  /**
+   * The compared values to materialise, when this block's trailing Jcc reads a
+   * `cmp`/`test` whose operands something after it overwrote. Computed once,
+   * here, because the placement and the reading are two ends of one decision:
+   * the statements go in at the compare below, `branchFor` builds the condition
+   * over them at the Jcc, and a plan half-applied would leave the guard naming
+   * a pseudo-register nothing assigns. Null for every ordinary block.
+   */
+  const spoiledCapture = spoiledCompareCapture(block, is64, solePred);
 
   /**
    * Did the *previous* instruction leave the flags somewhere this class cannot
@@ -1078,6 +1248,17 @@ export function liftBlock(
           parseOperand(parts[1], insn, is64),
         );
       }
+      // …unless a later instruction in this block overwrites what the flags were
+      // set from, in which case the compared values are held here, where they
+      // still are what the compare read. This is the ONE place a compare emits a
+      // statement, and it emits one only because the alternative is refusing the
+      // guard outright (`spoiledCompareCapture`). `regState` is deliberately not
+      // told about the pseudo-registers: it feeds `collectArgs64`'s "did this
+      // block write a fastcall register" question, and a capture is not an
+      // argument (peek-a-bin-xskz).
+      if (spoiledCapture && insn.address === spoiledCapture.at) {
+        stmts.push(...spoiledCapture.captures);
+      }
       continue;
     }
 
@@ -1229,7 +1410,7 @@ export function liftBlock(
     // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
       if (insn === block.insns[block.insns.length - 1]) {
-        const branch = branchFor(block, insn, mn, regState, is64, solePred);
+        const branch = branchFor(block, insn, mn, regState, is64, solePred, spoiledCapture);
         if (branch) stmts.push(branch);
       }
       continue;
