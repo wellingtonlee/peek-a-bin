@@ -1,7 +1,7 @@
 import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
 import type { ClobberScan } from "./flagModel";
-import { clobberedAfter, flagScanStream, isFlagTransparent, solePredecessor } from "./flagModel";
+import { clobberedAfter, flagPredecessor, flagScanStream, isFlagTransparent } from "./flagModel";
 import { hasSideEffects } from "./fold";
 import type { IRBranch, IRExpr, IRStmt } from "./ir";
 import {
@@ -491,13 +491,20 @@ export function structureCFG(
       //
       // What the walk reads is `flagModel.ts`'s `flagScanStream`, not the block
       // alone. A Jcc whose block writes no flag reads the flags of the block
-      // before it, and where there is exactly one such block the stream starts
-      // in it — the same rule, from the same declaration, that `lifter.ts` uses
-      // to build the `IRBranch`, so the reading this refuses over and the
-      // reading the IR offers below cannot come off different instructions
-      // (peek-a-bin-suql).
-      const solePred = solePredecessor(block, blockById);
-      const scan = flagScanStream(block, solePred);
+      // before it, and `flagPredecessor` says which block that is — the only
+      // predecessor, or, where several predecessors all set the flags from the
+      // same test, any one of them (peek-a-bin-xdxt). The same rule, from the
+      // same declaration, that `lifter.ts` uses to build the `IRBranch`, so the
+      // reading this refuses over and the reading the IR offers below cannot
+      // come off different instructions (peek-a-bin-suql).
+      //
+      // `conditionSpoiled` below is asked of the predecessor this returned and
+      // not of the others, which is sound because `unanimousCompare` has
+      // already run the forward `spoils` scan over *every* edge and refuses a
+      // compare any of them overwrote — and refuses a stack-relative compare
+      // outright, which is the one shape the two scans read differently.
+      const flagPred = flagPredecessor(block, blockById);
+      const scan = flagScanStream(block, flagPred);
       const regState = new RegState();
       let flagSetterAddr: number | null = null;
       for (const insn of scan.insns) {
@@ -552,7 +559,7 @@ export function structureCFG(
         !captured &&
         flagSetterAddr !== null &&
         cond.kind !== "unknown" &&
-        conditionSpoiled(block, flagSetterAddr, cond, scan.fromPredecessor ? solePred : undefined)
+        conditionSpoiled(block, flagSetterAddr, cond, scan.fromPredecessor ? flagPred : undefined)
       )
         return { kind: "unknown", text: mn };
 

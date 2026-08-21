@@ -549,11 +549,11 @@ function capturedWidth(expr: IRExpr, is64: boolean): number {
 function spoiledCompareCapture(
   block: BasicBlock,
   is64: boolean,
-  solePred?: BasicBlock,
+  flagPred?: BasicBlock,
 ): SpoiledCompareCapture | null {
   const last = block.insns[block.insns.length - 1];
   if (!last || !/^0x[0-9a-fA-F]+$/.test(last.opStr.trim())) return null;
-  const owned = blockFlagOwner(block, solePred);
+  const owned = blockFlagOwner(block, flagPred);
   if (!owned || owned.fromPredecessor) return null;
   const owner = owned.owner;
   if (owner.kind !== "compare" || !owner.spoiled) return null;
@@ -629,7 +629,7 @@ function spoiledCompareCapture(
  *    `pipeline.test.ts` pins it (peek-a-bin-ie0j).
  *
  * **A Jcc alone in its block owns none of this and is answered from its
- * predecessor**, which `flagScanStream` decides and `solePred` opts into. Three
+ * predecessor**, which `flagScanStream` decides and `flagPred` opts into. Three
  * things change on that path and each is a judgement:
  *
  * - The condition cannot come from `regState`. That state is what walking *this*
@@ -653,14 +653,14 @@ function branchFor(
   jcc: string,
   regState: RegState,
   is64: boolean,
-  solePred?: BasicBlock,
+  flagPred?: BasicBlock,
   capture?: SpoiledCompareCapture | null,
 ): IRBranch | null {
-  const owned = blockFlagOwner(block, solePred);
+  const owned = blockFlagOwner(block, flagPred);
   if (!owned || owned.jcc !== jcc) return null;
   const target = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
   if (!target) return null;
-  const ownerBlock = owned.fromPredecessor && solePred ? solePred : block;
+  const ownerBlock = owned.fromPredecessor && flagPred ? flagPred : block;
 
   let condition: IRExpr;
   let capturedAt: number | undefined;
@@ -760,8 +760,10 @@ function branchFor(
  * come from registers rather than pushes; omitting it keeps the pre-existing
  * behaviour, which is deliberately not the same claim as "there are no writes".
  *
- * `solePred` is the second, and is the block's only predecessor when it has
- * exactly one (`solePredecessor`). A Jcc whose block writes no flag at all reads
+ * `flagPred` is the second, and is the predecessor whose exit flags the block is
+ * entered with when that is knowable — its only predecessor, or, when several
+ * predecessors all set the flags from the same test, any one of them
+ * (`flagPredecessor`). A Jcc whose block writes no flag at all reads
  * flags set before the block was entered, so without it `branchFor` has nothing
  * to answer from and the guard emits as `__unrecovered_N` — 88 blocks across the
  * four corpus binaries, of which 69 are recoverable (peek-a-bin-suql). Omitting
@@ -784,7 +786,7 @@ export function liftBlock(
   funcMap: Map<number, { name: string; address: number }>,
   calleeSavedFirstWrite?: Map<string, number>,
   calleeClobbers?: CalleeClobbers,
-  solePred?: BasicBlock,
+  flagPred?: BasicBlock,
   stackSlots?: StackSlotPairs,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
@@ -797,7 +799,7 @@ export function liftBlock(
    * over them at the Jcc, and a plan half-applied would leave the guard naming
    * a pseudo-register nothing assigns. Null for every ordinary block.
    */
-  const spoiledCapture = spoiledCompareCapture(block, is64, solePred);
+  const spoiledCapture = spoiledCompareCapture(block, is64, flagPred);
 
   /**
    * Did the *previous* instruction leave the flags somewhere this class cannot
@@ -1435,7 +1437,7 @@ export function liftBlock(
     // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
       if (insn === block.insns[block.insns.length - 1]) {
-        const branch = branchFor(block, insn, mn, regState, is64, solePred, spoiledCapture);
+        const branch = branchFor(block, insn, mn, regState, is64, flagPred, spoiledCapture);
         if (branch) stmts.push(branch);
       }
       continue;

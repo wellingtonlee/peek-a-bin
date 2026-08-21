@@ -5,7 +5,7 @@ import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
 import { emitFunction } from "./emit";
-import { solePredecessor } from "./flagModel";
+import { flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
@@ -137,7 +137,7 @@ export function decompileFunction(
         funcMap,
         calleeSavedFirstWrite,
         calleeClobbers,
-        solePredecessor(block, blockById),
+        flagPredecessor(block, blockById),
         stackSlots,
       );
       liftedBlocks.set(block.id, stmts);

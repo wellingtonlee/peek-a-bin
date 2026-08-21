@@ -6110,8 +6110,9 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
   // instructions: `cmp eax, 0x53` on one edge, `test ecx, ecx` on the other. The
   // `je` reads whichever ran, which no single condition states, so it must stay
   // admitted. Refusing this is what keeps the recovery from being a guess, and
-  // it is 12 of the 19 corpus refusals.
-  it("refuses a lone jcc whose block has two predecessors", () => {
+  // it is 12 of the 14 multi-predecessor blocks in the corpus at `f169c00`
+  // (peek-a-bin-xdxt). The other 2 are the test below.
+  it("refuses a lone jcc whose two predecessors set the flags differently", () => {
     const code = run(
       seq(0x401000, [
         ["cmp", "eax, 0x53"],
@@ -6129,6 +6130,33 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
     expect(guardTexts(code)).toContain("<unrecovered>");
     expect(code).not.toContain("eax == 0x53");
     expect(code).not.toContain("ecx == 0");
+  });
+
+  // ...and the generalisation: when every predecessor sets the flags from the
+  // SAME test, the block is entered with those flags however it was reached, so
+  // one block-local condition states the machine and there is nothing to merge.
+  // This is MSVC's `_stricmp` tail, the only shape in the corpus that agrees —
+  // t32 0x40E696 and w32 0x40CDB6, one guard per 32-bit binary. `jb` after
+  // `cmp ah, al` is unsigned-below, and the arm that runs is the fallthrough, so
+  // the emitted guard is its negation (peek-a-bin-xdxt).
+  it("recovers a lone jcc whose two predecessors set the flags from the same test", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "ah, al"],
+        ["jne", "0x401014"],
+        ["xor", "ecx, ecx"],
+        ["cmp", "ah, al"],
+        ["je", "0x401020"],
+        ["mov", "ecx, 0xffffffff"],
+        ["jb", "0x401020"],
+        ["neg", "ecx"],
+        ["mov", "eax, ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["ah != al", "ah >= al", "ah != al"]);
+    expect(code).not.toContain("__unrecovered");
   });
 
   // The predecessor's compare is spoiled by a store in its own tail, which is

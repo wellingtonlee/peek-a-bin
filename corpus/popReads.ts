@@ -59,7 +59,7 @@
 
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
-import { solePredecessor } from "../src/disasm/decompile/flagModel";
+import { flagPredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
@@ -433,7 +433,7 @@ export function auditPopReads(
           funcMap,
           calleeSavedFirstWrite,
           calleeClobbers,
-          solePredecessor(b, blockById0),
+          flagPredecessor(b, blockById0),
           stackSlots,
         ),
       );

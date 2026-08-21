@@ -750,14 +750,25 @@ export function isFlagReadingJump(mnemonic: string): boolean {
 }
 
 /**
- * The block's only predecessor, or undefined when it has none, more than one,
- * or only itself.
+ * The predecessor whose exit flags this block is *entered* with, or undefined
+ * when that is not knowable.
  *
- * This lives beside `flagScanStream` because it is that rule's other half: the
- * flags a block is *entered* with are knowable exactly when one block can have
- * set them, and "one predecessor" is what makes that true. Self-loops are
- * excluded because the block would then be its own flag source, which is the
+ * This lives beside `flagScanStream` because it is that rule's other half. The
+ * flags a block is entered with are knowable exactly when every way into it
+ * leaves the flags saying the same thing, and there are two ways for that to be
+ * true. **One predecessor** is the degenerate case: there is nothing to
+ * disagree with. **Several predecessors that all set the flags from the same
+ * test** is the general one, and the block is then entered with those flags
+ * however it was reached, so one block-local condition states all of them and
+ * any of the predecessors may be returned to spell it. A self-edge is excluded
+ * either way, because the block would then be its own flag source, which is the
  * question rather than an answer to it.
+ *
+ * Asking for a block whose own instructions already own the flags returns
+ * undefined, which is exactly what `flagScanStream` does with the answer: the
+ * predecessor is consulted only where the block's own scan finds no flag writer
+ * at all. Keeping the test here as well means the unanimity walk below runs on
+ * the ~14 blocks per binary that can use it rather than on every jcc block.
  *
  * **Either edge counts, and that is a deliberate widening.** A Jcc writes no
  * flags — the `{clobber, unrecognised}` classification `flagEffect` gives it is
@@ -768,21 +779,100 @@ export function isFlagReadingJump(mnemonic: string): boolean {
  * to fallthrough was measured to leave 17 of 69 recoverable guards unclaimed,
  * and on the x64 pair the taken edge is the majority of them — 6 of 13 on t64
  * and 4 of 9 on w64 (peek-a-bin-suql).
+ *
+ * **The multi-predecessor arm is a UNANIMITY test, not a merge**, and that is
+ * what keeps it out of the per-edge-condition business the surrounding
+ * machinery cannot do. It is `unanimousCompare` below; see there for each of
+ * its five refusals and why a disagreement is refused rather than merged
+ * (peek-a-bin-xdxt).
  */
-export function solePredecessor(
+export function flagPredecessor(
   block: BasicBlock,
   blockById: Map<number, BasicBlock>,
 ): BasicBlock | undefined {
-  if (block.preds.length !== 1) return undefined;
-  const pred = blockById.get(block.preds[0]);
-  return pred && pred.id !== block.id ? pred : undefined;
+  const own = block.insns.slice(0, Math.max(0, block.insns.length - 1));
+  const scanned = flagOwnerBefore(own, own.length);
+  if (scanned.kind !== "none" || scanned.reason !== "no-owner") return undefined;
+  if (block.preds.length === 0) return undefined;
+  const preds: BasicBlock[] = [];
+  for (const id of block.preds) {
+    // A self-edge is refused whether or not the map can resolve it, and an
+    // unresolvable predecessor refuses the whole block rather than being
+    // dropped: a way in that cannot be read is a way in that may disagree.
+    if (id === block.id) return undefined;
+    const pred = blockById.get(id);
+    if (!pred || pred.id === block.id) return undefined;
+    preds.push(pred);
+  }
+  return preds.length === 1 ? preds[0] : unanimousCompare(preds, own);
+}
+
+/**
+ * Do all of these predecessors leave the flags set by the *same* comparison? If
+ * so, any one of them spells the condition, and the first is returned.
+ *
+ * The question is asked of each edge separately and then compared, because that
+ * is the only reading that is sound without a per-edge condition: the block is
+ * entered with one set of flags whichever way it was reached, so a single
+ * block-local `if` states the machine exactly when every edge agrees about what
+ * that test *is*. Where they disagree — `test rbx, rbx` on one edge and
+ * `test rbp, rbp` on the other — no block-local condition can state it, and
+ * naming either one would be a guard the machine does not always make. Measured
+ * over the four corpus binaries at `f169c00`: 14 such blocks, all with exactly
+ * two predecessors and all with a spellable compare on both edges, of which
+ * **2 agree** (one per 32-bit binary, MSVC's `_stricmp` tail) and 12 do not.
+ * The 12 need a value or a boolean materialised in each predecessor, which is
+ * a different mechanism and is refused here rather than approximated — see
+ * peek-a-bin-xdxt for the costing of the three schemes.
+ *
+ * Five refusals, and each is a soundness bound rather than a tuning knob:
+ *
+ * 1. **The owner is read over the whole path** — the predecessor's instructions
+ *    minus its terminator, and then the block's own — so `spoiled` states an
+ *    overwrite on *either* side of that edge. This is `flagScanStream`'s rule
+ *    applied per edge, from the same declaration, and it is why the other
+ *    edges do not need a second scan in `structure.ts`: a predecessor whose
+ *    tail spoils its compare never reaches unanimity.
+ * 2. **Only a `compare` owner.** The condition a `cmp`/`test` yields is a
+ *    function of its mnemonic and its operand text alone, which is what makes
+ *    the textual agreement test below exact. A `result` or `bittest` owner is
+ *    refused — 0 occurrences in the corpus — rather than given a second
+ *    equality rule that would have to reason about the destination as well.
+ * 3. **`canSpellCondition`**, i.e. unspoiled, exactly as the single-predecessor
+ *    arm applies it in `branchFor`.
+ * 4. **No `rip`.** `parseOperand` resolves a rip-relative operand against the
+ *    instruction's *own* address, so two identical operand strings at two
+ *    addresses are two different expressions and text equality would be a lie.
+ * 5. **No stack pointer.** `spoils` and `clobberedAfter` are twins with one
+ *    documented asymmetry — the latter reports `push`/`pop` as writes of RSP
+ *    and the former does not — and `structure.ts`'s `conditionSpoiled` scan is
+ *    asked of the *returned* predecessor only. Refusing a compare spelled
+ *    relative to the stack pointer makes that irrelevant by construction
+ *    instead of by the measurement that says the two scans disagree about 0
+ *    such owners today.
+ */
+function unanimousCompare(preds: BasicBlock[], own: Instruction[]): BasicBlock | undefined {
+  let key: string | null = null;
+  for (const pred of preds) {
+    const tail = pred.insns.slice(0, flagWalkEnd(pred.insns));
+    if (tail.length === 0) return undefined;
+    const owner = flagOwnerBefore([...tail, ...own], tail.length + own.length);
+    if (owner.kind !== "compare" || !canSpellCondition(owner)) return undefined;
+    const text = owner.insn.opStr.toLowerCase();
+    if (/\brip\b/.test(text)) return undefined;
+    for (const reg of registersIn(text)) if (reg === "rsp") return undefined;
+    const here = `${owner.mnemonic} ${text}`;
+    if (key === null) key = here;
+    else if (key !== here) return undefined;
+  }
+  return preds[0];
 }
 
 /** An instruction stream for the forward flag walk, and where it came from. */
 export interface FlagScan {
   /** Everything the walk reads, in execution order, ending before the Jcc. */
   insns: Instruction[];
-  /** Whether `solePredecessor`'s instructions were prepended. */
+  /** Whether `flagPredecessor`'s instructions were prepended. */
   fromPredecessor: boolean;
 }
 
@@ -814,10 +904,12 @@ function flagWalkEnd(insns: Instruction[]): number {
  * When *none* of those writes a flag — `flagOwnerBefore` reporting
  * `{kind: "none", reason: "no-owner"}`, which for a block holding nothing but
  * the Jcc is a walk of zero iterations — the flags were set before the block
- * was entered, and a block with exactly one predecessor was entered with that
- * predecessor's exit flags by construction. So the predecessor's instructions,
- * minus its own terminator, are prepended and the walk continues into the
- * block's.
+ * was entered, and `flagPredecessor` has decided that the block was entered
+ * with `flagPred`'s exit flags — either because it is the block's only
+ * predecessor, or because every predecessor leaves the flags set by the same
+ * test and this one may speak for all of them. So the predecessor's
+ * instructions, minus its own terminator, are prepended and the walk continues
+ * into the block's.
  *
  * Continuing the walk rather than stopping at the block boundary is what makes
  * the general case safe: the block's instructions cannot displace the owner
@@ -832,14 +924,14 @@ function flagWalkEnd(insns: Instruction[]): number {
  * `cmp`/`test` operands off the machine text for its refusals. One declaration
  * of the rule, because two would drift about which edge and which terminator.
  */
-export function flagScanStream(block: BasicBlock, solePred?: BasicBlock): FlagScan {
+export function flagScanStream(block: BasicBlock, flagPred?: BasicBlock): FlagScan {
   const own = block.insns.slice(0, Math.max(0, block.insns.length - 1));
-  if (!solePred || solePred.id === block.id) return { insns: own, fromPredecessor: false };
+  if (!flagPred || flagPred.id === block.id) return { insns: own, fromPredecessor: false };
   const scanned = flagOwnerBefore(own, own.length);
   if (scanned.kind !== "none" || scanned.reason !== "no-owner") {
     return { insns: own, fromPredecessor: false };
   }
-  const tail = solePred.insns.slice(0, flagWalkEnd(solePred.insns));
+  const tail = flagPred.insns.slice(0, flagWalkEnd(flagPred.insns));
   if (tail.length === 0) return { insns: own, fromPredecessor: false };
   return { insns: [...tail, ...own], fromPredecessor: true };
 }
@@ -851,19 +943,19 @@ export function flagScanStream(block: BasicBlock, solePred?: BasicBlock): FlagSc
  * Null is "you asked the wrong question" — the block's last instruction reads
  * no flags. Nothing-known is `owner.kind === "none"`.
  *
- * `solePred` is optional and opts the block into the cross-block reading
+ * `flagPred` is optional and opts the block into the cross-block reading
  * `flagScanStream` describes: a Jcc alone in its basic block has its flags set
  * in the block before, and without a predecessor to look at, its guard cannot
  * be recovered at all. Omitting it is exactly the pre-existing behaviour, which
  * is deliberately not the same claim as "the flags started here".
  */
-export function blockFlagOwner(block: BasicBlock, solePred?: BasicBlock): BlockFlagOwner | null {
+export function blockFlagOwner(block: BasicBlock, flagPred?: BasicBlock): BlockFlagOwner | null {
   const insns = block.insns;
   const last = insns[insns.length - 1];
   if (!last) return null;
   const jcc = last.mnemonic.toLowerCase();
   if (!isFlagReadingJump(jcc)) return null;
-  const scan = flagScanStream(block, solePred);
+  const scan = flagScanStream(block, flagPred);
   return {
     jcc,
     owner: flagOwnerBefore(scan.insns, scan.insns.length),

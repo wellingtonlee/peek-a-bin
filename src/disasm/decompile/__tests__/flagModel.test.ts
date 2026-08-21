@@ -10,6 +10,7 @@ import {
   clobberedAfter,
   flagEffect,
   flagOwnerBefore,
+  flagPredecessor,
   flagScanStream,
   IMPLICIT_REG_WRITERS,
   isFlagReadingJump,
@@ -19,7 +20,6 @@ import {
   parseBitTest,
   RESULT_OWNERS,
   SHIFTS,
-  solePredecessor,
   UNDEFINED_RESULT_FLAGS,
   withoutLockPrefix,
 } from "../flagModel";
@@ -880,30 +880,162 @@ describe("flagScanStream — flags carried across one edge", () => {
   });
 });
 
-describe("solePredecessor", () => {
+describe("flagPredecessor", () => {
   function bare(id: number, preds: number[]): BasicBlock {
     return { id, startAddr: 0, endAddr: 0, insns: [], succs: [], preds };
   }
 
-  it("answers only when there is exactly one", () => {
+  /**
+   * `n` predecessors, each with its own instruction list, falling into one
+   * successor whose code is `succCode`. Addresses are laid out so no two blocks
+   * share one, which matters: `flagPredecessor` compares operand TEXT, and a
+   * rule that accidentally compared addresses would pass every test here.
+   */
+  function join(
+    succCode: string[],
+    ...predCode: string[][]
+  ): [BasicBlock, Map<number, BasicBlock>] {
+    const blocks: BasicBlock[] = [];
+    let at = BASE;
+    predCode.forEach((code, n) => {
+      const b = block(...code);
+      b.id = n;
+      b.startAddr = at;
+      b.insns.forEach((i, k) => {
+        i.address = at + k * 4;
+      });
+      b.endAddr = at + b.insns.length * 4;
+      at = b.endAddr;
+      b.succs = [predCode.length];
+      blocks.push(b);
+    });
+    const succ = block(...succCode);
+    succ.id = predCode.length;
+    succ.startAddr = at;
+    succ.insns.forEach((i, k) => {
+      i.address = at + k * 4;
+    });
+    succ.endAddr = at + succ.insns.length * 4;
+    succ.preds = predCode.map((_, n) => n);
+    blocks.push(succ);
+    return [succ, new Map(blocks.map((b) => [b.id, b]))];
+  }
+
+  it("answers with the only predecessor", () => {
     const a = bare(0, []);
     const b = bare(1, [0]);
-    const c = bare(2, [0, 1]);
-    const map = new Map([a, b, c].map((x) => [x.id, x]));
-    expect(solePredecessor(b, map)).toBe(a);
-    expect(solePredecessor(a, map)).toBeUndefined();
-    // A phi of conditions: 12 of the corpus's 19 refusals are this, and every
-    // one has two predecessors whose owners are DIFFERENT instructions.
-    expect(solePredecessor(c, map)).toBeUndefined();
+    const map = new Map([a, b].map((x) => [x.id, x]));
+    expect(flagPredecessor(b, map)).toBe(a);
+    expect(flagPredecessor(a, map)).toBeUndefined();
   });
 
   it("declines a self-loop, which is the question rather than an answer to it", () => {
     const s = bare(0, [0]);
-    expect(solePredecessor(s, new Map([[0, s]]))).toBeUndefined();
+    expect(flagPredecessor(s, new Map([[0, s]]))).toBeUndefined();
   });
 
   it("declines a predecessor id no block answers to", () => {
     const b = bare(1, [99]);
-    expect(solePredecessor(b, new Map([[1, b]]))).toBeUndefined();
+    expect(flagPredecessor(b, new Map([[1, b]]))).toBeUndefined();
+  });
+
+  // A block that sets its own flags needs no predecessor, and answering with one
+  // would be a claim about a stream `flagScanStream` will not read anyway.
+  it("declines a block whose own instructions own the flags", () => {
+    const [succ, map] = join(["cmp ecx, 7", "je 0x401800"], ["cmp eax, 5", "jg 0x401800"]);
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // The generalisation (peek-a-bin-xdxt). Both edges leave the flags set by the
+  // SAME test, so the block is entered with those flags however it was reached
+  // and one block-local condition states the machine. 2 corpus sites, both
+  // MSVC's `_stricmp` tail: `cmp ah, al / jne` on one edge and
+  // `xor ecx, ecx / cmp ah, al / je` on the other, joining at `mov ecx, -1 / jb`.
+  it("answers when every predecessor sets the flags from the same test", () => {
+    const [succ, map] = join(
+      ["mov ecx, 0xffffffff", "jb 0x401800"],
+      ["cmp ah, al", "jne 0x401800"],
+      ["xor ecx, ecx", "cmp ah, al", "je 0x401800"],
+    );
+    const answer = flagPredecessor(succ, map);
+    expect(answer).toBe(map.get(0));
+    expect(blockFlagOwner(succ, answer)?.owner).toMatchObject({
+      kind: "compare",
+      mnemonic: "cmp",
+      spoiled: false,
+    });
+  });
+
+  // A phi of conditions, and the 12 of the corpus's 14 multi-predecessor blocks
+  // that are one: `test rbx, rbx` against `test rbp, rbp` is not a test a single
+  // block-local `if` can state, and naming either would be a guard the machine
+  // does not always make.
+  it("declines predecessors whose owners are different tests", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["test ebx, ebx", "jne 0x401800"],
+      ["test ebp, ebp", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // Same operator, same left operand, different right one — the t32 0x404641
+  // shape (`cmp byte ptr [ebp-0x44c], bl` against `cmp … , 0`). A phi over the
+  // VALUE could state this; one condition cannot, so it is refused too.
+  it("declines predecessors that compare the same place against different things", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["cmp byte ptr [ebp - 0x10], bl", "jne 0x401800"],
+      ["cmp byte ptr [ebp - 0x10], 0", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // Unanimous text is not enough if one edge overwrote what names the value: the
+  // walk runs over each edge's whole path, so `spoiled` states it and
+  // `canSpellCondition` refuses. This is why `structure.ts` can ask
+  // `conditionSpoiled` of the returned predecessor alone.
+  it("declines when one predecessor's tail spoiled its own compare", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["cmp eax, 5", "jne 0x401800"],
+      ["cmp eax, 5", "mov eax, edx", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // A result owner is refused rather than given a second equality rule: 0 corpus
+  // occurrences, and its condition is a function of the destination as well as
+  // of the operand text.
+  it("declines a unanimous result owner", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["dec ecx", "jne 0x401800"],
+      ["dec ecx", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // `parseOperand` resolves a rip-relative operand against the instruction's own
+  // address, so identical text at two addresses is two different expressions.
+  it("declines a unanimous rip-relative compare", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["cmp dword ptr [rip + 0x10], 0", "jne 0x401800"],
+      ["cmp dword ptr [rip + 0x10], 0", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
+  });
+
+  // `spoils` and `clobberedAfter` read `push`/`pop` differently about the stack
+  // pointer, and only the returned predecessor gets the second scan. Refusing a
+  // stack-relative compare makes that irrelevant by construction.
+  it("declines a unanimous compare spelled relative to the stack pointer", () => {
+    const [succ, map] = join(
+      ["je 0x401800"],
+      ["cmp dword ptr [esp + 4], 0", "jne 0x401800"],
+      ["cmp dword ptr [esp + 4], 0", "jmp 0x401800"],
+    );
+    expect(flagPredecessor(succ, map)).toBeUndefined();
   });
 });
