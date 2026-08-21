@@ -1507,6 +1507,31 @@ export function structureCFG(
      * `break` remains the answer for a block with no successors — an arm ending
      * in `ret` or a tail call — and for one whose branch the CFG has no two
      * edges for, where there is nothing truthful to name.
+     *
+     * NESTING THE WALK INTO THE ARM WAS RE-MEASURED AND REJECTED A SECOND TIME
+     * (peek-a-bin-64gp, base `39b1bb3`), and the reason is not the one on file.
+     * Replacing this with `structureFrom(target, switchStopAt, undefined, true)`
+     * does read better where it works — gotos 3070 → 2983 and labels 2517 →
+     * 2445 corpus-wide, `case 2:` of `t32!sub_40CBBE` becoming a real nested
+     * `if`/`else` chain — and the 12 guards it takes out of the polarity audit's
+     * anchored set (`only-base` 8 on t32, 4 on w32) are NOT a loss: the guard
+     * text is unchanged, `if`/`while`/`for` are unmoved on all four binaries,
+     * and 31 more guards become anchorable than leave (883 → 896, 793 → 799).
+     * What kills it is that the walk has to be closed off somewhere, and the
+     * variant closes it with the same unconditional `break` this function
+     * exists to stop emitting. Measured: of 64 arms it walks, 30 end with a
+     * REACHABLE appended `break` (20 t32, 10 w32), and in all 30 the walk
+     * stopped on an **already-visited** block rather than on the switch's stop
+     * set — four of them at 0x4050ED, `t32!sub_4045B1`'s `default` body. So
+     * every one is this same false claim, one block further on, and
+     * `corpus/armExits.ts` would not see a single one: the claimed-arm path no
+     * longer passes through here, so `arms` falls 72 → 32 and 54 → 30 while
+     * `falseBreaks` stays 0. It also raises provably dead `break`s (8 → 20 on
+     * t32, 8 → 14 on w32, each following a `goto` or `return`) and leaves
+     * `case 1:` jumping into a label now nested inside `case 0`'s body.
+     * Taking the nesting means spelling the walk's *stop* the way this function
+     * spells an arm's, and moving the observation with it; it is not a matter of
+     * flipping the call.
      */
     // `armBlock`, not `block`: the enclosing scope's `block` is the switch's own
     // dispatch block, and every question here is about the arm's. The two were
