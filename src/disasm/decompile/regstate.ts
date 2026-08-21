@@ -132,11 +132,16 @@ export class RegState {
    * OF depend on the operands and on the operation: `sub eax, ecx / jl` is
    * `eax_before < ecx` signed, which the result cannot express because it
    * disagrees on signed overflow. Those stay unrecovered.
+   *
+   * `result` is a register or, since peek-a-bin-ie0j, the deref of a memory
+   * destination — `dec dword ptr [ebp + 0x10] / je` is `arg_2 == 0`. The zero
+   * takes its width from either, so the comparison is width-matched in both
+   * cases; the 4 is the fallback for a shape neither carries a width for.
    */
   setFlagsFromResult(result: IRExpr): void {
     this.flagOp = "result";
     this.flagLeft = result;
-    this.flagRight = irConst(0, result.kind === "reg" ? result.size : 4);
+    this.flagRight = irConst(0, result.kind === "reg" || result.kind === "deref" ? result.size : 4);
   }
 
   /** Map a Jcc mnemonic to an IR condition expression from current flag state. */

@@ -335,12 +335,57 @@ describe("blockFlagOwner", () => {
     expect(o.kind === "result" && o.spoiled).toBe(true);
   });
 
-  it("owns the flags of a memory-destination result but cannot name it", () => {
+  it("owns AND can name a memory-destination result", () => {
+    // This asserted `canSpellCondition === false` until peek-a-bin-ie0j, and
+    // that was the suite pinning a limit on the spelling as a rule about the
+    // machine: `dec dword ptr [rcx]` lifts to a store, so the deref read after
+    // it IS the decremented value. `destReg` is still null — it answers "which
+    // register do I watch for an overwrite", and the answer is none — so
+    // `destForm` is what spellability has to be asked of.
     const o = owner("dec dword ptr [rcx]", "jne 0x401800");
     expect(o.kind).toBe("result");
     if (o.kind !== "result") return;
     expect(o.destReg).toBeNull();
+    expect(o.destForm).toBe("mem");
+    expect(canSpellCondition(o)).toBe(true);
+  });
+
+  it("refuses a destination that is neither a register nor memory", () => {
+    // The `"none"` arm of `destForm`, which is what keeps the relaxation from
+    // being "anything that is not a register". No well-formed x86 result owner
+    // reaches it — every `RESULT_OWNERS` destination is a register or a memory
+    // operand — so it is pinned against a synthetic operand rather than left an
+    // unexercised default a later edit could quietly widen.
+    const o = owner("dec whatever", "jne 0x401800");
+    expect(o.kind).toBe("result");
+    if (o.kind !== "result") return;
+    expect(o.destReg).toBeNull();
+    expect(o.destForm).toBe("none");
     expect(canSpellCondition(o)).toBe(false);
+  });
+
+  it("spoils a memory result on any store, without proving the addresses alias", () => {
+    const o = owner("dec dword ptr [ebp + 0x10]", "mov dword ptr [eax], ecx", "je 0x401800");
+    expect(o.kind === "result" && o.spoiled).toBe(true);
+    expect(canSpellCondition(o)).toBe(false);
+  });
+
+  it("spoils a memory result on a push, which writes memory its text does not name", () => {
+    // `writesMemory` exempts `push` because it only READS its operand, which is
+    // the right reading for a compare over memory. For a memory *result* the
+    // question is whether anything wrote the bytes the guard will read, and
+    // `push` writes `[rsp - N]`. Refusing makes the claim sound by construction
+    // rather than by the observation that no corpus binary has the shape.
+    const o = owner("dec dword ptr [ebp + 0x10]", "push eax", "je 0x401800");
+    expect(o.kind === "result" && o.spoiled).toBe(true);
+  });
+
+  it("does not spoil a memory result on a register-only write", () => {
+    // The real corpus shape: `dec DWORD PTR [ebp+0x10] / movzx eax, ax / je` at
+    // t32.exe 0x402125. `movzx` cannot touch the slot, so the guard stands.
+    const o = owner("dec dword ptr [ebp + 0x10]", "movzx eax, ax", "je 0x401800");
+    expect(o.kind === "result" && o.spoiled).toBe(false);
+    expect(canSpellCondition(o)).toBe(true);
   });
 
   it("marks a compare spoiled when a later instruction overwrites an operand", () => {
@@ -410,6 +455,12 @@ describe("which instruction a result-derived guard is answered from", () => {
     ["transparent after", ["dec ecx", "mov edx, eax", "jnz 0x401800"], "dec"],
     ["transparent before", ["mov ecx, edx", "dec ecx", "jne 0x401800"], "dec"],
     ["lea between", ["dec ecx", "lea eax, [ebx + 4]", "jne 0x401800"], "dec"],
+    // Memory destinations. Spellable since peek-a-bin-ie0j, and the last two
+    // are the shapes the corpus actually has: a `dec` on a stack slot and an
+    // `add` of a negative immediate to a field.
+    ["dec on memory", ["dec dword ptr [rcx]", "jne 0x401800"], "dec"],
+    ["dec on a stack slot", ["dec dword ptr [ebp + 0x10]", "je 0x401800"], "dec"],
+    ["add to a field", ["add dword ptr [esi + 4], 0xfffffffe", "js 0x401800"], "add"],
   ];
 
   it("names the arithmetic instruction and can spell its result", () => {
@@ -441,10 +492,15 @@ describe("which instruction a result-derived guard is answered from", () => {
   it("owns the flags but declines to NAME the result", () => {
     // Ownership and nameability are different facts, and this is the pair that
     // separates them: each of these really does leave the flags to the
-    // arithmetic, and in none of them does a register still hold its result.
+    // arithmetic, and in none of them does anything still hold its result.
+    //
+    // `["memory destination", ["dec dword ptr [rcx]", …]]` used to be a row
+    // here. It was the wrong list for it: the flags are the `dec`'s AND the
+    // deref names its result, so it is now in `answers` above (peek-a-bin-ie0j).
+    // What replaces it is the case where a store really did take the value.
     for (const [name, code] of [
       ["result overwritten", ["dec ecx", "mov ecx, edx", "jne 0x401800"]],
-      ["memory destination", ["dec dword ptr [rcx]", "jne 0x401800"]],
+      ["memory result stored over", ["dec dword ptr [rcx]", "mov [rdx], eax", "jne 0x401800"]],
       ["implicit writer after", ["dec eax", "cdq", "jne 0x401800"]],
     ] as [string, string[]][]) {
       const o = blockFlagOwner(block(...code))?.owner;

@@ -6227,3 +6227,223 @@ describe("decompileFunction — push <imm> / pop <reg> is a move", () => {
     expect(code).toContain("*(int32_t*)(eax) = -2");
   });
 });
+
+/**
+ * A read-modify-write on memory sets the flags from what it wrote, and the
+ * guard reading them is spelled from that memory operand.
+ *
+ * `dec dword ptr [ebp + 0x10] / je` is the shape, and until peek-a-bin-ie0j it
+ * emitted `__unrecovered_N` for a reason that was purely about spelling:
+ * `flagModel.ts` published only `destReg`, which is null for a memory
+ * destination, and `lifter.ts` built the condition with `irReg(destText, …)`,
+ * which cannot express `dword ptr [ebp + 0x10]`. The parent bead had recorded
+ * the cause as dataflow — "the result is in memory; naming it would need a load
+ * that is not in the IR" — and that was wrong: the lifter emits the store,
+ * `promoteVars` names its slot, and t32.exe 0x4020EE emitted `arg_2--;` on the
+ * line directly above an `if` whose condition was `!!__unrecovered_1` with the
+ * originating `je` in a trailing comment. The value was already on the page,
+ * spelled, one line up.
+ *
+ * **The ordering is the whole soundness argument, so it is asserted directly.**
+ * These are read-modify-write guards, so the `if` must read the location AFTER
+ * the store. That holds because `structureCFG` emits a block's statements above
+ * the `if` it closes with — the same property the compare arm's
+ * `conditionSpoiled` depends on, read the other way round — and it is a
+ * property no unit test of `flagModel` or `branchFor` can see.
+ *
+ * **Refusal is on any store, with no attempt to prove the addresses alias.**
+ * That is `spoils`' whole alias analysis, and the negative controls below are
+ * what say so: an unrelated `mov [eax], ecx` between the `dec` and the `je`
+ * gives the guard up rather than assume EAX misses the slot, and a `push` does
+ * too, since it writes memory its operand text does not name.
+ */
+describe("decompileFunction — a guard reads a memory destination the block just wrote", () => {
+  /** A 32-bit run with the StackFrame the real caller computes. */
+  function runFramed(instructions: Instruction[]): string {
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: instructions[0].address,
+      size: last.address + last.size - instructions[0].address,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      analyzeStackFrame(func, instructions, false),
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      new StructRegistry(),
+    ).code;
+  }
+
+  /** The emitted guards, or ["<unrecovered>"] where the condition was admitted. */
+  function guardTexts(code: string): string[] {
+    return guardConditions(code).map((c) => (/__unrecovered_\d+/.test(c) ? "<unrecovered>" : c));
+  }
+
+  /**
+   * t32.exe 0x4020EE, with the verified prologue that makes `[ebp + 0x10]` the
+   * third argument slot. This is the bead's own example: in, `dec dword ptr
+   * [ebp + 0x10]` / `je`; out, `arg_2 == 0`.
+   */
+  const framedDec: [string, string?][] = [
+    ["push", "ebp"],
+    ["mov", "ebp, esp"],
+    ["dec", "dword ptr [ebp + 0x10]"],
+    ["je", "0x401020"],
+    ["mov", "eax, 1"],
+    ["pop", "ebp"],
+    ["ret"],
+    ["mov", "eax, 2"],
+    ["pop", "ebp"],
+    ["ret"],
+  ];
+
+  it("spells the guard from the argument slot the dec wrote", () => {
+    expect(guardTexts(runFramed(seq(0x401000, framedDec)))).toEqual(["arg_2 == 0"]);
+  });
+
+  it("emits the decrement ABOVE the if that reads it", () => {
+    // The read-modify-write risk, stated as an assertion rather than assumed.
+    // `arg_2--` after the guard, or missing, would make `arg_2 == 0` a test of
+    // the value on the way IN, which is one iteration early — the same error
+    // `setFlagsFromResult`'s docstring warns about for a register.
+    const code = runFramed(seq(0x401000, framedDec));
+    const lines = code.split("\n").map((l) => l.trim());
+    const store = lines.findIndex((l) => /^arg_2--;$/.test(l));
+    const guard = lines.findIndex((l) => l.includes("arg_2 == 0"));
+    expect(store).toBeGreaterThanOrEqual(0);
+    expect(guard).toBeGreaterThan(store);
+  });
+
+  it("recovers a dec through a plain pointer, with no frame to promote it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["dec", "dword ptr [ecx + 4]"],
+        ["js", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["*(int32_t*)(ecx + 4) < 0"]);
+  });
+
+  it("recovers an add of a negative immediate to memory", () => {
+    // t32.exe 0x40AAF5: `add DWORD PTR [esi+0x4], 0xfffffffe / js`. The flags
+    // are the add's and the operand is the value it produced, so the sign test
+    // is exact — the same rule the `dec` cases use, with a different mnemonic.
+    const code = run(
+      seq(0x401000, [
+        ["add", "dword ptr [esi + 4], -2"],
+        ["js", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["*(int32_t*)(esi + 4) < 0"]);
+  });
+
+  it("keeps recovering across a write to an unrelated register", () => {
+    // The real corpus shape at t32.exe 0x402125: `dec DWORD PTR [ebp+0x10] /
+    // movzx eax, ax / je`. A register write cannot reach the slot.
+    const code = runFramed(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["dec", "dword ptr [ebp + 0x10]"],
+        ["movzx", "eax, ax"],
+        ["je", "0x401024"],
+        ["mov", "eax, 1"],
+        ["pop", "ebp"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["arg_2 == 0"]);
+  });
+
+  // ── Negative controls ──
+
+  it("refuses when an unrelated store could have reached the location", () => {
+    const code = run(
+      seq(0x401000, [
+        ["dec", "dword ptr [ecx + 4]"],
+        ["mov", "dword ptr [eax], edx"],
+        ["js", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses across a push, which writes memory its operand text does not name", () => {
+    const code = run(
+      seq(0x401000, [
+        ["dec", "dword ptr [ecx + 4]"],
+        ["push", "eax"],
+        ["js", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses a jcc the result cannot answer at all", () => {
+    // `inc`/`dec` do not write CF, and no result determines OF the way a `cmp`
+    // does, so `jae` stays unrecovered however well the destination is spelled.
+    // Admitting memory must not be read as admitting more Jcc forms.
+    const code = run(
+      seq(0x401000, [
+        ["dec", "dword ptr [ecx + 4]"],
+        ["jae", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses a memory result in a block that also holds a cmp", () => {
+    // Refusal 3 in `branchFor` — the compare and result recovery paths are kept
+    // disjoint, because `corpus/staleGuards.ts` reads ANY condition emitted at
+    // such a jcc as the superseded one. Admitting memory does not change that.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["dec", "dword ptr [ecx + 4]"],
+        ["js", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+});

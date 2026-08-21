@@ -40,11 +40,21 @@
  *    forms and `unknown` for every other Jcc — and is deliberately not made
  *    here. `flagResult.ts` stated it a second time, as `RESULT_ANSWERABLE_JCC`
  *    (peek-a-bin-wf7t).
- * 3. **Whether the condition can still be spelled** (`spoiled`, `destReg`).
+ * 3. **Whether the condition can still be spelled** (`spoiled`, `destForm`).
  *    Owning the flags and being nameable are different facts: `dec ecx / mov
- *    ecx, edx / jne` leaves ECX holding EDX where the guard would read it, and
- *    `dec dword ptr [rcx]` leaves its result where only a load could reach it.
+ *    ecx, edx / jne` leaves ECX holding EDX where the guard would read it.
  *    `canSpellCondition` is the single predicate for that.
+ *
+ *    A **memory** destination is nameable, and used to be refused here. `dec
+ *    dword ptr [rcx]` lifts to a store, so `*(int32_t*)(rcx)` read after it is
+ *    the decremented value — the same argument that makes a register
+ *    destination spellable, applied to the operand the instruction actually
+ *    names. What made it look unspellable was that this model published only
+ *    `destReg`, which is null for memory, and that `lifter.ts` spelled the
+ *    result with `irReg`, which cannot express `dword ptr [rcx]`. Both were
+ *    limits on the spelling rather than facts about the machine
+ *    (peek-a-bin-ie0j). `destForm` is what a consumer asks now; `destReg`
+ *    stays for `spoils`, which needs the register and not the form.
  *
  * The mnemonic tables below used to be duplicated in `flagResult.ts`, which is
  * exactly the hand-synced-copy hazard CLAUDE.md warns about (`ripRelative.ts`
@@ -231,6 +241,18 @@ export interface FlagOwnerResult extends FlagOwnerCommon {
   /** Canonicalised to the 64-bit parent, or null when the destination is memory. */
   destReg: string | null;
   /**
+   * How `destText` can be spelled, which is the question `canSpellCondition`
+   * asks. `"reg"` when a register names the result, `"mem"` when it is a memory
+   * operand `parseOperand` renders as a deref, `"none"` when the operand text
+   * is neither and nothing can name the value.
+   *
+   * Kept separate from `destReg` because the two answer different questions:
+   * `spoils` needs to know *which register* to watch for an overwrite, and
+   * `null` there means "not a register", not "not spellable". Conflating them
+   * is what refused every memory-destination guard (peek-a-bin-ie0j).
+   */
+  destForm: "reg" | "mem" | "none";
+  /**
    * ZF and SF only. `inc`/`dec` do not write CF at all, and no result determines
    * OF for a signed comparison the way a `cmp` does — so a CF- or OF-reading Jcc
    * cannot be answered from one of these.
@@ -253,7 +275,7 @@ export type FlagOwner = FlagOwnerCompare | FlagOwnerResult | FlagOwnerNone;
 /** An owner a condition can actually be spelled from. */
 export type SpellableFlagOwner =
   | FlagOwnerCompare
-  | (FlagOwnerResult & { destReg: string; spoiled: false });
+  | (FlagOwnerResult & { destForm: "reg" | "mem"; spoiled: false });
 
 export interface BlockFlagOwner {
   /** The block's trailing conditional jump, lowercased. */
@@ -379,6 +401,29 @@ function writesMemory(insn: Instruction): boolean {
 }
 
 /**
+ * `writesMemory` plus `push`, for an owner whose result *is* in memory.
+ *
+ * `writesMemory` exempts `push` because it names a register it only reads, and
+ * that reading is what the compare arm of `spoils` wants: a `cmp` over memory
+ * followed by a `push` is not a spoiled compare. For a memory **result** the
+ * question is the other one — does anything write the bytes the condition will
+ * read — and `push` does write memory, at `[rsp - N]`. Aliasing a stack slot
+ * the same block is testing is not a shape a compiler emits, and there is no
+ * occurrence of it in the corpus, so this costs nothing measurable; it is here
+ * so the claim is sound by construction rather than by that measurement.
+ *
+ * Every other `NO_FLAG_WRITE` member writes memory only through a bracketed
+ * first operand, which `writesMemory` already catches. `xchg` — whose memory
+ * operand can be the *second* one — is deliberately absent from that set and
+ * clears the owner outright, so it never reaches here.
+ */
+function writesAnyMemory(insn: Instruction): boolean {
+  const { base } = baseMnemonic(insn.mnemonic);
+  if (base === "nop") return false;
+  return base === "push" || firstOperand(insn).includes("[");
+}
+
+/**
  * Would `insn`, executed after the owner, invalidate the *name* a condition
  * would be spelled from? The flags remain the owner's either way.
  *
@@ -391,7 +436,11 @@ function writesMemory(insn: Instruction): boolean {
  */
 function spoils(insn: Instruction, owner: FlagOwnerCompare | FlagOwnerResult): boolean {
   if (owner.kind === "result") {
-    if (owner.destReg === null) return writesMemory(insn);
+    // A memory result is refused on ANY store, with no attempt to prove the two
+    // addresses alias. That is the whole alias analysis this model has, and it
+    // is the conservative direction: `dec dword ptr [ebp + 0x10] / mov dword
+    // ptr [eax], ecx / je` gives up rather than assume EAX misses the slot.
+    if (owner.destReg === null) return writesAnyMemory(insn);
     return writesRegister(insn, owner.destReg);
   }
   for (const reg of registersIn(owner.insn.opStr)) {
@@ -401,6 +450,7 @@ function spoils(insn: Instruction, owner: FlagOwnerCompare | FlagOwnerResult): b
 }
 
 function claimResult(insn: Instruction, index: number, destText: string): FlagOwnerResult {
+  const isReg = isKnownRegister(destText);
   return {
     kind: "result",
     mnemonic: baseMnemonic(insn.mnemonic).base,
@@ -408,7 +458,12 @@ function claimResult(insn: Instruction, index: number, destText: string): FlagOw
     index,
     address: insn.address,
     destText,
-    destReg: isKnownRegister(destText) ? canonReg(destText) : null,
+    destReg: isReg ? canonReg(destText) : null,
+    // A bracket is the whole test for a memory operand, and it is the same one
+    // `parseOperand` applies — anything with one it renders as a deref, so a
+    // consumer that says "mem" here and calls `parseOperand` there cannot
+    // disagree with itself about what is spellable.
+    destForm: isReg ? "reg" : destText.includes("[") ? "mem" : "none",
     defines: "zf-sf",
     spoiled: false,
   };
@@ -597,14 +652,21 @@ export function blockFlagOwner(block: BasicBlock, solePred?: BasicBlock): BlockF
 /**
  * Can a condition be spelled from this owner at the point it was asked about?
  *
- * Separate from ownership on purpose: `dec dword ptr [rcx] / jne` and `dec ecx /
- * mov ecx, edx / jne` both have a perfectly well-defined owner whose result
- * nothing in the emitted code names. It does **not** answer whether the *Jcc*
- * can be answered from that owner's flags — see `FlagOwnerResult.defines`.
+ * Separate from ownership on purpose: `dec ecx / mov ecx, edx / jne` has a
+ * perfectly well-defined owner whose result nothing in the emitted code names.
+ * It does **not** answer whether the *Jcc* can be answered from that owner's
+ * flags — see `FlagOwnerResult.defines`.
+ *
+ * `dec dword ptr [rcx] / jne` used to be refused here alongside it, and that
+ * was a spelling limit rather than a fact: the destination is a memory operand
+ * `parseOperand` renders as a deref, the lifter emits the store above the `if`,
+ * and reading the deref after it is reading the decremented value. The test is
+ * `destForm !== "none"` — a register or a memory operand, not the `destReg`
+ * that is null for both memory and unparseable text (peek-a-bin-ie0j).
  */
 export function canSpellCondition(owner: FlagOwner): owner is SpellableFlagOwner {
   if (owner.kind === "none" || owner.spoiled) return false;
-  return owner.kind === "compare" || owner.destReg !== null;
+  return owner.kind === "compare" || owner.destForm !== "none";
 }
 
 // ── The instruction-stream scan, asked after the fact ──

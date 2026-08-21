@@ -365,13 +365,21 @@ export function setFlagsFromCompare(
  *    superseded reading, and that gate reads *any* condition emitted at such a
  *    jcc as the stale one. Recovering it is a deliberate decision to be taken
  *    with the audit, not a side effect of this wiring.
- * 4. **A result whose register no longer holds it.** `canSpellCondition` — the
- *    forward model's equivalent of `clobberedAfter` over the result register.
+ * 4. **A result whose destination no longer holds it.** `canSpellCondition` —
+ *    the forward model's equivalent of `clobberedAfter`, over the result
+ *    register, or over *any* store when the result is in memory.
  *    A *compare* owner is deliberately not filtered on that: the guard's reads
  *    are what keep the compared values alive through DCE, and the same veto is
  *    applied against the machine text in `structure.ts`, which is where it has
  *    to be asked (see the `conditionSpoiled` docstring — copy propagation has
  *    rewritten the IR expression by then).
+ *
+ *    It is a *destination* and not a register because a memory one is spellable
+ *    too: `dec dword ptr [ebp + 0x10] / je` becomes `arg_2--; if (arg_2 == 0)`,
+ *    which is correct precisely because the block's statements are emitted
+ *    above the `if` — the same ordering the compare arm's `conditionSpoiled`
+ *    relies on, read the other way round. Ordering is what makes this sound and
+ *    `pipeline.test.ts` pins it (peek-a-bin-ie0j).
  *
  * **A Jcc alone in its block owns none of this and is answered from its
  * predecessor**, which `flagScanStream` decides and `solePred` opts into. Three
@@ -422,13 +430,24 @@ function branchFor(
     if (!canSpellCondition(owned.owner) || owned.owner.kind !== "result") return null;
     if (blockHasCompare(ownerBlock)) return null;
     // x86 sets the flags from the *result*, so the value tested is the
-    // destination register read after the instruction ran. `setFlagsFromResult`
-    // states that, and `getCondition` answers only the Jcc forms ZF and SF
+    // destination read after the instruction ran. `setFlagsFromResult` states
+    // that, and `getCondition` answers only the Jcc forms ZF and SF
     // determine — which is the judgement `RESULT_ANSWERABLE_JCC` was a second
     // copy of (peek-a-bin-wf7t).
+    //
+    // The destination is spelled by `parseOperand`, and that is what admits a
+    // memory one. It was `irReg(destText, regSize(destText))`, which cannot
+    // express `dword ptr [ebp + 0x10]` — so a `dec` on a stack slot, whose
+    // store the lifter does emit and `promoteVars` even names `arg_2`, still
+    // reached the page as `__unrecovered_N` with the value it needed on the
+    // line directly above. `regSize` would have made a wrong answer rather than
+    // no answer, since it falls back to 4 for any unrecognised name, which is
+    // the reason the refusal in `canSpellCondition` had to go first
+    // (peek-a-bin-ie0j). The instruction passed is the **owner's**, not the
+    // Jcc's: a `[rip + …]` destination resolves against the one that names it.
     const state = new RegState();
-    const destText = owned.owner.destText;
-    state.setFlagsFromResult(irReg(destText, regSize(destText)));
+    const resultOwner = owned.owner;
+    state.setFlagsFromResult(parseOperand(resultOwner.destText, resultOwner.insn, is64));
     condition = state.getCondition(jcc);
   }
   if (condition.kind === "unknown") return null;
