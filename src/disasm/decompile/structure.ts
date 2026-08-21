@@ -1455,24 +1455,28 @@ export function structureCFG(
      * in `ret` or a tail call — and for one whose branch the CFG has no two
      * edges for, where there is nothing truthful to name.
      */
-    function armExit(block: BasicBlock): IRStmt[] {
-      if (block.succs.length === 2 && endsWithCondJmp(block)) {
-        const [branchTarget, fallthrough] = identifyBranches(block);
+    // `armBlock`, not `block`: the enclosing scope's `block` is the switch's own
+    // dispatch block, and every question here is about the arm's. The two were
+    // one identifier apart, in a function where reading `block` as the wrong one
+    // would emit a condition belonging to the dispatch.
+    function armExit(armBlock: BasicBlock): IRStmt[] {
+      if (armBlock.succs.length === 2 && endsWithCondJmp(armBlock)) {
+        const [branchTarget, fallthrough] = identifyBranches(armBlock);
         const taken = branchTarget !== null ? blockById.get(branchTarget) : undefined;
         const notTaken = fallthrough !== null ? blockById.get(fallthrough) : undefined;
         if (taken && notTaken) {
           return [
             {
               kind: "if",
-              condition: extractCondition(block),
+              condition: extractCondition(armBlock),
               thenBody: [{ kind: "goto", label: labelNameFor(taken.startAddr) }],
             },
             { kind: "goto", label: labelNameFor(notTaken.startAddr) },
           ];
         }
       }
-      if (block.succs.length === 1) {
-        const only = blockById.get(block.succs[0]);
+      if (armBlock.succs.length === 1) {
+        const only = blockById.get(armBlock.succs[0]);
         if (only) return [{ kind: "goto", label: labelNameFor(only.startAddr) }];
       }
       return [{ kind: "break" }];
