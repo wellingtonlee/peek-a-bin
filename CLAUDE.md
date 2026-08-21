@@ -32,7 +32,7 @@ errors across 9 files**; `f8bc466` sorted imports repo-wide and cleared all but 
 survivor was `vite.config.ts` — that commit only walked `src/`, and `check` also covers the root
 config files. `.git-blame-ignore-revs` carries `f8bc466` so the sort does not pollute blame.
 
-Current state: **0 errors, 71 warnings, 3 infos over 261 files, exit 0.** The file count moves
+Current state: **0 errors, 71 warnings, 3 infos over 263 files, exit 0.** The file count moves
 whenever a module or an audit is added and is a date-stamp, not a claim; the claim is 0 errors.
 Warnings and infos do
 not fail it. Two of the infos are `useNodejsImportProtocol` on `vite.config.ts`'s `"path"`/`"fs"`
@@ -499,14 +499,14 @@ The two dispatches that went are `ssaopt.ts`'s `protectedFlagDefs` arithmetic lo
 `src/disasm/decompile/{ir,ssa,ssaopt,ssadestroy,fold,cfgpatterns,structure,cleanup,typeInfer,promote,structs,emit,pipeline}.ts`
 plus `corpus/{sweep,staleReads}.ts` — nothing else under `src/` dispatches on `IRStmt` at all.
 **Do not compare 137 with the 88 this paragraph used to claim**: that was a different rule, taken
-by hand, and nobody wrote down which reads it admitted. **8 are compiler-caught; the rest are
+by hand, and nobody wrote down which reads it admitted. **9 are compiler-caught; the rest are
 silent** — unchanged by stage 4, and still the number the probe below reports.
 
-That 8 is *measured*, not counted by reading: add a throwaway `IRStmt` kind to the union, run
-`npm run typecheck`, count the `not assignable to type 'never'` errors. Doing that names exactly
-`ssa.ts:renameStmt`, `ssadestroy.ts:stripVersionsStmt`, `emit.ts`'s three (`emitStmt`,
-`liveInStmt`, `collectAssignedRegs`), `corpus/sweep.ts`, and `ir.ts`'s `bodiesOf` and
-`rewriteBodies`. **This paragraph previously also claimed 8 while `ir.ts`'s two did not exist**,
+That 9 is *measured*, not counted by reading: add a throwaway `IRStmt` kind to the union, run
+`npm run typecheck`, count the `not assignable to type 'never'` errors. Re-run at `586a9f9` it
+reports exactly 9 — `ssa.ts:renameStmt`, `ssadestroy.ts:stripVersionsStmt`, `emit.ts`'s **four**
+(`emitStmt`, `liveInStmt`, `collectAssignedRegs` and, since `peek-a-bin-x54q`,
+`collectCapturedOperands`), `corpus/sweep.ts`, and `ir.ts`'s `bodiesOf` and `rewriteBodies`. **This paragraph previously also claimed 8 while `ir.ts`'s two did not exist**,
 because it credited `ssadestroy.ts:mapRegs` and `fold.ts:hasSideEffects` — both of which are
 `IRExpr` switches and catch nothing about a statement kind. Use the probe rather than the table
 if the number matters.
