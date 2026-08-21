@@ -241,12 +241,12 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**The whole-tree figures below were last taken from ONE run at `4ce0b2d`**, which is what makes
+**The whole-tree figures below were last taken from ONE run at `e3c8d60`**, which is what makes
 them mutually consistent: eight changes measured in parallel against the same base each re-stamped
 this section with numbers true of *their* base and of no single tree, which is the state
 `6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **288/279/275/285
 functions**, 18025/16844/15111/16601 instructions, 13/0/0/11 jump tables, gcc **1127/1127 clean**,
-`offsetof` **331/301/303/421 fields over 54/54/53/59 definitions, every ratio 1.00**, polarity
+`offsetof` **346/301/303/354 fields over 55/54/53/59 definitions, every ratio 1.00**, polarity
 anchor-A **497/565/492/428 correct with 0 inverted and 0 mismatch**, statements dropped **0** of
 7222/7750/6884/6675 lifted, unrecovered values 91/21/17/72, loop shape **`for` 6/6/6/6, `while`
 111/106/99/98, `do/while` 78/77/76/77, `if` 1985/1938/1719/1757**, and **0 on every gate** —
