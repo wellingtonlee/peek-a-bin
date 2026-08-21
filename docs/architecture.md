@@ -55,6 +55,18 @@ it is a record rather than a `!== "ready" && !== "failed"` chain because that sh
 newly added phase to "still analysing", i.e. to a spinner that can never resolve — which is
 what `"no-code"` was before it existed (peek-a-bin-bo3b).
 
+An engine that never loaded at all is a third state, and it is not a phase. `disasmWorker.init()`
+rejecting records `AppState.disasmFailed` (`SET_DISASM_FAILED`, which sets `error` too, for the
+`FileLoader` case where no file is open yet), and `RESET` carries it across a load exactly as it
+carries `disasmReady` — Capstone is initialised once per tab, so a dead engine is still dead for
+the next file. `analysisNotice()` reports it as `"engine-unavailable"`, ranked below the two
+no-fault properties of the file and above `"analysis-failed"`; the detection effect additionally
+moves the phase to `"failed"` so nothing reads as still analysing, and it does so for both orders
+(a file opened after the engine died, and an engine that dies with one already open). Before this
+the rejection dispatched a bare `SET_ERROR`, which renders only in `FileLoader` — unmounted
+whenever a PE is open — so three surfaces spun "Loading engine..." off `!disasmReady`, which a
+rejection never clears (peek-a-bin-b3jn).
+
 ### Target architecture
 
 The decoder is selected from `coffHeader.machine` via `archForMachine()` in
