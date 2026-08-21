@@ -1498,6 +1498,25 @@ export function structureCFG(
    * dropped here; the emitted text grows 20% on t32 and 0.1% on t64, which is
    * the shape of "recovered real code", not "resurrected noise".
    *
+   * **A block whose only statement was its `branch` is not padding**, and
+   * "lifts to no statements" stopped being able to tell the two apart when
+   * `pipeline.ts` step 4b started hoisting every `IRBranch` out of
+   * `liftedBlocks`. A `cmp eax, 0x64 / jg` block lifts to exactly one
+   * statement, the branch; step 4b takes it; the list is empty; this pass read
+   * that as alignment. So a *test the machine makes* was dropped whenever the
+   * only route to it was this pass — 55 blocks on t32 and 26 on w32, all of
+   * them the guards of MSVC's format-specifier dispatch chains, where
+   * `armBody` claims the head of the chain as a one-block switch arm and
+   * leaves the rest to be resurrected here. Nothing was lost from the *body*
+   * of those regions (every one of the 81 lifts to no statement of its own, so
+   * the statement-drop audit is structurally blind to them, and the successors
+   * they guard are each resurrected as their own region), but the reader was
+   * told nothing about the condition under which any of it runs
+   * (peek-a-bin-3zji). `branches.has` is exactly "step 4b took a statement out
+   * of this block", which is the question, and it is asked of the block rather
+   * than of its instructions so that a jcc the lifter *refused* to model — an
+   * unresolvable flag owner — is still treated as contributing nothing.
+   *
    * Terminates because `structureFrom` marks its starting block visited on
    * every path through it, so each round removes at least one candidate.
    */
@@ -1505,7 +1524,7 @@ export function structureCFG(
     let next: BasicBlock | undefined;
     for (const b of blocks) {
       if (visited.has(b.id)) continue;
-      if ((liftedBlocks.get(b.id)?.length ?? 0) === 0) continue;
+      if ((liftedBlocks.get(b.id)?.length ?? 0) === 0 && !branches.has(b.id)) continue;
       if (!next || b.startAddr < next.startAddr) next = b;
     }
     if (!next) break;
