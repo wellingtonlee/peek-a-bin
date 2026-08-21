@@ -237,6 +237,71 @@ const ARITH_OPS: Record<string, BinaryOp> = {
   sar: ">>",
 };
 
+/**
+ * The `ARITH_OPS` members whose identity element is the constant 0, so that a
+ * source of 0 leaves the destination holding exactly what it already held.
+ *
+ * All four are on the `lock`-legal opcode list, which is what makes the set a
+ * statement about instructions that can exist. The shifts are deliberately
+ * absent even though `x << 0 == x`: `lock` applies only to ADD/ADC/AND/BTC/BTR/
+ * BTS/CMPXCHG/DEC/INC/NEG/NOT/OR/SBB/SUB/XOR/XADD/XCHG, so `lock shl` raises
+ * #UD and admitting it would be admitting an encoding no image contains.
+ */
+const ZERO_NEUTRAL_OPS: ReadonlySet<BinaryOp> = new Set(["|", "+", "-", "^"]);
+
+/**
+ * Is this a `lock`-prefixed read-modify-write over memory whose value effect is
+ * **nil** — i.e. a memory barrier rather than a store?
+ *
+ * `lock or byte ptr [rsp], 0` is the classic full fence, and MSVC emits it
+ * immediately after a non-temporal `movnti` store loop. Since peek-a-bin-3qrl
+ * made `liftBlock` dispatch on the *base* mnemonic it reached the `or` handler
+ * like any other locked read-modify-write — which is right for `lock dec`/`inc`/
+ * `add`, and recovered four guards per x64 binary — and lifted to
+ * `*(rsp) = *(rsp) | 0`. `foldExpr` then folded `x | 0` to `x` and `promoteVars`
+ * named `[rsp+0]` a frame slot, so the fence reached the page as `var_0 = var_0`
+ * with an invented `uint8_t var_0;` declaration above it that nothing reads.
+ * That is strictly *less* information than the `/* unlifted: … *\/` the reader
+ * saw before 3qrl: the statement does nothing, the variable exists for nothing,
+ * and the fence is gone (peek-a-bin-qbk3).
+ *
+ * So the instruction goes back to `raw`. Three things about that:
+ *
+ * - **`raw` rather than `comment`.** A `comment` is not a statement, and the
+ *   emitter never emits a truly empty `if` body — a fence that is the whole
+ *   content of a region would take the region with it, which is exactly how
+ *   peek-a-bin-frt8's six `bt` guards had been surviving. `raw` also keeps the
+ *   instruction's address in the line map, where a `comment` carries none.
+ *   Its text stays the verbatim disassembly line, as everything else on that
+ *   fallback does; naming it a barrier in prose would put editorial into a field
+ *   `emit.ts` documents as always being a disassembly line.
+ * - **The test is the nil value effect, never the `lock` prefix.** 3qrl's whole
+ *   point is that the prefix is a fact about atomicity and about neither the
+ *   values nor the flags. An **unlocked** `or [mem], 0` is not a fence — it is a
+ *   genuinely dead store, and whether to delete one is a different judgement
+ *   from this one — so the prefix is required *as well*, not instead. It costs
+ *   nothing measurable: there are 0 unlocked value-neutral read-modify-writes
+ *   over memory in the corpus (t32/t64/w64/w32, at 41113c9).
+ * - **`and <mem>, <all ones>` is REFUSED, and that refusal is measured rather
+ *   than cautious.** `and`'s identity element is width-dependent, and a
+ *   text-level "all ones" reading of the source misfires on real instructions
+ *   *in this corpus*: `and <reg>, 0xff` and `and <reg>, 0xffff` (2 each per PE32
+ *   binary) and `and <reg>, 0xfff` (2 per x64 binary) are truncations, not
+ *   no-ops. A misfire in the admitting direction silently deletes a real store,
+ *   which is the one direction this file will not guess in, and the form has 0
+ *   occurrences to calibrate against. `xchg` is not in this class at all, by the
+ *   ISA rather than by measurement: `lock` requires a memory operand and `xchg`
+ *   requires a register one, so a locked `xchg` can never have equal operands.
+ *
+ * **Atomicity is still not modelled** — nothing in this IR expresses it — so the
+ * comment naming the instruction is the whole of what the reader is told. That
+ * is the same trade 3qrl recorded, and it is strictly better here than a
+ * statement claiming a store that does not happen.
+ */
+function isValueNeutralLockedRmw(op: BinaryOp, src: IRExpr): boolean {
+  return ZERO_NEUTRAL_OPS.has(op) && src.kind === "const" && src.value === 0;
+}
+
 const COND_SET: Record<string, string> = {
   sete: "je",
   setne: "jne",
@@ -582,6 +647,15 @@ export function liftBlock(
      * reading it has not earned.
      */
     const mn = withoutLockPrefix(insn.mnemonic);
+    /**
+     * Whether a `lock` prefix was stripped to get `mn`. Derived from the two
+     * spellings this loop already holds rather than by exporting
+     * `flagModel.ts`'s `baseMnemonic`, which that module deliberately keeps
+     * private — `withoutLockPrefix` returns its argument lowercased and
+     * unchanged for every other prefix, so the two differ exactly when the
+     * prefix was `lock`.
+     */
+    const isLocked = mn !== rawMn;
     const parts = splitOperands(insn.opStr);
 
     // ── Forward flag invalidation ──
@@ -851,6 +925,13 @@ export function liftBlock(
       const destVal = parseOperand(parts[0], insn, is64);
       const src = parseOperand(parts[1], insn, is64);
       const op = ARITH_OPS[mn];
+      // A locked read-modify-write over memory with no value effect is a memory
+      // barrier, not a store. See `isValueNeutralLockedRmw` for why the test is
+      // the nil value effect rather than the prefix, and for what it refuses.
+      if (isLocked && dest.kind === "deref" && isValueNeutralLockedRmw(op, src)) {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
       const result = irBinary(op, destVal, src);
       if (dest.kind === "deref") {
         stmts.push({

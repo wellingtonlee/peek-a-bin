@@ -6718,6 +6718,100 @@ describe("decompileFunction — a lock-prefixed read-modify-write lifts as its b
 });
 
 /**
+ * A locked read-modify-write with **no value effect** is a memory barrier, and
+ * says so instead of claiming a store.
+ *
+ * `lock or byte ptr [rsp], 0` is the classic full fence; MSVC emits it right
+ * after a non-temporal `movnti` store loop, which is where all six corpus
+ * occurrences sit (t64 0x140007F80 / 0x14000C5CA / 0x14000C76A and the same
+ * three in w64). peek-a-bin-3qrl made `liftBlock` dispatch on the *base*
+ * mnemonic — correctly, and it recovered four guards per x64 binary — and the
+ * fence was its unintended residue: it reached the `or` handler, lifted to
+ * `*(rsp) = *(rsp) | 0`, `foldExpr` folded `x | 0` to `x`, and `promoteVars`
+ * named `[rsp+0]` a frame slot. The reader got `var_0 = var_0;` plus an invented
+ * `uint8_t var_0;` declaration, and the fence was gone from the page
+ * (peek-a-bin-qbk3).
+ *
+ * The negative controls are the rule, not decoration. **The prefix is required
+ * as well as the nil value effect, never instead of it** — an unlocked
+ * `or [mem], 0` is a dead store rather than a fence — and `and <mem>, <all
+ * ones>` is refused because `and`'s identity element is width-dependent and a
+ * text-level reading of it misfires on real instructions in this corpus.
+ */
+describe("decompileFunction — a value-effect-free locked RMW is a barrier, not a store", () => {
+  /** t64.exe 0x140007F80: the fence closing a `movnti` store loop. */
+  const fence: [string, string?][] = [["lock or", "byte ptr [rsp], 0"], ["ret"]];
+
+  it("leaves the fence as a comment naming the instruction", () => {
+    expect(run(seq(0x401000, fence), true)).toContain("unlifted: lock or byte ptr [rsp], 0");
+  });
+
+  it("invents neither a self-assignment nor a declaration for it", () => {
+    const code = run(seq(0x401000, fence), true);
+    // Both halves of the symptom. `var_0` must not appear at all: not as the
+    // statement, and not as the `uint8_t var_0;` above it that nothing reads.
+    expect(code).not.toMatch(/\bvar_0\b/);
+    expect(code).not.toMatch(/(\w+)\s*=\s*\1\s*;/);
+  });
+
+  it("treats the other zero-neutral locked forms the same way", () => {
+    // `add`/`sub`/`xor` with a 0 source are the same nil value effect and are on
+    // the same `lock`-legal opcode list. None occurs in this corpus, so these
+    // are asserted from the rule rather than from a site.
+    for (const mn of ["lock add", "lock sub", "lock xor"]) {
+      const code = run(seq(0x401000, [[mn, "byte ptr [rsp], 0"], ["ret"]]), true);
+      expect(code).toContain(`unlifted: ${mn} byte ptr [rsp], 0`);
+      expect(code).not.toMatch(/\bvar_0\b/);
+    }
+  });
+
+  // ── Negative controls ──
+
+  it("still lifts a locked read-modify-write that DOES change the value", () => {
+    // The 3qrl population — 24 of the 27 locked instructions in each x64 binary
+    // — must be untouched. A source of 1 is not the identity element.
+    const code = run(
+      seq(0x401000, [
+        ["lock or", "dword ptr [rbx], 1"],
+        ["lock add", "dword ptr [rcx], r9d"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("unlifted");
+    expect(code).toContain("*(int32_t*)(rbx)");
+    expect(code).toContain("r9d");
+  });
+
+  it("does NOT claim an UNLOCKED or [mem], 0 as a barrier", () => {
+    // The prefix is required as well. An unlocked `or [mem], 0` is a genuinely
+    // dead store, and deleting one is a different judgement from this; 0 occur
+    // over memory in the corpus, so the restriction costs nothing measurable.
+    const code = run(seq(0x401000, [["or", "byte ptr [rsp], 0"], ["ret"]]), true);
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("does NOT claim a locked and <mem>, <all ones> as a barrier", () => {
+    // Refused on measured evidence: `and`'s identity element is width-dependent,
+    // and a text-level "all ones" reading misfires on real instructions here —
+    // `and <reg>, 0xff` / `0xffff` (PE32) and `and <reg>, 0xfff` (x64) are
+    // truncations. A misfire in the admitting direction deletes a real store.
+    for (const src of ["0xff", "-1", "0xffffffff"]) {
+      const code = run(seq(0x401000, [["lock and", `byte ptr [rsp], ${src}`], ["ret"]]), true);
+      expect(code).not.toContain("unlifted");
+    }
+  });
+
+  it("does NOT claim a locked RMW whose destination is a REGISTER", () => {
+    // `lock` requires a memory operand, so this encoding does not exist; the
+    // dest test is what keeps the rule about instructions that can.
+    const code = run(seq(0x401000, [["lock or", "eax, 0"], ["ret"]]), true);
+    expect(code).not.toContain("unlifted");
+  });
+});
+
+/**
  * `bt <reg>, <imm> / jb` tests one bit, and the guard says which.
  *
  * `bt` is in `PARTIAL_FLAG_WRITERS`, so `flagEffect` clobbered on it and the Jcc
