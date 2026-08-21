@@ -39,7 +39,7 @@ Entry point: `decompileFunction()` in `pipeline.ts`.
 | `buildSSA` | `ssa.ts` | Static Single Assignment: dominator tree, phi insertion, renaming |
 | `ssaOptimize` | `ssaopt.ts` | SSA optimizations: const prop, copy prop, DCE, GVN, LICM |
 | `destroySSA` | `ssadestroy.ts` | Lower phi nodes to copy statements |
-| `foldBlock` | `fold.ts` | Constant folding, single-use inlining, expression simplification |
+| `foldBlock` | `fold.ts` | Constant folding, single-use inlining, expression simplification. Per block, so the pipeline hands it `blockLiveOut`'s live-out set — a definition that escapes its block is not single-use and inlining it deletes the assignment a later read needs (peek-a-bin-7eyn) |
 | `structureCFG` | `structure.ts` | Recover if/while/do-while/for/switch from CFG |
 | `cleanupStructured` | `cleanup.ts` | Guard clause flattening, goto/empty-block elimination |
 | `wrapExceptionRegions` | `pipeline.ts` | Wrap `__try/__except` from `.pdata` exception info |

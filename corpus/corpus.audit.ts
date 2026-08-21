@@ -155,6 +155,14 @@ if (!pre.haveBins || !pre.haveCc) {
           r.popReads.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.popReads.rows.length > 0 ? "\n" : ""),
         );
+        // Every (block, register) whose reaching definition the fold removed.
+        // Written even when empty, because the standing claim about this one is
+        // that it IS empty — an absent file has to mean the audit did not run.
+        writeFileSync(
+          join(artifactDir, `lostdefs_${key}.jsonl`),
+          r.lostDefs.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.lostDefs.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -168,6 +176,7 @@ if (!pre.haveBins || !pre.haveCc) {
               },
               staleGuards: { ...r.staleGuards, rows: r.staleGuards.rows.length },
               popReads: { ...r.popReads, rows: r.popReads.rows.length },
+              lostDefs: { ...r.lostDefs, rows: r.lostDefs.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -345,6 +354,43 @@ if (!pre.haveBins || !pre.haveCc) {
         lifted += r.popReads.popsLifted;
       }
       expect(lifted).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, and the class it covers is one nothing else here can see.
+     *
+     * `foldBlock` inlines a definition read exactly once into that reader and
+     * deletes the assignment, counting reads over the ONE block it is handed —
+     * so a value read again in a successor used to be deleted out from under
+     * every later read. 544 reads over 172 functions at `91085f3`
+     * (168/110/110/156 on t32/t64/w64/w32); 0 since `blockLiveOut`. Every row
+     * is a register the emitted C reads and never assigns, which gcc accepts
+     * because `preludeFor` declares each undeclared identifier as its own
+     * `long` — the same blindness that hid `peek-a-bin-pzws`.
+     *
+     * `entryReads` and `regReads` are the liveness numbers, and the first is
+     * also the point of the audit: a read no definition reaches is USUALLY
+     * correct output — a parameter arriving in a register — so the count that
+     * matters is the one that separates the two, not the crude
+     * read-but-never-assigned scan. See `corpus/lostDefs.ts`.
+     */
+    it("never deletes a definition a later block still reads", () => {
+      for (const r of results.values()) {
+        const ld = r.lostDefs;
+        expect(
+          `${r.key} fold-lost: ${ld.rows
+            .slice(0, 5)
+            .map((x) => `${x.func}@B${x.block} ${x.canon} x${x.reads}`)
+            .join("; ")}`,
+        ).toBe(`${r.key} fold-lost: `);
+        expect(ld.lostReads).toBe(0);
+        expect(ld.functionsScanned).toBeGreaterThan(0);
+        // The entry values are the population the gate is distinguished from.
+        // Zero here would mean the discriminator stopped observing, and the
+        // gate would then read 0 for the wrong reason.
+        expect(ld.entryReads).toBeGreaterThan(0);
+        expect(ld.regReads).toBeGreaterThan(0);
+      }
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -666,6 +712,18 @@ function renderReport(): string {
     L.push("    lifted, so it is no definition in SSA. Reported, NOT gated — the count is not 0");
     L.push("    and no fix has been taken, but every row is a provably wrong name, so gate it at");
     L.push("    0 the moment it gets there. Sites in popreads_<bin>.jsonl. See popReads.ts.");
+    const ld = r.lostDefs;
+    L.push(
+      `  fold-lost definitions       ${ld.lostReads} reads over ${ld.lostSites} sites ` +
+        `(${ld.funcsAffected} functions), against ${ld.entryReads} entry-value reads ` +
+        `of ${ld.regReads} examined`,
+    );
+    L.push("    A read whose reaching definition `foldBlock` deleted: single-use inlining counts");
+    L.push("    uses within ONE block, so a value read again in a successor was dropped and every");
+    L.push(
+      "    later read named a register the C never assigns. A GATE at 0 — `entryReads` is the",
+    );
+    L.push("    legitimate population it is told apart from. Sites in lostdefs_<bin>.jsonl.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

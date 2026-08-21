@@ -3429,6 +3429,60 @@ describe("decompileFunction — a definition read twice is not deleted after one
     expect(code).toContain("*(int64_t*)(rsp + 0x20) = rbx;");
     expect(code).toContain("*(int64_t*)(rsi) = rbx;");
   });
+
+  it("keeps a definition whose other reads are in a later block", () => {
+    // The same defect one block over, and the reason `foldBlock` alone cannot
+    // see it: it is handed ONE block, so `totalReads === 1` means "once in this
+    // block" and says nothing about the successors. `t32!sub_40D99A`'s
+    // `mov ecx, [ebp+8]` has exactly one in-block reader — the store on the
+    // next line — and eleven reads in the three blocks after it, so the
+    // definition was inlined into the store and deleted, and every one of those
+    // eleven named a register the emitted function never assigns. gcc compiles
+    // that because `preludeFor` declares `ecx` as its own `long`
+    // (peek-a-bin-7eyn). `blockLiveOut` is what makes the escape visible.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, dword ptr [ebp + 8]"],
+        ["mov", "dword ptr [ecx + 8], eax"],
+        ["test", "eax, eax"],
+        ["je", "0x401014"],
+        ["mov", "dword ptr [ecx + 0xc], 1"],
+        ["mov", "dword ptr [ecx + 0x18], 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("ecx = *(int32_t*)(ebp + 8);");
+    // The inlined form, which is what the definition's deletion looked like.
+    expect(code).not.toContain("*(int32_t*)(*(int32_t*)(ebp + 8) + 8)");
+  });
+
+  it("still inlines a definition the block itself overwrites", () => {
+    // The refusal is about a value that ESCAPES, not about the register being
+    // written again later: `mov ecx, [ebp+8]` here dies at the `mov ecx, 5`
+    // below it, so the live-out set describes the constant and not the load,
+    // and inlining the load into its one reader remains sound. Without the
+    // `killedInBlock` half of the test this would stop folding, which is churn
+    // in the emitted C for no recovered value.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, dword ptr [ebp + 8]"],
+        ["mov", "dword ptr [ecx + 8], eax"],
+        ["mov", "ecx, 5"],
+        ["test", "eax, eax"],
+        ["je", "0x401018"],
+        ["mov", "dword ptr [edx + 0xc], ecx"],
+        ["mov", "dword ptr [edx + 0x18], ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("*(int32_t*)(*(int32_t*)(ebp + 8) + 8) = eax;");
+    // The constant reaches both later blocks under its own value rather than
+    // under the load's, which is what says the live range really did end here.
+    expect(code).toContain("*(int32_t*)(edx + 0xC) = 5;");
+    expect(code).toContain("*(int32_t*)(edx + 0x18) = 5;");
+  });
 });
 
 /**

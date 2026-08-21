@@ -806,13 +806,131 @@ function writesMemory(stmt: IRStmt): boolean {
   return false;
 }
 
+/** Canonical names of every register the statement reads. */
+function readsInStmt(stmt: IRStmt, out: Set<string>): void {
+  switch (stmt.kind) {
+    case "assign":
+      // A `deref` destination is an address computation, so its registers are
+      // read even though the statement is a write.
+      if (stmt.dest.kind === "deref") readRegs(stmt.dest.address, out);
+      readRegs(stmt.src, out);
+      return;
+    case "store":
+      readRegs(stmt.address, out);
+      readRegs(stmt.value, out);
+      return;
+    case "call_stmt":
+      for (const a of stmt.call.args) readRegs(a, out);
+      return;
+    case "return":
+      if (stmt.value) readRegs(stmt.value, out);
+      return;
+    // A guard's registers are reads like any other. Omitting the kind would make
+    // a register whose only reader is a successor's conditional jump look dead
+    // to this block — the branches are extracted after this stage, and only from
+    // the block that owns them.
+    case "branch":
+      readRegs(stmt.condition, out);
+      return;
+    // `raw` is deliberately silent. Its text is an unlifted instruction that
+    // reaches the page as a comment, so it reads nothing in the emitted C, and
+    // treating the register names inside it as reads would hold values alive for
+    // a statement that cannot use them.
+    default:
+      return;
+  }
+}
+
+/**
+ * The canonical registers live out of each block — read on some path from it
+ * before being written.
+ *
+ * `foldBlock` is handed ONE block, so its `totalReads === 1` is a statement
+ * about that block and nothing else, and that is the whole of what this exists
+ * to fix: a definition read once inside its block and again two blocks later
+ * was inlined into the in-block use and **deleted**, leaving every later read
+ * naming a register the emitted C never assigns. `t32!sub_40D99A`'s
+ * `mov ecx, [ebp+8]` is the witness — one in-block use at `mov [ecx+8], eax`,
+ * eleven reads over the three blocks after it, and the emitted function's only
+ * mention of `ecx` on the left of an `=` was an `ecx = ecx;` from an unrelated
+ * `lea ecx,[ecx]` NOP. `gcc -fsyntax-only` compiles that because `preludeFor`
+ * declares every undeclared identifier as its own `long`, and no other gate
+ * here can see a name that is read and never written (peek-a-bin-7eyn).
+ *
+ * Ordinary backward may-liveness: `liveIn = use ∪ (liveOut − def)`,
+ * `liveOut = ⋃ liveIn(succ)`. Taken over the program as it stands BEFORE any
+ * block is folded, which errs in the safe direction: inlining inside one block
+ * can remove that block's last read of a register, and this does not go back to
+ * re-examine the predecessor that defined it.
+ *
+ * The parameter is structural rather than `BasicBlock` so `fold.ts` keeps
+ * importing nothing but `ir.ts` — `cfg.ts` pulls in dagre, and `fold.test.ts`
+ * has no reason to load a graph layout engine.
+ */
+export function blockLiveOut(
+  blocks: readonly { id: number; succs: readonly number[] }[],
+  stmts: ReadonlyMap<number, IRStmt[]>,
+): Map<number, Set<string>> {
+  const use = new Map<number, Set<string>>();
+  const def = new Map<number, Set<string>>();
+  const liveIn = new Map<number, Set<string>>();
+  const liveOut = new Map<number, Set<string>>();
+  const known = new Set(blocks.map((b) => b.id));
+  for (const b of blocks) {
+    const u = new Set<string>();
+    const d = new Set<string>();
+    for (const s of stmts.get(b.id) ?? []) {
+      const reads = new Set<string>();
+      readsInStmt(s, reads);
+      for (const r of reads) if (!d.has(r)) u.add(r);
+      const dest = s.kind === "assign" ? s.dest : s.kind === "call_stmt" ? s.resultDest : undefined;
+      if (dest?.kind === "reg") d.add(canonReg(dest.name));
+    }
+    use.set(b.id, u);
+    def.set(b.id, d);
+    liveIn.set(b.id, new Set(u));
+    liveOut.set(b.id, new Set());
+  }
+  for (let pass = 0; pass <= blocks.length + 1; pass++) {
+    let changed = false;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      const out = liveOut.get(b.id) as Set<string>;
+      for (const succ of b.succs) {
+        if (!known.has(succ)) continue;
+        for (const r of liveIn.get(succ) as Set<string>) {
+          if (!out.has(r)) {
+            out.add(r);
+            changed = true;
+          }
+        }
+      }
+      const inSet = liveIn.get(b.id) as Set<string>;
+      const d = def.get(b.id) as Set<string>;
+      for (const r of out) {
+        if (!d.has(r) && !inSet.has(r)) {
+          inSet.add(r);
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  return liveOut;
+}
+
 /**
  * Fold a flat list of IR statements within a single block:
  * - Constant fold
  * - Inline single-use register assignments
  * - Eliminate dead register stores
+ *
+ * `liveOut` is the canonical registers read on some path after this block, from
+ * `blockLiveOut`. Omitting it keeps the pre-`peek-a-bin-7eyn` behaviour, which
+ * is unsound for any definition that escapes its block, so every caller holding
+ * a CFG must pass it — `pipeline.ts` and the corpus audits that replay it do.
  */
-export function foldBlock(stmts: IRStmt[]): IRStmt[] {
+export function foldBlock(stmts: IRStmt[], liveOut?: ReadonlySet<string>): IRStmt[] {
   // Pass 1: Constant fold
   let result = stmts.map(foldStmt);
 
@@ -849,6 +967,10 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
         let totalReads = 0;
         let firstReadIdx = -1;
         let blocked = false;
+        // Whether a later statement in THIS block redefines the register. When
+        // one does the value dies here, so `liveOut` describes the other
+        // definition's value and the escape test below must not fire on it.
+        let killedInBlock = false;
         for (let j = i + 1; j < result.length; j++) {
           const s = result[j];
           const reads = countReadsInStmt(s, canon);
@@ -858,10 +980,14 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
           // range: reads beyond it are reads of something else, and counting
           // them would only block a substitution that is in fact sound.
           if (s.kind === "assign" && s.dest.kind === "reg" && canonReg(s.dest.name) === canon) {
+            killedInBlock = true;
             break;
           }
           if (s.kind === "call_stmt" && s.resultDest?.kind === "reg") {
-            if (canonReg(s.resultDest.name) === canon) break;
+            if (canonReg(s.resultDest.name) === canon) {
+              killedInBlock = true;
+              break;
+            }
           }
           // Hazards only matter for statements the value has to move *past*.
           // A statement that reads the register evaluates its right-hand side
@@ -905,7 +1031,14 @@ export function foldBlock(stmts: IRStmt[]): IRStmt[] {
         // suite before the refusal existed: 8 structuring tests changed shape
         // (peek-a-bin-c33).
         const readerIsBranch = firstReadIdx >= 0 && result[firstReadIdx].kind === "branch";
-        if (!blocked && !readerIsBranch && totalReads === 1 && firstReadIdx >= 0) {
+        // A value that ESCAPES the block is not single-use, however the reads in
+        // this block count. Inlining deletes the assignment, so every read in a
+        // successor is left naming a register the emitted C never writes — the
+        // one class `gcc -fsyntax-only` is structurally blind to, because
+        // `preludeFor` declares each undeclared identifier as its own `long`
+        // (peek-a-bin-7eyn).
+        const escapes = !killedInBlock && liveOut !== undefined && liveOut.has(canon);
+        if (!blocked && !escapes && !readerIsBranch && totalReads === 1 && firstReadIdx >= 0) {
           // Inline: substitute into the statement that reads it
           result[firstReadIdx] = substituteRegInStmt(result[firstReadIdx], canon, stmt.src);
           changed = true;

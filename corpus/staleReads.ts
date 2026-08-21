@@ -42,7 +42,7 @@
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
 import { solePredecessor } from "../src/disasm/decompile/flagModel";
-import { foldBlock } from "../src/disasm/decompile/fold";
+import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg, isKnownRegister, regSize } from "../src/disasm/decompile/ir";
 import { firstCalleeSavedWrites, liftBlock } from "../src/disasm/decompile/lifter";
@@ -517,7 +517,12 @@ export function auditStaleV0Reads(
   // and on this corpus it doubles the count (151 against 78 on t64).
   try {
     destroySSA(ctx);
-    for (const [id, stmts] of ctx.liftedBlocks) ctx.liftedBlocks.set(id, foldBlock(stmts));
+    // With the live-out sets, because that is what `pipeline.ts` folds with: a
+    // fold that deletes a definition escaping its block produces a program
+    // nobody emits (peek-a-bin-7eyn).
+    const liveOut = blockLiveOut(ctx.blocks, ctx.liftedBlocks);
+    for (const [id, stmts] of ctx.liftedBlocks)
+      ctx.liftedBlocks.set(id, foldBlock(stmts, liveOut.get(id)));
   } catch {
     return;
   }

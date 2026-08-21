@@ -338,6 +338,28 @@ for (const b of bins) {
     note("  pop-restored stale reads      NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A definition the fold deleted while a later block read it (lostDefs.ts). ──
+  //
+  // Gated at 0 in the run, so a rise here is a second alarm rather than the
+  // only one. The rows beneath it are the liveness numbers, and `entry-value
+  // reads` is the population the gate is told apart from: it moves with
+  // function detection like any machine-shape count and is reported, never
+  // judged.
+  if (B.lostDefs && C.lostDefs) {
+    row(
+      "fold-lost definitions",
+      (x) => x.lostDefs.lostReads,
+      (a, c) => c > a,
+      "A DEFINITION A LATER BLOCK READS WAS DELETED",
+    );
+    row("  sites of the shape", (x) => x.lostDefs.lostSites);
+    row("  functions affected", (x) => x.lostDefs.funcsAffected);
+    row("  entry-value reads (legit)", (x) => x.lostDefs.entryReads);
+    row("  register reads examined", (x) => x.lostDefs.regReads);
+  } else {
+    note("  fold-lost definitions         NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

@@ -268,6 +268,36 @@ Per-site detail is in `staleguards_<bin>.jsonl` — the block's jcc, which mecha
 operands the reading would have named, the instruction that took them away, and the emitted
 condition where one reached the page (`null` where the reading was refused).
 
+**A read whose definition the fold deleted** (`lostDefs.ts`). *A failure means the emitted C reads
+a register that nothing in the function assigns.* `foldBlock` inlines a definition read exactly
+**once** into that one reader and drops the assignment — but it is handed ONE block, so "once"
+counts only that block's reads. A definition read once locally and again in a successor was
+therefore deleted out from under every later read: `t32!sub_40D99A`'s `mov ecx, [ebp+8]` has one
+in-block reader and eleven reads over the three blocks below it, and the emitted function's only
+`ecx` on the left of an `=` was an `ecx = ecx;` from an unrelated `lea ecx,[ecx]` NOP
+(`peek-a-bin-7eyn`). **544 reads over 172 functions at `91085f3`** — 168/110/110/156 on
+t32/t64/w64/w32 — and **0 on all four** since `pipeline.ts` passes `blockLiveOut`'s answer to the
+fold.
+
+The discriminator is what makes this a gate rather than another upper bound. A register read that
+no definition reaches is *usually correct output*: it is the function's entry value, which is
+exactly what a parameter arriving in a register looks like, and CLAUDE.md's crude
+read-but-never-assigned scan cannot separate the two. So the audit brackets the fold and counts
+only reads that **had** a reaching definition before it and have none after — an entry value has
+none on either side and never enters the count. `entryReads` reports that legitimate population
+(1159/1513/1460/1498) beside the gate, and a run where it collapsed to zero would be a gate
+reading 0 because the instrument stopped observing.
+
+**What it does not catch.** It brackets `foldBlock` and only `foldBlock`. A definition some *other*
+pass deletes, and the general question "does every name in the emitted C denote something the
+function produces", are outside it. Its independence is also weaker than the audits above and is
+stated as such in the module docstring: `fold.ts` decides what to keep from *liveness*, this
+decides what went missing from *reaching definitions*, which are dual analyses rather than one
+shared routine — but this is a regression gate on one pass, not an oracle standing outside the
+question. Negative-controlled the usual way: force `escapes` to false in `fold.ts` and
+`npm run corpus` exits 1 naming the rows, at exactly the 168/110/110/156 an independent throwaway
+instrument reported at `91085f3`.
+
 **Call arity OVER-count, against `apitypes.ts`'s declared signatures.** No entry in that table is
 variadic, so a call the emitted C passes more arguments to than the API declares passes one the
 machine never passed. *A failure means the emitted C states that the program hands a function a
@@ -923,21 +953,31 @@ remaining gap and is not implemented.
 | `artifacts/<label>/arity_<key>.jsonl` | Every declared-API call whose emitted arity is not the declared one, OVER rows first. Empty file = audit ran and found none. |
 | `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
 | `artifacts/<label>/staleguards_<key>.jsonl` | Every block whose trailing jcc reads flags the recovered compare does not describe, with the emitted condition where one reached the page. Empty file = audit ran and found none. |
+| `artifacts/<label>/lostdefs_<key>.jsonl` | Every (block, register) whose reaching definition the fold removed. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
 ### The audits that re-run the pipeline prefix, and why they have to
 
-`staleReads.ts` and `popReads.ts` each drive their own `buildCFG → liftBlock → buildSSA →
-ssaOptimize → destroySSA → foldBlock`, and they are the only two places in this directory that do.
+`staleReads.ts`, `popReads.ts` and `lostDefs.ts` each drive their own `buildCFG → liftBlock →
+buildSSA → ssaOptimize → destroySSA → foldBlock`, and they are the only three places in this
+directory that do.
 That is exactly the second copy the tap below exists to avoid, and it is accepted here for a
 reason the tap cannot serve: both questions need the SSA **before** it is lowered and the
 statement list **after**, and there is no single point in `pipeline.ts` at which one observer sees
 both. `popReads.ts` needs a third thing on top — the machine instruction at each read, to ask
-whether the register is read *there* rather than named by a value propagated from earlier. Every
-pass they call is the repo's own export, in `pipeline.ts`'s order, so a stage inserted between
-`ssaOptimize` and `destroySSA` shows up as a divergence — but nothing enforces that
-automatically. If you insert one, update **both** replicas.
+whether the register is read *there* rather than named by a value propagated from earlier.
+`lostDefs.ts` needs the statement lists on the two sides of `foldBlock` specifically, which is one
+pass narrower than the tap can see. Every pass they call is the repo's own export, in
+`pipeline.ts`'s order, so a stage inserted between `ssaOptimize` and `destroySSA` shows up as a
+divergence — but nothing enforces that automatically. If you insert one, update **all three**
+replicas.
+
+**`foldBlock`'s `liveOut` argument is part of the same hazard and is the newest instance of it.**
+All three replicas must pass `blockLiveOut`'s answer, exactly as `pipeline.ts` does: without it the
+fold deletes definitions that escape their block, so the replica measures a program nobody emits —
+and in `lostDefs.ts`'s case it would report its own missing argument as a decompiler defect
+(`peek-a-bin-7eyn`).
 
 **The `liftBlock` arguments are part of that, and one of them has already been missed.** The
 replica must be handed everything the pipeline lifts with, including `calleeSavedFirstWrite` and

@@ -6,7 +6,7 @@ import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
 import { emitFunction } from "./emit";
 import { solePredecessor } from "./flagModel";
-import { foldBlock } from "./fold";
+import { blockLiveOut, foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
 import { firstCalleeSavedWrites, liftBlock } from "./lifter";
 import { promoteVars } from "./promote";
@@ -131,8 +131,15 @@ export function decompileFunction(
     destroySSA(ssaCtx);
 
     // 4. Fold per block (constant folding + single-use inlining, post-SSA)
+    //
+    // The liveness is computed once, over the whole unfolded program: a
+    // definition read once in its own block and again in a successor is not
+    // single-use, and inlining it deletes the assignment the successor's read
+    // needs (peek-a-bin-7eyn). `blockLiveOut` is what makes that visible from
+    // inside a per-block pass.
+    const liveOut = blockLiveOut(blocks, liftedBlocks);
     for (const [blockId, stmts] of liftedBlocks) {
-      liftedBlocks.set(blockId, foldBlock(stmts));
+      liftedBlocks.set(blockId, foldBlock(stmts, liveOut.get(blockId)));
     }
 
     // 4b. Extract the branch statements again.

@@ -45,7 +45,7 @@
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
 import { solePredecessor } from "../src/disasm/decompile/flagModel";
-import { foldBlock } from "../src/disasm/decompile/fold";
+import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
 import { firstCalleeSavedWrites, liftBlock } from "../src/disasm/decompile/lifter";
@@ -428,7 +428,13 @@ export function auditPopReads(
     const natural = detectNaturalLoops(blocks, ctx.idom, ctx.domTree);
     ssaOptimize(ctx, natural.size > 0 ? natural : undefined);
     destroySSA(ctx);
-    for (const [id, stmts] of ctx.liftedBlocks) ctx.liftedBlocks.set(id, foldBlock(stmts));
+    // The live-out sets are `pipeline.ts`'s argument to `foldBlock` and not an
+    // extra of this replica's own: without them the fold deletes definitions
+    // that escape their block, which is a different program from the one the
+    // emitter sees (peek-a-bin-7eyn).
+    const liveOut = blockLiveOut(ctx.blocks, ctx.liftedBlocks);
+    for (const [id, stmts] of ctx.liftedBlocks)
+      ctx.liftedBlocks.set(id, foldBlock(stmts, liveOut.get(id)));
   } catch {
     // Same reading as `sweep.ts`: a function the pipeline cannot get through is
     // counted by the throw gate, not here.

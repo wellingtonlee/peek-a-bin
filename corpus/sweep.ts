@@ -26,6 +26,7 @@ import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
+import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
@@ -472,6 +473,17 @@ export interface BinResult {
    * blanket refusal would cost.
    */
   popReads: PopReadResult;
+  /**
+   * A READ WHOSE DEFINITION `foldBlock` DELETED ON ITS WAY OUT OF THE BLOCK.
+   *
+   * A GATE at 0 on `lostReads`: each row is a register the emitted C reads and
+   * never assigns, because a single-use inline counted uses within one block
+   * while the value escaped it. `entryReads` is the legitimate population it is
+   * distinguished from — a read no definition reaches on either side of the
+   * fold is the function's entry value and correct output. See
+   * `corpus/lostDefs.ts`.
+   */
+  lostDefs: LostDefResult;
   funcs: FuncRec[];
 }
 
@@ -623,6 +635,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     staleV0: emptyStaleV0(),
     staleGuards: emptyStaleGuards(),
     popReads: emptyPopReads(),
+    lostDefs: emptyLostDefs(),
     funcs: [],
   };
 
@@ -736,6 +749,20 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     // `corpus/popReads.ts`.
     auditPopReads(
       res.popReads,
+      key,
+      func,
+      insns,
+      af.xrefMap,
+      jumpTables,
+      af.pe.is64,
+      af.iatMap,
+      af.stringMap,
+      funcMap,
+      af.calleeClobbers,
+    );
+    // A read the fold left with no reaching definition at all.
+    auditLostDefs(
+      res.lostDefs,
       key,
       func,
       insns,
