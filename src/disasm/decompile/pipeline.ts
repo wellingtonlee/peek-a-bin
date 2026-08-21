@@ -15,7 +15,7 @@ import { buildSSA, detectNaturalLoops } from "./ssa";
 import { destroySSA } from "./ssadestroy";
 import { ssaOptimize } from "./ssaopt";
 import { type StructRegistry, synthesizeStructs } from "./structs";
-import { structureCFG } from "./structure";
+import { type SwitchArmExit, structureCFG } from "./structure";
 import { inferTypes } from "./typeInfer";
 
 export interface DecompileResult {
@@ -52,6 +52,18 @@ export interface StructuringTap {
   lifted: Map<number, IRStmt[]>;
   /** `structureCFG`'s output, before `cleanupStructured` touches it. */
   structured: IRStmt[];
+  /**
+   * How `structureSwitch` closed each arm of each switch it built, in the order
+   * they were built.
+   *
+   * Here for the same reason the two above are: the answer does not survive into
+   * anything a caller can see. An arm closed with `break` is indistinguishable
+   * in the emitted C from an arm that really ends, so whether the terminator is
+   * true of the machine is a question only `structureSwitch` can be asked
+   * (peek-a-bin-pqs5, gated by `corpus/armExits.ts`). Empty on every function
+   * with no recovered jump table, which is all of them on x64.
+   */
+  armExits: SwitchArmExit[];
 }
 
 /**
@@ -183,8 +195,20 @@ export function decompileFunction(
     const liftedBefore = tap
       ? new Map([...liftedBlocks].map(([id, stmts]) => [id, [...stmts]]))
       : null;
-    const structured = structureCFG(blocks, loops, liftedBlocks, jumpTables, is64, branches);
-    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured });
+    // The switch-arm observer is wired on exactly the same condition, and for
+    // the same reason: it is an instrument, so no production run may pay for it
+    // or be able to notice it. `structureCFG` computes nothing from it.
+    const armExits: SwitchArmExit[] = [];
+    const structured = structureCFG(
+      blocks,
+      loops,
+      liftedBlocks,
+      jumpTables,
+      is64,
+      branches,
+      tap ? (ev) => armExits.push(ev) : undefined,
+    );
+    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured, armExits });
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
     let cleaned = cleanupStructured(structured);

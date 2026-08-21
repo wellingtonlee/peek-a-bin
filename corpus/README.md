@@ -298,6 +298,40 @@ question. Negative-controlled the usual way: force `escapes` to false in `fold.t
 `npm run corpus` exits 1 naming the rows, at exactly the 168/110/110/156 an independent throwaway
 instrument reported at `91085f3`.
 
+**A switch arm claiming the switch is over** (`armExits.ts`). *A failure means the emitted C
+states control flow the machine contradicts.* `structureSwitch`'s `armBody` claims exactly one
+block per arm — deliberately, because the convergence scan after the switch is what decides where
+the region following it begins — and it used to close that arm with `break` however the block ends.
+`break` is not a terminator that can always be appended: it is a claim, and it says the switch is
+over. **35 arm blocks on t32 and 17 on w32** were closed that way while having a successor (25 and
+12 ending in a conditional jump, 10 and 5 in a `jmp`), of which 31 and 14 were a false claim; **0
+on all four** since `armExit` spells the block's own exit (`peek-a-bin-pqs5`). For the conditional
+half the recovered **test** went with the transfer: `pipeline.ts` step 4b has already hoisted the
+`IRBranch` out of `liftedBlocks`, so `t32!sub_4045B1` case 7 emitted `eax = (uint16_t)ecx; break;`
+for a block whose next two instructions are `cmp eax, 0x64 / jg 0x404B46`, with `eax > 0x64`
+nowhere in its 698 lines and no `goto` naming either successor.
+
+The two halves are reported separately because they are different mechanisms — the conditional one
+loses a recovered test as well as a transfer — and `arms`, `truthfulExits` and `unnameable` are the
+denominator. **That denominator is 0 on both x64 binaries**, which recover no jump table at all, so
+a green gate there says nothing whatever; the gate therefore ties its liveness check to the
+recovered-table count rather than asserting it blind (72 arms over 5 functions on t32, 54 over 3 on
+w32, all of them truthful, at `5c5dab9`). Negative-controlled: replace `armExit`'s body with
+`[{ kind: "break" }]` and `npm run corpus` exits 1 naming exactly 35/0/0/17, the figures an
+independent throwaway probe reported at `91085f3`.
+
+**What it does not catch.** Three things, all structural. It is scoped to a switch **arm** —
+`break` and `goto` are emitted in many other places and none of those closures is judged here
+(`gotoCheck` asks only that a `goto` names a label the function defines, never that the transfer is
+the one the machine makes). It judges the closure against `buildCFG`'s successor list, so a block
+whose real successor the CFG never drew reads as a block with nowhere to go, which is the blind
+spot function sizing gave the loop-exit audit. And it says nothing about the arm's *statements*: an
+arm that under-emits its body while spelling its exit correctly passes, which is the residue
+`peek-a-bin-pqs5` left behind. **The observation also comes from inside `structureSwitch`**, so it
+cannot catch an error in `armExit`'s own reading of the CFG — only the closure it chose, checked
+against the successor list the same `BasicBlock` carries. It is a regression gate on one decision,
+not a second opinion about control flow.
+
 **Call arity OVER-count, against `apitypes.ts`'s declared signatures.** No entry in that table is
 variadic, so a call the emitted C passes more arguments to than the API declares passes one the
 machine never passed. *A failure means the emitted C states that the program hands a function a
@@ -976,6 +1010,8 @@ remaining gap and is not implemented.
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
 | `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Machine-level write test — see the baseline entry. |
+| `lostDefs.ts` | A read whose reaching definition `foldBlock` deleted. Brackets that one pass; see the gate entry. |
+| `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -984,6 +1020,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/stalev0_<key>.jsonl` | Every version-0 read left naming an overwritten register, then every spoiled entry-value copy. Empty file = audit ran and found none. |
 | `artifacts/<label>/staleguards_<key>.jsonl` | Every block whose trailing jcc reads flags the recovered compare does not describe, with the emitted condition where one reached the page. Empty file = audit ran and found none. |
 | `artifacts/<label>/lostdefs_<key>.jsonl` | Every (block, register) whose reaching definition the fold removed. Empty file = audit ran and found none. |
+| `artifacts/<label>/armexits_<key>.jsonl` | Every switch arm closed with `break` while its own block has a successor, with that block's successors and which refusal produced the `break`. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
@@ -1022,8 +1059,16 @@ confident number about a program the pipeline does not build.
 `decompileFunction` takes an optional `tap` argument — its second-to-last, since
 `calleeClobbers` was appended after it in `df50c3f`; a call site passing only `tap` therefore
 reads `…, runtimeFunctions, tap)` while one passing both ends `…, tap, calleeClobbers)`, and the
-worker's passes `undefined` in the `tap` slot. The statement-drop audit is `tap`'s only caller. It fires once, between `structureCFG` being handed the lifted blocks and its result
-being passed on, and hands both sides over.
+worker's passes `undefined` in the `tap` slot. `corpus/sweep.ts` is `tap`'s only caller. It fires once, between `structureCFG` being handed the
+lifted blocks and its result being passed on, and hands both sides over.
+
+**It now carries a second observation, and that was a deliberate choice not to build a second
+mechanism.** `StructuringTap.armExits` is how `structureSwitch` reports the closure it chose for
+each switch arm, which `structureCFG` collects through an observer `pipeline.ts` wires on exactly
+the same condition as the tap itself — so a production run pays one `undefined` check per arm and
+can notice nothing else. Adding it to the existing hook rather than beside it is the point: two
+ways to watch one function drift about *when* they fire, and this observation has to be taken at
+the same moment as the statement snapshot to be about the same program.
 
 It exists because **neither side is recoverable from the return value** — the emitted C says
 nothing whatever about a statement that never entered the tree — and because the alternative was

@@ -3,7 +3,7 @@ import type { BasicBlock, Loop } from "../../cfg";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irReg } from "../ir";
-import { structureCFG } from "../structure";
+import { type SwitchArmExit, structureCFG } from "../structure";
 
 const BASE = 0x401000;
 const addrOf = (id: number) => BASE + id * 0x100;
@@ -52,11 +52,12 @@ function structure(
   lifted: Record<number, IRStmt[]> = {},
   loops: Loop[] = [],
   jumpTables: Map<number, number[]> = new Map(),
+  onArmExit?: (ev: SwitchArmExit) => void,
 ): IRStmt[] {
   const liftedMap = new Map<number, IRStmt[]>(
     Object.entries(lifted).map(([k, v]) => [Number(k), v]),
   );
-  return structureCFG(blocks, loops, liftedMap, jumpTables);
+  return structureCFG(blocks, loops, liftedMap, jumpTables, false, new Map(), onArmExit);
 }
 
 /** Depth-first search for the first statement of a kind, at any nesting level. */
@@ -960,5 +961,119 @@ describe("structureCFG — switches", () => {
     const blocks = switchCFG();
     const out = structure(blocks, { 2: [mark(2)] }, [], new Map());
     expect(findStmt(out, "switch")).toBeUndefined();
+  });
+
+  /**
+   * THE HOOK `corpus/armExits.ts` GATES ON.
+   *
+   * Whether an arm's closing statement is true of the machine is not a question
+   * the emitted C can be asked — a `break` at the end of an arm looks the same
+   * whether the block ends or goes on — so `structureSwitch` reports each
+   * closure to an observer instead, and the corpus audit gates the reports where
+   * `break` meets a successor at 0. 35 arm blocks on t32 and 17 on w32 were that
+   * shape before `armExit` (peek-a-bin-pqs5, peek-a-bin-64gp).
+   *
+   * What this pins is the observer's fidelity, which is all a synthetic fixture
+   * can pin: one report per arm, the successors as the CFG gives them, and
+   * `break` only where there is nowhere to go. The counts themselves need real
+   * binaries and live in `npm run corpus`.
+   */
+  it("reports how each arm was closed, with break only for a block that ends", () => {
+    const blocks = switchCFG();
+    // Case 0 goes to block 2, which `jmp`s to the join; case 1 goes straight to
+    // block 5, which `ret`s — nowhere to go, so `break` is the truthful closure
+    // there and the named transfer is the truthful one at block 2.
+    const seen: SwitchArmExit[] = [];
+    structure(
+      blocks,
+      { 2: [mark(2)], 4: [mark(4)], 5: [mark(5)] },
+      [],
+      jumpTable(blocks, [2, 5]),
+      (ev) => seen.push(ev),
+    );
+    expect(
+      seen.map((e) => ({
+        arm: e.armAddr,
+        claimedHere: e.claimedHere,
+        closedWith: e.closedWith,
+        condJmp: e.condJmp,
+        succs: e.succs,
+        why: e.why,
+      })),
+    ).toEqual([
+      // case 0: one successor, named rather than asserted away.
+      {
+        arm: addrOf(2),
+        claimedHere: true,
+        closedWith: "goto",
+        condJmp: false,
+        succs: [addrOf(5)],
+        why: "one-successor",
+      },
+      // case 1: `ret`, so the switch really is over for this arm.
+      {
+        arm: addrOf(5),
+        claimedHere: true,
+        closedWith: "break",
+        condJmp: false,
+        succs: [],
+        why: "no-successor",
+      },
+      // The default arm's block was emitted under the bounds check, so this
+      // closure is about a label and not about the block's own exit.
+      {
+        arm: addrOf(4),
+        claimedHere: false,
+        closedWith: "goto",
+        condJmp: false,
+        succs: [addrOf(5)],
+        why: "reclaimed-label",
+      },
+    ]);
+    // Every report names the switch it belongs to — the DISPATCH block, not the
+    // arm. The two are one identifier apart inside `structureSwitch` (aaa897f).
+    expect(new Set(seen.map((e) => e.switchAddr))).toEqual(new Set([addrOf(1)]));
+  });
+
+  it("reports an arm block's conditional jump as the two gotos it becomes", () => {
+    const blocks = switchCFG();
+    // Block 3 tests something and branches to the default body, which is the
+    // shape 25 arm blocks on t32 have and the one that used to lose its
+    // condition entirely: `break` said the switch was over and step 4b had
+    // already taken the `IRBranch` out of the lifted statements.
+    blocks[3] = bb(3, {
+      succs: [4, 5],
+      preds: [1],
+      code: [
+        ["cmp", "ecx, 0x0"],
+        ["jne", 4],
+      ],
+    });
+    const seen: SwitchArmExit[] = [];
+    const out = structure(
+      blocks,
+      { 2: [mark(2)], 3: [mark(3)], 4: [mark(4)] },
+      [],
+      jumpTable(blocks, [2, 3]),
+      (ev) => seen.push(ev),
+    );
+    const arm = seen.find((e) => e.armAddr === addrOf(3));
+    expect(arm).toMatchObject({
+      claimedHere: true,
+      closedWith: "if-goto",
+      condJmp: true,
+      why: "two-edges",
+    });
+    expect(new Set(arm?.succs)).toEqual(new Set([addrOf(4), addrOf(5)]));
+    const sw = findStmt(out, "switch") as { cases: { values: number[]; body: IRStmt[] }[] };
+    expect(sw.cases[1].body).toEqual([
+      mark(3),
+      {
+        kind: "if",
+        condition: ne0(),
+        thenBody: [{ kind: "goto", label: `loc_${addrOf(4).toString(16).toUpperCase()}` }],
+      },
+      { kind: "goto", label: `loc_${addrOf(5).toString(16).toUpperCase()}` },
+    ]);
   });
 });

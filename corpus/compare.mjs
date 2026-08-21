@@ -360,6 +360,31 @@ for (const b of bins) {
     note("  fold-lost definitions         NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A switch arm asserting the switch is over (armExits.ts). ───────────────
+  //
+  // Gated at 0 in the run, so a rise here is the second alarm rather than the
+  // only one — and it is the one that says WHICH arms came back. `arms` and the
+  // truthful closures below it are the denominator: they move with function
+  // detection and with how many jump tables are recovered, so they are reported
+  // and never judged, and a FALL in `arms` on a binary that still recovers
+  // tables is the shape of an instrument that stopped observing.
+  if (B.armExits && C.armExits) {
+    row(
+      "switch-arm false breaks",
+      (x) => x.armExits.falseBreaks,
+      (a, c) => c > a,
+      "AN ARM CLAIMS THE SWITCH IS OVER WHERE ITS BLOCK GOES ON",
+    );
+    row("  of those, conditional", (x) => x.armExits.falseBreaksCond);
+    row("  of those, unconditional", (x) => x.armExits.falseBreaksUncond);
+    row("  functions affected", (x) => x.armExits.funcsAffected);
+    row("  arms examined", (x) => x.armExits.arms);
+    row("  truthful closures", (x) => x.armExits.truthfulExits);
+    row("  breaks with no true spelling", (x) => x.armExits.unnameable);
+  } else {
+    note("  switch-arm false breaks       NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

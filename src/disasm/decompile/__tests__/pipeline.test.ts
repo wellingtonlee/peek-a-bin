@@ -3,7 +3,7 @@ import type { RuntimeFunction } from "../../../pe/types";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
-import { decompileFunction } from "../pipeline";
+import { decompileFunction, type StructuringTap } from "../pipeline";
 import { StructRegistry } from "../structs";
 
 /**
@@ -3072,6 +3072,62 @@ describe("decompileFunction — a switch states what it switches on", () => {
     // And the region the test jumps to is emitted under the label named.
     expect(code).toContain("loc_401038:");
     expect(code).toContain("sub_402014();");
+  });
+
+  /**
+   * THE HOOK THE CORPUS GATE READS, END TO END (peek-a-bin-64gp).
+   *
+   * `corpus/armExits.ts` gates "an arm closed with `break` while its own block
+   * has a successor" at 0, and the observations it judges come from
+   * `structureSwitch` through `structureCFG`'s last parameter and
+   * `pipeline.ts`'s `StructuringTap`. Every link in that chain is invisible to
+   * an output assertion — drop the argument and the emitted C is unchanged, the
+   * tap reports no arms at all, and the gate passes by observing nothing. Here
+   * the plumbing is exercised rather than scraped, on the same fixture whose
+   * emitted text is asserted above.
+   */
+  it("reports every arm's closure through the tap, and none is a false break", () => {
+    const instructions = armThatTests();
+    const last = instructions[instructions.length - 1];
+    const taps: StructuringTap[] = [];
+    decompileFunction(
+      {
+        name: "sub_401000",
+        address: instructions[0].address,
+        size: last.address + last.size - instructions[0].address,
+      },
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      armTable,
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      undefined,
+      (ev) => taps.push(ev),
+    );
+
+    expect(taps).toHaveLength(1);
+    const arms = taps[0].armExits;
+    // Three cases and the default: an arm is reported whatever it was closed
+    // with, so this count is the gate's denominator and not its subject.
+    expect(arms.length).toBeGreaterThanOrEqual(3);
+    // The arm that ends in `jne` is reported as the two named transfers it
+    // became, and as a conditional jump — which is the half of the class that
+    // loses a recovered test as well as the transfer.
+    expect(arms).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ armAddr: 0x40100c, closedWith: "if-goto", condJmp: true }),
+      ]),
+    );
+    // The gate itself, on this fixture: no arm asserts the switch is over while
+    // the CFG says its block goes on.
+    expect(
+      arms.filter((a) => a.closedWith === "break" && a.claimedHere && a.succs.length > 0),
+    ).toEqual([]);
   });
 
   it("sends an arm that jumps into another arm there rather than out of the switch", () => {

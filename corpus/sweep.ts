@@ -26,6 +26,7 @@ import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
+import { type ArmExitResult, auditArmExits, emptyArmExits } from "./armExits";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
@@ -484,6 +485,17 @@ export interface BinResult {
    * `corpus/lostDefs.ts`.
    */
   lostDefs: LostDefResult;
+  /**
+   * A SWITCH ARM ASSERTING THE SWITCH IS OVER WHERE ITS BLOCK GOES ON.
+   *
+   * A GATE at 0 on `falseBreaks`: `armBody` claims one block per arm and used to
+   * close it with `break` however the block ends, which for 35 arm blocks on t32
+   * and 17 on w32 was a statement about control flow the machine contradicts —
+   * and for the conditional half took the recovered test with it. `arms` and
+   * `truthfulExits` are the denominator, and both are 0 on t64/w64, which
+   * recover no jump table at all. See `corpus/armExits.ts`.
+   */
+  armExits: ArmExitResult;
   funcs: FuncRec[];
 }
 
@@ -636,6 +648,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     staleGuards: emptyStaleGuards(),
     popReads: emptyPopReads(),
     lostDefs: emptyLostDefs(),
+    armExits: emptyArmExits(),
     funcs: [],
   };
 
@@ -712,6 +725,10 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
 
     if (tapped.length > 0) {
       auditStatementDrops(res, func, insns, tapped[0], jumpTables, af);
+      // How every switch arm was closed. Same tap, because it is the same kind
+      // of question — one whose two sides are both internal to the structuring
+      // step and neither recoverable from the emitted C.
+      auditArmExits(res.armExits, key, func, tapped[0].armExits);
     }
     auditLineMapCoverage(res, func, insns, lineMap, jumpTables, af);
     auditCallees(res, func, insns, code, funcMap);

@@ -163,6 +163,15 @@ if (!pre.haveBins || !pre.haveCc) {
           r.lostDefs.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.lostDefs.rows.length > 0 ? "\n" : ""),
         );
+        // Every switch arm closed with `break` while its own block has a
+        // successor. Written even when empty, because the standing claim about
+        // this one is that it IS empty — an absent file has to mean the audit
+        // did not run.
+        writeFileSync(
+          join(artifactDir, `armexits_${key}.jsonl`),
+          r.armExits.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.armExits.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -177,6 +186,7 @@ if (!pre.haveBins || !pre.haveCc) {
               staleGuards: { ...r.staleGuards, rows: r.staleGuards.rows.length },
               popReads: { ...r.popReads, rows: r.popReads.rows.length },
               lostDefs: { ...r.lostDefs, rows: r.lostDefs.rows.length },
+              armExits: { ...r.armExits, rows: r.armExits.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -391,6 +401,49 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(ld.entryReads).toBeGreaterThan(0);
         expect(ld.regReads).toBeGreaterThan(0);
       }
+    });
+
+    /**
+     * A GATE at 0, over a class that is a false STATEMENT rather than an omission.
+     *
+     * `structureSwitch`'s `armBody` claims exactly one block per arm and used to
+     * close it with `break` however the block ends — and `break` says the switch
+     * is over. 35 arm blocks on t32 and 17 on w32 were closed that way while
+     * having a successor (25/12 ending in a conditional jump, 10/5 in a `jmp`),
+     * of which 31 and 14 were a false claim; 0 on all four since `armExit`
+     * (peek-a-bin-pqs5). For the conditional half the recovered test went with
+     * it, since `pipeline.ts` step 4b has already taken the `IRBranch` out.
+     *
+     * THE DENOMINATOR IS TIED TO THE JUMP TABLES rather than asserted blind: a
+     * binary with no recovered table structures no switch, so `arms` is
+     * legitimately 0 on both x64 binaries and a green gate there says nothing.
+     * Where tables were recovered, arms and truthful closures must both be
+     * non-zero or the instrument has stopped observing and the gate reads 0 for
+     * the wrong reason. See `corpus/armExits.ts`.
+     */
+    it("never closes a switch arm with break while its block has a successor", () => {
+      let arms = 0;
+      for (const r of results.values()) {
+        const ae = r.armExits;
+        expect(
+          `${r.key} false break: ${ae.rows
+            .slice(0, 5)
+            .map(
+              (x) =>
+                `${x.func}@0x${x.armAddr.toString(16)} ${x.condJmp ? "cond" : "uncond"} ${x.why}`,
+            )
+            .join("; ")}`,
+        ).toBe(`${r.key} false break: `);
+        expect(ae.falseBreaks).toBe(0);
+        // A recovered jump table in a decompiled function is what makes a
+        // switch, so this is the one non-vacuous form the liveness check has.
+        if (r.jumpTables > 0) {
+          expect(ae.arms).toBeGreaterThan(0);
+          expect(ae.truthfulExits).toBeGreaterThan(0);
+        }
+        arms += ae.arms;
+      }
+      expect(arms).toBeGreaterThan(0);
     });
 
     it("resolves every goto to a label the same function defines", () => {
@@ -724,6 +777,18 @@ function renderReport(): string {
       "    later read named a register the C never assigns. A GATE at 0 — `entryReads` is the",
     );
     L.push("    legitimate population it is told apart from. Sites in lostdefs_<bin>.jsonl.");
+    const ae = r.armExits;
+    L.push(
+      `  switch-arm false breaks     ${ae.falseBreaks} of ${ae.arms} arms ` +
+        `(${ae.falseBreaksCond} conditional, ${ae.falseBreaksUncond} unconditional; ` +
+        `${ae.truthfulExits} truthful, ${ae.unnameable} unnameable) over ` +
+        `${ae.funcsWithSwitch} functions with a switch`,
+    );
+    L.push("    An arm closed with `break` while its own block has a successor: `break` says the");
+    L.push("    switch is over, and for the conditional half the recovered test goes with it. A");
+    L.push("    GATE at 0, from 35/0/0/17 before `armExit` (peek-a-bin-pqs5). `arms` is the");
+    L.push("    denominator and is 0 wherever no jump table was recovered — both x64 binaries.");
+    L.push("    Sites in armexits_<bin>.jsonl. See armExits.ts.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

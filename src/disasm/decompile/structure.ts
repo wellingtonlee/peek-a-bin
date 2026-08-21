@@ -224,6 +224,47 @@ function computePostDominators(blocks: BasicBlock[]): Map<number, number> {
 }
 
 /**
+ * How `structureSwitch` closed one arm of one switch, handed to an instrument
+ * that asks to watch it.
+ *
+ * This exists for the same reason `pipeline.ts`'s `StructuringTap` does: neither
+ * side of the question survives into anything a caller can see. The emitted C
+ * shows a `break` at the end of an arm and says nothing whatever about the block
+ * it closed, so "is this arm's terminator true of the machine" is answerable
+ * only from in here — which is how `armBody` came to assert, for 35 arm blocks
+ * on t32 and 17 on w32, that a switch was over where the machine went on
+ * somewhere else (peek-a-bin-pqs5, gated by `corpus/armExits.ts`).
+ *
+ * `corpus/sweep.ts` is the only consumer, and it reaches this through the tap.
+ * Passing no observer costs one `undefined` check per arm and changes no value
+ * the structurer computes — an instrument that alters what it measures is worse
+ * than no instrument.
+ */
+export interface SwitchArmExit {
+  /** The dispatch block's start address: which `switch` this arm belongs to. */
+  switchAddr: number;
+  /**
+   * The arm's own block, or `null` where the jump-table entry named an address
+   * `buildCFG` built no block for.
+   */
+  armAddr: number | null;
+  /**
+   * Did *this* arm claim and emit that block? False for an arm naming a block
+   * another region already emitted, where the closure is a statement about a
+   * label rather than about the block's own exit.
+   */
+  claimedHere: boolean;
+  /** What the arm was closed with. */
+  closedWith: "if-goto" | "goto" | "break";
+  /** Does the arm's block end in a conditional jump? */
+  condJmp: boolean;
+  /** Start addresses of the arm block's CFG successors. */
+  succs: number[];
+  /** Which branch of the decision produced that closure. */
+  why: string;
+}
+
+/**
  * Structure a CFG into high-level control flow (if/while/do-while/switch).
  *
  * Approach: recursive structural analysis over basic blocks, using the loop
@@ -244,6 +285,14 @@ export function structureCFG(
   jumpTables: Map<number, number[]>,
   is64 = false,
   branches: Map<number, IRBranch> = new Map(),
+  /**
+   * Told how every switch arm was closed, if anyone is watching. Last, after
+   * `branches`, because it is a different kind of parameter from the six above
+   * it: they are evidence the structurer reads, this is an instrument reading
+   * the structurer, and it must never be able to change what the others decide.
+   * `pipeline.ts` passes it only when it has a tap of its own.
+   */
+  onArmExit?: (ev: SwitchArmExit) => void,
 ): IRStmt[] {
   if (blocks.length === 0) return [];
 
@@ -1366,6 +1415,10 @@ export function structureCFG(
 
   /** Structure a switch statement. */
   function structureSwitch(block: BasicBlock, targets: number[]): IRStmt {
+    // The switch's OWN block, under a name that cannot be read as an arm's.
+    // `block` and `armBlock` are one identifier apart in here and reading the
+    // wrong one reports the dispatch's exit as the arm's (see `armExit`).
+    const dispatch = block;
     let switchExpr: IRExpr = { kind: "unknown", text: "switch_expr" };
 
     // Two independent readings of what is being switched on: the register the
@@ -1465,6 +1518,7 @@ export function structureCFG(
         const taken = branchTarget !== null ? blockById.get(branchTarget) : undefined;
         const notTaken = fallthrough !== null ? blockById.get(fallthrough) : undefined;
         if (taken && notTaken) {
+          note(armBlock, true, "if-goto", "two-edges");
           return [
             {
               kind: "if",
@@ -1477,8 +1531,25 @@ export function structureCFG(
       }
       if (armBlock.succs.length === 1) {
         const only = blockById.get(armBlock.succs[0]);
-        if (only) return [{ kind: "goto", label: labelNameFor(only.startAddr) }];
+        if (only) {
+          note(armBlock, true, "goto", "one-successor");
+          return [{ kind: "goto", label: labelNameFor(only.startAddr) }];
+        }
       }
+      // Every `break` from here is either truthful — an arm ending in `ret` or a
+      // tail call — or the false claim `corpus/armExits.ts` gates at 0, and the
+      // reason is recorded so the two are told apart by the audit rather than by
+      // rereading this function.
+      note(
+        armBlock,
+        true,
+        "break",
+        armBlock.succs.length === 0
+          ? "no-successor"
+          : armBlock.succs.length === 2 && endsWithCondJmp(armBlock)
+            ? "edges-unresolved"
+            : "no-nameable-edge",
+      );
       return [{ kind: "break" }];
     }
 
@@ -1507,9 +1578,37 @@ export function structureCFG(
         return body;
       }
       if (targetBlock && labelled.has(targetBlock.id)) {
+        note(targetBlock, false, "goto", "reclaimed-label");
         return [{ kind: "goto", label: labelNameFor(targetBlock.startAddr) }];
       }
+      note(targetBlock, false, "break", targetBlock ? "claimed-unlabelled" : "no-block");
       return [{ kind: "break" }];
+    }
+
+    /**
+     * Report one arm's closure, when and only when somebody is watching.
+     *
+     * `dispatch`, not the enclosing `block`, for the same reason `armExit` takes
+     * `armBlock`: every question in here is about one of two blocks that are one
+     * identifier apart, and getting it wrong reports the dispatch's own exit as
+     * the arm's.
+     */
+    function note(
+      armBlock: BasicBlock | undefined,
+      claimedHere: boolean,
+      closedWith: SwitchArmExit["closedWith"],
+      why: string,
+    ): void {
+      if (!onArmExit) return;
+      onArmExit({
+        switchAddr: dispatch.startAddr,
+        armAddr: armBlock?.startAddr ?? null,
+        claimedHere,
+        closedWith,
+        condJmp: armBlock !== undefined && endsWithCondJmp(armBlock),
+        succs: armBlock ? armBlock.succs.map((id) => blockById.get(id)?.startAddr ?? -1) : [],
+        why,
+      });
     }
 
     for (const [targetAddr, values] of targetToCase) {
