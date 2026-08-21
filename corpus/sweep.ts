@@ -90,6 +90,53 @@ const TAKEN: Record<string, string> = {
   js: "<",
   jns: ">=",
 };
+/**
+ * `TAKEN` for a jcc whose flags come from a `bt`, where CF is a **bit** and not
+ * the borrow of a subtraction.
+ *
+ * `TAKEN` above is a `cmp` model: it maps each jcc to the operator of the
+ * magnitude comparison its flags describe. That is right for a `cmp` and for
+ * every `test`-owned form whose flags reduce to a comparison against zero, and
+ * it is simply the wrong vocabulary for a `bt` — CF is bit `n` of the operand,
+ * so `jb` means "that bit is set" and `jae` means "that bit is clear". No
+ * `<`-shaped or `>=`-shaped spelling of those exists, and contorting the emitted
+ * C into one to satisfy this table would be gaming the oracle.
+ *
+ * Only the CF-reading forms appear, because a `bt` leaves ZF **unaffected** and
+ * the decompiler declines every other jcc after one — so a guard emitted at, say,
+ * a `je` after a `bt` would fall back to `TAKEN` and be judged by it, which is
+ * the failing direction and the one to keep.
+ *
+ * **This is the audit's vocabulary widening, not its rule weakening**, and the
+ * distinction is checkable: `NEG` maps `!=` and `==` to each other, so a `bt`
+ * guard emitted at the wrong polarity is still reported INVERTED, and one
+ * emitted as a magnitude comparison is still reported MISMATCH. Both are
+ * negative-controlled (peek-a-bin-frt8).
+ */
+const BIT_TAKEN: Record<string, string> = {
+  jb: "!=",
+  jc: "!=",
+  jnae: "!=",
+  jae: "==",
+  jnb: "==",
+  jnc: "==",
+};
+
+/**
+ * The operator the jcc's own taken sense calls for.
+ *
+ * `afterBitTest` is decided from the **machine text** — is the instruction
+ * immediately before this jcc a `bt` — and deliberately not from any
+ * flag-transparency reasoning, which would re-implement the model under test.
+ * A `bt` separated from its jcc by anything at all therefore keeps `TAKEN`'s
+ * expectation and would be reported MISMATCH, which is the safe direction: the
+ * widening is as narrow as the fact that justifies it.
+ */
+function takenOpOf(jc: Jcc): string {
+  const mn = jc.insn.mnemonic;
+  return (jc.afterBitTest ? BIT_TAKEN[mn] : undefined) ?? TAKEN[mn];
+}
+
 const NEG: Record<string, string> = {
   "==": "!=",
   "!=": "==",
@@ -539,7 +586,17 @@ function readArrayBuffer(path: string): ArrayBuffer {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
 }
 
-type Jcc = { insn: Instruction; target: number; fall: number };
+type Jcc = {
+  insn: Instruction;
+  target: number;
+  fall: number;
+  /**
+   * Whether the instruction IMMEDIATELY before this jcc is a `bt`, i.e. whether
+   * the flags it reads are a single bit rather than a magnitude comparison. See
+   * `BIT_TAKEN` and `takenOpOf`.
+   */
+  afterBitTest: boolean;
+};
 type Anchored =
   | { jc: Jcc; expect: string; addr: number; sense: string; exact: boolean }
   | { why: string };
@@ -1223,7 +1280,13 @@ function auditGuardsAndLoops(
     if (!m || !TAKEN[ins.mnemonic]) continue;
     const fall = insns[i + 1]?.address;
     if (fall === undefined) continue;
-    jccs.push({ insn: ins, target: Number.parseInt(m[1], 16), fall });
+    const prev = insns[i - 1]?.mnemonic?.toLowerCase();
+    jccs.push({
+      insn: ins,
+      target: Number.parseInt(m[1], 16),
+      fall,
+      afterBitTest: prev === "bt",
+    });
   }
   if (jccs.length === 0) return unrecAnchors;
 
@@ -1365,7 +1428,7 @@ function auditGuardsAndLoops(
       return { why: cands.length === 0 ? "no-jcc-for-body-addr" : "ambiguous-jcc" };
     }
     const jc = cands[0];
-    const taken = TAKEN[jc.insn.mnemonic];
+    const taken = takenOpOf(jc);
     const isTarget = landing(jc.target) === b.addr;
     return {
       jc,
@@ -1385,7 +1448,7 @@ function auditGuardsAndLoops(
       return { why: cands.length === 0 ? "no-jcc-for-exit-addr" : "ambiguous-exit-jcc" };
     }
     const jc = cands[0];
-    const taken = TAKEN[jc.insn.mnemonic];
+    const taken = takenOpOf(jc);
     const isTarget = landing(jc.target) === e.addr;
     // Reaching the exit is the negation of continuing into the loop.
     return {
@@ -1507,7 +1570,7 @@ function auditGuardsAndLoops(
       } else {
         a = {
           jc: cands[0],
-          expect: TAKEN[cands[0].insn.mnemonic],
+          expect: takenOpOf(cands[0]),
           addr: top.addr,
           sense: "BACKEDGE",
           exact: top.exact,
@@ -1524,7 +1587,7 @@ function auditGuardsAndLoops(
       } else {
         b = {
           jc: cands[0],
-          expect: TAKEN[cands[0].insn.mnemonic],
+          expect: takenOpOf(cands[0]),
           addr: e.addr,
           sense: "BACKEDGE-EXIT",
           exact: e.exact,

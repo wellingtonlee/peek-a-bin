@@ -220,6 +220,7 @@ export type FlagEffect =
   | { kind: "none" }
   | { kind: "compare"; mnemonic: "cmp" | "test" }
   | { kind: "result"; destText: string }
+  | { kind: "bittest"; destText: string; bitIndex: number }
   | { kind: "clobber"; why: FlagClobberReason };
 
 interface FlagOwnerCommon {
@@ -282,12 +283,46 @@ export interface FlagOwnerNone {
   clearedBy?: Instruction;
 }
 
-export type FlagOwner = FlagOwnerCompare | FlagOwnerResult | FlagOwnerNone;
+/**
+ * A `bt` — the one x86 form whose whole output is a single bit of CF.
+ *
+ * It is neither a compare nor a result and must not be modelled as either.
+ * There is no destination: `bt` **writes nothing at all**, which is why a
+ * `FlagOwnerResult` cannot describe it — `destText` there means "the value the
+ * instruction produced", and reading `bt`'s operand after it ran gives the same
+ * value it had before. What the Jcc reads is CF, and CF is the selected bit, so
+ * the condition is an expression over the *unmodified* bit base
+ * (peek-a-bin-frt8).
+ *
+ * `defines: "cf"` is the other half of keeping it apart from a result. ZF is
+ * **unaffected** by `bt` (Intel SDM: "The CF flag contains the value of the
+ * selected bit. The ZF flag is unaffected. The OF, SF, AF, and PF flags are
+ * undefined"), so a `je` after one reads an older owner this whole-flags model
+ * cannot name — and answering it from the `bt` would be a wrong test, not a
+ * missing one. `RegState.getCondition`'s `bittest` arm answers the CF forms and
+ * nothing else.
+ */
+export interface FlagOwnerBitTest extends FlagOwnerCommon {
+  kind: "bittest";
+  /** Always `"bt"`. Present so every owner kind reports its mnemonic. */
+  mnemonic: "bt";
+  /** The bit base operand exactly as written — always a register here. */
+  destText: string;
+  /** Canonicalised to the 64-bit parent. Never null: see `parseBitTest`. */
+  destReg: string;
+  /** The selected bit, already reduced modulo the operand size. */
+  bitIndex: number;
+  /** CF only, and CF is the whole of what `bt` writes. */
+  defines: "cf";
+}
+
+export type FlagOwner = FlagOwnerCompare | FlagOwnerResult | FlagOwnerBitTest | FlagOwnerNone;
 
 /** An owner a condition can actually be spelled from. */
 export type SpellableFlagOwner =
   | FlagOwnerCompare
-  | (FlagOwnerResult & { destForm: "reg" | "mem"; spoiled: false });
+  | (FlagOwnerResult & { destForm: "reg" | "mem"; spoiled: false })
+  | (FlagOwnerBitTest & { spoiled: false });
 
 export interface BlockFlagOwner {
   /** The block's trailing conditional jump, lowercased. */
@@ -367,6 +402,62 @@ function shiftWritesFlags(destText: string, countText: string): boolean {
 }
 
 /**
+ * The `bt` forms whose CF this model will name, and the bit each selects — or
+ * null for every other `bt`, which stays a `"partial-write"` clobber.
+ *
+ * **The one declaration of this question**, because two callers ask it:
+ * `flagEffect` to decide whether the instruction becomes an owner, and
+ * `liftBlock` to record the same reading into `RegState` (which is what makes a
+ * `setcc` after a `bt` work, and what stops a stale earlier compare from
+ * surviving one). A second copy could disagree about which forms are sound.
+ *
+ * Admitted: a **register** bit base with an **immediate** bit offset, which is
+ * the whole recoverable population — 30 of the 34 `bt` sites in the corpus,
+ * every one of them `bt <reg32>, <imm8>` followed by `jb` or `jae`.
+ *
+ * Refused, and each for a stated reason rather than for tidiness:
+ *
+ * - **A register bit offset.** `bt eax, ecx` selects bit `ecx mod 32`, which is
+ *   expressible — but the offset register is then a second value the condition
+ *   reads, and `spoils` would have to watch it too. Nothing in the corpus has
+ *   the form with a register base, so admitting it buys nothing measurable and
+ *   widens what has to be kept sound.
+ * - **A memory bit base.** This is the one that would be *unsound*, not merely
+ *   unmeasured. Intel documents the modulo reduction for a register base only;
+ *   with a memory base the offset addresses a bit string, so `bt DWORD PTR
+ *   [esp], eax` can select a bit outside the dword the operand names, and
+ *   `(*(uint32_t*)esp >> eax) & 1` is right only while `eax < 32`, which nothing
+ *   proves. Both x86 binaries have exactly this shape (t32 0x40B678 and
+ *   0x40BB21, w32 0x40A3A8 and 0x40A4E1) — MSVC's `_bittest` on a stack
+ *   temporary — so the refusal is the reason bucket 1 recovers nothing on PE32.
+ *
+ * The modulo is the SDM's own rule for a register base ("the instruction takes
+ * the modulo 16, 32, or 64 of the bit offset operand"), and it is applied here
+ * rather than left to the spelling because it is a fact about the machine. It
+ * is also load-bearing downstream: an index at or past the operand width would
+ * make the emitted shift a width contradiction.
+ */
+export function parseBitTest(insn: Instruction): { destText: string; bitIndex: number } | null {
+  if (baseMnemonic(insn.mnemonic).base !== "bt") return null;
+  const parts = insn.opStr.split(",");
+  if (parts.length !== 2) return null;
+  const destText = parts[0].trim().toLowerCase();
+  if (!isKnownRegister(destText)) return null;
+  const offText = parts[1].trim().toLowerCase();
+  if (!/^(0x[0-9a-f]+|\d+)$/.test(offText)) return null;
+  const raw = offText.startsWith("0x")
+    ? Number.parseInt(offText.slice(2), 16)
+    : Number.parseInt(offText, 10);
+  if (!Number.isFinite(raw) || raw < 0) return null;
+  const width = regSize(destText) * 8;
+  // 16/32/64 are the only bit-base widths `bt` encodes, and `regSize` cannot
+  // report anything else for a name `isKnownRegister` accepted at 2 bytes or
+  // more. An 8-bit register is not an encodable bit base at all.
+  if (width !== 16 && width !== 32 && width !== 64) return null;
+  return { destText, bitIndex: raw % width };
+}
+
+/**
  * What `insn` does to the flags — the transfer function the forward walk
  * applies. **Anything not positively recognised clobbers**; see the module
  * docstring for why that asymmetry is the safety property rather than a
@@ -407,6 +498,16 @@ export function flagEffect(insn: Instruction): FlagEffect {
   }
 
   if (UNDEFINED_RESULT_FLAGS.has(base)) return { kind: "clobber", why: "undefined-result" };
+  // `bt` stays in `PARTIAL_FLAG_WRITERS` — it really does write CF alone — but
+  // CF alone is the entire question a `jb`/`jae` after it asks, and CF is the
+  // selected bit of an operand the instruction does not modify. So the forms
+  // `parseBitTest` admits become owners and the rest clear, which is why the
+  // test sits above the set membership rather than replacing it. `bts`/`btr`/
+  // `btc` deliberately stay clobbers: their CF is the bit's value BEFORE the
+  // write, so the post-state names 1, 0 or the complement rather than the value
+  // the Jcc reads (peek-a-bin-frt8).
+  const bit = parseBitTest(insn);
+  if (bit) return { kind: "bittest", destText: bit.destText, bitIndex: bit.bitIndex };
   if (PARTIAL_FLAG_WRITERS.has(base)) return { kind: "clobber", why: "partial-write" };
   if (CARRY_IN_WRITERS.has(base)) return { kind: "clobber", why: "carry-in" };
   if (base === "call") return { kind: "clobber", why: "call" };
@@ -477,7 +578,19 @@ function writesAnyMemory(insn: Instruction): boolean {
  * surely. `clobberedAfter` below asks the same question from the other end, for
  * `structure.ts`.
  */
-function spoils(insn: Instruction, owner: FlagOwnerCompare | FlagOwnerResult): boolean {
+function spoils(
+  insn: Instruction,
+  owner: FlagOwnerCompare | FlagOwnerResult | FlagOwnerBitTest,
+): boolean {
+  if (owner.kind === "bittest") {
+    // The bit base is a register (`parseBitTest` admits no other form) and the
+    // offset is an immediate, so there is exactly one name to watch. Note that
+    // `bt` writes nothing, so unlike a result the value the condition reads is
+    // the one the register held *before* the owner too — which changes nothing
+    // here, since either way an overwrite between the `bt` and the Jcc means the
+    // name no longer denotes the bits that were tested.
+    return writesRegister(insn, owner.destReg);
+  }
   if (owner.kind === "result") {
     // A memory result is refused on ANY store, with no attempt to prove the two
     // addresses alias. That is the whole alias analysis this model has, and it
@@ -521,7 +634,7 @@ function claimResult(insn: Instruction, index: number, destText: string): FlagOw
  * list is not an error — an `index` beyond it means "after everything".
  */
 export function flagOwnerBefore(insns: Instruction[], index: number): FlagOwner {
-  let owner: FlagOwnerCompare | FlagOwnerResult | null = null;
+  let owner: FlagOwnerCompare | FlagOwnerResult | FlagOwnerBitTest | null = null;
   let cleared: FlagOwnerNone = { kind: "none", reason: "no-owner" };
 
   const limit = Math.min(index, insns.length);
@@ -547,6 +660,20 @@ export function flagOwnerBefore(insns: Instruction[], index: number): FlagOwner 
         break;
       case "result":
         owner = claimResult(insn, i, effect.destText);
+        break;
+      case "bittest":
+        owner = {
+          kind: "bittest",
+          mnemonic: "bt",
+          insn,
+          index: i,
+          address: insn.address,
+          destText: effect.destText,
+          destReg: canonReg(effect.destText),
+          bitIndex: effect.bitIndex,
+          defines: "cf",
+          spoiled: false,
+        };
         break;
       case "clobber":
         owner = null;
@@ -706,9 +833,14 @@ export function blockFlagOwner(block: BasicBlock, solePred?: BasicBlock): BlockF
  * and reading the deref after it is reading the decremented value. The test is
  * `destForm !== "none"` — a register or a memory operand, not the `destReg`
  * that is null for both memory and unparseable text (peek-a-bin-ie0j).
+ *
+ * A `bittest` owner is spellable whenever it is not spoiled, and there is no
+ * form question to ask: `parseBitTest` admits only a register bit base with an
+ * immediate offset, so it exists only when it can be named (peek-a-bin-frt8).
  */
 export function canSpellCondition(owner: FlagOwner): owner is SpellableFlagOwner {
   if (owner.kind === "none" || owner.spoiled) return false;
+  if (owner.kind === "bittest") return true;
   return owner.kind === "compare" || owner.destForm !== "none";
 }
 

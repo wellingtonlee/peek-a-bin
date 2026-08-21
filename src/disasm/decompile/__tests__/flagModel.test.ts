@@ -16,6 +16,7 @@ import {
   isFlagTransparent,
   NO_FLAG_WRITE,
   PARTIAL_FLAG_WRITERS,
+  parseBitTest,
   RESULT_OWNERS,
   SHIFTS,
   solePredecessor,
@@ -119,10 +120,71 @@ describe("flagEffect — the transfer function", () => {
 
   it("clears on the CF/OF-only writers, which leave ZF and SF to something older", () => {
     expect(PARTIAL_FLAG_WRITERS.has("rol")).toBe(true);
+    // `bt` is still a member — it really does write CF alone — but CF alone is
+    // the entire question a `jb`/`jae` after it asks, so `flagEffect` claims the
+    // forms `parseBitTest` admits before it reaches the set. Every OTHER member
+    // clears, `bts`/`btr`/`btc` included: their CF is the bit's value *before*
+    // the write, so nothing readable afterwards names it (peek-a-bin-frt8).
     expect(PARTIAL_FLAG_WRITERS.has("bt")).toBe(true);
     for (const mn of PARTIAL_FLAG_WRITERS) {
+      if (mn === "bt") continue;
       expect(flagEffect(insn(mn, "eax, 1")), mn).toEqual({ kind: "clobber", why: "partial-write" });
     }
+  });
+
+  it("claims CF for a bt with a register bit base and an immediate offset", () => {
+    // The shape all 30 admissible corpus sites have: `bt r11d, 0xa / jb`.
+    expect(flagEffect(insn("bt", "r11d, 0xa"))).toEqual({
+      kind: "bittest",
+      destText: "r11d",
+      bitIndex: 10,
+    });
+    // Intel reduces the offset modulo the operand size for a register bit base,
+    // and applying it here is what keeps the emitted shift within the width.
+    expect(flagEffect(insn("bt", "eax, 0x21"))).toEqual({
+      kind: "bittest",
+      destText: "eax",
+      bitIndex: 1,
+    });
+    expect(flagEffect(insn("bt", "rax, 0x41"))).toEqual({
+      kind: "bittest",
+      destText: "rax",
+      bitIndex: 1,
+    });
+  });
+
+  it("refuses the bt forms it cannot name soundly, and they stay partial-write", () => {
+    // A MEMORY bit base is the unsound one, not merely the unmeasured one: the
+    // offset addresses a bit string, so `bt DWORD PTR [esp], eax` can select a
+    // bit outside the dword the operand names. This is the real corpus shape on
+    // both PE32 binaries (t32 0x40B678, w32 0x40A3A8), which is why bucket 1
+    // recovers nothing there.
+    for (const ops of ["dword ptr [esp], eax", "dword ptr [esp], 3", "eax, ecx", "al, 3"]) {
+      expect(flagEffect(insn("bt", ops)), ops).toEqual({
+        kind: "clobber",
+        why: "partial-write",
+      });
+      expect(parseBitTest(insn("bt", ops)), ops).toBeNull();
+    }
+  });
+
+  it("owns the flags of a bt and can spell its condition", () => {
+    const o = owner("bt eax, 3", "jb 0x401800");
+    expect(o.kind).toBe("bittest");
+    if (o.kind !== "bittest") return;
+    expect(o.destReg).toBe("rax");
+    expect(o.bitIndex).toBe(3);
+    expect(o.defines).toBe("cf");
+    expect(canSpellCondition(o)).toBe(true);
+  });
+
+  it("spoils a bt whose bit base a later instruction overwrote", () => {
+    // `bt` writes nothing, so the bits tested are the ones the register held on
+    // both sides of it — and either way, an overwrite before the Jcc means the
+    // name no longer denotes them.
+    const o = owner("bt eax, 3", "mov eax, edx", "jb 0x401800");
+    expect(o.kind === "bittest" && o.spoiled).toBe(true);
+    expect(canSpellCondition(o)).toBe(false);
   });
 
   it("clears on adc/sbb/xadd, whose result the lifter does not name", () => {

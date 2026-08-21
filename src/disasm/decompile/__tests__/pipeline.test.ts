@@ -798,10 +798,20 @@ describe("decompileFunction — IOCTL annotation", () => {
  * the "compiles while lying" failure this project has been bitten by.
  */
 describe("decompileFunction — what the emitter says when recovery failed", () => {
-  /** `bt` sets CF from a bit test; nothing models CF, so the `jb` has no condition. */
+  /**
+   * `rol` writes CF and OF only, so a `jb` after it reads a flag this
+   * whole-flags model cannot attribute and the guard has no condition.
+   *
+   * This was `bt eax, 3 / jb` until peek-a-bin-frt8, which recovers exactly that
+   * shape — CF after a `bt` is the selected bit of an unmodified operand, so it
+   * is spellable. These three tests are about the *emitter's* placeholder
+   * machinery and only ever needed some unrecoverable guard; `rol` is one whose
+   * CF really is a function of nothing the IR names. (`bt` with a memory bit
+   * base is another, and is asserted as such in `flagModel.test.ts`.)
+   */
   const unrecoveredCondition = (): Instruction[] =>
     seq(0x401000, [
-      ["bt", "eax, 3"],
+      ["rol", "eax, 3"],
       ["jb", "0x401014"],
       ["mov", "ecx, 1"],
       ["ret"],
@@ -830,12 +840,12 @@ describe("decompileFunction — what the emitter says when recovery failed", () 
   it("gives two unrecovered values two names, since they are two facts", () => {
     const code = run(
       seq(0x401000, [
-        ["bt", "eax, 3"],
+        ["rol", "eax, 3"],
         ["jb", "0x401014"],
         ["mov", "ecx, 1"],
         ["jmp", "0x401018"],
         ["mov", "ecx, 2"], // 0x401010
-        ["bt", "edx, 1"], // 0x401014
+        ["rol", "edx, 1"], // 0x401014
         ["jb", "0x401028"],
         ["mov", "esi, 3"],
         ["ret"],
@@ -6581,5 +6591,195 @@ describe("decompileFunction — a lock-prefixed read-modify-write lifts as its b
     );
 
     expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+});
+
+/**
+ * `bt <reg>, <imm> / jb` tests one bit, and the guard says which.
+ *
+ * `bt` is in `PARTIAL_FLAG_WRITERS`, so `flagEffect` clobbered on it and the Jcc
+ * reading its CF was left unrecovered — 34 sites across the four corpus
+ * binaries, every one of them in an MSVC `_bittest`-style flag check where the
+ * neighbouring bits were tested with `test r11b, 1` and read perfectly well.
+ * The blocker was literal: `bt` fell to the `raw` fallback, so the emitted C
+ * carried `/* unlifted: bt r11d, 0xa *\/;` and nothing named the value
+ * (peek-a-bin-frt8).
+ *
+ * **`bt` is a compare over one bit, not a read-modify-write**, and modelling it
+ * as either of the existing kinds would be wrong. It writes NO value: the bit
+ * base is unmodified, so there is no "read the destination after it ran" step —
+ * `FlagOwnerResult`'s whole premise — and the condition is an expression over
+ * the operand as written. Hence a third owner kind, `bittest`, and a `RegState`
+ * flag op of the same name whose `getCondition` arm answers **only** the
+ * CF-reading Jccs.
+ *
+ * ZF is where that restriction earns its keep. Intel: "The CF flag contains the
+ * value of the selected bit. The ZF flag is **unaffected**." So a `je` after a
+ * `bt` genuinely branches on an older instruction's ZF, and answering it from
+ * the bit would be a wrong test rather than a missing one — the exact opposite
+ * of `test`, which pins OF and CF to 0 and therefore answers strictly MORE Jcc
+ * forms than a result owner (peek-a-bin-92yy). The two look parallel and are not.
+ */
+describe("decompileFunction — a bt names the bit its jcc tests", () => {
+  /** The emitted guards, or ["<unrecovered>"] where the condition was admitted. */
+  function guardTexts(code: string): string[] {
+    return guardConditions(code).map((c) => (/__unrecovered_\d+/.test(c) ? "<unrecovered>" : c));
+  }
+
+  /** t64.exe 0x140003BB5, the bead's own witness: `bt r11d, 0xa / jb`. */
+  function btThen(jcc: string, ops = "r11d, 0xa"): string {
+    return run(
+      seq(0x401000, [
+        ["bt", ops],
+        [jcc, "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+  }
+
+  it("spells jb as the selected bit being set", () => {
+    expect(guardTexts(btThen("jb"))).toEqual(["(r11d >> 0xA & 1) != 0"]);
+  });
+
+  it("spells jae as the selected bit being clear", () => {
+    expect(guardTexts(btThen("jae"))).toEqual(["(r11d >> 0xA & 1) == 0"]);
+  });
+
+  it("emits no unlifted comment for the bt it now models", () => {
+    // `bt` writes no value, so like `cmp` and `test` it contributes no
+    // statement at all — the flags reach the page as the branch's condition.
+    expect(btThen("jb")).not.toContain("unlifted");
+  });
+
+  it("reduces the bit offset modulo the operand size, as the machine does", () => {
+    expect(guardTexts(btThen("jb", "eax, 0x21"))).toEqual(["(eax >> 1 & 1) != 0"]);
+  });
+
+  // ── Negative controls: the Jcc forms and operand forms that stay refused ──
+
+  it("refuses a ZF-reading jcc after a bt, because bt leaves ZF alone", () => {
+    // The single most important assertion here. `je` after a `bt` reads an older
+    // instruction's ZF, which this whole-flags model cannot name — so an
+    // admitted gap is the honest answer and a bit test would be a wrong one.
+    expect(guardTexts(btThen("je"))).toEqual(["<unrecovered>"]);
+    expect(guardTexts(btThen("jne"))).toEqual(["<unrecovered>"]);
+    expect(guardTexts(btThen("jg"))).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses a memory bit base, whose offset can address outside the operand", () => {
+    // t32.exe 0x40B678 and w32.exe 0x40A3A8 are exactly this — MSVC's
+    // `_bittest` on a stack temporary — and it is why bucket 1 recovers nothing
+    // on the PE32 pair. With a memory bit base the offset indexes a bit string,
+    // so `(*(uint32_t*)esp >> eax) & 1` is right only while `eax < 32`, which
+    // nothing proves. The instruction keeps its verbatim comment.
+    const code = run(
+      seq(0x401000, [
+        ["bt", "dword ptr [esp], eax"],
+        ["jae", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain("unlifted: bt dword ptr [esp], eax");
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses a register bit offset", () => {
+    const code = btThen("jb", "eax, ecx");
+    expect(code).toContain("unlifted: bt eax, ecx");
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("keeps bts/btr/btc refused — their CF is the bit BEFORE the write", () => {
+    // `bts` sets the bit and leaves CF holding its previous value, so nothing
+    // readable after the instruction names what the Jcc tested. 54 `bts` and 10
+    // `btr` sites on t64 stay unlifted, deliberately.
+    for (const mn of ["bts", "btr", "btc"]) {
+      const code = run(
+        seq(0x401000, [
+          [mn, "r13d, 0xf"],
+          ["jb", "0x401018"],
+          ["mov", "eax, 1"],
+          ["ret"],
+          ["mov", "eax, 2"],
+          ["ret"],
+        ]),
+        true,
+      );
+      expect(code, mn).toContain(`unlifted: ${mn} r13d, 0xf`);
+      expect(guardTexts(code), mn).toEqual(["<unrecovered>"]);
+    }
+  });
+
+  it("refuses a bt whose bit base a later instruction overwrote", () => {
+    // `spoils`, over the one register there is to watch. The block's statements
+    // are emitted above the `if`, so a guard naming `r11d` here would read the
+    // value the `mov` put there rather than the bits that were tested.
+    const code = run(
+      seq(0x401000, [
+        ["bt", "r11d, 0xa"],
+        ["mov", "r11d, edx"],
+        ["jb", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses a bt in a block that also holds a cmp", () => {
+    // Refusal 3 in `branchFor`, applied to the new arm for the same reason it
+    // applies to a result: `corpus/staleGuards.ts` reads ANY condition emitted
+    // at such a jcc as the superseded one, and that gate is at 0.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["bt", "r11d, 0xa"],
+        ["jb", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("does not leave an earlier compare standing across a refused bt", () => {
+    // The clear `liftBlock`'s `bt` case has to make by hand. `bt` is in
+    // `FLAG_MODELLED`, which suppresses the deferred clear at the top of the
+    // loop, so a form `parseBitTest` refuses must clear the flags itself — and
+    // the reader that would otherwise see the stale `cmp` is `setcc`, not the
+    // Jcc: `branchFor` asks `blockFlagOwner`, whose own forward walk clobbers on
+    // the refused `bt` in any case, while `setne` reads `regState` directly.
+    // Without the clear this emits `dl = (eax != 5)`, a value the machine does
+    // not compute — peek-a-bin-jitf one mnemonic further on.
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 5"],
+        ["bt", "dword ptr [esp], edx"],
+        ["setne", "dl"],
+        // A reader for DL, or DCE deletes the `setne` and the whole question
+        // with it — which is itself worth knowing about this shape.
+        ["movzx", "eax, dl"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toContain("eax != 5");
+    expect(code).toMatch(/__unrecovered_\d+ \/\* jne \*\//);
   });
 });

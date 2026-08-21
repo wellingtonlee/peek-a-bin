@@ -15,7 +15,7 @@ export class RegState {
   // somewhere the caller can name (`setFlagsFromResult`).
   flagLeft: IRExpr | null = null;
   flagRight: IRExpr | null = null;
-  flagOp: "cmp" | "test" | "result" | null = null;
+  flagOp: "cmp" | "test" | "result" | "bittest" | null = null;
 
   /**
    * Canonical registers whose current value has already been *read* by a later
@@ -144,6 +144,40 @@ export class RegState {
     this.flagRight = irConst(0, result.kind === "reg" || result.kind === "deref" ? result.size : 4);
   }
 
+  /**
+   * Flags left by `bt <reg>, <imm>` — CF holds the selected bit and nothing else
+   * is usable.
+   *
+   * `bt` is the one x86 form whose entire output is a single bit, and it writes
+   * **no value at all**: the bit base is unmodified, so unlike
+   * `setFlagsFromResult` there is no "read the destination afterwards" step and
+   * `base` is the operand as the instruction names it. The extraction is built
+   * here, once, so the spelling of "bit `n` of `base`" has a single declaration
+   * (peek-a-bin-frt8).
+   *
+   * `>>` rather than `>>>` deliberately. Both are correct — the `& 1` discards
+   * everything the sign extension could contribute — and `emitLogicalShiftRight`
+   * turns a `>>>` whose operand width it cannot determine into an
+   * `__unrecovered_N`, which after copy propagation has folded a call result or
+   * an arithmetic expression into `base` would trade a recovered guard for an
+   * admitted one. `bitIndex` is already reduced modulo the operand size by
+   * `parseBitTest`, so the shift can never contradict the width.
+   *
+   * Only the CF-reading Jcc forms are answerable, and `getCondition`'s
+   * `bittest` arm says so: ZF is **unaffected** by `bt`, so a `je` after one
+   * reads whatever set it last and answering it from here would be a wrong test
+   * rather than a missing one.
+   */
+  setFlagsFromBitTest(base: IRExpr, bitIndex: number): void {
+    this.flagOp = "bittest";
+    this.flagLeft = irBinary(
+      "&",
+      irBinary(">>", base, irConst(bitIndex, base.kind === "reg" ? base.size : 4)),
+      irConst(1, base.kind === "reg" ? base.size : 4),
+    );
+    this.flagRight = irConst(0, base.kind === "reg" ? base.size : 4);
+  }
+
   /** Map a Jcc mnemonic to an IR condition expression from current flag state. */
   getCondition(jcc: string): IRExpr {
     const left = this.flagLeft;
@@ -151,6 +185,28 @@ export class RegState {
 
     if (!left || !right) {
       return { kind: "unknown", text: jcc };
+    }
+
+    // `bt <reg>, <imm>` (see `setFlagsFromBitTest`). CF is the selected bit and
+    // `left` is the extraction of it, so the two CF-reading Jcc forms are exact.
+    // Everything else must stay unknown, and for a stronger reason than the
+    // `result` arm's: `bt` leaves ZF **unaffected** rather than undefined, so a
+    // `je` after one really does branch on an older instruction's ZF. Answering
+    // it from the bit would be a wrong test, not a missing one — and this model
+    // is whole-flags, so it has no way to name that older owner.
+    if (this.flagOp === "bittest") {
+      switch (jcc) {
+        case "jb":
+        case "jc":
+        case "jnae":
+          return irBinary("!=", left, right);
+        case "jae":
+        case "jnb":
+        case "jnc":
+          return irBinary("==", left, right);
+        default:
+          return { kind: "unknown", text: `${jcc} after bt` };
+      }
     }
 
     // An instruction that left its result in `left` (see `setFlagsFromResult`).

@@ -125,6 +125,18 @@ Two details in `sweep.ts` are load-bearing and must not be "simplified":
 - Candidate edges are resolved **through `jmp`-only blocks**. `jne exit / jmp top` is an ordinary
   MSVC loop entry, and matching the nearer jcc anchors to the wrong test — which produced a false
   INVERTED on a real function. A body two jccs can reach is *ambiguous and skipped*, never guessed.
+- `TAKEN` is a **`cmp` model**, and `BIT_TAKEN` is the one place it is widened. It maps each jcc to
+  the operator of the magnitude comparison its flags describe, which is right for a `cmp` and for
+  every `test`-owned form that reduces to a comparison against zero — and simply the wrong
+  vocabulary for a `bt`, where CF is bit *n* of the operand and no `<`- or `>=`-shaped spelling of
+  "that bit is set" exists. `BIT_TAKEN` gives `jb → !=` and `jae → ==` for a jcc whose
+  **immediately preceding instruction** is a `bt`, decided from the machine text with no
+  flag-transparency reasoning, so a `bt` one instruction further away keeps `TAKEN`'s expectation
+  and is reported MISMATCH — the widening is exactly as narrow as the fact justifying it. **It is a
+  widening, not a weakening, and that is checkable**: `NEG` maps `!=` and `==` to each other, so a
+  bit-test guard emitted at the wrong polarity is still INVERTED and one emitted as a magnitude
+  comparison is still MISMATCH. Negative-controlled — flipping the decompiler's `bittest` arm makes
+  the run exit 1 with `inverted=8` on t64 and `inverted=5` on w64 (`peek-a-bin-frt8`).
 
 Three anchors are reported and only one gates:
 

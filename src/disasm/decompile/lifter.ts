@@ -8,6 +8,7 @@ import {
   blockFlagOwner,
   canSpellCondition,
   isFlagTransparent,
+  parseBitTest,
   withoutLockPrefix,
 } from "./flagModel";
 import type { BinaryOp, IRBranch, IRCall, IRExpr, IRStmt } from "./ir";
@@ -298,8 +299,14 @@ const SSE_SCALAR = new Map<string, BinaryOp | null>([
  * whatever an earlier compare recorded. Membership is deliberately narrow: a
  * mnemonic wrongly *in* this set makes a Jcc answer from a test the machine no
  * longer holds, while one wrongly left out only costs a recovery.
+ *
+ * `bt` is a member and is the one whose handler has to clear the flags itself.
+ * Membership suppresses the deferred clear at the top of `liftBlock`'s loop, and
+ * only the forms `parseBitTest` admits are actually recorded — so the `bt` case
+ * calls `clearFlags()` on the forms it refuses, or a `bt` this file gave up on
+ * would leave an earlier `cmp` standing (peek-a-bin-frt8).
  */
-const FLAG_MODELLED = new Set(["cmp", "test", "comiss", "comisd", "ucomiss", "ucomisd"]);
+const FLAG_MODELLED = new Set(["cmp", "test", "bt", "comiss", "comisd", "ucomiss", "ucomisd"]);
 
 /** Does this block contain a `cmp` or `test` before its final instruction? */
 function blockHasCompare(block: BasicBlock): boolean {
@@ -431,6 +438,29 @@ function branchFor(
       // makes it the owner — so `regState` still holds exactly this compare.
       condition = regState.getCondition(jcc);
     }
+  } else if (owned.owner.kind === "bittest") {
+    // `bt <reg>, <imm> / jb` — CF is the selected bit of an operand the
+    // instruction does not modify, so the condition is an expression over the
+    // bit base as the instruction names it, and there is no "read the
+    // destination afterwards" step to get wrong. `getCondition`'s `bittest` arm
+    // answers `jb`/`jc`/`jnae` and `jae`/`jnb`/`jnc` and refuses every other
+    // Jcc, because `bt` leaves ZF *unaffected* rather than undefined and a `je`
+    // here really does read an older instruction's flags.
+    //
+    // `blockHasCompare` is asked for the same reason it is asked of a result:
+    // `corpus/staleGuards.ts` reads ANY condition emitted at a jcc in a block
+    // that also holds a `cmp`/`test` as the superseded reading, and that gate is
+    // at 0. Recovering that shape is a decision to take with the audit rather
+    // than a side effect of this wiring (peek-a-bin-frt8).
+    if (!canSpellCondition(owned.owner)) return null;
+    if (blockHasCompare(ownerBlock)) return null;
+    const bitOwner = owned.owner;
+    const state = new RegState();
+    state.setFlagsFromBitTest(
+      parseOperand(bitOwner.destText, bitOwner.insn, is64),
+      bitOwner.bitIndex,
+    );
+    condition = state.getCondition(jcc);
   } else {
     if (!canSpellCondition(owned.owner) || owned.owner.kind !== "result") return null;
     if (blockHasCompare(ownerBlock)) return null;
@@ -804,6 +834,46 @@ export function liftBlock(
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
       }
+      continue;
+    }
+
+    // ── bt → flag state, and no statement ──
+    //
+    // `bt` is a compare over one bit: it writes **no value whatever**, only CF,
+    // which holds the selected bit of an unmodified operand. So it belongs with
+    // `cmp`/`test` below rather than with the read-modify-writes it looks like,
+    // and like them it contributes no statement — the flags reach the page as
+    // the *condition* of the block's branch, which is a real IR reader of the
+    // bit base and holds its definition alive through DCE.
+    //
+    // Until peek-a-bin-frt8 it fell to the `raw` fallback at the bottom of this
+    // loop, so `bt r11d, 0xa / jb` printed `/* unlifted: bt r11d, 0xa */;`
+    // above `if (!__unrecovered_1 /* jb */)` — 34 sites across the four corpus
+    // binaries, in MSVC's `_bittest`-style flag checks, where the neighbouring
+    // bits were tested with `test r11b, 1` and read perfectly well.
+    //
+    // **`parseBitTest` is asked, not the mnemonic**, and that is the whole
+    // safety property: it is the same predicate `flagEffect` uses to decide
+    // whether the instruction owns the flags at all, so a form this file lifts
+    // is exactly a form that model will name, and a form it refuses keeps its
+    // verbatim `raw` comment AND clears the flags. Clearing explicitly is
+    // required because `bt` is in `FLAG_MODELLED`: the deferred clear at the top
+    // of the loop will not fire for it, so a refused `bt` would otherwise leave
+    // an earlier `cmp` standing and answer the Jcc from a test the machine no
+    // longer holds — peek-a-bin-jitf, one mnemonic further on.
+    //
+    // The residual cost is small and real: a `bt` whose Jcc reads no CF now
+    // contributes nothing at all rather than a comment. There are 0 such sites
+    // in this corpus — every one of the 30 admissible `bt`s is followed by `jb`
+    // or `jae` — and it is the same trade `cmp` has always made.
+    if (mn === "bt") {
+      const bit = parseBitTest(insn);
+      if (!bit) {
+        regState.clearFlags();
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      regState.setFlagsFromBitTest(parseOperand(bit.destText, insn, is64), bit.bitIndex);
       continue;
     }
 
