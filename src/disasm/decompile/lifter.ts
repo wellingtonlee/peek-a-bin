@@ -648,6 +648,60 @@ export function liftBlock(
 
     // ── mov ──
     if (mn === "mov") {
+      // On x64 a 32-bit self-move is a ZERO-EXTENSION, not a no-op: writing a
+      // 32-bit register clears bits 63:32 of its 64-bit parent, and MSVC emits
+      // `mov r8d, r8d` deliberately for exactly that effect. Lifted as a plain
+      // `assign r8d = r8d` it is structurally a copy, so `copyPropagation`'s
+      // `isCopyStmt` deletes it and rewrites the readers to the *pre*-truncation
+      // version — correctly, by its own rule, since nothing in that statement
+      // says the high half was cleared. The truncation has to be in the
+      // expression, and `x & 0xFFFFFFFF` over a 64-bit operand is the spelling
+      // `foldExpr` already refuses to strip for this very reason: `narrowEnough-
+      // ForMask32` keeps the mask whenever the left operand is wider than it
+      // (peek-a-bin-6hw). The destination is the 64-bit parent because that is
+      // what the instruction defines — all 64 bits — and it is what makes the
+      // mask read as the truncation it is.
+      //
+      // Scoped three ways, and each bound is load-bearing:
+      //   • `is64` only. On PE32 `mov edi, edi` is MSVC's hot-patch pad and a
+      //     true no-op; the two 32-bit binaries carry 173 and 170 of them and
+      //     are the control.
+      //   • 32-bit only. `mov al, al` and `mov ax, ax` do NOT clear the upper
+      //     bits — a byte or word write leaves them alone — and `mov rax, rax`
+      //     really is a no-op. Only the 32-bit width zero-extends.
+      //   • the LIFT only. `firstCalleeSavedWrites` below must keep reading
+      //     `mov X, X` as a non-definition: generalising that test withdrew the
+      //     zeroing at t32 0x4068C6 and turned four real `Sleep(esi)` calls per
+      //     x86 binary into `Sleep()`.
+      //
+      // Population is exactly 5 on t64 and 3 on w64 (4 and 2 `mov r8d, r8d`,
+      // one `mov eax, eax` each) and 0 at any other width. Six of the eight are
+      // the whole content of a `bt r12d/r13d, 0xc / jb` arm, so before this the
+      // arm lifted to nothing, `cleanup.ts` dropped the empty `if` and the
+      // region left the output together with the `(0x8000 & r12d) == 0` test
+      // above it (peek-a-bin-tez6, found as collateral of peek-a-bin-frt8). The
+      // other two feed a 64-bit `sub rbp, rax` two bytes later, where the
+      // emitted C read the untruncated value (t64 0x140002BD6, w64 0x140003072).
+      if (
+        is64 &&
+        parts.length === 2 &&
+        parts[0].trim().toLowerCase() === parts[1].trim().toLowerCase()
+      ) {
+        const name = parts[0].trim().toLowerCase();
+        // `isKnownRegister` first: `regSize` falls back to 4 for anything it
+        // does not recognise, so a width test alone admits every string. ESP is
+        // excluded for the reason the `pop` path above excludes it — RSP is the
+        // one register no stage here models, so a definition of it would be read
+        // by the frame analysis as a value it can move. 0 occurrences in this
+        // corpus, so it is a bound on the rule rather than a measured saving.
+        if (isKnownRegister(name) && regSize(name) === 4 && canonReg(name) !== "rsp") {
+          const canon = canonReg(name);
+          const src = irBinary("&", irReg(canon), irConst(0xffffffff, 8));
+          stmts.push({ kind: "assign", dest: irReg(canon), src, addr: insn.address });
+          regState.set(canon, src);
+          continue;
+        }
+      }
       if (parts.length < 2) {
         stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;

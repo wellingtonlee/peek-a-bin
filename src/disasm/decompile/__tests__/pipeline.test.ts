@@ -6783,3 +6783,79 @@ describe("decompileFunction — a bt names the bit its jcc tests", () => {
     expect(code).toMatch(/__unrecovered_\d+ \/\* jne \*\//);
   });
 });
+
+/**
+ * `mov <r32>, <same r32>` on x64 is a ZERO-EXTENSION, not a no-op
+ * (peek-a-bin-tez6).
+ *
+ * Both directions are pinned because one rule has to be true of both: the x64
+ * sites must state the truncation, and the 173 + 170 PE32 hot-patch pads must
+ * stay exactly as they were.
+ */
+describe("a 32-bit self-move", () => {
+  it("states the zero-extension it performs on x64", () => {
+    // t64.exe 0x140002BD6, the site whose value reaches arithmetic: a call
+    // returns in EAX, `mov eax, eax` clears RAX's high half, and `sub rbp, rax`
+    // two bytes later reads all 64 bits. Lifted as a plain `assign rax = rax`
+    // this is structurally a copy, so `copyPropagation` deletes it and RBP is
+    // decremented by the UNTRUNCATED value — a wrong value in C that compiles.
+    const code = run(
+      seq(0x140001000, [
+        ["call", "0x140008804"],
+        ["mov", "eax, eax"],
+        ["sub", "rbp, rax"],
+        ["mov", "rax, rbp"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    // The mask has to SURVIVE `foldExpr` as well as `copyPropagation`:
+    // `x & 0xFFFFFFFF` is stripped only when the left operand is no wider than
+    // the mask (peek-a-bin-6hw), so the 64-bit destination is what keeps it on
+    // the page. Where the truncated value has a single reader `foldBlock`
+    // inlines it into that reader, so the mask is asserted at the subtraction
+    // rather than as a statement of its own.
+    expect(code).toMatch(/rbp - \(rax & 0xFFFFFFFF\)/);
+  });
+
+  it("brings back a guarded arm whose only content is the self-move", () => {
+    // t64.exe 0x14000523F: `bt r12d, 0xc / jb <skip> / mov r8d, r8d`, where the
+    // self-move is the ENTIRE arm. With nothing lifted for it the arm is empty,
+    // `cleanup.ts` drops the `if`, and the test the machine makes leaves the
+    // output. R8 is read at 64 bits below, which is what makes it matter.
+    const code = run(
+      seq(0x140001000, [
+        ["bt", "r12d, 0xc"],
+        ["jb", "0x140001010"],
+        ["mov", "r8d, r8d"],
+        ["mov", "rax, r8"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toMatch(/rax = r8 & 0xFFFFFFFF/);
+    expect(code).toMatch(/r12d >> 0xC & 1/);
+  });
+
+  it("is left alone on PE32, where it is a true no-op", () => {
+    // MSVC's hot-patch pad — 173 in t32.exe, 170 in w32.exe. A 32-bit image has
+    // no register above the one being written, so nothing is cleared and there
+    // is nothing to state. The two x86 binaries are this change's control.
+    const code = run(seq(0x401000, [["mov", "edi, edi"], ["mov", "eax, edi"], ["ret"]]));
+
+    expect(code).not.toContain("0xFFFFFFFF");
+  });
+
+  it("is left alone at byte, word and 64-bit width on x64", () => {
+    // Only the 32-bit width zero-extends: a byte or word write leaves its
+    // parent's upper bits untouched, and `mov rax, rax` writes what it read.
+    // 0 occurrences of any of these three in the corpus, so this is the rule's
+    // bound rather than a measured population.
+    for (const operands of ["al, al", "ax, ax", "rax, rax"]) {
+      const code = run(seq(0x140001000, [["mov", operands], ["ret"]]), true);
+      expect(code).not.toContain("0xFFFFFFFF");
+    }
+  });
+});
