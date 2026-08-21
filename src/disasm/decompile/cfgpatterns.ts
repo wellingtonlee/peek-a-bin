@@ -1,5 +1,5 @@
 import type { BasicBlock } from "../cfg";
-import type { IRExpr, IRStmt } from "./ir";
+import type { IRAssign, IRExpr, IRStmt } from "./ir";
 import { irBinary, irConst } from "./ir";
 import { RegState } from "./regstate";
 
@@ -92,13 +92,88 @@ export function detectShortCircuit(
 }
 
 /**
+ * Is this statement an increment of its own destination — `x = x + c`, `x = x - c`?
+ *
+ * The candidate update of a `for`. Register names are compared case-insensitively
+ * because the lifter's spelling of one is whatever Capstone printed.
+ */
+function isSelfIncrement(stmt: IRStmt): stmt is IRAssign {
+  if (stmt.kind !== "assign") return false;
+  if (stmt.src.kind !== "binary") return false;
+  if (stmt.src.op !== "+" && stmt.src.op !== "-") return false;
+  if (stmt.src.right.kind !== "const") return false;
+  const d = stmt.dest;
+  const l = stmt.src.left;
+  return (
+    (d.kind === "reg" && l.kind === "reg" && d.name.toLowerCase() === l.name.toLowerCase()) ||
+    (d.kind === "var" && l.kind === "var" && d.name === l.name)
+  );
+}
+
+/** Do these two destinations name the same register or the same variable? */
+function sameDest(a: IRExpr, b: IRExpr): boolean {
+  if (a.kind === "reg" && b.kind === "reg") return a.name.toLowerCase() === b.name.toLowerCase();
+  if (a.kind === "var" && b.kind === "var") return a.name === b.name;
+  return false;
+}
+
+/**
+ * The last assignment to `dest` in any of `preds`, or null.
+ *
+ * `preds` is searched in order and the first block with a match wins, which is
+ * the caller's problem rather than this function's: the caller passes only
+ * blocks outside the loop, so every candidate is a genuine pre-loop write.
+ */
+function lastAssignTo(
+  dest: IRExpr,
+  preds: number[],
+  liftedBlocks: Map<number, IRStmt[]>,
+): IRStmt | null {
+  for (const predId of preds) {
+    const stmts = liftedBlocks.get(predId);
+    if (!stmts) continue;
+    for (let i = stmts.length - 1; i >= 0; i--) {
+      const s = stmts[i];
+      if (s.kind === "assign" && sameDest(s.dest, dest)) return s;
+    }
+  }
+  return null;
+}
+
+/**
  * Detect for-loop pattern:
  *   init block → header (cmp) → body → increment → back to header
  *
  * Requires:
  * - Header block ends with conditional jump (loop test)
- * - Body ends with an assignment that looks like an increment (x = x + 1, x += 1)
- * - An init assignment exists before the loop
+ * - A body block ends with an assignment that looks like an increment (x = x + 1)
+ * - An init assignment to the same place exists before the loop
+ *
+ * TWO THINGS THE SEARCH DELIBERATELY DOES, both of which it used not to
+ * (`peek-a-bin-9q2`, census at `bd73798`):
+ *
+ * **Every increment-shaped statement is a candidate, and the first one with an
+ * init wins.** A loop body can increment more than one thing — MSVC's
+ * newline-counting loop is `for (p = start; p < end; p++) if (*p == '\n') n++;`,
+ * whose *conditionally* incremented counter sits in a lower-numbered block than
+ * the latch. Committing to the first candidate in block-id order picked `n`,
+ * failed to find an init for it (there is none: `n` comes in from an enclosing
+ * scope) and returned null, so the loop was emitted as a `while` — 26 loops
+ * corpus-wide, 8/8/5/5 on t32/t64/w64/w32. The candidate that runs last on
+ * every iteration is the one the caller's guard demands anyway, so trying the
+ * rest costs nothing and claims nothing: a candidate is only ever *offered*,
+ * and `structureCFG` still refuses it unless it is the final statement of the
+ * structured body.
+ *
+ * **A predecessor inside the loop body is not a source of inits.** The back-edge
+ * test used to be `p < header.id`, block-id order standing in for "before the
+ * loop" — and the latch is routinely numbered below its header, so in 19/18/15/16
+ * of the loops reaching here one of the "pre-loop" predecessors was a body
+ * block. Reading an init out of one means reading it out of the loop, and the
+ * statement found is often the update itself. It has been harmless so far only
+ * because `structureFrom` cannot find such a statement in the code it has
+ * already emitted and demotes the `for` back to a `while`; the loop body is the
+ * fact, so it is what gets asked.
  */
 export function detectForLoop(
   header: BasicBlock,
@@ -113,84 +188,49 @@ export function detectForLoop(
 } | null {
   if (bodyBlocks.length === 0) return null;
 
-  // Search all body blocks for increment pattern: x = x + const or x = x - const
-  let updateStmt: IRStmt | null = null;
-  let updateBlockId: number | null = null;
+  // Every body block whose last statement increments its own destination, in
+  // block-id order. More than one is ordinary rather than exceptional — see the
+  // docstring — so the list is kept instead of the first entry.
+  const candidates: Array<{ update: IRAssign; blockId: number }> = [];
   for (const bid of bodyBlocks) {
     const stmts = liftedBlocks.get(bid);
     if (!stmts || stmts.length === 0) continue;
     const last = stmts[stmts.length - 1];
-    if (last.kind !== "assign") continue;
-    if (last.src.kind !== "binary") continue;
-    if (last.src.op !== "+" && last.src.op !== "-") continue;
-    if (last.src.right.kind !== "const") continue;
-    const d = last.dest;
-    const sl = last.src.left;
-    const isInc =
-      (d.kind === "reg" && sl.kind === "reg" && d.name.toLowerCase() === sl.name.toLowerCase()) ||
-      (d.kind === "var" && sl.kind === "var" && d.name === sl.name);
-    if (isInc) {
-      updateStmt = last;
-      updateBlockId = bid;
-      break;
-    }
+    if (isSelfIncrement(last)) candidates.push({ update: last, blockId: bid });
   }
-  if (!updateStmt || updateBlockId === null || updateStmt.kind !== "assign") return null;
-  const lastStmt = updateStmt;
-  const dest = lastStmt.dest;
+  if (candidates.length === 0) return null;
 
-  // Look for init: assignment to the same variable before the loop
-  // Check the header's predecessors (not back-edges) for an init
-  const initPreds = header.preds.filter((p) => {
-    // Not a back-edge: predecessor should come before header in block order
-    return p < header.id;
-  });
+  // Where an init can come from: a predecessor of the header that is not part
+  // of the loop. The header itself is named explicitly because
+  // `collectLoopBodyBlockIds` omits it, so a self-loop would otherwise offer
+  // its own statements as pre-loop ones.
+  const initPreds = header.preds.filter((p) => p !== header.id && !bodyBlocks.includes(p));
 
-  let initStmt: IRStmt | null = null;
-  for (const predId of initPreds) {
-    const predStmts = liftedBlocks.get(predId);
-    if (!predStmts) continue;
-    // Find last assignment to our loop variable
-    for (let i = predStmts.length - 1; i >= 0; i--) {
-      const s = predStmts[i];
-      if (s.kind === "assign") {
-        const sDest = s.dest;
-        const matches =
-          (sDest.kind === "reg" &&
-            dest.kind === "reg" &&
-            sDest.name.toLowerCase() === dest.name.toLowerCase()) ||
-          (sDest.kind === "var" && dest.kind === "var" && sDest.name === dest.name);
-        if (matches) {
-          initStmt = s;
-          break;
-        }
+  for (const cand of candidates) {
+    const initStmt = lastAssignTo(cand.update.dest, initPreds, liftedBlocks);
+    if (!initStmt) continue;
+
+    // Collect body stmts (excluding the increment at the end)
+    const bodyStmts: IRStmt[] = [];
+    for (const bid of bodyBlocks) {
+      const stmts = liftedBlocks.get(bid) ?? [];
+      if (bid === cand.blockId) {
+        bodyStmts.push(...stmts.slice(0, -1)); // exclude increment
+      } else {
+        bodyStmts.push(...stmts);
       }
     }
-    if (initStmt) break;
+
+    // The condition is the header's, which only the caller can extract; it
+    // documents that it always overrides this placeholder.
+    return {
+      init: initStmt,
+      condition: irConst(1), // placeholder
+      update: cand.update,
+      bodyStmts,
+    };
   }
-
-  if (!initStmt) return null;
-
-  // Collect body stmts (excluding the increment at the end)
-  const bodyStmts: IRStmt[] = [];
-  for (const bid of bodyBlocks) {
-    const stmts = liftedBlocks.get(bid) ?? [];
-    if (bid === updateBlockId) {
-      bodyStmts.push(...stmts.slice(0, -1)); // exclude increment
-    } else {
-      bodyStmts.push(...stmts);
-    }
-  }
-
-  // We need the condition from the header
-  // The caller should extract this and pass it in
-  // For now, return null for the condition (caller will fill it in)
-  return {
-    init: initStmt,
-    condition: irConst(1), // placeholder
-    update: lastStmt,
-    bodyStmts,
-  };
+  return null;
 }
 
 /**

@@ -334,12 +334,38 @@ describe("detectForLoop", () => {
     expect(res?.init).toBe(second);
   });
 
-  it("ignores predecessors whose id is above the header (assumed back-edges)", () => {
-    // The back-edge filter is `pred.id < header.id`, so an initialiser in a
-    // later-numbered block is never found. Real initialisers precede the
-    // header in address order, so this only costs a for/while downgrade.
+  it("ignores a predecessor that is inside the loop body", () => {
+    // The back edge is the one thing an init may not come from, and the test
+    // for it is membership of the loop body — not `pred.id < header.id`, which
+    // this used to assert as the rule. A latch is routinely numbered BELOW its
+    // header (19/18/15/16 of the loops reaching this site on t32/t64/w64/w32
+    // at `bd73798` have a body block among the "pre-loop" predecessors), so
+    // the proxy admitted in-loop writes as initialisers far more often than it
+    // rejected real ones.
+    const hdr = block(4, { succs: [2, 3], preds: [2], end: ["jge", 3] });
+    expect(forLoop({ 2: [initReg("ecx", 0), incReg("ecx")] }, [2], hdr)).toBeNull();
+  });
+
+  it("searches a predecessor numbered above the header when it is outside the loop", () => {
+    // The other half of the same correction: a block laid out after the loop
+    // can still jump into it, and its id says nothing about whether it runs
+    // first. The old `pred.id < header.id` filter refused this outright.
+    const init = initReg("ecx", 0);
     const hdr = block(1, { succs: [2, 3], preds: [5, 2], end: ["jge", 3] });
-    expect(forLoop({ 5: [initReg("ecx", 0)], 2: [incReg("ecx")] }, [2], hdr)).toBeNull();
+    expect(forLoop({ 5: [init], 2: [incReg("ecx")] }, [2], hdr)?.init).toBe(init);
+  });
+
+  it("tries every increment candidate, not just the first, for one with an init", () => {
+    // MSVC's newline count is `for (p = a; p < b; p++) if (*p == 'n') n++;` —
+    // the conditionally incremented counter sits in a lower-numbered block
+    // than the latch and has no initialiser inside the function, so committing
+    // to the first candidate in block-id order gave up on the whole loop. 26
+    // loops corpus-wide at `bd73798` (8/8/5/5 on t32/t64/w64/w32).
+    const init = initReg("edx", 0);
+    const hdr = block(4, { succs: [2, 3], preds: [0, 3], end: ["jge", 9] });
+    const res = forLoop({ 0: [init], 2: [incReg("ecx")], 3: [incReg("edx")] }, [2, 3], hdr);
+    expect(res?.init).toBe(init);
+    expect(res?.update).toEqual(incReg("edx"));
   });
 
   it("reports a placeholder condition for the caller to replace", () => {

@@ -2346,6 +2346,43 @@ describe("decompileFunction — a for loop keeps its body", () => {
     expect(code.match(/rcx = 0\b/g)).toHaveLength(1);
     expect(code).not.toMatch(/^\s*rcx = 0;$/m);
   });
+
+  /**
+   * MSVC's newline count, which is the shape `detectForLoop` used to give up on
+   * (peek-a-bin-9q2, census at `bd73798`).
+   *
+   *   for (rax = start; rax < end; rax++) if (*rax == '\n') counter++;
+   *
+   * The *conditionally* incremented counter is a self-increment too, and its
+   * block is numbered below the latch — so the first candidate in block-id
+   * order is `r8d`, whose initialiser is not in the function at all. Committing
+   * to it made the whole loop unrecognisable: 26 loops corpus-wide, of which
+   * this one shape (t64!sub_140003200 and w64!sub_14000356C) reached the page.
+   */
+  const countedLoopWithConditionalCounter = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "rax, qword ptr [rsi]"], // 401000 the real init
+      ["jmp", "0x401018"], // 401004 straight to the test
+      ["cmp", "byte ptr [rax], 0xa"], // 401008 body head
+      ["jne", "0x401014"], // 40100c
+      ["add", "r8d, 1"], // 401010 the counter — no init anywhere
+      ["add", "rax, 1"], // 401014 the latch update
+      ["cmp", "rax, rdi"], // 401018 the header test
+      ["jb", "0x401008"], // 40101c
+      ["mov", "eax, r8d"], // 401020 so the counter is read
+      ["ret"], // 401024
+    ]);
+
+  it("recognises the induction variable when another counter is incremented first", () => {
+    const code = run(countedLoopWithConditionalCounter(), true);
+
+    // The `for` names RAX, not the counter, and its init came out of the block
+    // above rather than being repeated there.
+    expect(code).toMatch(/for \(rax = [^;]+; [^;]+; rax\+\+\)/);
+    expect(code).not.toMatch(/^\s*while \(/m);
+    // The conditional counter stays conditional, inside the body.
+    expect(code).toMatch(/if \(\*\(uint8_t\*\)\(rax\) == 0xA\) \{\n\s*r8d\+\+;\n\s*\}/);
+  });
 });
 
 /**
