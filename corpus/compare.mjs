@@ -260,7 +260,32 @@ for (const b of bins) {
     row("  distinct clobbered values", (x) => x.clobbered.values);
     row("  functions affected", (x) => x.clobbered.funcsAffected);
     row("  if emitted", (x) => x.clobbered.ifs);
-    row("  while emitted", (x) => x.clobbered.whiles);
+    row("  while emitted (raw)", (x) => x.clobbered.whiles);
+    // LOOP SHAPE, and it is the property no gate here models — which is why
+    // `peek-a-bin-9q2`'s 4x fall in for-loop recognition happened with nothing
+    // recording it, and why every session since has counted these by hand.
+    //
+    // `whiles` is the raw `while (` match count and so is the SUM of a
+    // top-tested `while (c) {` and a do/while's `} while (c);` back edge; the
+    // row above keeps that meaning so a comparison against an artifact
+    // directory predating `doWhiles` is not a fake fall of exactly that many.
+    // These two rows are the split, and the top-tested figure is the one
+    // CLAUDE.md's loop-shape lines quote.
+    //
+    // REPORT-ONLY, in both directions, for the same reason as the clobbered
+    // rows above: a `for` that becomes a `while` is a fidelity loss rather than
+    // a wrong statement about the machine, the absolutes move whenever function
+    // detection does, and no threshold on any of them is established. What this
+    // buys is that a shape change between two pinned runs is a ROW rather than
+    // something the next agent has to think to count.
+    if (B.clobbered.doWhiles !== undefined && C.clobbered.doWhiles !== undefined) {
+      row("    of which do/while", (x) => x.clobbered.doWhiles);
+      row("    top-tested while", (x) => x.clobbered.whiles - x.clobbered.doWhiles);
+    } else {
+      note(
+        "    of which do/while           NOT MEASURED on both sides (a run predating the split)",
+      );
+    }
     row("  for emitted", (x) => x.clobbered.fors);
     row("  callee summaries non-empty", (x) => x.clobbered.summaryNonEmpty);
     row(

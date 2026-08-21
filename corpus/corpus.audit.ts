@@ -754,7 +754,8 @@ function renderReport(): string {
         `across ${cb.funcsAffected} functions — NOT a gate`,
     );
     L.push(
-      `    constructs emitted        ${cb.ifs} if, ${cb.whiles} while, ${cb.fors} for` +
+      `    constructs emitted        ${cb.ifs} if, ${cb.whiles - cb.doWhiles} while, ` +
+        `${cb.doWhiles} do/while, ${cb.fors} for` +
         (byReg ? `\n    by register:              ${byReg}` : ""),
     );
     L.push(

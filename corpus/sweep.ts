@@ -482,9 +482,22 @@ export interface BinResult {
     reads: number;
     funcsAffected: number;
     byRegister: Record<string, number>;
-    /** Emitted `if (`, `while (` and `for (` — the guard-deletion tell. */
+    /**
+     * Emitted `if (`, `while (` and `for (` — the guard-deletion tell.
+     *
+     * `whiles` is the RAW `while (` match count, so it is the sum of two
+     * different constructs: a top-tested `while (c) {` and the back-edge
+     * `} while (c);` of a do/while. It is left raw deliberately, because
+     * artifact directories from earlier commits carry it under that meaning and
+     * narrowing it here would make every old-vs-new comparison report a fall of
+     * exactly `doWhiles` as though output had been lost. `doWhiles` is the
+     * splitter: top-tested while is `whiles - doWhiles`, which is the figure
+     * CLAUDE.md's loop-shape lines quote, and which every session before this
+     * one counted by hand for want of it being here.
+     */
     ifs: number;
     whiles: number;
+    doWhiles: number;
     fors: number;
     summaryFuncs: number;
     summaryNonEmpty: number;
@@ -693,6 +706,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       byRegister: {},
       ifs: 0,
       whiles: 0,
+      doWhiles: 0,
       fors: 0,
       summaryFuncs: af.calleeClobbers.byAddress.size,
       summaryNonEmpty: [...af.calleeClobbers.byAddress.values()].filter((v) => v.length > 0).length,
@@ -882,6 +896,17 @@ function auditClobbered(res: BinResult): void {
     res.clobbered.ifs += f.code.match(/\bif \(/g)?.length ?? 0;
     res.clobbered.whiles += f.code.match(/\bwhile \(/g)?.length ?? 0;
     res.clobbered.fors += f.code.match(/\bfor \(/g)?.length ?? 0;
+    // The do/while back edge, which the `whiles` match above also counts. Read
+    // per line and anchored, because the two constructs are only separable by
+    // position: `} while (c);` closes a body, `while (c) {` opens one, and the
+    // same regex pair `siteOf` uses is what keeps them disjoint (the top-tested
+    // form admits `} else while`, which is why a bare `}` prefix cannot be it).
+    // Corroborated rather than assumed: over the four binaries of the run at
+    // `177ada8` the line-based split summed to the raw match count exactly —
+    // 114+78=192, 107+77=184, 100+76=176, 101+77=178.
+    for (const line of f.code.split("\n")) {
+      if (/^\}\s*while\s*\(/.test(line.trim())) res.clobbered.doWhiles++;
+    }
     const hits = [...f.code.matchAll(NAME)];
     if (hits.length === 0) continue;
     res.clobbered.funcsAffected++;
