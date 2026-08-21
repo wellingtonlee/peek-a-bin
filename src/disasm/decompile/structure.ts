@@ -2,8 +2,17 @@ import type { BasicBlock, Loop } from "../cfg";
 import { detectForLoop, detectMultiExitLoop, detectShortCircuit } from "./cfgpatterns";
 import type { ClobberScan } from "./flagModel";
 import { clobberedAfter, flagScanStream, isFlagTransparent, solePredecessor } from "./flagModel";
+import { hasSideEffects } from "./fold";
 import type { IRBranch, IRExpr, IRStmt } from "./ir";
-import { bodiesOf, canonReg, irReg, isKnownRegister, rewriteBodies, walkExpr } from "./ir";
+import {
+  bodiesOf,
+  canonReg,
+  irReg,
+  isKnownRegister,
+  rewriteBodies,
+  walkExpr,
+  walkStmts,
+} from "./ir";
 import { parseOperand, setFlagsFromCompare } from "./lifter";
 import { RegState } from "./regstate";
 import { computeDominators, computeRPO } from "./ssa";
@@ -182,6 +191,97 @@ function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
     return out;
   };
   return rewrite(stmts);
+}
+
+/**
+ * WRITES MEMORY, asked of one statement and everything nested inside it.
+ *
+ * `IRAssign.dest` is an `IRExpr`, so an assignment whose destination is a
+ * `deref` is a memory write exactly as a `store` is; testing only the kind
+ * would miss it.
+ */
+function writesMemoryDeep(stmt: IRStmt): boolean {
+  if (stmt.kind === "store") return true;
+  if (stmt.kind === "assign") {
+    let mem = false;
+    walkExpr(stmt.dest, (e) => {
+      if (e.kind === "deref" || e.kind === "field_access" || e.kind === "array_access") mem = true;
+    });
+    if (mem) return true;
+  }
+  for (const body of bodiesOf(stmt)) {
+    for (const inner of body) if (writesMemoryDeep(inner)) return true;
+  }
+  return false;
+}
+
+/**
+ * CAN THE `for`'s INIT MOVE FROM WHERE THE WALK PUT IT INTO THE LOOP HEADER?
+ *
+ * `structureFrom` has already emitted the init as part of an earlier block, and
+ * a `for` header repeats it — so one of the two copies has to go, and the only
+ * sound direction is to delete the emitted one. When the init is the statement
+ * immediately before the loop that is free. This answers the general case, and
+ * it is worth being precise about what the question actually is: hoisting moves
+ * the init LATER, past every statement between it and the loop, so it is not
+ * enough that nothing in between touches the induction variable — the value the
+ * init computes has to be the same value after the move.
+ *
+ * Hence four refusals, and the measured population is why each is here rather
+ * than being a hypothetical (`peek-a-bin-9q2`, census at `c560b4c`):
+ *
+ *  * **Anything but an `assign`, `store` or `comment` in between.** A
+ *    whitelist rather than a blacklist, because the dangerous cases are the
+ *    ones nobody thought of: a `label` in between is a jump target, and a
+ *    `goto` reaching it today SKIPS the init while after the move it would RUN
+ *    it — a different program, and not one any gate here models. A `raw` is an
+ *    instruction the lifter refused, so its effects are by definition unknown.
+ *    Every intervening statement in the corpus population is an `assign` or a
+ *    `store`, so nothing measured is refused by this.
+ *  * **A side-effecting init.** `x = f()` moved later runs the call later.
+ *  * **Any mention of the induction variable, or of anything the init's
+ *    right-hand side reads, in between** — including inside a nested body,
+ *    which is why the scan is `walkStmts` rather than a loop over the top
+ *    level. A mention is not necessarily a write, and the distinction is not
+ *    worth drawing: refusing on a read costs a `for` and claims nothing false.
+ *  * **A memory write in between, when the init's own right-hand side reads
+ *    memory.** No attempt is made to prove the two do not alias, which is the
+ *    same policy `spoils` applies for the same reason.
+ *
+ * Measured: 3 loops per 32-bit binary and 0 on either x64 binary. The x64
+ * population is out of reach by construction and not by strictness — there the
+ * init is not in `result` at all, so there is no emitted copy to delete and
+ * hoisting would either duplicate a statement or invent one.
+ */
+function initHoistable(result: IRStmt[], idx: number, init: IRStmt): boolean {
+  if (init.kind !== "assign") return false;
+  if (hasSideEffects(init.src)) return false;
+  const destName = init.dest.kind === "reg" || init.dest.kind === "var" ? init.dest.name : null;
+  if (destName === null) return false;
+
+  const mid = result.slice(idx + 1);
+  for (const m of mid) {
+    if (m.kind !== "assign" && m.kind !== "store" && m.kind !== "comment") return false;
+  }
+
+  const reads = new Set<string>();
+  let srcReadsMemory = false;
+  walkExpr(init.src, (e) => {
+    if (e.kind === "reg" || e.kind === "var") reads.add(e.name);
+    if (e.kind === "deref" || e.kind === "field_access" || e.kind === "array_access")
+      srcReadsMemory = true;
+  });
+
+  let clash = false;
+  walkStmts(mid, (e) => {
+    if (e.kind === "call") clash = true;
+    if ((e.kind === "reg" || e.kind === "var") && (e.name === destName || reads.has(e.name)))
+      clash = true;
+  });
+  if (clash) return false;
+
+  if (srcReadsMemory && mid.some(writesMemoryDeep)) return false;
+  return true;
 }
 
 /**
@@ -659,8 +759,23 @@ export function structureCFG(
         // the machine put it.
         const asFor =
           loopResult.length === 1 && loopResult[0].kind === "for" ? loopResult[0] : null;
-        if (asFor && result[result.length - 1] === asFor.init) {
+        // Where the walk put the init, if it put it anywhere at all. `-1` is
+        // ordinary rather than exceptional: `detectForLoop` searches every
+        // non-back-edge predecessor for the last assignment to the induction
+        // variable, so the statement it names can live in a region this walk
+        // never emitted — that is the whole x64 population. Deleting it is then
+        // not an option, since there is no copy here to delete.
+        const initAt = asFor ? result.indexOf(asFor.init) : -1;
+        // `initAt >= 0` is not redundant with the equality: for an empty
+        // `result` both sides are -1, and taking the hoist path there would
+        // copy an init the walk never emitted into the header while the real
+        // one stays wherever it is. The `result[result.length - 1] === init`
+        // test this replaces was incidentally safe against that, since
+        // `result[-1]` is undefined.
+        if (asFor && initAt >= 0 && initAt === result.length - 1) {
           result.pop();
+        } else if (asFor && initAt >= 0 && initHoistable(result, initAt, asFor.init)) {
+          result.splice(initAt, 1);
         } else if (asFor) {
           loopResult[0] = {
             kind: "while",

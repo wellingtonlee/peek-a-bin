@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BasicBlock, Loop } from "../../cfg";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
-import { irBinary, irConst, irReg } from "../ir";
+import { irBinary, irConst, irDeref, irReg } from "../ir";
 import { type SwitchArmExit, structureCFG } from "../structure";
 
 const BASE = 0x401000;
@@ -736,23 +736,121 @@ describe("structureCFG — for loops", () => {
     expect(out[0]).toMatchObject({ kind: "for", init });
   });
 
-  it("keeps the loop a while when the initialiser is not the statement before it", () => {
-    // `mark(9)` sits between the initialiser and the loop, so hoisting `init`
-    // into the header would move it past that statement. The loop stays a
-    // `while` with the update at the end of the body, where the machine put it,
-    // and nothing is duplicated or lost.
+  // The init does NOT have to be the statement immediately before the loop.
+  //
+  // This asserted the opposite until `peek-a-bin-9q2`'s census, on the
+  // reasoning that hoisting "would move it past that statement" — but movement
+  // is only a defect when it moves the init past something that changes what it
+  // computes or when it runs, and `eax = 9` beside `ecx = 0` is neither. The
+  // conservative approximation was costing 3 for-loops per 32-bit corpus
+  // binary; the refusals below are the real invariant, each with its own test.
+  it("hoists the initialiser past a statement that cannot interact with it", () => {
     const out = structure(counted(), { 0: [init, mark(9)], 2: [mark(2), inc] }, [
       loopOf(1, [2], 2),
     ]);
     expect(out).toEqual([
-      init,
       mark(9),
+      {
+        kind: "for",
+        init,
+        condition: irBinary("<", irReg("ecx", 4), irConst(10, 4)),
+        update: inc,
+        body: [mark(2)],
+      },
+    ]);
+  });
+
+  /**
+   * Each of these keeps the loop a `while` and leaves the init where the walk
+   * put it, which is the shape asserted once here and then only checked for.
+   */
+  const staysWhile = (out: IRStmt[], leading: IRStmt[], theInit: IRStmt = init): void => {
+    expect(out).toEqual([
+      theInit,
+      ...leading,
       {
         kind: "while",
         condition: irBinary("<", irReg("ecx", 4), irConst(10, 4)),
         body: [mark(2), inc],
       },
     ]);
+  };
+
+  it("does not invent an initialiser the walk never emitted", () => {
+    // The init `detectForLoop` names can live in a region this walk never
+    // emitted — that is the whole x64 corpus population. With nothing emitted
+    // ahead of the loop at all, `result` is empty and `indexOf` returns -1,
+    // which is also `result.length - 1`: the loop must stay a `while` rather
+    // than copying an init that is not here into the header.
+    const out = structure(counted(), { 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    expect(findStmt(out, "for")).toBeUndefined();
+    expect(findStmt(out, "while")).toBeDefined();
+    expect(JSON.stringify(out)).not.toContain('"value":0');
+  });
+
+  it("refuses to hoist the initialiser past a mention of the induction variable", () => {
+    const readsEcx: IRStmt = { kind: "assign", dest: irReg("eax", 4), src: irReg("ecx", 4) };
+    const out = structure(counted(), { 0: [init, readsEcx], 2: [mark(2), inc] }, [
+      loopOf(1, [2], 2),
+    ]);
+    staysWhile(out, [readsEcx]);
+  });
+
+  it("refuses to hoist the initialiser past a write to something its own source reads", () => {
+    // `ecx = edx` moved past `edx = 9` would initialise from the new EDX.
+    const fromEdx: IRStmt = { kind: "assign", dest: irReg("ecx", 4), src: irReg("edx", 4) };
+    const setsEdx: IRStmt = { kind: "assign", dest: irReg("edx", 4), src: irConst(9) };
+    const out = structure(counted(), { 0: [fromEdx, setsEdx], 2: [mark(2), inc] }, [
+      loopOf(1, [2], 2),
+    ]);
+    staysWhile(out, [setsEdx], fromEdx);
+  });
+
+  it("refuses to hoist a side-effecting initialiser", () => {
+    // `x = f()` moved later calls f later.
+    const fromCall: IRStmt = {
+      kind: "assign",
+      dest: irReg("ecx", 4),
+      src: { kind: "call", target: "sub_401000", args: [] },
+    };
+    const out = structure(counted(), { 0: [fromCall, mark(9)], 2: [mark(2), inc] }, [
+      loopOf(1, [2], 2),
+    ]);
+    staysWhile(out, [mark(9)], fromCall);
+  });
+
+  it("refuses to hoist a memory-reading initialiser past a store", () => {
+    // No attempt is made to prove the two do not alias — the same policy
+    // `spoils` applies, for the same reason.
+    const fromMem: IRStmt = {
+      kind: "assign",
+      dest: irReg("ecx", 4),
+      src: irDeref(irReg("edx", 4), 4),
+    };
+    const st: IRStmt = { kind: "store", address: irReg("ebx", 4), value: irConst(1), size: 4 };
+    const out = structure(counted(), { 0: [fromMem, st], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    staysWhile(out, [st], fromMem);
+  });
+
+  it("refuses to hoist the initialiser past a label", () => {
+    // A label is a jump target: a `goto` reaching it skips the init today and
+    // would RUN it after the move, which is a different program.
+    const lbl: IRStmt = { kind: "label", name: "loc_dead" };
+    const out = structure(counted(), { 0: [init, lbl], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    // The label itself is gone from the OUTPUT — nothing jumps to it, so
+    // `pruneLabels` drops it — but it was there when the hoist was decided, and
+    // the loop staying a `while` with the init still ahead of it is that
+    // decision. Asserting the pruned shape rather than the label's presence is
+    // deliberate: the two passes are independent and this is testing the first.
+    staysWhile(out, []);
+  });
+
+  it("refuses to hoist the initialiser past an unlifted instruction", () => {
+    // A `raw` is an instruction the lifter refused, so its effects are by
+    // definition unknown — including on the induction variable.
+    const rw: IRStmt = { kind: "raw", text: "out 0xb8, eax" };
+    const out = structure(counted(), { 0: [init, rw], 2: [mark(2), inc] }, [loopOf(1, [2], 2)]);
+    staysWhile(out, [rw]);
   });
 
   // Was a KNOWN BUG: detectForLoop returns a flat concatenation of the body
