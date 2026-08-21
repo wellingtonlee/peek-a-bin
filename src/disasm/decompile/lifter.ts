@@ -507,6 +507,31 @@ export function capturedOperandName(compareAddr: number, operandIndex: number): 
   return `flg_${compareAddr.toString(16)}_${operandIndex}`;
 }
 
+/** The pattern `capturedOperandName` produces, read backwards. */
+const CAPTURED_OPERAND_NAME = /^flg_[0-9a-f]+_\d+$/;
+
+/**
+ * Whether an `IRVar` name is one of the captures above.
+ *
+ * `emit.ts` needs this to DECLARE them, and the name is the only channel it can
+ * ask down — an `IRVar` carries a name and a width and nothing that says who
+ * made it, and the alternative rules are both worse. "Every undeclared `IRVar`
+ * destination" is not this set: `ssadestroy.ts`'s `splitStaleReads` parks a
+ * pre-clobber value in an `IRVar` too — 2114 undeclared (function, name) pairs
+ * over the four corpus binaries against these 114 — and those are spelled as
+ * registers on purpose and
+ * are covered by the documented decision to leave a register undeclared. So this
+ * is deliberately the narrow question, and one declaration of the spelling
+ * answers it in both directions.
+ *
+ * `corpus/staleGuards.ts` deliberately does NOT import this: an audit that
+ * derived the name from the code under test would be measuring its own input,
+ * so it rebuilds the same spelling from the compare address it found itself.
+ */
+export function isCapturedOperandName(name: string): boolean {
+  return CAPTURED_OPERAND_NAME.test(name);
+}
+
 /**
  * The width a captured operand's variable carries.
  *

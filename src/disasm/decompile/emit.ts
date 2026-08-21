@@ -1,6 +1,7 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
 import type { BinaryOp, IRExpr, IRFunction, IRStmt } from "./ir";
 import { canonReg, isKnownRegister, regSize, walkExpr, walkStmts } from "./ir";
+import { isCapturedOperandName } from "./lifter";
 import type { DecompType, TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 
@@ -312,6 +313,8 @@ let _declaredVarTypes: Map<string, string> = new Map();
 let _assignedRegs: Set<string> = new Set();
 /** Call statements whose result register is read — see `collectCapturedCalls`. */
 let _capturedCalls: ReadonlySet<IRStmt> = new Set();
+/** Spoiled-compare captures the body assigns → the type they are declared with. */
+let _capturedOperands: Map<string, string> = new Map();
 
 type EnumType = DecompType & { kind: "enum" };
 
@@ -1136,6 +1139,130 @@ function collectAssignedRegs(
       case "break":
       case "continue":
       // A branch assigns no register — it only reads its condition.
+      case "branch":
+        break;
+      default: {
+        const _exhaustive: never = stmt;
+        void _exhaustive;
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * The type a spoiled-compare capture is declared with.
+ *
+ * `IRVar.size` is the width `capturedWidth` took from the operand `parseOperand`
+ * read out of the machine text, and it is already the width `operandWidth` reads
+ * for this same variable when it decides a cast — so a declaration derived from
+ * anything else can disagree with the casts the emitter has already emitted
+ * around it. `sizeToType` is therefore the floor, and it is the same spelling
+ * `promoteVars` gives a stack local before type inference speaks.
+ *
+ * Type inference is preferred where it says something, exactly as `promoteVars`
+ * prefers it for a local — but only when its spelling names the SAME width, and
+ * that guard is not decoration. `typeInfer.ts` types a comparison operand
+ * `{ int, size: 4 }` with the width hard-coded, so for a 1- or 2-byte capture it
+ * would claim a width the machine operand does not have; and the test also
+ * refuses every non-integer spelling, which is what keeps a declaration from
+ * turning `emitsAsPointer` true and changing the arithmetic the body already
+ * emits. Measured over the four corpus binaries at `f169c00`: of 114 captures,
+ * type inference has an opinion about 10 and every one of them agrees in width,
+ * so today the guard costs nothing and refuses nothing — it is a bound on the
+ * rule, not a saving.
+ */
+function capturedOperandType(size: number, name: string): string {
+  const inferred = _typeCtx?.types.get(name);
+  if (inferred && inferred.kind !== "unknown") {
+    const spelling = typeToString(inferred);
+    if (castWidth(spelling) === size) return spelling;
+  }
+  return sizeToType(size);
+}
+
+/**
+ * Every spoiled-compare capture (`lifter.ts`'s `flg_<addr>_<i>`) the body
+ * ASSIGNS, so the header can declare it.
+ *
+ * These were emitted undeclared, and the emitted C therefore named an
+ * identifier nothing in it declares — 114 of them over the four corpus
+ * binaries, one per capture, all of them invisible because
+ * `corpus/emitAudits.ts`' `preludeFor` answers gcc's complaint by manufacturing
+ * a `long` of its own. That is not the documented decision to leave a *register*
+ * undeclared (see `structPointer`): a capture is not a register and not an
+ * incoming value, it is a local written by a statement this emitter itself
+ * emits, and the other locals the pipeline invents (`var_N` from `promoteVars`)
+ * are declared. The `long` was also the wrong width for every one of the 114 —
+ * 64 are 4 bytes, 42 are 1 and 8 are 2, and not one is 8 — so the program gcc
+ * actually compiled was not the one the emitter wrote.
+ *
+ * ASSIGNMENT DESTINATIONS ONLY, and keyed BY NAME. A capture is built per
+ * *block* while a declaration is per *function*, and `structureCFG` can emit one
+ * block more than once (the switch-arm and leftover passes both emit), so the
+ * name is what dedupes — first mention wins, and the type is a function of the
+ * name and width alone, so which mention wins cannot matter. Restricting to
+ * destinations is the other half: a capture READ in an emitted region whose
+ * defining statement was not emitted is a lost definition, and declaring it
+ * would state that the function computes a value it never assigns. Such a
+ * capture stays undeclared and keeps showing up in the prelude, which is the
+ * honest signal. Measured at `f169c00`: 0 of the 114 is mentioned twice and 0 is
+ * read without its definition, so both rules are bounds rather than savings.
+ *
+ * The `never` binding at the bottom is load-bearing for the same reason
+ * `collectAssignedRegs`' is: a new `IRStmt` kind that can assign a variable
+ * would otherwise be missed silently, and the symptom is an undeclared
+ * identifier no gate here can see.
+ */
+function collectCapturedOperands(
+  stmts: readonly IRStmt[],
+  declared: ReadonlySet<string>,
+  out: Map<string, string>,
+): void {
+  const note = (dest: IRExpr): void => {
+    if (dest.kind !== "var" || declared.has(dest.name) || out.has(dest.name)) return;
+    if (!isCapturedOperandName(dest.name)) return;
+    out.set(dest.name, capturedOperandType(dest.size, dest.name));
+  };
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case "assign":
+        note(stmt.dest);
+        break;
+      case "call_stmt":
+        if (stmt.resultDest) note(stmt.resultDest);
+        break;
+      case "if":
+        collectCapturedOperands(stmt.thenBody, declared, out);
+        if (stmt.elseBody) collectCapturedOperands(stmt.elseBody, declared, out);
+        break;
+      case "while":
+      case "do_while":
+        collectCapturedOperands(stmt.body, declared, out);
+        break;
+      case "for":
+        collectCapturedOperands([stmt.init, stmt.update], declared, out);
+        collectCapturedOperands(stmt.body, declared, out);
+        break;
+      case "switch":
+        for (const c of stmt.cases) collectCapturedOperands(c.body, declared, out);
+        if (stmt.defaultBody) collectCapturedOperands(stmt.defaultBody, declared, out);
+        break;
+      case "try":
+        collectCapturedOperands(stmt.body, declared, out);
+        collectCapturedOperands(stmt.handler, declared, out);
+        break;
+      // A phi destination is a register by construction (`insertPhis` mints it
+      // with `irReg`), and every one of these assigns nothing.
+      case "phi":
+      case "store":
+      case "return":
+      case "goto":
+      case "label":
+      case "comment":
+      case "raw":
+      case "break":
+      case "continue":
       case "branch":
         break;
       default: {
@@ -2100,6 +2227,7 @@ export function emitFunction(
   const prevDeclaredVarTypes = _declaredVarTypes;
   const prevAssignedRegs = _assignedRegs;
   const prevCapturedCalls = _capturedCalls;
+  const prevCapturedOperands = _capturedOperands;
   _typeCtx = typeCtx;
   _stringMap = stringMap;
   _unrecovered = [];
@@ -2132,6 +2260,12 @@ export function emitFunction(
       _enumTypesNeeded.add(enumType.name);
     }
   }
+  // After the loop above, so `_declaredVarTypes` is the set a capture must not
+  // already be in — and before the body, because `emitsAsPointer` reads that map
+  // while the body is emitted.
+  _capturedOperands = new Map();
+  collectCapturedOperands(func.body, new Set(_declaredVarTypes.keys()), _capturedOperands);
+  for (const [name, type] of _capturedOperands) _declaredVarTypes.set(name, type);
   try {
     return emitFunctionBody(func);
   } finally {
@@ -2146,6 +2280,7 @@ export function emitFunction(
     _declaredVarTypes = prevDeclaredVarTypes;
     _assignedRegs = prevAssignedRegs;
     _capturedCalls = prevCapturedCalls;
+    _capturedOperands = prevCapturedOperands;
   }
 }
 
@@ -2281,9 +2416,16 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
   lineAddrs.push(undefined);
 
   // Local variable declarations
-  if (func.locals.length > 0 || _unrecovered.length > 0) {
+  if (func.locals.length > 0 || _capturedOperands.size > 0 || _unrecovered.length > 0) {
     for (const local of func.locals) {
       lines.push(`    ${local.type} ${local.name};`);
+      lineAddrs.push(undefined);
+    }
+    // A spoiled compare's captured operands. Declared here rather than left to
+    // the reader because the emitter is what invents them and what writes them
+    // — see `collectCapturedOperands`.
+    for (const [name, type] of _capturedOperands) {
+      lines.push(`    ${type} ${name};`);
       lineAddrs.push(undefined);
     }
     // `intptr_t` because an unrecovered value is a machine word of unknown

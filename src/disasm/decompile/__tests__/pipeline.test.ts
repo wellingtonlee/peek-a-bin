@@ -5871,6 +5871,62 @@ describe("decompileFunction — a guard reads the flags the jcc actually reads",
     expect(guardTexts(code)).toEqual(["flg_401000_0 == 0"]);
   });
 
+  // EVERY CAPTURE IS DECLARED, AT THE OPERAND'S OWN WIDTH. A capture is a local
+  // the emitter invents and writes, so leaving it undeclared made the emitted C
+  // reference an identifier nothing in it declares — 114 of them over the four
+  // corpus binaries at `f169c00`, and `corpus/emitAudits.ts`' `preludeFor` hid
+  // every one by manufacturing `long flg_…;` in answer to gcc's complaint. The
+  // width is the point of the assertion as much as the presence: not one of
+  // those 114 captures is 8 bytes wide, so `long` was wrong for all of them and
+  // the program gcc compiled was not the one the emitter wrote.
+  it.each([
+    ["a 32-bit register", "eax, 5", "eax, edx", "int32_t"],
+    ["a byte register", "al, 5", "al, dl", "uint8_t"],
+    ["a 16-bit register", "ax, 5", "ax, dx", "uint16_t"],
+  ])("declares the capture of %s", (_label, cmp, spoil, type) => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", cmp],
+        ["mov", spoil],
+        ["je", "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain(`    ${type} flg_401000_0;`);
+  });
+
+  // THE DECLARATION IS WHAT MAKES THE COMPARISON UNSIGNED, so the type is taken
+  // from type inference where it has one. `cOp` spells `u<` as a bare `<`, so
+  // nothing in the expression says which comparison the machine makes — under
+  // the prelude's `long` both of these compiled as a signed 64-bit compare.
+  // Inference is consulted only when its spelling names the SAME width as the
+  // operand, because `typeInfer.ts` types a comparison operand with the width
+  // hard-coded at 4.
+  it.each([
+    ["jl", "int32_t"],
+    ["jb", "uint32_t"],
+  ])("declares a captured operand of a %s with inference's signedness", (jcc, type) => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, ecx"],
+        ["mov", "eax, edx"],
+        [jcc, "0x401014"],
+        ["mov", "ebx, 1"],
+        ["ret"],
+        ["mov", "ebx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toContain(`    ${type} flg_401000_0;`);
+    expect(code).toContain(`    ${type} flg_401000_1;`);
+    expect(guardTexts(code)).toEqual(["flg_401000_0 < flg_401000_1"]);
+  });
+
   // ── Controls. Every one of these must keep recovering, or the refusal is
   // too wide and the cost is guards that were correct becoming admissions.
 

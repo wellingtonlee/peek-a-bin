@@ -379,3 +379,109 @@ describe("emitFunction — a branch statement that escapes extraction is a hard 
     expect(() => emitFunction(fn([nested]))).toThrow(/IRBranch reached the emitter/);
   });
 });
+
+/**
+ * A spoiled compare's captured operand (`lifter.ts`'s `flg_<addr>_<i>`) is a
+ * local the emitter itself invents and writes, so the emitter declares it.
+ *
+ * It did not, and nothing here noticed for a reason worth keeping in view:
+ * `corpus/emitAudits.ts`' `preludeFor` answers gcc's "'flg_…' undeclared" by
+ * manufacturing `long flg_…;` of its own, so the gcc gate stayed 1127/1127
+ * clean over C that referenced an identifier nothing in it declared — and at a
+ * width (`long`) that no capture in the corpus actually has.
+ *
+ * These tests are direct `emitFunction` calls rather than pipeline runs because
+ * the two properties below cannot be reached through the pipeline at all: no
+ * corpus function emits one capture twice, and `splitStaleReads`' repair
+ * variables are the population the scope has to exclude.
+ */
+describe("emitFunction — spoiled-compare captures are declared", () => {
+  const capture = (name: string, size: number, src: IRExpr): IRStmt => ({
+    kind: "assign",
+    dest: irVar(name, size),
+    src,
+  });
+
+  it("declares a captured operand at its own width", () => {
+    const code = emitFunction(
+      fn([
+        capture("flg_401000_0", 1, irReg("al", 1)),
+        { kind: "return", value: irVar("flg_401000_0", 1) },
+      ]),
+    ).code;
+    expect(code).toContain("    uint8_t flg_401000_0;");
+  });
+
+  /**
+   * HAZARD TWO, and the reason the width guard is not decoration. Type
+   * inference runs on the structured tree and types a comparison operand
+   * `{ int, size: 4 }` with the width HARD-CODED, so for a 1- or 2-byte capture
+   * its spelling claims a width the machine operand does not have — and
+   * `operandWidth` reads `IRVar.size` for this same variable when it decides a
+   * cast, so the declaration and the casts around it would disagree. Inference
+   * is preferred only when it names the same width. Untriggered in the corpus at
+   * `f169c00` (of 114 captures inference has an opinion about 10 and all 10
+   * agree in width), which is why it is pinned here.
+   */
+  it("refuses an inferred type whose width is not the operand's", () => {
+    const ctx = { types: new Map([["flg_401000_0", { kind: "int", size: 4, signed: true }]]) };
+    const code = emitFunction(
+      fn([
+        capture("flg_401000_0", 1, irReg("al", 1)),
+        { kind: "return", value: irVar("flg_401000_0", 1) },
+      ]),
+      ctx as unknown as TypeContext,
+    ).code;
+    expect(code).toContain("    uint8_t flg_401000_0;");
+    expect(code).not.toContain("int32_t flg_401000_0;");
+  });
+
+  /**
+   * HAZARD ONE. A capture is built per BLOCK while a declaration is per
+   * FUNCTION, and `structureCFG` can emit one block more than once — the
+   * switch-arm and leftover passes both emit. Two declarations of one name is
+   * not valid C, so the dedupe is by name. No corpus function reaches this
+   * today (measured: 0 of 114 captures is assigned twice), which is exactly the
+   * condition under which such a rule quietly stops working.
+   */
+  it("declares a capture emitted in two regions exactly once", () => {
+    const twice: IRStmt = {
+      kind: "if",
+      condition: irBinary("!=", irReg("ecx", 4), irConst(0, 4)),
+      thenBody: [capture("flg_401000_0", 4, irReg("eax", 4))],
+      elseBody: [capture("flg_401000_0", 4, irReg("eax", 4))],
+    };
+    const code = emitFunction(fn([twice])).code;
+    expect(code.match(/int32_t flg_401000_0;/g)).toEqual(["int32_t flg_401000_0;"]);
+  });
+
+  /**
+   * THE SCOPE, and its negative control. `ssadestroy.ts`'s `splitStaleReads`
+   * parks a pre-clobber value in an `IRVar` too — 2114 undeclared
+   * (function, name) pairs over the four corpus binaries against the captures'
+   * 114 — and those are spelled as registers deliberately, which the documented
+   * decision to leave a register undeclared covers. Declaring them is a much
+   * larger change with an emitted-C effect of its own (a pointer-typed one would
+   * flip `emitsAsPointer` and rescale the arithmetic around it), so the rule
+   * asks `isCapturedOperandName` and nothing broader.
+   */
+  it("leaves a register-shaped repair variable undeclared", () => {
+    const code = emitFunction(
+      fn([capture("ecx_3", 4, irReg("ecx", 4)), { kind: "return", value: irVar("ecx_3", 4) }]),
+    ).code;
+    expect(code).not.toMatch(/\bint32_t ecx_3;/);
+    expect(code).toContain("ecx_3 = ecx;");
+  });
+
+  /**
+   * A capture READ where its defining statement was not emitted is a lost
+   * definition, and declaring it would state that the function computes a value
+   * it never assigns. It stays undeclared, so it keeps showing up in the
+   * prelude, which is the honest signal. Measured at `f169c00`: 0 of 114.
+   */
+  it("does not declare a capture the body only reads", () => {
+    const code = emitFunction(fn([{ kind: "return", value: irVar("flg_401000_0", 4) }])).code;
+    expect(code).not.toMatch(/u?int\d+_t flg_401000_0;/);
+    expect(code).toContain("return flg_401000_0;");
+  });
+});
