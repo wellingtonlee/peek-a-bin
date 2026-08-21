@@ -32,7 +32,9 @@ errors across 9 files**; `f8bc466` sorted imports repo-wide and cleared all but 
 survivor was `vite.config.ts` — that commit only walked `src/`, and `check` also covers the root
 config files. `.git-blame-ignore-revs` carries `f8bc466` so the sort does not pollute blame.
 
-Current state: **0 errors, 71 warnings, 3 infos over 238 files, exit 0.** Warnings and infos do
+Current state: **0 errors, 71 warnings, 3 infos over 261 files, exit 0.** The file count moves
+whenever a module or an audit is added and is a date-stamp, not a claim; the claim is 0 errors.
+Warnings and infos do
 not fail it. Two of the infos are `useNodejsImportProtocol` on `vite.config.ts`'s `"path"`/`"fs"`
 imports — Biome classes those fixes as *unsafe* so `--write` skips them; they are deliberately
 left. The third is a `biome.json` deprecation notice (`linter.rules.recommended` → `preset`),
@@ -55,6 +57,17 @@ npx biome check --diagnostic-level=error --max-diagnostics=300   # errors only, 
 
 Warnings and infos never fail the run — only error-severity findings do, so the second form is
 the one that answers "will CI pass".
+
+**A worktree inside the repo makes a root test run lie, in the other direction from the Biome
+trap above.** Tool-created subagent worktrees land at `<repo>/.claude/worktrees/agent-<id>`, i.e.
+*inside* the working tree, so a bare `npm test` from the repo root walks into them: with two
+agents live it reported **291 files / 9756 tests** against this tree's own 93 + 4, and the extra
+results are someone else's in-progress code — a green run that says nothing about your change,
+or a red one that is not your fault. Scope it: `npx vitest run --dir src`, then
+`npx vitest run --dir build` as a second command, because `--dir` takes exactly one directory and
+bare path filters (`vitest run src/ build/`) are regex-matched against full paths and still hit
+the worktrees. `git worktree list` is the check when a gate count looks unfamiliar. An agent
+running inside its own worktree root is unaffected — it sees only its own tree.
 
 **Biome** (`biome.json`) is the linter/formatter. All seven configured `a11y` rules,
 `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` are at **`error`** —
