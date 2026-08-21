@@ -273,6 +273,34 @@ describe("64-bit constant folding", () => {
     );
   });
 
+  // `+`, `-` and `*` must NOT wrap to int32, and this is the guard for that
+  // direction rather than a statement about which reading is meant.
+  //
+  // The bit pattern 0x80000000 is right either way: for a 64-bit `add` it is the
+  // value RAX holds, and for a 32-bit one it is the wrapped result under its
+  // unsigned reading. What differs is only how the stored `number` reads back.
+  // So wrapping here — `(l + r) | 0`, `Math.imul`, matching what the bitwise
+  // arms of the same switch do by JavaScript's own semantics — would turn a
+  // correct 64-bit constant into a negative one, and it CANNOT be decided at
+  // this site: both operands are `IRConst`, `knownWidth` returns null for a
+  // constant deliberately, and `IRConst.size` is the CPU mode rather than the
+  // operand width (see `needs64`). `peek-a-bin-ivj5` has the census.
+  //
+  // Without this, the only test that failed on the wrapping experiment was the
+  // 2^53 one above — which catches it incidentally, for a different stated
+  // reason — while `npm run corpus` stayed byte-identical on all four binaries.
+  it("does not wrap an arithmetic fold to int32", () => {
+    expect(foldExprVia(irBinary("+", irConst(0x7fffffff, 8), irConst(1, 8)))).toEqual(
+      irConst(0x80000000, 8),
+    );
+    expect(foldExprVia(irBinary("-", irConst(-0x80000000, 8), irConst(1, 8)))).toEqual(
+      irConst(-0x80000001, 8),
+    );
+    expect(foldExprVia(irBinary("*", irConst(0x10000, 8), irConst(0x10000, 8)))).toEqual(
+      irConst(0x100000000, 8),
+    );
+  });
+
   it("complements a 64-bit constant at 64 bits (JS `~` gives -1 here)", () => {
     expect(foldExprVia(irUnary("~", irConst(0x100000000, 8)))).toEqual(irConst(-0x100000001, 8));
     // ~x for any x that survives ToInt32 is the same number at 32 and 64 bits,
