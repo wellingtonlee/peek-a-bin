@@ -517,6 +517,79 @@ describe("blockFlagOwner", () => {
   });
 });
 
+/**
+ * TWO QUESTIONS ABOUT THE SAME INSTRUCTION, and `push`/`pop` is where they come
+ * apart. Membership in `NO_FLAG_WRITE` says the standing owner survives;
+ * `spoils` says whether the value can still be named. A `pop` answers *yes* to
+ * the first and *no* to the second whenever it writes a register the compare
+ * named, and both answers have to hold at once or the model is wrong in one of
+ * two opposite directions — a guard needlessly refused, or a guard that reads
+ * the restored callee-saved value in place of the tested one.
+ *
+ * These are here because peek-a-bin-thsj proposed adding `push`/`pop` to
+ * `NO_FLAG_WRITE` — where they have been since `b35a786` — on the reasoning
+ * that a Jcc behind an epilogue restore is needlessly unrecovered. The
+ * adjudication was that the model already answers both questions correctly and
+ * that the refusal is right; nothing pinned that, so a later change could have
+ * "fixed" it by exempting a `pop` from `spoils` and emitted a wrong test at 4
+ * corpus sites with every gate green. See the `NO_FLAG_WRITE` and `spoils`
+ * docstrings for the measured populations.
+ */
+describe("push and pop: flag-transparent AND a spoiler", () => {
+  it("keeps the standing owner across an epilogue restore", () => {
+    // t32 sub_40E1D8 0x40e275, verified against objdump -d -M intel. The three
+    // pops write no flag, so the `test` is still what the `jne` reads.
+    const o = owner("test edi, edi", "pop edi", "pop esi", "pop ebx", "jne 0x40e283");
+    expect(o.kind).toBe("compare");
+    expect(o.kind === "compare" && o.mnemonic).toBe("test");
+  });
+
+  it("…and still refuses it, because the pop overwrote the compared register", () => {
+    const o = owner("test edi, edi", "pop edi", "pop esi", "pop ebx", "jne 0x40e283");
+    expect(o.kind === "compare" && o.spoiled).toBe(true);
+    expect(canSpellCondition(o)).toBe(false);
+  });
+
+  it("recovers the guard when the pops touch neither operand", () => {
+    // The majority shape: 26 of 34 such compare owners on t32 and 20 of 27 on
+    // w32 are recovered today, and they are recovered BECAUSE push and pop are
+    // members of NO_FLAG_WRITE.
+    const o = owner("test eax, eax", "pop edi", "pop esi", "pop ebx", "jne 0x401800");
+    expect(o.kind === "compare" && o.spoiled).toBe(false);
+    expect(canSpellCondition(o)).toBe(true);
+  });
+
+  it("does not let a push spoil a register it only reads", () => {
+    const o = owner("cmp edi, esi", "push edi", "jne 0x401800");
+    expect(o.kind === "compare" && o.spoiled).toBe(false);
+  });
+
+  it("spoils a compare over memory on a pop whose destination IS memory", () => {
+    // `pop dword ptr [ebp - 0x210]` is the form the CRT uses after `pushfd`.
+    const o = owner("cmp dword ptr [ebp - 4], 0", "pop dword ptr [ebp - 0x210]", "je 0x401800");
+    expect(o.kind === "compare" && o.spoiled).toBe(true);
+  });
+
+  it("MATCHES BY EXACT MNEMONIC: popf restores every flag and is not transparent", () => {
+    // Hazard 1. A prefix test would admit `popf` as a `pop` and let a Jcc read a
+    // condition off a compare the restored flags superseded. `pushfd` is not
+    // hypothetical — it occurs twice in each 32-bit corpus binary.
+    for (const mn of ["pushf", "pushfd", "pushfq", "popf", "popfd", "popfq", "pusha", "popa"]) {
+      expect(isFlagTransparent(mn), mn).toBe(false);
+      expect(flagEffect(insn(mn, "")), mn).toEqual({ kind: "clobber", why: "unrecognised" });
+    }
+    expect(isFlagTransparent("push")).toBe(true);
+    expect(isFlagTransparent("pop")).toBe(true);
+  });
+
+  it("clears a compare owner when a pushfd sits between it and the jump", () => {
+    const o = owner("cmp eax, 5", "pushfd", "je 0x401800");
+    expect(o.kind).toBe("none");
+    expect(o.kind === "none" && o.reason).toBe("cleared");
+    expect(o.kind === "none" && o.clearedBy?.mnemonic).toBe("pushfd");
+  });
+});
+
 describe("flagOwnerBefore", () => {
   it("answers for an arbitrary program point, not just a trailing jump", () => {
     const insns = block("cmp eax, 5", "dec ecx", "jne 0x401800").insns;

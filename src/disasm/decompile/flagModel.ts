@@ -76,6 +76,39 @@ import { canonReg, isKnownRegister, regSize } from "./ir";
  * direction in both models — a wrong member makes a Jcc read a condition off an
  * instruction that no longer owns the flags — and nothing here has measured
  * what widening it would recover.
+ *
+ * **`push` and `pop` are already members, and adding them is not a fix waiting
+ * to be applied.** They have been here since this module was written
+ * (`b35a786`), the SDM is explicit that neither touches a flag, and a compare
+ * owner in this corpus is displaced by a `push`/`pop` **0 times on all four
+ * binaries** — the clearers are `sbb`, `bt` and `movnti`. Measured at
+ * `41113c9`: of the compare owners with a `push` or `pop` between the compare
+ * and the Jcc — 34/0/0/27 (t32/t64/w64/w32) — **26/0/0/20 are recovered
+ * today**, precisely because membership here is what keeps them standing
+ * (peek-a-bin-thsj).
+ *
+ * **Membership is one of two questions about the same instruction, and the
+ * second is `spoils`.** Owning the flags and still *naming* the compared value
+ * are independent: `test edi, edi / pop edi / pop esi / pop ebx / jne` (t32
+ * `sub_40E1D8` 0x40e275) keeps the `test` as owner — no `pop` writes a flag —
+ * while `pop edi` overwrites the very register the guard would be spelled
+ * with, so `spoils` marks it and the reading is refused. That refusal is
+ * **correct**, not a defect: EDI at the Jcc holds the restored callee-saved
+ * value and `edi != 0` would be a test the machine does not make. Recovering
+ * it needs the tested value materialised into a temporary *before* the
+ * clobber, which `structure.ts`'s `conditionSpoiled` docstring names and which
+ * is a lifter change worth 106 guards corpus-wide rather than the 2/0/0/2 the
+ * `pop` shape accounts for — see CLAUDE.md's gotcha (peek-a-bin-thsj).
+ *
+ * **Matching is by exact base mnemonic, and that is load-bearing here rather
+ * than stylistic.** `popf`/`popfd`/`popfq` load *every* flag from the stack and
+ * `pushf`/`pushfd`/`pushfq`, `pusha`/`popa` are different instructions again;
+ * none is a member, so all of them clobber. `baseMnemonic` is what makes that
+ * true, and a prefix test (`startsWith("pop")`) would silently admit `popf` and
+ * let a Jcc read a condition off a compare the restored flags superseded. The
+ * hazard is live, not hypothetical: `pushfd` occurs **2 times in each 32-bit
+ * corpus binary** (t32 0x402b8b and 0x403c4b, w32 0x402ddf and 0x403eab —
+ * MSVC's CRT capturing an exception context).
  */
 export const NO_FLAG_WRITE: ReadonlySet<string> = new Set([
   "mov",
@@ -577,6 +610,25 @@ function writesAnyMemory(insn: Instruction): boolean {
  * *before* the `if`, so `eax = edx; if (eax != 5)` reads the wrong value just as
  * surely. `clobberedAfter` below asks the same question from the other end, for
  * `structure.ts`.
+ *
+ * **This is the second of the two questions `NO_FLAG_WRITE` membership does not
+ * answer**, and a `pop` is the instruction where keeping them apart matters
+ * most: it writes no flag, so the owner stands, *and* it writes its operand
+ * register, so the name is gone. Both answers must hold at once — see that
+ * set's docstring. Do not make `spoils` exempt a `pop` by analogy with the
+ * `push` exemption in `writesRegister`: `push` names a register it only reads,
+ * where `pop` names the one it writes.
+ *
+ * **Known asymmetry with `clobberedAfter`, currently harmless.**
+ * `clobberedAfter` reports `push` and `pop` as writes of RSP; this does not, so
+ * a `cmp dword ptr [esp + 4], 0 / pop edi / jne` is spoiled by that scan and
+ * not by this one, even though the `pop` moved the base the operand is spelled
+ * relative to. It costs nothing today: `branchFor` applies
+ * `canSpellCondition` — hence this predicate — only to a *predecessor's*
+ * compare, and `structure.ts`'s `conditionSpoiled` is the backstop for the
+ * block-local case and does use `clobberedAfter`. Measured over all four corpus
+ * binaries at `41113c9`: 4/39/34/4 compare owners name ESP or RSP at all and
+ * the two scans disagree about **0** of them (peek-a-bin-thsj).
  */
 function spoils(
   insn: Instruction,
