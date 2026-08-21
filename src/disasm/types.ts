@@ -53,11 +53,14 @@ export interface StackFrame {
    * area. Under frame-pointer omission RBP is an ordinary callee-saved
    * register, usually an object pointer, and neither of those holds.
    *
-   * `arg_<N>` in a var's name already carries this — stack.ts spells a slot
-   * that way only when this is true (see `hasFramePointerPrologue`) — but only
-   * for a frame that *has* an argument slot. A framed function that takes no
-   * arguments says nothing through that channel, so the fact is published here
-   * as well rather than re-derived from the names.
+   * NOT the same fact as `arg_<N>` in a var's name, and it stopped being so at
+   * peek-a-bin-sx57. That name now means the weaker "the frame register's
+   * displacement from the entry stack pointer was recovered", which is what
+   * makes an argument *index* derivable; this means the displacement is
+   * `slotSize` specifically. Every framed function is displacement-recovered,
+   * not the reverse. Consumers wanting "is the frame register invariant" —
+   * `promote.ts`'s `frameRegisterAliases` is the only one — want this field;
+   * consumers wanting "is this slot an argument position" want the name.
    */
   framed: boolean;
 }

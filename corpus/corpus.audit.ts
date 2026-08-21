@@ -1041,11 +1041,16 @@ function renderReport(): string {
         (oa.subSlot > 0 ? `, plus ${oa.subSlot} sub-slot (correctly offset-named)` : ""),
     );
   }
-  L.push("    An `arg_0xN` whose offset divides evenly into an argument slot: a slot the naming");
-  L.push("    would have INDEXED had the frame pointer been recognised. REPORT-ONLY in both");
-  L.push("    directions — the PE32 residue is detection over-production, where the prologue is");
-  L.push("    outside the range and the frame register is the enclosing function's, and the x64");
-  L.push("    population is phantom parameters rather than unnamed ones (peek-a-bin-ikd).");
+  L.push("    An `arg_0xN` whose offset divides evenly into an argument slot. REPORT-ONLY in");
+  L.push("    both directions, and NOT a defect count: since peek-a-bin-sx57 a slot is indexed");
+  L.push("    when the frame register's displacement was recovered AND — inside the x64 home");
+  L.push("    space, which the ABI hands the callee as scratch — the callee was shown to spill");
+  L.push("    that argument's own register into it. So the x64 residue is mostly slots that");
+  L.push("    are NOT arguments: 15 of the 20 home slots in this corpus hold a saved register");
+  L.push("    or a byte local, and naming those would state something false. Driving this row");
+  L.push("    to 0 is therefore the WRONG target — measured, it moves no other number in this");
+  L.push("    report at all. The PE32 residue is detection over-production, where the prologue");
+  L.push("    is outside the range and the frame register is the enclosing function's.");
   L.push("    Nothing else here sees this class: it is a well-typed name gcc compiles.");
   L.push("  unencodable register names — detail:");
   L.push("    A 64-bit name in the C of a PE32 image: `canonReg` maps every alias to the 64-bit");

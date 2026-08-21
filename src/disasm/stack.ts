@@ -35,21 +35,38 @@ function parseDisp(text: string): number {
 }
 
 /**
- * Geometry of the incoming-argument area, relative to the frame pointer, for a
- * function that opens with `push <fp>; mov <fp>, <sp>`. The frame pointer then
- * points at the saved frame pointer, the return address is one slot above it,
- * and the arguments start one slot after that.
+ * Geometry of the incoming-argument area, measured from the stack pointer on
+ * **entry**. Call that `E`: `[E]` holds the return address, `[E + slot]` is
+ * argument 0 and `[E + slot + N*slot]` is argument N. Every positional name in
+ * this file is that arithmetic plus `D` — see `inlineFrameGeometry`.
  *
- * On x64 that first slot is the home slot the Microsoft x64 ABI reserves for
- * the *first* argument — the one that arrives in RCX — so the numbering runs
- * continuously across the register/stack boundary: `[rbp+0x10]` is argument 0
- * (RCX's home) and the fifth argument, the first that has no register, lands at
- * `[rbp+0x30]` as argument 4. That is what makes the index comparable with the
- * caller-side index, which counts argument registers on x64.
+ * `homeRegs` is the part of the area the caller does **not** write, and it is
+ * why an index alone is not enough to name a slot. The Microsoft x64 ABI has
+ * the caller reserve four slots — the *home space* — for the arguments that
+ * arrive in RCX, RDX, R8 and R9, and hands them to the callee as scratch: the
+ * caller never stores anything there, so a home slot holds argument N only if
+ * the callee spilled that register into it itself. The numbering still runs
+ * continuously across the register/stack boundary, which is what makes the
+ * index comparable with the caller-side one (`collectArgs64` counts argument
+ * registers), so argument 4 — the first with no register — is at `[E + 0x28]`.
+ * `homeRegs[N]` is therefore both *which* register carries argument N and, by
+ * its length, *how many* leading slots are callee scratch.
+ *
+ * On x86 nothing arrives in a register: every argument is pushed by the caller,
+ * so there is no home space and `homeRegs` is empty. That is not a shortcut for
+ * "x86 is simpler" — it is the fact that makes every x86 slot nameable from `D`
+ * alone, and it is why both PE32 binaries are the untouched control for any
+ * change to the home-space rule.
+ *
+ * (The argument-register order is spelled in five other places in `src/` —
+ * `signatures.ts`, `decompile/{lifter,ssa,structs}.ts` — each deliberately
+ * local to a file that must not import the others. This one is a *field of the
+ * geometry table* rather than a sixth free-standing copy, because its length
+ * is the geometry: it is read here only to answer "whose home slot is this".)
  */
 const ARG_AREA = {
-  64: { firstOffset: 0x10, slotSize: 8 },
-  32: { firstOffset: 0x08, slotSize: 4 },
+  64: { slotSize: 8, homeRegs: ["rcx", "rdx", "r8", "r9"] as readonly string[] },
+  32: { slotSize: 4, homeRegs: [] as readonly string[] },
 };
 
 /** `nop`, or a register moved onto itself (MSVC's `mov edi, edi` hot-patch pad). */
@@ -104,6 +121,69 @@ function entryRelative(
   return m[2] === "-" ? base - v : base + v;
 }
 
+/** What `[<fp> + off]` means in one function — see `inlineFrameGeometry`. */
+interface FrameGeometry {
+  /**
+   * `E - V` for the frame register, where `E` is the stack pointer on entry and
+   * `V` the value the function establishes in it — or null when it never
+   * establishes one *from the stack pointer* at all.
+   */
+  delta: number | null;
+  /**
+   * Argument indices inside the home space (`[0, homeRegs.length)`) whose home
+   * slot the prologue provably fills with that argument's own register. Always
+   * empty on x86, which has no home space, and never consulted when `delta` is
+   * null.
+   */
+  homed: ReadonlySet<number>;
+}
+
+/** No home slot was shown to hold its argument. */
+const NO_HOMED: ReadonlySet<number> = new Set<number>();
+
+/** The frame register is not derived from the stack pointer in this function. */
+const REFUSED: FrameGeometry = { delta: null, homed: NO_HOMED };
+
+/**
+ * A memory operand as Capstone spells it, with the size prefix removed:
+ * `qword ptr [rsp + 8]` → `[rsp + 8]`. `entryRelative` anchors on the brackets,
+ * so the prefix has to come off before it will read the operand at all — and a
+ * segment override (`dword ptr fs:[0]`, the second instruction of
+ * `__SEH_prolog4`) still fails to match, which is the right answer.
+ */
+const MEM_SIZE_PREFIX = /^(?:byte|word|dword|qword|fword|tbyte|[xyz]mmword)\s+ptr\s+/i;
+
+/**
+ * The argument index whose home slot this store fills, or null.
+ *
+ * `target` is the address written, as an offset from `E`, so argument N's home
+ * slot is at `slot * (N + 1)`. The store counts only when its source is
+ * argument N's **own** register: `mov [rsp + 8], rbx` writes argument 0's home
+ * slot too, and it is a callee-saved register being parked in space the ABI
+ * gave the callee for scratch — the same instruction shape stating the opposite
+ * fact. Getting that backwards is not a cosmetic error, because
+ * `paramIndexByBase` in `decompile/structs.ts` lets a home slot's `arg_<N>`
+ * *displace* the argument register's own provenance claim, so a saved register
+ * would then be linked to whatever the callers pass as argument N.
+ *
+ * A narrower source is admitted — `mov word ptr [rsp + 8], cx` spills the low
+ * half of argument 0 and the slot does hold it, with the width coming from the
+ * reads — but a store at an address *inside* a slot rather than at its base is
+ * not that argument and is refused.
+ */
+function homedSlot(
+  target: number | null,
+  src: string,
+  slotSize: number,
+  homeRegs: readonly string[],
+): number | null {
+  if (target === null || target <= 0 || target % slotSize !== 0) return null;
+  const index = target / slotSize - 1;
+  if (index >= homeRegs.length) return null;
+  if (!isKnownRegister(src)) return null;
+  return canonReg(src) === canonReg(homeRegs[index]) ? index : null;
+}
+
 /**
  * `E - V` for the frame register, where `E` is the stack pointer on entry and
  * `V` the value the function establishes in the frame register — or null when it
@@ -115,11 +195,11 @@ function entryRelative(
  * is at `[E + slot]` and argument N at `[E + slot + N*slot]`; therefore
  * `[<fp> + off]` is argument `(off - D - slot) / slot`, and an `off` below
  * `D + slot` is *below the return address* — a local of this frame, not an
- * argument. The canonical `push <fp>; mov <fp>, <sp>` gives `D = slot`, which is
- * where `ARG_AREA.firstOffset` (`2 * slot`) comes from; every other shape MSVC
- * emits gives some other `D`, and reading `firstOffset` as if `D` were `slot`
- * anyway is what numbered a large frame's locals — a GS cookie at
- * `[rbp + 0x1A20]` — as incoming arguments (peek-a-bin-ikd).
+ * argument. The canonical `push <fp>; mov <fp>, <sp>` gives `D = slot`; every
+ * other shape MSVC emits gives some other `D`, and reading the canonical
+ * geometry as if `D` were `slot` anyway is what numbered a large frame's
+ * locals — a GS cookie at `[rbp + 0x1A20]` — as incoming arguments
+ * (peek-a-bin-ikd).
  *
  * Note `D` is measured from the stack pointer on **entry** and not from the
  * saved frame pointer, which is why it does not matter *what* the function
@@ -138,18 +218,49 @@ function entryRelative(
  * makes RBP an object pointer, `mov rbp, rdx` is how an MSVC funclet receives
  * its parent's frame, and `xor ebp, ebp` makes it a constant — in none of those
  * is `[rbp + off]` an argument of this function at all.
+ *
+ * THE SECOND ANSWER, `homed`, is the home space's own question, and it is asked
+ * in the same walk because it needs the same stack model: whether the *callee*
+ * stored argument N's register into argument N's home slot — see `homedSlot`
+ * and `ARG_AREA`. `D` says which offsets are arguments; on x64 it cannot say
+ * whether the first four of them hold one, because the ABI gives those slots to
+ * the callee as scratch and MSVC spends them on saved registers and byte locals
+ * about as often as on spills (15 of this corpus's 20 such slots).
+ *
+ * `argsPristine` is the whole soundness argument for that half, and it is
+ * deliberately blunt: a store counts as a spill only while *no* instruction in
+ * the window has written any register but the stack pointer and the frame
+ * register, so every argument register still provably holds its incoming value
+ * and no liveness reasoning is needed. Pushes and the modelled `<sp>`
+ * arithmetic keep it, since they are exactly what the walk already tracks and
+ * neither touches an argument register. It costs nothing measurable — every
+ * spill in this corpus is in the entry store block, before any register write —
+ * and it is what makes the claim structural instead of empirical. The
+ * alternative, tracking which argument registers are still live, would need a
+ * second register-write grammar here and would have to be right about `cdq`,
+ * `mul` and `xchg` to be worth anything.
  */
-function inlineFrameDisplacement(insns: Instruction[], is64: boolean): number | null {
+function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry {
   const fp = is64 ? "rbp" : "ebp";
   const sp = is64 ? "rsp" : "esp";
-  const slotSize = ARG_AREA[is64 ? 64 : 32].slotSize;
+  const { slotSize, homeRegs } = ARG_AREA[is64 ? 64 : 32];
   const fpCanon = canonReg(fp);
   const spCanon = canonReg(sp);
 
   /** `<sp> - E` as the walk stands. */
   let spDelta = 0;
-  /** Registers holding an earlier `<sp>` value, keyed canonically, as `<sp> - E`. */
+  /**
+   * Registers holding an earlier `<sp>` value, keyed canonically, as `<sp> - E`.
+   * The frame register joins them the moment it is established, which is what
+   * lets a spill addressed `[<fp> + N]` resolve through the same grammar as one
+   * addressed `[<sp> + N]`.
+   */
   const spAlias = new Map<string, number>();
+  /** Set once the frame register is established; `delta` never moves after. */
+  let delta: number | null = null;
+  /** No register but `<sp>` and `<fp>` has been written — see the docstring. */
+  let argsPristine = true;
+  const homed = new Set<number>();
 
   for (let i = 0; i < insns.length && i < FRAME_MAX_INSNS; i++) {
     const insn = insns[i];
@@ -162,7 +273,7 @@ function inlineFrameDisplacement(insns: Instruction[], is64: boolean): number | 
     const memDest = dest.includes("[");
 
     if (mn === "push") {
-      if (!pushesWholeSlot(dest, slotSize)) return null;
+      if (!pushesWholeSlot(dest, slotSize)) return stop(delta, homed);
       spDelta -= slotSize;
       continue;
     }
@@ -170,43 +281,83 @@ function inlineFrameDisplacement(insns: Instruction[], is64: boolean): number | 
     if (!memDest && isKnownRegister(dest) && canonReg(dest) === fpCanon) {
       // The frame register is being written. Either this establishes the frame
       // from a stack value, or the register is not a frame pointer here.
-      if (dest !== fp) return null; // a narrower write is not a frame pointer
+      //
+      // Once it IS established the walk carries on, for `homed` only: a second
+      // write means `[<fp> + N]` no longer addresses the frame, so the spill
+      // scan ends there while `delta` — already fixed, and what every caller
+      // before this bead received at exactly this point — is handed back
+      // untouched.
+      if (delta !== null) return { delta, homed };
+      if (dest !== fp) return REFUSED; // a narrower write is not a frame pointer
       if (mn === "mov" || mn === "lea") {
         const v = entryRelative(ops[1] ?? "", sp, spDelta, spAlias, mn === "lea");
-        if (v !== null) return -v;
+        if (v !== null) {
+          delta = -v;
+          spAlias.set(fpCanon, v);
+          continue;
+        }
       }
-      return null;
+      return REFUSED;
     }
 
     if (!memDest && isKnownRegister(dest) && canonReg(dest) === spCanon) {
       // `sub <sp>, imm` and `add <sp>, imm` are the frame arithmetic; anything
       // else that moves the stack pointer ends the model.
       const imm = dest === sp ? loneImmediate(ops[1] ?? "") : null;
-      if (imm === null) return null;
+      if (imm === null) return stop(delta, homed);
       if (mn === "sub") spDelta -= imm;
       else if (mn === "add") spDelta += imm;
-      else return null;
+      else return stop(delta, homed);
       continue;
     }
 
     // `xchg` writes BOTH of its operands, so it is not enough to look at the
     // destination — the same reason `fpSurvivesToReturn` special-cases it.
     if (mn === "xchg" && ops.some((o) => isKnownRegister(o) && canonReg(o) === fpCanon)) {
-      return null;
+      return stop(delta, homed);
     }
 
-    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return null;
+    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return stop(delta, homed);
 
-    if (!memDest && isKnownRegister(dest)) {
+    if (memDest) {
+      // A store: it writes memory and no register, so it neither advances the
+      // stack model nor ends it — the prologue is full of them. `mov` is the
+      // only form that can be an argument spill, and it is also the only one
+      // that provably writes no register: `xchg`, `xadd` and `cmpxchg` through
+      // a memory operand write theirs, which `argsPristine` cannot survive.
+      if (mn !== "mov") argsPristine = false;
+      else if (argsPristine) {
+        const target = entryRelative(dest.replace(MEM_SIZE_PREFIX, ""), sp, spDelta, spAlias, true);
+        const slot = homedSlot(target, ops[1] ?? "", slotSize, homeRegs);
+        if (slot !== null) homed.add(slot);
+      }
+      continue;
+    }
+
+    if (isKnownRegister(dest)) {
       // Any write ends whatever this register was standing in for; a full-width
       // copy of the stack pointer then makes it stand in for this point.
       spAlias.delete(canonReg(dest));
       if (mn === "mov" && ops[1] === sp && regSize(dest) === slotSize) {
         spAlias.set(canonReg(dest), spDelta);
       }
+      argsPristine = false;
+    } else {
+      // An instruction whose written registers this walk cannot name — `cdq`
+      // writes EDX, `mul` writes RDX:RAX — so nothing after it is a spill.
+      argsPristine = false;
     }
   }
-  return null;
+  return stop(delta, homed);
+}
+
+/**
+ * The answer when the walk stops without establishing a frame, or stops after
+ * having established one. Both are the same statement — this is everything that
+ * was shown — and the pre-`sx57` code expressed the first half as a bare `null`.
+ */
+function stop(delta: number | null, homed: ReadonlySet<number>): FrameGeometry {
+  return delta === null ? REFUSED : { delta, homed };
 }
 
 /**
@@ -292,7 +443,7 @@ function fpSurvivesToReturn(window: Instruction[], from: number, fp: string): bo
  * arithmetic, checked. Let `E` be the caller's stack pointer on entry, so `[E]`
  * is the return address and `[E + slot]` is argument 0. The canonical prologue
  * leaves `<fp> = E - slot`, pointing at the saved frame pointer, which is what
- * makes `ARG_AREA.firstOffset` (`2 * slot`) argument 0. So the helper has
+ * makes `[<fp> + 2 * slot]` argument 0. So the helper has
  * established the caller's frame exactly when the `<fp>` it computes equals
  * `E - slot`, and the offset of the stack pointer from `E` is known all the way
  * there: `-slot` for each of the caller's pushes, `-slot` for the return address
@@ -399,9 +550,8 @@ function hasHelperFramePointerPrologue(
 }
 
 /**
- * `E - V` for the frame register — see `inlineFrameDisplacement` — established
- * either inline or by a prologue helper the function calls, or null when the
- * frame register is not derived from the stack pointer at all.
+ * What `[<fp> + off]` means in this function — see `inlineFrameGeometry` — for a
+ * frame established either inline or by a prologue helper the function calls.
  *
  * The helper path is deliberately still a yes/no question underneath: it admits
  * a helper only when the frame it establishes is `E - slot`, i.e. exactly the
@@ -410,17 +560,61 @@ function hasHelperFramePointerPrologue(
  * because the arithmetic in `hasHelperFramePointerPrologue` is what keeps the
  * search off ordinary calls and relaxing it has not been measured against
  * anything (peek-a-bin-emlv).
+ *
+ * It reports **no** homed slots, which is the conservative reading and costs
+ * nothing measured: `__SEH_prolog4` is a 32-bit form, where there is no home
+ * space to report on, and the helper search is measured to fire 0 times on both
+ * x64 binaries. A helper-framed x64 function would keep its home slots
+ * offset-named rather than have them guessed at.
  */
-function frameDisplacement(
+function frameGeometry(
   insns: Instruction[],
   is64: boolean,
   instructions: Instruction[],
-): number | null {
-  const inline = inlineFrameDisplacement(insns, is64);
-  if (inline !== null) return inline;
+): FrameGeometry {
+  const inline = inlineFrameGeometry(insns, is64);
+  if (inline.delta !== null) return inline;
   return hasHelperFramePointerPrologue(insns, instructions, is64)
-    ? ARG_AREA[is64 ? 64 : 32].slotSize
-    : null;
+    ? { delta: ARG_AREA[is64 ? 64 : 32].slotSize, homed: NO_HOMED }
+    : REFUSED;
+}
+
+/**
+ * `arg_<index>` when the slot's argument position is both derivable and a
+ * statement about this function's interface, and `arg_0x<offset>` when it is
+ * not. The name is the only channel to `decompile/structs.ts`, which keys
+ * cross-function parameter provenance off `^arg_(\d+)$`, so the two spellings
+ * are what keep a slot that is an argument apart from a slot that merely sits
+ * where one would (CLAUDE.md's stack-frame gotcha).
+ *
+ * Three ways to fall back, and only the first is about the frame:
+ *
+ *  - **No `delta`.** Nothing says where the argument area is; the caller does
+ *    not record such a slot as a parameter at all, so this is defence in depth.
+ *  - **A sub-slot offset.** `[ebp+0xA]` is the third byte of argument 0 and
+ *    divides into no index, so it is named after its offset rather than
+ *    silently rounded into a neighbour's.
+ *  - **A home slot the callee never filled.** The index is known exactly and is
+ *    still refused, because on x64 `[E + slot]` through `[E + 4*slot]` is space
+ *    the ABI gives the callee for scratch — see `ARG_AREA` and
+ *    `inlineFrameGeometry`. Naming one `arg_0` states something false about the
+ *    interface and, worse, hands `paramIndexByBase` a claim that *displaces*
+ *    the argument register's own.
+ */
+function argSlotName(
+  offset: number,
+  delta: number | null,
+  slotSize: number,
+  homeRegs: readonly string[],
+  homed: ReadonlySet<number>,
+): string {
+  const byOffset = `arg_0x${offset.toString(16).toUpperCase()}`;
+  if (delta === null) return byOffset;
+  const above = offset - delta - slotSize;
+  if (above < 0 || above % slotSize !== 0) return byOffset;
+  const index = above / slotSize;
+  if (index < homeRegs.length && !homed.has(index)) return byOffset;
+  return `arg_${index}`;
 }
 
 export function analyzeStackFrame(
@@ -506,7 +700,8 @@ export function analyzeStackFrame(
   // (`xor ebp, ebp`). Recording one as a parameter put a phantom argument in the
   // emitted signature and took the deref out of struct synthesis's reach
   // (peek-a-bin-ikd).
-  const frameDelta = frameDisplacement(funcInsns, is64, instructions);
+  const geometry = frameGeometry(funcInsns, is64, instructions);
+  const frameDelta = geometry.delta;
   // The lowest `[<fp> + off]` that can be an argument: one slot past the return
   // address, which sits at `[<fp> + delta]`.
   const minParamOffset = frameDelta === null ? null : frameDelta + ARG_AREA[width].slotSize;
@@ -546,7 +741,7 @@ export function analyzeStackFrame(
       // `[<fp> + frameDelta]`. For the canonical prologue that is [ebp+0x8] in
       // 32-bit and [rbp+0x10] in 64-bit — on x64 the home slot the ABI reserves
       // for the argument passed in RCX, not the first argument that lacks a
-      // register. See ARG_AREA and `inlineFrameDisplacement`.
+      // register. See ARG_AREA and `inlineFrameGeometry`.
       //
       // Anything below it, or any offset at all when there is no frame pointer
       // to measure from, is recorded as nothing and left as a plain deref —
@@ -578,8 +773,10 @@ export function analyzeStackFrame(
   // Assumptions, in the order they can fail:
   //
   //  1. The frame pointer is a frame pointer. Only checked, never assumed: a
-  //     slot in a function without the canonical prologue is named after its
-  //     offset (`arg_0x10`) instead, since no index can be derived from it.
+  //     slot in a function whose frame register is not derived from the stack
+  //     pointer is named after its offset (`arg_0x10`) instead, since no index
+  //     can be derived from it. `arg_<N>` therefore means "`D` was recovered",
+  //     which is what `decompile/structs.ts` reads it as.
   //  2. Each argument occupies exactly one slot, so N is really a *slot* index.
   //     An argument wider than one slot (an int64 on x86, a by-value struct)
   //     consumes several, and the arguments after it are then numbered past
@@ -590,30 +787,25 @@ export function analyzeStackFrame(
   //  3. An untouched argument leaves a gap in the numbering rather than
   //     shifting everything after it down. That gap is the point.
   //
-  // A sub-slot access ([ebp+0xA], the third byte of argument 0) does not
-  // divide evenly and is offset-named too, rather than silently rounded into a
-  // neighbour's index.
-  // `framed` is the *canonical* geometry specifically, because that is what
-  // `ARG_AREA.firstOffset` encodes and therefore what makes `arg_<index>`
-  // spellable. A recovered delta of any other value still says which offsets
-  // are arguments — that is `minParamOffset` above — but turning it into an
-  // index would put `arg_<N>` names on 83 more slots per x64 binary, and
-  // `structs.ts` keys cross-function parameter provenance off `^arg_(\d+)$`, so
-  // that is a change to struct *identity* and needs its own measurement. Left
-  // offset-named deliberately (peek-a-bin-ikd; peek-a-bin-sx57 carries the
-  // census of what is left and why it is not a follow-on hunk).
+  // The index is `(offset - D - slot) / slot`, so it follows the recovered
+  // geometry rather than the canonical one: a `push`-heavy MSVC prologue shifts
+  // every offset by however many slots it pushed, and reading those offsets
+  // against `D = slot` anyway is what left 83 genuine slots per x64 binary
+  // offset-named (peek-a-bin-sx57). `argSlotName` holds the three reasons an
+  // index is still not spellable, of which the x64 home space is the one that
+  // is not about the frame at all.
+  //
+  // `framed` — the *canonical* geometry — no longer takes part in naming. It is
+  // published for `promote.ts`, which uses it for a different question: whether
+  // a copy of the frame register may be followed to the same slot.
   const framed = frameDelta === ARG_AREA[width].slotSize;
-  const { firstOffset, slotSize } = ARG_AREA[width];
+  const { slotSize, homeRegs } = ARG_AREA[width];
 
   const usedNames = new Set<string>();
   for (const v of entries) {
     let name: string;
     if (v.isParam) {
-      const delta = v.offset - firstOffset;
-      name =
-        framed && delta % slotSize === 0
-          ? `arg_${delta / slotSize}`
-          : `arg_0x${v.offset.toString(16).toUpperCase()}`;
+      name = argSlotName(v.offset, frameDelta, slotSize, homeRegs, geometry.homed);
     } else {
       // Two locals can now share an operand offset (e.g. [rbp-0x10] and
       // [rsp+0x10]); suffix the base so their names stay distinct. Names are

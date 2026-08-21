@@ -87,7 +87,10 @@ describe("analyzeStackFrame — slot identity", () => {
     expect(frame).not.toBeNull();
 
     const names = frame!.vars.map((v) => v.name);
-    expect(names).toContain("arg_0");
+    // `arg_0x10`, not `arg_0`: this function never spills RCX, so argument 0's
+    // home slot is not shown to hold argument 0 (peek-a-bin-sx57). The name is
+    // incidental here — what is under test is that the two slots stay apart.
+    expect(names).toContain("arg_0x10");
     // The rsp slot is a local, not part of the parameter list.
     const spVar = frame!.vars.find((v) => v.key === stackVarKey("sp", 0x10));
     expect(spVar).toBeDefined();
@@ -110,9 +113,16 @@ describe("analyzeStackFrame — slot identity", () => {
   });
 
   it("names and orders unambiguous frames exactly as before", () => {
+    // The two spills are what make the home slots argument 0 and argument 1 —
+    // an x64 caller never writes the home space, so without them the slots are
+    // named after their offsets and this would be testing something else
+    // (peek-a-bin-sx57). MSVC emits them for exactly this reason: a function
+    // that reads a register argument out of memory has to put it there.
     const insns = body(
       ...PROLOGUE_64,
       ["sub", "rsp, 0x28"],
+      ["mov", "qword ptr [rbp + 0x10], rcx"],
+      ["mov", "qword ptr [rbp + 0x18], rdx"],
       ["mov", "dword ptr [rbp - 0x4], eax"],
       ["mov", "dword ptr [rbp - 0x8], ecx"],
       ["mov", "eax, dword ptr [rbp + 0x10]"],
@@ -173,8 +183,15 @@ describe("analyzeStackFrame — argument numbering", () => {
     // RCX/RDX/R8/R9. A spilled argument therefore gets the same index whether
     // it is reached through its register or through its slot. Two slots, not
     // four, so the numbering cannot coincide with a running counter.
+    //
+    // The spills are the fixture's own premise and used to be missing from it:
+    // the comment said "a spilled argument" while the instructions spilled
+    // nothing, so the test passed on a rule that named any home slot after its
+    // index whether or not the callee had filled it (peek-a-bin-sx57).
     const insns = body(
       ...PROLOGUE_64,
+      ["mov", "qword ptr [rbp + 0x18], rdx"],
+      ["mov", "qword ptr [rbp + 0x28], r9"],
       ["mov", "rax, qword ptr [rbp + 0x18]"],
       ["mov", "rcx, qword ptr [rbp + 0x28]"],
     );
@@ -189,8 +206,13 @@ describe("analyzeStackFrame — argument numbering", () => {
     // [rbp+0x30], and is argument 4. This is where an off-by-shadow-space error
     // would surface: read as the *first* stack argument it would be numbered 0
     // and collide with RCX, linking the fifth argument to the first.
+    //
+    // [rbp+0x30] needs no spill — it is in the caller's own argument area, the
+    // caller put it there, and that is the whole difference from the home space
+    // below it. The RCX spill is what earns argument 0 its name.
     const insns = body(
       ...PROLOGUE_64,
+      ["mov", "qword ptr [rbp + 0x10], rcx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
       ["mov", "rcx, qword ptr [rbp + 0x30]"],
     );
@@ -223,6 +245,133 @@ describe("analyzeStackFrame — argument numbering", () => {
     // index, so it does not get one.
     const insns = body(...PROLOGUE_32, ["mov", "al, byte ptr [ebp + 0xA]"]);
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0xA"]);
+  });
+});
+
+describe("analyzeStackFrame — the x64 home space", () => {
+  // The Microsoft x64 ABI has the CALLER reserve four slots for the arguments
+  // that arrive in RCX/RDX/R8/R9 and hands them to the callee as scratch. So
+  // the displacement says a home slot's argument index exactly, and says
+  // nothing about whether the slot holds that argument: only the callee
+  // spilling the register there does. Naming one `arg_0` regardless states
+  // something false about the function's interface and, worse, hands
+  // `paramIndexByBase` a provenance claim that DISPLACES the argument
+  // register's own — so a saved register gets linked to the callers' argument.
+  //
+  // Measured over the corpus at f169c00: of the 20 home slots the x64 binaries
+  // access through a recovered frame pointer, 15 are a saved register or a byte
+  // local and 5 are a real spill (peek-a-bin-sx57).
+
+  it("does not index a home slot the function never filled", () => {
+    const insns = body(...PROLOGUE_64, ["mov", "rax, qword ptr [rbp + 0x10]"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+  });
+
+  it("indexes a home slot the function spills its own argument into", () => {
+    const insns = body(
+      ...PROLOGUE_64,
+      ["mov", "qword ptr [rbp + 0x10], rcx"],
+      ["mov", "rax, qword ptr [rbp + 0x10]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0"]);
+  });
+
+  it("reads a spill through the stack pointer before the frame exists", () => {
+    // MSVC's own order: the spills come first, addressed off RSP, and the
+    // pushes and the frame follow. t64!sub_1400080E0 opens exactly like this.
+    const insns = body(
+      ["mov", "qword ptr [rsp + 0x10], rdx"],
+      ["mov", "dword ptr [rsp + 8], ecx"],
+      ["push", "rbp"],
+      ["push", "rbx"],
+      ["mov", "rbp, rsp"],
+      ["mov", "rax, qword ptr [rbp + 0x18]"],
+      ["mov", "rcx, qword ptr [rbp + 0x20]"],
+    );
+    // Two pushes then `mov rbp, rsp` is D = 0x10, so the return address is at
+    // [rbp+0x10], argument 0's home slot is [rbp+0x18] and argument 1's is
+    // [rbp+0x20] — the pushes shift both by two slots from the canonical
+    // 0x10/0x18, which is the whole of what `D` is for.
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+      "arg_0",
+      "arg_1",
+    ]);
+  });
+
+  it("does not index a home slot filled with a callee-saved register", () => {
+    // NEGATIVE CONTROL for the one that matters: `mov [rbp+0x10], rbx` is the
+    // same instruction shape as a spill and the opposite fact — RBX is not
+    // argument 0's register, so the slot is a register save parked in the
+    // scratch the ABI gave the callee. t64!sub_1400027C8 does this four times
+    // over, into arguments 0-3's home slots.
+    const insns = body(
+      ...PROLOGUE_64,
+      ["mov", "qword ptr [rbp + 0x10], rbx"],
+      ["mov", "rax, qword ptr [rbp + 0x10]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+  });
+
+  it("indexes a home slot spilled at a narrower width", () => {
+    // t64!sub_14000EE7C spills R9's low half with `mov word ptr [rsp+0x20], r9w`
+    // and reads it back with `movzx`. The slot holds argument 3; the width comes
+    // from the reads, not from the spill.
+    const insns = body(
+      ["mov", "word ptr [rsp + 0x20], r9w"],
+      ["push", "rbp"],
+      ["mov", "rbp, rsp"],
+      ["movzx", "eax, word ptr [rbp + 0x28]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_3"]);
+  });
+
+  it("does not index a slot written at an address inside a home slot", () => {
+    // A byte at [rsp+9] is not argument 0; it is one byte of it, and the slot
+    // as a whole has not been shown to hold the argument.
+    const insns = body(
+      ["mov", "byte ptr [rsp + 9], cl"],
+      ["push", "rbp"],
+      ["mov", "rbp, rsp"],
+      ["mov", "rax, qword ptr [rbp + 0x10]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+  });
+
+  it("refuses a spill once any register has been written", () => {
+    // `argsPristine`. After `mov rcx, rax` the register no longer provably
+    // holds the incoming argument, so the store into its home slot is not
+    // evidence about argument 0. Refusing costs an index; admitting it would
+    // name the slot after a value the caller never passed.
+    const insns = body(
+      ...PROLOGUE_64,
+      ["mov", "rcx, rax"],
+      ["mov", "qword ptr [rbp + 0x10], rcx"],
+      ["mov", "rax, qword ptr [rbp + 0x10]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+  });
+
+  it("indexes the caller's own argument area with no spill anywhere", () => {
+    // Index 4 and up is above the home space, in storage the caller wrote
+    // because there is no other way to pass a fifth argument. No spill is
+    // possible and none is wanted.
+    const insns = body(
+      ...PROLOGUE_64,
+      ["mov", "rax, qword ptr [rbp + 0x30]"],
+      ["mov", "rcx, qword ptr [rbp + 0x38]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+      "arg_4",
+      "arg_5",
+    ]);
+  });
+
+  it("has no home space on x86, so a slot needs no spill", () => {
+    // Every x86 argument is pushed by the caller, so `homeRegs` is empty and
+    // `D` alone names every slot. This is why both PE32 binaries are the
+    // byte-identical control for the whole home-space rule.
+    const insns = body(...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0x8]"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
   });
 });
 
@@ -328,10 +477,12 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
 
   it("keeps an argument reached over intervening pushes", () => {
     // The displacement, not the push pattern, is what says where the arguments
-    // are: three pushes then `mov rbp, rsp` puts the return address at
-    // [rbp + 0x18] and argument 0 at [rbp + 0x20]. Both offsets are arguments
-    // and must stay parameters — 94 of t64's 147 offset-named slots are this
-    // shape, and refusing them wholesale on `framed` would have lost every one.
+    // are — and it says *which* argument as well: three pushes then
+    // `mov rbp, rsp` puts the return address at [rbp + 0x18], argument 0 at
+    // [rbp + 0x20], and [rbp + 0x40] at index 4. This asserted `arg_0x40` until
+    // peek-a-bin-sx57, which is the defect: `framed` is false here, so the
+    // index was withheld even though the displacement determines it exactly.
+    // Index 4 is above the home space, so it needs no spill.
     const insns = body(
       ["push", "rbp"],
       ["push", "r12"],
@@ -342,26 +493,42 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     );
     const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
     // 0x10 is below the return address at 0x18, so it is not an argument.
-    expect(argNames(frame)).toEqual(["arg_0x40"]);
+    expect(argNames(frame)).toEqual(["arg_4"]);
     expect(frame!.framed).toBe(false);
   });
 
-  it("does not number slots of a frame established with lea", () => {
-    // `lea rbp, [rsp + 0x20]` shifts every argument offset by 0x20, so the
-    // offsets mean something — just not what the standard prologue makes them
-    // mean.
+  it("numbers slots of a frame established with lea", () => {
+    // t64!sub_1400027C8's own prologue: three pushes, `sub rsp, 0x40`, then
+    // `lea rbp, [rsp + 0x30]`, which leaves the frame register 0x28 below the
+    // entry stack pointer. Every argument offset is shifted by that, and the
+    // shift is exactly what `D` measures — so [rbp + 0x50] is index 4.
+    //
+    // This asserted `arg_0x10` on a fabricated single-push shape until
+    // peek-a-bin-sx57, under the title "does not number slots of a frame
+    // established with lea". The `lea` form is not a reason to withhold an
+    // index; it is a reason to measure the displacement instead of assuming it.
     const insns = body(
       ["push", "rbp"],
-      ["lea", "rbp, [rsp + 0x20]"],
-      ["mov", "rax, qword ptr [rbp + 0x10]"],
+      ["push", "r13"],
+      ["push", "r14"],
+      ["sub", "rsp, 0x40"],
+      ["lea", "rbp, [rsp + 0x30]"],
+      ["mov", "rax, qword ptr [rbp + 0x50]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(argNames(frame)).toEqual(["arg_4"]);
+    // Not the canonical geometry, which is a different question — see
+    // `StackFrame.framed` and `promote.ts`'s `frameRegisterAliases`.
+    expect(frame!.framed).toBe(false);
   });
 
-  // This asserted ["arg_0x8"] until peek-a-bin-ikd. `push ebx` before
-  // `push ebp` leaves EBP at entry-ESP minus two slots, so `[ebp + 8]` is the
-  // RETURN ADDRESS and the first argument is at `[ebp + 0xC]`. Naming the return
-  // address after an offset was still calling it a parameter.
+  // This asserted ["arg_0x8"] until peek-a-bin-ikd and ["arg_0xC"] until
+  // peek-a-bin-sx57. `push ebx` before `push ebp` leaves EBP at entry-ESP minus
+  // two slots, so `[ebp + 8]` is the RETURN ADDRESS and the first argument is at
+  // `[ebp + 0xC]`. ikd stopped calling the return address a parameter; sx57
+  // gives the argument the index the comment had been asserting in prose all
+  // along. There is no home space on x86 — every argument is pushed by the
+  // caller — so `D` alone names it.
   it("records no parameter for the return address of a shifted frame", () => {
     const insns = body(
       ["push", "ebx"],
@@ -369,7 +536,7 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "eax, dword ptr [ebp + 0x8]"],
       ["mov", "ecx, dword ptr [ebp + 0xC]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0xC"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
   });
 
   it("sees through hot-patch padding before the prologue", () => {
@@ -552,10 +719,18 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
     // rather than measured. One caller push, the return address and one helper
     // push put RSP 3 slots below the caller's entry, so the frame is the
     // caller's precisely at `0x10 + (-3 * 8) === -8`.
+    //
+    // [rbp + 0x30] is index 4 and is what pins the arithmetic: it is only 4 if
+    // the helper really was read as leaving the frame at `E - 8`. [rbp + 0x10]
+    // is argument 0's HOME slot and stays offset-named, because the helper path
+    // reports no spilled home slots at all — a deliberate refusal rather than a
+    // gap, since `__SEH_prolog4` is a 32-bit form with no home space and the
+    // helper search fires 0 times on both x64 binaries (peek-a-bin-sx57).
     const callerInsns: [string, string][] = [
       ["push", "0x20"],
       ["call", `0x${HELPER_ADDR.toString(16)}`],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
+      ["mov", "rcx, qword ptr [rbp + 0x30]"],
     ];
     const helper: [string, string][] = [
       ["push", "0x4041d0"],
@@ -563,6 +738,6 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["ret", ""],
     ];
     const { func: f, instructions } = withHelper(callerInsns, helper);
-    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_0x10", "arg_4"]);
   });
 });

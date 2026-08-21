@@ -442,21 +442,30 @@ const FRAME_POINTER_KEY = `reg:${canonReg("rbp")}`;
  * What is excluded is a frame pointer this function *established from the stack
  * pointer*, on either of two independent pieces of evidence:
  *
- *  - **A parameter named `arg_<N>`.** stack.ts spells a slot that way only after
- *    it has verified the `push rbp; mov rbp, rsp` prologue; anything else is
- *    named after its offset (`arg_0x10`) precisely so the two cases stay
- *    distinguishable. That name is the only channel between the two files, and
- *    it is the same one `paramIndexByBase` reads provenance out of. It is also
- *    the *load-bearing* half in production, because the establishing assignment
- *    frequently does not survive to this pass at all: `mov rbp, rsp` is dropped
- *    upstream while the accesses through RBP keep their base (see
- *    peek-a-bin-a6n's follow-up), leaving no trace of it in the body.
+ *  - **A parameter named `arg_<N>`.** stack.ts spells a slot that way only
+ *    after it has measured the frame register's displacement from the stack
+ *    pointer on entry; a frame register it could not derive from the stack
+ *    pointer leaves every slot named after its offset (`arg_0x10`), precisely
+ *    so the two cases stay distinguishable. That name is the only channel
+ *    between the two files, and it is the same one `paramIndexByBase` reads
+ *    provenance out of. It is also the *load-bearing* half in production,
+ *    because the establishing assignment frequently does not survive to this
+ *    pass at all: `mov rbp, rsp` is dropped upstream while the accesses through
+ *    RBP keep their base (see peek-a-bin-a6n's follow-up), leaving no trace of
+ *    it in the body.
  *  - **The assignment itself, where it does survive.** `rbp = rsp`, or the
- *    `lea rbp, [rsp + 0x20]` form of it — which stack.ts declines to derive
- *    argument indices from, because the offsets are shifted, so the name channel
- *    stays silent for it and only this one fires. Propagation the other way is
- *    covered by the seed: once the accesses themselves read `[rsp + N]` the base
- *    *is* the stack pointer.
+ *    `lea rbp, [rsp + 0x20]` form of it. Propagation the other way is covered
+ *    by the seed: once the accesses themselves read `[rsp + N]` the base *is*
+ *    the stack pointer.
+ *
+ * Until peek-a-bin-sx57 the first bullet was narrower than the second — the
+ * name channel was silent for any prologue but the canonical one, so a
+ * `lea`-established or push-shifted frame was excluded by the assignment alone
+ * or not at all. It now fires wherever a displacement was recovered, so the two
+ * pieces of evidence agree about far more functions than they used to. That is
+ * a widening of the exclusion and therefore of the FPO reading's protection; it
+ * moved no struct in the corpus, because the assignment was already catching
+ * every such function there.
  *
  * A load (`pop rbp`, `mov rbp, [rsp+8]`) is *not* stack-derived: the address is
  * on the stack, the value is whatever was stored there. That matters because an
@@ -790,9 +799,14 @@ const X64_ARG_REGS = ["rcx", "rdx", "r8", "r9"];
 
 /**
  * A stack parameter whose name carries a known argument index. stack.ts names a
- * slot `arg_<decimal index>` only when it verified the frame-pointer prologue
- * and the offset divided evenly into a slot; otherwise the name is the offset
- * (`arg_0x10`), which this deliberately does not match.
+ * slot `arg_<decimal index>` only when it recovered the frame register's
+ * displacement, the offset divided evenly into a slot, AND — inside the x64
+ * home space — the callee was shown to spill that argument's own register into
+ * it; otherwise the name is the offset (`arg_0x10`), which this deliberately
+ * does not match. The home-space condition exists for this map in particular:
+ * a home slot's `arg_<N>` DISPLACES the argument register's claim below, so a
+ * saved register named `arg_0` would be linked to whatever the callers pass as
+ * argument 0 (peek-a-bin-sx57).
  */
 const STACK_PARAM_RE = /^arg_(\d+)$/;
 
@@ -811,9 +825,10 @@ const STACK_PARAM_RE = /^arg_(\d+)$/;
  *   stack.ts from the slot's offset above the frame pointer. A slot stack.ts
  *   could not derive an index for is named after its offset instead, so it does
  *   not match here and contributes no provenance. That is the whole gate: an
- *   `arg_N` reaching this point means the frame pointer was verified to be one,
- *   which matters most on x64, where RBP is more often a callee-saved object
- *   pointer whose `[rbp+0x10]` is a struct field rather than an argument.
+ *   `arg_N` reaching this point means the frame register was shown to be
+ *   derived from the entry stack pointer, which matters most on x64, where RBP
+ *   is more often a callee-saved object pointer whose `[rbp+0x10]` is a struct
+ *   field rather than an argument.
  *
  * Both schemes count the same thing the call-site side counts — a slot, not a
  * source-level argument — so an argument occupying two slots shifts caller and
@@ -835,8 +850,14 @@ const STACK_PARAM_RE = /^arg_(\d+)$/;
  * something else after the spill, which is routine for a volatile register —
  * and only one of the two bases can be argument N.
  *
- * The home slot wins. `[rbp+0x10]` in a function whose frame-pointer prologue
- * stack.ts verified can only be argument 0's storage; that is the ABI. RCX's
+ * The home slot wins, and since peek-a-bin-sx57 that rests on evidence rather
+ * than on the ABI. `[rbp+0x10]` reaching this point as `arg_0` now means
+ * stack.ts saw this function spill RCX into that slot — the home space is
+ * *callee scratch* under the Microsoft x64 ABI, so the slot is argument 0's
+ * storage only when the callee made it so, and a slot holding a saved register
+ * is named after its offset and never gets here. (This paragraph used to argue
+ * "that is the ABI", which was the wrong way round: the ABI reserves the slot
+ * and then gives it away.) RCX's
  * claim rests on two heuristics instead — that the signature detector got the
  * parameter count right, and that the register still holds the incoming value
  * at the point of use — and the surviving collision is evidence the second one
