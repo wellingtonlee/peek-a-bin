@@ -27,9 +27,15 @@ const PROLOGUE_32: [string, string][] = [
   ["mov", "ebp, esp"],
 ];
 
-/** Names of the parameter slots, in frame order. */
+/**
+ * Names of the parameter slots, in frame order.
+ *
+ * A null frame is `[]` rather than a crash, because refusing to record a
+ * `[<fp> + N]` as a parameter is now an outcome in its own right: where that was
+ * the only slot the function touched, there is no frame left to return.
+ */
 function argNames(frame: { vars: { name: string }[] } | null): string[] {
-  return frame!.vars.map((v) => v.name).filter((n) => n.startsWith("arg_"));
+  return (frame?.vars ?? []).map((v) => v.name).filter((n) => n.startsWith("arg_"));
 }
 
 // ── Tests ──
@@ -118,7 +124,11 @@ describe("analyzeStackFrame — slot identity", () => {
   });
 
   it("handles 32-bit ebp/esp bases", () => {
+    // The prologue is here because this is about bp-vs-sp slot identity: without
+    // it `[ebp + 8]` is not a parameter at all (see the frame-pointer
+    // verification block), and the third key would simply not exist.
     const insns = body(
+      ...PROLOGUE_32,
       ["mov", "dword ptr [ebp - 0xC], eax"],
       ["mov", "dword ptr [esp + 0xC], ecx"],
       ["mov", "eax, dword ptr [ebp + 0x8]"],
@@ -268,16 +278,72 @@ describe("analyzeStackFrame — displacements Capstone printed in decimal", () =
 });
 
 describe("analyzeStackFrame — frame-pointer verification", () => {
-  it("does not number slots of a function with no frame-pointer prologue", () => {
+  // This asserted ["arg_0x10", "arg_0x18"] until peek-a-bin-ikd: the slots were
+  // still recorded as PARAMETERS and only the positional name was withheld. RBP
+  // is never written here, so it holds whatever the caller left in it and
+  // `[rbp + N]` is not an argument of this function under any reading — the two
+  // names were phantom parameters in the emitted signature, and they blocked
+  // struct synthesis from seeing the accesses at all.
+  it("records no parameter for a function with no frame pointer", () => {
     const insns = body(
       ["sub", "rsp, 0x28"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
       ["mov", "rcx, qword ptr [rbp + 0x18]"],
     );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(argNames(frame)).toEqual([]);
+    // Not renamed to a local either: nothing knows what the slot is, so the
+    // deref is left exactly as it stands.
+    expect(frame!.vars).toEqual([]);
+  });
+
+  it("records no parameter when the frame register holds an object pointer", () => {
+    // MSVC's `mov rbp, rcx`: RBP is argument 0's object, so `[rbp + 0x18]` is a
+    // field of it. This is peek-a-bin-ikd's own example, t64!sub_1400058F4.
+    const insns = body(
+      ["push", "rbp"],
+      ["sub", "rsp, 0x20"],
+      ["mov", "rbp, rcx"],
+      ["mov", "rax, qword ptr [rbp + 0x18]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+  });
+
+  it("records no parameter for a slot below the argument area of a shifted frame", () => {
+    // `lea rbp, [rsp - 0x1A30]` after seven pushes puts the frame register
+    // 0x1A68 below the stack pointer on entry, so `[rbp + 0x1A20]` is 0x48
+    // bytes BELOW the return address — a local, and in the corpus the GS
+    // cookie. t64!sub_14000D8C4.
+    const insns = body(
+      ["push", "rbp"],
+      ["lea", "rbp, [rsp - 0x1A30]"],
+      ["mov", "qword ptr [rbp + 0x1A20], rax"],
+      ["mov", "rcx, qword ptr [rbp + 0x1A40]"],
+    );
+    // 0x1A38 is the return address, so the first argument is at 0x1A40.
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
-      "arg_0x10",
-      "arg_0x18",
+      "arg_0x1A40",
     ]);
+  });
+
+  it("keeps an argument reached over intervening pushes", () => {
+    // The displacement, not the push pattern, is what says where the arguments
+    // are: three pushes then `mov rbp, rsp` puts the return address at
+    // [rbp + 0x18] and argument 0 at [rbp + 0x20]. Both offsets are arguments
+    // and must stay parameters — 94 of t64's 147 offset-named slots are this
+    // shape, and refusing them wholesale on `framed` would have lost every one.
+    const insns = body(
+      ["push", "rbp"],
+      ["push", "r12"],
+      ["push", "r13"],
+      ["mov", "rbp, rsp"],
+      ["mov", "rax, qword ptr [rbp + 0x40]"],
+      ["mov", "rcx, qword ptr [rbp + 0x10]"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    // 0x10 is below the return address at 0x18, so it is not an argument.
+    expect(argNames(frame)).toEqual(["arg_0x40"]);
+    expect(frame!.framed).toBe(false);
   });
 
   it("does not number slots of a frame established with lea", () => {
@@ -292,11 +358,18 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
   });
 
-  it("does not number slots when a register is pushed before the frame pointer", () => {
-    // `push ebx` before `push ebp` puts the saved EBX where the return address
-    // would otherwise be, shifting the whole argument area by one slot.
-    const insns = body(["push", "ebx"], ...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0x8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0x8"]);
+  // This asserted ["arg_0x8"] until peek-a-bin-ikd. `push ebx` before
+  // `push ebp` leaves EBP at entry-ESP minus two slots, so `[ebp + 8]` is the
+  // RETURN ADDRESS and the first argument is at `[ebp + 0xC]`. Naming the return
+  // address after an offset was still calling it a parameter.
+  it("records no parameter for the return address of a shifted frame", () => {
+    const insns = body(
+      ["push", "ebx"],
+      ...PROLOGUE_32,
+      ["mov", "eax, dword ptr [ebp + 0x8]"],
+      ["mov", "ecx, dword ptr [ebp + 0xC]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0xC"]);
   });
 
   it("sees through hot-patch padding before the prologue", () => {
@@ -305,9 +378,15 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
   });
 
-  it("does not mistake a push of another register for the frame-pointer push", () => {
+  // This asserted ["arg_0x8"] until peek-a-bin-ikd, on the reasoning that the
+  // pushed register was not EBP. It is not the register that matters: what makes
+  // `[ebp + 8]` argument 0 is that EBP ends up exactly one slot below the stack
+  // pointer on entry, which `push esi / mov ebp, esp` achieves as surely as
+  // `push ebp / mov ebp, esp` does. `[ebp]` is the saved ESI, `[ebp + 4]` the
+  // return address, `[ebp + 8]` argument 0.
+  it("numbers an argument whatever register the frame push saved", () => {
     const insns = body(["push", "esi"], ["mov", "ebp, esp"], ["mov", "eax, dword ptr [ebp + 0x8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0x8"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
   });
 });
 
@@ -405,9 +484,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
     const offByOne = SEH_PROLOG4.map(
       ([mn, op]) => (mn === "lea" ? [mn, "ebp, [esp + 0xc]"] : [mn, op]) as [string, string],
     );
-    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], offByOne)).toEqual([
-      "arg_0x8",
-    ]);
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], offByOne)).toEqual([]);
   });
 
   it("refuses a helper that saves the frame pointer with a push", () => {
@@ -427,7 +504,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
           ["ret", ""],
         ],
       ),
-    ).toEqual(["arg_0x8"]);
+    ).toEqual([]);
   });
 
   it("refuses an ordinary call: the caller may only push immediates", () => {
@@ -441,7 +518,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
         ["call", `0x${HELPER_ADDR.toString(16)}`],
         ["mov", "ebx, dword ptr [ebp + 0x8]"],
       ]),
-    ).toEqual(["arg_0x8"]);
+    ).toEqual([]);
   });
 
   it("refuses a helper that writes the frame pointer again before returning", () => {
@@ -449,18 +526,14 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ([mn, op]) =>
         (mn === "sub" && op === "esp, eax" ? ["add", "ebp, 0x10"] : [mn, op]) as [string, string],
     );
-    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], clobbers)).toEqual([
-      "arg_0x8",
-    ]);
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], clobbers)).toEqual([]);
   });
 
   it("refuses a helper whose return is never reached", () => {
     // A helper whose `ret` was not seen has not been shown to preserve the
     // value it computed, so the frame is not claimed.
     const noRet = SEH_PROLOG4.filter(([mn]) => mn !== "ret");
-    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], noRet)).toEqual([
-      "arg_0x8",
-    ]);
+    expect(argsOf([...HELPER_CALL, ["mov", "ebx, dword ptr [ebp + 0x8]"]], noRet)).toEqual([]);
   });
 
   it("refuses a call whose target is not in the instruction array", () => {
@@ -470,7 +543,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["call", "0x9000"],
       ["mov", "ebx, dword ptr [ebp + 0x8]"],
     ]);
-    expect(argNames(analyzeStackFrame(f, instructions, false))).toEqual(["arg_0x8"]);
+    expect(argNames(analyzeStackFrame(f, instructions, false))).toEqual([]);
   });
 
   it("applies the same arithmetic on x64, where the slot is 8 bytes", () => {

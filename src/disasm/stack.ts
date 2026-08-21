@@ -1,4 +1,4 @@
-import { isKnownRegister, regSize } from "./decompile/ir";
+import { canonReg, isKnownRegister, regSize } from "./decompile/ir";
 import { collectFuncInsns, getFuncInsns } from "./funcInsns";
 import { loneImmediate, STACK_TRAFFIC } from "./stackIdiom";
 import type { DisasmFunction, Instruction, StackFrame, StackVar } from "./types";
@@ -61,38 +61,152 @@ function isProloguePadding(insn: Instruction): boolean {
 }
 
 /**
- * True when the function opens with the canonical frame-pointer prologue *in
- * line*, so a `[<fp> + N]` operand really does address the caller's argument
- * area and N can be turned into an argument index.
- *
- * Deliberately strict: `push <fp>` must be the first instruction (bar
- * hot-patch padding) and `mov <fp>, <sp>` the one after it. Anything pushed in
- * between shifts every argument offset by a slot, and `lea <fp>, [<sp> + N]` —
- * MSVC's other way of establishing a frame — shifts them by N.
- *
- * Outside that exact shape the offset carries no argument index at all. On x64
- * especially, RBP is far more often a plain callee-saved pointer than a frame
- * pointer, so `[rbp + 0x10]` in a function that never established a frame is a
- * field of whatever object RBP happens to hold.
- *
- * A frame the function delegates to a *helper* is the other true case and is
- * `hasHelperFramePointerPrologue`'s question, not this one's.
+ * How far into a function the frame-pointer search reads. A frame established
+ * further in than this is *refused*, never guessed at.
  */
-function hasInlineFramePointerPrologue(insns: Instruction[], is64: boolean): boolean {
+const FRAME_MAX_INSNS = 32;
+
+/**
+ * The value an operand denotes, as an offset from the stack pointer on entry, or
+ * null when it is not derived from the stack pointer at all.
+ *
+ * `withDisplacement` distinguishes the two forms that can establish a frame
+ * pointer: a bare register source (`mov <fp>, <sp>`, or a copy of it) and a
+ * memory *address* (`lea <fp>, [<sp> - N]`). An index register, a scale or a
+ * second base all return null, since the displacement would then not be the
+ * whole offset.
+ *
+ * `spAlias` maps a canonical register to the `<sp> - E` it holds, so a frame
+ * established from a copy of the stack pointer reads exactly as one established
+ * from the stack pointer itself. There is one grammar for this in this file —
+ * `fpFromSp` asks it with an empty alias map, which is the prologue-helper
+ * path's own question.
+ */
+function entryRelative(
+  operand: string,
+  sp: string,
+  spDelta: number,
+  spAlias: ReadonlyMap<string, number>,
+  withDisplacement: boolean,
+): number | null {
+  const t = operand.trim().toLowerCase();
+  const deltaOf = (reg: string): number | undefined =>
+    reg === sp ? spDelta : spAlias.get(canonReg(reg));
+
+  if (!withDisplacement) return isKnownRegister(t) ? (deltaOf(t) ?? null) : null;
+
+  const m = new RegExp(`^\\[\\s*([a-z][a-z0-9]*)\\s*(?:([+-])\\s*${DISP}\\s*)?\\]$`, "i").exec(t);
+  if (!m) return null;
+  const base = deltaOf(m[1]);
+  if (base === undefined) return null;
+  if (m[2] === undefined) return base;
+  const v = parseDisp(m[3]);
+  return m[2] === "-" ? base - v : base + v;
+}
+
+/**
+ * `E - V` for the frame register, where `E` is the stack pointer on entry and
+ * `V` the value the function establishes in the frame register — or null when it
+ * never establishes one *from the stack pointer* at all.
+ *
+ * This is the one quantity the argument area's geometry needs, and it is a
+ * quantity rather than a yes/no because a frame pointer does not have to point
+ * at the saved frame pointer. `E` is where the return address is, so argument 0
+ * is at `[E + slot]` and argument N at `[E + slot + N*slot]`; therefore
+ * `[<fp> + off]` is argument `(off - D - slot) / slot`, and an `off` below
+ * `D + slot` is *below the return address* — a local of this frame, not an
+ * argument. The canonical `push <fp>; mov <fp>, <sp>` gives `D = slot`, which is
+ * where `ARG_AREA.firstOffset` (`2 * slot`) comes from; every other shape MSVC
+ * emits gives some other `D`, and reading `firstOffset` as if `D` were `slot`
+ * anyway is what numbered a large frame's locals — a GS cookie at
+ * `[rbp + 0x1A20]` — as incoming arguments (peek-a-bin-ikd).
+ *
+ * Note `D` is measured from the stack pointer on **entry** and not from the
+ * saved frame pointer, which is why it does not matter *what* the function
+ * pushed before establishing the frame: `push rbx; mov rbp, rsp` is `D = slot`
+ * and `[rbp + 2*slot]` really is argument 0 there too.
+ *
+ * The walk is a small abstract interpretation of the prologue holding the stack
+ * pointer's offset from `E`, plus the registers standing in for an earlier value
+ * of it — MSVC's large-frame prologue opens `mov rax, rsp` and establishes the
+ * frame with `lea rbp, [rax - N]`, so the copy has to be tracked or that whole
+ * shape is unreadable. Everything not understood is a **refusal**, because a `D`
+ * that is wrong by a slot is an argument index that is wrong by one, and on the
+ * naming side that is a parameter identity `structs.ts` links across functions.
+ * In particular a write to the frame register from anything that is not a
+ * tracked stack value returns null and does not fall through: `mov rbp, rcx`
+ * makes RBP an object pointer, `mov rbp, rdx` is how an MSVC funclet receives
+ * its parent's frame, and `xor ebp, ebp` makes it a constant — in none of those
+ * is `[rbp + off]` an argument of this function at all.
+ */
+function inlineFrameDisplacement(insns: Instruction[], is64: boolean): number | null {
   const fp = is64 ? "rbp" : "ebp";
   const sp = is64 ? "rsp" : "esp";
+  const slotSize = ARG_AREA[is64 ? 64 : 32].slotSize;
+  const fpCanon = canonReg(fp);
+  const spCanon = canonReg(sp);
 
-  let i = 0;
-  while (i < insns.length && isProloguePadding(insns[i])) i++;
+  /** `<sp> - E` as the walk stands. */
+  let spDelta = 0;
+  /** Registers holding an earlier `<sp>` value, keyed canonically, as `<sp> - E`. */
+  const spAlias = new Map<string, number>();
 
-  const push = insns[i];
-  const setFp = insns[i + 1];
-  if (!push || !setFp) return false;
-  if (push.mnemonic !== "push" || push.opStr.trim().toLowerCase() !== fp) return false;
-  if (setFp.mnemonic !== "mov") return false;
+  for (let i = 0; i < insns.length && i < FRAME_MAX_INSNS; i++) {
+    const insn = insns[i];
+    if (isProloguePadding(insn)) continue;
+    const mn = insn.mnemonic.toLowerCase();
+    const ops = insn.opStr.split(",").map((p) => p.trim().toLowerCase());
+    const dest = ops[0] ?? "";
+    // A memory destination writes no register, and the prologue is full of them:
+    // `mov [rsp + 8], rbx` and `mov [rax + 0x10], rbx` are argument spills.
+    const memDest = dest.includes("[");
 
-  const [dst, src] = setFp.opStr.split(",");
-  return dst?.trim().toLowerCase() === fp && src?.trim().toLowerCase() === sp;
+    if (mn === "push") {
+      if (!pushesWholeSlot(dest, slotSize)) return null;
+      spDelta -= slotSize;
+      continue;
+    }
+
+    if (!memDest && isKnownRegister(dest) && canonReg(dest) === fpCanon) {
+      // The frame register is being written. Either this establishes the frame
+      // from a stack value, or the register is not a frame pointer here.
+      if (dest !== fp) return null; // a narrower write is not a frame pointer
+      if (mn === "mov" || mn === "lea") {
+        const v = entryRelative(ops[1] ?? "", sp, spDelta, spAlias, mn === "lea");
+        if (v !== null) return -v;
+      }
+      return null;
+    }
+
+    if (!memDest && isKnownRegister(dest) && canonReg(dest) === spCanon) {
+      // `sub <sp>, imm` and `add <sp>, imm` are the frame arithmetic; anything
+      // else that moves the stack pointer ends the model.
+      const imm = dest === sp ? loneImmediate(ops[1] ?? "") : null;
+      if (imm === null) return null;
+      if (mn === "sub") spDelta -= imm;
+      else if (mn === "add") spDelta += imm;
+      else return null;
+      continue;
+    }
+
+    // `xchg` writes BOTH of its operands, so it is not enough to look at the
+    // destination — the same reason `fpSurvivesToReturn` special-cases it.
+    if (mn === "xchg" && ops.some((o) => isKnownRegister(o) && canonReg(o) === fpCanon)) {
+      return null;
+    }
+
+    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return null;
+
+    if (!memDest && isKnownRegister(dest)) {
+      // Any write ends whatever this register was standing in for; a full-width
+      // copy of the stack pointer then makes it stand in for this point.
+      spAlias.delete(canonReg(dest));
+      if (mn === "mov" && ops[1] === sp && regSize(dest) === slotSize) {
+        spAlias.set(canonReg(dest), spDelta);
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -108,18 +222,8 @@ const HELPER_MAX_INSNS = 32;
 /** Mnemonics that end a helper by returning to the caller. */
 const HELPER_RETURNS = new Set(["ret", "retn", "retf"]);
 
-/**
- * The displacement of `[<sp>]` / `[<sp> + N]` / `[<sp> - N]`, signed, or null
- * for any other memory operand. An index register, a scale, or a second base
- * all return null: the displacement would then not be the whole offset.
- */
-function spDisplacement(rhs: string, sp: string): number | null {
-  const m = new RegExp(`^\\[\\s*${sp}\\s*(?:([+-])\\s*${DISP}\\s*)?\\]$`, "i").exec(rhs.trim());
-  if (!m) return null;
-  if (m[1] === undefined) return 0;
-  const v = parseDisp(m[2]);
-  return m[1] === "-" ? -v : v;
-}
+/** No register stands in for an earlier stack-pointer value — see `entryRelative`. */
+const NO_SP_ALIAS: ReadonlyMap<string, number> = new Map<string, number>();
 
 /**
  * `N` where this instruction sets `<fp>` to `<sp> + N`, or null when it does not
@@ -130,14 +234,10 @@ function fpFromSp(insn: Instruction, fp: string, sp: string): number | null {
   const comma = insn.opStr.indexOf(",");
   if (comma < 0) return null;
   if (insn.opStr.slice(0, comma).trim().toLowerCase() !== fp) return null;
-  const rhs = insn.opStr
-    .slice(comma + 1)
-    .trim()
-    .toLowerCase();
+  const rhs = insn.opStr.slice(comma + 1);
   const mn = insn.mnemonic.toLowerCase();
-  if (mn === "mov") return rhs === sp ? 0 : null;
-  if (mn === "lea") return spDisplacement(rhs, sp);
-  return null;
+  if (mn !== "mov" && mn !== "lea") return null;
+  return entryRelative(rhs, sp, 0, NO_SP_ALIAS, mn === "lea");
 }
 
 /**
@@ -299,21 +399,28 @@ function hasHelperFramePointerPrologue(
 }
 
 /**
- * True when the function's frame pointer really is one, so `[<fp> + N]`
- * addresses the caller's argument area and N carries an argument index.
+ * `E - V` for the frame register — see `inlineFrameDisplacement` — established
+ * either inline or by a prologue helper the function calls, or null when the
+ * frame register is not derived from the stack pointer at all.
  *
- * Either established inline, or by a prologue helper the function calls — see
- * the two functions above for which shapes each admits and why.
+ * The helper path is deliberately still a yes/no question underneath: it admits
+ * a helper only when the frame it establishes is `E - slot`, i.e. exactly the
+ * canonical geometry, so its displacement is `slotSize` by construction. A
+ * helper leaving some other displacement is *refused* rather than measured,
+ * because the arithmetic in `hasHelperFramePointerPrologue` is what keeps the
+ * search off ordinary calls and relaxing it has not been measured against
+ * anything (peek-a-bin-emlv).
  */
-function hasFramePointerPrologue(
+function frameDisplacement(
   insns: Instruction[],
   is64: boolean,
   instructions: Instruction[],
-): boolean {
-  return (
-    hasInlineFramePointerPrologue(insns, is64) ||
-    hasHelperFramePointerPrologue(insns, instructions, is64)
-  );
+): number | null {
+  const inline = inlineFrameDisplacement(insns, is64);
+  if (inline !== null) return inline;
+  return hasHelperFramePointerPrologue(insns, instructions, is64)
+    ? ARG_AREA[is64 ? 64 : 32].slotSize
+    : null;
 }
 
 export function analyzeStackFrame(
@@ -384,6 +491,26 @@ export function analyzeStackFrame(
   const spRe = SP_RE[width];
   const bpParamRe = BP_PARAM_RE[width];
 
+  // The frame register's displacement from the stack pointer on entry, which is
+  // what decides where the incoming-argument area begins — see
+  // `inlineFrameDisplacement`. Computed before the scan because the scan needs
+  // it: `[<fp> + off]` is an argument only at or above `delta + slot`, and only
+  // when a delta exists at all.
+  //
+  // `null` is the case worth understanding. It means the frame register is not
+  // derived from the stack pointer anywhere in this function's prologue, so it
+  // is not a frame pointer and `[<fp> + off]` is not an argument of this
+  // function under any reading — it is a field of whatever object the register
+  // holds (`mov rbp, rcx`), a local of a *parent* frame handed to an MSVC
+  // funclet (`mov rbp, rdx`), or address arithmetic over a constant
+  // (`xor ebp, ebp`). Recording one as a parameter put a phantom argument in the
+  // emitted signature and took the deref out of struct synthesis's reach
+  // (peek-a-bin-ikd).
+  const frameDelta = frameDisplacement(funcInsns, is64, instructions);
+  // The lowest `[<fp> + off]` that can be an argument: one slot past the return
+  // address, which sits at `[<fp> + delta]`.
+  const minParamOffset = frameDelta === null ? null : frameDelta + ARG_AREA[width].slotSize;
+
   // Size heuristic from operand prefix
   function inferSize(opStr: string): number {
     if (opStr.includes("byte")) return 1;
@@ -415,12 +542,19 @@ export function analyzeStackFrame(
     const bpParamMatch = op.match(bpParamRe);
     if (bpParamMatch) {
       const offset = parseDisp(bpParamMatch[1]);
-      // The argument area starts one slot past the return address: [ebp+0x8]
-      // in 32-bit, [rbp+0x10] in 64-bit — which on x64 is the home slot the
-      // ABI reserves for the argument passed in RCX, not the first argument
-      // that lacks a register. See ARG_AREA.
-      const minParamOffset = is64 ? 0x10 : 0x8;
-      if (offset >= minParamOffset) {
+      // The argument area starts one slot past the return address, which is at
+      // `[<fp> + frameDelta]`. For the canonical prologue that is [ebp+0x8] in
+      // 32-bit and [rbp+0x10] in 64-bit — on x64 the home slot the ABI reserves
+      // for the argument passed in RCX, not the first argument that lacks a
+      // register. See ARG_AREA and `inlineFrameDisplacement`.
+      //
+      // Anything below it, or any offset at all when there is no frame pointer
+      // to measure from, is recorded as nothing and left as a plain deref —
+      // which is what `[<fp> + off]` below the threshold has always been. That
+      // is the refusal, not a gap: naming it a local would claim a stack slot
+      // just as falsely as naming it an argument did, and leaving it alone is
+      // what lets struct synthesis see an object field for what it is.
+      if (minParamOffset !== null && offset >= minParamOffset) {
         record("bp", offset, offset, inferSize(op), true);
       }
     }
@@ -459,7 +593,16 @@ export function analyzeStackFrame(
   // A sub-slot access ([ebp+0xA], the third byte of argument 0) does not
   // divide evenly and is offset-named too, rather than silently rounded into a
   // neighbour's index.
-  const framed = hasFramePointerPrologue(funcInsns, is64, instructions);
+  // `framed` is the *canonical* geometry specifically, because that is what
+  // `ARG_AREA.firstOffset` encodes and therefore what makes `arg_<index>`
+  // spellable. A recovered delta of any other value still says which offsets
+  // are arguments — that is `minParamOffset` above — but turning it into an
+  // index would put `arg_<N>` names on 83 more slots per x64 binary, and
+  // `structs.ts` keys cross-function parameter provenance off `^arg_(\d+)$`, so
+  // that is a change to struct *identity* and needs its own measurement. Left
+  // offset-named deliberately (peek-a-bin-ikd; peek-a-bin-sx57 carries the
+  // census of what is left and why it is not a follow-on hunk).
+  const framed = frameDelta === ARG_AREA[width].slotSize;
   const { firstOffset, slotSize } = ARG_AREA[width];
 
   const usedNames = new Set<string>();
