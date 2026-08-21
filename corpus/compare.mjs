@@ -435,6 +435,59 @@ for (const b of bins) {
     note("  branches outside the image    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A self-assignment in the emitted C (selfAssigns.ts). ──────────────────
+  //
+  // `openOperand` is the one that matters and it is NOT gated in the run: a
+  // self-assignment whose instruction reads a value the emitted line is silent
+  // about is either a legitimate zero-propagation or a LOST OPERAND, and telling
+  // those apart is the dataflow question the audit does not answer. So a RISE
+  // here is the signal — measured: disabling `peek-a-bin-3axd` takes it 1 -> 4
+  // on both PE32 binaries. The corroboration split is the triage hint, so a rise
+  // in the UNcorroborated half is the alarming shape; it is derived rather than
+  // stored, since the stored field is the corroborated count.
+  //
+  // `wrong` and `unresolved` ARE gated at 0 in the run, so a rise here names
+  // which binary. `identity` is the denominator and is 0 on both x64 binaries
+  // because `peek-a-bin-qbk3` emptied that population — a FALL in it on a PE32
+  // binary is an instrument that stopped observing, which is the only way these
+  // gates read green for the wrong reason.
+  if (B.selfAssigns && C.selfAssigns) {
+    row(
+      "self-assign open operand",
+      (x) => x.selfAssigns.openOperand,
+      (a, c) => c > a,
+      "A SELF-ASSIGNMENT WHOSE INSTRUCTION READS SOMETHING THE C DOES NOT MENTION",
+    );
+    row(
+      "  of those, uncorroborated",
+      (x) => x.selfAssigns.openOperand - x.selfAssigns.openZeroCorroborated,
+      (a, c) => c > a,
+      "NOTHING IN THE FUNCTION CORROBORATES THE MISSING OPERAND BEING ZERO",
+    );
+    row(
+      "  wrong (name vs dest)",
+      (x) => x.selfAssigns.wrong,
+      (a, c) => c > a,
+      "THE EMITTED NAME IS NOT AN ALIAS OF THE INSTRUCTION'S DESTINATION",
+    );
+    row(
+      "  unresolved (unjudgeable)",
+      (x) => x.selfAssigns.unresolved,
+      (a, c) => c > a,
+      "A SELF-ASSIGNMENT THAT RESOLVED TO NO INSTRUCTION",
+    );
+    row("  machine identities", (x) => x.selfAssigns.identity);
+    row("  functions affected", (x) => x.selfAssigns.funcsAffected);
+    row(
+      "  emitted lines scanned",
+      (x) => x.selfAssigns.lines,
+      (a, c) => c === 0 && a > 0,
+      "THE SCAN STOPPED READING EMITTED C AT ALL",
+    );
+  } else {
+    note("  self-assignments              NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A register name the image has no encoding for (emitAudits.ts). ─────────
   //
   // Gated at 0 in the run, so a rise here names which binary. PE32 ONLY: on the

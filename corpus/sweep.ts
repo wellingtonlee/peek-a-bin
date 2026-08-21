@@ -30,6 +30,7 @@ import { type ArmExitResult, auditArmExits, emptyArmExits } from "./armExits";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
+import { auditSelfAssigns, emptySelfAssigns, type SelfAssignResult } from "./selfAssigns";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
 import { auditWildBranches, emptyWildBranches, type WildBranchResult } from "./wildBranches";
@@ -568,6 +569,18 @@ export interface BinResult {
    * `corpus/wildBranches.ts`.
    */
   wildBranches: WildBranchResult;
+  /**
+   * A SELF-ASSIGNMENT IN THE EMITTED C WHOSE INSTRUCTION IS NOT AN IDENTITY.
+   *
+   * A GATE at 0 on `suspect`: `eax = eax;` is noise where the machine really
+   * does nothing (`lea ecx,[ecx+0x0]`, `or al,al`, `add eax,0x0`) and evidence
+   * of a LOST OPERAND where it does not — `add edi, esi` emitted as `edi = edi`
+   * is what `peek-a-bin-3axd` was found by, and every other gate here is blind
+   * to that class. `idioms` is the liveness denominator and it matters: the x64
+   * population was emptied by `peek-a-bin-qbk3`, so 0 there is vacuous. See
+   * `corpus/selfAssigns.ts`.
+   */
+  selfAssigns: SelfAssignResult;
   funcs: FuncRec[];
 }
 
@@ -733,6 +746,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     lostDefs: emptyLostDefs(),
     armExits: emptyArmExits(),
     wildBranches: emptyWildBranches(),
+    selfAssigns: emptySelfAssigns(),
     funcs: [],
   };
 
@@ -825,6 +839,20 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       auditArmExits(res.armExits, key, func, tapped[0].armExits);
     }
     auditLineMapCoverage(res, func, insns, lineMap, jumpTables, af);
+    // A SELF-ASSIGNMENT, resolved through the same line map to the instruction
+    // it carries the address of. Here rather than in the emitted-text audits
+    // because that resolution needs both sides — the emitted line and the
+    // machine instruction — and neither is recoverable from the other.
+    auditSelfAssigns(
+      res.selfAssigns,
+      key,
+      func.name,
+      func.address,
+      code,
+      lineMap,
+      insns,
+      af.pe.is64,
+    );
     auditCallees(res, func, insns, code, funcMap);
     // The guard pass is what can name a jcc for an unrecovered condition — it
     // is the only thing here that anchors an emitted arm to a machine block —

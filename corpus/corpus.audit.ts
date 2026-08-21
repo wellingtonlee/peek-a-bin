@@ -182,6 +182,15 @@ if (!pre.haveBins || !pre.haveCc) {
           r.wildBranches.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.wildBranches.rows.length > 0 ? "\n" : ""),
         );
+        // Every self-assignment in the emitted C with the instruction it
+        // resolved to, idiom rows included — the idiom count is this audit's
+        // liveness denominator, so a file holding only the failures would make
+        // a vacuous zero indistinguishable from a clean one.
+        writeFileSync(
+          join(artifactDir, `selfassigns_${key}.jsonl`),
+          r.selfAssigns.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.selfAssigns.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -198,6 +207,7 @@ if (!pre.haveBins || !pre.haveCc) {
               lostDefs: { ...r.lostDefs, rows: r.lostDefs.rows.length },
               armExits: { ...r.armExits, rows: r.armExits.rows.length },
               wildBranches: { ...r.wildBranches, rows: r.wildBranches.rows.length },
+              selfAssigns: { ...r.selfAssigns, rows: r.selfAssigns.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -519,6 +529,67 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(wb.rows.length).toBe(0);
         expect(wb.checked).toBeGreaterThan(0);
       }
+    });
+
+    /**
+     * TWO GATES AT 0 OVER THE INSTRUMENT'S INTEGRITY, and a REPORTED baseline
+     * over the one visible trace a LOST OPERAND leaves.
+     *
+     * `eax = eax;` is a cosmetic line when the instruction behind it is one of
+     * MSVC's identities — `lea ecx,[ecx+0x0]`, `mov edi,edi`, `or al,al`,
+     * `add eax,0x0` — and it is a wrong statement about the machine when the
+     * instruction behind it is `add edi, esi`. `peek-a-bin-3axd` (97 wrong reads
+     * over 28 t32 functions, from `push <imm>`/`pop <reg>` lifting to no
+     * definition) was found through exactly two such lines, and every other gate
+     * here is blind to that class: gcc compiles it, polarity judges a guard's
+     * operator, `staleReads` and `lostDefs` both see a definition reaching the
+     * read (a self-assignment IS one), and the statement-drop audit snapshots
+     * after `foldBlock`.
+     *
+     * WHAT IS NOT GATED, and why the bead's recommendation could not be taken
+     * literally: "gate at 0 the subset whose instruction is not an identity
+     * idiom" would be a FALSE RED. t32 0x403034 and w32 0x40320B are
+     * `sub ecx, ebx` whose EBX is zeroed by the only write of it in the whole
+     * function, so the fold is right and `ecx = ecx;` is correct output. A
+     * legitimate zero-propagation and a lost operand are the same shape from
+     * here. `openOperand` is therefore REPORTED and judged in `compare.mjs`,
+     * with the status `unrecovered values` has.
+     *
+     * WHAT IS GATED: `wrong`, where the emitted name is not even an alias of the
+     * destination of the instruction the line carries the address of — broken
+     * attribution, which no dataflow answer rescues — and `unresolved`, a row
+     * that could not be judged at all. The second is the one that keeps the
+     * report honest: a row silently leaving the population is how a gate reads 0
+     * by not looking.
+     *
+     * THE DENOMINATOR IS NOT OPTIONAL. `peek-a-bin-qbk3` emptied the whole x64
+     * population three commits before this audit existed, so every count is 0 on
+     * t64/w64 for want of anything to see — exactly the vacuous green `armExits`
+     * shows on the two binaries with no jump table. `identity` is asserted over
+     * the corpus rather than per binary, since a binary with no identity idiom in
+     * its emitted C is a legitimate state. See `corpus/selfAssigns.ts`.
+     */
+    it("resolves every emitted self-assignment to an instruction that writes that register", () => {
+      let identity = 0;
+      for (const r of results.values()) {
+        const sa = r.selfAssigns;
+        expect(
+          `${r.key} self-assign: ${sa.rows
+            .filter((x) => x.verdict === "wrong" || x.verdict === "unresolved")
+            .slice(0, 5)
+            .map(
+              (x) =>
+                `${x.fname}:${x.line} '${x.text}' @${x.addr === null ? "?" : `0x${x.addr.toString(16)}`}` +
+                ` ${x.mnemonic ?? "?"} ${x.opStr ?? ""} — ${x.why}`,
+            )
+            .join("; ")}`,
+        ).toBe(`${r.key} self-assign: `);
+        expect(sa.wrong).toBe(0);
+        expect(sa.unresolved).toBe(0);
+        expect(sa.lines).toBeGreaterThan(0);
+        identity += sa.identity;
+      }
+      expect(identity).toBeGreaterThan(0);
     });
 
     /**
@@ -915,6 +986,26 @@ function renderReport(): string {
     L.push("    0, from 1/0/0/1 at 6d5ae92 (peek-a-bin-xqxy). A LOWER bound: it sees fiction only");
     L.push("    where the fiction happens to be a direct branch aimed out of the image.");
     L.push("    Sites in wildbranches_<bin>.jsonl. See wildBranches.ts.");
+    const sa = r.selfAssigns;
+    L.push(
+      `  self-assignments            ${sa.wrong} wrong, ${sa.unresolved} unresolved, ` +
+        `${sa.openOperand} open-operand (${sa.openZeroCorroborated} zero-corroborated), ` +
+        `${sa.identity} machine identities, over ${sa.funcsAffected} functions` +
+        (sa.inForHeader > 0 ? ` (${sa.inForHeader} in a for header)` : ""),
+    );
+    L.push("    `eax = eax;` is noise where the instruction is an identity (`lea ecx,[ecx+0x0]`,");
+    L.push("    `or al,al`, `add eax,0x0`) and a LOST OPERAND where it is not — `add edi, esi`");
+    L.push("    emitted as `edi = edi` is what peek-a-bin-3axd was found by, and no other gate");
+    L.push("    here sees that class. GATED at 0 on `wrong` (the emitted name is not even an");
+    L.push("    alias of the instruction's destination) and on `unresolved` (a row that could");
+    L.push("    not be judged). `openOperand` is REPORTED, NOT gated — a zero-propagated");
+    L.push("    `sub ecx,ebx` and a lost operand are the same shape from here, and both base");
+    L.push("    rows are the legitimate kind; a RISE is the signal, judged in compare.mjs.");
+    L.push("    `identity` is the denominator and is 0 on both x64 binaries because");
+    L.push("    peek-a-bin-qbk3 emptied that population, so a green x64 row says nothing. A");
+    L.push(
+      "    FAINT trace: only 2 of 3axd's 97 wrong reads left one. In selfassigns_<bin>.jsonl.",
+    );
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

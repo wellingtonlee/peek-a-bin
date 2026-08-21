@@ -496,6 +496,93 @@ changes 66 functions of emitted text, loses one struct field on each x86 binary
 over it.
 
 
+**A self-assignment resolved back to its instruction** — `corpus/selfAssigns.ts`. Two gates over
+the instrument's own integrity, and a **reported** count over the defect class itself. Measured at
+`97249dc`, t32/t64/w64/w32: **0/0/0/0 `wrong`, 0/0/0/0 `unresolved`, 1/0/0/1 `openOperand` (all
+corroborated, so **0 uncorroborated**), over 30/0/0/30 machine identities across 13/0/0/13
+functions.**
+
+`eax = eax;` is one line of noise when the machine instruction behind it is an identity — MSVC's
+multi-byte NOP `lea ecx,[ecx+0x0]`, its hot-patch pad `mov edi,edi`, its `or al,al`
+test-that-writes, an `add eax,0x0` — and it is a wrong statement about the machine when the
+instruction behind it is `add edi, esi`. `peek-a-bin-3axd` (97 wrong reads over 28 t32 functions,
+including an inverted success/failure return) was found through **exactly two** such lines, and
+every other audit here is structurally blind to that class: gcc compiles `eax = eax`, polarity
+judges the operator of a guard that exists, `staleReads` and `lostDefs` both see a definition
+reaching every later read *because a self-assignment is one*, and the statement-drop audit
+snapshots after `foldBlock`, so an operand removed at or before `foldBlock` is outside its
+comparison — the statement is still there, one operand short.
+
+Each self-assignment is resolved through the emitted **line map**, i.e. `IRAssign.addr`, to the
+instruction in that function's own stream, and classified from that instruction's **operands**:
+
+| verdict | what it means | status |
+|---|---|---|
+| `identity` | an identity for **every** value it reads: `lea r,[r±0]`, `mov r,r`, `or r,r`, `and r,r`, `xchg r,r`, `add/sub/or/xor/shl/shr/sar/rol/ror dst,0`, `nop` | **the liveness denominator** |
+| `openOperand` | an identity only if a value the emitted line is silent about is the neutral one | **reported, judged in `compare.mjs`, NOT gated** |
+| `wrong` | the emitted name is not even an alias of the destination of the instruction it carries the address of | **GATE at 0** |
+| `unresolved` | no address on the line, or no instruction at that address | **GATE at 0** |
+
+> **The bead's recommended gate could not be taken literally, and that is a finding.**
+> `peek-a-bin-o7pj` asked for a gate at 0 over "the subset whose instruction is not an identity
+> idiom". That subset is **not empty**: t32 0x403034 and w32 0x40320B are `sub ecx, ebx` where
+> EBX's only write before that address anywhere in the function is the `xor ebx,ebx` above it, so
+> the fold is right to propagate the zero and `ecx = ecx;` is correct output. A legitimate
+> zero-propagation and a lost operand are the **same shape** from here, and telling them apart is
+> the general dataflow question this audit does not answer.
+
+> **Read the two gates for what they are.** They gate the *instrument*, not the decompiler: a row
+> whose emitted name is about a different register than the address it carries is broken
+> attribution whatever the dataflow says, and an `unresolved` row is one that could not be judged
+> at all — reported and asserted precisely because a row silently leaving the population is how a
+> gate reads 0 by not looking. Neither has ever been observed non-zero here, so
+> `build/selfAssignAudit.test.ts` is where they are negative-controlled.
+
+> **The whitelist is tested against the instruction's OPERANDS, and that is what keeps it useful.**
+> A lost operand is still spelled in `insn.opStr`, so `add edi, esi` matches neither `add <dst>,0`
+> nor a same-register form however the emitted line reads. Two judgements in it are worth knowing:
+> the same-register set is a **whitelist of mnemonics** and not "the operands are equal", because
+> `add r,r` doubles and `sub r,r`/`xor r,r` zero; and **`mov <r32>,<r32>` on x64 is a
+> zero-extension, not a no-op** (`peek-a-bin-tez6`), so it is refused at that one width while
+> `mov al,al`, `mov ax,ax`, `mov rax,rax` and every PE32 width stay identities.
+
+> **Zero-corroboration is a HINT, never a verdict.** For an `openOperand` row whose open operand is
+> a register, the function's instructions *before that address* are asked whether every write of it
+> zeroes it, using `callSummary.ts`'s `writtenRegsOfInsn` rather than a second write model. It stops
+> at the site deliberately — `sub_402FEF` restores EBX with a `pop ebx` in its epilogue, and asking
+> the whole function would report that save/restore as a non-zeroing write and lose the
+> corroboration for a genuine zero. It can never become a gate: a copy of a zeroed register
+> (`xor eax,eax / mov ebx,eax`) is ordinary MSVC output that reads as *un*corroborated while being a
+> real zero, and the fold proves zero through copies where this does not.
+
+> **The denominator is not decoration.** `peek-a-bin-qbk3` emptied the entire x64 population three
+> commits before this audit existed — six `lock or byte ptr [rsp], 0` memory fences that folded to
+> `var_0 = var_0` — so every count here is 0 on t64/w64 *because there is nothing to see*, the same
+> vacuous green `armExits` shows on the two binaries that recover no jump table. `identity` is
+> asserted non-zero over the corpus as a whole rather than per binary, and `lines` is the liveness
+> half of the text scan itself.
+
+> **It is a FAINT trace and a loose lower bound.** It cannot see a lost operand that leaves no
+> self-assignment behind, which is the overwhelming majority of them — 95 of `3axd`'s 97. A green
+> reading is weak evidence; a red one is proof.
+
+*Validated by negative control.* Disabling `stackIdiom.ts`'s block-local `push <imm>` / `pop <reg>`
+pairing (`peek-a-bin-3axd`) takes `openOperand` **1 → 4 on both PE32 binaries**, of which
+**uncorroborated 0 → 3**, with x64 unmoved at 0 and `identity` unmoved at 30 — and the three rows it
+names are `t32!sub_40CBBE` 0x40cd96 `sub eax, esi`, 0x40cda7
+`or dword ptr [ebp-0x210], esi` and **0x40d23f `add edi, esi`**, the last being the exact site
+`peek-a-bin-3axd` records. ESI has six writes in that function and only one zeroes it, so all three
+are correctly uncorroborated while the base's `sub ecx, ebx` stays corroborated: `compare.mjs`
+flags both rows. The two *gates* are not moved by that control and are negative-controlled in
+`build/selfAssignAudit.test.ts` instead, which also pins the width rules.
+
+> **STANDING UPGRADE, on the pattern `arity over` was gated by.** The uncorroborated half of
+> `openOperand` is **0 on all four binaries** and goes to 3 on a real defect. It is not gated
+> because a row it prints can be correct output — the copy-of-zero case above. If
+> `everyWriteZeroes` is ever strengthened to follow a copy chain from an all-zeroing register, and
+> the uncorroborated count is still 0 over the corpus, **gate it at 0**: that is the point at which
+> every row it can print becomes provably an operand the machine has and the C does not.
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures
@@ -839,6 +926,17 @@ emitted C against the machine text, and the instruments for that are per-instruc
 coverage (above) and cross-substitution (below) — neither of which is a gate, because neither has
 a threshold that means anything on its own.
 
+**One sliver of the wrong-value class does now leave a trace, and `selfAssigns.ts` is the only
+thing here that reads it.** A lost operand — `add edi, esi` emitted as `edi = edi` — is a
+wrong-value defect that happens to be *visible*, because the statement it leaves behind says a
+register is unchanged. Every audit in the table above is silent on it for its own reason, and two
+of them for reasons worth naming: `staleReads` and `lostDefs` both check that a definition reaches
+each read, and a self-assignment **is** a definition, so the read below it passes; and the
+statement-drop audit takes its snapshot after `foldBlock`, so an operand removed at or before
+`foldBlock` is not a dropped statement, it is a statement with a missing operand. It is a very
+faint trace — 2 of `peek-a-bin-3axd`'s 97 wrong reads left one — and the count it moves is a
+reported baseline rather than a gate, for the reason given in that audit's entry.
+
 **A green polarity ratio is not evidence of a recovery rate, and never was.** `1490/1490 correct`
 says every guard the auditor *could judge* states its jcc's sense. It says nothing whatever about
 how many guards there were to judge: the denominator is what survived anchoring **and** had a
@@ -1118,6 +1216,7 @@ remaining gap and is not implemented.
 | `lostDefs.ts` | A read whose reaching definition `foldBlock` deleted. Brackets that one pass; see the gate entry. |
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
+| `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -1129,6 +1228,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/armexits_<key>.jsonl` | Every switch arm closed with `break` while its own block has a successor, with that block's successors and which refusal produced the `break`. Empty file = audit ran and found none. |
 | `artifacts/<label>/wildbranches_<key>.jsonl` | Every filed direct branch aimed outside the image, with its `source`. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
+| `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
 | `artifacts/` | Generated. Gitignored. |
 
 ### The audits that re-run the pipeline prefix, and why they have to
