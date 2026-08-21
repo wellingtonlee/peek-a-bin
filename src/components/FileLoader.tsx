@@ -8,7 +8,20 @@ import {
 } from "../utils/recentFiles";
 
 interface FileLoaderProps {
-  onFile: (buffer: ArrayBuffer, fileName: string) => void;
+  /**
+   * @param buffer the file's bytes, already read.
+   * @param fileName the name to show and to key annotations by.
+   * @param file the `File` the bytes were read from, when there is one.
+   *
+   * The third argument exists because a `File` is structured-cloneable by
+   * reference, so the metrics worker can be handed the handle instead of a copy
+   * of the buffer (`workers/metricsClient.ts`'s `registerSourceBlob`). It is
+   * optional and **not** merely for old browsers: only the drop/browse path has
+   * a `File` at all. `loadExample` fetches an `ArrayBuffer` and
+   * `handleRecentClick` reads one out of IndexedDB, so those two omit it and
+   * keep paying the copy, which is by construction rather than by accident.
+   */
+  onFile: (buffer: ArrayBuffer, fileName: string, file?: File) => void;
   loading: boolean;
   error: string | null;
   analysisPhase: AnalysisPhase;
@@ -192,7 +205,9 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       const reader = new FileReader();
       reader.onload = () => {
         if (reader.result instanceof ArrayBuffer) {
-          onFile(reader.result, file.name);
+          // The `File` rides along: same bytes, and posting it to the metrics
+          // worker costs nothing where copying the buffer costs a walk over it.
+          onFile(reader.result, file.name, file);
         }
       };
       reader.onerror = () => {

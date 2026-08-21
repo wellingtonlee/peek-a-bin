@@ -623,7 +623,13 @@ export default function App() {
     // caused the popstate listener to be re-registered.
   }, [state.peFile, state.currentAddress, state.activeTab]);
 
-  const handleFile = useCallback((buffer: ArrayBuffer, fileName: string) => {
+  // `file` is present only on the drop/browse path — `loadRecentFile` returns an
+  // ArrayBuffer out of IndexedDB and the demo binary arrives via
+  // `fetch().arrayBuffer()`, so two of the three load paths have no `File` and
+  // keep copying the buffer for the metrics worker. Where there is one, handing
+  // it over is a pure win: a Blob is structured-cloneable by reference, so the
+  // post is O(1) and the worker reads the bytes itself.
+  const handleFile = useCallback((buffer: ArrayBuffer, fileName: string, file?: File) => {
     dispatch({ type: "RESET" });
     stringsConfiguredRef.current = false;
     setDriverBannerDismissed(false);
@@ -636,6 +642,11 @@ export default function App() {
       // rejected file — a 275 MB ELF dropped on the app — stayed pinned by this
       // ref until some later load happened to replace it.
       bufferRef.current = buffer;
+      // Same placement rule as `bufferRef` above: only once the parse succeeded,
+      // so a rejected file does not leave a handle registered. The registry is a
+      // WeakMap keyed on this buffer, so nothing here has to be torn down — the
+      // File becomes unreachable with the buffer it describes.
+      if (file) metricsWorker.registerSourceBlob(buffer, file);
       // The load handshake, and it must stay *above* the dispatch below.
       //
       // The architecture is a property of this file, and every later decode

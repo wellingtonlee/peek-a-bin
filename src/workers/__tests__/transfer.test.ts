@@ -206,3 +206,55 @@ describe("prepareBinaryArgs — edges", () => {
     expect((args as { instructions: unknown }).instructions).toBe(instructions);
   });
 });
+
+/**
+ * A `Blob` argument must survive this function untouched.
+ *
+ * `metricsClient` posts the original `File` as `fileMetrics`'s `source` when it
+ * has one, and the entire point is that a Blob is structured-cloneable *by
+ * reference*: O(1) to post at any size. A Blob is neither an `ArrayBuffer` nor a
+ * view, so `copyBinary` already returns null for it and it passes through —
+ * these pin that, because the failure mode is silent. A future deep walk here
+ * could not *copy* a Blob (there is no synchronous way to read one), but it
+ * could plausibly drop it, replace it with `{}`, or add it to a transfer list it
+ * does not belong in — and the request would then arrive with no bytes at all.
+ */
+describe("prepareBinaryArgs — a Blob is not a buffer", () => {
+  it("passes a Blob through by identity and transfers nothing", () => {
+    const blob = new Blob([new Uint8Array([1, 2, 3])]);
+    const { args, transfer } = prepareBinaryArgs({ source: blob, peHeaderOffset: 0x40 });
+
+    expect((args as { source: Blob }).source).toBe(blob);
+    expect(transfer).toEqual([]);
+    // Nothing binary was found, so the args object itself is not even rebuilt.
+    expect((args as { peHeaderOffset: number }).peHeaderOffset).toBe(0x40);
+  });
+
+  it("passes a File through by identity — that is what the browser posts", () => {
+    const file = new File([new Uint8Array(8)], "t.exe");
+    const { args, transfer } = prepareBinaryArgs({ source: file });
+    expect((args as { source: File }).source).toBe(file);
+    expect(transfer).toEqual([]);
+  });
+
+  it("still copies a buffer sitting beside a Blob", () => {
+    // Mixed args must not take an all-or-nothing path.
+    const blob = new Blob([new Uint8Array(4)]);
+    const bytes = new Uint8Array(new ArrayBuffer(64), 16, 8);
+    const { args, transfer } = prepareBinaryArgs({ source: blob, bytes });
+
+    expect((args as { source: Blob }).source).toBe(blob);
+    expect((args as { bytes: Uint8Array }).bytes).not.toBe(bytes);
+    expect(transfer).toHaveLength(1);
+    expect(transfer[0].byteLength).toBe(8);
+  });
+
+  it("survives the structured clone with its bytes intact", () => {
+    // The claim is about `postMessage`, so run the algorithm `postMessage` runs.
+    const blob = new Blob([new Uint8Array([9, 9, 9, 9])]);
+    const { args, transfer } = prepareBinaryArgs({ source: blob });
+    const cloned = structuredClone(args, { transfer }) as { source: Blob };
+    expect(cloned.source).toBeInstanceOf(Blob);
+    expect(cloned.source.size).toBe(4);
+  });
+});

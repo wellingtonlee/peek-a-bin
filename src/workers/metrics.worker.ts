@@ -8,10 +8,16 @@
 
 import { type MetricsRequest, metricsDispatch } from "./metricsDispatch";
 
-self.onmessage = (e: MessageEvent<MetricsRequest>) => {
+// `async` because a `fileMetrics` request may carry a `Blob` (the original
+// `File`, posted by reference so the main thread never copies it) that has to be
+// read here. The `await` is inside the `try`, so a rejected dispatch — including
+// the unknown-method branch, which now rejects rather than throwing — still
+// posts an `error` reply instead of surfacing as an unhandled rejection that
+// would leave the caller on its watchdog.
+self.onmessage = async (e: MessageEvent<MetricsRequest>) => {
   const { id, method, args } = e.data;
   try {
-    self.postMessage({ id, result: metricsDispatch(method, args) });
+    self.postMessage({ id, result: await metricsDispatch(method, args) });
   } catch (err) {
     self.postMessage({ id, error: err instanceof Error ? err.message : String(err) });
   }

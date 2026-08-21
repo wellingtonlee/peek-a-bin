@@ -6,7 +6,10 @@
  * Modelled on `disasmClient.test.ts` — the fake worker runs the real
  * `structuredClone(msg, { transfer })`, which is the algorithm `postMessage`
  * runs, so it detaches exactly what a real post would detach. A test claiming
- * the file survives is worth nothing if nothing in the fake ever detaches.
+ * the file survives is worth nothing if nothing in the fake ever detaches. That
+ * also makes the Blob claim checkable here rather than merely argued: Node's
+ * `structuredClone` clones a `Blob` by reference, so a posted one comes out the
+ * other side as a `Blob` with nothing in the transfer list.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -121,7 +124,7 @@ describe("MetricsWorkerClient — fileMetrics", () => {
     expect(buf.byteLength).toBe(1024);
     expect(new Uint8Array(buf)[0]).toBe(0x41);
     // And the worker still received the bytes.
-    expect(worker.received[0].args.buffer.byteLength).toBe(1024);
+    expect(worker.received[0].args.source.byteLength).toBe(1024);
   });
 
   it("serves a second call for the same buffer from the first request", async () => {
@@ -271,5 +274,111 @@ describe("MetricsWorkerClient — failure paths", () => {
     await expect(metricsWorker.fileMetrics(file(64), 0x40, 0, [])).rejects.toThrow(
       "blocked by CSP",
     );
+  });
+});
+
+/**
+ * The source-blob registry.
+ *
+ * `App.tsx` registers the original `File` for the buffer it was read from, and
+ * `fileMetrics` then posts the handle instead of a copy. Two properties matter
+ * and neither is visible from the result: *what goes over the wire* (a Blob, and
+ * nothing in the transfer list), and *that the copy path is still the default* —
+ * two of the three load paths have no `File`, so a change that made the Blob
+ * path unconditional would break the demo binary and every recent file.
+ */
+describe("MetricsWorkerClient — source blob", () => {
+  /** A stand-in for the `File` the drop handler hands over. */
+  const blobFor = (buf: ArrayBuffer) => new Blob([buf]);
+
+  it("copies the buffer when no blob is registered", async () => {
+    // The common case: a recent file out of IndexedDB, or the bundled demo
+    // binary via fetch. Neither has a File, so this must stay the behaviour.
+    const client = await loadClient();
+    const buf = file(1024);
+    client.fileMetrics(buf, 0x80, 0, []);
+
+    const worker = only();
+    expect(worker.transfers[0]).toHaveLength(1);
+    expect(worker.transfers[0][0]).not.toBe(buf);
+    expect(worker.posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+  });
+
+  it("posts the blob by reference, transferring nothing, once registered", async () => {
+    const client = await loadClient();
+    const buf = file(1024);
+    const blob = blobFor(buf);
+    client.registerSourceBlob(buf, blob);
+    client.fileMetrics(buf, 0x80, 0, []);
+
+    const worker = only();
+    expect(worker.posted[0].args.source).toBe(blob);
+    // Nothing to transfer, and nothing copied: that is the entire win.
+    expect(worker.transfers[0]).toHaveLength(0);
+    // The structured clone still delivers a Blob of the right size — this is
+    // what a plain `postMessage` of a File does, and it is O(1).
+    expect(worker.received[0].args.source).toBeInstanceOf(Blob);
+    expect(worker.received[0].args.source.size).toBe(1024);
+    // The caller's buffer is untouched either way.
+    expect(buf.byteLength).toBe(1024);
+  });
+
+  it("still sends the header scalars and ranges with a blob source", async () => {
+    // A Blob carries no PE metadata, so dropping these would leave the worker
+    // guessing at the checksum field's offset.
+    const client = await loadClient();
+    const buf = file(1024);
+    client.registerSourceBlob(buf, blobFor(buf));
+    client.fileMetrics(buf, 0x80, 0xdeadbeef, [{ offset: 0, length: 512 }]);
+
+    const sent = only().posted[0];
+    expect(sent.args.peHeaderOffset).toBe(0x80);
+    expect(sent.args.expectedChecksum).toBe(0xdeadbeef);
+    expect(sent.args.ranges).toEqual([{ offset: 0, length: 512 }]);
+  });
+
+  it("keys the registry per buffer, so another file still copies", async () => {
+    const client = await loadClient();
+    const registered = file(1024);
+    const other = file(1024);
+    client.registerSourceBlob(registered, blobFor(registered));
+    client.fileMetrics(other, 0x80, 0, []);
+    expect(only().posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+  });
+
+  it("falls back to copying when the registered blob is the wrong size", async () => {
+    // The defect this catches is a mis-paired handle — a stale closure, or the
+    // previous load's File — which would compute one file's checksum under
+    // another's headers. Cheap, because `Blob.size` needs no read.
+    const client = await loadClient();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const buf = file(1024);
+    client.registerSourceBlob(buf, blobFor(file(512)));
+    client.fileMetrics(buf, 0x80, 0, []);
+
+    expect(only().posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+    expect(only().transfers[0]).toHaveLength(1);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("does not change the per-buffer cache or its eviction", async () => {
+    // The cache is keyed on the ArrayBuffer, not on what gets posted, so
+    // registering a blob must not split the Headers and Sections tabs into two
+    // requests — nor make a failure permanent.
+    const client = await loadClient();
+    const buf = file(1024);
+    client.registerSourceBlob(buf, blobFor(buf));
+    const first = client.fileMetrics(buf, 0x80, 0, []);
+    expect(client.fileMetrics(buf, 0x80, 0, [])).toBe(first);
+    expect(only().posted).toHaveLength(1);
+
+    only().fail(1, "worker exploded");
+    await expect(first).rejects.toThrow("worker exploded");
+    const retry = client.fileMetrics(buf, 0x80, 0, []);
+    expect(retry).not.toBe(first);
+    // And the retry still takes the blob path.
+    expect(only().posted[1].args.source).toBeInstanceOf(Blob);
+    only().reply(2, { checksum: { expected: 0, actual: 1, valid: true }, sectionEntropies: [] });
+    await expect(retry).resolves.toBeTruthy();
   });
 });

@@ -318,6 +318,25 @@ for ~140 ms (Headers), ~770 ms (Sections) and ~6.5 s (entropy strip, recomputed 
 open whether or not the strip was ever shown). Measured after: Headers+Sections 910 → 148 ms,
 entropy strip 6569 → 101 ms.
 
+**The `File` is posted by reference when there is one; otherwise the buffer is copied.** After
+the split the only main-thread cost left in this path was `prepareBinaryArgs` slicing the
+argument — ~100 ms for a 253 MiB file, which is a large win for the entropy work but a wash for
+the checksum alone (138 ms computed inline against 148 ms to hand off). A `Blob`, and therefore
+the `File` the drop/browse handler receives, is structured-cloneable *by reference*: posting it
+is O(1) at any size and `metricsDispatch` reads the bytes itself with `Blob.arrayBuffer()`, on
+the worker thread. So `FileMetricsArgs.source` is `ArrayBuffer | Blob`, `metricsDispatch` is
+`async` for that one reason, and `App.tsx` registers the handle for the buffer it was read from
+(`metricsWorker.registerSourceBlob`, a `WeakMap<ArrayBuffer, Blob>`, so it needs no teardown).
+
+The copy path is **not** legacy: only the drop/browse path has a `File` at all —
+`loadRecentFile()` returns an `ArrayBuffer` out of IndexedDB and the demo binary arrives via
+`fetch().arrayBuffer()` — so two of the three load paths still copy, by construction rather than
+by accident. The result cache stays keyed on the `ArrayBuffer` whichever arm is used, so the
+Headers and Sections tabs still collapse into one request. What is *measured* is that the two
+arms answer identically (`workers/__tests__/metricsDispatch.test.ts`, negative-controlled); the
+O(1) post is a spec property plus the earlier measurement of the copy it removes, since no test
+here spawns a real worker and no large real PE exists on this machine (`peek-a-bin-ex2`).
+
 Inputs under the thresholds in `src/hooks/asyncMetricState.ts` — 256 KiB for the strip, 1 MiB
 for file metrics — stay synchronous and spawn no worker, so an ordinary binary never shows a
 loading state. `asyncMetricState.ts` also holds `asyncMetricReducer`, the pure state machine

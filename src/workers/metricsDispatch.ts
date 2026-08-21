@@ -38,12 +38,33 @@ export interface MetricsRequest {
 /**
  * Arguments for `fileMetrics`.
  *
- * `buffer` is deliberately a top-level property: `prepareBinaryArgs` copies and
+ * `source` is deliberately a top-level property: `prepareBinaryArgs` copies and
  * transfers only top-level binary values, so nesting it would silently fall
  * back to a structured clone of the whole file.
+ *
+ * ## Why the type is a union and not just an `ArrayBuffer`
+ *
+ * A `Blob` — and therefore the `File` the drop/open handler receives — is
+ * structured-cloneable **by reference**, so posting one is O(1) regardless of
+ * size and the worker reads the bytes itself via `Blob.arrayBuffer()`, entirely
+ * off the main thread. An `ArrayBuffer` has to be copied before it is posted
+ * (`prepareBinaryArgs`, ~0.4 ms/MiB, measured ~100 ms for a 253 MiB file), which
+ * is the last main-thread cost in this path.
+ *
+ * The `ArrayBuffer` arm is **not** legacy: two of the three load paths have no
+ * `File` at all — `loadRecentFile()` hands back an `ArrayBuffer` out of
+ * IndexedDB and the demo binary arrives via `fetch().arrayBuffer()` — so it is
+ * the common case, not a fallback that only fires on old browsers. Whichever
+ * arm is used, the answer must be identical; `__tests__/metricsDispatch.test.ts`
+ * asserts that byte for byte over the same fixture.
+ *
+ * A `Blob` is neither an `ArrayBuffer` nor a view, so `prepareBinaryArgs`
+ * passes it through untouched and transfers nothing — pinned in
+ * `__tests__/transfer.test.ts`, because a future deep-walk there could not
+ * copy a Blob but could very plausibly drop it.
  */
 export interface FileMetricsArgs {
-  buffer: ArrayBuffer;
+  source: ArrayBuffer | Blob;
   /** `dosHeader.e_lfanew`. */
   peHeaderOffset: number;
   /** `optionalHeader.checksum`. */
@@ -79,18 +100,44 @@ export interface EntropyBlocksArgs {
 }
 
 /**
+ * Resolve a `fileMetrics` source to bytes.
+ *
+ * The `Blob` read is the whole point of accepting one: it happens here, on the
+ * worker thread, so the main thread paid nothing but an O(1) postMessage. It is
+ * also the only asynchronous step in this module, and the reason
+ * {@link metricsDispatch} is `async`.
+ *
+ * The test is for Blob-ness rather than for `ArrayBuffer`-ness on purpose. A
+ * structured clone rebuilds the value in *this* realm, so `instanceof` is sound
+ * either way here — but if it ever were not, an unrecognised value falling
+ * through to the `ArrayBuffer` arm is the pre-existing behaviour, while falling
+ * through to the Blob arm would call `.arrayBuffer()` on something that has no
+ * such method.
+ */
+async function bytesOf(source: ArrayBuffer | Blob): Promise<ArrayBuffer> {
+  return source instanceof Blob ? await source.arrayBuffer() : source;
+}
+
+/**
  * Checksum and per-section entropy are answered by one method because both
  * walk essentially the whole file, and the argument copy — not the arithmetic
  * — is the only main-thread cost left. Splitting them would pay that copy
  * twice for a user who opens both the Headers and the Sections tab.
+ *
+ * Asynchronous only because a `Blob` source has to be read (see
+ * {@link bytesOf}); every computation here is still a synchronous walk. The
+ * unknown-method branch therefore *rejects* rather than throwing synchronously,
+ * which is the same thing from `metrics.worker.ts`'s point of view — it awaits
+ * inside the `try` — but is a visible difference to a direct caller.
  */
-export function metricsDispatch(method: MetricsMethod, args: unknown): unknown {
+export async function metricsDispatch(method: MetricsMethod, args: unknown): Promise<unknown> {
   switch (method) {
     case "fileMetrics": {
       const a = args as FileMetricsArgs;
+      const buffer = await bytesOf(a.source);
       return {
-        checksum: checksumFile(a.buffer, a.peHeaderOffset, a.expectedChecksum),
-        sectionEntropies: computeSectionEntropies(a.buffer, a.ranges ?? []),
+        checksum: checksumFile(buffer, a.peHeaderOffset, a.expectedChecksum),
+        sectionEntropies: computeSectionEntropies(buffer, a.ranges ?? []),
       } satisfies FileMetricsResult;
     }
 
