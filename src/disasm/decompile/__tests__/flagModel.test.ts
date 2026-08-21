@@ -20,6 +20,7 @@ import {
   SHIFTS,
   solePredecessor,
   UNDEFINED_RESULT_FLAGS,
+  withoutLockPrefix,
 } from "../flagModel";
 
 /**
@@ -130,15 +131,55 @@ describe("flagEffect — the transfer function", () => {
     }
   });
 
-  it("clears on a lock-prefixed read-modify-write", () => {
+  it("classifies a lock-prefixed form by its BASE mnemonic", () => {
+    // Both of these asserted `{clobber, "locked"}` until peek-a-bin-3qrl, and
+    // that was the suite pinning a blanket refusal as a fact about the machine.
+    // The `lock` prefix makes the read-modify-write atomic and changes no flag
+    // effect whatever, so `lock dec dword ptr [rcx]` sets ZF from what it wrote
+    // exactly as `dec dword ptr [rcx]` does — an ordinary memory-destination
+    // result owner, spellable since peek-a-bin-ie0j.
     expect(flagEffect(insn("lock dec", "dword ptr [rcx]"))).toEqual({
-      kind: "clobber",
-      why: "locked",
+      kind: "result",
+      destText: "dword ptr [rcx]",
     });
+    expect(flagEffect(insn("lock inc", "dword ptr [rax]"))).toEqual({
+      kind: "result",
+      destText: "dword ptr [rax]",
+    });
+    expect(flagEffect(insn("lock add", "dword ptr [rcx], r9d"))).toEqual({
+      kind: "result",
+      destText: "dword ptr [rcx]",
+    });
+  });
+
+  it("keeps refusing the locked forms their own mnemonic refuses, with the real reason", () => {
+    // The other half of dropping the blanket: each of these is still a clobber,
+    // and now says *why* rather than only that a prefix was present. Every one
+    // is a form `liftBlock` has no handler for, so it stays on the `raw`
+    // fallback and there is no value for a condition to name either.
     expect(flagEffect(insn("lock cmpxchg", "[rcx], edx"))).toEqual({
       kind: "clobber",
-      why: "locked",
+      why: "unrecognised",
     });
+    expect(flagEffect(insn("lock xadd", "[rcx], edx"))).toEqual({
+      kind: "clobber",
+      why: "carry-in",
+    });
+    expect(flagEffect(insn("lock bts", "dword ptr [rcx], 0xf"))).toEqual({
+      kind: "clobber",
+      why: "partial-write",
+    });
+  });
+
+  it("strips only a lock prefix, and only for the dispatch key", () => {
+    // `withoutLockPrefix` is what `liftBlock` dispatches on. A `rep` prefix must
+    // survive it: Capstone spells the string primitives sometimes into the
+    // mnemonic and sometimes into `opStr`, and `liftBlock` has its own case for
+    // both spellings, which stripping generally would route into plain `movsd`.
+    expect(withoutLockPrefix("lock dec")).toBe("dec");
+    expect(withoutLockPrefix("LOCK DEC")).toBe("dec");
+    expect(withoutLockPrefix("rep movsd")).toBe("rep movsd");
+    expect(withoutLockPrefix("dec")).toBe("dec");
   });
 
   it("clears on string operations, prefixed or not", () => {

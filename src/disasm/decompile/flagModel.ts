@@ -192,13 +192,25 @@ const STRING_OPS: ReadonlySet<string> = new Set([
   "outs",
 ]);
 
-/** Why an instruction displaced the standing owner without becoming one. */
+/**
+ * Why an instruction displaced the standing owner without becoming one.
+ *
+ * `"locked"` used to be a member, returned for **any** `lock`-prefixed
+ * instruction before the base mnemonic was even looked at. That was wrong about
+ * the machine: the `lock` prefix changes atomicity and the bus, and nothing
+ * else — it writes no flag of its own and alters no flag semantics of the
+ * instruction it prefixes, so `lock dec [rbx]` sets ZF from what it wrote
+ * exactly as `dec [rbx]` does. The prefix is now dropped and the base
+ * classified, which leaves each locked form in the class its own mnemonic
+ * earns: `lock cmpxchg` is `"unrecognised"`, `lock xadd` is `"carry-in"`,
+ * `lock bts` is `"partial-write"` — each of them still refused, and now for the
+ * reason that is actually true of it (peek-a-bin-3qrl).
+ */
 export type FlagClobberReason =
   | "undefined-result"
   | "partial-write"
   | "carry-in"
   | "variable-count"
-  | "locked"
   | "string-op"
   | "call"
   | "unrecognised";
@@ -301,6 +313,26 @@ function baseMnemonic(mnemonic: string): { prefix: string; base: string } {
     : { prefix: lower.slice(0, space), base: lower.slice(space + 1).trim() };
 }
 
+/**
+ * `mnemonic` lowercased, with a `lock` prefix removed; anything else unchanged.
+ *
+ * For `lifter.ts`, which has to dispatch a locked read-modify-write to the same
+ * handler as the unlocked form — the prefix changes atomicity and nothing about
+ * the values or the flags, so `lock dec` must lift to the store `dec` lifts to
+ * or the guard reading its ZF has no value to name (peek-a-bin-3qrl).
+ *
+ * Deliberately **only** `lock`, and not `baseMnemonic` exported outright. A
+ * `rep` prefix does change the effect — the primitive runs to a count, writing
+ * its flags once per iteration — and Capstone spells `rep movsd` sometimes into
+ * the mnemonic and sometimes into `opStr`, which `liftBlock` handles as its own
+ * case. Stripping prefixes generally would route one of those spellings into
+ * the plain `movsd` path.
+ */
+export function withoutLockPrefix(mnemonic: string): string {
+  const { prefix, base } = baseMnemonic(mnemonic);
+  return prefix === "lock" ? base : mnemonic.toLowerCase();
+}
+
 /** `opStr`'s first operand, lowercased. No x86 memory operand contains a comma. */
 function firstOperand(insn: Instruction): string {
   return insn.opStr.split(",")[0]?.trim().toLowerCase() ?? "";
@@ -343,9 +375,20 @@ function shiftWritesFlags(destText: string, countText: string): boolean {
 export function flagEffect(insn: Instruction): FlagEffect {
   const { prefix, base } = baseMnemonic(insn.mnemonic);
 
-  // A `lock`-prefixed form is a read-modify-write on memory whose result this
-  // model could not name in any case; `rep`-prefixed forms are string ops.
-  if (prefix === "lock") return { kind: "clobber", why: "locked" };
+  // A `lock`-prefixed form is classified by its BASE mnemonic, because the
+  // prefix says nothing about the flags: it makes the read-modify-write atomic
+  // and leaves every flag effect of the underlying instruction exactly as it
+  // was. `lock dec dword ptr [rbx] / jne` is therefore an ordinary
+  // memory-destination result owner, and peek-a-bin-ie0j already made that
+  // spellable. Blanket-clobbering on the prefix instead was the whole of what
+  // left those guards unrecovered, and it also mislabelled the forms that
+  // really are refused — `lock cmpxchg` reaches `"unrecognised"` now, which
+  // says *why* (the lifter has no `cmpxchg`) where `"locked"` said only that a
+  // prefix was present (peek-a-bin-3qrl).
+  //
+  // `rep`-prefixed forms are string ops and are a different question: they
+  // write the flags once per iteration, so the prefix really does change the
+  // effect and the early return below is not the same shape of mistake.
   if (prefix === "rep" || prefix === "repe" || prefix === "repz") {
     return { kind: "clobber", why: "string-op" };
   }

@@ -4,7 +4,12 @@ import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import { pushedImmediate } from "../stackIdiom";
 import type { Instruction } from "../types";
-import { blockFlagOwner, canSpellCondition, isFlagTransparent } from "./flagModel";
+import {
+  blockFlagOwner,
+  canSpellCondition,
+  isFlagTransparent,
+  withoutLockPrefix,
+} from "./flagModel";
 import type { BinaryOp, IRBranch, IRCall, IRExpr, IRStmt } from "./ir";
 import {
   canonReg,
@@ -507,7 +512,37 @@ export function liftBlock(
   // this loop is unconditional about the index, so it is bound at the top.
   for (let insnIndex = 0; insnIndex < block.insns.length; insnIndex++) {
     const insn = block.insns[insnIndex];
-    const mn = insn.mnemonic.toLowerCase();
+    /**
+     * The verbatim mnemonic, for the `raw` fallbacks below.
+     *
+     * `mn` is the *dispatch* key and has any `lock` prefix stripped, so it must
+     * not be the text of an instruction this file gives up on: `__asm { cmpxchg
+     * … }` for a `lock cmpxchg` would drop the one word that says the exchange
+     * was atomic, from the only place the reader is told about it at all.
+     */
+    const rawMn = insn.mnemonic.toLowerCase();
+    /**
+     * The dispatch key: `rawMn` with a `lock` prefix removed.
+     *
+     * A locked instruction is lifted exactly as its unlocked form, because the
+     * prefix changes atomicity and the bus and nothing about the values — the
+     * plain `dec dword ptr [rbx]` already lifts to a store here, and `lock dec
+     * dword ptr [rbx]` writes the same value to the same place. Dispatching on
+     * the prefixed text instead left every locked form on the `raw` fallback,
+     * so the guard reading its ZF had no value to name and emitted
+     * `__unrecovered_N` beside an `/* unlifted: lock dec … *\/` comment holding
+     * the answer (peek-a-bin-3qrl).
+     *
+     * **Atomicity is not modelled, and this loses the word `lock` from the
+     * page.** Nothing in this IR can express it — `xchg` with a memory operand
+     * is implicitly locked on x86 and has been lifted as a plain swap since
+     * before any of this — and a comment naming the instruction beside an
+     * unrecovered guard states strictly less than the decrement plus the test.
+     * Every form the lifter has no handler for still reaches `raw` verbatim,
+     * `lock cmpxchg` and `lock xadd` among them, so nothing is silently given a
+     * reading it has not earned.
+     */
+    const mn = withoutLockPrefix(insn.mnemonic);
     const parts = splitOperands(insn.opStr);
 
     // ── Forward flag invalidation ──
@@ -584,7 +619,7 @@ export function liftBlock(
     // ── mov ──
     if (mn === "mov") {
       if (parts.length < 2) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -607,7 +642,7 @@ export function liftBlock(
     // ── movzx / movsx / movsxd → emit IRCast with type annotation ──
     if (mn === "movzx" || mn === "movsx" || mn === "movsxd") {
       if (parts.length < 2) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -645,7 +680,7 @@ export function liftBlock(
     // ── lea ──
     if (mn === "lea") {
       if (parts.length < 2) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -678,7 +713,7 @@ export function liftBlock(
     // ── Arithmetic: add/sub/and/or/xor/shl/shr/sar ──
     if (mn in ARITH_OPS) {
       if (parts.length < 2) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -718,7 +753,7 @@ export function liftBlock(
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
       } else {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
       }
       continue;
     }
@@ -726,7 +761,7 @@ export function liftBlock(
     // ── inc / dec ──
     if (mn === "inc" || mn === "dec") {
       if (parts.length < 1) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -751,7 +786,7 @@ export function liftBlock(
     // ── not / neg ──
     if (mn === "not" || mn === "neg") {
       if (parts.length < 1) {
-        stmts.push({ kind: "raw", text: `${mn} ${insn.opStr}`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
       const dest = parseDestOperand(parts[0], insn, is64);
@@ -1023,7 +1058,7 @@ export function liftBlock(
         regState.set(dividendLo, quotient);
         regState.set(dividendHi, remainder);
       } else {
-        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
@@ -1052,7 +1087,7 @@ export function liftBlock(
         regState.set(accLo, result);
         regState.set(accHi, irBinary(">>", result, irConst(srcSize * 8)));
       } else {
-        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
@@ -1077,7 +1112,7 @@ export function liftBlock(
         regState.set(a.name, bVal);
         regState.set(b.name, aVal);
       } else {
-        stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
       }
       continue;
     }
@@ -1173,7 +1208,7 @@ export function liftBlock(
     }
 
     // ── Everything else: AVX, etc. → raw asm ──
-    stmts.push({ kind: "raw", text: `__asm { ${mn} ${insn.opStr} }`, addr: insn.address });
+    stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
   }
 
   return stmts;

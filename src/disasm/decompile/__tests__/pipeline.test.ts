@@ -6447,3 +6447,139 @@ describe("decompileFunction — a guard reads a memory destination the block jus
     expect(guardTexts(code)).toEqual(["<unrecovered>"]);
   });
 });
+
+/**
+ * A `lock`-prefixed read-modify-write lifts as its unlocked form, and the guard
+ * reading its flags is spelled from the memory it wrote.
+ *
+ * `flagModel.ts` used to return `{clobber, "locked"}` for **any** `lock` prefix
+ * before looking at the base mnemonic, and `liftBlock` dispatched on the
+ * prefixed text — so `lock dec dword ptr [rbx] / jne`, the textbook COM
+ * `Release`, emitted an `unlifted` comment above `if (!!__unrecovered_1)`. Both
+ * halves were wrong about the machine in the same way: the prefix changes
+ * atomicity and the bus and **nothing** about the values or the flags, so the
+ * instruction sets ZF from what it wrote exactly as the unlocked form does, and
+ * peek-a-bin-ie0j had already made a memory destination spellable
+ * (peek-a-bin-3qrl).
+ *
+ * **What the lift loses is the word `lock`**, and that is the deliberate trade:
+ * nothing in this IR can express atomicity — `xchg` with a memory operand is
+ * implicitly locked on x86 and has been lifted as a plain swap since long
+ * before this — and a comment naming the instruction beside an unrecovered
+ * guard states strictly less than the decrement plus the test.
+ *
+ * The negative controls are the other half of the rule: `lock cmpxchg` and
+ * `lock xadd` are **not** `lock dec`, the lifter has no handler for either
+ * base, and inventing a reading for them would be worse than leaving them. Both
+ * stay verbatim on the `raw` fallback, `lock` included.
+ */
+describe("decompileFunction — a lock-prefixed read-modify-write lifts as its base form", () => {
+  /** The emitted guards, or ["<unrecovered>"] where the condition was admitted. */
+  function guardTexts(code: string): string[] {
+    return guardConditions(code).map((c) => (/__unrecovered_\d+/.test(c) ? "<unrecovered>" : c));
+  }
+
+  /** t64.exe 0x140005BC8 and three siblings: an atomic refcount release. */
+  const lockDec: [string, string?][] = [
+    ["lock dec", "dword ptr [rbx]"],
+    ["jne", "0x401020"],
+    ["mov", "rcx, rbx"],
+    ["call", "0x401100"],
+    ["ret"],
+    ["mov", "eax, 2"],
+    ["ret"],
+  ];
+
+  it("spells the guard from the memory the locked decrement wrote", () => {
+    expect(guardTexts(run(seq(0x401000, lockDec), true))).toEqual(["*(int32_t*)(rbx) != 0"]);
+  });
+
+  it("emits the decrement ABOVE the if that reads it", () => {
+    // Same read-modify-write ordering argument as peek-a-bin-ie0j's, asserted
+    // rather than assumed: a guard emitted above the store would test the
+    // refcount on the way in, which is one release too early.
+    const lines = run(seq(0x401000, lockDec), true)
+      .split("\n")
+      .map((l) => l.trim());
+    const store = lines.findIndex((l) => /\*\(int32_t\*\)\(rbx\).*(--|-= 1|= .*- 1)/.test(l));
+    const guard = lines.findIndex((l) => l.includes("*(int32_t*)(rbx) != 0"));
+    expect(store).toBeGreaterThanOrEqual(0);
+    expect(guard).toBeGreaterThan(store);
+  });
+
+  it("leaves no unlifted comment for a locked form it now lifts", () => {
+    expect(run(seq(0x401000, lockDec), true)).not.toContain("unlifted");
+  });
+
+  it("lifts a locked increment and a locked add with no guard involved", () => {
+    // t64.exe 0x140006143 and 0x1400061E5. There is a `test`/`cmp` between each
+    // of these and its Jcc in the real binary, so the compare owns the flags and
+    // this is purely about the value reaching the page at all.
+    const code = run(
+      seq(0x401000, [
+        ["lock inc", "dword ptr [rax]"],
+        ["lock add", "dword ptr [rcx], r9d"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).not.toContain("unlifted");
+    expect(code).toContain("*(int32_t*)(rax)");
+    expect(code).toContain("r9d");
+  });
+
+  // ── Negative controls ──
+
+  it("leaves lock cmpxchg unlifted, prefix included, and its guard unrecovered", () => {
+    const code = run(
+      seq(0x401000, [
+        ["lock cmpxchg", "dword ptr [rbx], edx"],
+        ["jne", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("unlifted: lock cmpxchg dword ptr [rbx], edx");
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("leaves lock xadd unlifted, prefix included, and its guard unrecovered", () => {
+    const code = run(
+      seq(0x401000, [
+        ["lock xadd", "dword ptr [rbx], edx"],
+        ["jne", "0x401018"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(code).toContain("unlifted: lock xadd dword ptr [rbx], edx");
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+
+  it("refuses the locked guard when a later store could have reached the location", () => {
+    // `spoils`' whole alias analysis, inherited unchanged from peek-a-bin-ie0j.
+    const code = run(
+      seq(0x401000, [
+        ["lock dec", "dword ptr [rbx]"],
+        ["mov", "dword ptr [rax], ecx"],
+        ["jne", "0x40101c"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+      true,
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+  });
+});
