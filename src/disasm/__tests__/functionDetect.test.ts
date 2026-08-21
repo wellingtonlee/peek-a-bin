@@ -1037,6 +1037,122 @@ describe("detectFunctions — jumpTableSpans", () => {
   });
 });
 
+// ── An unbounded dispatch's bytes are still data (peek-a-bin-7lb9) ──
+// A bounds check is the only statement of a switch's LENGTH, so without one
+// there are no case targets to report. The bytes are data regardless, and
+// nothing else in the image says so: at d514274 the two unbounded tables in each
+// 32-bit corpus binary came out of the gap fill as 25 and 33 phantom
+// instructions, and the misaligned walk ran past each table's end and ate the
+// first bytes of the case body after it. So the extent is recovered on its own,
+// with no cases — see `unboundedTableExtent`.
+describe("detectFunctions — an unbounded dispatch's bytes are still data", () => {
+  const TABLE = 0x30;
+  const ENTRIES = 8;
+  const END = TABLE + ENTRIES * 4;
+  const LEN = 0x80;
+  /** `jmp dword ptr [eax*4 + <base>]` — 7 bytes. */
+  const dispatch = (base: number) => [0xff, 0x24, 0xc5, ...le32(base)];
+  /** `n` entries at TABLE, each pointing at a `nop; ret` body in the image. */
+  const table = (n: number) => {
+    const parts: Record<number, number[]> = {};
+    parts[TABLE] = Array.from({ length: n }, (_, i) => le32(BASE + 0x60 + i * 4)).flat();
+    for (let i = 0; i < n; i++) parts[0x60 + i * 4] = [0x90, 0xc3];
+    return parts;
+  };
+  const detect32 = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE });
+
+  it("reports the extent, and no cases", () => {
+    const { jumpTables, jumpTableSpans } = detect32(
+      image(LEN, { 0x00: dispatch(BASE + TABLE), ...table(ENTRIES) }),
+    );
+    // No bound, so nothing states how long the switch is: the bytes are the
+    // whole answer.
+    expect(jumpTables).toEqual([]);
+    expect(jumpTableSpans).toEqual([[BASE + TABLE, BASE + END]]);
+  });
+
+  it("scans backwards, because the named base need not be the first entry", () => {
+    // MSVC's reverse `memmove` does `neg ecx` and then dispatches through the
+    // table's LAST slot (t32.exe 0x40b968, w32.exe 0x409602). A forward-only
+    // read finds one entry there and refuses.
+    const { jumpTableSpans } = detect32(
+      image(LEN, { 0x00: dispatch(BASE + END - 4), ...table(ENTRIES) }),
+    );
+    expect(jumpTableSpans).toEqual([[BASE + TABLE, BASE + END]]);
+  });
+
+  it("falls back to the extent when a bound reads fewer than two cases", () => {
+    // The descending shape DOES have a `cmp` in front of it, and reading eight
+    // entries forward from the last slot finds exactly one. One case is not a
+    // switch, so the reading falls through to the extent — which is why the
+    // fallback is on "no cases recovered" and not on "no bound found".
+    const { jumpTables, jumpTableSpans } = detect32(
+      image(LEN, {
+        0x00: [0x83, 0xf8, 0x07], // cmp eax, 7
+        0x03: dispatch(BASE + END - 4),
+        ...table(ENTRIES),
+      }),
+    );
+    expect(jumpTables).toEqual([]);
+    expect(jumpTableSpans).toEqual([[BASE + TABLE, BASE + END]]);
+  });
+
+  it("refuses a run shorter than the minimum", () => {
+    // With no bound the run IS the evidence, so it has to be stronger than the
+    // two entries the bounded path is content with.
+    const { jumpTableSpans } = detect32(image(LEN, { 0x00: dispatch(BASE + TABLE), ...table(3) }));
+    expect(jumpTableSpans).toEqual([]);
+  });
+
+  it("refuses when the named base itself is not a code address", () => {
+    // MSVC overlaps an unreachable entry 0 with the tail of the preceding
+    // instruction to save four bytes (t32.exe 0x40b7f1, w32.exe 0x409491). The
+    // run has to contain the base, so this is refused outright rather than
+    // guessed at from where the plausible entries start.
+    const { jumpTableSpans } = detect32(
+      image(LEN, { 0x00: dispatch(BASE + TABLE - 4), ...table(ENTRIES) }),
+    );
+    expect(jumpTableSpans).toEqual([]);
+  });
+
+  it("refuses an absolute indirect jump that names no index", () => {
+    // `jmp qword ptr [rip + N]` is an import thunk, not a one-entry switch, and
+    // scanning a run of words out of the IAT is not a question worth asking. The
+    // fallback is restricted to the operand naming a scale.
+    const target = BASE + 0x40;
+    const img = image(LEN, {
+      0x00: [0xff, 0x25, ...le32(target - (BASE + 6))],
+      0x40: Array.from({ length: 4 }, () => [...le32(BASE + 0x60), 0, 0, 0, 0]).flat(),
+      0x60: [0x90, 0xc3],
+    });
+    const { jumpTables, jumpTableSpans } = detectFunctions(
+      img,
+      BASE,
+      true,
+      ctxOf({ cs64: fakeCs() }),
+      { entryPoint: BASE },
+    );
+    expect(jumpTables).toEqual([]);
+    expect(jumpTableSpans).toEqual([]);
+  });
+
+  it("claims nothing about what the entries mean", () => {
+    // The deliberate asymmetry: the base may be mid-table and the index may be
+    // negative, so which entry is which case is unknown and no address is
+    // reported as a case label. A prologue pattern sitting on one is therefore
+    // NOT suppressed, where a recovered table's target would be.
+    const { functions } = detect32(
+      image(LEN, {
+        0x00: dispatch(BASE + TABLE),
+        ...table(ENTRIES),
+        0x60: [0x55, 0x8b, 0xec], // push ebp; mov ebp, esp
+      }),
+    );
+    expect(functions.map((f) => f.address)).toContain(BASE + 0x60);
+  });
+});
+
 // ── x86-64 RVA jump tables (peek-a-bin-ydh) ──
 // x64 code is position-independent, so the dispatch cannot name its table: the
 // table address arrives through a `lea`, the entry through a scaled load, and

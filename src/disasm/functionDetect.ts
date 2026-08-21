@@ -177,7 +177,14 @@ export interface DetectResult {
   functions: DisasmFunction[];
   jumpTables: [number, number[]][];
   /**
-   * `[start, end)` of the bytes the recovered tables themselves occupy, deduped.
+   * `[start, end)` of the bytes the tables themselves occupy, deduped.
+   *
+   * **Not the same population as `jumpTables`, in one direction.** Every table
+   * whose cases were recovered contributes a span, and so does an *unbounded*
+   * dispatch, whose extent {@link unboundedTableExtent} establishes without
+   * being able to state a case count — the bytes are data either way, and that
+   * is all a span claims (peek-a-bin-7lb9). So a span with no entry in
+   * `jumpTables` is normal; the reverse is not.
    *
    * A jump table is data in the middle of a code section, and nothing in the
    * image says so: recursive descent never walks into one, so `hybridDisassemble`
@@ -187,9 +194,10 @@ export interface DetectResult {
    * (peek-a-bin-y1di). Pass these to `hybridDisassemble` and those bytes are
    * left alone.
    *
-   * Empty is not "no tables": a table this could not size is a table that was
-   * not read at all, and one read from outside the code window (an x64 `.rdata`
-   * RVA table) is reported here too but falls outside the bytes the sweep sees.
+   * Empty is not "no tables": a table this could neither size nor locate is a
+   * table that was not read at all, and one read from outside the code window
+   * (an x64 `.rdata` RVA table) is reported here too but falls outside the bytes
+   * the sweep sees.
    */
   jumpTableSpans: [number, number][];
   /**
@@ -645,14 +653,109 @@ function pdataRangeTest(
  *
  * A span may lie outside the code window — an x64 RVA table lives in `.rdata` —
  * so a consumer clamps rather than assuming.
+ *
+ * `dataOnly` marks the one reading that reports bytes and **no cases**: an
+ * unbounded dispatch, where {@link unboundedTableExtent} can say where the table
+ * is without being able to say how long the switch is. Empty `targets` with a
+ * non-empty `spans` cannot arise any other way, but the flag is explicit so the
+ * caller states which question it is answering rather than inferring it from an
+ * array length.
  */
 interface TableRead {
   targets: number[];
   spans: [number, number][];
+  dataOnly?: true;
 }
 
 /** The "nothing was recovered" answer, built fresh so no refusal aliases another. */
 const noTable = (): TableRead => ({ targets: [], spans: [] });
+
+/**
+ * Least evidence that will make an unbounded dispatch's bytes data.
+ *
+ * The bounded path is content with two entries because the `cmp` in front of it
+ * independently states a length; here the run of entries **is** the whole
+ * evidence, so it has to be stronger. Four pointer-width words each holding an
+ * address inside the code section is the bar. Measured over the whole code
+ * section of the four corpus binaries at `d514274` — every maximal run of four
+ * or more such words, whether or not a dispatch names it — there are 6/5/0/0
+ * (t32/w32/t64/w64), and the only ones that intersect anything the
+ * disassembler files as code are exactly the two real jump tables per 32-bit
+ * binary. At a threshold of two it is 8/7/0/0 with 4/4 intersecting, which is
+ * the reason this is not 2 (peek-a-bin-7lb9).
+ */
+const MIN_UNBOUNDED_TABLE_ENTRIES = 4;
+
+/**
+ * Where an *unbounded* dispatch's table is, when there is no saying how long it
+ * is.
+ *
+ * A bounds check is the only statement of a switch's *length*, so without one
+ * there are no case targets to report — reading `maxCases` entries out of thin
+ * air is how a table gets misread, and reporting entries in an order that is
+ * not case order is what peek-a-bin-div refused. But the bytes are still data
+ * sitting in the middle of a code section, and `hybridDisassemble`'s gap fill
+ * decodes anything nothing has claimed: at `d514274` the two unbounded tables in
+ * each 32-bit corpus binary came out as 25 and 33 phantom instructions, and the
+ * misaligned walk ran off the end of each and ate the first bytes of the case
+ * body that follows (3 bytes on t32, 10 on w32) — real instructions replaced by
+ * fiction. So the extent is recovered on its own, and reported as
+ * {@link TableRead.dataOnly}: these bytes are not code, and that is the whole
+ * claim.
+ *
+ * The extent is the maximal run of pointer-width words on the named base's own
+ * grid, **each** holding an address inside the code section, scanned in *both*
+ * directions from the base. Both halves are the machine's, not a guess:
+ *
+ *  - Stopping at the first word that is not a code address is the same test the
+ *    bounded path already applies to every entry it reads.
+ *  - The base is not necessarily the table's first entry, because the index is
+ *    not necessarily non-negative. MSVC's reverse `memmove` does `neg ecx` and
+ *    then `jmp dword ptr [ecx*4 + <base>]`, so the base names the *last* slot
+ *    and the seven before it are the table (t32.exe 0x40b968, w32.exe
+ *    0x409602). A forward-only scan reads one entry there and refuses.
+ *
+ * **It errs short, and that is the safe direction.** Over-reporting marks real
+ * code as data, which deletes instructions from the output with nothing said;
+ * under-reporting leaves them decoded as they are today. Three things keep it
+ * short: the run must contain the named base, so a table whose base slot MSVC
+ * overlapped with the preceding instruction to save four bytes is refused
+ * outright (t32.exe 0x40b7f1 and 0x40b985 — 3 real entries each, still
+ * fiction); it stops dead at one non-resolving word rather than tolerating a
+ * gap; and {@link MIN_UNBOUNDED_TABLE_ENTRIES} discards a short run.
+ *
+ * Confined to the code section on purpose. A table in `.rdata` is not reached
+ * by the gap fill, so there is nothing there for this to fix, and a run scanned
+ * through data it cannot bound is exactly what it must not report.
+ *
+ * The corroboration is worth recording, because it comes from outside this
+ * rule: on all four sites it fires on in the corpus the run length is 8, which
+ * is exactly the bound the machine imposes (`cmp ecx, 8` / `jb`) — a bound
+ * `readAbsoluteTable` cannot see because the compare is in a control-flow
+ * predecessor that sits *later* in address order, so the linear `recent` window
+ * never holds it.
+ */
+function unboundedTableExtent(
+  tableBase: number,
+  reader: ImageReader,
+  ptrSize: number,
+  codeStart: number,
+  codeEnd: number,
+): TableRead {
+  const resolves = (addr: number): boolean => {
+    if (addr < codeStart || addr + ptrSize > codeEnd) return false;
+    const v = ptrSize === 8 ? reader.u64(addr) : reader.u32(addr);
+    return v !== null && v >= codeStart && v < codeEnd;
+  };
+  if (!resolves(tableBase)) return noTable();
+  let lo = tableBase;
+  let hi = tableBase + ptrSize;
+  const entries = () => (hi - lo) / ptrSize;
+  while (entries() < MAX_JUMP_TABLE_CASES && resolves(lo - ptrSize)) lo -= ptrSize;
+  while (entries() < MAX_JUMP_TABLE_CASES && resolves(hi)) hi += ptrSize;
+  if (entries() < MIN_UNBOUNDED_TABLE_ENTRIES) return noTable();
+  return { targets: [], spans: [[lo, hi]], dataOnly: true };
+}
 
 /**
  * Case targets of a table the dispatching instruction names itself.
@@ -667,6 +770,13 @@ const noTable = (): TableRead => ({ targets: [], spans: [] });
  * thing, and everything downstream of the count — the {@link
  * MAX_JUMP_TABLE_CASES} ceiling, and every entry having to resolve into the
  * code window — applies unchanged.
+ *
+ * With no bound at all there are no cases, and the answer is
+ * {@link unboundedTableExtent}'s: where the bytes are, and nothing about what
+ * they mean. That fallback is deliberately restricted to the *indexed* form —
+ * the operand naming a scale, i.e. an actual array subscript. A plain
+ * `jmp dword ptr [0x40f0a8]` is an import thunk, not a one-entry switch, and
+ * scanning a run of words out of the IAT is not a question worth asking.
  */
 function readAbsoluteTable(
   insn: StackInsn,
@@ -676,6 +786,17 @@ function readAbsoluteTable(
   codeStart: number,
   codeEnd: number,
 ): TableRead {
+  let tableBase = 0;
+  const scaleMatch = insn.opStr.match(/\[.*\*\d\s*\+\s*0x([0-9a-fA-F]+)\]/);
+  if (scaleMatch) tableBase = parseInt(scaleMatch[1], 16);
+  const indexed = tableBase !== 0;
+  if (!tableBase && is64) {
+    const ripTarget = resolveRipTarget(insn);
+    if (ripTarget !== null) tableBase = ripTarget;
+  }
+  if (!tableBase) return noTable();
+
+  const ptrSize = is64 ? 8 : 4;
   let maxCases = 0;
   for (let ri = recent.length - 1; ri >= Math.max(0, recent.length - CMP_LOOKBACK); ri--) {
     const prev = recent[ri];
@@ -691,18 +812,10 @@ function readAbsoluteTable(
       break;
     }
   }
-  if (maxCases <= 0 || maxCases > MAX_JUMP_TABLE_CASES) return noTable();
+  // A count above the ceiling is a claim not to be trusted, and not an
+  // invitation to go looking for a second reading — same rule as readRvaTable.
+  if (maxCases > MAX_JUMP_TABLE_CASES) return noTable();
 
-  let tableBase = 0;
-  const scaleMatch = insn.opStr.match(/\[.*\*\d\s*\+\s*0x([0-9a-fA-F]+)\]/);
-  if (scaleMatch) tableBase = parseInt(scaleMatch[1], 16);
-  if (!tableBase && is64) {
-    const ripTarget = resolveRipTarget(insn);
-    if (ripTarget !== null) tableBase = ripTarget;
-  }
-  if (!tableBase) return noTable();
-
-  const ptrSize = is64 ? 8 : 4;
   const targets: number[] = [];
   for (let c = 0; c < maxCases; c++) {
     const entry = tableBase + c * ptrSize;
@@ -710,8 +823,18 @@ function readAbsoluteTable(
     if (target === null || target < codeStart || target >= codeEnd) break;
     targets.push(target);
   }
-  if (targets.length === 0) return noTable();
-  return { targets, spans: [[tableBase, tableBase + targets.length * ptrSize]] };
+  if (targets.length >= 2) {
+    return { targets, spans: [[tableBase, tableBase + targets.length * ptrSize]] };
+  }
+  // No switch was recovered — either nothing bounded the index, or the bound
+  // read fewer than two cases forward from the named base, which is not a
+  // switch and which the caller has always discarded. The fallback is the same
+  // decision in both: the cases are unknown, the bytes may not be. It is the
+  // *cases* that a bound is needed for, and the descending shape is exactly why
+  // the two must be asked separately — MSVC's reverse `memmove` does have a
+  // `cmp ecx, 8` in front of it, and reading eight entries *forward* from a
+  // base that is the table's last slot finds one (peek-a-bin-7lb9).
+  return indexed ? unboundedTableExtent(tableBase, reader, ptrSize, codeStart, codeEnd) : noTable();
 }
 
 /**
@@ -1479,12 +1602,19 @@ export function detectFunctions(
             is64 && regFamily(insn.opStr)
               ? readRvaTable(insn, recentInsns, reader, baseAddress, endAddress)
               : readAbsoluteTable(insn, recentInsns, reader, is64, baseAddress, endAddress);
-          if (table.targets.length >= 2) {
+          const hasCases = table.targets.length >= 2;
+          if (hasCases) {
             jumpTables.set(insn.address, table.targets);
             for (const t of table.targets) jumpTableTargets.add(t);
-            // Deduped: one table serves several dispatches — t32.exe's
-            // `0x40ba8c` is read by three — and a span is about the bytes, not
-            // about the `jmp` that reached them.
+          }
+          // The two questions are separate, and an unbounded dispatch answers
+          // only the second: `dataOnly` carries an extent with no case list,
+          // because a table with no bounds check has no *length* and reporting
+          // targets would be inventing one (peek-a-bin-7lb9). Deduped either
+          // way: one table serves several dispatches — t32.exe's `0x40ba8c` is
+          // read by three — and a span is about the bytes, not about the `jmp`
+          // that reached them.
+          if (hasCases || table.dataOnly) {
             for (const [start, end] of table.spans) {
               const key = `${start}:${end}`;
               if (!spanKeys.has(key)) {
