@@ -6,7 +6,9 @@
  * (CLAUDE.md, "No read of RSP may be moved to another program point"). The one
  * exception is MSVC's two-byte `mov reg, imm`, spelled `push <imm>` /
  * `pop <reg>`, which `stackIdiom.ts` pairs and the lifter turns into an
- * assignment (peek-a-bin-3axd). Every other `pop <reg>` is therefore **not a
+ * assignment — block-locally since peek-a-bin-3axd, and across a branch since
+ * peek-a-bin-6ilz, where the definition lands in each PREDECESSOR and
+ * `buildSSA` builds the phi. Every other `pop <reg>` is therefore **not a
  * definition in SSA**, so a later read of that register binds to the value it
  * held BEFORE the pop, and the emitted C names something the machine no longer
  * has there.
@@ -48,7 +50,11 @@ import { solePredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
-import { firstCalleeSavedWrites, liftBlock } from "../src/disasm/decompile/lifter";
+import {
+  firstCalleeSavedWrites,
+  liftBlock,
+  liftCrossBlockPops,
+} from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import type { SSAContext } from "../src/disasm/decompile/ssa";
 import { buildSSA, detectNaturalLoops } from "../src/disasm/decompile/ssa";
@@ -412,6 +418,11 @@ export function auditPopReads(
           solePredecessor(b, blockById0),
         ),
       );
+    // `pipeline.ts` step 2b, and it must run BEFORE `liftedPops` is collected:
+    // a cross-block `push imm` / `pop reg` is defined in the predecessors, and
+    // the assignment carries the POP's address precisely so the scan below sees
+    // it (peek-a-bin-6ilz).
+    liftCrossBlockPops(blocks, lifted);
     // Asked of the LIFT, not of the lowered program: `push 0x1a / pop eax /
     // ret` really is lifted (peek-a-bin-3axd's rule), copy propagation folds
     // the constant into the `return`, and DCE then deletes the assignment — so

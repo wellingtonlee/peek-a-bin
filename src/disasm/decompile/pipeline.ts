@@ -8,7 +8,7 @@ import { emitFunction } from "./emit";
 import { solePredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
-import { firstCalleeSavedWrites, liftBlock } from "./lifter";
+import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops } from "./lifter";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -135,6 +135,19 @@ export function decompileFunction(
       );
       liftedBlocks.set(block.id, stmts);
     }
+
+    // 2b. A `pop <reg>` whose `push <imm>` is in a PREDECESSOR.
+    //
+    // MSVC's two-byte `mov reg, imm` is routinely split across a branch — three
+    // arms each pushing a different character, one `pop` at the join — and
+    // `stackIdiom.ts`'s pairing is handed one block, so it answers nothing there
+    // and the `pop` is no definition in SSA. It cannot be done inside
+    // `liftBlock` for a structural reason rather than a convenient one: the
+    // definition has to land in EACH predecessor so `buildSSA` builds the phi,
+    // and `liftBlock` returns one block's statements. See
+    // `crossBlockPopImmediates` for the four refusals that make defining the
+    // register early sound (peek-a-bin-6ilz).
+    liftCrossBlockPops(blocks, liftedBlocks);
 
     // 3. SSA: build → optimize → destroy
     const ssaCtx = buildSSA(blocks, liftedBlocks);

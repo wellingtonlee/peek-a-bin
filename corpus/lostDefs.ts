@@ -52,7 +52,11 @@ import { solePredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
-import { firstCalleeSavedWrites, liftBlock } from "../src/disasm/decompile/lifter";
+import {
+  firstCalleeSavedWrites,
+  liftBlock,
+  liftCrossBlockPops,
+} from "../src/disasm/decompile/lifter";
 import { RegState } from "../src/disasm/decompile/regstate";
 import { buildSSA, detectNaturalLoops } from "../src/disasm/decompile/ssa";
 import { destroySSA } from "../src/disasm/decompile/ssadestroy";
@@ -315,6 +319,8 @@ export function auditLostDefs(
           solePredecessor(b, blockById),
         ),
       );
+    // `pipeline.ts` step 2b (peek-a-bin-6ilz).
+    liftCrossBlockPops(blocks, lifted);
     const ctx = buildSSA(blocks, lifted);
     const natural = detectNaturalLoops(blocks, ctx.idom, ctx.domTree);
     ssaOptimize(ctx, natural.size > 0 ? natural : undefined);

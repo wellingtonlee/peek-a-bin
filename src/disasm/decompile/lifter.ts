@@ -21,6 +21,7 @@ import {
   irUnary,
   irUnknown,
   isKnownRegister,
+  pushBeforeTerminator,
   regSize,
 } from "./ir";
 import { RegState } from "./regstate";
@@ -624,9 +625,13 @@ export function liftBlock(
     //
     // The pairing is `../stackIdiom`'s, shared with `functionDetect.ts` rather
     // than re-derived — the same `push 7 / pop ecx` that sizes a jump table
-    // there is this idiom, and the two must not be able to disagree. Anything
-    // it refuses, including every save/restore pair and every `pop` whose
-    // `push` is in another block, is left exactly as it was (peek-a-bin-4ynk).
+    // there is this idiom, and the two must not be able to disagree.
+    //
+    // A `pop` whose `push` is in a PREDECESSOR is refused here and picked up by
+    // `crossBlockPopImmediates` below, which is `pipeline.ts` step 2b: the
+    // definition has to land in each predecessor for `buildSSA` to build a phi,
+    // and this function returns one block's statements. Every save/restore pair
+    // is still left exactly as it was, and that residue is peek-a-bin-6f3v.
     if (mn === "push" || mn === "pop") {
       if (mn === "pop" && parts.length === 1) {
         const name = parts[0].trim().toLowerCase();
@@ -1884,4 +1889,169 @@ function isCalleeSavedSave(
   const firstWrite = calleeSavedFirstWrite.get(canon);
   // Never written in this function at all — every push of it is a save.
   return firstWrite === undefined || pushInsn.address < firstWrite;
+}
+
+/**
+ * One `reg = imm` to append to one predecessor of a cross-block `pop`.
+ *
+ * `crossBlockPopImmediates` returns a flat list because the caller's work is
+ * flat: append each entry to that block's lifted statements. A `pop` with three
+ * pushing predecessors contributes three entries, and `buildSSA` turns them into
+ * the phi the value should always have been.
+ */
+export interface CrossBlockPopDef {
+  /** The predecessor block whose statement list this belongs at the end of. */
+  blockId: number;
+  /** The immediate that predecessor pushes. */
+  imm: number;
+  /** The register, spelled as the `pop` spells it. */
+  reg: string;
+  /** The `pop`'s own address — see below on why not the push's. */
+  addr: number;
+}
+
+/**
+ * MSVC's two-byte `mov reg, imm` split across a branch: a `pop <reg>` at the
+ * head of its block whose `push <imm>` sits in **every** predecessor.
+ *
+ * `stackIdiom.ts`'s pairing is handed one block, so it answers nothing here, and
+ * a `pop` it declines is not a definition in SSA — every later read of the
+ * register binds to the value it held *before* the pop, which is
+ * `peek-a-bin-3axd`'s defect one block further out. All five x86 corpus sites
+ * are MSVC selecting a character across an `if`/`else if` chain and popping it
+ * once:
+ *
+ *     404f38: je   0x404f3e
+ *     404f3a: push 0x2d          ; '-'
+ *     404f3c: jmp  0x404f4c
+ *     404f3e: test al, 0x1
+ *     404f40: je   0x404f46
+ *     404f42: push 0x2b          ; '+'
+ *     404f44: jmp  0x404f4c
+ *     404f46: test al, 0x2
+ *     404f48: je   0x404f5e
+ *     404f4a: push 0x20          ; ' '
+ *     404f4c: pop  ecx
+ *     404f4d: mov  WORD PTR [ebp-0x434], cx
+ *
+ * so the value is a **phi of three different immediates**, and a rule of the
+ * shape "every predecessor pushes the same constant, therefore assign it at the
+ * `pop`" describes not one site in this corpus. The definition has to land in
+ * each predecessor and `buildSSA` has to build the phi — which is why this
+ * cannot live in `liftBlock`, whose entire input is one block.
+ *
+ * FOUR REFUSALS, and each is the same question: is the register's *old* value
+ * provably dead on the edge? Defining it at the push is EARLY — the machine does
+ * not write the register until the pop.
+ *
+ * - **Every predecessor must pair, or none of them do.** Defining the register
+ *   on some incoming edges and not others is worse than defining it on none: the
+ *   phi's other operand is the stale value this rule exists to remove, so the
+ *   result reads as recovered while being wrong on one path. A block with no
+ *   predecessor at all — an MSVC `__except` continuation the unwinder enters
+ *   (peek-a-bin-d3z) — needs no test of its own: the loop over predecessors
+ *   produces nothing, so refusing it is structural.
+ * - **A pushing predecessor's only successor must be the `pop`'s block.** The
+ *   definition is appended to the predecessor, so it reaches every successor of
+ *   it; `push 0xd / je <pop>` would define the register on the fallthrough path
+ *   as well, where the `pop` never runs.
+ * - **A predecessor must not end in a conditional jump.** Implied by the rule
+ *   above for any CFG that lists both edges, and asked of the machine text
+ *   anyway, because `pushBeforeTerminator` places the definition *before* an
+ *   `IRBranch`: a guard reading the same register would then read the new value
+ *   one instruction early. Two edges drawn to one block is the shape where the
+ *   successor test alone could let that through.
+ * - **The `pop` must be its block's FIRST instruction.** This is what makes the
+ *   interval provably empty and is why no register-liveness grammar is needed
+ *   here — the definition arrives on the edge, so anything in the `pop`'s block
+ *   ahead of the `pop` would read it early. It also keeps this rule and
+ *   `liftBlock`'s structurally disjoint, since `pushedImmediate(insns, 0)` scans
+ *   nothing, so no `pop` can be defined twice. Every corpus site is a block
+ *   leader, being a `jmp` target, so the narrow rule costs nothing measurable
+ *   here; erring short leaves today's behaviour standing.
+ *
+ * Depth is still `stackIdiom.ts`'s question, asked of the predecessor's tail:
+ * `pushedImmediate(pred.insns, pred.insns.length)` refuses across any stack
+ * traffic or any mention of `esp`/`rsp` between the push and the block's end,
+ * exactly as it does inside a block. A `jmp` is neither, which is why the
+ * `push 0x2d / jmp` shape pairs at all.
+ *
+ * The statement carries the **`pop`'s** address rather than the push's, for two
+ * reasons. `liftBlock`'s block-local form does the same, so one pair cannot be
+ * attributed to two different instructions depending on where the push landed;
+ * and `corpus/popReads.ts` asks "did the lifter define this `pop`" by looking for
+ * an assignment at the `pop`'s address, so that audit's `popsLifted` liveness
+ * check covers this rule too instead of needing a second notion of "handled".
+ *
+ * `pop esp`/`pop rsp` is refused for `liftBlock`'s reason: ESP is the one
+ * register no stage here models, and a definition of it would be read by the
+ * frame analysis as a value it can move (peek-a-bin-6ilz).
+ */
+export function crossBlockPopImmediates(blocks: BasicBlock[]): CrossBlockPopDef[] {
+  const byId = new Map(blocks.map((b) => [b.id, b]));
+  const out: CrossBlockPopDef[] = [];
+
+  for (const block of blocks) {
+    const pop = block.insns[0];
+    if (pop?.mnemonic.toLowerCase() !== "pop") continue;
+    const parts = splitOperands(pop.opStr);
+    if (parts.length !== 1) continue;
+    const reg = parts[0].trim().toLowerCase();
+    if (!isKnownRegister(reg) || canonReg(reg) === "rsp") continue;
+
+    // No explicit test for a block with no predecessor: the loop below yields no
+    // definition for one, so an unwinder-entered block is refused by
+    // construction rather than by a branch. An early exit here would be a branch
+    // no test could make fail.
+    const defs: CrossBlockPopDef[] = [];
+    let paired = true;
+    for (const predId of block.preds) {
+      const pred = byId.get(predId);
+      // A predecessor outside this CFG is a path the rule cannot see, so it
+      // cannot claim every path defines the register.
+      if (!pred || pred.insns.length === 0) {
+        paired = false;
+        break;
+      }
+      if (pred.succs.length !== 1 || pred.succs[0] !== block.id) {
+        paired = false;
+        break;
+      }
+      const tail = pred.insns[pred.insns.length - 1].mnemonic.toLowerCase();
+      if (tail !== "jmp" && tail.startsWith("j")) {
+        paired = false;
+        break;
+      }
+      const imm = pushedImmediate(pred.insns, pred.insns.length);
+      if (imm === null) {
+        paired = false;
+        break;
+      }
+      defs.push({ blockId: predId, imm, reg, addr: pop.address });
+    }
+    if (paired) out.push(...defs);
+  }
+
+  return out;
+}
+
+/**
+ * Append every `crossBlockPopImmediates` definition to the block it belongs in.
+ *
+ * A one-line call for `pipeline.ts` and for each corpus replica of it, so the
+ * *placement* rule — `pushBeforeTerminator`, never a plain `push` — has one
+ * declaration rather than four. `stackIdiom.test.ts` fails if a file that calls
+ * `liftBlock` does not also call this.
+ */
+export function liftCrossBlockPops(blocks: BasicBlock[], lifted: Map<number, IRStmt[]>): void {
+  for (const def of crossBlockPopImmediates(blocks)) {
+    const stmts = lifted.get(def.blockId);
+    if (!stmts) continue;
+    pushBeforeTerminator(stmts, {
+      kind: "assign",
+      dest: irReg(def.reg),
+      src: irConst(def.imm, regSize(def.reg)),
+      addr: def.addr,
+    });
+  }
 }

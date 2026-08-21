@@ -101,10 +101,18 @@ export const STACK_TRAFFIC = new Set([
  * program never checked, or assign a register a value the machine never put in
  * it.
  *
- * Running off the front of `insns` is also a refusal. For the lifter that is
- * what confines the rule to a single basic block: a `pop` whose `push` is in
- * another block, and every save/restore pair, gets no answer here and is left
- * exactly as it was (peek-a-bin-4ynk).
+ * Running off the front of `insns` is also a refusal, and that is what confines
+ * this function to a single basic block: a `pop` whose `push` is in another
+ * block, and every save/restore pair, gets no answer *here*.
+ *
+ * "No answer here" is no longer "left exactly as it was", and the distinction
+ * matters if you are reading this to find out what happens to such a `pop`.
+ * `lifter.ts`'s `crossBlockPopImmediates` asks this same question of each
+ * PREDECESSOR's tail — `pushedImmediate(pred.insns, pred.insns.length)` — and
+ * puts a definition in each one so `buildSSA` builds the phi, because MSVC
+ * routinely splits the idiom across an `if`/`else if` chain and the immediates
+ * then differ per arm (peek-a-bin-6ilz). Every save/restore pair is still left
+ * alone, and that residue is peek-a-bin-6f3v.
  */
 export function pushedImmediate(insns: StackInsn[], popIndex: number): number | null {
   for (let ri = popIndex - 1; ri >= 0; ri--) {

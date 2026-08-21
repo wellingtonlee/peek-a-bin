@@ -16,8 +16,11 @@ import { loneImmediate, pushedImmediate, type StackInsn } from "../stackIdiom";
  * the two instructions can have moved the stack pointer or written through it.
  *
  * `pushedImmediate` running off the front of the array is also a refusal, and
- * that is what confines the lifter's use to one basic block — the lifter passes
- * `block.insns`, so a `pop` whose `push` is in another block finds nothing.
+ * that is what confines THIS function to one basic block — `liftBlock` passes
+ * `block.insns`, so a `pop` whose `push` is in another block finds nothing. It
+ * is asked a second time, of each predecessor's tail, by `lifter.ts`'s
+ * `crossBlockPopImmediates` (peek-a-bin-6ilz), whose own refusals live beside it
+ * in `decompile/__tests__/lifter.test.ts`.
  */
 
 /** One instruction. Only `mnemonic` and `opStr` are read; the rest is shape. */
@@ -100,9 +103,11 @@ describe("pushedImmediate", () => {
     expect(pushedImmediate(insns, 2)).toBeNull();
   });
 
-  // Running off the front is a refusal, not a fallthrough. For the lifter this
-  // IS the block-locality guarantee: it passes one basic block's instructions,
-  // so a pop whose push is in a predecessor gets no answer and is left alone.
+  // Running off the front is a refusal, not a fallthrough, and that is this
+  // function's block-locality guarantee: the lifter passes one basic block's
+  // instructions, so a pop whose push is in a predecessor gets no answer HERE.
+  // It is not left alone any more — `crossBlockPopImmediates` asks this same
+  // function about each predecessor's tail instead (peek-a-bin-6ilz).
   it("refuses when there is no push above the pop at all", () => {
     expect(pushedImmediate([ins("pop", "esi")], 0)).toBeNull();
     expect(pushedImmediate([ins("mov", "eax, 1"), ins("pop", "esi")], 1)).toBeNull();
@@ -159,5 +164,63 @@ describe("stackIdiom is a leaf, and the decompiler has no Capstone edge", () => 
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * Every replica of the lift loop must also run the cross-block pairing.
+ *
+ * `pipeline.ts` lifts each block and then calls `liftCrossBlockPops`, and three
+ * corpus audits replicate that loop because neither side of their question is
+ * recoverable from `decompileFunction`'s return value (`popReads.ts`,
+ * `staleReads.ts`, `lostDefs.ts`). A replica that skips step 2b measures a
+ * program the emitter never sees — and it fails in the *quiet* direction:
+ * `corpus/popReads.ts` would keep reporting the very rows peek-a-bin-6ilz fixed,
+ * so a future agent would read a green tree as a red one and go looking for a
+ * defect that is not there.
+ *
+ * The scan is over call sites rather than imports, because an unused import is
+ * the shape a half-finished edit leaves behind. It deliberately says nothing
+ * about ORDER — that `liftCrossBlockPops` must run before `buildSSA`, which is
+ * the whole point of it, is not something a text scan can check and is pinned
+ * end to end by `decompile/__tests__/pipeline.test.ts` instead.
+ */
+describe("every caller of liftBlock also runs the cross-block pop pairing", () => {
+  const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+  /** Every non-test `.ts` under `src/` and `corpus/` that calls `liftBlock(`. */
+  function liftBlockCallers(): string[] {
+    const hits: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "__tests__" && entry.name !== "node_modules") walk(full);
+          continue;
+        }
+        if (!entry.name.endsWith(".ts")) continue;
+        // The declaration itself is not a call site.
+        if (full.endsWith(join("decompile", "lifter.ts"))) continue;
+        const source = readFileSync(full, "utf-8");
+        if (/\bliftBlock\s*\(/.test(source)) hits.push(full);
+      }
+    };
+    walk(join(REPO, "src"));
+    walk(join(REPO, "corpus"));
+    return hits;
+  }
+
+  it("finds the callers at all", () => {
+    // Liveness: a scan that matches nothing passes the assertion below for the
+    // wrong reason. `pipeline.ts` plus the three corpus replicas.
+    expect(liftBlockCallers().length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("leaves none of them without the pairing call", () => {
+    const offenders = liftBlockCallers().filter(
+      (f) => !/\bliftCrossBlockPops\s*\(/.test(readFileSync(f, "utf-8")),
+    );
+
+    expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
   });
 });

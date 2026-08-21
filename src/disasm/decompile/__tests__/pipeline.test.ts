@@ -6183,8 +6183,11 @@ describe("decompileFunction — push <imm> / pop <reg> is a move", () => {
   // correct save/restore readings for admitted gaps.
   //
   // A pop with no `push <imm>` above it in its own block must therefore produce
-  // no assignment at all. Cross-block is the same case by construction: the
-  // rule is given `block.insns`, so running off the front is a refusal.
+  // no assignment at all. `pushedImmediate` is given `block.insns`, so running
+  // off the front is a refusal — and since peek-a-bin-6ilz a SECOND rule gets
+  // asked afterwards, so this fixture pins the case by having the pop in the
+  // ENTRY block: no predecessor pushes anything, because there is no
+  // predecessor.
   it("lifts nothing for a pop with no push above it", () => {
     const code = run(
       seq(0x401000, [["pop", "esi"], ["mov", "edi, esi"], ["mov", "eax, edi"], ["ret"]]),
@@ -6235,6 +6238,89 @@ describe("decompileFunction — push <imm> / pop <reg> is a move", () => {
     );
 
     expect(code).toContain("*(int32_t*)(eax) = -2");
+  });
+});
+
+/**
+ * …and the same idiom split across a branch, which is a PHI of immediates.
+ *
+ * MSVC routinely puts the `push` in each arm of an `if`/`else if` chain and the
+ * `pop` at the join, so the register's value is one of several constants. The
+ * `pop` is not a definition in SSA and every later read binds to the value the
+ * register held before it — `peek-a-bin-3axd`'s defect one block further out,
+ * and `pushedImmediate` cannot see it because it is handed one block.
+ *
+ * These are end-to-end for the reason the whole file is: the fix puts a
+ * definition in each PREDECESSOR and relies on `buildSSA` to build the phi, so
+ * nothing at the stage level can tell you the read at the join binds to it.
+ * Both shapes below were read against `objdump -d -M intel t32.exe`
+ * (peek-a-bin-6ilz).
+ */
+describe("decompileFunction — a cross-block push <imm> / pop <reg>", () => {
+  // t32 0x4077f3, the site the bead named: `cmp WORD PTR [ebp-8], 0xa / je` then
+  // `push 0xd` on the fallthrough and `push 0xa` from an earlier block that
+  // jumps in, joining at `pop eax / mov WORD PTR [ebx], ax`. MSVC writing CR or
+  // LF. With the pop invisible the store named whatever EAX last held — a
+  // `ReadFile` result at the real site.
+  it("gives the join a phi of the immediates its predecessors push", () => {
+    const code = run(
+      seq(0x401000, [
+        ["test", "eax, 0x100"],
+        ["je", "0x401010"],
+        ["push", "0xd"],
+        ["jmp", "0x401014"],
+        ["push", "0xa"],
+        ["pop", "ecx"],
+        ["mov", "dword ptr [ebx], ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).toMatch(/\becx = 0xD\b/);
+    expect(code).toMatch(/\becx = 0xA\b/);
+    expect(code).toContain("*(int32_t*)(ebx) = ecx");
+  });
+
+  // ALL predecessors or none, and this is the test that says why: defining the
+  // register on one incoming edge and not the other leaves the phi's other
+  // operand naming the stale value, which reads as recovered while being wrong
+  // on that path. Refusing leaves both paths at today's behaviour, which is
+  // visible rather than plausible.
+  it("refuses when one predecessor pushes nothing", () => {
+    const code = run(
+      seq(0x401000, [
+        ["test", "eax, 0x100"],
+        ["je", "0x401010"],
+        ["push", "0xd"],
+        ["jmp", "0x401014"],
+        ["mov", "edx, 1"],
+        ["pop", "ecx"],
+        ["mov", "dword ptr [ebx], ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toMatch(/\becx = 0xD\b/);
+  });
+
+  // The definition is appended to the predecessor, so it reaches every successor
+  // of it — including the one where the `pop` never runs. `push 0xd / jne <pop>`
+  // must therefore refuse, and this is the shape where the emitted C would state
+  // a value the machine does not have on the fallthrough path.
+  it("refuses a predecessor whose push is guarded by its own conditional jump", () => {
+    const code = run(
+      seq(0x401000, [
+        ["push", "0xd"],
+        ["jne", "0x401010"],
+        ["mov", "edx, 1"],
+        ["ret"],
+        ["pop", "ecx"],
+        ["mov", "dword ptr [ebx], ecx"],
+        ["ret"],
+      ]),
+    );
+
+    expect(code).not.toMatch(/\becx = 0xD\b/);
   });
 });
 

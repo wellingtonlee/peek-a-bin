@@ -701,9 +701,14 @@ calls.
 **A register a `pop` wrote, read under its previous value** (`popReads.ts`). Reported, never
 gated — *for now*, and only because the count is not zero. Every row it prints is a provably
 wrong name, which gives it the character of `polarity inverted` rather than of a baseline: **gate
-it at 0 the moment a fix gets it there.** `6952d53`: **7 wrong over 5 pops on t32, 6 over 4 on
-w32, 0 on both x64 binaries**, plus 2/2/0/0 implicit `ret` reads and 67/63/0/0 pops lifted by
-`stackIdiom.ts`'s pairing.
+it at 0 the moment a fix gets it there.** Currently **4 wrong over 2 pops on t32, 4 over 2 on
+w32, 0 on both x64 binaries** at `6d5ae92` + `peek-a-bin-6ilz`, plus 2/2/0/0 implicit `ret` reads
+and 73/68/0/0 pops lifted by the two `stackIdiom.ts`-based pairings. It was 7/6/0/0 wrong over
+5/4/0/0 pops with 67/63/0/0 lifted at `6952d53`; `peek-a-bin-6ilz` took the 3 t32 and 2 w32
+`push-imm` rows by pairing a `push <imm>` in a PREDECESSOR (`crossBlockPopImmediates`, and note it
+lifts 6 and 5 pops of which only those 5 had a read to fix). **The whole residue is one shape** —
+`pushKind: push-same-reg`, a matched save/restore in two functions per binary — which is
+`peek-a-bin-6f3v` and needs a stack slot rather than a constant.
 
 `liftBlock` does not lift `pop`, so it is no definition in SSA and a later read of the register
 binds to the value it held *before* the pop. The audit walks forward from each `pop <reg>` over
@@ -737,8 +742,16 @@ pointer, where the emitted `return eax` returns the loop counter instead.
 > test called the pop unlifted and printed **four false `ret-wrong` rows per x86 binary**, each one
 > a function returning a constant the emitted C states correctly.
 
-*Validated by negative control, in both directions.* Disabling `stackIdiom.ts`'s `push <imm>` /
-`pop <reg>` pairing — the half of this class that **is** fixed (`peek-a-bin-3axd`) — takes t32 from
+> **This audit replicates `pipeline.ts` stages 1–3 plus `foldBlock`, and the replica must include
+> step 2b.** `liftCrossBlockPops` runs *before* `liftedPops` is collected, because the cross-block
+> definition carries the **pop's** address precisely so that scan finds it — the same reason
+> `liftBlock`'s block-local form does. A replica that skips it fails in the quiet direction: this
+> audit keeps reporting rows a landed fix already removed, so a green tree reads as a red one.
+> `src/disasm/__tests__/stackIdiom.test.ts` fails if any file calling `liftBlock(` does not also
+> call `liftCrossBlockPops(` — `staleReads.ts` and `lostDefs.ts` replicate the same loop.
+
+*Validated by negative control, in both directions.* Disabling `stackIdiom.ts`'s block-local
+`push <imm>` / `pop <reg>` pairing (`peek-a-bin-3axd`) takes t32 from
 7 to **78** wrong over 44 pops and w32 from 6 to **61** over 38, and fails the run's liveness
 assertion on `popsLifted`. Lifting every unpaired `pop` as `reg = <unknown>` takes all four
 binaries to **0** — which is the measured cost of that fix, not a recommendation: it moves

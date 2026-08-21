@@ -3,7 +3,13 @@ import type { BasicBlock } from "../../cfg";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
-import { firstCalleeSavedWrites, liftBlock, parseOperand } from "../lifter";
+import {
+  crossBlockPopImmediates,
+  firstCalleeSavedWrites,
+  liftBlock,
+  liftCrossBlockPops,
+  parseOperand,
+} from "../lifter";
 import { RegState } from "../regstate";
 
 const START = 0x401000;
@@ -1179,5 +1185,334 @@ describe("firstCalleeSavedWrites", () => {
     const b1 = { ...blockOf([["push", "esi"]]), id: 1, startAddr: 0x402000 };
     b1.insns = [insn("push", "esi", 0x402000)];
     expect(firstCalleeSavedWrites([b1, b0]).get("rsi")).toBe(START);
+  });
+});
+
+/**
+ * `push <imm>` / `pop <reg>` split across a branch.
+ *
+ * `pushedImmediate` is handed one block, so it answers nothing when the push is
+ * in a predecessor — and the `pop` is then no definition in SSA, which is
+ * `peek-a-bin-3axd`'s wrong-value defect one block further out. The answer has to
+ * be a set of definitions, one per predecessor, because the real shape in this
+ * corpus is a **phi of different immediates**: MSVC selects a character across an
+ * `if`/`else if` chain and pops it once (t32 0x404f4c pops `0x2d`/`0x2b`/`0x20`).
+ *
+ * Every refusal below is asking one question — is the register's old value
+ * provably dead on the edge? — and the tests are written against the shapes the
+ * corpus supplies rather than against the implementation's branch order.
+ */
+describe("crossBlockPopImmediates", () => {
+  /** A block at an explicit id/address, with explicit edges. */
+  function blk(
+    id: number,
+    addr: number,
+    list: [string, string?][],
+    edges: { succs?: number[]; preds?: number[] } = {},
+  ): BasicBlock {
+    return {
+      id,
+      startAddr: addr,
+      endAddr: addr + list.length * SIZE,
+      insns: list.map(([m, o], i) => insn(m, o ?? "", addr + i * SIZE)),
+      succs: edges.succs ?? [],
+      preds: edges.preds ?? [],
+    };
+  }
+
+  /**
+   * t32 0x404f4c, cut down to two arms: two predecessors each pushing a
+   * different immediate, one `pop` at the join. `p0` reaches the join through a
+   * `jmp` and `p1` by falling through, which is exactly how MSVC lays it out.
+   */
+  function twoArm(imm0: string, imm1: string): BasicBlock[] {
+    return [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", imm0],
+          ["jmp", "0x401100"],
+        ],
+        { succs: [2] },
+      ),
+      blk(1, 0x401080, [["push", imm1]], { succs: [2] }),
+      blk(
+        2,
+        0x401100,
+        [
+          ["pop", "ecx"],
+          ["mov", "dword ptr [eax], ecx"],
+        ],
+        { preds: [0, 1] },
+      ),
+    ];
+  }
+
+  it("defines the register in every predecessor, once per pushed immediate", () => {
+    const defs = crossBlockPopImmediates(twoArm("0x2d", "0x20"));
+
+    expect(defs.map((d) => [d.blockId, d.imm, d.reg])).toEqual([
+      [0, 0x2d, "ecx"],
+      [1, 0x20, "ecx"],
+    ]);
+    // The POP's address, not either push's: `liftBlock`'s block-local form does
+    // the same, so one pair cannot be attributed to two instructions depending
+    // on where the push landed, and `corpus/popReads.ts` finds it there.
+    expect(new Set(defs.map((d) => d.addr))).toEqual(new Set([0x401100]));
+  });
+
+  // The immediates differing is the whole point. A rule of the shape "every
+  // predecessor pushes the SAME constant, therefore assign it at the pop" would
+  // describe not one site in this corpus — t32 0x4077f3 is MSVC's CR/LF pair.
+  it("does not require the predecessors to agree on the immediate", () => {
+    expect(crossBlockPopImmediates(twoArm("0xd", "0xa")).map((d) => d.imm)).toEqual([0xd, 0xa]);
+  });
+
+  // ALL of them or none. Defining the register on some incoming edges and not
+  // others is worse than defining it on none: the phi's other operand is the
+  // stale value the rule exists to remove, so the output reads as recovered
+  // while being wrong on one path.
+  it("refuses when any predecessor does not push an immediate", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[1] = blk(1, 0x401080, [["mov", "ebx, 1"]], { succs: [2] });
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // The definition is appended to the predecessor, so it reaches every successor
+  // of it. `push 0xd / je <pop>` would define the register on the fallthrough
+  // path too, where the pop never runs.
+  //
+  // The tail here is an INDIRECT `jmp` — a recovered jump table's dispatch, the
+  // one real shape with many successors and an unconditional terminator — so the
+  // conditional-tail refusal below cannot fire and this isolates the successor
+  // rule. Written that way deliberately: with a `je` tail both refusals reject
+  // the fixture and relaxing either one alone still passes.
+  it("refuses a predecessor with a second successor", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[0] = blk(
+      0,
+      0x401000,
+      [
+        ["push", "0x2d"],
+        ["jmp", "dword ptr [eax*4 + 0x40f0a8]"],
+      ],
+      {
+        succs: [2, 3],
+      },
+    );
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // Implied by the successor test for any CFG that lists both edges, and asked
+  // of the machine text anyway: `pushBeforeTerminator` places the definition
+  // BEFORE an `IRBranch`, so a guard reading the same register would read the
+  // new value one instruction early. Two edges drawn to one block is the shape
+  // where the successor test alone could let that through.
+  it("refuses a predecessor ending in a conditional jump", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[0] = blk(
+      0,
+      0x401000,
+      [
+        ["push", "0x2d"],
+        ["jne", "0x401100"],
+      ],
+      { succs: [2] },
+    );
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // The definition arrives on the edge, so anything in the pop's own block
+  // ahead of the pop would read it early. Requiring the pop to lead its block
+  // answers that structurally instead of with a second register-liveness
+  // grammar — and it costs nothing measurable: of the 53 and 50 non-leader pops
+  // on t32/w32 whose prefix touches neither the stack nor the register, 0 would
+  // have paired anyway (measured at 6d5ae92).
+  it("refuses a pop that is not its block's first instruction", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[2] = blk(
+      2,
+      0x401100,
+      [
+        ["mov", "edx, ecx"],
+        ["pop", "ecx"],
+      ],
+      { preds: [0, 1] },
+    );
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // A block the unwinder enters has no predecessor at all — an MSVC `__except`
+  // continuation, which `structureCFG` does emit (peek-a-bin-d3z). This pins the
+  // BEHAVIOUR and not a branch: the loop over predecessors produces nothing for
+  // such a block, so there is deliberately no early exit to delete. Measured —
+  // adding one back is a branch no test can make fail.
+  it("refuses a pop in a block with no predecessors", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[2] = { ...blocks[2], preds: [] };
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // Depth is still `stackIdiom.ts`'s question, asked of the predecessor's tail.
+  // A `jmp` is neither stack traffic nor an `esp` mention, which is why the
+  // `push 0x2d / jmp` shape pairs; an `add esp, 4` is the pairing being one slot
+  // out.
+  it("refuses across a stack-pointer move in the predecessor's tail", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[0] = blk(
+      0,
+      0x401000,
+      [
+        ["push", "0x2d"],
+        ["add", "esp, 4"],
+        ["jmp", "0x401100"],
+      ],
+      {
+        succs: [2],
+      },
+    );
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // t32 0x401a79 is `push 0x22 / add eax, 0x4 / pop ecx`: MSVC schedules an
+  // unrelated instruction after the push, and requiring adjacency would refuse
+  // one of the six real sites.
+  it("pairs across an instruction that does not touch the stack", () => {
+    const blocks = twoArm("0x20", "0x22");
+    blocks[1] = blk(
+      1,
+      0x401080,
+      [
+        ["push", "0x22"],
+        ["add", "eax, 0x4"],
+      ],
+      { succs: [2] },
+    );
+
+    expect(crossBlockPopImmediates(blocks).map((d) => d.imm)).toEqual([0x20, 0x22]);
+  });
+
+  // `push 8 / pop esp` really does set ESP, and it is refused for
+  // `liftBlock`'s reason: ESP is the one register no stage here models, so a
+  // definition of it would be read by the frame analysis as a value it can move.
+  it("refuses a pop of the stack pointer", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[2] = blk(2, 0x401100, [["pop", "esp"]], { preds: [0, 1] });
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+
+  // A push of a REGISTER is a copy this rule cannot state. That is the
+  // save/restore class and it is peek-a-bin-6f3v, deliberately out of scope.
+  it("refuses a pushed register", () => {
+    const blocks = twoArm("0x2d", "0x20");
+    blocks[0] = blk(
+      0,
+      0x401000,
+      [
+        ["push", "ebx"],
+        ["jmp", "0x401100"],
+      ],
+      { succs: [2] },
+    );
+
+    expect(crossBlockPopImmediates(blocks)).toEqual([]);
+  });
+});
+
+/**
+ * The placement rule, which is the half of this that `crossBlockPopImmediates`
+ * cannot state: a definition appended to another block's statement list must
+ * stay ahead of that block's terminator.
+ *
+ * `pushBeforeTerminator` exists because a plain `push` lands the definition
+ * AFTER the `IRBranch`, i.e. after the guard that may read the register — the
+ * defect `destroySSA` and `loopInvariantCodeMotion` both hit. The conditional
+ * predecessor is refused outright here, so this can only be reached by a
+ * single-successor block whose CFG lists one edge for a two-edge jump; keeping
+ * the placement correct means that shape degrades to noise rather than to a read
+ * preceding its own definition.
+ */
+describe("liftCrossBlockPops", () => {
+  function blk(
+    id: number,
+    addr: number,
+    list: [string, string?][],
+    edges: { succs?: number[]; preds?: number[] } = {},
+  ): BasicBlock {
+    return {
+      id,
+      startAddr: addr,
+      endAddr: addr + list.length * SIZE,
+      insns: list.map(([m, o], i) => insn(m, o ?? "", addr + i * SIZE)),
+      succs: edges.succs ?? [],
+      preds: edges.preds ?? [],
+    };
+  }
+
+  it("appends the definition to each pushing predecessor", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "0x2d"],
+          ["jmp", "0x401100"],
+        ],
+        { succs: [1] },
+      ),
+      blk(1, 0x401100, [["pop", "ecx"]], { preds: [0] }),
+    ];
+    const lifted = new Map<number, IRStmt[]>([
+      [0, []],
+      [1, []],
+    ]);
+
+    liftCrossBlockPops(blocks, lifted);
+
+    expect(lifted.get(0)).toEqual([
+      { kind: "assign", dest: irReg("ecx"), src: irConst(0x2d, 4), addr: 0x401100 },
+    ]);
+    expect(lifted.get(1)).toEqual([]);
+  });
+
+  it("keeps the definition ahead of the predecessor's terminator", () => {
+    const blocks = [
+      blk(
+        0,
+        0x401000,
+        [
+          ["push", "0x2d"],
+          ["jmp", "0x401100"],
+        ],
+        { succs: [1] },
+      ),
+      blk(1, 0x401100, [["pop", "ecx"]], { preds: [0] }),
+    ];
+    const branch: IRStmt = {
+      kind: "branch",
+      condition: irConst(1),
+      jcc: "jne",
+      target: 0x401100,
+      addr: 0x401004,
+    };
+    const lifted = new Map<number, IRStmt[]>([
+      [0, [branch]],
+      [1, []],
+    ]);
+
+    liftCrossBlockPops(blocks, lifted);
+
+    const stmts = lifted.get(0) as IRStmt[];
+    expect(stmts).toHaveLength(2);
+    expect(stmts[0].kind).toBe("assign");
+    expect(stmts[1]).toBe(branch);
   });
 });
