@@ -660,11 +660,21 @@ function pdataRangeTest(
  * non-empty `spans` cannot arise any other way, but the flag is explicit so the
  * caller states which question it is answering rather than inferring it from an
  * array length.
+ *
+ * `deferredBase` is the one refusal that is not final. It names a base the read
+ * could not use *because the base is not an address at all* — MSVC overlaps an
+ * unbounded table's entry 0 with the tail of the instruction in front of it to
+ * save four bytes, so the base slot's bytes are opcode. Whether that is what
+ * happened is a question about an instruction at a **higher** address than the
+ * dispatch, which the linear `recent` window structurally cannot hold, so the
+ * refusal is handed back to the sweep to finish once it gets there — see
+ * {@link overlappedTableExtent} (peek-a-bin-xqxy).
  */
 interface TableRead {
   targets: number[];
   spans: [number, number][];
   dataOnly?: true;
+  deferredBase?: number;
 }
 
 /** The "nothing was recovered" answer, built fresh so no refusal aliases another. */
@@ -719,10 +729,12 @@ const MIN_UNBOUNDED_TABLE_ENTRIES = 4;
  * code as data, which deletes instructions from the output with nothing said;
  * under-reporting leaves them decoded as they are today. Three things keep it
  * short: the run must contain the named base, so a table whose base slot MSVC
- * overlapped with the preceding instruction to save four bytes is refused
- * outright (t32.exe 0x40b7f1 and 0x40b985 — 3 real entries each, still
- * fiction); it stops dead at one non-resolving word rather than tolerating a
- * gap; and {@link MIN_UNBOUNDED_TABLE_ENTRIES} discards a short run.
+ * overlapped with the preceding instruction to save four bytes is not answered
+ * here at all — it is deferred to {@link overlappedTableExtent} via
+ * {@link TableRead.deferredBase}, because the evidence needed is an instruction
+ * this function cannot see; it stops dead at one non-resolving word rather than
+ * tolerating a gap; and {@link MIN_UNBOUNDED_TABLE_ENTRIES} discards a short
+ * run.
  *
  * Confined to the code section on purpose. A table in `.rdata` is not reached
  * by the gap fill, so there is nothing there for this to fix, and a run scanned
@@ -747,7 +759,7 @@ function unboundedTableExtent(
     const v = ptrSize === 8 ? reader.u64(addr) : reader.u32(addr);
     return v !== null && v >= codeStart && v < codeEnd;
   };
-  if (!resolves(tableBase)) return noTable();
+  if (!resolves(tableBase)) return { targets: [], spans: [], deferredBase: tableBase };
   let lo = tableBase;
   let hi = tableBase + ptrSize;
   const entries = () => (hi - lo) / ptrSize;
@@ -755,6 +767,113 @@ function unboundedTableExtent(
   while (entries() < MAX_JUMP_TABLE_CASES && resolves(hi)) hi += ptrSize;
   if (entries() < MIN_UNBOUNDED_TABLE_ENTRIES) return noTable();
   return { targets: [], spans: [[lo, hi]], dataOnly: true };
+}
+
+/**
+ * Most pending {@link TableRead.deferredBase} entries carried at once.
+ *
+ * The prune rule below bounds the list to bases the sweep has not yet reached,
+ * which for real output is a handful — 7 indexed dispatches are refused per
+ * 32-bit corpus binary in total, and each one is pruned within a few
+ * instructions. The cap is for a file that names thousands of bases far ahead of
+ * every dispatch, which costs nothing to write and which nothing between the
+ * bytes and here checks (same reasoning as {@link pdataRangeTest}'s sorted
+ * ranges). Refusing to add one past the cap is the safe direction: a base never
+ * settled is a span never reported, which is exactly the behaviour before this
+ * existed.
+ */
+const MAX_PENDING_OVERLAP_BASES = 64;
+
+/**
+ * Where an unbounded dispatch's table is when MSVC **overlapped its entry 0
+ * with the instruction in front of it**.
+ *
+ * {@link unboundedTableExtent} requires the run of code-pointer words to contain
+ * the base the dispatch names, and at four sites in the corpus it does not,
+ * because the base's four bytes are not an address — they are the tail of a
+ * real instruction plus a `nop`. t32.exe:
+ *
+ * ```text
+ *   40b7ec  and eax, 3                          ; index is 1..3, never 0
+ *   40b7ef  add ecx, eax
+ *   40b7f1  jmp dword ptr [eax*4 + 0x40b804]    ; base 0x40b804
+ *   40b7f8  jmp dword ptr [ecx*4 + 0x40b900]
+ *   40b7ff  nop
+ *   40b800  jmp dword ptr [ecx*4 + 0x40b884]    ; 7 bytes: 40b800..40b806
+ *   40b807  nop                                 ; so [0x40b804] = b8 40 00 90
+ *   40b808  dd 0x40b814, 0x40b840, 0x40b864     ; entries 1..3, real
+ *   40b814  and edx, ecx                        ; case body 1
+ * ```
+ *
+ * Entry 0 is unreachable: the block is entered only when `test edi, 3` was
+ * non-zero, so `and eax, 3` cannot produce 0, and the assembler spent its slot
+ * on an instruction rather than four bytes of padding. The other three sites are
+ * the same shape — t32.exe 0x40b985 (base 0x40b990) and w32.exe 0x409491 and
+ * 0x409625.
+ *
+ * **The evidence is real rather than statistical: a byte that belongs to a
+ * decoded instruction cannot be a table entry.** So the table's *bytes* begin at
+ * the first grid slot past that instruction, and the slot the instruction ate is
+ * excluded from the reported span — it is code, and marking it data would delete
+ * the `jmp` in front of the dispatch.
+ *
+ * Three restrictions keep it as short as {@link unboundedTableExtent}, and each
+ * refuses something this corpus contains:
+ *
+ *  - **The instruction must end *inside* the base slot** (`base < end <= base +
+ *    ptrSize`). That is the idiom — one instruction's tail shared with entry 0 —
+ *    and it is the whole claim. An instruction reaching further has swallowed a
+ *    slot whole, and a "base" that deep inside code is not a table base. This is
+ *    what refuses w32.exe 0x409498, whose base 0x4095a0 the sweep covers with a
+ *    6-byte `add` running to 0x4095a5.
+ *  - **The run is counted from the base, not from the span**, so
+ *    {@link MIN_UNBOUNDED_TABLE_ENTRIES} is applied to the table's own length.
+ *    The overlapped slot is a table slot — the dispatch names it — and it is one
+ *    slot by the rule above, so four table entries means three readable words.
+ *    Lowering the threshold instead would weaken every *unanchored* run, which
+ *    is the population that number was calibrated against. This is what refuses
+ *    t32.exe 0x40b7f8, whose base 0x40b900 is followed by nothing that resolves.
+ *  - **A base some recovered table already dispatches to is refused by the
+ *    caller.** An address a `jmp [table]` reaches is code, so it is not any
+ *    table's slot. Both `0x40b900` and `0x4095a0` are case targets of the table
+ *    recovered one dispatch earlier, which makes the negative-index shape —
+ *    `sub ecx, 4` leaves ecx at 0xFFFFFFFC..0xFFFFFFFF, so the words read are
+ *    *below* the base and are a table already recovered and already spanned —
+ *    refused as a property rather than by the two counts above happening to
+ *    disagree with it.
+ *
+ * The corroboration is from outside the rule, as it was for
+ * {@link unboundedTableExtent}: all four sites carry `and <index>, 3`
+ * immediately before the dispatch, on the very register the dispatch indexes
+ * with. That bounds the index to `[0, 3]` — four slots, exactly the length this
+ * finds, and exactly the one the overlap plus the run predicts. It is
+ * deliberately not *used*: a mask is not a `cmp`, using it would widen the
+ * bounded path's vocabulary at every dispatch in the corpus, and it says nothing
+ * about which bytes are opcode, so on its own it would report a span covering
+ * four bytes of a real `jmp`.
+ */
+function overlappedTableExtent(
+  tableBase: number,
+  insnEnd: number,
+  reader: ImageReader,
+  ptrSize: number,
+  codeStart: number,
+  codeEnd: number,
+): TableRead {
+  if (insnEnd <= tableBase || insnEnd > tableBase + ptrSize) return noTable();
+  const resolves = (addr: number): boolean => {
+    if (addr < codeStart || addr + ptrSize > codeEnd) return false;
+    const v = ptrSize === 8 ? reader.u64(addr) : reader.u32(addr);
+    return v !== null && v >= codeStart && v < codeEnd;
+  };
+  const start = tableBase + ptrSize;
+  let hi = start;
+  // Counted from the base, because the overlapped slot is entry 0 of the table
+  // whose length this is testing — see the second restriction above.
+  const entries = () => (hi - tableBase) / ptrSize;
+  while (entries() < MAX_JUMP_TABLE_CASES && resolves(hi)) hi += ptrSize;
+  if (entries() < MIN_UNBOUNDED_TABLE_ENTRIES) return noTable();
+  return { targets: [], spans: [[start, hi]], dataOnly: true };
 }
 
 /**
@@ -1549,6 +1668,26 @@ export function detectFunctions(
   /** `[start, end)` of the bytes each recovered table occupies — see {@link TableRead}. */
   const jumpTableSpans: [number, number][] = [];
   const spanKeys = new Set<string>();
+  /**
+   * Deduped, because one table serves several dispatches — t32.exe's `0x40ba8c`
+   * is read by three — and a span is about the bytes, not about the `jmp` that
+   * reached them.
+   */
+  const recordSpans = (table: TableRead): void => {
+    for (const [start, end] of table.spans) {
+      const key = `${start}:${end}`;
+      if (!spanKeys.has(key)) {
+        spanKeys.add(key);
+        jumpTableSpans.push([start, end]);
+      }
+    }
+  };
+  /**
+   * Bases {@link readAbsoluteTable} refused because they hold no address, still
+   * waiting for the sweep to reach the instruction that might overlap them —
+   * see {@link overlappedTableExtent} (peek-a-bin-xqxy).
+   */
+  const pendingOverlaps: number[] = [];
   const reader = makeImageReader([{ base: baseAddress, bytes }, ...(options?.dataWindows ?? [])]);
   // Unlike `disassemble`/`hybridDisassemble`/`buildAllXrefs`, this stage keeps
   // its no-decoder branch rather than throwing (peek-a-bin-cen). Its answer is
@@ -1596,6 +1735,32 @@ export function detectFunctions(
           addrSet.add(insn.address);
         }
 
+        // A deferred base is settled by the sweep walking onto it. The list is
+        // address-monotone with the sweep, so an instruction starting at or
+        // after a pending base is proof no instruction can still contain it:
+        // that base is dropped rather than carried, which is what keeps this
+        // list to a handful of entries and its cost to nothing. Answered here
+        // rather than at the top of the loop so the current instruction is not
+        // yet in the list and cannot settle itself.
+        for (let p = pendingOverlaps.length - 1; p >= 0; p--) {
+          const base = pendingOverlaps[p];
+          if (insn.address >= base) {
+            pendingOverlaps.splice(p, 1);
+            continue;
+          }
+          if (insn.address + insn.size <= base) continue;
+          pendingOverlaps.splice(p, 1);
+          const overlapped = overlappedTableExtent(
+            base,
+            insn.address + insn.size,
+            reader,
+            is64 ? 8 : 4,
+            baseAddress,
+            endAddress,
+          );
+          if (overlapped.dataOnly) recordSpans(overlapped);
+        }
+
         // Jump table detection
         if (insn.mnemonic === "jmp" && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
           const table =
@@ -1610,18 +1775,20 @@ export function detectFunctions(
           // The two questions are separate, and an unbounded dispatch answers
           // only the second: `dataOnly` carries an extent with no case list,
           // because a table with no bounds check has no *length* and reporting
-          // targets would be inventing one (peek-a-bin-7lb9). Deduped either
-          // way: one table serves several dispatches — t32.exe's `0x40ba8c` is
-          // read by three — and a span is about the bytes, not about the `jmp`
-          // that reached them.
-          if (hasCases || table.dataOnly) {
-            for (const [start, end] of table.spans) {
-              const key = `${start}:${end}`;
-              if (!spanKeys.has(key)) {
-                spanKeys.add(key);
-                jumpTableSpans.push([start, end]);
-              }
-            }
+          // targets would be inventing one (peek-a-bin-7lb9).
+          if (hasCases || table.dataOnly) recordSpans(table);
+          // A base that is not an address at all may still be a table base whose
+          // entry 0 shares bytes with the instruction in front of it, and that
+          // instruction is at a HIGHER address than the dispatch — so the
+          // question cannot be answered here, only remembered. A base a
+          // recovered table already dispatches to is code and is never one of
+          // these (peek-a-bin-xqxy).
+          else if (
+            table.deferredBase !== undefined &&
+            !jumpTableTargets.has(table.deferredBase) &&
+            pendingOverlaps.length < MAX_PENDING_OVERLAP_BASES
+          ) {
+            pendingOverlaps.push(table.deferredBase);
           }
         }
 

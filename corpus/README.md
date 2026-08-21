@@ -333,6 +333,41 @@ question. Negative-controlled the usual way: force `escapes` to false in `fold.t
 `npm run corpus` exits 1 naming the rows, at exactly the 168/110/110/156 an independent throwaway
 instrument reported at `91085f3`.
 
+**A direct branch aimed outside the image** (`wildBranches.ts`). *A failure means the
+disassembler is decoding data as code somewhere, and this branch is where it showed.* `jmp`, `call`
+and every `Jcc` with a literal target encode a displacement relative to the next instruction, and a
+linker resolves that displacement inside the image it is producing. So a filed `jmp 0x288402b` in a
+PE whose image is `0x400000`..`0x40e000` is not an instruction the file contains: nothing the loader
+maps is there, the branch could only fault, and no compiler or hand-written prologue emits one. It
+is a byte string the disassembler walked into — and what it walked into is the interesting part,
+because it is always either `.text` data read as code or a misaligned walk off the end of some.
+**1/0/0/1 over 4241/4073/3644/3792 direct branches** at `6d5ae92`; **0 on all four** since
+`overlappedTableExtent` (`peek-a-bin-xqxy`).
+
+Deliberately *not* the weaker question. "This branch leaves its function" is ordinary — a tail
+call, a `__finally` funclet, an ICF-shared epilogue — and it is what `peek-a-bin-y1di`'s instrument
+asked; "outside the code *section*" would be arguable, since a thunk table lives in a data section
+on some toolchains. The image is the one boundary nothing legitimate crosses, which is what makes
+every row unarguable rather than merely suspicious.
+
+**It is a lower bound, and a loose one.** Fiction registers here only when it happens to decode as
+a direct branch AND the displacement happens to land outside the image: of the four jump-table
+sites `peek-a-bin-xqxy` fixed, this saw one per binary. So a green reading is weak evidence that no
+bytes are being read as code, while a red one is proof that some are. Every other standing
+instrument was blind to that class — gcc compiles fiction, polarity judges guards that exist, the
+statement-drop audit counts drops rather than inventions, and the spurious-run census below needs a
+run of four code-pointer words *containing its own dispatch base*, which Shape 1's three-word run
+does not. `checked` is the liveness half and is non-vacuous on all four binaries, so unlike the
+switch-arm denominator it needs no per-binary condition. Negative-controlled: revert
+`overlappedTableExtent` and `npm run corpus` exits 1 naming exactly `t32 0x40b824 jmp 0x288402b`
+and `w32 0x40964c jmp 0x2301953`, both `source: "gap-fill"`.
+
+**What it does not look at.** Only a literal absolute target — `insn.opStr` being exactly `0x…`.
+An indirect branch names no address to check and a register's value is not a static fact. It is
+also phrased in terms of the emitted stream and `sizeOfImage` and mentions neither jump tables nor
+`unboundedTableExtent`, on purpose: the change it was built for works by marking table bytes as
+data, and an audit in those terms would be measuring its own input.
+
 **A switch arm claiming the switch is over** (`armExits.ts`). *A failure means the emitted C
 states control flow the machine contradicts.* `structureSwitch`'s `armBody` claims exactly one
 block per arm — deliberately, because the convergence scan after the switch is what decides where
@@ -1047,6 +1082,7 @@ remaining gap and is not implemented.
 | `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Machine-level write test — see the baseline entry. |
 | `lostDefs.ts` | A read whose reaching definition `foldBlock` deleted. Brackets that one pass; see the gate entry. |
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
+| `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -1056,6 +1092,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/staleguards_<key>.jsonl` | Every block whose trailing jcc reads flags the recovered compare does not describe, with the emitted condition where one reached the page. Empty file = audit ran and found none. |
 | `artifacts/<label>/lostdefs_<key>.jsonl` | Every (block, register) whose reaching definition the fold removed. Empty file = audit ran and found none. |
 | `artifacts/<label>/armexits_<key>.jsonl` | Every switch arm closed with `break` while its own block has a successor, with that block's successors and which refusal produced the `break`. Empty file = audit ran and found none. |
+| `artifacts/<label>/wildbranches_<key>.jsonl` | Every filed direct branch aimed outside the image, with its `source`. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 

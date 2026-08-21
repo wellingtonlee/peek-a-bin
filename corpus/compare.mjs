@@ -410,6 +410,31 @@ for (const b of bins) {
     note("  switch-arm false breaks       NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A direct branch aimed outside the image (wildBranches.ts). ─────────────
+  //
+  // Gated at 0 in the run, so a rise here names which branch. `checked` is the
+  // denominator and moves with detection like any instruction count; a FALL in
+  // it to zero is an instrument that stopped observing, which is the only way
+  // this gate can read green for the wrong reason. The count is a LOWER bound:
+  // bytes read as code register here only when they happen to decode as a
+  // direct branch whose displacement lands outside the image.
+  if (B.wildBranches && C.wildBranches) {
+    row(
+      "branches outside the image",
+      (x) => x.wildBranches.rows,
+      (a, c) => c > a,
+      "A FILED BRANCH NAMES AN ADDRESS THE IMAGE DOES NOT CONTAIN",
+    );
+    row(
+      "  direct branches examined",
+      (x) => x.wildBranches.checked,
+      (a, c) => c === 0 && a > 0,
+      "THE SCAN STOPPED SEEING BRANCHES AT ALL",
+    );
+  } else {
+    note("  branches outside the image    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A register name the image has no encoding for (emitAudits.ts). ─────────
   //
   // Gated at 0 in the run, so a rise here names which binary. PE32 ONLY: on the

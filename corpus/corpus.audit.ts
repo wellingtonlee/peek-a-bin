@@ -173,6 +173,14 @@ if (!pre.haveBins || !pre.haveCc) {
           r.armExits.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.armExits.rows.length > 0 ? "\n" : ""),
         );
+        // Every filed direct branch aimed outside the image. Written even when
+        // empty, for the same reason `armexits_` is: the standing claim is that
+        // it IS empty, so an absent file must not read as a clean run.
+        writeFileSync(
+          join(artifactDir, `wildbranches_${key}.jsonl`),
+          r.wildBranches.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.wildBranches.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -188,6 +196,7 @@ if (!pre.haveBins || !pre.haveCc) {
               popReads: { ...r.popReads, rows: r.popReads.rows.length },
               lostDefs: { ...r.lostDefs, rows: r.lostDefs.rows.length },
               armExits: { ...r.armExits, rows: r.armExits.rows.length },
+              wildBranches: { ...r.wildBranches, rows: r.wildBranches.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -450,6 +459,41 @@ if (!pre.haveBins || !pre.haveCc) {
         arms += ae.arms;
       }
       expect(arms).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, decided against the PE header and nothing else.
+     *
+     * A direct branch's displacement is resolved by the linker inside the image
+     * it is producing, so a filed `jmp 0x288402b` in a 0x400000-0x40e000 image
+     * names an address nothing maps: it is a byte string the disassembler walked
+     * into, not an instruction the file contains. Every row is therefore
+     * provably fiction and the gate has `polarity inverted`'s character.
+     *
+     * It is a LOWER bound and a loose one — fiction registers only where it
+     * happens to decode as a direct branch aimed outside the image, which was 1
+     * of the 2 jump-table sites per 32-bit binary that `peek-a-bin-xqxy` fixed.
+     * `checked` is the liveness half, and it is non-vacuous on all four
+     * binaries: every one of them is full of ordinary intra-image branches, so
+     * unlike the switch-arm denominator this needs no per-binary condition.
+     * See `corpus/wildBranches.ts`.
+     */
+    it("never files a direct branch aimed outside the image", () => {
+      for (const r of results.values()) {
+        const wb = r.wildBranches;
+        expect(
+          `${r.key} wild: ${wb.rows
+            .slice(0, 5)
+            .map(
+              (x) =>
+                `0x${x.addr.toString(16)} ${x.mnemonic} 0x${x.target.toString(16)}` +
+                ` [${x.source ?? "?"}]`,
+            )
+            .join("; ")}`,
+        ).toBe(`${r.key} wild: `);
+        expect(wb.rows.length).toBe(0);
+        expect(wb.checked).toBeGreaterThan(0);
+      }
     });
 
     /**
@@ -824,6 +868,13 @@ function renderReport(): string {
     L.push("    GATE at 0, from 35/0/0/17 before `armExit` (peek-a-bin-pqs5). `arms` is the");
     L.push("    denominator and is 0 wherever no jump table was recovered — both x64 binaries.");
     L.push("    Sites in armexits_<bin>.jsonl. See armExits.ts.");
+    const wb = r.wildBranches;
+    L.push(`  branches outside the image  ${wb.rows.length} of ${wb.checked} direct branches`);
+    L.push("    A literal branch displacement is resolved inside the image, so a filed");
+    L.push("    `jmp 0x288402b` in a 0x400000-0x40e000 image is bytes decoded as code. A GATE at");
+    L.push("    0, from 1/0/0/1 at 6d5ae92 (peek-a-bin-xqxy). A LOWER bound: it sees fiction only");
+    L.push("    where the fiction happens to be a direct branch aimed out of the image.");
+    L.push("    Sites in wildbranches_<bin>.jsonl. See wildBranches.ts.");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }

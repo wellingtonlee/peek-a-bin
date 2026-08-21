@@ -32,6 +32,7 @@ import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
+import { auditWildBranches, emptyWildBranches, type WildBranchResult } from "./wildBranches";
 
 // ── Condition polarity ─────────────────────────────────────────────────────
 //
@@ -556,6 +557,17 @@ export interface BinResult {
    * recover no jump table at all. See `corpus/armExits.ts`.
    */
   armExits: ArmExitResult;
+  /**
+   * A DIRECT BRANCH WHOSE TARGET THE IMAGE DOES NOT CONTAIN.
+   *
+   * A GATE at 0 on `rows`: a literal branch displacement is resolved by the
+   * linker inside the image, so a filed `jmp 0x288402b` in a 0x400000-0x40e000
+   * image is a byte string decoded as code and not an instruction the file has.
+   * `checked` is the liveness half. A LOWER bound — fiction registers only when
+   * it happens to decode as a direct branch aimed outside the image. See
+   * `corpus/wildBranches.ts`.
+   */
+  wildBranches: WildBranchResult;
   funcs: FuncRec[];
 }
 
@@ -720,8 +732,19 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     popReads: emptyPopReads(),
     lostDefs: emptyLostDefs(),
     armExits: emptyArmExits(),
+    wildBranches: emptyWildBranches(),
     funcs: [],
   };
+
+  // Whole-binary and function-independent: the fiction this looks for is filed
+  // under whichever function its byte range fell inside, which says nothing.
+  auditWildBranches(
+    res.wildBranches,
+    key,
+    af.instructions,
+    af.pe.optionalHeader.imageBase,
+    af.pe.optionalHeader.imageBase + af.pe.optionalHeader.sizeOfImage,
+  );
 
   for (const func of af.functions) {
     const insns = funcInsnMap.get(func.address) ?? [];
