@@ -67,7 +67,15 @@ or a red one that is not your fault. Scope it: `npx vitest run --dir src`, then
 `npx vitest run --dir build` as a second command, because `--dir` takes exactly one directory and
 bare path filters (`vitest run src/ build/`) are regex-matched against full paths and still hit
 the worktrees. `git worktree list` is the check when a gate count looks unfamiliar. An agent
-running inside its own worktree root is unaffected — it sees only its own tree.
+running inside its own worktree root is *mostly* unaffected — it sees only its own tree's sources —
+**but a tool-created worktree arrives with no `node_modules` at all** (verified: 0 entries, against
+333 in one where an agent had run `npm ci`). Node then resolves binaries and packages from the
+nearest ancestor that has one, i.e. the main tree's, so a gate run there is executing another
+tree's dependency versions; one agent this session also reported a `npm run corpus` resolving into
+a *sibling* worktree before it noticed, and discarded that run. The remedy either way is one line
+before any gate: `npm ci` in the worktree, or symlink the main tree's `node_modules` into it. The
+corpus config is not itself at risk — its `include` is anchored at `corpus/**`, so a run from the
+repo root does not sweep the worktrees the way the default config does.
 
 **Biome** (`biome.json`) is the linter/formatter. All seven configured `a11y` rules,
 `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` are at **`error`** —
