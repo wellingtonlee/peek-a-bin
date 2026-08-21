@@ -978,23 +978,28 @@ describe("Arm64SweepCache", () => {
   it("caches the decode, never the decoration", () => {
     // The cached array is undecorated, and each caller re-annotates. Two
     // callers with different string maps must not see each other's comments.
-    const cs = fakeCs(new Map([[BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }]]));
+    const cs = fakeCs(
+      new Map([
+        [BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }],
+        [BASE + 4, { mnemonic: "add", opStr: "x1, x0, #0x10" }],
+      ]),
+    );
     const cache = new Arm64SweepCache();
-    const bytes = section(4, 0x33);
+    const bytes = section(8, 0x33);
 
     const bare = disassembleArm64(bytes, BASE, ctx(cs), undefined, cache);
     const annotated = disassembleArm64(
       bytes,
       BASE,
-      { cs, stringMap: new Map([[0x140002000, "hello"]]), iatMap: new Map(), driverMode: false },
+      { cs, stringMap: new Map([[0x140002010, "hello"]]), iatMap: new Map(), driverMode: false },
       undefined,
       cache,
     );
     const bareAgain = disassembleArm64(bytes, BASE, ctx(cs), undefined, cache);
 
-    expect(bare[0].comment).toBeUndefined();
-    expect(annotated[0].comment).toBe("hello");
-    expect(bareAgain[0].comment).toBeUndefined();
+    expect(bare[1].comment).toBeUndefined();
+    expect(annotated[1].comment).toBe("hello");
+    expect(bareAgain[1].comment).toBeUndefined();
   });
 
   it("caches the decode, never the .pdata classification", () => {
@@ -1070,26 +1075,190 @@ describe("Arm64SweepCache", () => {
 
 describe("sweepArm64 / decorateArm64Sweep", () => {
   it("sweeps undecorated and decorates without touching the raw array", () => {
-    const cs = fakeCs(new Map([[BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }]]));
-    const raw = sweepArm64(new Uint8Array(4), BASE, cs);
+    // The reference is the PAIR: `adrp` names the page, `add` completes it.
+    // Annotating the `adrp` off its own operand is the defect peek-a-bin-vg3
+    // fixed — see the "an A64 comment names a reference" block below.
+    const cs = fakeCs(
+      new Map([
+        [BASE, { mnemonic: "adrp", opStr: "x0, #0x140002000" }],
+        [BASE + 4, { mnemonic: "add", opStr: "x1, x0, #0x10" }],
+      ]),
+    );
+    const raw = sweepArm64(new Uint8Array(8), BASE, cs);
 
     const decorated = decorateArm64Sweep(
       raw,
-      { cs, stringMap: new Map([[0x140002000, "abc"]]), iatMap: new Map(), driverMode: false },
-      [{ beginAddress: BASE, endAddress: BASE + 4 }],
+      { cs, stringMap: new Map([[0x140002010, "abc"]]), iatMap: new Map(), driverMode: false },
+      [{ beginAddress: BASE, endAddress: BASE + 8 }],
     );
 
-    expect(raw[0].comment).toBeUndefined();
-    expect(raw[0].source).toBeUndefined();
-    expect(decorated[0].comment).toBe("abc");
-    expect(decorated[0].source).toBe("recursive");
-    expect(decorated[0]).not.toBe(raw[0]);
+    expect(raw[1].comment).toBeUndefined();
+    expect(raw[1].source).toBeUndefined();
+    expect(decorated[1].comment).toBe("abc");
+    expect(decorated[1].source).toBe("recursive");
+    expect(decorated[1]).not.toBe(raw[1]);
   });
 
   it("throws the decode-rate error from the sweep, before any decoration", () => {
     expect(() => sweepArm64(new Uint8Array(0x2000), BASE, fakeCs(code(1, 400)))).toThrow(
       Arm64DecodeRateError,
     );
+  });
+});
+
+/**
+ * peek-a-bin-vg3. `mapInsn`'s reference resolution is an x86 operand grammar:
+ * `resolveRipTarget`, then any `0x…` literal in the operand string that is a
+ * known string or IAT address. On A64 the first never fires and the second is
+ * unsound — the only literals an A64 operand carries are branch targets and
+ * `adrp` PAGE BASES, neither of which is a data reference. Measured on the two
+ * real ARM64 binaries at 91085f3: 248 of t64-arm.exe's 248 comments and 253 of
+ * w64-arm.exe's 253 were such coincidences, and 243/252 of them said the same
+ * one wrong thing, because the IAT begins at a page boundary so every `adrp` at
+ * that page matched the FIRST import in it.
+ *
+ * The right answer is `findArm64AddressRefs`, attributed — as `buildArm64Xrefs`
+ * already does — to the instruction that COMPLETES the pair.
+ */
+describe("an A64 comment names a reference, not a collision", () => {
+  /** Decode `rows` as consecutive words from BASE and decorate with `ctx`. */
+  function decorate(
+    rows: [string, string][],
+    stringMap: Map<number, string>,
+    iatMap: Map<number, { lib: string; func: string }>,
+    driverMode = false,
+  ): Instruction[] {
+    const words = new Map<number, { mnemonic: string; opStr: string }>();
+    rows.forEach(([mnemonic, opStr], i) => {
+      words.set(BASE + i * ARM64_INSN_SIZE, { mnemonic, opStr });
+    });
+    const cs = fakeCs(words);
+    const raw = sweepArm64(new Uint8Array(rows.length * ARM64_INSN_SIZE), BASE, cs);
+    return decorateArm64Sweep(raw, { cs, stringMap, iatMap, driverMode });
+  }
+
+  const IAT = new Map([
+    [0x14001d000, { lib: "KERNEL32.dll", func: "GetStartupInfoW" }],
+    [0x14001d098, { lib: "KERNEL32.dll", func: "ExitProcess" }],
+  ]);
+
+  it("does not comment an adrp whose page base collides with an IAT entry", () => {
+    // t64-arm.exe 0x140002048/0x14000204c, the shape behind 243 of its 248
+    // comments: the page base IS the first IAT entry, and the paired `ldr`
+    // loads a different import entirely.
+    const insns = decorate(
+      [
+        ["adrp", "x8, #0x14001d000"],
+        ["ldr", "x8, [x8, #0x98]"],
+      ],
+      new Map(),
+      IAT,
+    );
+    expect(insns[0].comment).toBeUndefined();
+    expect(insns[1].comment).toBe("KERNEL32.dll!ExitProcess");
+  });
+
+  it("comments the add that completes an adrp, not the adrp", () => {
+    // t64-arm.exe 0x140002038/0x14000203c.
+    const insns = decorate(
+      [
+        ["adrp", "x8, #0x140024000"],
+        ["add", "x1, x8, #0x480"],
+      ],
+      new Map([[0x140024480, "Fatal error in launcher: %s"]]),
+      new Map(),
+    );
+    expect(insns[0].comment).toBeUndefined();
+    expect(insns[1].comment).toBe("Fatal error in launcher: %s");
+  });
+
+  it("comments the one-instruction adr form on the instruction itself", () => {
+    const insns = decorate(
+      [["adr", "x8, #0x1400018b0"]],
+      new Map([[0x1400018b0, "hi"]]),
+      new Map(),
+    );
+    expect(insns[0].comment).toBe("hi");
+  });
+
+  it("does not comment a branch whose target collides with a string address", () => {
+    // `extractStrings` scans the code section too, so a `.text` address can be
+    // in the string map. A branch target is still not a data reference.
+    const insns = decorate(
+      [
+        ["b", "#0x140001210"],
+        ["bl", "#0x140001210"],
+        ["cbz", "x0, #0x140001210"],
+      ],
+      new Map([[0x140001210, "not a reference"]]),
+      new Map(),
+    );
+    expect(insns.map((i) => i.comment)).toEqual([undefined, undefined, undefined]);
+  });
+
+  it("takes the string over the import when a target is in both maps", () => {
+    // mapInsn's own precedence, preserved.
+    const insns = decorate(
+      [
+        ["adrp", "x8, #0x140024000"],
+        ["add", "x1, x8, #0x8"],
+      ],
+      new Map([[0x140024008, "the string"]]),
+      new Map([[0x140024008, { lib: "A.dll", func: "B" }]]),
+    );
+    expect(insns[1].comment).toBe("the string");
+  });
+
+  it("elides a long string exactly as the x86 path does", () => {
+    const long = "x".repeat(80);
+    const insns = decorate(
+      [
+        ["adrp", "x8, #0x140024000"],
+        ["add", "x1, x8, #0x8"],
+      ],
+      new Map([[0x140024008, long]]),
+      new Map(),
+    );
+    expect(insns[1].comment).toBe(`${"x".repeat(57)}...`);
+  });
+
+  it("leaves the driver-mode IOCTL annotation alone, and a reference outranks it", () => {
+    // The IOCTL comment is a shape test over immediates, not a reference
+    // resolution, so it is unchanged on this architecture — but a resolved
+    // reference still wins, exactly as a string or IAT hit did before.
+    const ioctl = decorate([["mov", "w2, #0x22e004"]], new Map(), new Map(), true);
+    expect(ioctl[0].comment).toMatch(/IOCTL|FILE_DEVICE|METHOD_/);
+
+    const both = decorate(
+      [
+        ["adrp", "x8, #0x140024000"],
+        ["add", "x1, x8, #0x22e004"],
+      ],
+      new Map([[0x140024000 + 0x22e004, "wins"]]),
+      new Map(),
+      true,
+    );
+    expect(both[1].comment).toBe("wins");
+  });
+
+  it("re-decorating one raw sweep with different maps does not leak comments", () => {
+    const cs = fakeCs(
+      new Map([
+        [BASE, { mnemonic: "adrp", opStr: "x8, #0x140024000" }],
+        [BASE + 4, { mnemonic: "add", opStr: "x1, x8, #0x8" }],
+      ]),
+    );
+    const raw = sweepArm64(new Uint8Array(8), BASE, cs);
+    const withMaps = decorateArm64Sweep(raw, {
+      cs,
+      stringMap: new Map([[0x140024008, "abc"]]),
+      iatMap: new Map(),
+      driverMode: false,
+    });
+    const without = decorateArm64Sweep(raw, ctx(cs));
+    expect(withMaps[1].comment).toBe("abc");
+    expect(without[1].comment).toBeUndefined();
+    expect(raw[1].comment).toBeUndefined();
   });
 });
 

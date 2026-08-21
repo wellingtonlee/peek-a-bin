@@ -17,8 +17,9 @@
  * `unsupportedOnArch` in ./arch.ts.
  */
 
+import { findArm64AddressRefs } from "./arm64Operands";
 import { type CapstoneHandle, createScan, requireCapstone } from "./capstoneWindow";
-import { type DetectPass, type DetectResult, mapInsn } from "./functionDetect";
+import { type DetectPass, type DetectResult, mapInsn, stringComment } from "./functionDetect";
 import type { DisasmFunction, Instruction } from "./types";
 
 /** Every A64 instruction is exactly four bytes, always 4-byte aligned. */
@@ -223,9 +224,59 @@ export function sweepArm64(
   return out;
 }
 
-/** Shared empties for {@link sweepArm64}; `mapInsn` only ever reads their size. */
+/**
+ * The maps `mapInsn` is given on this architecture — always empty, in BOTH the
+ * sweep and the decoration.
+ *
+ * `mapInsn` only ever reads their size, so passing empties declines its x86
+ * reference resolution outright rather than filtering its output afterwards.
+ * See {@link decorateArm64Sweep} for why that is the right answer here and
+ * {@link arm64Comments} for what supplies the A64 one.
+ */
 const EMPTY_STRINGS: Map<number, string> = new Map();
 const EMPTY_IAT: Map<number, { lib: string; func: string }> = new Map();
+
+/**
+ * String and import comments for an A64 instruction stream, keyed by address.
+ *
+ * A64 carries no `[rip ± 0x..]` and no absolute address in any operand, so the
+ * only thing that can name a referenced address here is the two-instruction
+ * materialisation idiom — which is what `findArm64AddressRefs` reads. The
+ * reference is attributed to the instruction that COMPLETES the pair, the same
+ * rule `buildArm64Xrefs` applies, so an instruction carries a string comment
+ * precisely when it is a string xref source. Two rules for one question would
+ * let the comment and the xref map disagree about the same instruction.
+ *
+ * `mapInsn` cannot answer this and must not be asked to (peek-a-bin-vg3): its
+ * fallback reads any `0x…` literal in the operand string, and on A64 the only
+ * literals are branch targets and `adrp` *page bases*. A page base that happens
+ * to equal a data address is a coincidence, and a systematic one — the IAT
+ * begins at a page boundary, so `adrp x8, #0x14001d000` collided with the FIRST
+ * IAT entry and 243 of t64-arm.exe's 248 comments read
+ * `KERNEL32.dll!GetStartupInfoW` while the paired `ldr` loaded something else.
+ *
+ * Precedence is `mapInsn`'s: a string wins over an import, and the first
+ * reference an instruction completes wins over any later one.
+ */
+function arm64Comments(
+  raw: readonly Instruction[],
+  stringMap: Map<number, string>,
+  iatMap: Map<number, { lib: string; func: string }>,
+): Map<number, string> {
+  const out = new Map<number, string>();
+  if (stringMap.size === 0 && iatMap.size === 0) return out;
+  for (const ref of findArm64AddressRefs(raw)) {
+    if (out.has(ref.from)) continue;
+    const str = stringMap.get(ref.target);
+    if (str !== undefined) {
+      out.set(ref.from, stringComment(str));
+      continue;
+    }
+    const iat = iatMap.get(ref.target);
+    if (iat !== undefined) out.set(ref.from, `${iat.lib}!${iat.func}`);
+  }
+  return out;
+}
 
 /**
  * Annotate a raw sweep: string/IAT/IOCTL comments, and `.pdata` classification.
@@ -234,6 +285,20 @@ const EMPTY_IAT: Map<number, { lib: string; func: string }> = new Map();
  * than mutates — so a cached raw sweep can be decorated any number of times, by
  * callers wanting different maps or different ranges, without any of them
  * seeing another's annotations.
+ *
+ * **`mapInsn` is handed the empty maps on purpose.** Its string/IAT resolution
+ * is an x86 operand grammar (see its docstring and {@link arm64Comments});
+ * passing the real maps is what put a comment on every `adrp` whose page base
+ * collided with a data address. `driverMode` is still passed, so the IOCTL
+ * annotation — a shape test over immediates rather than a reference
+ * resolution — is unaffected on either architecture, and a resolved reference
+ * overrides it exactly as a string or IAT hit did before.
+ *
+ * The recomputation belongs on the DECORATION side, not in the cached decode:
+ * it is a function of `ctx`'s maps, which differ between callers, so it sits
+ * beside `comment` and `source` rather than inside {@link Arm64SweepCache}.
+ * Measured 2.5 ms over t64-arm.exe's 27428 instructions and 4.5 ms over
+ * w64-arm.exe's 24393, against a ~130 ms sweep.
  */
 export function decorateArm64Sweep(
   raw: readonly Instruction[],
@@ -242,9 +307,12 @@ export function decorateArm64Sweep(
 ): Instruction[] {
   const isKnownCode = rangeTest(pdataRanges);
   const marks = pdataRanges !== undefined && pdataRanges.length > 0;
+  const comments = arm64Comments(raw, ctx.stringMap, ctx.iatMap);
   const out: Instruction[] = new Array(raw.length);
   for (let i = 0; i < raw.length; i++) {
-    const mapped = mapInsn(raw[i], ctx.stringMap, ctx.iatMap, ctx.driverMode);
+    const mapped = mapInsn(raw[i], EMPTY_STRINGS, EMPTY_IAT, ctx.driverMode);
+    const comment = comments.get(raw[i].address);
+    if (comment !== undefined) mapped.comment = comment;
     if (marks) mapped.source = isKnownCode(raw[i].address) ? "recursive" : "gap-fill";
     out[i] = mapped;
   }

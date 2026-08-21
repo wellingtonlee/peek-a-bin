@@ -26,6 +26,33 @@ export interface DisasmContext {
 // two-thirds of the way to the WASM heap ceiling, and going over either killed
 // the decoder silently — see `./capstoneWindow.ts` for the measurements.
 
+/**
+ * The comment text for a resolved string reference.
+ *
+ * Exported because the ARM64 decoration path in `./arm64.ts` annotates from its
+ * own reference resolver (`findArm64AddressRefs`) rather than from `mapInsn`'s
+ * x86 operand grammar, and two elision rules for the same annotation would
+ * drift — the same reason `ripRelative.ts` and `sections.ts` exist.
+ */
+export function stringComment(str: string): string {
+  return str.length > 60 ? str.substring(0, 57) + "..." : str;
+}
+
+/**
+ * Copy one decoded instruction, annotating it with what it references.
+ *
+ * **The reference resolution here is an x86 operand grammar, and only the x86
+ * callers may use it.** It asks `resolveRipTarget` for a `[rip ± 0x..]` target,
+ * and failing that scans the operand string for any `0x…` literal that is a
+ * known string or IAT address. Both are sound on x86, where an operand really
+ * can carry an absolute address (`mov eax, [0x404000]`, `push 0x40a010`).
+ *
+ * Neither is sound on A64, where no operand ever names a data address: a
+ * literal in an A64 operand is a branch target or an `adrp` *page base*, and a
+ * page base matching a data address is a coincidence rather than a reference
+ * (peek-a-bin-vg3). So `arm64.ts` passes empty maps here and applies its own
+ * annotation — see `decorateArm64Sweep`.
+ */
 export function mapInsn(
   insn: any,
   stringMap: Map<number, string>,
@@ -43,8 +70,7 @@ export function mapInsn(
   if (stringMap.size > 0) {
     const ripTarget = resolveRipTarget(insn);
     if (ripTarget !== null && stringMap.has(ripTarget)) {
-      const str = stringMap.get(ripTarget)!;
-      instruction.comment = str.length > 60 ? str.substring(0, 57) + "..." : str;
+      instruction.comment = stringComment(stringMap.get(ripTarget)!);
     }
     if (!instruction.comment) {
       const addressMatch = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
@@ -52,8 +78,7 @@ export function mapInsn(
         for (const addrStr of addressMatch) {
           const addr = parseInt(addrStr, 16);
           if (stringMap.has(addr)) {
-            const str = stringMap.get(addr)!;
-            instruction.comment = str.length > 60 ? str.substring(0, 57) + "..." : str;
+            instruction.comment = stringComment(stringMap.get(addr)!);
             break;
           }
         }

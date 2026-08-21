@@ -647,6 +647,36 @@ over it.
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
+## `corpus/comments.ts` — separate, and the only ARM64 coverage here
+
+`npm run corpus` drives **t32, t64, w64, w32** and nothing else. The ARM64 half of this project
+has no coverage in it at all: not one of the audits above loads `t64-arm.exe` or `w64-arm.exe`,
+and `preflight.ts`'s `BinKey` does not name them. `corpus/comments.ts` is the exception, and it is
+run on its own (`npm run corpus:comments`) precisely so that this run's header keeps naming the
+four binaries the standing numbers are measured against.
+
+It also audits something no gate above can see. Every gate here reads emitted C or the IR behind
+it, and an inline `Instruction.comment` reaches neither — so gcc, polarity, `offsetof`, arity, the
+stale-read gates and the statement-drop audit are all *structurally* blind to a comment that names
+the wrong thing, while a comment is one of the few things a reader of the disassembly view takes
+purely on trust.
+
+Two questions, one per architecture, and they are not the same question:
+
+- **ARM64: is the comment a reference or a collision?** `mapInsn`'s resolution is an x86 operand
+  grammar — `resolveRipTarget`, then any `0x…` literal in the operand string that is a known
+  string or IAT address. On A64 the only literals an operand carries are branch targets and `adrp`
+  *page bases*, so a hit meant a coincidence rather than a reference. The audit splits today's
+  comments by whether `findArm64AddressRefs` — the real A64 reference reader, and already
+  `buildArm64Xrefs`' oracle — agrees. **0 coincidences on both binaries** now, from 248/248 and
+  253/253 at `91085f3`, where 243 and 252 of them said the same one wrong thing because the IAT
+  begins at a page boundary. Every row it can report is provably wrong, so this has a gate's
+  character; it is reported rather than gated only because it is outside the gated run.
+- **x86/x64: has the comment stream moved?** The same operand scan *is* sound there — an x86
+  operand really can carry an absolute address — so there is nothing to judge and the audit prints
+  an md5 over every commented instruction instead. That is the byte-identity instrument for any
+  change to the shared `mapInsn` path: run it at both commits and the four digests must not move.
+
 ## What the standing set does NOT catch
 
 **None of the nine gates above catches a wrong-value defect** — a statement that is emitted, is

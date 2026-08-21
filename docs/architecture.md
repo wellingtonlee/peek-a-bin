@@ -170,11 +170,29 @@ bytes. Measured at `7082e66` by replaying a load's RPCs against the real dispatc
 | w64-arm.exe (98 KiB `.text`, 24393 insns) | 3393 → **1131** | 6.51 → **2.17 MiB** | 328 → **129 ms** |
 
 Only the decode is shared. Comments and the `.pdata` `source` classification are reapplied per
-caller (~5 ms on 27428 instructions), so what each RPC returns is unchanged — verified
+caller (~5 ms on 27428 instructions, plus 2.5 ms for the `findArm64AddressRefs` pass the comments
+are resolved from — see below), so what each RPC returns is unchanged — verified
 element-by-element against an uncached run on both binaries, with real extracted strings, a real
 IAT map and driver mode on. The x86 path never consults it: `buildAllXrefs` and the two x86
 disassemblers own their decode inside `functionDetect.ts`, and the four x86 corpus binaries emit
 byte-identical C across the change.
+
+**An A64 instruction's inline comment comes from the address idiom, not from its operand.**
+`mapInsn` in `functionDetect.ts` resolves a reference with `resolveRipTarget` and, failing that,
+by scanning the operand string for a `0x…` literal that is a known string or IAT address — both
+sound on x86, where an operand really can carry an absolute address, and neither sound on A64,
+where an operand's only literals are a branch target and an `adrp` *page base*. So ARM64 used to
+get a comment exactly when a literal coincided with a data address: at `91085f3` **248 of
+t64-arm.exe's 248 comments and 253 of w64-arm.exe's 253** were such coincidences, 243 and 252 of
+them naming the same import because the IAT begins at a page boundary. `decorateArm64Sweep` now
+hands `mapInsn` the *empty* string/IAT maps — declining its grammar rather than filtering its
+output, which is what keeps the x86 comment stream provably unmoved — and annotates from
+`findArm64AddressRefs`, attributed to the instruction that **completes** the `adrp`+`add`/`ldr`
+pair. That is `buildArm64Xrefs`' own rule, so an instruction carries a string comment precisely
+when it is a string xref source. 248 → 275 and 253 → 290 comments, with the before and after sets
+disjoint. `driverMode`'s IOCTL annotation is a shape test over immediates rather than a reference
+resolution and is unchanged on both architectures. Audited by `corpus/comments.ts`
+(`npm run corpus:comments`), which is the only harness in the repo that loads the ARM64 binaries.
 
 ### Export table
 
