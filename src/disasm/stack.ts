@@ -594,12 +594,14 @@ function frameGeometry(
  *  - **A sub-slot offset.** `[ebp+0xA]` is the third byte of argument 0 and
  *    divides into no index, so it is named after its offset rather than
  *    silently rounded into a neighbour's.
- *  - **A home slot the callee never filled.** The index is known exactly and is
- *    still refused, because on x64 `[E + slot]` through `[E + 4*slot]` is space
- *    the ABI gives the callee for scratch — see `ARG_AREA` and
- *    `inlineFrameGeometry`. Naming one `arg_0` states something false about the
- *    interface and, worse, hands `paramIndexByBase` a claim that *displaces*
- *    the argument register's own.
+ *  - **A home slot the callee never filled** — `inUnfilledHomeSpace`. On x64
+ *    `[E + slot]` through `[E + 4*slot]` is space the ABI gives the callee for
+ *    scratch, so naming one `arg_0` states something false about the interface
+ *    and, worse, hands `paramIndexByBase` a claim that *displaces* the argument
+ *    register's own. Since peek-a-bin-g186 the caller does not record such a
+ *    slot as a parameter at all, so this arm is defence in depth exactly as the
+ *    first one is — the same predicate decides both, which is what keeps them
+ *    from disagreeing.
  */
 function argSlotName(
   offset: number,
@@ -610,11 +612,55 @@ function argSlotName(
 ): string {
   const byOffset = `arg_0x${offset.toString(16).toUpperCase()}`;
   if (delta === null) return byOffset;
+  if (inUnfilledHomeSpace(offset, delta, slotSize, homeRegs, homed)) return byOffset;
   const above = offset - delta - slotSize;
   if (above < 0 || above % slotSize !== 0) return byOffset;
-  const index = above / slotSize;
-  if (index < homeRegs.length && !homed.has(index)) return byOffset;
-  return `arg_${index}`;
+  return `arg_${above / slotSize}`;
+}
+
+/**
+ * Whether `[<fp> + offset]` lands in home space the callee did **not** fill with
+ * the argument that owns it — i.e. in storage that is inside the incoming
+ * argument area and is nevertheless not an argument of this function.
+ *
+ * This is the one place the home-space judgement is made, and it has two
+ * callers asking two different questions of it. `analyzeStackFrame` asks whether
+ * to record a parameter at all; `argSlotName` asks whether an index it can
+ * derive is a statement about the interface. Splitting the rule between them is
+ * how a saved register came to be *named* after its offset — `argSlotName`
+ * already refused it — while still being *emitted as a parameter*, which is the
+ * defect this predicate closes (peek-a-bin-g186).
+ *
+ * Three properties are deliberate:
+ *
+ *  - **It is empty on x86 by construction, not by a special case.** `homeRegs`
+ *    is `[]` there, so the length test returns false before any arithmetic
+ *    runs; every x86 argument is pushed by the caller and `D` alone names it.
+ *    That is what makes both PE32 binaries the untouched control.
+ *  - **Containment, not slot alignment.** `[<fp> + D + slot + 2]` is the third
+ *    byte of argument 0's home slot; if the callee never filled that slot, that
+ *    byte is not part of an argument either. `argSlotName` still needs exact
+ *    alignment to *spell* an index, which is a different question and stays
+ *    separate. No such offset occurs in this corpus, so the two readings are
+ *    measurably indistinguishable here and the containment one is the honest
+ *    reading of the ABI fact.
+ *  - **It cannot withdraw a positional name.** Everything it answers true for
+ *    is exactly what `argSlotName`'s home-space fallback already spelled by
+ *    offset, so no slot that reaches `arg_<N>` can be refused by it —
+ *    peek-a-bin-sx57's five spilled home slots keep their indices as a property
+ *    of the two rules being the same rule, not as a measurement.
+ */
+function inUnfilledHomeSpace(
+  offset: number,
+  delta: number,
+  slotSize: number,
+  homeRegs: readonly string[],
+  homed: ReadonlySet<number>,
+): boolean {
+  if (homeRegs.length === 0) return false;
+  const above = offset - delta - slotSize;
+  if (above < 0 || above >= homeRegs.length * slotSize) return false;
+  return !homed.has(Math.floor(above / slotSize));
 }
 
 export function analyzeStackFrame(
@@ -702,9 +748,21 @@ export function analyzeStackFrame(
   // (peek-a-bin-ikd).
   const geometry = frameGeometry(funcInsns, is64, instructions);
   const frameDelta = geometry.delta;
-  // The lowest `[<fp> + off]` that can be an argument: one slot past the return
-  // address, which sits at `[<fp> + delta]`.
-  const minParamOffset = frameDelta === null ? null : frameDelta + ARG_AREA[width].slotSize;
+  const { slotSize, homeRegs } = ARG_AREA[width];
+
+  /**
+   * Whether `[<fp> + offset]` is an argument of *this* function, which is two
+   * questions and not one.
+   *
+   * The lowest offset that can be one is a slot past the return address, which
+   * sits at `[<fp> + delta]`; below that is a local of this frame, and with no
+   * `delta` at all nothing says where the area is. And on x64 being inside the
+   * area is still not sufficient — see `inUnfilledHomeSpace`.
+   */
+  const isArgumentSlot = (offset: number): boolean =>
+    frameDelta !== null &&
+    offset >= frameDelta + slotSize &&
+    !inUnfilledHomeSpace(offset, frameDelta, slotSize, homeRegs, geometry.homed);
 
   // Size heuristic from operand prefix
   function inferSize(opStr: string): number {
@@ -749,7 +807,21 @@ export function analyzeStackFrame(
       // is the refusal, not a gap: naming it a local would claim a stack slot
       // just as falsely as naming it an argument did, and leaving it alone is
       // what lets struct synthesis see an object field for what it is.
-      if (minParamOffset !== null && offset >= minParamOffset) {
+      //
+      // `inUnfilledHomeSpace` is the second refusal and it is the same
+      // statement one storey up: on x64 an offset inside the argument area is
+      // an argument of this function only if the callee spilled the register
+      // that carries it, because the home space is four slots the *caller*
+      // reserves and the *callee* may use for anything. 16 slots per x64 binary
+      // are a saved register, a byte local or an out-param buffer sitting
+      // there, and recording one put it in the emitted signature —
+      // `void sub_1400027C8(int64_t arg_0x30, …) { arg_0x30 = rbx; }`
+      // (peek-a-bin-g186). Not recording is again the *only* honest option
+      // rather than the cautious one: it is not a local either — the caller
+      // owns the storage — and `promote.ts`'s `matchStackAccess` classifies
+      // every `[<fp> + N]` as a parameter from the offset alone, so a local
+      // name recorded here would have no site to be promoted at.
+      if (isArgumentSlot(offset)) {
         record("bp", offset, offset, inferSize(op), true);
       }
     }
@@ -798,8 +870,7 @@ export function analyzeStackFrame(
   // `framed` — the *canonical* geometry — no longer takes part in naming. It is
   // published for `promote.ts`, which uses it for a different question: whether
   // a copy of the frame register may be followed to the same slot.
-  const framed = frameDelta === ARG_AREA[width].slotSize;
-  const { slotSize, homeRegs } = ARG_AREA[width];
+  const framed = frameDelta === slotSize;
 
   const usedNames = new Set<string>();
   for (const v of entries) {

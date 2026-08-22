@@ -2531,14 +2531,18 @@ describe("decompileFunction — a value is only reused where it has actually bee
  */
 describe("decompileFunction — the stack frame is not a struct", () => {
   /**
-   * Identical in both cases. `[rbp + 0x10]` is the argument slot whose *name*
-   * carries the verdict — `arg_0` when stack.ts verified the prologue,
-   * `arg_0x10` when it did not. The pair at 4 and 8 sits below the argument
-   * area, so no promotion pass claims either one and both reach struct
-   * synthesis as raw derefs, which is what makes the two cases comparable at
-   * all. They are 4 bytes wide because the subject here is which base is an
-   * object, not what a layout does with fields that overlap — an 8-byte read at
-   * 4 runs through 8, and no struct declaration can place both (peek-a-bin-ey0).
+   * Identical in both cases. `[rbp + 0x10]` is the argument slot whose verdict
+   * the framed case turns on. The pair at 4 and 8 sits below the argument area,
+   * so no promotion pass claims either one and both reach struct synthesis as
+   * raw derefs, which is what makes the two cases comparable at all. They are 4
+   * bytes wide because the subject here is which base is an object, not what a
+   * layout does with fields that overlap — an 8-byte read at 4 runs through 8,
+   * and no struct declaration can place both (peek-a-bin-ey0).
+   *
+   * On x64 `[rbp + 0x10]` is argument 0's home slot, which is a parameter only
+   * where the callee spilled RCX into it (peek-a-bin-g186) — so the framed
+   * PROLOGUE carries that spill and the FPO case, having no frame at all, is
+   * unaffected by it.
    */
   const ACCESSES: [string, string?][] = [
     ["mov", "rax, qword ptr [rbp + 0x10]"],
@@ -2551,6 +2555,7 @@ describe("decompileFunction — the stack frame is not a struct", () => {
     ["push", "rbp"],
     ["mov", "rbp, rsp"],
     ["sub", "rsp, 0x20"],
+    ["mov", "qword ptr [rbp + 0x10], rcx"],
   ];
 
   /** 64-bit, with the StackFrame the real caller computes — as dispatch.ts does. */
@@ -2586,14 +2591,14 @@ describe("decompileFunction — the stack frame is not a struct", () => {
     expect(code).not.toMatch(/\b(?:rbp|rsp|ebp|esp)->/);
     // The accesses are still emitted, as the stack references they are.
     expect(code).toMatch(/rbp \+ /);
-    // …and the argument slot is still an argument.
+    // …and the spilled argument slot is still an argument.
     expect(code).toContain("arg_0");
   });
 
   it("still synthesises a struct from a frame-pointer-omitted object pointer", () => {
     // Identical accesses, no prologue: nothing here ever wrote a stack address
     // into RBP, so it holds an object it was handed — and stack.ts says as much
-    // by naming the slot `arg_0x10` rather than `arg_0`.
+    // by recording no parameter at all, since no displacement was recovered.
     const code = run64(seq(0x401000, ACCESSES));
 
     expect(code).toContain("typedef struct");

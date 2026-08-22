@@ -74,25 +74,26 @@ describe("analyzeStackFrame — slot identity", () => {
     expect(bp!.name).not.toBe(sp!.name);
   });
 
-  it("does not let a [rbp + 0x10] param absorb a [rsp + 0x10] local", () => {
+  it("does not let a [rbp + 0x30] param absorb a [rsp + 0x30] local", () => {
     // The param branch ran first for [rbp + N] and set isParam, so a later
     // [rsp + N] access with the same offset inherited "param" and vanished
-    // into arg_0.
+    // into arg_4.
+    //
+    // The offset is index 4 — above the home space — because a home slot this
+    // function never spills into is not a parameter at all (peek-a-bin-g186),
+    // and the subject here is that two slots at one operand offset stay apart.
     const insns = body(
       ...PROLOGUE_64,
-      ["mov", "eax, dword ptr [rbp + 0x10]"],
-      ["mov", "dword ptr [rsp + 0x10], ecx"],
+      ["mov", "eax, dword ptr [rbp + 0x30]"],
+      ["mov", "dword ptr [rsp + 0x30], ecx"],
     );
     const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
     expect(frame).not.toBeNull();
 
     const names = frame!.vars.map((v) => v.name);
-    // `arg_0x10`, not `arg_0`: this function never spills RCX, so argument 0's
-    // home slot is not shown to hold argument 0 (peek-a-bin-sx57). The name is
-    // incidental here — what is under test is that the two slots stay apart.
-    expect(names).toContain("arg_0x10");
+    expect(names).toContain("arg_4");
     // The rsp slot is a local, not part of the parameter list.
-    const spVar = frame!.vars.find((v) => v.key === stackVarKey("sp", 0x10));
+    const spVar = frame!.vars.find((v) => v.key === stackVarKey("sp", 0x30));
     expect(spVar).toBeDefined();
     expect(spVar!.name).not.toMatch(/^arg_/);
     expect(frame!.vars.filter((v) => v.name.startsWith("arg_"))).toHaveLength(1);
@@ -258,13 +259,23 @@ describe("analyzeStackFrame — the x64 home space", () => {
   // `paramIndexByBase` a provenance claim that DISPLACES the argument
   // register's own — so a saved register gets linked to the callers' argument.
   //
-  // Measured over the corpus at f169c00: of the 20 home slots the x64 binaries
-  // access through a recovered frame pointer, 15 are a saved register or a byte
-  // local and 5 are a real spill (peek-a-bin-sx57).
+  // Measured over the corpus at f169c00: of the 22 home slots the x64 binaries
+  // access through a recovered frame pointer, 16 are a saved register, a byte
+  // local or an out-param buffer and 6 are a real spill (peek-a-bin-sx57,
+  // peek-a-bin-g186).
+  //
+  // So an unfilled home slot is **not recorded as a parameter at all** — the
+  // offset name it used to get still put it in the emitted signature, and
+  // `arg_0x30 = rbx` is a declared parameter overwritten by a callee-saved
+  // register (peek-a-bin-g186). It is not recorded as a local either: the
+  // caller owns the storage, and `promote.ts` reads every `[<fp> + N]` as a
+  // parameter from the offset alone, so a local name would have no site to be
+  // promoted at. It stays a plain deref, which is what an offset below the
+  // argument area has always been.
 
-  it("does not index a home slot the function never filled", () => {
+  it("records no parameter for a home slot the function never filled", () => {
     const insns = body(...PROLOGUE_64, ["mov", "rax, qword ptr [rbp + 0x10]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
   });
 
   it("indexes a home slot the function spills its own argument into", () => {
@@ -298,7 +309,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
     ]);
   });
 
-  it("does not index a home slot filled with a callee-saved register", () => {
+  it("records no parameter for a home slot filled with a callee-saved register", () => {
     // NEGATIVE CONTROL for the one that matters: `mov [rbp+0x10], rbx` is the
     // same instruction shape as a spill and the opposite fact — RBX is not
     // argument 0's register, so the slot is a register save parked in the
@@ -309,7 +320,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "qword ptr [rbp + 0x10], rbx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
   });
 
   it("indexes a home slot spilled at a narrower width", () => {
@@ -325,7 +336,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
     expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_3"]);
   });
 
-  it("does not index a slot written at an address inside a home slot", () => {
+  it("records no parameter for a slot written at an address inside a home slot", () => {
     // A byte at [rsp+9] is not argument 0; it is one byte of it, and the slot
     // as a whole has not been shown to hold the argument.
     const insns = body(
@@ -334,21 +345,48 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "rbp, rsp"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+  });
+
+  it("records no parameter for a sub-slot byte of an unfilled home slot", () => {
+    // `inUnfilledHomeSpace` asks containment, not slot alignment: [rbp+0x12] is
+    // the third byte of argument 0's home slot, and if the callee never filled
+    // that slot the byte is not part of an argument either. No such offset
+    // occurs in the corpus, so this is the rule pinned rather than measured —
+    // the reading it replaces named it `arg_0x12` and declared it a parameter.
+    const insns = body(...PROLOGUE_64, ["mov", "al, byte ptr [rbp + 0x12]"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+  });
+
+  it("keeps a sub-slot byte of a FILLED home slot, named by its offset", () => {
+    // The other side of the same containment test, and the reason it is not a
+    // blanket refusal: the slot is shown to hold argument 0, so the byte is
+    // part of an argument. No index divides out of it, so the name is still the
+    // offset — which is `argSlotName`'s sub-slot fallback, unchanged.
+    const insns = body(
+      ...PROLOGUE_64,
+      ["mov", "qword ptr [rbp + 0x10], rcx"],
+      ["mov", "al, byte ptr [rbp + 0x12]"],
+    );
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+      "arg_0",
+      "arg_0x12",
+    ]);
   });
 
   it("refuses a spill once any register has been written", () => {
     // `argsPristine`. After `mov rcx, rax` the register no longer provably
     // holds the incoming argument, so the store into its home slot is not
-    // evidence about argument 0. Refusing costs an index; admitting it would
-    // name the slot after a value the caller never passed.
+    // evidence about argument 0. Refusing costs the whole parameter, not just
+    // its index; admitting it would name the slot after a value the caller
+    // never passed.
     const insns = body(
       ...PROLOGUE_64,
       ["mov", "rcx, rax"],
       ["mov", "qword ptr [rbp + 0x10], rcx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0x10"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
   });
 
   it("indexes the caller's own argument area with no spill anywhere", () => {
@@ -459,20 +497,23 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
   });
 
   it("records no parameter for a slot below the argument area of a shifted frame", () => {
-    // `lea rbp, [rsp - 0x1A30]` after seven pushes puts the frame register
-    // 0x1A68 below the stack pointer on entry, so `[rbp + 0x1A20]` is 0x48
-    // bytes BELOW the return address — a local, and in the corpus the GS
-    // cookie. t64!sub_14000D8C4.
+    // `lea rbp, [rsp - 0x1A30]` after one push puts the frame register 0x1A38
+    // below the stack pointer on entry, so `[rbp + 0x1A20]` is 0x18 bytes
+    // BELOW the return address — a local, and in the corpus the GS cookie.
+    // t64!sub_14000D8C4.
     const insns = body(
       ["push", "rbp"],
       ["lea", "rbp, [rsp - 0x1A30]"],
       ["mov", "qword ptr [rbp + 0x1A20], rax"],
       ["mov", "rcx, qword ptr [rbp + 0x1A40]"],
+      ["mov", "rdx, qword ptr [rbp + 0x1A60]"],
     );
-    // 0x1A38 is the return address, so the first argument is at 0x1A40.
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
-      "arg_0x1A40",
-    ]);
+    // 0x1A38 is the return address. 0x1A40 is the slot after it — and on x64
+    // that is argument 0's HOME slot, which this function never spills into, so
+    // it is no parameter either (peek-a-bin-g186). 0x1A60 is index 4, above the
+    // home space, where the caller had no register to pass in and the slot is
+    // an argument by construction. Both refusals in one fixture.
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_4"]);
   });
 
   it("keeps an argument reached over intervening pushes", () => {
@@ -722,10 +763,13 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
     //
     // [rbp + 0x30] is index 4 and is what pins the arithmetic: it is only 4 if
     // the helper really was read as leaving the frame at `E - 8`. [rbp + 0x10]
-    // is argument 0's HOME slot and stays offset-named, because the helper path
-    // reports no spilled home slots at all — a deliberate refusal rather than a
-    // gap, since `__SEH_prolog4` is a 32-bit form with no home space and the
-    // helper search fires 0 times on both x64 binaries (peek-a-bin-sx57).
+    // is argument 0's HOME slot and yields NO parameter, because the helper
+    // path reports no spilled home slots at all — a deliberate refusal rather
+    // than a gap, since `__SEH_prolog4` is a 32-bit form with no home space and
+    // the helper search fires 0 times on both x64 binaries (peek-a-bin-sx57).
+    // Under peek-a-bin-g186 that empty `homed` now withholds the slot entirely
+    // rather than merely offset-naming it, which is the same conservatism one
+    // storey up and still costs nothing measured.
     const callerInsns: [string, string][] = [
       ["push", "0x20"],
       ["call", `0x${HELPER_ADDR.toString(16)}`],
@@ -738,6 +782,6 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["ret", ""],
     ];
     const { func: f, instructions } = withHelper(callerInsns, helper);
-    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_0x10", "arg_4"]);
+    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_4"]);
   });
 });
