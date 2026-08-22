@@ -158,6 +158,17 @@ function fakeCs() {
           emit("pop", R32[b & 7], 1);
           continue;
         }
+        // FF /6 with mod=01 — `push dword ptr [ebp + disp8]`, the first
+        // instruction of an MSVC x86 `__finally` funclet. The displacement
+        // follows the same decimal-below-ten rule as an immediate: the shipped
+        // decoder prints t32.exe's `ff 75 08` as `push dword ptr [ebp + 8]` and
+        // its `ff 75 18` as `push dword ptr [ebp + 0x18]`.
+        if (b === 0xff && bytes[i + 1] === 0x75 && i + 2 < bytes.length) {
+          const disp = (bytes[i + 2] << 24) >> 24;
+          const text = disp < 0 ? `- ${imm(-disp)}` : `+ ${imm(disp)}`;
+          emit("push", `dword ptr [ebp ${text}]`, 3);
+          continue;
+        }
         if (b >= 0xb8 && b <= 0xbf && i + 4 < bytes.length) {
           emit("mov", `${R32[b & 7]}, ${imm(readI32(bytes, i + 1))}`, 5);
           continue;
@@ -711,6 +722,194 @@ describe("detectFunctions — a start the function before it jumps over (peek-a-
       0x04: [0xcc, 0xcc, 0xcc, 0xcc],
     });
     expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + 0x08]);
+  });
+});
+
+describe("detectFunctions — an unconditional jump over a start nothing reaches (peek-a-bin-qe8z)", () => {
+  // An unconditional `jmp` past a candidate implies nothing on its own: a tail
+  // call and a shared epilogue are both spelled that way. What removes the
+  // ambiguity is that a tail call's target and a shared epilogue are *reached*
+  // — so where the image contains NO direct transfer to the candidate at all,
+  // and the function in front of it jumps past it, the candidate is that
+  // function's own code.
+  //
+  // `w32!sub_401981` is the measured case, and its harm was an INVENTED CALL
+  // rather than a lost `jcc`: the function really runs to 0x401b4b, the
+  // `6a 0c 68` at 0x4019e0 (`push 0xc; push 0x40ece4`, mid-body) cut it to 95
+  // bytes, and its `jmp 0x401aaa` then aimed outside its own range, so the
+  // lifter read the jump as a tail call and emitted `eax = sub_401AAA();
+  // return eax;` for an instruction that never leaves the function.
+  //
+  //   0x00  e9 .. jmp BASE+0x14  ; the function jumps over the candidate
+  //   0x10  55 8b ec             ; the candidate — a PE32 prologue pattern
+  //   0x14  ...  ret             ; where the jump lands: the same function
+  //   0x16  cc cc                ; padding — 0x18 is the next real function
+  const CAND = 0x10;
+  const RESUME = 0x14;
+  const NEXT = 0x18;
+  /** 0x40 decodes as a one-byte filler and is not padding, so it starts nothing. */
+  const filled = (len: number, parts: Record<number, number[]>): Uint8Array => {
+    const out = new Uint8Array(len).fill(0x40);
+    for (const [off, bytes] of Object.entries(parts)) out.set(bytes, Number(off));
+    return out;
+  };
+  const parent = {
+    0x00: jmpTo(0x00, BASE + RESUME),
+    [CAND]: [0x55, 0x8b, 0xec],
+    [RESUME]: [0x40, 0xc3],
+    0x16: [0xcc, 0xcc],
+    [NEXT]: [0x40, 0xc3],
+  };
+  const detect = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE }).functions;
+
+  it("withdraws it, so the function keeps the code past it", () => {
+    const funcs = detect(filled(0x20, parent));
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+    expect(funcs[0].size).toBe(NEXT);
+  });
+
+  it("keeps it when a call reaches it", () => {
+    // The `reached` half, controlled with the transfer kind the previous rule
+    // already looked at.
+    const img = filled(0x28, { ...parent, [NEXT]: callTo(NEXT, BASE + CAND), 0x1d: [0xc3] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + CAND, BASE + NEXT]);
+  });
+
+  it("keeps it when only a jmp reaches it, which is the shape a tail call has", () => {
+    // `t32!sub_403A88` and `w32!sub_403CDC` are `mainCRTStartup`'s body: the
+    // entry point's own `jmp` is the only thing that reaches either, and
+    // nothing calls them. A rule reading call sites alone would swallow both,
+    // which is why `reached` is a union over every transfer kind.
+    const img = filled(0x28, { ...parent, [NEXT]: jmpTo(NEXT, BASE + CAND) });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + CAND, BASE + NEXT]);
+  });
+
+  it("keeps it when only a jcc reaches it", () => {
+    // `74 xx` is `je`; the target is BASE+CAND, two bytes past the branch.
+    const img = filled(0x28, { ...parent, [NEXT]: [0x74, (CAND - NEXT - 2) & 0xff] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + CAND, BASE + NEXT]);
+  });
+
+  it("ignores a crossing jmp the function cannot reach", () => {
+    // The same reachability rule the conditional case has, and for the same
+    // reason: `.text` carries data, and a linear decode turns it into plausible
+    // jumps. `eb 10` here is data sitting past a `ret`.
+    //
+    //   0x00  ret            ; the function really ends here
+    //   0x02  eb 10          ; data, decoding as `jmp 0x401014`
+    //   0x04  cc cc cc cc    ; padding — 0x08 is the next function
+    const img = filled(0x20, {
+      0x00: [0x40, 0xc3],
+      0x02: [0xeb, 0x10],
+      0x04: [0xcc, 0xcc, 0xcc, 0xcc],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + 0x08]);
+  });
+
+  it("does not withdraw a start no jump crosses at all", () => {
+    // Without the crossing jump there is no evidence the function in front
+    // continues, and "nothing reaches it" alone must not be enough: a function
+    // called only through a stored pointer has no direct transfer either.
+    const img = filled(0x20, {
+      0x00: [0x40, 0xc3],
+      [CAND]: [0x55, 0x8b, 0xec],
+      0x16: [0xcc, 0xcc],
+      [NEXT]: [0x40, 0xc3],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + CAND, BASE + NEXT]);
+  });
+});
+
+describe("detectFunctions — a start reading a frame it did not establish (peek-a-bin-qe8z)", () => {
+  // `[ebp + 8]` in the FIRST instruction at an address is a read of a frame some
+  // other function set up: nothing has run there yet to set one up, and no x86
+  // calling convention passes EBP, so an entry point cannot mean anything by it.
+  // Beside "the previous function is the only thing that calls it" the candidate
+  // is that function's `__finally` body — emitted inside the parent, called from
+  // it, running on its frame with no prologue of its own.
+  //
+  // Eight such starts on t32 and six on w32, every one of them
+  // `push dword ptr [ebp + N]; call; pop ecx; ret` or the 46-byte pair at
+  // t32 0x40a631 / w32 0x40921c. `t32!sub_401DB3` is the worked example: the
+  // funclet at 0x401e67 is called from 0x401e59, and the parent overwrites
+  // `[ebp+8]` at 0x401e05 — so the base emitted a standalone
+  // `sub_401E67() { eax = sub_4023CD(*(int32_t*)(ebp + 8)); }` with nothing in
+  // it assigning `ebp`, where the withdrawal gives `eax = sub_4023CD(arg_0)`.
+  //
+  //   0x00  e8 .. call BASE+0x10   ; the parent calls its funclet
+  //   0x06  ...  ret               ; the parent ends
+  //   0x10  ff 75 08               ; the funclet: push dword ptr [ebp + 8]
+  //   0x13  ...  ret
+  //   0x15  cc cc cc               ; padding — 0x18 is the next real function
+  const FUNCLET = 0x10;
+  const NEXT = 0x18;
+  /** 0x40 decodes as a one-byte filler and is not padding, so it starts nothing. */
+  const filled = (len: number, parts: Record<number, number[]>): Uint8Array => {
+    const out = new Uint8Array(len).fill(0x40);
+    for (const [off, bytes] of Object.entries(parts)) out.set(bytes, Number(off));
+    return out;
+  };
+  const parent = {
+    0x00: callTo(0x00, BASE + FUNCLET),
+    0x06: [0x40, 0xc3],
+    [FUNCLET]: [0xff, 0x75, 0x08],
+    0x13: [0x40, 0xc3],
+    0x15: [0xcc, 0xcc, 0xcc],
+    [NEXT]: [0x40, 0xc3],
+  };
+  const detect = (img: Uint8Array, options = {}) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), {
+      entryPoint: BASE,
+      ...options,
+    }).functions;
+
+  it("withdraws it, so the read belongs to the frame that established it", () => {
+    const funcs = detect(filled(0x20, parent));
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+    expect(funcs[0].size).toBe(NEXT);
+  });
+
+  it("keeps it when something outside the previous function calls it", () => {
+    // `t32!sub_4041B5` / `w32!sub_404415` is `__SEH_epilog4`: it opens
+    // `mov ecx, dword ptr [ebp - 0x10]`, reading its caller's frame BY DESIGN,
+    // and 31 and 29 sites call it. Dropping this test withdraws it, and every
+    // gate in `npm run corpus` reports that as clean — the function count is the
+    // only number that moves, and it moves toward its "better" value.
+    const img = filled(0x28, { ...parent, [NEXT]: callTo(NEXT, BASE + FUNCLET), 0x1d: [0xc3] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps it when nothing calls it at all", () => {
+    // A candidate nothing calls is not a funclet, and there is then no
+    // independent evidence that the address is even an instruction boundary —
+    // the frame read would be whatever the byte pattern happened to decode as.
+    //
+    //   0x0e  cc cc     ; padding, so 0x10 is a candidate with no caller
+    const img = filled(0x20, {
+      0x00: [0x40, 0xc3],
+      0x0e: [0xcc, 0xcc],
+      [FUNCLET]: [0xff, 0x75, 0x08],
+      0x13: [0x40, 0xc3],
+      0x15: [0xcc, 0xcc, 0xcc],
+      [NEXT]: [0x40, 0xc3],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps a funclet whose first instruction reads no frame", () => {
+    // `push 0xa; call _unlock; pop ecx; ret` is the same funclet family and is
+    // deliberately NOT touched: an immediate says nothing about whose frame is
+    // in scope, so the only evidence left would be the sole caller — which a
+    // helper laid out right after its one caller also has.
+    const img = filled(0x20, { ...parent, [FUNCLET]: [0x6a, 0x0a, 0x40, 0xc3] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps an exported start, whatever its first instruction reads", () => {
+    const img = filled(0x20, parent);
+    const funcs = detect(img, { exports: [{ name: "f", address: BASE + FUNCLET }] });
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
   });
 });
 

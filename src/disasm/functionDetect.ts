@@ -1150,9 +1150,24 @@ function interiorPatternStarts(matches: Map<number, number>): Set<number> {
 /** Instructions after which control does not simply continue to the next one. */
 const NO_FALLTHROUGH = new Set(["ret", "retn", "int3", "ud2"]);
 
+/** What kinds of reachable direct jump aim into `[boundary, windowEnd)`. */
+interface Crossings {
+  /**
+   * A conditional jump, whose fallthrough therefore stays on this side of the
+   * boundary — so both sides belong to one function.
+   */
+  cond: boolean;
+  /**
+   * An unconditional `jmp`, which on its own implies nothing: a tail call and a
+   * shared epilogue are spelled exactly this way. It is evidence only beside
+   * "nothing in the image transfers to the boundary" — see
+   * {@link interiorBranchedOverStarts}.
+   */
+  uncond: boolean;
+}
+
 /**
- * Is any conditional jump *reachable from `from`* aimed at or past `boundary`,
- * while its own fallthrough stays before it?
+ * Which reachable direct jumps *from `from`* aim at or past `boundary`.
  *
  * The reachability is the whole point, and it is why this decodes rather than
  * reading the linear scan's answer. A `.text` section carries data — jump
@@ -1168,19 +1183,23 @@ const NO_FALLTHROUGH = new Set(["ret", "retn", "int3", "ud2"]);
  *
  * The walk follows fallthrough and direct branches only. A `call` is followed
  * by its fallthrough and nothing else — the callee's body is not this
- * function's — and an indirect jump ends its path rather than guessing.
+ * function's — and an indirect jump ends its path rather than guessing. It runs
+ * to completion rather than stopping at the first crossing, because both kinds
+ * are wanted and the caller weighs them differently; the window is one
+ * function, so that costs nothing the previous early return was saving.
  */
-function reachableCondJumpCrosses(
+function reachableCrossings(
   from: number,
   boundary: number,
   windowEnd: number,
   bytes: Uint8Array,
   baseAddress: number,
   scan: CapstoneScan,
-): boolean {
+): Crossings {
+  const out: Crossings = { cond: false, uncond: false };
   const lo = from - baseAddress;
   const hi = windowEnd - baseAddress;
-  if (lo < 0 || hi > bytes.length || hi <= lo) return false;
+  if (lo < 0 || hi > bytes.length || hi <= lo) return out;
 
   const decoded = new Map<number, { mn: string; size: number; target: number | null }>();
   let offset = lo;
@@ -1212,12 +1231,15 @@ function reachableCondJumpCrosses(
     if (!insn) continue; // not on the linear grid — this path is not followed
     if (NO_FALLTHROUGH.has(insn.mn)) continue;
     if (insn.mn === "jmp") {
-      if (insn.target !== null) queue.push(insn.target);
+      if (insn.target !== null) {
+        if (insn.target >= boundary && insn.target < windowEnd) out.uncond = true;
+        queue.push(insn.target);
+      }
       continue;
     }
     if (insn.mn.startsWith("j")) {
       if (insn.target !== null) {
-        if (insn.target >= boundary && insn.target < windowEnd) return true;
+        if (insn.target >= boundary && insn.target < windowEnd) out.cond = true;
         queue.push(insn.target);
       }
       queue.push(addr + insn.size);
@@ -1225,7 +1247,40 @@ function reachableCondJumpCrosses(
     }
     queue.push(addr + insn.size);
   }
-  return false;
+  return out;
+}
+
+/**
+ * A memory operand based on the frame register, in either width.
+ *
+ * Deliberately `[ebp` / `[rbp` and not "mentions ebp": `mov ebp, esp` and
+ * `push ebp` mention it and *establish* a frame rather than read one, and they
+ * are what a real entry point does with it.
+ */
+const FRAME_MEMORY_OPERAND = /\[[er]bp\b/;
+
+/**
+ * The operand text of the single instruction at `addr`, or null where nothing
+ * decodes there or the decode does not start on `addr` itself.
+ *
+ * Decoded from `addr` rather than read off the linear sweep on purpose. The
+ * sweep's grid is whatever the bytes before it produced, so its instruction at
+ * a given address can be a misalignment — and this question is asked about an
+ * address a `call` names, i.e. one that provably *is* an instruction boundary.
+ * Sixteen bytes is more than the longest x86 instruction.
+ */
+function firstInstructionOperands(
+  addr: number,
+  windowEnd: number,
+  bytes: Uint8Array,
+  baseAddress: number,
+  scan: CapstoneScan,
+): string | null {
+  const lo = addr - baseAddress;
+  const hi = Math.min(windowEnd - baseAddress, lo + 16);
+  if (lo < 0 || hi > bytes.length || hi <= lo) return null;
+  const insns = scan.decodeOne(bytes, lo, hi, addr);
+  return insns.length > 0 && insns[0].address === addr ? insns[0].opStr : null;
 }
 
 /**
@@ -1256,15 +1311,78 @@ function reachableCondJumpCrosses(
  *    one caller and it is its parent. `t32!sub_40A925` is the shape this saves:
  *    a second entry point sharing a tail with the code in front of it, called
  *    from 0x4043CE and 0x404471 as well as from its neighbour.
- *  * **A conditional jump the previous function can actually execute crosses
- *    it** — see {@link reachableCondJumpCrosses}. *Conditional* specifically: a
- *    `jcc` leaves its fallthrough behind, so both sides belong to one function,
- *    whereas an unconditional `jmp` past the boundary is how a tail call and a
- *    shared epilogue are spelled and implies nothing.
+ *  * **A jump the previous function can actually execute crosses it** — see
+ *    {@link reachableCrossings}. A *conditional* one is sufficient on its own: a
+ *    `jcc` leaves its fallthrough behind, so both sides belong to one function.
+ *    An unconditional `jmp` past the boundary is how a tail call and a shared
+ *    epilogue are spelled, so it implies nothing by itself — but it is
+ *    conclusive beside the second admission below.
  *
- * Two exemptions bound it, and both are the linker's record outranking this
- * inference: a start in `strong` is never withdrawn, and a previous function
- * whose extent `.pdata` states is never extended.
+ * **The second admission: an unconditional `jmp` over a start NOTHING REACHES.**
+ * The ambiguity in a crossing `jmp` is entirely about what sits on the far side
+ * of it: a tail call's target and a shared epilogue are *reached*, by the very
+ * `jmp` or `call` that spells them. So where the image contains no direct
+ * transfer to the boundary at all — no `call`, no `jmp`, no `jcc`, no
+ * jump-table case — the alternative readings are gone, and an address nothing
+ * transfers to, admitted on a byte pattern, with the function in front of it
+ * jumping past it, is that function's own code.
+ *
+ * `reached` is that test, and it must stay a union of every direct transfer the
+ * sweep saw rather than the call sites alone. It fires on exactly one candidate
+ * in the corpus and the case is worth stating, because the harm was not a lost
+ * `jcc` but an INVENTED CALL: `w32!sub_401981` really runs to 0x401b4b, and the
+ * `6a 0c 68` at 0x4019e0 — `push 0xc; push 0x40ece4` inside its body — cut it to
+ * 95 bytes. Its `jmp 0x401aaa` at 0x4019d8 then aimed outside its own range, so
+ * the lifter read it as a tail call and emitted `eax = sub_401AAA(); return
+ * eax;` for an instruction that stays inside the function; the 363 bytes past
+ * the cut became `sub_4019E0`, reading `[ebp + 0xC]` and `ebx` off a frame it
+ * never establishes. The literal 0x4019e0 occurs nowhere in the image, so
+ * nothing takes its address either.
+ *
+ * Two candidates this deliberately does NOT touch, and both are the reason the
+ * `reached` half is phrased over every transfer kind: `t32!sub_403A88` and
+ * `w32!sub_403CDC` are `mainCRTStartup`'s body, reached by the entry point's
+ * `jmp` and by nothing else, and `t32!sub_40A925` / `w32!sub_4093C5` are the
+ * shared-tail second entry points the previous bullet protects.
+ *
+ * **The third admission: a start whose first instruction reads the frame it did
+ * not establish.** The two above are properties of the code *around* the
+ * candidate; this one is a property of the candidate itself, and it is the
+ * stronger evidence of the three. `[ebp + 8]` in the first instruction at an
+ * address is a read of a frame some *other* function set up, because nothing
+ * has run there yet to set one up — no x86 calling convention passes EBP, so an
+ * entry point cannot mean anything by it. Paired with the funclet condition
+ * above ("the previous function is the only thing that calls it") the candidate
+ * is that function's `__finally`/`__except` body: MSVC emits it inside the
+ * parent, `call`s it from the parent, and it runs on the parent's frame with no
+ * prologue of its own — which is exactly what CLAUDE.md's `peek-a-bin-sysf`
+ * note says such a funclet is, "part of that function, not another one".
+ *
+ * At least one caller is REQUIRED here, unlike in the second admission. A
+ * candidate nothing calls is not a funclet, and the reading is then made of a
+ * first instruction with no independent evidence that the address is an
+ * instruction boundary at all.
+ *
+ * Measured over the corpus: 8 starts on t32 and 6 on w32, every one of them a
+ * ten-byte `push dword ptr [ebp + N]; call; pop ecx; ret` or the 46-byte
+ * `cmp dword ptr [ebp - 0x1c], edi; …` pair at t32 0x40a631 / w32 0x40921c. In
+ * each case the base emitted a standalone function reading `*(int32_t*)(ebp +
+ * 8)` with **nothing in it assigning `ebp`**, and after the withdrawal the same
+ * read is `arg_0` — the parent's own argument slot, which `promoteVars` can name
+ * because the frame is now the frame of the function it sits in. `t32!sub_401DB3`
+ * overwrites `[ebp+8]` at 0x401e05, so the funclet reads the *updated* argument
+ * and the base gave the reader no way to know which frame it was.
+ *
+ * `t32!sub_4041B5` / `w32!sub_404415` are the reason the caller condition is not
+ * negotiable: `__SEH_epilog4` opens `mov ecx, dword ptr [ebp - 0x10]` — it reads
+ * its caller's frame by design — and it is called from 31 and 29 sites. Dropping
+ * the "no caller outside the previous function" test withdraws it, and no gate
+ * in `npm run corpus` reports that (see the CHANGELOG entry for the measurement).
+ *
+ * Two exemptions bound all three, and both are the linker's record outranking
+ * this inference: a start in `strong` is never withdrawn, and a previous function
+ * whose extent `.pdata` states is never extended. The second is why this is a
+ * PE32 rule in practice — a `.pdata` image states where the parent ends.
  *
  * **`strong` is "named by a table the parser reads", which is narrower than
  * "named by the file", and the gap is exactly this shape.** MSVC's 32-bit SEH
@@ -1295,6 +1413,8 @@ function interiorBranchedOverStarts(
   strong: Set<number>,
   callSites: Map<number, number[]>,
   forwardCondJumps: number[],
+  forwardJumps: number[],
+  reached: Set<number>,
   pdataEndMap: Map<number, number>,
   bytes: Uint8Array,
   baseAddress: number,
@@ -1304,16 +1424,16 @@ function interiorBranchedOverStarts(
   const interior = new Set<number>();
   if (sortedAddrs.length < 2) return interior;
 
-  // `forwardCondJumps` is filled in scan order, so it is already sorted by
+  // Both jump lists are filled in scan order, so each is already sorted by
   // source address: a binary search gives the jumps that start inside a
   // candidate's predecessor without touching the rest.
-  const firstJumpFrom = (addr: number): number => {
+  const firstJumpFrom = (jumps: number[], addr: number): number => {
     let lo = 0;
-    let hi = forwardCondJumps.length / 2 - 1;
-    let at = forwardCondJumps.length / 2;
+    let hi = jumps.length / 2 - 1;
+    let at = jumps.length / 2;
     while (lo <= hi) {
       const mid = (lo + hi) >>> 1;
-      if (forwardCondJumps[mid * 2] >= addr) {
+      if (jumps[mid * 2] >= addr) {
         at = mid;
         hi = mid - 1;
       } else {
@@ -1338,22 +1458,43 @@ function interiorBranchedOverStarts(
       continue;
     }
 
-    let straddles = false;
-    for (let j = firstJumpFrom(prev); j * 2 < forwardCondJumps.length; j++) {
-      const src = forwardCondJumps[j * 2];
-      if (src >= boundary) break;
-      const dst = forwardCondJumps[j * 2 + 1];
-      if (dst >= boundary && dst < windowEnd) {
-        straddles = true;
-        break;
+    // The third admission. Reaching here means every direct caller — if there
+    // is one at all — is inside the previous function.
+    if (callers !== undefined && callers.length > 0) {
+      const ops = firstInstructionOperands(boundary, windowEnd, bytes, baseAddress, scan);
+      if (ops !== null && FRAME_MEMORY_OPERAND.test(ops)) {
+        interior.add(boundary);
+        // As below: `prev` stays put, so the next boundary is measured from the
+        // function this one was just folded back into.
+        continue;
       }
+    }
+
+    // The cheap pre-filter, over the linear scan's own answer: only a boundary
+    // some jump in the previous function's address range straddles is worth
+    // decoding for. An unconditional straddle only counts where the boundary is
+    // unreached, which is the same condition the decode is judged against.
+    const unreached = !reached.has(boundary);
+    let straddles = false;
+    for (const jumps of unreached ? [forwardCondJumps, forwardJumps] : [forwardCondJumps]) {
+      for (let j = firstJumpFrom(jumps, prev); j * 2 < jumps.length; j++) {
+        const src = jumps[j * 2];
+        if (src >= boundary) break;
+        const dst = jumps[j * 2 + 1];
+        if (dst >= boundary && dst < windowEnd) {
+          straddles = true;
+          break;
+        }
+      }
+      if (straddles) break;
     }
     if (!straddles) {
       prev = boundary;
       continue;
     }
 
-    if (reachableCondJumpCrosses(prev, boundary, windowEnd, bytes, baseAddress, scan)) {
+    const crossing = reachableCrossings(prev, boundary, windowEnd, bytes, baseAddress, scan);
+    if (crossing.cond || (crossing.uncond && unreached)) {
       interior.add(boundary);
       // `prev` deliberately stays where it is: the next boundary is measured
       // from the function this one was just folded back into.
@@ -1655,6 +1796,25 @@ export function detectFunctions(
    * `.text`, the same order as the call targets already held here.
    */
   const forwardCondJumps: number[] = [];
+  /**
+   * Every forward unconditional `jmp`, as `from, to` pairs in scan order — the
+   * same shape and the same purpose as `forwardCondJumps`, for the second
+   * admission in {@link interiorBranchedOverStarts}. Kept as its own list
+   * rather than a kind flag on one, because a conditional straddle is
+   * sufficient evidence on its own and an unconditional one is not: merging
+   * them would need every consumer to re-separate them.
+   */
+  const forwardJumps: number[] = [];
+  /**
+   * Every address a direct `jmp` or `jcc` in the sweep aims at.
+   *
+   * Together with `callTargets` and the jump-table targets this is "the image
+   * transfers control here", which is what makes an unconditional jump over a
+   * candidate conclusive rather than ambiguous — a tail call's target and a
+   * shared epilogue are both *reached*. Both directions, because the question
+   * is whether anything reaches the address, not where from.
+   */
+  const branchTargets = new Set<number>();
   const jumpTables = new Map<number, number[]>();
   /**
    * Every address any jump table dispatches to.
@@ -1722,12 +1882,14 @@ export function detectFunctions(
               else callSites.set(target, [insn.address]);
             }
           }
-        } else if (insn.mnemonic.startsWith("j") && insn.mnemonic !== "jmp") {
+        } else if (insn.mnemonic.startsWith("j")) {
           const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
           if (m) {
             const target = parseInt(m[1], 16);
+            if (target >= baseAddress && target < endAddress) branchTargets.add(target);
             if (target > insn.address && target < endAddress) {
-              forwardCondJumps.push(insn.address, target);
+              if (insn.mnemonic === "jmp") forwardJumps.push(insn.address, target);
+              else forwardCondJumps.push(insn.address, target);
             }
           }
         }
@@ -1856,12 +2018,15 @@ export function detectFunctions(
   // {@link interiorBranchedOverStarts}; it needs a decoder, so without one this
   // arbitration is simply not made, as with the other decoder-fed passes.
   const allStarts = Array.from(addrSet).sort((a, b) => a - b);
+  const reached = new Set<number>([...callTargets, ...branchTargets, ...jumpTableTargets]);
   const interiorStarts = cs
     ? interiorBranchedOverStarts(
         allStarts,
         strongStarts,
         callSites,
         forwardCondJumps,
+        forwardJumps,
+        reached,
         pdataEndMap,
         bytes,
         baseAddress,
