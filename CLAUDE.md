@@ -241,19 +241,32 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**The whole-tree figures below were last taken from ONE run at `21ea66e`**, which is what makes
+**The whole-tree figures below were last taken from ONE run at `97bbebe`**, which is what makes
 them mutually consistent: eight changes measured in parallel against the same base each re-stamped
 this section with numbers true of *their* base and of no single tree, which is the state
-`6d7bb36` had to repair once already. **`peek-a-bin-qe8z`'s fourth admission has since taken the 32-bit pair to 268 and 266 functions and this stamp is deliberately NOT rewritten** — see the funclet gotcha for that run's own figures. Per binary (t32/t64/w64/w32) at that commit: **268/279/275/266
-functions**, 18025/16844/15111/16601 instructions, 13/0/0/11 jump tables, gcc **1088/1088 clean**,
-`offsetof` **346/301/303/354 fields over 55/54/53/59 definitions, every ratio 1.00**, polarity
+`6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **268/279/275/266
+functions**, 18025/16844/15111/16601 instructions, **15/0/0/13** jump tables, gcc **1088/1088 clean**,
+`offsetof` **342/301/303/355 fields over 55/54/53/56 definitions, every ratio 1.00**, polarity
 anchor-A **517/574/497/441 correct with 0 inverted and 0 mismatch**, statements dropped **0** of
-7268/7764/6893/6711 lifted, unrecovered values **36/12/11/33**, loop shape **`for` 6/6/6/6,
+7280/7764/6893/6723 lifted, unrecovered values **36/12/11/33**, loop shape **`for` 6/6/6/6,
 `while` 111/106/99/98, `do/while` 78/77/76/77, `if` 1987/1938/1719/1759**, and **0 on every
 gate** —
 popReads (now gated on both counts, with 151/5/5/146 of 1095/350/328/1043 pops paired beside it),
 staleReads, staleGuards, lostDefs, armExits, unencodableNames, wildBranches, arity over, callees
-lost, loops short, throws.
+lost, loops short, throws, plus the three audits added since the last stamp — `undefinedCallees`
+(report-only, 25/0/0/23 internal and 7/3/3/7 external), `emptyCaseBodies` (report-only, 0 of
+80/0/0/62 case labels) and `memberNameAgreement` (a gate, 0 disagreeing of 597/599/587/579
+members).
+
+**Three rows moved against the `21ea66e` stamp this replaces, and all three are one change.**
+`peek-a-bin-padl` unified the jump-table bound rule: jump tables **13/0/0/11 → 15/0/0/13**,
+`offsetof` **346/354 → 342/355** fields and **55/59 → 55/56** definitions on the 32-bit pair at
+ratio 1.00, and statements lifted **7268/6711 → 7280/6723**. The two new tables per 32-bit binary
+are real — t32 `0x40b8e7` is `jmp DWORD PTR [edx*4+0x40b8f0]` over four entries
+(`0x40b900/0x40b908/0x40b914/0x40b928`, verified against `objdump`), bounded by the `and edx, 3`
+the fix now reads, and previously emitted as `loc_40B925: ecx = ecx; goto loc_40B928;`. The
+`offsetof` moves are re-identifications in both directions, not losses; see the funclet and
+jump-table gotchas.
 
 **`peek-a-bin-6f3v` moved five of those and the stamp above is deliberately NOT rewritten**, so
 that it stays one consistent run; the deltas, base `bd73798`: popReads **4/0/0/4 → 0/0/0/0** (now a
