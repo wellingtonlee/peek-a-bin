@@ -285,6 +285,15 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(r.polarity.mismatch).toBe(0);
         // An audit that stopped anchoring anything would pass vacuously.
         expect(r.polarity.checked).toBeGreaterThan(100);
+        // A2 does not gate — see README on why it has no oracle over the output
+        // — but it needs the same liveness half, and for a sharper reason than
+        // anchor A does. `peek-a-bin-1qqx` removed 4 A2 rows per x64 binary by
+        // refusing a (jcc, sense) two guards claim, which is the right fix for
+        // that shape and is also exactly the shape of the WRONG fix: a rule
+        // that refused more broadly would drive A2's reported failures to 0 by
+        // no longer looking, and the report would read better for it. Measured
+        // at cc45263: 391/234/216/369 on t32/t64/w64/w32.
+        expect(r.polarity.a2Checked).toBeGreaterThan(100);
       }
     });
 

@@ -1473,6 +1473,50 @@ function auditGuardsAndLoops(
     res.skipReasons[kk] = (res.skipReasons[kk] ?? 0) + 1;
   };
 
+  /**
+   * ONE JCC IS ONE MACHINE DECISION, so at most one emitted guard can be the
+   * guard for a given outcome of it. Two different guards resolving to the same
+   * (jcc, sense) is a contradiction, and which of the two the anchoring
+   * misattributed is not decidable from here — so both are skipped. This is the
+   * exact dual of note 1 at the top of this file: there, a body two jccs can
+   * reach is ambiguous and skipped rather than guessed; here, a jcc two bodies
+   * claim is skipped for the same reason. Skipping is the safe direction,
+   * because a guessed anchor yields a wrong verdict rather than no verdict.
+   *
+   * The shape it fires on is A2's own soundness condition failing. A2
+   * normalises a body's first line to its CFG block, which is right only while
+   * that line really is in the arm's first block — and a statement
+   * `loopInvariantCodeMotion` hoisted into a loop preheader carries the address
+   * of the block it came FROM, deep inside the loop. The preheader IS the body
+   * of the loop's own entry guard, so that guard normalises to the inner block
+   * and is judged against the inner block's jcc, one test away from its own.
+   *
+   * Measured over this corpus that is the only shape producing a duplicate at
+   * all: 4 groups of 2 among 3297 anchored rows, all four the `jae` /
+   * `if (r14 < rax)` rows of peek-a-bin-1qqx, where the outer loop-entry guard
+   * is CORRECT against its own `cmp r14, rax / jae` and was being judged
+   * against the inner `cmp r13, rax / jae`. The refusal is blind to the
+   * verdict and drops the correct sibling too, which is what distinguishes it
+   * from silencing the row: `a2Checked` falls by 4 per x64 binary while
+   * `a2Ok` falls by 2. A change that moved only the failing row would show
+   * `a2Checked` falling by 2 and `a2Ok` not at all.
+   *
+   * Staging is what makes the question answerable: the walk is a single pass
+   * over the emitted lines, so the second claimant is not yet known when the
+   * first would be judged.
+   */
+  type StagedGuard = {
+    kind: string;
+    cond: string;
+    expect: string;
+    jc: Jcc;
+    bodyAddr: number;
+    sense: string;
+    anchor: "A" | "A2" | "B";
+    emitted: string;
+  };
+  const staged: StagedGuard[] = [];
+
   const judge = (
     kind: string,
     cond: string,
@@ -1487,6 +1531,13 @@ function auditGuardsAndLoops(
       skip(kind, "cond-not-single-comparison");
       return;
     }
+    // A guard with no single comparison never reaches a verdict, so it is not a
+    // claim on the jcc and is deliberately not staged — it cannot refuse a
+    // sibling that would otherwise be judged.
+    staged.push({ kind, cond, expect, jc, bodyAddr, sense, anchor, emitted });
+  };
+
+  const commit = ({ kind, cond, expect, jc, bodyAddr, sense, anchor, emitted }: StagedGuard) => {
     const verdict = emitted === expect ? "OK" : emitted === NEG[expect] ? "INVERTED" : "MISMATCH";
     if (anchor === "A2") {
       res.polarity.a2Checked++;
@@ -1514,6 +1565,20 @@ function auditGuardsAndLoops(
       fn: func.address,
       fname: func.name,
     });
+  };
+
+  const claimKey = (s: StagedGuard) => `${s.jc.insn.address}|${s.sense}`;
+
+  const commitStaged = () => {
+    const claims = new Map<string, number>();
+    for (const s of staged) claims.set(claimKey(s), (claims.get(claimKey(s)) ?? 0) + 1);
+    for (const s of staged) {
+      if ((claims.get(claimKey(s)) ?? 0) > 1) {
+        skip(s.kind, "ambiguous-guards-for-jcc");
+        continue;
+      }
+      commit(s);
+    }
   };
 
   /** Anchor A: the guard's body identifies the block that runs when it holds. */
@@ -1693,6 +1758,8 @@ function auditGuardsAndLoops(
     }
     reconcile("do_while", cond, a, b);
   }
+
+  commitStaged();
 
   auditLoopExits(res, func, lines, lineAddr, jccs, machineLoops, landing, closingBrace);
   return unrecAnchors;

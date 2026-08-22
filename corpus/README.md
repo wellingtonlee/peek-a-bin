@@ -146,8 +146,58 @@ Three anchors are reported and only one gates:
 | A2 | That line had to be normalised to its CFG block. Sound whenever the line really is in the arm's first block. | No |
 | B | The statement *after* a loop — its test's other side only when the loop has no other exit. A heuristic; it has disagreed with A on real functions. | No |
 
-A2 currently carries **two long-standing INVERTED verdicts on each of t64 and w64** (`jae`,
-`if (r14 < rax)`). They are not new, and CLAUDE.md's "0 inverted" claim has always meant anchor A.
+**A2's four long-standing INVERTED verdicts were an ANCHORING ARTIFACT, and they are gone**
+(`peek-a-bin-1qqx`). Two on each of t64 and w64, all four `jae` / `if (r14 < rax)` in
+`sub_1400080E0` / `sub_1400079B0`. Adjudicated against `objdump -d -M intel`: the emitted guard is
+**correct**, and it belongs to a jcc one test away from the one it was judged against. At t64
+0x140008606 the machine does `cmp r14, rax / jae 0x140008774`, so the fallthrough — the loop the
+guard opens — really is entered when `r14 < rax`; the auditor anchored it to the *inner*
+`cmp r13, rax / jae 0x140008661` at 0x140008645, whose taken sense is `>=`, and called the
+correct guard inverted. The inner guard `if (r13 >= rax)` is on the page directly below it and is
+also anchored to that same jcc, correctly.
+
+The mechanism is A2's own soundness condition failing, and it is worth knowing because nothing
+about it is specific to these four sites. A2 normalises the body's first line to its CFG block,
+which is right only while that line really is in the arm's first block — and
+`loopInvariantCodeMotion` hoists into a loop **preheader**, which *is* the body of the loop's entry
+guard. The hoisted statement carries the address of the block it came FROM, deep inside the loop,
+so the preheader normalises to that inner block and picks up the inner block's jcc. Visible in the
+emitted C without any instrumentation: the arm's first line is `rdx_29 = rbp - 0x28`
+(`lea rdx,[rbp-0x28]` at 0x14000866d, inside block 0x140008661) and `rdx_29` is *used* only much
+further down, in the `ReadFile` call inside the inner arm.
+
+**The refusal is a contradiction rule, not a repair**: one jcc is one machine decision, so at most
+one emitted guard can be the guard for a given outcome of it, and two guards resolving to the same
+`(jcc, sense)` means the anchoring misattributed at least one — which one is not decidable from
+here, so **both are skipped**. That is the exact dual of the ambiguity rule in note 1 of
+`sweep.ts`: there, one body two jccs can reach is skipped rather than guessed; here, one jcc two
+bodies claim is skipped for the same reason. Measured at `cc45263`, it fires on **4 groups of 2
+among 3297 anchored rows corpus-wide** — precisely these four sites, nothing else on any binary.
+
+Two things make it more than a count going to zero:
+
+- **It is blind to the verdict and drops the correct sibling too.** `a2Checked` falls by 4 per x64
+  binary (238 → 234 on t64, 220 → 216 on w64) while `a2Ok` falls by 2 (236 → 234, 218 → 216). A
+  change that silenced only the failing row would show `a2Checked` falling by **2** and `a2Ok` not
+  at all, so the two are distinguishable in the report — which matters, because a wrong change and
+  a right one both drive A2-bad to 0.
+- **It does not blind the tier.** Negative control, every recovered condition globally inverted by
+  negating `extractCondition`'s two returns: A2 reports **0/234 on t64 and 0/216 on w64** (and
+  0/391, 0/369 on the PE32 pair) with anchor A red at 0/574 and 0/497, exit 1. The denominators
+  under the control are still 234 and 216 rather than 238 and 220 even though *both* members of
+  each duplicate group are INVERTED there — which is the verdict-blindness demonstrated rather than
+  argued.
+
+`compare.mjs` reports it as `distinct jccs` 824 → 822 and 729 → 727 with `only-base 2`,
+`CHANGED 0`, `only-change 0`, and `polarity guards audited` flat at 574/497 — the 2 jccs per x64
+binary that now anchor nothing are flagged rather than silent. The emitted C is **byte-identical on
+all four binaries** (md5), as it must be: this changes an audit and no `src/` code.
+
+**A2 still does not gate, and the reason is unchanged by this.** Its soundness condition is still
+unverified in general: the duplicate rule catches a misattribution only when a *second* guard
+happens to reveal it, and a hoisted first line with no rival claimant is still mis-anchored
+silently. A2 has no oracle over the output the way anchor A does, so it stays reported. CLAUDE.md's
+"0 inverted" claim has always meant anchor A, and it still does.
 
 **Loop exit coverage.** For each innermost emitted loop matched to a machine loop, every
 conditional jump inside it whose target leaves it is an exit the machine has; the emitted loop must
