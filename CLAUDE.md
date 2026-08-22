@@ -111,7 +111,7 @@ CI runs `lint`, `typecheck`, `test` and `build` on every PR, plus a separate
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (46 fields), `AppAction` discriminated union (54 action types). Access via `useAppState()` / `useAppDispatch()`.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (34 fields), `AppAction` discriminated union (55 action types) — both counted at `1c3de72`; `AppState` is the top-level properties of the `interface` (lines 107-177), not `initialState`'s keys or any nested object type. Access via `useAppState()` / `useAppDispatch()`.
 
 `usePEFile.ts` also exports **`VIEW_TABS`**, the nine view tabs in display order, and it is the
 single declaration of that ordering — `AddressBar`'s tab bar and its 1-9 `TAB_KEYS` shortcut map
