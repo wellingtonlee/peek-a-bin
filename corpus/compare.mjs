@@ -459,6 +459,34 @@ for (const b of bins) {
     note("  switch-arm false breaks       NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A case label whose whole body is `break;` (emitAudits.ts). ─────────────
+  //
+  // The question `armExits` cannot answer: it judges the closure `armExit`
+  // chose, from inside `structureSwitch`, so an arm that spells its exit
+  // correctly and emits no body passes it. This reads the emitted text.
+  //
+  // Not gated in the run — one row can be legitimate, see `emptyCaseBodies` —
+  // so a rise here is the ONLY alarm. `a lone goto` is the population it is
+  // told apart from and must be read beside it: spelling every arm as a `goto`
+  // would drive `bare` to 0 by saying nothing about any of them. The three
+  // buckets sum to `case labels`, which moves with how many tables detection
+  // recovers and is reported rather than judged.
+  if (B.caseBodies && C.caseBodies) {
+    row(
+      "empty case bodies",
+      (x) => x.caseBodies.bare,
+      (a, c) => c > a,
+      "A CASE SAYS IT DOES NOTHING",
+    );
+    row("  of those, functions", (x) => x.caseBodies.funcsAffected);
+    row("  case labels", (x) => x.caseBodies.labels);
+    row("  of those, a lone goto", (x) => x.caseBodies.gotoOnly);
+    row("  of those, with a body", (x) => x.caseBodies.ownBlock);
+    row("  switches emitted", (x) => x.caseBodies.switches);
+  } else {
+    note("  empty case bodies             NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A direct branch aimed outside the image (wildBranches.ts). ─────────────
   //
   // Gated at 0 in the run, so a rise here names which branch. `checked` is the

@@ -25,6 +25,7 @@ import { type ArityResult, auditApiArity } from "./arity";
 import {
   type CcResult,
   ccSyntaxCheck,
+  emptyCaseBodies,
   gotoCheck,
   type OffsetofResult,
   offsetNamedArgs,
@@ -251,6 +252,14 @@ if (!pre.haveBins || !pre.haveCc) {
               // `unencodableNames` on why the question is PE32-only — which is
               // why `funcs` is beside it as the liveness half.
               unencodable: unencodableNames([{ funcs: r.funcs, is64: r.is64 }]),
+              // A case label whose whole body is `break;` — the case saying it
+              // does nothing. Report-only, per binary so `compare.mjs` can name
+              // which one moved; structurally 0 wherever no jump table was
+              // recovered, which is both x64 binaries (peek-a-bin-37az).
+              caseBodies: (() => {
+                const eb = emptyCaseBodies([{ funcs: r.funcs }]);
+                return { ...eb, bad: eb.bad.length };
+              })(),
               // How much of the argument area the frame recovery is still
               // missing. Report-only in both directions — see `offsetNamedArgs`
               // on why a residue is legitimate — and per binary so
@@ -814,6 +823,30 @@ if (!pre.haveBins || !pre.haveCc) {
       }
     });
 
+    /**
+     * Not a gate, for the reason in `emptyCaseBodies`' docstring: one row can be
+     * legitimate, and the count is 0 over a corpus where the legitimate
+     * population is empty too — so a gate would rest on nothing. What is
+     * asserted is that the scrape READ something, and that it read it on the
+     * binaries where a switch exists at all. A rise is judged in `compare.mjs`.
+     */
+    it("reads the emitted C for empty case bodies (instrument liveness)", () => {
+      let labels = 0;
+      for (const r of results.values()) {
+        const eb = emptyCaseBodies([{ funcs: r.funcs }]);
+        expect(eb.funcs).toBeGreaterThan(0);
+        // A recovered jump table in a decompiled function is what makes a
+        // switch, so this is the one non-vacuous form the liveness check has —
+        // the same tie `armExits` uses, and for the same reason.
+        if (r.jumpTables > 0) {
+          expect(eb.switches).toBeGreaterThan(0);
+          expect(eb.labels).toBeGreaterThan(0);
+        }
+        labels += eb.labels;
+      }
+      expect(labels).toBeGreaterThan(0);
+    });
+
     it("resolves every goto to a label the same function defines", () => {
       const g = gotoCheck(over(auditedKeys(), results).map((r) => ({ funcs: r.funcs })));
       expect(g.dangling).toBe(0);
@@ -1186,6 +1219,19 @@ function renderReport(): string {
     L.push("    GATE at 0, from 35/0/0/17 before `armExit` (peek-a-bin-pqs5). `arms` is the");
     L.push("    denominator and is 0 wherever no jump table was recovered — both x64 binaries.");
     L.push("    Sites in armexits_<bin>.jsonl. See armExits.ts.");
+    const eb = emptyCaseBodies([{ funcs: r.funcs }]);
+    L.push(
+      `  empty case bodies           ${eb.bare} of ${eb.labels} case labels ` +
+        `(${eb.gotoOnly} a lone goto, ${eb.ownBlock} with a body) over ` +
+        `${eb.switches} switches` +
+        (eb.bad.length > 0 ? `  [${eb.bad.slice(0, 4).join(", ")}]` : ""),
+    );
+    L.push("    A `case N: break;` says the case does nothing, which a reader cannot tell from");
+    L.push("    a case whose block was emitted elsewhere. NOT a gate: where the fold consumed");
+    L.push("    the target block without a label there is no name to `goto`, and `armExits.ts`");
+    L.push("    refuses to gate that same population. Read it beside `a lone goto` — a rule");
+    L.push("    spelling every arm as a goto reaches 0 by saying nothing. 10 of 72 on t32 when");
+    L.push("    peek-a-bin-37az was filed; 0 on all four since `armExit` and `armBody`.");
     const wb = r.wildBranches;
     L.push(`  branches outside the image  ${wb.rows.length} of ${wb.checked} direct branches`);
     L.push("    A literal branch displacement is resolved inside the image, so a filed");

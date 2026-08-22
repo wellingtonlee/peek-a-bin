@@ -377,6 +377,130 @@ export function unencodableNames(sets: { funcs: FuncRec[]; is64: boolean }[]): U
   return out;
 }
 
+export interface CaseBodyResult {
+  /** `switch` statements read. Instrument liveness. */
+  switches: number;
+  /** `case`/`default` labels read. The denominator, and liveness. */
+  labels: number;
+  /**
+   * Labels whose whole body is `break;` — the case says it does nothing.
+   * REPORTED, never gated: see the docstring on why one can be legitimate.
+   */
+  bare: number;
+  /**
+   * Labels whose whole body is a single `goto` — `armBody`'s spelling for a
+   * block another region already emitted under a label (peek-a-bin-dp6). The
+   * population `bare` is told apart from, and the reason a fall in `bare` has
+   * to be read beside a rise here.
+   */
+  gotoOnly: number;
+  /** Labels carrying statements or a conditional exit of their own. */
+  ownBlock: number;
+  funcsAffected: number;
+  /** Functions read. A text scrape fails by matching nothing. */
+  funcs: number;
+  /** Up to a dozen `func case` pairs, so a red row names itself. */
+  bad: string[];
+}
+
+/** A `case <values>:` or `default:` on a line of its own, with its indent. */
+const CASE_LABEL = /^(\s*)(case [^:{}]*:|default:)\s*$/;
+
+/**
+ * A CASE LABEL WHOSE WHOLE BODY IS `break;` — the case says it does nothing.
+ *
+ * This is `peek-a-bin-37az`'s quantity, and it was hand-counted with a
+ * throwaway script when the bead was filed because nothing in the run reported
+ * it. `corpus/armExits.ts` is the nearest instrument and it asks a different
+ * question: it judges the *closure* `armExit` chose, from an observation taken
+ * inside `structureSwitch`, so an arm that spells its exit correctly and emits
+ * no body passes it — which that file records as `peek-a-bin-pqs5`'s residue.
+ * This reads the emitted text instead, which is where a reader meets the class.
+ *
+ * WHY IT IS NOT A GATE. Two of `armBody`'s three answers are provably right and
+ * the third is provably a false claim with no true alternative: where the
+ * short-circuit fold consumed the target block without emitting a label there
+ * is no name for a `goto` to use, and `break` is all that is left. `armExits.ts`
+ * refuses to gate that same population (`unnameable`) for the same reason, and
+ * refusing here keeps the two consistent. The count is 0 across the corpus at
+ * `d8d2d02` and `unnameable` is 0 with it, so a gate would rest on an empty
+ * population — the mistake CLAUDE.md records against `selfAssigns.openOperand`.
+ * A RISE is judged in `compare.mjs`.
+ *
+ * READ IT BESIDE `gotoOnly`. A rule that emitted `goto` for every arm would
+ * drive `bare` to 0 by no longer saying anything, so the three buckets are
+ * reported together and sum to `labels`.
+ *
+ * THE DENOMINATOR IS 0 ON BOTH x64 BINARIES. Neither recovers a jump table, so
+ * `structureSwitch` never runs there and a green row on those two says nothing
+ * at all — the x86 pair is the whole population, exactly as for `armExits`.
+ *
+ * WHAT IT DOES NOT SEE. It judges the body's *emptiness*, never its contents: an
+ * arm that emits half its block passes, as does one that emits the wrong
+ * statements. Nothing here can see either — the emitted C is self-consistent
+ * and the oracle for it is `objdump` read by hand.
+ */
+export function emptyCaseBodies(sets: { funcs: FuncRec[] }[]): CaseBodyResult {
+  const out: CaseBodyResult = {
+    switches: 0,
+    labels: 0,
+    bare: 0,
+    gotoOnly: 0,
+    ownBlock: 0,
+    funcsAffected: 0,
+    funcs: 0,
+    bad: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      out.funcs++;
+      const src = (r.code ?? "").split("\n");
+      let hits = 0;
+      for (let i = 0; i < src.length; i++) {
+        if (/^\s*switch \(/.test(src[i])) out.switches++;
+        const m = src[i].match(CASE_LABEL);
+        if (m === null) continue;
+        out.labels++;
+        const body = caseBody(src, i, m[1].length);
+        if (body.length === 1 && body[0] === "break;") {
+          out.bare++;
+          hits++;
+          if (out.bad.length < 12) out.bad.push(`${r.name} ${m[2]}`);
+        } else if (body.length === 1 && /^goto \w+;$/.test(body[0])) out.gotoOnly++;
+        else out.ownBlock++;
+      }
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  return out;
+}
+
+/**
+ * The statements under one case label, as trimmed non-empty lines.
+ *
+ * THE TWO STOP RULES ARE THE WHOLE AUDIT and each was wrong in an early draft.
+ * `emit.ts` puts a case label at the SAME indent as its `switch (`, and the
+ * switch's own closing brace with it — so a stop at a brace *strictly* shallower
+ * than the label runs the last arm's body on into whatever follows the switch,
+ * and a genuinely bare final arm then reads as one that does work. And a `loc_`
+ * label is emitted at column 0 whatever its nesting, so an indent-only rule
+ * treats it as the end of the body; it is skipped by name instead, since a label
+ * is not a statement.
+ */
+function caseBody(src: string[], at: number, indent: number): string[] {
+  const body: string[] = [];
+  for (let j = at + 1; j < src.length; j++) {
+    const line = src[j];
+    const text = line.trim();
+    if (text.length === 0) continue;
+    const col = line.length - line.trimStart().length;
+    if (col <= indent && (CASE_LABEL.test(line) || text === "}")) break;
+    if (/^loc_[0-9A-Fa-f]+:$/.test(text)) continue;
+    body.push(text);
+  }
+  return body;
+}
+
 export interface OffsetArgResult {
   /**
    * Occurrences of an `arg_0x<N>` whose N divides evenly into an argument slot,
