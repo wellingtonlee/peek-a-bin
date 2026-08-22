@@ -38,6 +38,11 @@ import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
 import { auditSelfAssigns, emptySelfAssigns, type SelfAssignResult } from "./selfAssigns";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
+import {
+  auditStructOverlaps,
+  emptyStructOverlaps,
+  type StructOverlapResult,
+} from "./structOverlaps";
 import { auditWildBranches, emptyWildBranches, type WildBranchResult } from "./wildBranches";
 
 // ── Condition polarity ─────────────────────────────────────────────────────
@@ -595,6 +600,7 @@ export interface BinResult {
    * `corpus/selfAssigns.ts`.
    */
   selfAssigns: SelfAssignResult;
+  structOverlaps: StructOverlapResult;
   funcs: FuncRec[];
 }
 
@@ -762,6 +768,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     armExits: emptyArmExits(),
     wildBranches: emptyWildBranches(),
     selfAssigns: emptySelfAssigns(),
+    structOverlaps: emptyStructOverlaps(),
     funcs: [],
   };
 
@@ -827,6 +834,11 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // rather than here: the measurement must be of the same code the MCP
         // decompile path runs, not of a summary the harness computed for itself.
         af.calleeClobbers,
+        // HOW STRUCT SYNTHESIS SETTLED EACH BASE'S OVERLAPPING READINGS. Same
+        // reasoning as the structuring tap above: the choice and the reading it
+        // discarded are both internal to the pass, and the emitted declaration
+        // shows only the winner. See `corpus/structOverlaps.ts`.
+        (g) => auditStructOverlaps(res.structOverlaps, key, g),
       );
       code = r.code;
       lineMap = r.lineMap;

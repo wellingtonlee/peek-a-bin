@@ -210,6 +210,15 @@ if (!pre.haveBins || !pre.haveCc) {
           r.selfAssigns.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.selfAssigns.rows.length > 0 ? "\n" : ""),
         );
+        // Every base's overlapping readings and how the first-by-offset rule
+        // settled each one. Written even when empty: the standing claim is that
+        // the population is small and stable, and an absent file must not read
+        // as a run that found none.
+        writeFileSync(
+          join(artifactDir, `structoverlaps_${key}.jsonl`),
+          r.structOverlaps.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.structOverlaps.rows.length > 0 ? "\n" : ""),
+        );
         // Every emitted call to an identifier the output never defines, the
         // INTERNAL rows first — those are the ones an emitter change could
         // reach. Written even when empty, so an absent file means the audit did
@@ -240,6 +249,7 @@ if (!pre.haveBins || !pre.haveCc) {
               armExits: { ...r.armExits, rows: r.armExits.rows.length },
               wildBranches: { ...r.wildBranches, rows: r.wildBranches.rows.length },
               selfAssigns: { ...r.selfAssigns, rows: r.selfAssigns.rows.length },
+              structOverlaps: { ...r.structOverlaps, rows: r.structOverlaps.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
               drops: r.drops.length,
@@ -750,6 +760,43 @@ if (!pre.haveBins || !pre.haveCc) {
         identity += sa.identity;
       }
       expect(identity).toBeGreaterThan(0);
+    });
+
+    /**
+     * NOT A GATE. A LIVENESS ASSERTION over a report-only census, and the
+     * distinction is the point.
+     *
+     * `corpus/structOverlaps.ts` counts the overlapping readings of one base
+     * that `candidateFields` had to settle, and nothing in it is provably a
+     * defect: a non-maximal selection kept a real measurement, and a maximal one
+     * can still be the wrong reading — measured, four of the twelve rows at
+     * `f3b89ec` are maximum-cardinality and misdescribe the CRT `ioinfo` object,
+     * with the correct pair lost one step earlier to the same-offset width rule.
+     * So there is no column to gate.
+     *
+     * What IS asserted is that the audit looked. A structure-scraping census
+     * fails by silently matching nothing — the observer stops being passed, or
+     * `synthesizeStructs` stops calling it — and then a zero population reads as
+     * a clean tree rather than as an absent instrument. `groups` and
+     * `candidates` are non-vacuous on all four binaries: every one of them
+     * recovers dozens of struct definitions, so unlike the switch-arm
+     * denominator this needs no per-binary condition. `peek-a-bin-k6hh`.
+     */
+    it("looks at every struct base's overlapping readings", () => {
+      let rows = 0;
+      for (const r of results.values()) {
+        const so = r.structOverlaps;
+        expect(so.groups).toBeGreaterThan(0);
+        expect(so.candidates).toBeGreaterThan(0);
+        expect(so.extents).toBeGreaterThan(so.groups);
+        // Every row must be judgeable in both directions, or the two counters
+        // that split it are silently dropping rows.
+        expect(so.contained + so.partial).toBe(so.rows.length);
+        rows += so.rows.length;
+      }
+      // The population is small and has never been empty. A zero here is far
+      // more likely to be the observer going quiet than the class going away.
+      expect(rows).toBeGreaterThan(0);
     });
 
     /**
@@ -1309,6 +1356,26 @@ function renderReport(): string {
     L.push(
       "    FAINT trace: only 2 of 3axd's 97 wrong reads left one. In selfassigns_<bin>.jsonl.",
     );
+    const so = r.structOverlaps;
+    L.push(
+      `  overlapping struct reads    ${so.rows.length} overlaps ` +
+        `(${so.contained} contained, ${so.partial} partial; ${so.reaching} reach a declaration), ` +
+        `${so.notMaximal} non-maximal, ${so.ambiguous} at an ambiguous base, ` +
+        `${so.narrowedOut} narrowed out, over ${so.groups} bases ` +
+        `(${so.candidates} candidates, ${so.extents} offsets)`,
+    );
+    L.push("    Two accesses whose bytes overlap are two readings and at most one is a member.");
+    L.push("    `candidateFields` keeps the earlier offset; `structs.ts` settles the same-offset");
+    L.push("    case one step before that by keeping the WIDER width. Neither side of either");
+    L.push("    decision survives into the emitted C, so no other instrument here can see this");
+    L.push("    class — `offsetof` checks that a declaration is self-consistent, never that it");
+    L.push("    is the right reading. REPORT-ONLY in every column, deliberately: a non-maximal");
+    L.push("    selection is not automatically wrong (the wide access is a real measurement)");
+    L.push("    and a maximal one is not automatically right — at f3b89ec the four");
+    L.push("    `field_0x1F`/`field_0x2F` rows are maximal AND wrong against the CRT `ioinfo`");
+    L.push("    layout, and the correct pair was lost to the same-offset rule, which is what");
+    L.push("    `narrowedOut` counts. `groups` is the liveness half. peek-a-bin-k6hh; rows in");
+    L.push("    structoverlaps_<bin>.jsonl. See structOverlaps.ts.");
     const uc = ucResults.get(r.key);
     if (uc !== undefined) {
       L.push(

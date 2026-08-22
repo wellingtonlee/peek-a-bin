@@ -69,6 +69,36 @@ describe("pipeline.ts — is64 reaches structureCFG (peek-a-bin-h0us)", () => {
   });
 });
 
+/**
+ * peek-a-bin-k6hh — `decompileFunction` must hand its `structTap` to
+ * `synthesizeStructs`.
+ *
+ * The tap is `corpus/structOverlaps.ts`'s only channel, and it observes a
+ * decision — which of two overlapping readings of a base's bytes became a field
+ * — that leaves no trace in the emitted C. So dropping the argument is
+ * output-neutral by construction: emitted text, `offsetof`, gcc, polarity and
+ * every other gate are byte-identical with the tap threaded or not (measured at
+ * `f3b89ec`), and the only symptom would be the audit reporting a clean zero for
+ * want of looking. `corpus.audit.ts` asserts the population is non-empty, but
+ * the corpus SKIPS without four real binaries, so a source guard is the only
+ * thing that fails on a machine without them.
+ *
+ * Asserted against the source text for the same reason `is64` above is: the
+ * argument has no observable effect on the return value.
+ */
+describe("pipeline.ts — structTap reaches synthesizeStructs (peek-a-bin-k6hh)", () => {
+  it("passes structTap as synthesizeStructs's third argument", () => {
+    const text = flatSource("pipeline.ts");
+    expect(
+      /synthesizeStructs\(\s*irFunc\s*,\s*registry\s*,\s*structTap\s*\)/.test(text),
+      "src/disasm/decompile/pipeline.ts must call " +
+        "synthesizeStructs(irFunc, registry, structTap). The parameter is optional and the " +
+        "pass computes the same values without it, so omitting it is invisible to every gate " +
+        "and silently empties corpus/structOverlaps.ts (peek-a-bin-k6hh).",
+    ).toBe(true);
+  });
+});
+
 /** The behaviour the argument selects, asserted where it is observable. */
 describe("structureCFG — is64 selects the operand widths of a branch condition", () => {
   const BASE = 0x140001000;

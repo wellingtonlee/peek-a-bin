@@ -1183,6 +1183,36 @@ unmoved at 7. The classifier's own rules — the half-open extent boundary, the 
 definition-header skip — are pinned in `build/undefinedCalleeAudit.test.ts`, since the corpus
 populates each half with one shape apiece and cannot separate them.
 
+**Which of two overlapping readings of a struct base became a field.** `corpus/structOverlaps.ts`,
+**12 overlaps over 1231 bases at `f3b89ec`** — 3 per binary, 6 contained and 6 partial, 8 of them
+in a base that is a struct candidate and therefore reaching a declaration. `candidateFields`
+settles a base's accesses twice over, and each step discards a directly observed reading: two
+accesses at one offset become one field of the **wider** width, and two whose extents then still
+overlap are settled by keeping the **earlier offset**. Neither side of either decision survives
+into the emitted C — the declaration shows the winner and does not say that there was a choice —
+so no other instrument here can see the class. `offsetof` compiles and runs the layout, which
+proves it is *self-consistent* and can never see a wrong identity; `memberNameAgreement` sees a
+name disagreeing with its own brackets; gcc compiles any layout at all.
+
+**Report-only in every column, and that is a judgement.** A **non-maximal** selection is not
+automatically wrong — the wide access it kept is a real measurement of one instruction, and a
+merged word store really can be a single member. A **maximal** one is not automatically right,
+which is measured rather than argued: the four `field_0x1F` / `field_0x2F` rows (t32 `sub_40667A`,
+w32 `sub_406037`, t64 `sub_140006FA8`, w64 `sub_140006AC4`) are maximum-cardinality **and wrong**.
+Adjudicated against `objdump -d -M intel` and the CRT `ioinfo` layout, the object there has a
+one-byte `textmode`/`unicode` bitfield followed by a two-byte `pipech2[2]`, and the emitted
+two-byte field spans one byte of each; the correct pair is fully present in the accesses and was
+lost at the **same-offset** step, which is what `narrowedOut` counts (**10 of the 12**). So there
+is no column whose zero is a claim, and `notMaximal` reading 0 on all four binaries is a fact
+about this corpus rather than a property. `groups` and `candidates` are the liveness halves, and
+`corpus.audit.ts` asserts them: a structure-scraping census fails by silently matching nothing.
+
+**It is a differential test, not a readout.** `StructGroupReport` carries the RAW accesses — every
+offset, width and index stride grouped onto the base — and `structOverlaps.ts` re-derives both
+steps for itself, so the rule is written twice, the status `crossEdgeGuards`' `admitted` count has.
+`maximal` goes further and asks something `structs.ts` never asks: whether the sweep's selection is
+of maximum cardinality over the same extents, by exhaustive search. `peek-a-bin-k6hh`.
+
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
@@ -1532,6 +1562,7 @@ remaining gap and is not implemented.
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent. Reads only emitted text. Report-only in both directions. |
+| `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -1544,6 +1575,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/wildbranches_<key>.jsonl` | Every filed direct branch aimed outside the image, with its `source`. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
+| `artifacts/<label>/structoverlaps_<key>.jsonl` | Every overlap `candidateFields` had to settle: the base's whole extent list, which reading was kept and which dropped, whether the dropped one was contained, whether the selection was maximal, whether the base was ambiguous, and any narrower same-offset reading that step 1 discarded. Empty file = audit ran and found none. |
 | `artifacts/<label>/undefinedcallees_<key>.jsonl` | Every emitted call to an identifier the output never defines, INTERNAL rows first, each with the caller's extent and whether a `loc_` label names the target. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 

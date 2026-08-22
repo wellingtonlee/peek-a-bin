@@ -14,7 +14,7 @@ import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
 import { destroySSA } from "./ssadestroy";
 import { ssaOptimize } from "./ssaopt";
-import { type StructRegistry, synthesizeStructs } from "./structs";
+import { type StructGroupReport, type StructRegistry, synthesizeStructs } from "./structs";
 import { type SwitchArmExit, structureCFG } from "./structure";
 import { inferTypes } from "./typeInfer";
 
@@ -96,6 +96,13 @@ export function decompileFunction(
    * anywhere else would renumber twelve existing call sites for nothing.
    */
   calleeClobbers?: CalleeClobbers,
+  /**
+   * An instrument watching how struct synthesis settled each base's overlapping
+   * readings. Last, after `calleeClobbers`, for the reason that parameter is
+   * last: appending is what keeps fourteen existing call sites unrenumbered.
+   * `corpus/structOverlaps.ts` is the only caller. See `StructGroupReport`.
+   */
+  structTap?: (g: StructGroupReport) => void,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -254,7 +261,7 @@ export function decompileFunction(
 
     // 8. Struct synthesis (if registry provided)
     if (registry) {
-      irFunc = synthesizeStructs(irFunc, registry);
+      irFunc = synthesizeStructs(irFunc, registry, structTap);
     }
 
     // 9. Emit C text + lineMap

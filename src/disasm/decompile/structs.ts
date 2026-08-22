@@ -981,6 +981,44 @@ function collectCallArgSlots(
   return slots;
 }
 
+/**
+ * One base's accesses, exactly as struct synthesis grouped them, handed to an
+ * instrument that asks to watch.
+ *
+ * This exists for ONE reason: which of two OVERLAPPING readings of a base's
+ * bytes becomes a field is settled inside `candidateFields`, and neither side of
+ * that decision is recoverable from the emitted C — the declaration shows the
+ * winner and says nothing about the loser or about there having been a choice.
+ * The same is true of the same-offset rule one step earlier, where a narrower
+ * directly-observed access is discarded in favour of a wider one at the same
+ * offset. `peek-a-bin-k6hh` sat unmeasured for ten days because re-deriving its
+ * one count needed a probe in this file.
+ *
+ * The report is deliberately RAW — every access grouped onto the base, with the
+ * stride of any index that reached it — rather than the fields the rule chose.
+ * An audit handed the rule's own answer would be a readout of the rule; handed
+ * the accesses, `corpus/structOverlaps.ts` re-derives both the same-offset rule
+ * and first-by-offset for itself and is a differential test of them, the status
+ * `crossEdgeGuards`' `admitted` count has.
+ *
+ * Reported for every group that reaches `candidateFields`, i.e. after the
+ * frame-base and `isFieldOffset` filters and before the two-field candidate
+ * test, so a group whose overlap resolution left it under the threshold is still
+ * in the population. Passing no observer costs one `undefined` check and changes
+ * no value this pass computes, which is the point: an instrument that alters
+ * what it measures is worse than no instrument.
+ */
+export interface StructGroupReport {
+  func: string;
+  funcAddr: number;
+  /** Canonical base key — see `exprKey`. Version-blind; that is its own story. */
+  baseKey: string;
+  /** Offset, width, and the stride of an index that reached it (0 for none). */
+  accesses: { offset: number; size: number; scale: number }[];
+  /** Fields `candidateFields` returned. Under 2 and the base is no candidate. */
+  fields: number;
+}
+
 // ── Candidate Fields ──
 
 /**
@@ -1051,7 +1089,12 @@ function candidateFields(accesses: AccessPattern[]): StructField[] {
 
 // ── Struct Synthesis Pass ──
 
-export function synthesizeStructs(func: IRFunction, registry: StructRegistry): IRFunction {
+export function synthesizeStructs(
+  func: IRFunction,
+  registry: StructRegistry,
+  /** An instrument watching how each base's overlapping readings were settled. */
+  observe?: (g: StructGroupReport) => void,
+): IRFunction {
   // 4a. Collect access patterns
   const patterns = collectAccessPatterns(func.body);
   if (patterns.length === 0) return func;
@@ -1095,6 +1138,19 @@ export function synthesizeStructs(func: IRFunction, registry: StructRegistry): I
   for (const [key, group] of groups) {
     if (frameBases.has(key)) continue;
     const fields = candidateFields(group.accesses);
+    if (observe) {
+      observe({
+        func: func.name,
+        funcAddr: func.address,
+        baseKey: key,
+        accesses: group.accesses.map((a) => ({
+          offset: a.offset,
+          size: a.size,
+          scale: a.index !== null ? a.scale : 0,
+        })),
+        fields: fields.length,
+      });
+    }
     if (fields.length >= 2) {
       candidates.set(key, { base: group.base, fields });
     }

@@ -5,6 +5,7 @@ import {
   buildFingerprint,
   decomposeAddress,
   type StructField,
+  type StructGroupReport,
   StructRegistry,
   synthesizeStructs,
 } from "../structs";
@@ -2032,5 +2033,66 @@ describe("synthesizeStructs — nested struct fields", () => {
       reg,
     );
     expect(b.typedefs).toHaveLength(2);
+  });
+});
+
+/**
+ * The observer `corpus/structOverlaps.ts` reads. Its whole value is that the
+ * report is RAW — every access, not the fields the rule chose — so an audit can
+ * re-derive both the same-offset width rule and first-by-offset for itself and
+ * be a differential test of them rather than a readout. Handing it the fields
+ * would make it agree by construction. See `StructGroupReport`.
+ */
+describe("synthesizeStructs — group observer", () => {
+  it("reports every access grouped onto a base, not the fields the rule chose", () => {
+    const seen: StructGroupReport[] = [];
+    // Three readings of overlapping bytes: a word and a byte at 0, and a byte at
+    // 1. The rule keeps one field; the observer must show all three.
+    synthesizeStructs(
+      fn([
+        assign(irReg("eax", 2), at(RCX, 0, 2)),
+        assign(irReg("ebx", 1), at(RCX, 0, 1)),
+        assign(irReg("edx", 1), at(RCX, 1, 1)),
+      ]),
+      new StructRegistry(),
+      (g) => seen.push(g),
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0].baseKey).toBe("reg:rcx");
+    expect(seen[0].accesses.map((a) => [a.offset, a.size])).toEqual([
+      [0, 2],
+      [0, 1],
+      [1, 1],
+    ]);
+    // One field survives, so this base is no struct candidate — and the group is
+    // still reported. A census that only saw candidates would miss exactly the
+    // overlaps that cost a base its second field.
+    expect(seen[0].fields).toBe(1);
+  });
+
+  it("records the stride of an index that reached an offset, and 0 for none", () => {
+    const seen: StructGroupReport[] = [];
+    synthesizeStructs(
+      fn([
+        assign(irReg("eax", 4), at(RCX, 0)),
+        assign(irReg("ebx", 4), idx(irBinary("+", RCX, irConst(8)), RDX, 4)),
+      ]),
+      new StructRegistry(),
+      (g) => seen.push(g),
+    );
+    const byOffset = new Map(seen[0].accesses.map((a) => [a.offset, a.scale]));
+    expect(byOffset.get(0)).toBe(0);
+    expect(byOffset.get(8)).toBe(4);
+  });
+
+  it("changes nothing it observes", () => {
+    const body = [
+      assign(irReg("eax", 4), at(RCX, 0)),
+      assign(irReg("ebx", 4), at(RCX, 8)),
+      assign(irReg("edx", 2), at(RCX, 2, 2)),
+    ];
+    const plain = synthesizeStructs(fn(body), new StructRegistry());
+    const watched = synthesizeStructs(fn(body), new StructRegistry(), () => {});
+    expect(JSON.stringify(watched)).toBe(JSON.stringify(plain));
   });
 });
