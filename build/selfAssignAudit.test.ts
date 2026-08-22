@@ -167,6 +167,115 @@ describe("selfAssigns: the open-operand population and its corroboration hint", 
     expect(out.openZeroCorroborated).toBe(0);
   });
 
+  it("follows a copy chain: `xor eax,eax / mov ebx,eax` is a real zero in EBX", () => {
+    const out = run(
+      "ecx = ecx;",
+      [
+        insn(0x1f00, "xor", "eax, eax"),
+        insn(0x1f10, "mov", "ebx, eax"),
+        insn(0x2000, "sub", "ecx, ebx"),
+      ],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(1);
+    expect(out.rows[0].zeroCorroborated).toBe(true);
+  });
+
+  it("follows a chain more than one link long", () => {
+    const out = run(
+      "ecx = ecx;",
+      [
+        insn(0x1f00, "xor", "eax, eax"),
+        insn(0x1f10, "mov", "edx, eax"),
+        insn(0x1f20, "mov", "ebx, edx"),
+        insn(0x2000, "sub", "ecx, ebx"),
+      ],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(1);
+  });
+
+  /**
+   * THE TRAP. If the recursive call dropped the `writes > 0` requirement, a copy
+   * from a register the function has not written — its arbitrary ENTRY value —
+   * would corroborate vacuously, and the hint would become a rubber stamp. Over
+   * the corpus's 1035 arithmetic-with-register-source sites that wrong version
+   * corroborates 112 (38/20/20/34 on t32/t64/w64/w32) where the correct one
+   * corroborates 0 more than the pre-chain rule did, so this is the assertion
+   * that separates the two.
+   */
+  it("REFUSES a copy whose source has no write before it — that is the entry value", () => {
+    const out = run(
+      "ecx = ecx;",
+      [insn(0x1f10, "mov", "ebx, esi"), insn(0x2000, "sub", "ecx, ebx")],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(0);
+    expect(out.rows[0].zeroCorroborated).toBe(false);
+  });
+
+  it("REFUSES a source zeroed only AFTER the copy, since the copy read the older value", () => {
+    const out = run(
+      "ecx = ecx;",
+      [
+        insn(0x1f00, "mov", "ebx, eax"),
+        insn(0x1f10, "xor", "eax, eax"),
+        insn(0x2000, "sub", "ecx, ebx"),
+      ],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(0);
+  });
+
+  it("REFUSES a chain whose source has a non-zeroing write of its own", () => {
+    const out = run(
+      "ecx = ecx;",
+      [
+        insn(0x1f00, "xor", "eax, eax"),
+        insn(0x1f08, "mov", "eax, dword ptr [ebp + 8]"),
+        insn(0x1f10, "mov", "ebx, eax"),
+        insn(0x2000, "sub", "ecx, ebx"),
+      ],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(0);
+  });
+
+  it.each([
+    ["a memory load", "mov", "ebx, dword ptr [ebp + 8]"],
+    ["a lea off a zeroed register", "lea", "ebx, [eax]"],
+    ["a pop", "pop", "ebx"],
+    ["an arithmetic result", "add", "ebx, eax"],
+  ])("REFUSES %s as a link in the chain: only `mov <r>,<r>` chains", (_label, mn, ops) => {
+    const out = run(
+      "ecx = ecx;",
+      [insn(0x1f00, "xor", "eax, eax"), insn(0x1f10, mn, ops), insn(0x2000, "sub", "ecx, ebx")],
+      0x2000,
+    );
+    expect(out.openZeroCorroborated).toBe(0);
+  });
+
+  /**
+   * `peek-a-bin-3axd`'s three sites, in shape: ESI's first write before each of
+   * them is `mov esi, [ebp+8]`, a memory load. The chain must not rescue it —
+   * measured against the real binaries, all three stay uncorroborated with the
+   * chain on, which is what makes the negative control still discriminating.
+   */
+  it("still refuses peek-a-bin-3axd's shape, whose ESI comes from memory", () => {
+    const out = run(
+      "edi = edi;",
+      [
+        insn(0x1f00, "mov", "esi, dword ptr [ebp + 8]"),
+        insn(0x1f10, "mov", "esi, eax"),
+        insn(0x1f20, "xor", "esi, esi"),
+        insn(0x2000, "add", "edi, esi"),
+      ],
+      0x2000,
+    );
+    expect(out.openOperand).toBe(1);
+    expect(out.rows[0].zeroCorroborated).toBe(false);
+  });
+
   it("ignores the epilogue restore, which is a write only after the site", () => {
     // `sub_402FEF` is exactly this: `xor ebx,ebx` above the site and `pop ebx`
     // below it. Asking the whole function loses the corroboration.

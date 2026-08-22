@@ -708,12 +708,15 @@ instruction in that function's own stream, and classified from that instruction'
 
 > **Zero-corroboration is a HINT, never a verdict.** For an `openOperand` row whose open operand is
 > a register, the function's instructions *before that address* are asked whether every write of it
-> zeroes it, using `callSummary.ts`'s `writtenRegsOfInsn` rather than a second write model. It stops
-> at the site deliberately — `sub_402FEF` restores EBX with a `pop ebx` in its epilogue, and asking
-> the whole function would report that save/restore as a non-zeroing write and lose the
-> corroboration for a genuine zero. It can never become a gate: a copy of a zeroed register
-> (`xor eax,eax / mov ebx,eax`) is ordinary MSVC output that reads as *un*corroborated while being a
-> real zero, and the fold proves zero through copies where this does not.
+> zeroes it, using `callSummary.ts`'s `writtenRegsOfInsn` rather than a second write model, and
+> **following a chain of register-to-register copies** so that `xor eax,eax / mov ebx,eax` — ordinary
+> MSVC output and a real zero — corroborates. It stops at the site deliberately — `sub_402FEF`
+> restores EBX with a `pop ebx` in its epilogue, and asking the whole function would report that
+> save/restore as a non-zeroing write and lose the corroboration for a genuine zero. Only
+> `mov <r>,<r>` links: a memory load, a `lea`, a `pop` and an arithmetic result are each refused,
+> because whether the value one of those produces is zero is the general dataflow question, and a
+> copy whose SOURCE has no write before it is refused too — that register holds the function's
+> arbitrary entry value, and a vacuous true there would turn the hint into a rubber stamp.
 
 > **The denominator is not decoration.** `peek-a-bin-qbk3` emptied the entire x64 population three
 > commits before this audit existed — six `lock or byte ptr [rsp], 0` memory fences that folded to
@@ -733,15 +736,50 @@ names are `t32!sub_40CBBE` 0x40cd96 `sub eax, esi`, 0x40cda7
 `or dword ptr [ebp-0x210], esi` and **0x40d23f `add edi, esi`**, the last being the exact site
 `peek-a-bin-3axd` records. ESI has six writes in that function and only one zeroes it, so all three
 are correctly uncorroborated while the base's `sub ecx, ebx` stays corroborated: `compare.mjs`
-flags both rows. The two *gates* are not moved by that control and are negative-controlled in
+flags both rows. **All three are still named with the copy chain on**, re-run at `99203fb` — ESI's
+first pre-site write there is `mov esi, [ebp+8]`, a memory load, which no chain rule admits — so the
+control keeps its full discriminating power. The two *gates* are not moved by that control and are negative-controlled in
 `build/selfAssignAudit.test.ts` instead, which also pins the width rules.
 
-> **STANDING UPGRADE, on the pattern `arity over` was gated by.** The uncorroborated half of
-> `openOperand` is **0 on all four binaries** and goes to 3 on a real defect. It is not gated
-> because a row it prints can be correct output — the copy-of-zero case above. If
-> `everyWriteZeroes` is ever strengthened to follow a copy chain from an all-zeroing register, and
-> the uncorroborated count is still 0 over the corpus, **gate it at 0**: that is the point at which
-> every row it can print becomes provably an operand the machine has and the C does not.
+> **THE STANDING UPGRADE WAS TAKEN UP AND THE GATE WAS REFUSED. Do not re-attempt it.**
+> `peek-a-bin-o7pj` recorded a standing upgrade on the pattern `arity over` was gated by: follow a
+> copy chain, re-measure, and if the uncorroborated half of `openOperand` is still 0, gate it at 0.
+> The chain landed (above) and the count **is** still 0 — and gating it would still be wrong, for a
+> reason the upgrade had not weighed. **An `arity over` row is provably an argument the machine
+> never passed**, because the oracle is outside the code under test: no entry in `apitypes.ts` is
+> variadic. **An uncorroborated row is this scan reporting that IT could not confirm the operand is
+> zero** — a statement about the scan. It is address-ordered rather than dominance-ordered, and it
+> enumerates a handful of routes to zero out of unboundedly many: a frame slot the fold proved, a
+> `movzx` of a byte that is zero, a call returning zero, a phi of two zeroing paths laid out below
+> the site. Each of those is a red gate on **correct** C. The corpus cannot settle it either way —
+> the population is **one row per PE32 binary**, and it is corroborated *directly* rather than
+> through the chain — so a 0 here is a property of a population of size 1, where `arity over`
+> reached 0 through three real fixes driving a population of 8/3/3/10 down. It stays **reported**,
+> with the split as the triage hint.
+
+*Measured at `99203fb`, both sides pinned.* The strengthening moves **no count on any binary** —
+`openOperand` 1/0/0/1, uncorroborated 0/0/0/0, `identity` 30/0/0/30, over 13/0/0/13 functions — and
+the emitted C is **byte-identical on all 1127 functions of all four binaries** (md5 of every
+`funcs_*.jsonl` and of the whole `cc/` tree; `compare.mjs` "byte-identical throughout", verdict no
+regression). That it changed nothing is the deliverable, and it is not the same claim as the rule
+being unexercised:
+
+> **REACH CENSUS.** Over every arithmetic instruction with a register source in every detected
+> function — the population any future open operand is drawn from — there are **284/258/232/261
+> sites** (t32/t64/w64/w32; 1035 corpus-wide). Of those, **141/119/105/130 (495, 48%) have a
+> pre-site register-copy write of the source**, so the chain is *consultable* at nearly half the
+> population; corroborated is **2/0/0/2 with the chain off and 2/0/0/2 with it on**, and
+> **chain-only is 0 on all four**. In every consultable case the chain either is not reached — an
+> earlier non-copy, non-zeroing write already refuses — or the copy's own source is not
+> all-zeroing. The rule is a rule that declines, not a rule nothing asks.
+
+> **THE TRAP WAS IMPLEMENTED DELIBERATELY, and it moves 112 sites.** The failure mode for this kind
+> of strengthening is reaching 0 *by no longer looking*. Had the recursive call dropped the
+> `writes > 0` requirement, a copy from a register the function never wrote — its arbitrary ENTRY
+> value — would corroborate vacuously: measured over the same 1035 sites, that wrong version
+> corroborates **38/20/20/34 (112)**, including **40 on the two x64 binaries where the correct rule
+> corroborates nothing at all**. Exactly two tests in `build/selfAssignAudit.test.ts` fail under it
+> and pass under the correct rule.
 
 ### Baselines — reported, never gated
 

@@ -70,11 +70,27 @@
  * register, the function's own instructions are asked whether every write of
  * that register zeroes it (`xor r,r`, `sub r,r`, `and r,0`, `mov r,0`), using
  * `writtenRegsOfInsn` so the write model is the one `callSummary.ts` already
- * uses rather than a second copy. Corroborated is what both base rows are;
+ * uses rather than a second copy, and a chain of register-to-register copies is
+ * followed so that `xor eax,eax / mov ebx,eax` — ordinary MSVC output and a real
+ * zero — corroborates. Corroborated is what both base rows are;
  * `peek-a-bin-3axd`'s defect was the opposite — ESI had five definitions with
- * one zeroing. It is deliberately NOT gated, because a copy of a zeroed
- * register (`xor eax,eax / mov ebx,eax`) is ordinary MSVC output and would read
- * as uncorroborated: gating it would be a false red on correct C.
+ * one zeroing, and none of the six is a register copy.
+ *
+ * It is deliberately NOT GATED, and following the copy chain does not change
+ * that. `peek-a-bin-o7pj` recorded a standing upgrade to gate the
+ * uncorroborated half at 0 once the chain was followed, on the pattern
+ * `arity over` was gated by; the chain landed and **the gate was refused**,
+ * because the two are not the same kind of row. An `arity over` row is provably
+ * an argument the machine never passed — no entry in `apitypes.ts` is variadic,
+ * so the oracle is outside the code under test. An uncorroborated row is this
+ * scan reporting that IT could not confirm the operand is zero, which is a
+ * statement about the scan. Zero reaches a register by routes no peephole
+ * enumerates — a frame slot the fold proved, a `movzx` of a byte that is zero, a
+ * call returning zero, a phi of two zeroing paths laid out below the site — and
+ * the scan is address-ordered rather than dominance-ordered on top of that. Each
+ * of those is a red gate on correct C. What it is instead is the triage split on
+ * a REPORTED count, so that a rise in `openOperand` comes with the cheap
+ * question already answered.
  *
  * THE DENOMINATOR IS NOT DECORATION. `peek-a-bin-qbk3` emptied the entire x64
  * population three commits before this was written (six `lock or byte ptr
@@ -366,30 +382,96 @@ function zeroesItsDest(insn: Instruction): boolean {
 }
 
 /**
- * Does every write of `reg` that precedes `at` in ADDRESS ORDER zero it?
+ * A register-to-register `mov`, i.e. a copy whose source is a register.
  *
- * A HINT for triage and never a verdict, for three reasons worth naming.
- * Address order is not dominance — the same one-directional approximation
- * `firstCalleeSavedWrites` makes, and a write laid out below the site that only
- * a back edge reaches is not seen. It stops at the site precisely because the
- * epilogue does not count: `sub_402FEF` restores EBX with a `pop ebx` at
- * 0x403072, and asking the whole function would report that save/restore as a
- * non-zeroing write and lose the corroboration for a genuine zero. And a copy
- * of a zeroed register — `xor eax,eax / mov ebx,eax`, ordinary MSVC output —
- * reads as UNcorroborated while being a real zero, which is the reason this can
- * never become a gate.
+ * `[dst, src]`, or null for anything else. No width test is needed and adding
+ * one would state something the ISA already guarantees: x86 `mov` requires its
+ * two operands to be the same size, so there is no `mov al, ebx` to exclude.
+ */
+function regCopy(insn: Instruction): [string, string] | null {
+  if (withoutLockPrefix(insn.mnemonic) !== "mov") return null;
+  const ops = splitOperands(insn.opStr);
+  if (ops.length !== 2) return null;
+  if (!isKnownRegister(ops[0]) || !isKnownRegister(ops[1])) return null;
+  return [ops[0], ops[1]];
+}
+
+/** How far a copy chain is followed. Hygiene: see the termination note below. */
+const MAX_COPY_CHAIN_DEPTH = 16;
+
+/**
+ * Does every write of `reg` that precedes `at` in ADDRESS ORDER zero it,
+ * following a chain of register-to-register copies?
+ *
+ * A HINT for triage and never a verdict, for the reasons in the header and
+ * below. Address order is not dominance — the same one-directional
+ * approximation `firstCalleeSavedWrites` makes, and a write laid out below the
+ * site that only a back edge reaches is not seen. It stops at the site precisely
+ * because the epilogue does not count: `sub_402FEF` restores EBX with a
+ * `pop ebx` at 0x403072, and asking the whole function would report that
+ * save/restore as a non-zeroing write and lose the corroboration for a genuine
+ * zero.
  *
  * `writtenRegsOfInsn` is `callSummary.ts`'s write model, borrowed rather than
  * re-derived, so the two cannot disagree about what writes a register.
+ *
+ * ── THE COPY CHAIN ─────────────────────────────────────────────────────────
+ *
+ * `xor eax,eax / mov ebx,eax` is ordinary MSVC output and a real zero, and a
+ * scan that reads only the writes of EBX itself calls it UNcorroborated — which
+ * is a spurious triage row, because the fold this audit is watching proves zero
+ * *through* copies. So a write that is a register copy is admitted when every
+ * write of its SOURCE, before the copy's own address, zeroes it. Three details
+ * are the whole rule and each is pinned by a test:
+ *
+ *   - **A source with NO write before the copy is refused**, because the
+ *     recursive call keeps the `writes > 0` requirement. That register holds the
+ *     function's ENTRY value, which is arbitrary; a vacuous true there would
+ *     corroborate `mov edi, esi` on an untouched ESI and turn the hint into a
+ *     rubber stamp. This is the one way the strengthening could have driven the
+ *     count to 0 by no longer looking.
+ *   - **Only `mov <r>,<r>` chains.** A memory load, a `lea`, an arithmetic
+ *     result or a `pop` is refused: whether the value it produces is zero is the
+ *     general dataflow question, and `mov esi, [ebp+8]` is exactly the write
+ *     that (correctly) keeps `peek-a-bin-3axd`'s three sites uncorroborated.
+ *   - **Termination is by construction, not by the depth cap.** Each recursive
+ *     call is asked at `insn.address`, which is strictly below the `at` it was
+ *     asked at, so the chain is well-founded on a finite instruction stream.
+ *     `MAX_COPY_CHAIN_DEPTH` is hostile-input hygiene, and refusing at the cap
+ *     is the safe direction — it is the pre-strengthening answer.
+ *
+ * The chain does NOT make this gateable, and the reason is not the chain's
+ * reach: an uncorroborated row means "this scan could not confirm the operand
+ * is zero", which is not a statement about the machine at all, where an
+ * `arity over` row is provably an argument the machine never passed. Zero
+ * reaches a register by routes no peephole enumerates — a frame slot the fold
+ * proved, a `movzx` of a byte that is zero, a call that returns zero, a phi of
+ * two zeroing paths laid out below the site — and every one of those would be a
+ * red gate on correct output. Exported so the reach census and
+ * `build/selfAssignAudit.test.ts` can ask it directly.
  */
-function everyWriteZeroes(reg: string, insns: Instruction[], at: number): boolean {
+export function everyWriteZeroes(
+  reg: string,
+  insns: Instruction[],
+  at: number,
+  depth = 0,
+): boolean {
   const canon = canonReg(reg);
   let writes = 0;
   for (const insn of insns) {
     if (insn.address >= at) continue;
     if (!writtenRegsOfInsn(insn).includes(canon)) continue;
     writes++;
-    if (!zeroesItsDest(insn)) return false;
+    if (zeroesItsDest(insn)) continue;
+    const copy = regCopy(insn);
+    if (
+      copy !== null &&
+      canonReg(copy[0]) === canon &&
+      depth < MAX_COPY_CHAIN_DEPTH &&
+      everyWriteZeroes(copy[1], insns, insn.address, depth + 1)
+    )
+      continue;
+    return false;
   }
   return writes > 0;
 }

@@ -495,6 +495,12 @@ for (const b of bins) {
   // in the UNcorroborated half is the alarming shape; it is derived rather than
   // stored, since the stored field is the corroborated count.
   //
+  // THE UNCORROBORATED HALF IS NOT A GATE AND MUST NOT BECOME ONE. `everyWriteZeroes`
+  // follows a copy chain, so `peek-a-bin-o7pj`'s standing upgrade to gate it at 0 has
+  // been discharged — and refused: an uncorroborated row says this SCAN could not
+  // confirm the operand is zero, where an `arity over` row is provably an argument the
+  // machine never passed. See `corpus/README.md` for the census and the refusal.
+  //
   // `wrong` and `unresolved` ARE gated at 0 in the run, so a rise here names
   // which binary. `identity` is the denominator and is 0 on both x64 binaries
   // because `peek-a-bin-qbk3` emptied that population — a FALL in it on a PE32
