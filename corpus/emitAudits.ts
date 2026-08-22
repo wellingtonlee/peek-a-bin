@@ -411,15 +411,25 @@ export interface OffsetArgResult {
  * frame recovery is still missing, which is why the sub-slot half is reported
  * separately: those are correctly offset-named at any level of recovery.
  *
- * **REPORT-ONLY, and not gateable at 0 in either direction.** A residue is
- * legitimate: where function detection over-produces and a prologue falls
- * outside the detected range, the frame register belongs to the *enclosing*
- * function and no index can be derived from the offset — the whole PE32
- * residue is that case (`peek-a-bin-abv`, `peek-a-bin-emlv`). On x64 the
- * population is a different thing again and mostly *phantom* rather than
- * merely unnamed: RBP there is usually a callee-saved object pointer, so
- * `[rbp + N]` is a struct field and `isParam` is wrong rather than the name
- * (`peek-a-bin-ikd`).
+ * **REPORT-ONLY, and it is a TARGET rather than a gate — which is the important
+ * thing about this row.** It reads **0 on all four binaries** as of
+ * `peek-a-bin-g186`, so every future run compares 0 against 0 and the row is now
+ * a regression detector: a non-zero reading means frame recovery has lost
+ * ground, either because detection over-produced and a prologue fell outside the
+ * detected range (the frame register then belongs to the *enclosing* function
+ * and no index can be derived from the offset — `peek-a-bin-abv`,
+ * `peek-a-bin-emlv`), or because a displacement stopped being recovered
+ * (`peek-a-bin-ikd`, `peek-a-bin-sx57`).
+ *
+ * **It must NOT be gated at 0, and that is measured rather than cautious.** The
+ * row cannot tell a right change from a wrong one: `peek-a-bin-g186` reaches 0
+ * by declaring no parameter for an unfilled home slot, and the variant
+ * `peek-a-bin-sx57` measured and refused reaches the same 0 by *naming* all 35
+ * x64 slots `arg_<i>` — moving nothing else in the whole report — while printing
+ * eleven declared parameters per x64 binary that a callee-saved register
+ * overwrites at entry. A gate here would be satisfied by either. The question
+ * asked over the DECLARED PARAMETER LIST does discriminate, and that is
+ * `paramClobberedAtEntry` below (`peek-a-bin-15q7`).
  *
  * **Nothing else here can see it.** An offset-named argument is a well-typed
  * identifier that gcc compiles, it states nothing false so polarity,
@@ -495,5 +505,141 @@ export function gotoCheck(sets: { funcs: FuncRec[] }[]): GotoResult {
       if (bad > 0) out.fnWithDangling++;
     }
   }
+  return out;
+}
+
+export interface ParamClobberResult {
+  /**
+   * Declared parameters whose FIRST appearance in the body is an assignment
+   * from a bare callee-saved register. Every one is a slot the emitted C
+   * declares as an incoming value and then overwrites before reading, which no
+   * calling convention produces. Expect 0.
+   */
+  clobbered: number;
+  /** Distinct `function:parameter` pairs, so one row is one slot. */
+  distinct: number;
+  funcsAffected: number;
+  /** Declared parameters read. Instrument liveness: 0 means the scan saw nothing. */
+  params: number;
+  /** Functions read. Instrument liveness. */
+  funcs: number;
+  /** `function:parameter = register` for each row, for the failure message. */
+  rows: string[];
+}
+
+/**
+ * The callee-saved registers, at every width the emitter can spell them.
+ *
+ * Windows x64 preserves RBX, RBP, RDI, RSI and R12-R15; the 32-bit conventions
+ * preserve EBX, ESI, EDI and EBP. Both sets are listed together and the audit is
+ * asked of both widths, because the question is about the *shape* of the
+ * statement rather than about which convention is in force: a parameter
+ * overwritten at entry by a register the callee is obliged to restore is a
+ * register save under a parameter's name on either architecture.
+ *
+ * `rsp`/`esp` are deliberately absent. The stack pointer is preserved too, but
+ * nothing here models it (CLAUDE.md: "No read of RSP may be moved to another
+ * program point"), so an `arg = esp` is a different defect and not this one.
+ */
+const CALLEE_SAVED = new RegExp(
+  "^(?:" +
+    "rbx|rbp|rdi|rsi|r1[2-5]|" +
+    "ebx|ebp|edi|esi|r1[2-5]d|" +
+    "bx|bp|di|si|r1[2-5]w|" +
+    "bl|bpl|dil|sil|r1[2-5]b" +
+    ")(?:_\\d+)?$",
+);
+
+/** The emitted signature's parameter names, or null where the line is not one. */
+function declaredParams(code: string): { names: string[]; bodyAt: number } | null {
+  // The emitter writes the signature as one line ending in `) {`, after the
+  // typedefs and struct declarations. Anchored on the brace rather than on a
+  // return type, so a spelling this audit does not know about cannot skip it.
+  const m = /^[A-Za-z_][^;{}\n]*\(([^)]*)\)\s*\{[ \t]*$/m.exec(code);
+  if (!m) return null;
+  const names: string[] = [];
+  for (const part of m[1].split(",")) {
+    // `int64_t arg_0x30` -> `arg_0x30`; `void` and `...` yield nothing.
+    const name = /([A-Za-z_]\w*)\s*$/.exec(part.trim());
+    if (name && name[1] !== "void") names.push(name[1]);
+  }
+  return { names, bodyAt: m.index + m[0].length };
+}
+
+/**
+ * A declared parameter the body overwrites from a callee-saved register before
+ * ever reading it.
+ *
+ * This exists because **`offsetNamedArgs` cannot tell a right change from a
+ * wrong one**, and that is measured rather than argued (`peek-a-bin-15q7`).
+ * That row counts `arg_0x<N>` spellings, so it reaches 0 both when a slot is
+ * correctly withdrawn from the parameter list (`peek-a-bin-g186`) and when every
+ * slot is wrongly *named* `arg_<i>` (the variant `peek-a-bin-sx57` measured and
+ * refused). Under the naming variant it reads 0/0/0/0 and moves nothing else in
+ * the whole report, while printing four declared parameters that a callee-saved
+ * register overwrites at entry. A row a wrong change drives to its best value is
+ * a target, not a gate.
+ *
+ * So the question is asked over the **declared parameter list** instead, where
+ * the two answers differ. `void f(int64_t arg_0) { arg_0 = rbx; … }` says the
+ * caller passed a value and the callee discarded it unread, which no calling
+ * convention produces: the slot is the caller-reserved home space being used as
+ * a register save, which is what the Microsoft x64 ABI explicitly permits and
+ * what makes "this offset is in the argument area" not imply "this is a
+ * parameter". Every row is therefore provably wrong output rather than a count
+ * awaiting a threshold, and it gates at 0.
+ *
+ * **First appearance, not any appearance**, and that is the whole precision of
+ * it. A parameter assigned from a callee-saved register *after* being read is
+ * ordinary — the callee is free to reuse an argument slot as scratch once it has
+ * consumed the argument, and MSVC does. Only a write that precedes every read
+ * says the declaration was wrong.
+ *
+ * **Both counts beside it are liveness.** `params` and `funcs` go to 0 if the
+ * signature grammar ever stops matching, which is the way a text-scraping audit
+ * fails silently; a gate at 0 over 0 parameters would be green for want of
+ * looking (CLAUDE.md's `armExits` lesson).
+ *
+ * **Nothing else here can see it.** `gcc` compiles an unread parameter happily;
+ * `offsetof` only checks layouts it was given; polarity, `staleGuards` and
+ * `staleReads` are indifferent to a parameter's provenance; and the unrecovered
+ * count does not move because nothing is admitted. `offsetNamedArgs` is the row
+ * that looks like it covers this and provably does not.
+ */
+export function paramClobberedAtEntry(sets: { funcs: FuncRec[] }[]): ParamClobberResult {
+  const out: ParamClobberResult = {
+    clobbered: 0,
+    distinct: 0,
+    funcsAffected: 0,
+    params: 0,
+    funcs: 0,
+    rows: [],
+  };
+  const seen = new Set<string>();
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      out.funcs++;
+      const sig = declaredParams(r.code ?? "");
+      if (!sig) continue;
+      const body = (r.code ?? "").slice(sig.bodyAt);
+      let hits = 0;
+      for (const name of sig.names) {
+        out.params++;
+        // Written so a reformat cannot break it: the first mention is found by
+        // identifier, and the statement shape is then read around that offset
+        // rather than by matching a whole line of expected whitespace.
+        const first = new RegExp(`\\b${name}\\b`).exec(body);
+        if (!first) continue;
+        const stmt = /^\s*=\s*([A-Za-z_]\w*)\s*;/.exec(body.slice(first.index + name.length));
+        if (!stmt || !CALLEE_SAVED.test(stmt[1])) continue;
+        hits++;
+        out.clobbered++;
+        seen.add(`${r.name}:${name}`);
+        if (out.rows.length < 8) out.rows.push(`${r.name}:${name} = ${stmt[1]}`);
+      }
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  out.distinct = seen.size;
   return out;
 }

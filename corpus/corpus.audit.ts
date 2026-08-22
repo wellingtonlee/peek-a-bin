@@ -29,6 +29,7 @@ import {
   type OffsetofResult,
   offsetNamedArgs,
   offsetofCheck,
+  paramClobberedAtEntry,
   unencodableNames,
 } from "./emitAudits";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
@@ -236,6 +237,14 @@ if (!pre.haveBins || !pre.haveCc) {
               // on why a residue is legitimate — and per binary so
               // `compare.mjs` can name which one moved.
               offsetArgs: offsetNamedArgs([{ funcs: r.funcs, is64: r.is64 }]),
+              // The question `offsetArgs` above CANNOT answer: that row reaches 0
+              // both when a slot is correctly withdrawn and when every slot is
+              // wrongly named, so this asks it over the declared parameter list
+              // instead, where the two differ (peek-a-bin-15q7).
+              paramClobber: (() => {
+                const p = paramClobberedAtEntry([{ funcs: r.funcs }]);
+                return { ...p, rows: p.rows.length };
+              })(),
             },
             null,
             1,
@@ -716,6 +725,29 @@ if (!pre.haveBins || !pre.haveCc) {
       );
       expect(u.names).toBe(0);
       expect(u.funcs).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, and the one that discriminates where `offsetNamedArgs` cannot.
+     *
+     * A declared parameter overwritten from a callee-saved register before it is
+     * ever read says the caller passed a value the callee discarded unread, which
+     * no calling convention produces. See `paramClobberedAtEntry` for why the
+     * `offsetNamedArgs` row beside it is a target rather than a gate: the wrong
+     * variant `peek-a-bin-sx57` measured drives that row to its BEST value while
+     * printing exactly these rows.
+     *
+     * `params` is the liveness half and matters as much as the gate — a text
+     * scan whose signature grammar stopped matching would report 0 over 0.
+     */
+    it("never declares a parameter that a callee-saved register overwrites at entry", () => {
+      const p = paramClobberedAtEntry(
+        over(auditedKeys(), results).map((r) => ({ funcs: r.funcs })),
+      );
+      expect(p.rows.join("; ")).toBe("");
+      expect(p.clobbered).toBe(0);
+      expect(p.params).toBeGreaterThan(0);
+      expect(p.funcs).toBeGreaterThan(0);
     });
 
     /**

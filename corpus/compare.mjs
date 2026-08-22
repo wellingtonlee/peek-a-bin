@@ -578,6 +578,31 @@ for (const b of bins) {
     note("  offset-named argument slots    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A parameter a callee-saved register overwrites at entry (emitAudits.ts). ─
+  //
+  // A GATE at 0 in the run, and the row that discriminates where the one above
+  // cannot: `offsetArgs` reaches its best value under BOTH a correct withdrawal
+  // and the wrong naming variant, so a rise here is what separates them. Any
+  // rise is a regression (peek-a-bin-15q7).
+  if (B.paramClobber && C.paramClobber) {
+    row(
+      "params clobbered at entry",
+      (x) => x.paramClobber.clobbered,
+      (a, c) => c > a,
+      "A DECLARED PARAMETER IS OVERWRITTEN BEFORE IT IS READ",
+    );
+    row("  distinct (function, param)", (x) => x.paramClobber.distinct);
+    row("  functions affected", (x) => x.paramClobber.funcsAffected);
+    row(
+      "  declared params scanned",
+      (x) => x.paramClobber.params,
+      (a, c) => c < a,
+      "THE SCAN STOPPED READING PARAMETERS",
+    );
+  } else {
+    note("  params clobbered at entry     NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

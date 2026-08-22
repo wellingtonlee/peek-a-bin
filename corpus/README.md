@@ -162,6 +162,29 @@ call the reader is told does not happen.*
 
 **Dangling gotos.** Every `goto` must name a label its own function defines.
 
+**A declared parameter a callee-saved register overwrites at entry**
+(`paramClobberedAtEntry` in `emitAudits.ts`). *A failure means the emitted C says the caller passed
+a value and the callee discarded it unread, which no calling convention produces.* **0 rows over
+430/578/414/565 declared parameters at `99203fb`.**
+
+It exists because the `offset-named argument slots` row **cannot tell a right change from a wrong
+one**, and that is measured. The Microsoft x64 home space is four slots the *caller* reserves and
+the *callee* may use for anything, so a home slot holding a saved register is not a parameter.
+`peek-a-bin-g186` reaches 0 on that row by declaring no parameter for such a slot; the variant
+`peek-a-bin-sx57` measured and refused reaches the same 0 by *naming* all 35 slots `arg_<i>`,
+moving nothing else in the whole report, while printing **11 declared parameters per x64 binary
+that a callee-saved register overwrites at entry** — 10 register saves across three functions plus
+one byte local (`arg_3 = r13b`). Asked over the declared parameter list, the two answers differ;
+asked over the name, they do not. So that row is a **target** and this one is the **gate**
+(`peek-a-bin-15q7`).
+
+**First appearance, not any appearance.** Once a callee has consumed an argument it may reuse the
+slot as scratch, and MSVC does; only a write preceding every read says the declaration was wrong.
+The register set is what makes it a defect rather than a shape — the same corpus contains
+`arg_3 = rax` under that variant and it is correctly **not** counted, RAX being volatile.
+`params` and `funcs` are the liveness halves, since a text scan fails by silently matching
+nothing.
+
 **A register name the image has no encoding for** (`unencodableNames` in `emitAudits.ts`). *A
 failure means the emitted C names a register no instruction in the file can have written and no
 reader can mean.* `canonReg` maps every alias to the 64-bit parent because that is the register's
