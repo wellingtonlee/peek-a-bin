@@ -543,6 +543,45 @@ for (const b of bins) {
     note("  self-assignments              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A call whose callee the output defines nowhere (undefinedCallees.ts). ──
+  //
+  // REPORT-ONLY in the run, so a RISE here is the whole signal. The two halves
+  // have different owners and must not be added together: INTERNAL is a body
+  // that IS in the output, in the same function, merely unconnected — the
+  // emitter's business, and what `peek-a-bin-pf5g` is about — while EXTERNAL is
+  // a function detection never produced or an indirect call through a data
+  // pointer, which no emitter change reaches. Neither is gateable at 0: the
+  // machine really does make the call and the name is derived from its target,
+  // so a row is an incompleteness rather than a false statement. `calls` is the
+  // liveness half, and a FALL in it to zero is a text scan that stopped
+  // matching — the only way this reads clean for the wrong reason.
+  if (B.undefinedCallees && C.undefinedCallees) {
+    row(
+      "undefined callees, internal",
+      (x) => x.undefinedCallees.internal,
+      (a, c) => c > a,
+      "MORE CALLS TO A BODY THAT IS IN THIS FUNCTION BUT NOT CONNECTED TO THE CALL",
+    );
+    row("  of those, target labelled", (x) => x.undefinedCallees.internalLabelled);
+    row("  distinct internal targets", (x) => x.undefinedCallees.internalDistinct);
+    row("  functions affected", (x) => x.undefinedCallees.internalFuncs);
+    row(
+      "  undefined callees, external",
+      (x) => x.undefinedCallees.external,
+      (a, c) => c > a,
+      "MORE CALLS TO A FUNCTION DETECTION DID NOT PRODUCE",
+    );
+    row("  distinct external targets", (x) => x.undefinedCallees.externalDistinct);
+    row(
+      "  sub_ call sites scanned",
+      (x) => x.undefinedCallees.calls,
+      (a, c) => c === 0 && a > 0,
+      "THE SCAN STOPPED SEEING CALLS AT ALL",
+    );
+  } else {
+    note("  undefined callees             NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A register name the image has no encoding for (emitAudits.ts). ─────────
   //
   // Gated at 0 in the run, so a rise here names which binary. PE32 ONLY: on the

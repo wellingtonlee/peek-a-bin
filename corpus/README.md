@@ -1118,6 +1118,71 @@ of runs moved nothing about arguments at all — the only other signal was `pola
 falling by 2 and 3, which is an instruction to go and read some guards, not a statement about
 calls.
 
+**A call whose callee the output defines nowhere** — `corpus/undefinedCallees.ts`. Every emitted
+`sub_<hex>(` is resolved against the set of addresses this binary's output actually defines a
+function at, and the misses are split by whether the target lies inside the CALLING function's own
+extent:
+
+| | t32 | t64 | w64 | w32 |
+|---|---|---|---|---|
+| internal (inside the caller's extent) | 25 | 0 | 0 | 23 |
+| … of those, target has a `loc_` label | 8 | 0 | 0 | 6 |
+| external (outside it) | 7 | 3 | 3 | 7 |
+
+Measured at `d8d2d02`. The split is the whole point, because the two halves have different owners.
+
+**INTERNAL** is a body that *is* in the output, in this same function, further down under a `loc_`
+label — the call and the body are simply not connected. In this corpus every one of the 48 rows is
+an MSVC x86 `__finally` funclet the detector folded into its parent (`peek-a-bin-qe8z`,
+`peek-a-bin-d827`): the parent's own `call` names the funclet body, the withdrawal took that
+body's start out of the function set, and `resolveCallTarget`'s `sub_<hex>` fallback is what is
+left. All 48 were read against `objdump -d -M intel` and each has **exactly one** direct caller in
+the whole image, inside the function it is now part of. That is a measurement and not a property of
+the row: "internal" is an address relation, so a mid-function entry point of another kind, or
+fiction a misaligned decode produced, would land here too.
+
+**EXTERNAL** is detection's or the IAT's business rather than the emitter's, and is two shapes
+here: a tail `jmp` to a code address function detection never produced, lifted as a call
+(4 per 32-bit binary — t32 0x406c69, 0x40a930, 0x40d9e3, 0x40e43d), and an indirect
+`call dword ptr ds:0x414738` / `call qword ptr [rip+…]` through a data-section function pointer
+with no IAT entry, where the minted name is the **pointer's** address and not the callee's at all
+(3 per binary, on all four).
+
+**Report-only in both directions, and not gateable at 0.** `sub_4038F7();` is an
+*incompleteness*, not a falsehood — the machine really does call that address and the name is
+derived from it — so the row has `offsetNamedArgs`' character rather than `unencodableNames`'. The
+external half is doubly ungateable. If a change ever connects the internal half and drives it to 0,
+gating that half becomes worth re-arguing; at 25/0/0/23 a gate is unavailable on the count alone.
+
+**`internalLabelled` is the row that decided `peek-a-bin-pf5g`, so read it before proposing a
+repair.** A comment at the call site naming the label the body sits under is available only where
+the target is a block leader `structureCFG` labelled — 8 of 25 and 6 of 23. At 16 of each the
+leader is the **unwinder's own entry** three to six bytes earlier, because MSVC emits the register
+reloads only the unwinder needs and the parent's `call` names the body past them: at t32 0x405f1a
+the label is `loc_405F17` and the line under it is `esi = arg_0`, a reload the call does *not*
+execute, so naming that label would state something false. At one site per binary (t32 0x4063b8,
+w32 0x40224b) the funclet body is a **fallthrough continuation** of the parent's own code and
+carries no label at all.
+
+**Nothing else here sees the class, and `gcc` is blind structurally rather than incidentally.**
+`ccSyntaxCheck` compiles one function per file with no prototypes, so *every* callee in the corpus
+is an implicit declaration and `-std=gnu89` accepts one; `-w` suppresses the warning before
+`preludeFor` is consulted, so this leaves **no invented prelude declaration either** and
+`peek-a-bin-k8i`'s instrument is blind too. Telling a folded funclet from an ordinary
+cross-function call would need a whole-program link, which the harness does not do. `distinct
+callees lost` asks whether the emitted C still *names* the callee the disassembly found, and the
+name is on the page — the same camouflage CLAUDE.md records for the `__SEH_epilog4` control.
+`wildBranches` judges targets outside the *image* and these are all inside it; the statement-drop
+audit counts drops, not disconnections.
+
+*Validated by negative control.* Reverting `peek-a-bin-d827`'s fourth admission — the
+`precedingOperands` disjunct in `interiorBranchedOverStarts` — takes `internal` from 25 to 13 on
+t32 and 23 to 11 on w32 while `functions` rises 268 → 280 and 266 → 278, i.e. the instrument moves
+by exactly the twelve funclet starts that admission withdraws per binary, and the external half is
+unmoved at 7. The classifier's own rules — the half-open extent boundary, the `labelled` flag, the
+definition-header skip — are pinned in `build/undefinedCalleeAudit.test.ts`, since the corpus
+populates each half with one shape apiece and cannot separate them.
+
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
@@ -1466,6 +1531,7 @@ remaining gap and is not implemented.
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
+| `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent. Reads only emitted text. Report-only in both directions. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -1478,6 +1544,7 @@ remaining gap and is not implemented.
 | `artifacts/<label>/wildbranches_<key>.jsonl` | Every filed direct branch aimed outside the image, with its `source`. Empty file = audit ran and found none. |
 | `artifacts/<label>/popreads_<key>.jsonl` | Every read of a register a `pop` wrote that the emitted C names under its previous value, with the paired push. Empty file = audit ran and found none. |
 | `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
+| `artifacts/<label>/undefinedcallees_<key>.jsonl` | Every emitted call to an identifier the output never defines, INTERNAL rows first, each with the caller's extent and whether a `loc_` label names the target. Empty file = audit ran and found none. |
 | `artifacts/` | Generated. Gitignored. |
 
 ### The audits that re-run the pipeline prefix, and why they have to

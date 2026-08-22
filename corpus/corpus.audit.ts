@@ -34,6 +34,7 @@ import {
 } from "./emitAudits";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
 import { type BinResult, sweepBinary } from "./sweep";
+import { auditUndefinedCallees, type UndefinedCalleeResult } from "./undefinedCallees";
 
 const pre = preflight();
 
@@ -48,6 +49,7 @@ const results = new Map<BinKey, BinResult>();
 const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
 const arResults = new Map<BinKey, ArityResult>();
+const ucResults = new Map<BinKey, UndefinedCalleeResult>();
 
 const auditedKeys = (): BinKey[] => [...results.keys()];
 function over<T>(keys: readonly BinKey[], m: Map<BinKey, T>): T[] {
@@ -88,6 +90,11 @@ if (!pre.haveBins || !pre.haveCc) {
         // it accepts an implicit declaration at any arity, and `preludeFor`
         // declares every undeclared identifier as its own `long`.
         arResults.set(key, auditApiArity(r.funcs, r.is64));
+        // Every emitted call whose callee is defined nowhere in the output,
+        // split by whether the target is inside the caller's own extent. Report
+        // only, in both directions — see `undefinedCallees.ts` on why an
+        // undefined callee is an incompleteness rather than a false statement.
+        ucResults.set(key, auditUndefinedCallees([{ funcs: r.funcs }]));
 
         // Written per binary rather than at the end, so a run that dies on the
         // fourth binary still leaves the first three on disk.
@@ -201,6 +208,18 @@ if (!pre.haveBins || !pre.haveCc) {
           r.selfAssigns.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.selfAssigns.rows.length > 0 ? "\n" : ""),
         );
+        // Every emitted call to an identifier the output never defines, the
+        // INTERNAL rows first — those are the ones an emitter change could
+        // reach. Written even when empty, so an absent file means the audit did
+        // not run rather than that every call resolves.
+        {
+          const uc = ucResults.get(key) as UndefinedCalleeResult;
+          const ordered = [...uc.rows].sort((a, b) => Number(b.internal) - Number(a.internal));
+          writeFileSync(
+            join(artifactDir, `undefinedcallees_${key}.jsonl`),
+            ordered.map((x) => JSON.stringify(x)).join("\n") + (ordered.length > 0 ? "\n" : ""),
+          );
+        }
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -244,6 +263,13 @@ if (!pre.haveBins || !pre.haveCc) {
               paramClobber: (() => {
                 const p = paramClobberedAtEntry([{ funcs: r.funcs }]);
                 return { ...p, rows: p.rows.length };
+              })(),
+              // A call the reader cannot follow. Per binary because the two
+              // halves have different owners and only the INTERNAL one is an
+              // emitter question; `compare.mjs` judges a rise in each.
+              undefinedCallees: (() => {
+                const uc = ucResults.get(key) as UndefinedCalleeResult;
+                return { ...uc, rows: uc.rows.length };
               })(),
             },
             null,
@@ -772,6 +798,22 @@ if (!pre.haveBins || !pre.haveCc) {
       expect(o.funcs).toBeGreaterThan(0);
     });
 
+    /**
+     * NOT A GATE, and read `undefinedCallees.ts` before making it one. An
+     * undefined callee is an incompleteness rather than a false statement — the
+     * machine really does call that address — so the row has `offsetNamedArgs`'
+     * character and not `unencodableNames`'. What is asserted is only that the
+     * scan READ something: this is a text-scraping audit, and the way one fails
+     * is by silently matching nothing, which would report 0 undefined callees
+     * over a binary whose every call is undefined.
+     */
+    it("reads the emitted C for calls with no definition (instrument liveness)", () => {
+      for (const [key, uc] of ucResults) {
+        expect(`${key}: funcs=${uc.funcs > 0}`).toBe(`${key}: funcs=true`);
+        expect(uc.calls).toBeGreaterThan(0);
+      }
+    });
+
     it("resolves every goto to a label the same function defines", () => {
       const g = gotoCheck(over(auditedKeys(), results).map((r) => ({ funcs: r.funcs })));
       expect(g.dangling).toBe(0);
@@ -1171,6 +1213,36 @@ function renderReport(): string {
     L.push(
       "    FAINT trace: only 2 of 3axd's 97 wrong reads left one. In selfassigns_<bin>.jsonl.",
     );
+    const uc = ucResults.get(r.key);
+    if (uc !== undefined) {
+      L.push(
+        `  calls with no definition    ${uc.internal} internal ` +
+          `(${uc.internalDistinct} distinct targets over ${uc.internalFuncs} functions, ` +
+          `${uc.internalLabelled} with a loc_ label to name), ` +
+          `${uc.external} external (${uc.externalDistinct} distinct over ${uc.externalFuncs}), ` +
+          `of ${uc.calls} sub_ calls scanned`,
+      );
+      L.push("    An emitted `sub_<hex>(` the output defines nowhere — a call the reader cannot");
+      L.push("    follow. REPORT-ONLY in both directions: the machine does make that call and");
+      L.push("    the name is derived from its target, so the row is an INCOMPLETENESS and not a");
+      L.push("    false statement — `offsetNamedArgs`' character, not `unencodableNames`'.");
+      L.push("    INTERNAL means the target is inside the caller's own extent, so the callee's");
+      L.push("    body IS in the output, further down under a `loc_` label, merely unconnected;");
+      L.push("    in this corpus all of them are MSVC `__finally` funclets the detector folded");
+      L.push("    into their parents (peek-a-bin-qe8z, peek-a-bin-d827), 25/0/0/23 at d8d2d02.");
+      L.push("    EXTERNAL is detection's or the IAT's business, not the emitter's: a tail `jmp`");
+      L.push("    to a function detection never produced, or an indirect call through a data");
+      L.push("    pointer with no IAT entry, where the name is the POINTER's address. `label`");
+      L.push("    is what decides whether a comment could name the body: only where the target");
+      L.push("    is a block leader, 8 of 25 and 6 of 23 here — elsewhere the leader is the");
+      L.push("    UNWINDER's entry a few bytes earlier and naming it would claim a reload the");
+      L.push("    call does not execute. gcc is structurally blind (one function per file, no");
+      L.push("    prototypes, so every callee is an implicit declaration `gnu89` accepts) and so");
+      L.push("    is `distinct callees lost`, which asks only whether the name is on the page.");
+      L.push(
+        "    Sites in undefinedcallees_<bin>.jsonl. See undefinedCallees.ts (peek-a-bin-pf5g).",
+      );
+    }
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }
