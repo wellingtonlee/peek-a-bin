@@ -493,7 +493,12 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "rbp, rcx"],
       ["mov", "rax, qword ptr [rbp + 0x18]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(argNames(frame)).toEqual([]);
+    // And the refusal is PUBLISHED, because it is also what stops `promote.ts`
+    // from following a copy of RBP to a slot of a frame that does not exist —
+    // the FPO reading `structs.ts` must be left to make (peek-a-bin-cvri).
+    expect(frame!.frameDelta).toBeNull();
   });
 
   it("records no parameter for a slot below the argument area of a shifted frame", () => {
@@ -535,7 +540,12 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
     // 0x10 is below the return address at 0x18, so it is not an argument.
     expect(argNames(frame)).toEqual(["arg_4"]);
-    expect(frame!.framed).toBe(false);
+    // The displacement is PUBLISHED, and this asserted a `framed` of false until
+    // peek-a-bin-cvri — which is the second half of the same defect: `framed`
+    // was also `promote.ts`'s gate on following a copy of the frame register, so
+    // a shifted frame had its aliased slots left unresolved. The register is a
+    // frame pointer here whatever `D` is.
+    expect(frame!.frameDelta).toBe(0x18);
   });
 
   it("numbers slots of a frame established with lea", () => {
@@ -558,9 +568,12 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     );
     const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
     expect(argNames(frame)).toEqual(["arg_4"]);
-    // Not the canonical geometry, which is a different question — see
-    // `StackFrame.framed` and `promote.ts`'s `frameRegisterAliases`.
-    expect(frame!.framed).toBe(false);
+    // Not the canonical geometry, which is a different question — and one that
+    // is no longer a boolean: `promote.ts`'s `frameRegisterAliases` needs only
+    // "is this a frame pointer", which is `frameDelta !== null`, so the
+    // displacement is published rather than compared to `slotSize` here
+    // (peek-a-bin-cvri).
+    expect(frame!.frameDelta).toBe(0x28);
   });
 
   // This asserted ["arg_0x8"] until peek-a-bin-ikd and ["arg_0xC"] until

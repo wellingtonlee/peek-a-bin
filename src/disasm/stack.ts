@@ -867,10 +867,12 @@ export function analyzeStackFrame(
   // index is still not spellable, of which the x64 home space is the one that
   // is not about the frame at all.
   //
-  // `framed` — the *canonical* geometry — no longer takes part in naming. It is
-  // published for `promote.ts`, which uses it for a different question: whether
-  // a copy of the frame register may be followed to the same slot.
-  const framed = frameDelta === slotSize;
+  // `frameDelta` itself is published on the `StackFrame` for `promote.ts`, which
+  // asks a different question of it: whether a copy of the frame register may be
+  // followed to the same slot. That needs only "is the frame register a frame
+  // pointer", i.e. `!== null`, and it used to be handed the canonical geometry
+  // `frameDelta === slotSize` under the name `framed` — which withheld the
+  // whole shifted-frame population from it (peek-a-bin-cvri).
 
   const usedNames = new Set<string>();
   for (const v of entries) {
@@ -895,7 +897,7 @@ export function analyzeStackFrame(
     });
   }
 
-  return { frameSize, vars, framed };
+  return { frameSize, vars, frameDelta };
 }
 
 /** Stable identity for a stack slot: base register + signed operand offset. */

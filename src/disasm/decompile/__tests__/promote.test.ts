@@ -36,13 +36,30 @@ function stackVar(over: Partial<StackVar> & { name: string }): StackVar {
   return over.signedOffset === undefined ? { ...base, signedOffset: -base.offset } : base;
 }
 
+/**
+ * The canonical geometry: `D === slotSize`, i.e. `push <fp>; mov <fp>, <sp>`.
+ * These fixtures are 64-bit unless they say otherwise, so `D` is 8.
+ */
 function frameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, framed: true };
+  return { frameSize: 0x40, vars, frameDelta: 8 };
 }
 
-/** A frame whose prologue stack.ts could NOT verify — frame-pointer omission. */
+/**
+ * A frame register `stack.ts` could not derive from the stack pointer —
+ * frame-pointer omission, where RBP is an ordinary callee-saved register.
+ */
 function unframedFrameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, framed: false };
+  return { frameSize: 0x40, vars, frameDelta: null };
+}
+
+/**
+ * A SHIFTED frame: a real frame pointer whose displacement is not the canonical
+ * one — `mov rbp, rsp` after N pushes, or `lea rbp, [rsp + k]`. Both are
+ * ordinary MSVC output and hold 34 of this corpus's x64 functions
+ * (peek-a-bin-ikd, peek-a-bin-sx57).
+ */
+function shiftedFrameOf(frameDelta: number, ...vars: StackVar[]): StackFrame {
+  return { frameSize: 0x40, vars, frameDelta };
 }
 
 /** `[rbp - offset]` — a local slot. */
@@ -311,6 +328,30 @@ describe("promoteVars — frame-register aliases", () => {
       { frame: unframed },
     );
     expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
+  });
+
+  // The other half of the same question, and the defect peek-a-bin-cvri fixed:
+  // `promote.ts` used to gate this on the CANONICAL geometry, so a frame pointer
+  // established after N pushes — a real frame pointer, invariant for the whole
+  // body — had its aliased slots left unresolved. `t64!sub_1400080E0` printed
+  // `arg_0` at one site and `*(int32_t*)(rbp_1 + 0x48)` at three others, and its
+  // `arg_1` was a declared parameter with zero uses while both reads of the slot
+  // went through the copy.
+  it("follows a copy when the frame is shifted but the displacement is known", () => {
+    // Eight pushes then `mov rbp, rsp` gives D = 0x40, so [rbp + 0x48] is
+    // argument 0's home slot — sub_1400080E0's own geometry.
+    const shifted = shiftedFrameOf(
+      0x40,
+      stackVar({ name: "arg_0", offset: 0x48, key: stackVarKey("bp", 0x48) }),
+    );
+    const fn = promote(
+      [
+        assign(irVar("rbp_1", 8), irReg("rbp", 8)),
+        assign(irReg("eax", 4), viaVar("rbp_1", "+", 0x48)),
+      ],
+      { frame: shifted },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
   });
 
   it("still promotes the literal frame register when the prologue was not verified", () => {

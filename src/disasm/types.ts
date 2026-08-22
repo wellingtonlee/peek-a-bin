@@ -47,22 +47,39 @@ export interface StackFrame {
   frameSize: number;
   vars: StackVar[];
   /**
-   * Did the function open with the canonical `push <fp>; mov <fp>, <sp>`
-   * prologue? Only then is the frame register a *frame* pointer — invariant for
-   * the whole body, and with `[<fp> + N]` addressing the caller's argument
-   * area. Under frame-pointer omission RBP is an ordinary callee-saved
-   * register, usually an object pointer, and neither of those holds.
+   * `E - V` for the frame register, where `E` is the stack pointer on **entry**
+   * and `V` the value the function establishes in it — or `null` when it never
+   * establishes one *from the stack pointer* at all. `inlineFrameGeometry` in
+   * `disasm/stack.ts` is the one place it is computed.
    *
-   * NOT the same fact as `arg_<N>` in a var's name, and it stopped being so at
-   * peek-a-bin-sx57. That name now means the weaker "the frame register's
-   * displacement from the entry stack pointer was recovered", which is what
-   * makes an argument *index* derivable; this means the displacement is
-   * `slotSize` specifically. Every framed function is displacement-recovered,
-   * not the reverse. Consumers wanting "is the frame register invariant" —
-   * `promote.ts`'s `frameRegisterAliases` is the only one — want this field;
-   * consumers wanting "is this slot an argument position" want the name.
+   * The QUANTITY, and it replaced a boolean `framed` at peek-a-bin-cvri because
+   * that boolean was answering two different questions with one bit:
+   *
+   *  - **`frameDelta !== null` means the frame register IS a frame pointer** —
+   *    derived from the stack pointer, therefore invariant for the whole body.
+   *    That invariance is what makes a *copy* of the register interchangeable
+   *    with the register itself, which is the only thing `promote.ts`'s
+   *    `frameRegisterAliases` needs to know. `null` is frame-pointer omission:
+   *    `mov rbp, rcx` makes RBP an object pointer, `mov rbp, rdx` is how an MSVC
+   *    funclet receives its parent's frame, `xor ebp, ebp` makes it a constant,
+   *    and in none of those is `[<fp> + N]` this frame at all.
+   *  - **The value says where the incoming-argument area begins**:
+   *    `[<fp> + D]` holds the return address, so `[<fp> + D + slot]` is
+   *    argument 0 and `[<fp> + off]` is argument `(off - D - slot) / slot`.
+   *
+   * `framed` was `D === slotSize`, i.e. the *canonical* geometry alone, and it
+   * was the gate on both. A shifted frame — `lea rbp, [rsp + k]`, or
+   * `mov rbp, rsp` after N pushes — is an ordinary MSVC shape with some other
+   * `D` and a frame pointer every bit as invariant, so gating invariance on the
+   * canonical geometry printed one slot under two spellings in 34 of this
+   * corpus's x64 functions (peek-a-bin-ikd, peek-a-bin-sx57, peek-a-bin-cvri).
+   *
+   * `null` and `undefined` must read the same way, since a `StackFrame` crosses
+   * a worker boundary: consumers ask `frameDelta ?? null`, so a shape from
+   * before this field degrades to the refusal rather than to "every frame
+   * register is a frame pointer".
    */
-  framed: boolean;
+  frameDelta: number | null;
 }
 
 export interface DataItem {

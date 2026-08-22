@@ -171,20 +171,44 @@ interface StackAccess {
  * two spellings — `arg_0` at one site and `*(int32_t*)(ebp_1 + 8)` at another
  * (peek-a-bin-5zpo).
  *
- * ONLY under a verified prologue, and only for the frame register. Both limits
- * are the point:
+ * ONLY where the frame register IS a frame pointer, and only for the frame
+ * register. Both limits are the point:
  *
- *  - Without `StackFrame.framed` the invariance is not established. RBP is then
- *    an ordinary callee-saved register — usually an object pointer — and two
- *    versions of it are two different objects, which is precisely what the
- *    split exists to keep apart. It is also what `structs.ts` needs left alone:
- *    `[rbp + 0x10]` in a frame-pointer-omitted function is a struct field
- *    access, and this pass consuming it would take it out of struct synthesis's
- *    reach before that pass's own gate could decline it.
+ *  - **`StackFrame.frameDelta === null` is frame-pointer omission**, and there
+ *    the invariance is not established: RBP is an ordinary callee-saved
+ *    register — usually an object pointer — so two versions of it are two
+ *    different objects, which is precisely what the split exists to keep apart.
+ *    It is also what `structs.ts` needs left alone: `[rbp + 0x10]` in an FPO
+ *    function is a struct field access, and this pass consuming it would take it
+ *    out of struct synthesis's reach before that pass's own gate could decline
+ *    it. `stack.ts` reaches `null` by *refusing* everything it cannot read as a
+ *    stack-derived write of the frame register, so the FPO population is
+ *    excluded structurally rather than by a test here.
+ *  - **A displacement, not the canonical geometry.** What is needed is only that
+ *    the register was established from the stack pointer, since that is what
+ *    makes it invariant; *where* it points is a separate question, and one this
+ *    pass never asks. The gate used to be `StackFrame.framed`, i.e.
+ *    `D === slotSize` — so a shifted frame (`lea rbp, [rsp + k]`, or
+ *    `mov rbp, rsp` after N pushes, both ordinary MSVC output) was refused for
+ *    having a frame pointer in the wrong *place*, and 34 x64 functions of this
+ *    corpus printed one slot under two spellings as a result: `arg_0` at one
+ *    site and `*(int32_t*)(rbp_1 + 0x48)` at another in `t64!sub_1400080E0`,
+ *    whose `arg_1` was a declared parameter with zero uses while both its reads
+ *    went through the copy (peek-a-bin-cvri).
  *  - The stack pointer gets nothing here. It moves — that is the whole of what
  *    it does — so no version of it is interchangeable with another, and
  *    CLAUDE.md's standing rule is that no read of RSP may be reinterpreted at a
  *    program point other than its own.
+ *
+ * The invariance is a claim about the whole body and this pass sees only the
+ * prologue's arithmetic, so it was checked rather than assumed: over all four
+ * corpus binaries, **no** function with a recovered displacement writes its
+ * frame register anywhere between establishing it and the epilogue's
+ * `pop`/`leave` restore — 18 + 16 shifted-frame functions on the x64 pair and 1
+ * on each PE32 binary. The two counterexamples in the corpus (`t32!sub_40A810`
+ * and `w32!sub_4092B0`, `longjmp` reloading EBP from a `jmp_buf`) are both
+ * *canonical*, so they were already inside this pass's reach before the gate was
+ * widened; see peek-a-bin-633s.
  *
  * The evidence is the body's own assignments, in either direction, because
  * `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;` — the
@@ -192,9 +216,13 @@ interface StackAccess {
  * to the frame register. Chains are resolved to a fixpoint so the order the
  * statements appear in does not matter.
  */
-function frameRegisterAliases(body: IRStmt[], is64: boolean, framed: boolean): Set<string> {
+function frameRegisterAliases(
+  body: IRStmt[],
+  is64: boolean,
+  frameDelta: number | null,
+): Set<string> {
   const alias = new Set<string>();
-  if (!framed) return alias;
+  if (frameDelta === null) return alias;
   const bp = is64 ? "rbp" : "ebp";
   const isFrameReg = (e: IRExpr): boolean => e.kind === "reg" && e.name.toLowerCase() === bp;
 
@@ -235,8 +263,9 @@ function frameRegisterAliases(body: IRStmt[], is64: boolean, framed: boolean): S
  * Check if expr is [rbp - const] or [rsp + const] and return the slot.
  *
  * `bpAliases` names variables standing in for the frame register — see
- * `frameRegisterAliases`. It is empty unless the frame-pointer prologue was
- * verified, so the frame-pointer-omission reading of `[rbp + N]` is untouched.
+ * `frameRegisterAliases`. It is empty unless `stack.ts` recovered the frame
+ * register's displacement, so the frame-pointer-omission reading of `[rbp + N]`
+ * is untouched.
  */
 function matchStackAccess(
   expr: IRExpr,
@@ -644,8 +673,11 @@ export function promoteVars(
 
   // Variables standing in for the frame register, so a slot reached through one
   // resolves to the same name as one reached through the register. Empty unless
-  // stack.ts verified the prologue — see `frameRegisterAliases`.
-  const bpAliases = frameRegisterAliases(body, is64, stackFrame?.framed ?? false);
+  // stack.ts recovered the frame register's displacement, which is what says the
+  // register is a frame pointer at all — see `frameRegisterAliases`. `?? null`
+  // rather than `?.` alone: a `StackFrame` crosses a worker boundary, and a
+  // shape predating the field must read as the refusal.
+  const bpAliases = frameRegisterAliases(body, is64, stackFrame?.frameDelta ?? null);
 
   // For x64 fastcall: add register params
   if (is64 && signature && signature.paramCount > 0) {
