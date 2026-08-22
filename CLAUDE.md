@@ -241,14 +241,14 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**The whole-tree figures below were last taken from ONE run at `b3ce0ec`**, which is what makes
+**The whole-tree figures below were last taken from ONE run at `a236123`**, which is what makes
 them mutually consistent: eight changes measured in parallel against the same base each re-stamped
 this section with numbers true of *their* base and of no single tree, which is the state
-`6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **288/279/275/285
-functions**, 18025/16844/15111/16601 instructions, 13/0/0/11 jump tables, gcc **1127/1127 clean**,
+`6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **280/279/275/278
+functions**, 18025/16844/15111/16601 instructions, 13/0/0/11 jump tables, gcc **1112/1112 clean**,
 `offsetof` **346/301/303/354 fields over 55/54/53/59 definitions, every ratio 1.00**, polarity
 anchor-A **517/574/497/441 correct with 0 inverted and 0 mismatch**, statements dropped **0** of
-7274/7764/6893/6713 lifted, unrecovered values **36/12/11/33**, loop shape **`for` 6/6/6/6,
+7274/7764/6893/6717 lifted, unrecovered values **36/12/11/33**, loop shape **`for` 6/6/6/6,
 `while` 111/106/99/98, `do/while` 78/77/76/77, `if` 1987/1938/1719/1759**, and **0 on every
 gate** —
 popReads (now gated on both counts, with 151/5/5/146 of 1095/350/328/1043 pops paired beside it),
