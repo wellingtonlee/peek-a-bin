@@ -342,6 +342,46 @@ for (const b of bins) {
     note("  wrong-operand guards named    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A guard wrong on one incoming edge (corpus/crossEdgeGuards.ts). ────────
+  //
+  // The dimension `staleGuards` above cannot reach: its scan needs a cmp/test in
+  // the jcc's own block, and these blocks hold nothing but the jcc, so they are
+  // not in its denominator. A Jcc alone in its block reads flags set before the
+  // block was entered, and where its predecessors set them from different tests
+  // no block-local `if` states the machine on every path in.
+  //
+  // NAMED is gated at 0 in the run, so a rise fails CI before this script is
+  // reached; it is repeated here because compare.mjs is what says WHICH rows came
+  // back. DIFFER is deliberately not gated — it is a property of the machine code
+  // and moves only when function detection or block construction moves, so a
+  // change in it is a signal about something else and is adjudicated, not judged.
+  // ANSWERED is the complete half — the predecessor the code admitted, which is
+  // necessary for either route to spell a condition at such a jcc — and NAMED is
+  // the same defect stated at the output, where it depends on the polarity
+  // anchor and is a lower bound. The two SOLE- rows are the liveness halves: a
+  // fall in either says a 0 above may be for want of observing rather than for
+  // want of a defect.
+  if (B.crossEdgeGuards && C.crossEdgeGuards) {
+    row(
+      "cross-edge guards answered",
+      (x) => x.crossEdgeGuards.admitted,
+      (a, c) => c > a,
+    );
+    row(
+      "  of those, named on the page",
+      (x) => x.crossEdgeGuards.named,
+      (a, c) => c > a,
+    );
+    row("  disagreeing edges (machine shape)", (x) => x.crossEdgeGuards.differ);
+    row("  agreeing edges", (x) => x.crossEdgeGuards.agree);
+    row("  multi-edge blocks", (x) => x.crossEdgeGuards.multi);
+    row("  cross-edge blocks", (x) => x.crossEdgeGuards.crossEdge);
+    row("  sole-predecessor blocks answered", (x) => x.crossEdgeGuards.soleAdmitted);
+    row("  sole-predecessor blocks named", (x) => x.crossEdgeGuards.soleNamed);
+  } else {
+    note("  cross-edge guards answered    NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A register a `pop` wrote, read under its previous value (popReads.ts). ──
   //
   // Not gated in the run — the count is not zero and no fix has been taken —

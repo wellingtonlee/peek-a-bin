@@ -149,6 +149,15 @@ if (!pre.haveBins || !pre.haveCc) {
           r.staleGuards.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.staleGuards.rows.length > 0 ? "\n" : ""),
         );
+        // Every cross-edge block whose incoming edges make different tests,
+        // with the emitted condition where one reached the page. Written even
+        // when empty, because the standing claim is that `named` is 0 while
+        // `differ` is not — an absent file has to mean the audit did not run.
+        writeFileSync(
+          join(artifactDir, `crossedgeguards_${key}.jsonl`),
+          r.crossEdgeGuards.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.crossEdgeGuards.rows.length > 0 ? "\n" : ""),
+        );
         // Every read of a register a `pop` wrote that the emitted C still names
         // under its previous value. Written even when empty, so an absent file
         // means the audit did not run rather than that it found nothing.
@@ -203,6 +212,7 @@ if (!pre.haveBins || !pre.haveCc) {
                 corrupt: r.staleV0.corrupt.length,
               },
               staleGuards: { ...r.staleGuards, rows: r.staleGuards.rows.length },
+              crossEdgeGuards: { ...r.crossEdgeGuards, rows: r.crossEdgeGuards.rows.length },
               popReads: { ...r.popReads, rows: r.popReads.rows.length },
               lostDefs: { ...r.lostDefs, rows: r.lostDefs.rows.length },
               armExits: { ...r.armExits, rows: r.armExits.rows.length },
@@ -376,6 +386,87 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(sg.blocks).toBeGreaterThan(0);
       }
       expect(shapes).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, for the class every audit above is structurally blind to.
+     *
+     * A Jcc alone in its basic block reads flags set before the block was
+     * entered. Where several predecessors set them from DIFFERENT tests, no
+     * single block-local `if` states the machine, and a guard emitted there is
+     * a test the machine does not make on at least one path in. Every row is
+     * therefore provably wrong output rather than a count awaiting a threshold,
+     * which is `polarity inverted`'s character and is what makes it gateable.
+     *
+     * It is a gate on the day it lands because it lands at 0: `unanimousCompare`
+     * already refuses all 12 disagreeing sites in this corpus. What it buys is
+     * that a RELAXATION of that refusal is red rather than green. Negative-
+     * controlled at 16f1633 — drop the agreement test and answer such a block
+     * from its first predecessor, and this names 2/5/4/1 rows, including
+     * `t64!sub_140002A2C` at 0x140002afd, whose emitted `if (rbx_2 == 0)` sits
+     * on a block the other edge reaches having tested RBP. Every other gate in
+     * this file passes that control, and the recovery baseline scores it as an
+     * IMPROVEMENT, unrecovered values falling by 12.
+     *
+     * TWO GATED COUNTS, and the reason for both is that the stronger claim has
+     * the weaker coverage. `named` is a guard anchored on the page — a test the
+     * machine does not make, in C that compiles — but the polarity pass anchors
+     * only some guards, so under the control it sees 8 of the 12 sites and NOT
+     * the `sub_140002A2C` witness, whose `if (rbx_2 == 0)` is on the page at
+     * emitted line 67 with no anchor to hang it on. `admitted` is the complete
+     * one: both routes to a condition at such a jcc take their stream from
+     * `flagScanStream(block, flagPredecessor(…))`, so an admitted predecessor
+     * is necessary for either to spell anything, and it is address-exact —
+     * 12 of 12 under the control. It reads the decision the code made rather
+     * than the text it produced, which makes that half a differential test
+     * between two independently written answers to the same question rather
+     * than an oracle outside it.
+     *
+     * FOUR liveness assertions, because this audit measures an absence and four
+     * different things could make the absence vacuous. `blocks` says it
+     * examined the binary at all — thousands, so it is the robust "did it run"
+     * check. `differ` says it can still find the machine-code shape it watches,
+     * and is asserted over the corpus TOTAL rather than per binary: it is 1 on
+     * w32, thin enough that a legitimate detection change could take one binary
+     * to 0 without the instrument having gone blind. `soleAdmitted === sole`
+     * says `flagPredecessor` is still what decides this, so `admitted` is 0 for
+     * want of a defect rather than for want of looking. `soleNamed` says the
+     * same about the anchoring behind `named`.
+     *
+     * See `corpus/crossEdgeGuards.ts` for why the presence of a guard is the
+     * whole question today, and for the one mechanism that would require
+     * sharpening it (peek-a-bin-0xe2).
+     */
+    it("never answers a jcc from an edge that disagrees with the others", () => {
+      let differ = 0;
+      let soleNamed = 0;
+      for (const r of results.values()) {
+        const ce = r.crossEdgeGuards;
+        differ += ce.differ;
+        soleNamed += ce.soleNamed;
+        expect(
+          `${r.key} cross-edge: ${ce.rows
+            .filter((x) => x.gated && x.admittedFrom !== null)
+            .slice(0, 6)
+            .map(
+              (x) =>
+                `${x.func}@0x${x.jcc.toString(16)} answered from ` +
+                `0x${(x.admittedFrom ?? 0).toString(16)} ${x.emitted === null ? "(refused downstream)" : `'${x.emitted}'`} ` +
+                `— edges ${x.edges.map((e) => `0x${e.pred.toString(16)}:${e.ownerText}`).join(" | ")}`,
+            )
+            .join("; ")}`,
+        ).toBe(`${r.key} cross-edge: `);
+        expect(ce.admitted).toBe(0);
+        expect(ce.named).toBe(0);
+        expect(ce.blocks).toBeGreaterThan(0);
+        // `flagPredecessor` still being consulted, which is what stops
+        // `admitted` reading 0 for want of looking. A cross-edge block with one
+        // predecessor is exactly the shape the rule answers freely, so the two
+        // are equal on a healthy tree rather than merely non-zero.
+        expect(ce.soleAdmitted).toBe(ce.sole);
+      }
+      expect(differ).toBeGreaterThan(0);
+      expect(soleNamed).toBeGreaterThan(0);
     });
 
     /**
@@ -951,6 +1042,27 @@ function renderReport(): string {
     L.push("    the spoiler could have written — since peek-a-bin-xskz the lifter materialises a");
     L.push("    spoiled compare's operands, so a guard being present is no longer the question.");
     L.push("    Sites in staleguards_<bin>.jsonl. See corpus/README.md.");
+    const ce = r.crossEdgeGuards;
+    L.push(
+      `  cross-edge guards           ${ce.admitted} answered / ${ce.named} named of ` +
+        `${ce.differ} disagreeing (${ce.differOther} non-compare, ${ce.admittedOther} answered, ` +
+        `${ce.namedOther} named) of ${ce.multi} multi-edge, ${ce.agree} agreeing ` +
+        `(${ce.agreeAdmitted} answered), over ${ce.crossEdge} cross-edge of ${ce.blocks} jcc blocks`,
+    );
+    L.push(
+      `    sole-predecessor blocks   ${ce.soleAdmitted}/${ce.sole} answered, ${ce.soleNamed} named ` +
+        `— the two liveness halves; ${ce.refused} refused, ${ce.unknownEdge} unreadable edge`,
+    );
+    L.push("    A Jcc ALONE in its block reads flags set before the block, and where its");
+    L.push("    predecessors set them from different tests no block-local `if` states the");
+    L.push("    machine on every path in. GATED at 0 on BOTH counts: `named` is the guard on");
+    L.push("    the page, `answered` is the predecessor the code admitted — necessary for");
+    L.push("    either route to spell a condition, so it is the COMPLETE half where `named`");
+    L.push("    depends on the polarity anchor. `staleGuards` above cannot see this at all:");
+    L.push("    its scan needs a cmp/test in the jcc's own block. Polarity judges the");
+    L.push("    OPERATOR, which is right; it is the operands that belong to one edge.");
+    L.push("    `differ` is machine-code shape and does not move with a decompiler fix.");
+    L.push("    Sites in crossedgeguards_<bin>.jsonl. See crossEdgeGuards.ts.");
     const pr = r.popReads;
     L.push(
       `  pop-restored reads          ${pr.wrong} wrong over ${pr.popsWrong} pops ` +

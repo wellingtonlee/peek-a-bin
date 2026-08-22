@@ -27,6 +27,11 @@ import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
 import { type ArmExitResult, auditArmExits, emptyArmExits } from "./armExits";
+import {
+  auditCrossEdgeGuards,
+  type CrossEdgeGuardResult,
+  emptyCrossEdgeGuards,
+} from "./crossEdgeGuards";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
@@ -526,6 +531,15 @@ export interface BinResult {
    */
   staleGuards: StaleGuardResult;
   /**
+   * A GUARD THAT IS WRONG ON ONE INCOMING EDGE. A Jcc alone in its block reads
+   * flags set before the block, and where several predecessors set them from
+   * different tests no single block-local `if` states the machine. `admitted`
+   * and `named` are the two gates — the complete one and the output-level one;
+   * `differ` is the machine-code shape they watch for and does not move with a
+   * decompiler fix. See `corpus/crossEdgeGuards.ts`.
+   */
+  crossEdgeGuards: CrossEdgeGuardResult;
+  /**
    * A REGISTER A `pop` WROTE, READ IN THE EMITTED C UNDER ITS PREVIOUS VALUE.
    *
    * REPORTED, NOT GATED, and `corpus/popReads.ts` says why: the count is not
@@ -742,6 +756,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     },
     staleV0: emptyStaleV0(),
     staleGuards: emptyStaleGuards(),
+    crossEdgeGuards: emptyCrossEdgeGuards(),
     popReads: emptyPopReads(),
     lostDefs: emptyLostDefs(),
     armExits: emptyArmExits(),
@@ -869,12 +884,18 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       const g = res.guards[gi];
       if (!emittedAt.has(g.jcc)) emittedAt.set(g.jcc, g.cond);
     }
-    auditStaleGuards(
-      res.staleGuards,
+    const cfgForGuards = buildCFG(func, insns, af.xrefMap, jumpTables);
+    auditStaleGuards(res.staleGuards, key, func.name, func.address, cfgForGuards, emittedAt);
+    // A GUARD THAT IS WRONG ON ONE INCOMING EDGE. The same `emittedAt` map and
+    // the same CFG, for the question `staleGuards` structurally cannot ask: its
+    // scan needs a `cmp`/`test` in the jcc's own block, and these blocks hold
+    // nothing but the jcc. One `buildCFG` call feeds both.
+    auditCrossEdgeGuards(
+      res.crossEdgeGuards,
       key,
       func.name,
       func.address,
-      buildCFG(func, insns, af.xrefMap, jumpTables),
+      cfgForGuards,
       emittedAt,
     );
     // Runs AFTER `decompileFunction`, so the shared `StructRegistry` has

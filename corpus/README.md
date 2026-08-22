@@ -345,6 +345,101 @@ condition where one reached the page (`null` where the reading was refused), plu
 reason it is a defect, or `null`), the canonicalised registers written between the compare and the
 jcc, and whether that stretch wrote memory.
 
+**Cross-edge guards** (`crossEdgeGuards.ts`). *A failure means the emitted `if` asserts a test the
+machine makes on some paths into the block and not on others.* A Jcc **alone in its basic block**
+sets no flags of its own, so the test it makes was made in the block before it — and where there
+is more than one such block, there is more than one test. One block-local `if` can state only one
+of them.
+
+```text
+  ; t64!sub_140002A2C
+  140002afa  test rbx, rbx
+  140002afd  je   0x140002c5b     <- a block holding nothing but this jcc
+  …
+  140002c16  test rbp, rbp
+  140002c19  jmp  0x140002afd     <- the other way in
+```
+
+`if (rbx == 0)` is the machine's test on the fallthrough edge and is a statement about RBX in a
+program that, on the other edge, branched on RBP.
+
+**This existed as a hole for as long as it did because every other audit here is blind to it, and
+that was demonstrated by executing the wrong version rather than argued.** Drop only the agreement
+test in `flagModel.ts`'s `unanimousCompare` — one line — and answer such a block from its *first*
+predecessor. `npm run corpus` then passes all 19 pre-existing gates and `compare.mjs` reports
+**"VERDICT: no regression"**, measured at `16f1633`. Polarity judges the emitted comparison's
+**operator** against the jcc, and the operator is right — it is the *operands* that belong to one
+edge — so 519/577/499/442 guards are audited **all correct**. `staleGuards` above is **block-local
+by construction**: its scan needs a `cmp`/`test` in the jcc's own block, and these blocks have
+none, so they are not in its denominator at all. gcc compiles it. And it is not `__unrecovered_N`,
+so the **recovery baseline scores it as an improvement** — unrecovered values *fall* by 12,
+2/5/4/1 on t32/t64/w64/w32.
+
+| | |
+|---|---|
+| `multi` | Cross-edge blocks entered from several predecessors. **14** corpus-wide (3/5/4/2), all with exactly two. |
+| `differ` | Of those, the ones whose edges make provably different tests. **12** (2/5/4/1). Machine-code shape: a decompiler fix does not move it, so it is the instrument-liveness number. |
+| `admitted` | Of `differ`, the ones the code answered from a predecessor at all. **GATE at 0**, and the complete one — 12/12 under the control. |
+| `named` | Of `differ`, the ones an emitted guard is anchored on the page for. **GATE at 0** — 8/12 under the control. |
+
+**Both are gated, because the stronger claim has the weaker coverage.** `named` is a guard on the
+page: a test the machine does not make, in C that compiles. But it depends on the polarity pass
+having **anchored** a guard at that jcc, and four of the twelve sites — the `sub_140002A2C` witness
+among them — are unanchorable, so `named` alone would have gone red on the control while missing
+the row the control exists to expose. (Its guard *is* on the page: `if (rbx_2 == 0)` at emitted
+line 67, against `if (!!__unrecovered_1 /* je */)` on the shipping tree.) `admitted` reads the
+predecessor `flagPredecessor` chose, which is **necessary** for either route to a condition here —
+`lifter.ts`'s `branchFor` building the `IRBranch`, and `structure.ts`'s `extractCondition`
+re-reading the machine text when there is no usable one, both take their stream from
+`flagScanStream(block, flagPredecessor(…))` — so it is address-exact and needs no anchoring.
+
+What that makes `admitted`, stated plainly: a **differential test between two independently
+written answers to the same question** — the disagreement rule, once in `unanimousCompare` and once
+here from raw operand text — in the manner the PE parser is checked against an independently
+written from-spec reader, rather than an oracle outside the question. `named` is the half that is
+an oracle over the output, and it is the half with the holes. A middle tier was considered and
+refused: replicating `pipeline.ts` stage 1 to read the `IRBranch` condition, the way `popReads.ts`
+and `lostDefs.ts` replicate the lift. `admitted` is a strict superset of it — no branch condition
+exists at such a block without an admitted predecessor — so gating `admitted` is stricter, and it
+keeps the file a leaf that imports no pipeline stage.
+
+What it does not catch:
+
+- **Two edges are held to disagree on text inequality**, after folding the two equivalences `test`
+  has: `test x, x` states exactly what `cmp x, 0` states (same ZF, SF, OF, CF, PF) and `test a, b`
+  is `and`, which is commutative. Any *other* coincidental equivalence between two different
+  compares would be a false positive, so a row is hand-adjudicated before it is acted on. Over this
+  corpus there is none — the 12 differing pairs are two different registers, two different
+  immediates, or two different widths of the same register, and in the width pair the two values
+  are results of *different calls*.
+- **It under-reports a rip-relative compare.** `parseOperand` resolves one against the
+  instruction's own address, so the same operand text at two addresses is two different memory
+  locations and reads here as agreement. Wrong in the safe direction, and it is why
+  `unanimousCompare` refuses `rip` outright rather than relying on text.
+- **The gate is restricted to edges whose owners are all `cmp`/`test`**, since for a compare the
+  mnemonic and the operand text determine the test exactly. A disagreement involving an arithmetic
+  or bit-test owner is reported as `differOther` and not gated — 0 occurrences.
+- **`admitted` reads `flagPredecessor`.** Reimplement the rule elsewhere and this count reads 0 by
+  no longer looking, which is what `soleAdmitted === sole` is asserted for: every
+  single-predecessor cross-edge block is one the rule answers freely (32/13/9/22 of them), so a
+  fall there means the audit went blind rather than clean. `soleNamed` (6/4/2/3 of the same 76) is
+  the much thinner liveness half behind `named`.
+- **The presence of a guard is the whole question, and only while refusing is the only sound
+  answer.** If a mechanism ever materialises the test in *each* predecessor — a boolean or a
+  captured value phi'd at the join, which is what these 12 sites would need — a guard here becomes
+  routinely correct and both counts must be sharpened to ask whether the condition reads that
+  materialised value, exactly as `wrongOperand` was sharpened when `flg_<addr>_<n>` captures
+  landed. Until then, sharpening it would be checking for a mechanism that does not exist.
+- **An edge `buildCFG` drew that can never execute** would make a row a false positive. That is
+  the assumption every stage here makes about a detected function's boundaries.
+- **It shares `isFlagTransparent` with the code under test**, so it cannot catch an error in that
+  table. Everything built on top of it — which instruction owns the flags on each edge, and whether
+  two owners state the same test — is written here from raw operand text.
+
+Per-site detail is in `crossedgeguards_<bin>.jsonl` — the block's jcc, whether the row is gated,
+the predecessor the code answered from (`null` where it refused), every edge with the flag owner it
+carries and that owner's normalised test, and the emitted condition where one reached the page.
+
 **A read whose definition the fold deleted** (`lostDefs.ts`). *A failure means the emitted C reads
 a register that nothing in the function assigns.* `foldBlock` inlines a definition read exactly
 **once** into that one reader and drops the assignment — but it is handed ONE block, so "once"
@@ -947,7 +1042,7 @@ Two questions, one per architecture, and they are not the same question:
 
 ## What the standing set does NOT catch
 
-**None of the nine gates above catches a wrong-value defect** — a statement that is emitted, is
+**None of the gates above catches a wrong-value defect** — a statement that is emitted, is
 well-formed, and computes the wrong thing. `peek-a-bin-qzrl` is the worked example: a `xor edi, edi`
 (zeroing) emitted as `edi = ebx`, a copy of a live register. Every gate was green over it, and each
 for its own reason:
@@ -962,7 +1057,7 @@ for its own reason:
 | dangling gotos | Looks only at labels. |
 | throws | Nothing raised. |
 
-So a green run means "no defect **of the seven kinds these audits model**", which is a real and
+So a green run means "no defect **of the kinds these audits model**", which is a real and
 useful claim but a narrower one than "the output is right". Wrong values are found by reading the
 emitted C against the machine text, and the instruments for that are per-instruction line map
 coverage (above) and cross-substitution (below) — neither of which is a gate, because neither has
@@ -1254,6 +1349,7 @@ remaining gap and is not implemented.
 | `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
+| `crossEdgeGuards.ts` | The cross-edge guard audit: whether a Jcc alone in its block is entered with the same flags however it was reached. |
 | `popReads.ts` | A register a `pop` wrote, read in the emitted C under its previous value. Gated at 0 on both counts; machine-level write test, and a paired pop leaves the population — see the gate entry. |
 | `lostDefs.ts` | A read whose reaching definition `foldBlock` deleted. Brackets that one pass; see the gate entry. |
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
