@@ -150,6 +150,13 @@ export class StructRegistry {
         if (nf.isArray && !ef.isArray) {
           ef.isArray = true;
           ef.arrayElementSize = nf.arrayElementSize;
+          // The name is the other half of the array claim, so it moves with it.
+          // Kept as it was, the merged field is declared `field_0x8[]` — an
+          // identifier saying scalar member over brackets saying array, since
+          // `declareArrayField` reads only the flag (peek-a-bin-tm29). Derived
+          // from the offset rather than adopted from `nf` so the two spellings
+          // cannot come apart: the offsets are equal by the lookup above.
+          ef.name = fieldNameFor(ef.offset, true);
         }
       }
     }
@@ -743,6 +750,23 @@ function offsetLabel(offset: number): string {
 }
 
 /**
+ * A field's identifier: the offset the recovery found, prefixed by what kind of
+ * member the evidence supports.
+ *
+ * ONE declaration, deliberately, because the name and `isArray` are two halves
+ * of one statement and the emitter reads them separately — `declareArrayField`
+ * spells `[...]` off `isArray` alone, so a name and a flag decided in two places
+ * produce `uint64_t field_0x8[];`, a declaration whose identifier says scalar
+ * member and whose brackets say array. That is exactly what happened: this rule
+ * lived inline in `candidateFields` while `mergeFields` promoted `isArray`
+ * without it (peek-a-bin-tm29). Anything that changes `isArray` on a field must
+ * re-derive the name through here.
+ */
+function fieldNameFor(offset: number, isArray: boolean): string {
+  return `${isArray ? "array" : "field"}_${offsetLabel(offset)}`;
+}
+
+/**
  * Largest displacement that is treated as a position inside an object.
  *
  * `decomposeAddress` reports the displacement of `[base + 0x412620]` as an
@@ -1015,7 +1039,7 @@ function candidateFields(accesses: AccessPattern[]): StructField[] {
     fields.push({
       offset,
       size: info.size,
-      name: `${isArray ? "array" : "field"}_${offsetLabel(offset)}`,
+      name: fieldNameFor(offset, isArray),
       type: inferFieldType(info.size),
       isArray,
       arrayElementSize: isArray ? info.stride : undefined,

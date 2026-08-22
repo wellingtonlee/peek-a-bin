@@ -630,6 +630,33 @@ for (const b of bins) {
     note("  unencodable register names    NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A struct member whose name and brackets disagree (emitAudits.ts). ──────
+  //
+  // Gated at 0 in the run, so a rise here names which binary. `members` and
+  // `defs` beside it are the liveness halves: a FALL in either with the gate at
+  // 0 is a text scrape that stopped matching, which reads green for want of
+  // observation.
+  if (B.memberNames && C.memberNames) {
+    row(
+      "member name vs brackets",
+      (x) => x.memberNames.disagreeing,
+      (a, c) => c > a,
+      "A STRUCT MEMBER'S NAME AND ITS BRACKETS DISAGREE",
+    );
+    row("  field_ declared with []", (x) => x.memberNames.fieldNamedArrays);
+    row("  array_ declared without", (x) => x.memberNames.arrayNamedScalars);
+    row("  functions affected", (x) => x.memberNames.funcsAffected);
+    row(
+      "  struct members scanned",
+      (x) => x.memberNames.members,
+      (a, c) => c === 0 && a > 0,
+      "THE MEMBER SCAN STOPPED MATCHING",
+    );
+    row("  struct definitions scanned", (x) => x.memberNames.defs);
+  } else {
+    note("  member name vs brackets       NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── Offset-named argument slots (emitAudits.ts). ───────────────────────────
   //
   // How much of the argument area the frame recovery is still missing. NOT a

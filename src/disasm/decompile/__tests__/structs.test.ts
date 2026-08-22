@@ -319,11 +319,45 @@ describe("StructRegistry", () => {
       expect(def.fields[0].size).toBe(8);
     });
 
-    it("promotes a field to an array when a later access is indexed", () => {
+    // The promotion is the cross-function refinement mechanism working: another
+    // function's indexed access at the same offset IS evidence of an array. What
+    // this also pins is the NAME, which used to be left as the field was created
+    // — so the merged field was declared `uint64_t field_0x8[];`, an identifier
+    // saying scalar member over brackets saying array, in a declaration nothing
+    // else here could see was self-contradictory (peek-a-bin-tm29).
+    it("promotes a field to an array when a later access is indexed, and renames it", () => {
       const reg = new StructRegistry();
       const def = reg.findOrCreate("0:4", [field(0, 4)]);
+      expect(def.fields[0].name).toBe("field_0x0");
       reg.mergeFields(def.id, [field(0, 4, { isArray: true, arrayElementSize: 4 })]);
-      expect(def.fields[0]).toMatchObject({ isArray: true, arrayElementSize: 4 });
+      expect(def.fields[0]).toMatchObject({
+        isArray: true,
+        arrayElementSize: 4,
+        name: "array_0x0",
+      });
+    });
+
+    // The other direction of the same claim: a merge that carries no array
+    // evidence must leave the name alone. Renaming on every merge would make the
+    // gate green by spelling every member `array_`, which is the same defect
+    // pointing the other way.
+    it("leaves a field's name alone when the merge carries no array evidence", () => {
+      const reg = new StructRegistry();
+      const def = reg.findOrCreate("8:4", [field(8, 4)]);
+      reg.mergeFields(def.id, [field(8, 8)]);
+      expect(def.fields[0]).toMatchObject({ name: "field_0x8", size: 8, isArray: false });
+    });
+
+    // A field the merge ADDS keeps the name its own evidence built, which for an
+    // indexed access is already `array_`. Guards the copy path against acquiring
+    // the promotion path's rename.
+    it("keeps an added array field's own name", () => {
+      const reg = new StructRegistry();
+      const def = reg.findOrCreate("0:4", [field(0, 4)]);
+      reg.mergeFields(def.id, [
+        field(8, 4, { isArray: true, arrayElementSize: 4, name: "array_0x8" }),
+      ]);
+      expect(def.fields[1]).toMatchObject({ name: "array_0x8", isArray: true });
     });
 
     it("keeps fields sorted and the total size current", () => {

@@ -27,6 +27,7 @@ import {
   ccSyntaxCheck,
   emptyCaseBodies,
   gotoCheck,
+  memberNameAgreement,
   type OffsetofResult,
   offsetNamedArgs,
   offsetofCheck,
@@ -252,6 +253,14 @@ if (!pre.haveBins || !pre.haveCc) {
               // `unencodableNames` on why the question is PE32-only — which is
               // why `funcs` is beside it as the liveness half.
               unencodable: unencodableNames([{ funcs: r.funcs, is64: r.is64 }]),
+              // The naming half of the claim `offsetof` makes about the layout
+              // half, over the same member list: a member whose identifier and
+              // whose brackets disagree. Gated at 0, and per binary so
+              // `compare.mjs` can name which one moved (peek-a-bin-tm29).
+              memberNames: (() => {
+                const mn = memberNameAgreement([{ tag: key, funcs: r.funcs }]);
+                return { ...mn, rows: mn.rows.length };
+              })(),
               // A case label whose whole body is `break;` — the case saying it
               // does nothing. Report-only, per binary so `compare.mjs` can name
               // which one moved; structurally 0 wherever no jump table was
@@ -772,6 +781,38 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * A GATE at 0. A struct member whose identifier and whose brackets disagree
+     * — `uint64_t field_0x8[];` — is a declaration contradicting itself, which
+     * is `polarity inverted`'s character rather than a baseline's: the row is
+     * provably wrong from the emitted text alone, with no reference to the
+     * machine.
+     *
+     * The two gates nearest to it are both blind. `gcc -fsyntax-only` compiles a
+     * flexible array member happily and an identifier is only an identifier; and
+     * `offsetofCheck` reads the same member list and passes at 1.00, because
+     * `offsetof(struct_20, field_0x8)` really is 8 — the layout is right and the
+     * *kind* of member is what the declaration lies about. It was 10/1/1/10 over
+     * 4/1/1/4 functions at `51264fe` (peek-a-bin-tm29).
+     *
+     * `members` and `defs` are the liveness halves and matter as much as the
+     * gate: a text scrape whose member grammar stopped matching would report 0
+     * disagreements over 0 members.
+     */
+    it("never declares a struct member whose name and brackets disagree", () => {
+      // Built from the keys rather than through `over`, which drops absent ones
+      // and would misalign a parallel index.
+      const mn = memberNameAgreement(
+        auditedKeys()
+          .filter((k) => results.has(k))
+          .map((k) => ({ tag: k, funcs: (results.get(k) as BinResult).funcs })),
+      );
+      expect(mn.rows.join("; ")).toBe("");
+      expect(mn.disagreeing).toBe(0);
+      expect(mn.members).toBeGreaterThan(0);
+      expect(mn.defs).toBeGreaterThan(0);
+    });
+
+    /**
      * A GATE at 0, and the one that discriminates where `offsetNamedArgs` cannot.
      *
      * A declared parameter overwritten from a callee-saved register before it is
@@ -1044,6 +1085,15 @@ function renderReport(): string {
       `  offsetof (compiled and run) ${o.fieldsCorrect}/${o.fields} fields, ` +
         `${o.distinctCorrect}/${o.distinctDefs} distinct definitions`,
     );
+    const mn = memberNameAgreement([{ tag: key, funcs: r.funcs }]);
+    L.push(
+      `  member name vs brackets     ${mn.disagreeing} disagreeing of ${mn.members} members ` +
+        `over ${mn.defs} definitions — GATED at 0` +
+        (mn.disagreeing > 0
+          ? ` (${mn.fieldNamedArrays} field_ with [], ${mn.arrayNamedScalars} array_ without)`
+          : ""),
+    );
+    if (mn.rows.length > 0) for (const row of mn.rows) L.push(`    ${row}`);
     const ar = arResults.get(key) as ArityResult;
     L.push(
       `  API call arity vs apitypes   ${ar.exact}/${ar.sites} exact (${pct(ar.exact, ar.sites)}), ` +
@@ -1323,6 +1373,14 @@ function renderReport(): string {
   L.push("    report at all. The PE32 residue is detection over-production, where the prologue");
   L.push("    is outside the range and the frame register is the enclosing function's.");
   L.push("    Nothing else here sees this class: it is a well-typed name gcc compiles.");
+  L.push("  member name vs brackets — detail:");
+  L.push("    A struct member whose identifier and whose brackets disagree: `field_0x8[]` says");
+  L.push("    scalar member in the name and array in the extent. The field names carry what the");
+  L.push("    recovery FOUND, so the two halves of one declaration contradicting each other is");
+  L.push("    provably wrong from the text alone — a GATE at 0, from 10/1/1/10 over 4/1/1/4");
+  L.push("    functions at `51264fe` (peek-a-bin-tm29). gcc compiles a flexible array member");
+  L.push("    without comment and `offsetof` passes at 1.00 over the SAME member list, because");
+  L.push("    the offset really is right and it is the member's KIND that is misstated.");
   L.push("  unencodable register names — detail:");
   L.push("    A 64-bit name in the C of a PE32 image: `canonReg` maps every alias to the 64-bit");
   L.push("    parent, so any leak of that identity prints `rcx` where the image has no RCX. A");

@@ -180,7 +180,12 @@ export interface OffsetofResult {
 interface StructDef {
   id: string;
   body: string;
-  fields: { name: string; offset: number }[];
+  /**
+   * `array` is whether the declaration carries `[...]`, which is a different
+   * statement from what the *name* says — see `memberNameAgreement`. It is read
+   * here so the two audits cannot end up with different denominators.
+   */
+  fields: { name: string; offset: number; array: boolean }[];
 }
 
 /** Everything the emitter put above the function definition line. */
@@ -199,12 +204,15 @@ function defsIn(preamble: string): StructDef[] {
     const body: string[] = [];
     let j = i + 1;
     for (; j < lines.length && lines[j] !== "};"; j++) body.push(lines[j]);
-    const fields: { name: string; offset: number }[] = [];
+    const fields: { name: string; offset: number; array: boolean }[] = [];
     for (const line of body) {
-      const f = /^\s+[A-Za-z_][\w *]*?\b((?:field|array)_0x[0-9A-F]+)\s*(?:\[[^\]]*\])?;/.exec(
-        line,
-      );
-      if (f) fields.push({ name: f[1], offset: Number.parseInt(f[1].split("_0x")[1], 16) });
+      const f = /^\s+[A-Za-z_][\w *]*?\b((?:field|array)_0x[0-9A-F]+)\s*(\[[^\]]*\])?;/.exec(line);
+      if (f)
+        fields.push({
+          name: f[1],
+          offset: Number.parseInt(f[1].split("_0x")[1], 16),
+          array: f[2] !== undefined,
+        });
     }
     defs.push({ id: m[1], body: body.join("\n"), fields });
     i = j;
@@ -765,5 +773,101 @@ export function paramClobberedAtEntry(sets: { funcs: FuncRec[] }[]): ParamClobbe
     }
   }
   out.distinct = seen.size;
+  return out;
+}
+
+export interface MemberNameResult {
+  /** Struct definitions read. A text scrape fails by matching nothing. */
+  defs: number;
+  /** Member declarations read (padding excluded). The denominator, and liveness. */
+  members: number;
+  /**
+   * Members whose identifier and whose brackets disagree — `field_0x8[]` or
+   * `array_0x8;`. GATED at 0: every one is a declaration contradicting itself.
+   */
+  disagreeing: number;
+  /** Of those, the ones named `field_` and declared with `[...]`. */
+  fieldNamedArrays: number;
+  /** Of those, the ones named `array_` and declared without. */
+  arrayNamedScalars: number;
+  funcsAffected: number;
+  /** Functions read. Instrument liveness. */
+  funcs: number;
+  /** Up to a dozen `bin:addr struct_N <line>` rows, so a red row names itself. */
+  rows: string[];
+}
+
+/**
+ * A STRUCT MEMBER WHOSE NAME AND WHOSE BRACKETS DISAGREE.
+ *
+ * The field names carry the recovered offsets *and* what kind of member the
+ * recovery found: `candidateFields` spells an indexed access whose stride is the
+ * width read there `array_0x8` and everything else `field_0x8`. `declareField`
+ * spells the brackets off `isArray` alone. So the two can come apart, and they
+ * did — `StructRegistry.mergeFields` promoted a field to an array when a later
+ * function's indexed access reached the same offset and kept the name the field
+ * was created with, emitting `uint64_t field_0x8[];`: an identifier saying
+ * scalar member over an extent saying array (peek-a-bin-tm29).
+ *
+ * A GATE at 0, and it has `polarity inverted`'s character rather than a
+ * baseline's: the two halves of one declaration state different things about the
+ * same member, so the row is provably wrong from the emitted text alone with no
+ * reference to the machine. Both directions are counted because only one of them
+ * has ever been produced — a demotion would be the other, and `mergeFields` has
+ * no path to one — so a rule that renamed instead of promoting would be caught
+ * here too rather than reading green.
+ *
+ * NOTHING ELSE HERE CAN SEE IT, and two neighbours are close enough to be
+ * mistaken for instruments of it. `gcc -fsyntax-only` compiles
+ * `uint64_t field_0x8[];` without comment: a flexible array member is legal C
+ * and the identifier is only an identifier. `offsetofCheck` reads the SAME
+ * grammar and passes at 1.00, because it derives the expected offset from the
+ * name's hex suffix and `offsetof(struct_20, field_0x8)` really is 8 — the
+ * layout is right and it is the *kind* of member the declaration lies about. So
+ * this is the naming half of the claim `offsetofCheck` makes about the layout
+ * half, and it reads the same `defsIn` member list so a definition cannot be in
+ * one denominator and out of the other.
+ *
+ * WHAT IT DOES NOT SEE. Only the two spellings above: a member declared at a
+ * width no access measured, an `array_0x4[1]` whose extent the gap to the next
+ * field bounded rather than the recovery, and a field the layout refused
+ * entirely are each judged elsewhere or not at all.
+ */
+export function memberNameAgreement(sets: { tag: string; funcs: FuncRec[] }[]): MemberNameResult {
+  const out: MemberNameResult = {
+    defs: 0,
+    members: 0,
+    disagreeing: 0,
+    fieldNamedArrays: 0,
+    arrayNamedScalars: 0,
+    funcsAffected: 0,
+    funcs: 0,
+    rows: [],
+  };
+  for (const { tag, funcs } of sets) {
+    for (const r of funcs) {
+      out.funcs++;
+      const code = r.code ?? "";
+      if (!code.includes("struct ")) continue;
+      let hits = 0;
+      for (const def of defsIn(preambleOf(code))) {
+        out.defs++;
+        for (const f of def.fields) {
+          out.members++;
+          if (f.name.startsWith("array_") === f.array) continue;
+          hits++;
+          out.disagreeing++;
+          if (f.array) out.fieldNamedArrays++;
+          else out.arrayNamedScalars++;
+          if (out.rows.length < 12)
+            out.rows.push(
+              `${tag}:0x${r.addr.toString(16)} ${def.id} ${f.name} declared ` +
+                `${f.array ? "with []" : "without []"}`,
+            );
+        }
+      }
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
   return out;
 }
