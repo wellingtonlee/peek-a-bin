@@ -41,7 +41,7 @@ function stackVar(over: Partial<StackVar> & { name: string }): StackVar {
  * These fixtures are 64-bit unless they say otherwise, so `D` is 8.
  */
 function frameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta: 8 };
+  return { frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt: null };
 }
 
 /**
@@ -49,7 +49,7 @@ function frameOf(...vars: StackVar[]): StackFrame {
  * frame-pointer omission, where RBP is an ordinary callee-saved register.
  */
 function unframedFrameOf(...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta: null };
+  return { frameSize: 0x40, vars, frameDelta: null, frameEstablishedAt: null };
 }
 
 /**
@@ -59,7 +59,18 @@ function unframedFrameOf(...vars: StackVar[]): StackFrame {
  * (peek-a-bin-ikd, peek-a-bin-sx57).
  */
 function shiftedFrameOf(frameDelta: number, ...vars: StackVar[]): StackFrame {
-  return { frameSize: 0x40, vars, frameDelta };
+  return { frameSize: 0x40, vars, frameDelta, frameEstablishedAt: null };
+}
+
+/**
+ * A frame whose establishing instruction `stack.ts` located — which is what
+ * lets `frameRegisterAliases` recognise the frame register's own definition
+ * after `swapDefWithCopy` swapped its destination for a variable and DCE took
+ * the tie-back (peek-a-bin-xb2f). `frameEstablishedAt` defaults to null in
+ * every other fixture here, so nothing else in this file can reach shape 3.
+ */
+function establishedFrameOf(frameEstablishedAt: number, ...vars: StackVar[]): StackFrame {
+  return { frameSize: 0x40, vars, frameDelta: 8, frameEstablishedAt };
 }
 
 /** `[rbp - offset]` — a local slot. */
@@ -432,6 +443,152 @@ describe("promoteVars — frame-register aliases", () => {
     const fn = promote([...prologue, assign(irReg("eax", 4), access)], { is64: false });
     expect(fn.body[2]).toEqual(assign(irReg("eax", 4), access));
     expect(fn.locals).toEqual([]);
+  });
+
+  // ── Shape 3: the tie-back is gone (peek-a-bin-xb2f) ──────────────────────
+  //
+  // `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;`, and
+  // where every read of the frame register was rewritten to the copy nothing
+  // reads `ebp` any more, so DCE deletes the second statement. What is left is
+  // a variable assigned the STACK pointer, which shapes 1 and 2 must refuse —
+  // and did, leaving 27 frame-slot derefs per PE32 binary unresolved in
+  // functions that declare the very slots (t32!sub_40667A declared and never
+  // used all five of its locals). `frameEstablishedAt` is what tells this
+  // statement from an unrelated copy of ESP: it says the statement IS the frame
+  // register's definition.
+  const EST = 0x401005;
+  const assignAt = (dest: IRExpr, src: IRExpr, addr: number): IRStmt => ({
+    kind: "assign",
+    dest,
+    src,
+    addr,
+  });
+  /** The prologue pair with the tie-back deleted. */
+  const orphanedCopy = (name = "ebp_1") => assignAt(irVar(name, 4), irReg("esp", 4), EST);
+
+  it("promotes a local slot through the frame copy when the tie-back is gone", () => {
+    const fn = promote([orphanedCopy(), assign(irReg("eax", 4), viaVar("ebp_1", "-", 4))], {
+      frame: establishedFrameOf(
+        EST,
+        stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) }),
+      ),
+      is64: false,
+    });
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("var_4", 4)));
+  });
+
+  it("promotes a param slot through the frame copy when the tie-back is gone", () => {
+    const fn = promote([orphanedCopy(), assign(irReg("eax", 4), viaVar("ebp_1", "+", 8))], {
+      frame: establishedFrameOf(
+        EST,
+        stackVar({ name: "arg_0", offset: 8, key: stackVarKey("bp", 8) }),
+      ),
+      is64: false,
+    });
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+  });
+
+  // The negative control for the whole shape: the same body, with the
+  // establishing address withheld. If this passed, the rule would be "follow any
+  // copy of the stack pointer" — which is the thing that must never happen.
+  it("refuses the same copy when no establishing address is known", () => {
+    const access = viaVar("ebp_1", "-", 4);
+    const fn = promote([orphanedCopy(), assign(irReg("eax", 4), access)], {
+      frame: frameOf(stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) })),
+      is64: false,
+    });
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
+  });
+
+  // …and a copy of ESP at any OTHER address is still a copy of the stack
+  // pointer, which moves. Only the statement at the establishing address is the
+  // frame register's definition.
+  it("refuses a copy of the stack pointer taken at another address", () => {
+    const access = viaVar("esp_7", "-", 4);
+    const fn = promote(
+      [assignAt(irVar("esp_7", 4), irReg("esp", 4), EST + 0x20), assign(irReg("eax", 4), access)],
+      {
+        frame: establishedFrameOf(
+          EST,
+          stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) }),
+        ),
+        is64: false,
+      },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
+  });
+
+  // The variable's NAME is not the channel and must never become one:
+  // `splitStaleReads` names it after the register, so `ebp_1` is a spelling
+  // rather than a fact. A differently named variable at the establishing address
+  // is the same fact and is admitted.
+  it("keys on the address rather than the variable's name", () => {
+    const fn = promote([orphanedCopy("t_9"), assign(irReg("eax", 4), viaVar("t_9", "-", 4))], {
+      frame: establishedFrameOf(
+        EST,
+        stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) }),
+      ),
+      is64: false,
+    });
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("var_4", 4)));
+  });
+
+  // The source is not examined at all, which is what makes the shifted `lea`
+  // form work: `lea rbp, [rax - 0x488]` where RAX itself holds the entry stack
+  // pointer — t64!sub_140005980's own prologue — and no test of the source
+  // expression would recognise it.
+  it("admits a shifted lea establishment whose source is not the stack pointer", () => {
+    const src = irBinary("-", irReg("rax", 8), irConst(0x488));
+    const fn = promote(
+      [assignAt(irVar("rbp_1", 8), src, EST), assign(irReg("eax", 4), viaVar("rbp_1", "-", 0x20))],
+      {
+        frame: {
+          frameSize: 0x40,
+          vars: [stackVar({ name: "var_20", offset: 0x20, key: stackVarKey("bp", -0x20) })],
+          frameDelta: 0x488,
+          frameEstablishedAt: EST,
+        },
+      },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), irVar("var_20", 4)));
+  });
+
+  it("carries a shape-3 seed through a chain of copies", () => {
+    const fn = promote(
+      [
+        orphanedCopy(),
+        assign(irVar("ebp_2", 4), irVar("ebp_1", 4)),
+        assign(irReg("eax", 4), viaVar("ebp_2", "-", 4)),
+      ],
+      {
+        frame: establishedFrameOf(
+          EST,
+          stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", -4) }),
+        ),
+        is64: false,
+      },
+    );
+    expect(fn.body[2]).toEqual(assign(irReg("eax", 4), irVar("var_4", 4)));
+  });
+
+  // Defence in depth: `stack.ts` reports no establishing address when it
+  // recovered no displacement, so this pairing cannot arise — but the FPO gate
+  // is what keeps `[rbp + N]` inside struct synthesis's reach, and it must not
+  // become reachable through the new shape.
+  it("refuses the establishing address under frame-pointer omission", () => {
+    const access = viaVar("rbp_1", "+", 0x10);
+    const fn = promote(
+      [assignAt(irVar("rbp_1", 8), irReg("rsp", 8), EST), assign(irReg("eax", 4), access)],
+      {
+        frame: {
+          frameSize: 0x40,
+          vars: [stackVar({ name: "arg_0x10", offset: 0x10, key: stackVarKey("bp", 0x10) })],
+          frameDelta: null,
+          frameEstablishedAt: EST,
+        },
+      },
+    );
+    expect(fn.body[1]).toEqual(assign(irReg("eax", 4), access));
   });
 });
 

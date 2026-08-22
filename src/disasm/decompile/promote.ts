@@ -231,16 +231,55 @@ interface StackAccess {
  * *canonical*, so they were already inside this pass's reach before the gate was
  * widened; see peek-a-bin-633s.
  *
- * The evidence is the body's own assignments, in either direction, because
- * `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;` — the
- * copy's source is the *stack* pointer, and only the second statement ties it
- * to the frame register. Chains are resolved to a fixpoint so the order the
- * statements appear in does not matter.
+ * The evidence is the body's own assignments, and there are THREE shapes of it
+ * because `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;` —
+ * the copy's source is the *stack* pointer, so on its own it says nothing, and
+ * it is the second statement that ties it to the frame register. Chains are
+ * resolved to a fixpoint so the order the statements appear in does not matter.
+ *
+ *  1. `v = <something that holds the frame>` — an ordinary copy forward.
+ *  2. `<fp> = v` — the tie-back, which is what makes shape 1 usable for the
+ *     prologue pair above.
+ *  3. `v = <anything>` **at `frameEstablishedAt`** — the prologue pair with its
+ *     second statement gone.
+ *
+ * SHAPE 3 IS NOT A RELAXATION OF SHAPE 2, IT IS THE SAME FACT FROM A STRONGER
+ * WITNESS. The tie-back is not always there: where every read of the frame
+ * register was rewritten to the copy, nothing reads `ebp` any more, DCE deletes
+ * `ebp = ebp_1`, and the body is left with `ebp_1 = esp;` alone —
+ * indistinguishable to shapes 1 and 2 from a copy of the stack pointer, which
+ * must be refused (CLAUDE.md: no read of RSP may be reinterpreted at another
+ * program point). `stack.ts` knows which instruction established the frame, and
+ * an assignment carrying that address whose destination is a *variable* is that
+ * instruction's own definition wearing the copy's name: a `mov`/`lea` into a
+ * register lifts to exactly one statement, and `swapDefWithCopy` is the only
+ * pass that swaps such a statement's destination for a variable while keeping
+ * its address. So the variable holds the value the frame register was
+ * established WITH, at the point it was established — which is the frame
+ * (peek-a-bin-xb2f).
+ *
+ * Three things about shape 3 are deliberate:
+ *
+ *  - **It keys on the address, never on the variable's NAME.** `splitStaleReads`
+ *    names its variable after the register, so `ebp_1` looks like the answer and
+ *    is a spelling rather than a fact; keying on it would make the alias set a
+ *    function of a naming convention. The address is dataflow: it says this
+ *    statement *is* the frame register's definition.
+ *  - **The source is not examined at all**, because the address already settles
+ *    it. That is also what makes the shifted `lea rbp, [rax - 0x488]` form work,
+ *    where the copy's source is a binary over a register that itself holds the
+ *    entry stack pointer and no source test would recognise it.
+ *  - **It is still inside the `frameDelta !== null` gate**, so frame-pointer
+ *    omission is untouched: `frameEstablishedAt` is null in exactly the cases
+ *    `frameDelta` is, plus the helper-framed prologue, where the establishing
+ *    instruction is inside `__SEH_prolog4` and this function's stream has no
+ *    statement at that address to match.
  */
 function frameRegisterAliases(
   body: IRStmt[],
   is64: boolean,
   frameDelta: number | null,
+  frameEstablishedAt: number | null,
 ): Set<string> {
   const alias = new Set<string>();
   if (frameDelta === null) return alias;
@@ -248,10 +287,10 @@ function frameRegisterAliases(
   const isFrameReg = (e: IRExpr): boolean => e.kind === "reg" && e.name.toLowerCase() === bp;
 
   // Collected first so the fixpoint below can see a chain written in any order.
-  const defs: { dest: IRExpr; src: IRExpr }[] = [];
+  const defs: { dest: IRExpr; src: IRExpr; addr?: number }[] = [];
   const scan = (stmts: IRStmt[]): void => {
     for (const s of stmts) {
-      if (s.kind === "assign") defs.push({ dest: s.dest, src: s.src });
+      if (s.kind === "assign") defs.push({ dest: s.dest, src: s.src, addr: s.addr });
       // `bodiesOf` does not reach inside a `for`'s init and update — they are
       // single statements, not lists — and a copy of the frame register can sit
       // in either, so they are walked here.
@@ -260,6 +299,14 @@ function frameRegisterAliases(
     }
   };
   scan(body);
+
+  // Shape 3, and it seeds the fixpoint rather than joining it: it needs nothing
+  // else to already be known.
+  if (frameEstablishedAt !== null) {
+    for (const { dest, addr } of defs) {
+      if (dest.kind === "var" && addr === frameEstablishedAt) alias.add(dest.name);
+    }
+  }
 
   const holdsFrame = (e: IRExpr): boolean =>
     isFrameReg(e) || (e.kind === "var" && alias.has(e.name));
@@ -706,7 +753,12 @@ export function promoteVars(
   // register is a frame pointer at all — see `frameRegisterAliases`. `?? null`
   // rather than `?.` alone: a `StackFrame` crosses a worker boundary, and a
   // shape predating the field must read as the refusal.
-  const bpAliases = frameRegisterAliases(body, is64, stackFrame?.frameDelta ?? null);
+  const bpAliases = frameRegisterAliases(
+    body,
+    is64,
+    stackFrame?.frameDelta ?? null,
+    stackFrame?.frameEstablishedAt ?? null,
+  );
 
   // For x64 fastcall: add register params
   if (is64 && signature && signature.paramCount > 0) {

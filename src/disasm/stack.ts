@@ -136,13 +136,23 @@ interface FrameGeometry {
    * null.
    */
   homed: ReadonlySet<number>;
+  /**
+   * The address of the instruction that set `delta`, or null when none did.
+   *
+   * Published so `promote.ts` can recognise the frame register's own definition
+   * after `swapDefWithCopy` has swapped its destination for a variable — see
+   * `StackFrame.frameEstablishedAt`. It is a fact about *which instruction*, so
+   * it is set at exactly the point `delta` is and never afterwards; a second
+   * write of the frame register ends the spill scan and leaves both alone.
+   */
+  establishedAt: number | null;
 }
 
 /** No home slot was shown to hold its argument. */
 const NO_HOMED: ReadonlySet<number> = new Set<number>();
 
 /** The frame register is not derived from the stack pointer in this function. */
-const REFUSED: FrameGeometry = { delta: null, homed: NO_HOMED };
+const REFUSED: FrameGeometry = { delta: null, homed: NO_HOMED, establishedAt: null };
 
 /**
  * A memory operand as Capstone spells it, with the size prefix removed:
@@ -258,6 +268,11 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
   const spAlias = new Map<string, number>();
   /** Set once the frame register is established; `delta` never moves after. */
   let delta: number | null = null;
+  /**
+   * The address of the instruction that set `delta`. Moves with it, and with
+   * nothing else — see `FrameGeometry.establishedAt`.
+   */
+  let establishedAt: number | null = null;
   /** No register but `<sp>` and `<fp>` has been written — see the docstring. */
   let argsPristine = true;
   const homed = new Set<number>();
@@ -273,7 +288,7 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
     const memDest = dest.includes("[");
 
     if (mn === "push") {
-      if (!pushesWholeSlot(dest, slotSize)) return stop(delta, homed);
+      if (!pushesWholeSlot(dest, slotSize)) return stop(delta, homed, establishedAt);
       spDelta -= slotSize;
       continue;
     }
@@ -287,12 +302,13 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       // scan ends there while `delta` — already fixed, and what every caller
       // before this bead received at exactly this point — is handed back
       // untouched.
-      if (delta !== null) return { delta, homed };
+      if (delta !== null) return { delta, homed, establishedAt };
       if (dest !== fp) return REFUSED; // a narrower write is not a frame pointer
       if (mn === "mov" || mn === "lea") {
         const v = entryRelative(ops[1] ?? "", sp, spDelta, spAlias, mn === "lea");
         if (v !== null) {
           delta = -v;
+          establishedAt = insn.address;
           spAlias.set(fpCanon, v);
           continue;
         }
@@ -304,20 +320,20 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       // `sub <sp>, imm` and `add <sp>, imm` are the frame arithmetic; anything
       // else that moves the stack pointer ends the model.
       const imm = dest === sp ? loneImmediate(ops[1] ?? "") : null;
-      if (imm === null) return stop(delta, homed);
+      if (imm === null) return stop(delta, homed, establishedAt);
       if (mn === "sub") spDelta -= imm;
       else if (mn === "add") spDelta += imm;
-      else return stop(delta, homed);
+      else return stop(delta, homed, establishedAt);
       continue;
     }
 
     // `xchg` writes BOTH of its operands, so it is not enough to look at the
     // destination — the same reason `fpSurvivesToReturn` special-cases it.
     if (mn === "xchg" && ops.some((o) => isKnownRegister(o) && canonReg(o) === fpCanon)) {
-      return stop(delta, homed);
+      return stop(delta, homed, establishedAt);
     }
 
-    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return stop(delta, homed);
+    if (STACK_TRAFFIC.has(mn) || mn.startsWith("j")) return stop(delta, homed, establishedAt);
 
     if (memDest) {
       // A store: it writes memory and no register, so it neither advances the
@@ -348,7 +364,7 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       argsPristine = false;
     }
   }
-  return stop(delta, homed);
+  return stop(delta, homed, establishedAt);
 }
 
 /**
@@ -356,8 +372,12 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
  * having established one. Both are the same statement — this is everything that
  * was shown — and the pre-`sx57` code expressed the first half as a bare `null`.
  */
-function stop(delta: number | null, homed: ReadonlySet<number>): FrameGeometry {
-  return delta === null ? REFUSED : { delta, homed };
+function stop(
+  delta: number | null,
+  homed: ReadonlySet<number>,
+  establishedAt: number | null,
+): FrameGeometry {
+  return delta === null ? REFUSED : { delta, homed, establishedAt };
 }
 
 /**
@@ -575,7 +595,7 @@ function frameGeometry(
   const inline = inlineFrameGeometry(insns, is64);
   if (inline.delta !== null) return inline;
   return hasHelperFramePointerPrologue(insns, instructions, is64)
-    ? { delta: ARG_AREA[is64 ? 64 : 32].slotSize, homed: NO_HOMED }
+    ? { delta: ARG_AREA[is64 ? 64 : 32].slotSize, homed: NO_HOMED, establishedAt: null }
     : REFUSED;
 }
 
@@ -953,7 +973,7 @@ export function analyzeStackFrame(
     });
   }
 
-  return { frameSize, vars, frameDelta };
+  return { frameSize, vars, frameDelta, frameEstablishedAt: geometry.establishedAt };
 }
 
 /** Stable identity for a stack slot: base register + signed operand offset. */

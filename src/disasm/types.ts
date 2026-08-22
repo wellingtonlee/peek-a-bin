@@ -80,6 +80,31 @@ export interface StackFrame {
    * register is a frame pointer".
    */
   frameDelta: number | null;
+  /**
+   * The address of the instruction that establishes the frame register from the
+   * stack pointer, or `null` when no such instruction was found in this function
+   * — which includes every case where `frameDelta` is `null`, and also the
+   * helper-framed prologue, where the establishing `lea` is inside
+   * `__SEH_prolog4` and not in this function's instruction stream at all.
+   *
+   * It exists for ONE consumer and one question. `destroySSA`'s
+   * `swapDefWithCopy` rewrites the frame register's own definition as
+   * `ebp_1 = esp; ebp = ebp_1;`, and where every read of the register was
+   * rewritten to the copy, DCE deletes the second statement — leaving a body in
+   * which the only thing `promote.ts` can see is a variable assigned the *stack*
+   * pointer, indistinguishable from an unrelated copy of it, which it must
+   * refuse. This address is what tells the two apart: an assignment carrying it
+   * whose destination is a variable IS the frame register's definition wearing
+   * the copy's name, because a `mov`/`lea` into a register lifts to exactly one
+   * statement and `swapDefWithCopy` is the only pass that swaps its destination
+   * for a variable while keeping its address (peek-a-bin-xb2f).
+   *
+   * `null` and `undefined` must read the same way, for `frameDelta`'s reason: a
+   * `StackFrame` crosses a worker boundary, so a shape from before this field
+   * degrades to "no such statement can be identified" rather than to some
+   * address that would match one.
+   */
+  frameEstablishedAt: number | null;
 }
 
 export interface DataItem {

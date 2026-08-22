@@ -611,6 +611,61 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
   });
 });
 
+describe("analyzeStackFrame — the establishing instruction's address", () => {
+  // Published for ONE consumer: `promote.ts` recognising the frame register's
+  // own definition after `destroySSA`'s `swapDefWithCopy` swapped its
+  // destination for a variable and DCE deleted the tie-back, which is the whole
+  // of peek-a-bin-xb2f. It is a fact about WHICH INSTRUCTION, so it must be the
+  // address of the write that set `D` and of nothing else.
+  it("reports the address of the mov that establishes the frame", () => {
+    const insns = body(...PROLOGUE_64, ["mov", "dword ptr [rbp - 0x10], eax"]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    // `body` lays the instructions out four bytes apart, so the establishing
+    // `mov rbp, rsp` is the second of them.
+    expect(frame!.frameDelta).toBe(8);
+    expect(frame!.frameEstablishedAt).toBe(0x1004);
+  });
+
+  it("reports the address of a lea that establishes a shifted frame", () => {
+    // t64!sub_1400027C8's geometry, and the shape whose IR copy carries a
+    // *binary* source — which is why `frameRegisterAliases` reads the address
+    // and never the source expression.
+    const insns = body(
+      ["push", "rbp"],
+      ["push", "r13"],
+      ["sub", "rsp, 0x40"],
+      ["lea", "rbp, [rsp + 0x30]"],
+      ["mov", "rax, qword ptr [rbp + 0x50]"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(frame!.frameDelta).toBe(0x20);
+    expect(frame!.frameEstablishedAt).toBe(0x100c);
+  });
+
+  it("reports no address when the frame register is not a frame pointer", () => {
+    // `mov rbp, rcx` — frame-pointer omission, so there is no establishing
+    // instruction to name and the two fields refuse together.
+    const insns = body(
+      ["push", "rbp"],
+      ["mov", "rbp, rcx"],
+      ["mov", "dword ptr [rsp + 0x18], eax"],
+    );
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(frame!.frameDelta).toBeNull();
+    expect(frame!.frameEstablishedAt).toBeNull();
+  });
+
+  it("is unmoved by a second write of the frame register", () => {
+    // The spill scan ends at a second write; `D` was fixed at the first and so
+    // is this. Naming the later instruction would point `promote.ts` at a
+    // statement that does not define the frame.
+    const insns = body(...PROLOGUE_64, ["mov", "dword ptr [rbp - 0x10], eax"], ["mov", "rbp, rcx"]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    expect(frame!.frameDelta).toBe(8);
+    expect(frame!.frameEstablishedAt).toBe(0x1004);
+  });
+});
+
 describe("signed offsets", () => {
   // The Stack Frame panel renders the sign from signedOffset. `offset` is the
   // operand value as written and is always positive, so a frame holding locals
@@ -696,6 +751,21 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
         ["mov", "eax, dword ptr [ebp + 0xc]"],
       ]),
     ).toEqual(["arg_0", "arg_1"]);
+  });
+
+  it("names no establishing instruction, because it is in the helper", () => {
+    // `frameEstablishedAt` is an address in THIS function's instruction stream —
+    // the statement `promote.ts` will look for. The helper's `lea` is in another
+    // function, so there is no such statement and the honest answer is null; a
+    // caller-side address here would be an address that matches something else
+    // (peek-a-bin-xb2f).
+    const { func: f, instructions } = withHelper([
+      ...HELPER_CALL,
+      ["mov", "ebx, dword ptr [ebp + 0x8]"],
+    ]);
+    const frame = analyzeStackFrame(f, instructions, false);
+    expect(frame!.frameDelta).toBe(4);
+    expect(frame!.frameEstablishedAt).toBeNull();
   });
 
   it("refuses a helper whose lea lands one slot off the saved frame pointer", () => {
