@@ -4998,12 +4998,16 @@ describe("decompileFunction — a register's entry value outlives a write to the
  * to touch the register is another definition of it.
  */
 describe("decompileFunction — a call's result", () => {
-  it("assigns the register the call returned in, when the body reads it", () => {
+  it("names the value the call returned, when the body reads it", () => {
     const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
 
-    // Before: `sub_408000(); return eax;` — C in which nothing assigns eax.
-    expect(code).toMatch(/eax = sub_408000\(\);/);
-    expect(code).toContain("return eax;");
+    // Before peek-a-bin-oro: `sub_408000(); return eax;` — C in which nothing
+    // assigns eax. What that fix pins is that the call's result reaches the
+    // reader, and `foldReturnedCallResults` (peek-a-bin-l1f) now spells the
+    // whole of this function's body as one statement; the assertion is on the
+    // property, not on the two-line shape it used to have.
+    expect(code).toContain("return sub_408000();");
+    expect(code).not.toMatch(/^\s*sub_408000\(\);$/m);
   });
 
   it("leaves a call whose result the next call overwrites as a bare statement", () => {
@@ -5013,7 +5017,46 @@ describe("decompileFunction — a call's result", () => {
     // and an assignment nobody reads is noise in output written for people.
     expect(code).toMatch(/^\s*sub_408000\(\);$/m);
     expect(code).not.toMatch(/= sub_408000\(/);
-    expect(code).toMatch(/eax = sub_408004\(\);/);
+    expect(code).toContain("return sub_408004();");
+  });
+
+  it("folds a call whose only reader is the return of its result", () => {
+    const code = run(seq(0x401000, [["mov", "ecx, 1"], ["call", "0x408000"], ["ret"]]));
+
+    // One statement, and the accumulator is not named at all — it is dead the
+    // moment the value is returned.
+    expect(code).toContain("return sub_408000();");
+    expect(code).not.toContain("eax");
+  });
+
+  it("does not fold a call whose result the body reads before returning it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["call", "0x408000"], // 0x401000
+        ["mov", "dword ptr [0x412920], eax"], // 0x401005 — a second reader
+        ["ret"], // 0x40100b
+      ]),
+    );
+
+    // The assignment has to stay: the store below it reads the same value, and
+    // a fold would leave that store naming a register nothing assigns.
+    expect(code).toMatch(/eax = sub_408000\(\);/);
+    expect(code).toContain("return eax;");
+  });
+
+  it("does not fold a return of a register the preceding call did not produce", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "esi, 7"], // 0x401000
+        ["call", "0x408000"], // 0x401005
+        ["mov", "eax, esi"], // 0x40100a
+        ["ret"], // 0x40100c
+      ]),
+    );
+
+    // `return esi` is not the call's result, so the call keeps whatever shape
+    // the liveness rule gives it and the return keeps its own value.
+    expect(code).not.toContain("return sub_408000();");
   });
 
   it("says where the value a guard tests came from, and spells both the same way", () => {

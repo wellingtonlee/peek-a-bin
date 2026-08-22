@@ -1,6 +1,6 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
 import type { BinaryOp, IRExpr, IRFunction, IRStmt } from "./ir";
-import { canonReg, isKnownRegister, regSize, walkExpr, walkStmts } from "./ir";
+import { canonReg, isKnownRegister, regSize, rewriteBodies, walkExpr, walkStmts } from "./ir";
 import { isCapturedOperandName } from "./lifter";
 import type { DecompType, TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
@@ -824,6 +824,66 @@ function collectCapturedCalls(body: readonly IRStmt[]): Set<IRStmt> {
   // behind is read by the `return` statement the lifter emits for it.
   liveInList(body, new Set<string>(), ctx);
   return ctx.captured;
+}
+
+/**
+ * `eax = f(); return eax;` → `return f();`
+ *
+ * The commonest shape at a function's end, and two lines where one says the
+ * same thing: 400 pairs over the four corpus binaries at `f3b89ec`
+ * (119/84/83/114 on t32/t64/w64/w32). Purely cosmetic — both forms name the
+ * same call and return the same value — but the shape is also what a reader
+ * uses to decide whether the accumulator matters afterwards, and here it does
+ * not.
+ *
+ * It is `emitFunction`'s FIRST act, before `collectCapturedCalls` and
+ * `collectAssignedRegs`, and that ordering is the whole of its safety. Folding
+ * removes an assignment of the accumulator, so `_assignedRegs` may lose that
+ * name — and `registerText` respells a narrow read as a narrowing of the widest
+ * *assigned* alias. Computing both sets over the folded body keeps the output
+ * self-consistent by construction: a read is respelled exactly when a wider
+ * alias really is assigned in the text the reader sees. Removing an assigned
+ * name can only ever *withdraw* a respelling, never add one, and k8i's own rule
+ * says the residue is honest — a name with no wider assigned alias is an
+ * incoming value and its own name is what to call it.
+ *
+ * Nor can it change which *other* calls print a result. Before the fold the
+ * accumulator is dead immediately above `<acc> = f()` (the assignment kills
+ * it); after it, it is dead immediately above `return f()` for want of a
+ * mention. The live set every earlier statement is judged against is therefore
+ * identical, so `_capturedCalls` moves by exactly this call and nothing else.
+ *
+ * The folded line keeps the CALL's address, not the `return`'s. That is what
+ * the base's line at this position carried, so a guard whose body begins here —
+ * 27/35/35/26 of the sites — anchors to the same jcc in `corpus/sweep.ts` as it
+ * did before. The `return`'s own address leaves the line map, which is the one
+ * unavoidable cost of printing two statements as one line.
+ *
+ * Restricted to a `call_stmt`, which is the shape the liveness rule above is
+ * about. The other 12 pairs in the corpus are an ordinary `assign` whose value
+ * is not a call; folding those is equally sound and is deliberately left alone
+ * (peek-a-bin-l1f).
+ */
+function foldReturnedCallResults(body: readonly IRStmt[]): IRStmt[] {
+  const out: IRStmt[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const stmt = body[i];
+    const next = body[i + 1];
+    if (
+      stmt.kind === "call_stmt" &&
+      stmt.resultDest?.kind === "reg" &&
+      next !== undefined &&
+      next.kind === "return" &&
+      next.value?.kind === "reg" &&
+      next.value.name === stmt.resultDest.name
+    ) {
+      out.push({ kind: "return", value: stmt.call, addr: stmt.addr });
+      i++;
+      continue;
+    }
+    out.push(rewriteBodies(stmt, foldReturnedCallResults));
+  }
+  return out;
 }
 
 /** Canonical registers an expression reads. */
@@ -2205,10 +2265,13 @@ export interface EmitFunctionResult {
 }
 
 export function emitFunction(
-  func: IRFunction,
+  original: IRFunction,
   typeCtx?: TypeContext,
   stringMap?: Map<number, string>,
 ): EmitFunctionResult {
+  // Before anything reads the body: every analysis below has to be asked about
+  // the statements the reader will see — see `foldReturnedCallResults`.
+  const func: IRFunction = { ...original, body: foldReturnedCallResults(original.body) };
   // emitStmt/emitExpr are mutually recursive and unbounded, so deeply nested IR
   // can throw (e.g. RangeError) part-way through, and pipeline.ts swallows the
   // exception. The unwind used to skip the reset at the bottom of this function

@@ -652,6 +652,53 @@ fields and x64 byte-identical (peek-a-bin-5zpo, measured at `f685b6d`).
 
 **A call takes an assignment only when its result is live out of the call.** `liftBlock` gives every `call_stmt` a `resultDest` of RAX/EAX, but emit printed the call and dropped the assignment, so `GetProcAddress(...)` followed by `if (rax == 0)` was C in which nothing ever assigns `rax` — 968 accumulator reads of an unassigned name across the corpus, now 254. Which calls get one is answered as the liveness question it is: a backward pass over the **structured** body (the tree emission walks, so the statement the reader sees after a call is the one the analysis asked about), loop headers to a fixpoint, `break`/`continue` carrying the live set of the construct they leave, a handler live throughout the body it guards, and a `goto` — the one shape the tree does not model — falling back to every register the body names. 2665 of 4160 calls take an assignment; the rest stay bare, because an assignment nobody reads is noise. `_assignedRegs` follows the same rule, so `registerText` cannot respell a read of `al` as `(uint8_t)rax` in a function whose only write of RAX went unprinted.
 
+**…and where that assignment's only reader is the very next `return` of it, the two lines are
+printed as one: `rax = f(); return rax;` → `return f();`** — 396 pairs folded over the four
+corpus binaries at `f3b89ec` (117/84/83/112 on t32/t64/w64/w32, of a population of 400).
+`foldReturnedCallResults` (`emit.ts`) is `emitFunction`'s **first** act, before
+`collectCapturedCalls` and `collectAssignedRegs`, and that ordering is the whole of its safety
+rather than tidiness. Five things:
+
+- **Asking both sets about the folded body is what keeps the output self-consistent.** The fold
+  removes an assignment of the accumulator, so `_assignedRegs` may lose that name — and
+  `registerText` respells a narrow read as a narrowing of the widest *assigned* alias. Computed
+  over the folded body, a read is respelled exactly when a wider alias really is assigned in the
+  text the reader sees. Removing an assigned name can only ever **withdraw** a respelling, never
+  add one, and `peek-a-bin-k8i`'s own residue rule says what is left is honest: a name with no
+  wider assigned alias is an incoming value and its own name is what to call it. Measured, the
+  k8i instrument moves in the *good* direction — invented prelude declarations
+  **1495/2506/2328/1451 → 1460/2456/2278/1417**, i.e. −169 corpus-wide, because a folded function
+  stops naming the accumulator at all. The one function per PE32 binary where a respelling is
+  withdrawn is `t32!sub_40E714` / `w32!sub_40CE34`, where 115 `(uint8_t)eax` become `al` — decoded
+  `00 00` padding past a `ret`, i.e. a region the machine never executes.
+- **It cannot change which OTHER calls print a result, and that is a property rather than a
+  measurement.** Before the fold the accumulator is dead immediately above `<acc> = f()` (the
+  assignment kills it); after it, dead immediately above `return f()` for want of a mention. The
+  live set every earlier statement is judged against is therefore identical, so `_capturedCalls`
+  moves by exactly this call.
+- **The folded line keeps the CALL's address, not the `return`'s**, which is what the base's line
+  at that position carried — so a guard whose body *begins* here (27/35/35/26 of the sites)
+  anchors to the same jcc in `corpus/sweep.ts`. Measured: `polarity guards audited` exactly flat
+  at 517/574/497/441 with `CHANGED 0 / only-base 0 / only-change 0` on all four. The `return`'s
+  own address leaves the line map, which is the one unavoidable cost of printing two statements as
+  one line: `insns covered` **6624/6144/5565/6136 → 6517/6097/5520/6033**, with `blocks covered`
+  unmoved. That row is labelled "read the C, not a gate" for exactly this kind of move.
+- **Adjacency in the statement list is the rule, and it refuses more than it looks like.**
+  `t32!sub_401000` ends `eax = sub_401DA4(); /* unlifted: leave */; return eax;` and is left
+  alone — an unlifted instruction between the two is a statement, and folding across it would
+  claim the machine does nothing there.
+- **Restricted to a `call_stmt`**, which is the shape the liveness rule is about. The residue is
+  **2/0/0/2** pairs whose left side is an ordinary `assign` (`eax = var_4; return eax;` in
+  `t32!sub_4079E0` / `w32!sub_4071F0`); folding those is equally sound and is deliberately out of
+  scope.
+
+**Two tests pinned the two-line shape and both were pinning the shape, not the property**
+(`pipeline.test.ts`, "a call's result"). `peek-a-bin-oro` exists so that a call's result reaches
+the reader instead of a `return eax` with nothing assigning `eax`, and `return sub_408000();`
+satisfies that more directly than `eax = sub_408000(); return eax;` did; the sibling test's real
+claim — the *first* of two calls stays bare because its result is dead — is untouched. Both now
+assert the property (`peek-a-bin-l1f`).
+
 **emit.ts module-level `_typeCtx`**: Set before emission, cleared after. Enables cast suppression and type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
 
 ## Gotchas
