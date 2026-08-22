@@ -152,7 +152,28 @@ interface StackAccess {
   base: "bp" | "sp";
   /** Offset as written in the operand (always positive). */
   offset: number;
-  isParam: boolean;
+  /**
+   * Whether the slot sits **above** the frame register, i.e. at a positive
+   * `bp:` key — which is a fact about the operand, not a judgement about the
+   * function's interface.
+   *
+   * It selects which lookup the key is resolved in, and that is all it can do,
+   * because the two maps partition the key space: `analyzeStackFrame` records a
+   * positive `bp:` key *only* from its argument-slot branch, so such a key
+   * exists in `paramLookup` or nowhere, and every other shape it records — the
+   * `[<fp> - N]` locals, the `[<sp> + N]` slots — is negative or `sp:`-based
+   * and can only be in `varLookup`. Consulting one map is therefore the same
+   * answer as consulting both, and the *only* way a slot resolves is that
+   * `stack.ts` recorded it.
+   *
+   * That partition is why this field asks the structural question rather than
+   * the ABI one. It used to be `isParam`, decided here from a hard-coded
+   * canonical threshold (`is64 ? 0x10 : 0x8`) — `D === slotSize`'s answer, in a
+   * file that has no `D` — so a genuine argument in a frame with `D < slotSize`
+   * was classified a local, looked up in the wrong map and never promoted,
+   * while `stack.ts` had already declared it a parameter (peek-a-bin-s7hl).
+   */
+  aboveFrame: boolean;
 }
 
 /**
@@ -260,7 +281,13 @@ function frameRegisterAliases(
 }
 
 /**
- * Check if expr is [rbp - const] or [rsp + const] and return the slot.
+ * Check if expr is `[<fp> ± const]` or `[<sp> + const]` and return the slot.
+ *
+ * This pass identifies a slot; it does **not** decide what the slot is. Which
+ * side of the frame register the operand names is read off the operand, the
+ * `bp:`/`sp:` key is built from it, and the two lookup maps do the rest — see
+ * `StackAccess.aboveFrame` for why that is the whole test and why no threshold
+ * belongs here.
  *
  * `bpAliases` names variables standing in for the frame register — see
  * `frameRegisterAliases`. It is empty unless `stack.ts` recovered the frame
@@ -281,18 +308,20 @@ function matchStackAccess(
     (e.kind === "reg" && e.name.toLowerCase() === bp) ||
     (e.kind === "var" && bpAliases.has(e.name));
 
-  // [rbp - offset] → local
+  // [rbp - offset] → a slot below the frame register
   if (addr.kind === "binary" && addr.op === "-" && isBp(addr.left) && addr.right.kind === "const") {
     const offset = addr.right.value;
-    return { key: stackVarKey("bp", -offset), base: "bp", offset, isParam: false };
+    return { key: stackVarKey("bp", -offset), base: "bp", offset, aboveFrame: false };
   }
 
-  // [rbp + offset] → param (if offset >= threshold)
+  // [rbp + offset] → a slot above the frame register, resolved in `paramLookup`
+  // and nowhere else. No threshold: whether the offset is far enough above the
+  // frame register to be an argument is `analyzeStackFrame`'s question, it is
+  // answered there from the recovered displacement, and its answer is already
+  // on the record this lookup reads — see `StackAccess.aboveFrame`.
   if (addr.kind === "binary" && addr.op === "+" && isBp(addr.left) && addr.right.kind === "const") {
-    const minParam = is64 ? 0x10 : 0x8;
     const offset = addr.right.value;
-    if (offset >= minParam)
-      return { key: stackVarKey("bp", offset), base: "bp", offset, isParam: true };
+    if (offset > 0) return { key: stackVarKey("bp", offset), base: "bp", offset, aboveFrame: true };
   }
 
   // [rsp + offset] → local
@@ -304,13 +333,13 @@ function matchStackAccess(
     addr.right.kind === "const"
   ) {
     const offset = addr.right.value;
-    return { key: stackVarKey("sp", offset), base: "sp", offset, isParam: false };
+    return { key: stackVarKey("sp", offset), base: "sp", offset, aboveFrame: false };
   }
 
   // Direct base (rbp/rsp, or a frame-register alias) with no displacement
-  if (isBp(addr)) return { key: stackVarKey("bp", 0), base: "bp", offset: 0, isParam: false };
+  if (isBp(addr)) return { key: stackVarKey("bp", 0), base: "bp", offset: 0, aboveFrame: false };
   if (addr.kind === "reg" && addr.name.toLowerCase() === sp)
-    return { key: stackVarKey("sp", 0), base: "sp", offset: 0, isParam: false };
+    return { key: stackVarKey("sp", 0), base: "sp", offset: 0, aboveFrame: false };
 
   return null;
 }
@@ -327,7 +356,7 @@ function promoteExpr(
   // Check if this is a stack variable deref
   const stackAccess = matchStackAccess(expr, is64, bpAliases);
   if (stackAccess) {
-    const lookup = stackAccess.isParam ? paramLookup : varLookup;
+    const lookup = stackAccess.aboveFrame ? paramLookup : varLookup;
     const name = lookup.get(stackAccess.key);
     if (name) {
       return irVar(name, expr.kind === "deref" ? expr.size : 4);
@@ -402,7 +431,7 @@ function promoteStmt(
         bpAliases,
       );
       if (stackAccess) {
-        const lookup = stackAccess.isParam ? paramLookup : varLookup;
+        const lookup = stackAccess.aboveFrame ? paramLookup : varLookup;
         const name = lookup.get(stackAccess.key);
         if (name) {
           // Convert store to assign to variable
@@ -532,7 +561,7 @@ function inferVarTypes(
       const inner = expr.operand;
       const sa = matchStackAccess(inner, is64, bpAliases);
       if (sa) {
-        const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
+        const name = (sa.aboveFrame ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
           const entry = info.get(name) ?? { minSize: 8, signed: null };
           const castSigned = expr.type.startsWith("int");
@@ -548,7 +577,7 @@ function inferVarTypes(
     if (expr.kind === "deref") {
       const sa = matchStackAccess(expr, is64, bpAliases);
       if (sa) {
-        const name = (sa.isParam ? paramLookup : varLookup).get(sa.key);
+        const name = (sa.aboveFrame ? paramLookup : varLookup).get(sa.key);
         if (name && localsByName.has(name)) {
           const entry = info.get(name) ?? { minSize: 8, signed: null };
           entry.minSize = Math.min(entry.minSize, expr.size);
@@ -593,7 +622,7 @@ function synthesizeStackFrame(
     // No `StackFrame` at all means nothing verified a prologue, so there is no
     // frame-register alias to follow — see `frameRegisterAliases`.
     const sa = matchStackAccess(expr, is64, NO_ALIASES);
-    if (sa && !sa.isParam && expr.kind === "deref") {
+    if (sa && !sa.aboveFrame && expr.kind === "deref") {
       const existing = accesses.get(sa.key);
       if (!existing) {
         accesses.set(sa.key, { key: sa.key, base: sa.base, offset: sa.offset, size: expr.size });

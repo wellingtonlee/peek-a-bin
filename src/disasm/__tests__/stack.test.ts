@@ -797,4 +797,25 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
     const { func: f, instructions } = withHelper(callerInsns, helper);
     expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_4"]);
   });
+
+  // The helper is itself detected as a function — t32!sub_404170 and
+  // w32!sub_4043D0 are exactly this — and analysed on its own it has `D = -8`:
+  // two pushes leave the stack pointer at `E - 8`, so `lea ebp, [esp + 0x10]`
+  // puts the frame register at `E + 8`, ABOVE its own entry stack pointer. The
+  // frame it addresses is the CALLER's, so no `[ebp + off]` in it is an argument
+  // of it — and at `D = -8, slot = 4` the plain threshold `off >= D + slot`
+  // admits every offset there is, spelling the caller's saved EBP `arg_1` and
+  // its return address `arg_2` (peek-a-bin-s7hl).
+  it("records no parameter for the helper itself, whose frame is its caller's", () => {
+    const asOwnFunction: [string, string][] = [
+      ...SEH_PROLOG4.slice(0, 5),
+      ["mov", "eax, dword ptr [ebp + 0x4]"],
+      ["mov", "ecx, dword ptr [ebp + 0x10]"],
+      ["ret", ""],
+    ];
+    const insns = asOwnFunction.map(([mn, op], i) => insn(0x1000 + i * 4, mn, op));
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, false);
+    expect(frame!.frameDelta).toBe(-8);
+    expect(argNames(frame)).toEqual([]);
+  });
 });

@@ -203,10 +203,48 @@ describe("promoteVars — stack access matching", () => {
     expect(fn.body[0]).toEqual(assign(irReg("al", 1), irVar("var_8", 1)));
   });
 
-  it("ignores [rbp + const] below the x64 parameter threshold", () => {
-    // The x64 home area starts at [rbp+0x10]; anything below is not a param.
+  // The whole test for a slot above the frame register is whether `stack.ts`
+  // recorded it — this pass carries no threshold of its own. `frame` records
+  // `bp:0x10` and nothing else on that side, so `[rbp + 8]` resolves to nothing
+  // and is left as a dereference.
+  it("leaves a slot above the frame register that the frame does not record", () => {
     const fn = promote([assign(irReg("eax", 4), bpParam(0x8))], { frame });
     expect(fn.body[0]).toEqual(assign(irReg("eax", 4), bpParam(0x8)));
+  });
+
+  // The defect: this pass used to decide the question itself, from the CANONICAL
+  // threshold `is64 ? 0x10 : 0x8` — which is `D === slotSize`'s answer, in a file
+  // that has no `D`. `mov ebp, esp` with no push ahead of it gives `D = 0`, so
+  // argument 0 sits at `[ebp + 4]`: `stack.ts` records it, declares `arg_0` in the
+  // signature, and every read of it in the body stayed an unpromoted
+  // `*(int32_t*)(ebp + 4)` because 4 is below 8 (peek-a-bin-s7hl).
+  it("resolves an argument slot below the canonical threshold", () => {
+    const shifted = shiftedFrameOf(
+      0,
+      stackVar({ name: "arg_0", offset: 4, key: stackVarKey("bp", 4) }),
+    );
+    const fn = promote([assign(irReg("eax", 4), bpParam(4, 4, "ebp"))], {
+      frame: shifted,
+      is64: false,
+    });
+    expect(fn.params).toEqual([{ name: "arg_0", type: "int32_t" }]);
+    expect(fn.body[0]).toEqual(assign(irReg("eax", 4), irVar("arg_0", 4)));
+  });
+
+  // ...and the other direction, which is what keeps dropping the threshold from
+  // being a WIDENING: a slot above the frame register is resolved in
+  // `paramLookup` and nowhere else. `analyzeStackFrame` writes a positive `bp:`
+  // key only from its argument-slot branch, so the two maps partition the key
+  // space and a local can never be reached from `[<fp> + N]` however it is named.
+  // Consulting both maps, or routing on the name, would put back the phantom
+  // parameter peek-a-bin-ikd and peek-a-bin-g186 removed.
+  it("never resolves a slot above the frame register as a local", () => {
+    const mislabelled = frameOf(stackVar({ name: "var_4", offset: 4, key: stackVarKey("bp", 4) }));
+    const fn = promote([assign(irReg("eax", 4), bpParam(4, 4, "ebp"))], {
+      frame: mislabelled,
+      is64: false,
+    });
+    expect(fn.body[0]).toEqual(assign(irReg("eax", 4), bpParam(4, 4, "ebp")));
   });
 
   it("uses ebp/esp in 32-bit mode and ignores the 64-bit names", () => {
@@ -221,7 +259,7 @@ describe("promoteVars — stack access matching", () => {
     expect(asEbp.body[0]).toEqual(assign(irReg("eax", 4), irVar("var_8", 4)));
   });
 
-  it("uses the lower x86 parameter threshold in 32-bit mode", () => {
+  it("resolves a slot above the frame register in 32-bit mode", () => {
     const frame32 = frameOf(stackVar({ name: "arg_0", offset: 8, key: stackVarKey("bp", 8) }));
     const fn = promote([assign(irReg("eax", 4), bpParam(8, 4, "ebp"))], {
       frame: frame32,

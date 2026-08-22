@@ -589,8 +589,10 @@ function frameGeometry(
  *
  * Three ways to fall back, and only the first is about the frame:
  *
- *  - **No `delta`.** Nothing says where the argument area is; the caller does
- *    not record such a slot as a parameter at all, so this is defence in depth.
+ *  - **No usable `delta`** — `addressesOwnFrame`. With no displacement nothing
+ *    says where the argument area is; with a negative one the frame is not this
+ *    function's. The caller does not record such a slot as a parameter at all,
+ *    so this is defence in depth.
  *  - **A sub-slot offset.** `[ebp+0xA]` is the third byte of argument 0 and
  *    divides into no index, so it is named after its offset rather than
  *    silently rounded into a neighbour's.
@@ -611,7 +613,7 @@ function argSlotName(
   homed: ReadonlySet<number>,
 ): string {
   const byOffset = `arg_0x${offset.toString(16).toUpperCase()}`;
-  if (delta === null) return byOffset;
+  if (!addressesOwnFrame(delta)) return byOffset;
   if (inUnfilledHomeSpace(offset, delta, slotSize, homeRegs, homed)) return byOffset;
   const above = offset - delta - slotSize;
   if (above < 0 || above % slotSize !== 0) return byOffset;
@@ -650,6 +652,48 @@ function argSlotName(
  *    peek-a-bin-sx57's five spilled home slots keep their indices as a property
  *    of the two rules being the same rule, not as a measurement.
  */
+/**
+ * Whether `D` describes **this** function's frame, which is what every
+ * positional name derived from it is a statement about.
+ *
+ * `D = E - V`, so `D >= 0` says the frame register points at or below the stack
+ * pointer on entry — into storage this function owns — and `[<fp> + D]` is its
+ * own return address. `D < 0` says the register points *above* `E`, at storage
+ * the **caller** owns, and there is exactly one way for that to happen: the
+ * function is establishing somebody else's frame. MSVC's `__SEH_prolog4` is
+ * that function and it is in this corpus twice —
+ * `push <handler> / push dword ptr fs:[0] / mov eax, [esp+0x10] /
+ * mov [esp+0x10], ebp / lea ebp, [esp+0x10]`, two pushes so `V = E + 8` and
+ * `D = -8` — where it does for its caller precisely what `push ebp;
+ * mov ebp, esp` would have done inside it.
+ *
+ * So `[<fp> + off]` there is a slot of the *caller's* frame, and naming one
+ * `arg_<N>` states something false about an interface that has no such
+ * argument: at `D = -8, slot = 4` the threshold `off >= D + slot` is `off >= -4`,
+ * i.e. **every** `[ebp + off]` operand would be recorded as a parameter and
+ * `[ebp + 0]` — the caller's saved `ebp` — would be spelled `arg_1`. The sign of
+ * the operand stops separating the two populations at all: argument 0 sits at
+ * `[<fp> + D + slot]`, which for a negative `D` can be a *negative* operand
+ * offset that `BP_LOCAL_RE` reads as a local.
+ *
+ * Refusing is free in this corpus and is not measurable here — both functions
+ * contain no `[ebp + N]` operand at all, so nothing was recorded either way
+ * (peek-a-bin-s7hl). It is stated as a rule rather than left to the arithmetic
+ * because `promote.ts` no longer carries a threshold of its own: the record this
+ * file writes is now the only answer, so it has to be honest at the one geometry
+ * where the two files used to disagree.
+ *
+ * `D` itself is still published, and deliberately not nulled: `frameDelta`
+ * answers a *second* question — "is the frame register a frame pointer", which
+ * `promote.ts`'s `frameRegisterAliases` asks — and `__SEH_prolog4`'s EBP is
+ * stack-derived and invariant for the whole body, so a copy of it may still be
+ * followed to the same slot (peek-a-bin-cvri). Conflating the two is the defect
+ * the boolean `framed` was.
+ */
+function addressesOwnFrame(delta: number | null): delta is number {
+  return delta !== null && delta >= 0;
+}
+
 function inUnfilledHomeSpace(
   offset: number,
   delta: number,
@@ -756,11 +800,12 @@ export function analyzeStackFrame(
    *
    * The lowest offset that can be one is a slot past the return address, which
    * sits at `[<fp> + delta]`; below that is a local of this frame, and with no
-   * `delta` at all nothing says where the area is. And on x64 being inside the
-   * area is still not sufficient — see `inUnfilledHomeSpace`.
+   * `delta` at all — or a negative one, where the frame is not this function's —
+   * nothing says where the area is (`addressesOwnFrame`). And on x64 being
+   * inside the area is still not sufficient — see `inUnfilledHomeSpace`.
    */
   const isArgumentSlot = (offset: number): boolean =>
-    frameDelta !== null &&
+    addressesOwnFrame(frameDelta) &&
     offset >= frameDelta + slotSize &&
     !inUnfilledHomeSpace(offset, frameDelta, slotSize, homeRegs, geometry.homed);
 
@@ -818,9 +863,20 @@ export function analyzeStackFrame(
       // `void sub_1400027C8(int64_t arg_0x30, …) { arg_0x30 = rbx; }`
       // (peek-a-bin-g186). Not recording is again the *only* honest option
       // rather than the cautious one: it is not a local either — the caller
-      // owns the storage — and `promote.ts`'s `matchStackAccess` classifies
-      // every `[<fp> + N]` as a parameter from the offset alone, so a local
-      // name recorded here would have no site to be promoted at.
+      // owns the storage — and `promote.ts` resolves a positive `bp:` key in
+      // `paramLookup` and nowhere else, so a local name recorded here would
+      // have no site to be promoted at.
+      //
+      // Which is now the whole of what happens downstream: `matchStackAccess`
+      // used to re-derive the threshold itself, from the CANONICAL geometry
+      // (`is64 ? 0x10 : 0x8`, i.e. `D === slotSize`'s answer), so the record
+      // written here was consulted only where the two arithmetics happened to
+      // agree. They agree for every `D >= slotSize`, which is why nothing was
+      // ever observed — but a genuine argument in a frame with `D < slotSize`
+      // was declared a parameter here and left an unpromoted deref in the body
+      // (peek-a-bin-s7hl). `addressesOwnFrame` is the other half of closing
+      // that: the geometries where the two disagreed are exactly `D < 0`, and
+      // there the record itself was not worth agreeing with.
       if (isArgumentSlot(offset)) {
         record("bp", offset, offset, inferSize(op), true);
       }
