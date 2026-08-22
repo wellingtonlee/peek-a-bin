@@ -194,6 +194,20 @@ function fakeCs() {
           emit("add", `${R32[bytes[i + 1] & 7]}, ${imm(bytes[i + 2])}`, 3);
           continue;
         }
+        // 83 /4 ib — `and r32, imm8`, the mask MSVC bounds a memcpy tail's
+        // dispatch index with. The docstring above records the shipped decoder
+        // printing `83 e0 0f` as `and eax, 0xf`.
+        if (b === 0x83 && (bytes[i + 1] & 0xf8) === 0xe0 && i + 2 < bytes.length) {
+          emit("and", `${R32[bytes[i + 1] & 7]}, ${imm(bytes[i + 2])}`, 3);
+          continue;
+        }
+        // F3 A5 — `rep movsd`, which writes ECX, ESI and EDI without naming any
+        // of them in an operand. Spelled the way the shipped decoder spells it
+        // on t32.exe, prefix folded into the mnemonic.
+        if (b === 0xf3 && bytes[i + 1] === 0xa5) {
+          emit("rep movsd", "dword ptr es:[edi], dword ptr [esi]", 2);
+          continue;
+        }
         if (b === 0x89 && bytes[i + 1] >= 0xc0) {
           emit("mov", `${R32[bytes[i + 1] & 7]}, ${R32[(bytes[i + 1] >> 3) & 7]}`, 2);
           continue;
@@ -252,8 +266,24 @@ function fakeCs() {
           emit("jmp", R64[bytes[i + 1] & 7], 2);
           continue;
         }
-        if (b === 0xff && bytes[i + 1] === 0x24 && bytes[i + 2] === 0xc5 && i + 6 < bytes.length) {
-          emit("jmp", `qword ptr [rax*8 + ${hex(readI32(bytes, i + 3))}]`, 7);
+        // FF 24 <sib> dd — `jmp [<index>*<scale> + disp32]`, mod=00 rm=100 with
+        // a SIB base of 101. The SIB decides which register is the index, which
+        // is the whole point of `boundedCaseCount`'s register tracking: a fake
+        // that only ever emitted `rax` could not tell a bound on the index from
+        // a bound on something else. `0xc5` is still `rax*8`.
+        if (
+          b === 0xff &&
+          bytes[i + 1] === 0x24 &&
+          (bytes[i + 2] & 7) === 5 &&
+          i + 6 < bytes.length
+        ) {
+          const sib = bytes[i + 2];
+          const scale = 1 << (sib >> 6);
+          emit(
+            "jmp",
+            `qword ptr [${R64[(sib >> 3) & 7]}*${scale} + ${hex(readI32(bytes, i + 3))}]`,
+            7,
+          );
           continue;
         }
         if (b === 0xff && bytes[i + 1] === 0x25 && i + 5 < bytes.length) {
@@ -1337,6 +1367,145 @@ describe("detectFunctions — jumpTableSpans", () => {
     });
     expect(jumpTableSpans).toEqual([]);
     expect(omitted).toContain("jump-tables");
+  });
+});
+
+// ── What bounds a jump table, and which register it is about (peek-a-bin-padl) ──
+// `readAbsoluteTable` used to walk back to the FIRST `cmp` it met, read its
+// immediate as the case count and stop, without ever asking which register was
+// compared — while `boundedCaseCount`, in the same file, tracked the index
+// register but could not read a bound carried in a register. Two declarations of
+// one rule, each wrong where the other was right. There is one now, and nothing
+// in this suite had ever put a `cmp` of an unrelated register in front of a
+// dispatch, which is why nothing failed.
+describe("detectFunctions — what bounds a jump table", () => {
+  const TABLE = 0x20;
+  const CASES = [0x40, 0x44, 0x48];
+  const LEN = 0x60;
+  /** `jmp dword ptr [<index>*8 + <base>]` — 7 bytes; the SIB names the index. */
+  const dispatch = (sib: number, base = BASE + TABLE) => [0xff, 0x24, sib, ...le32(base)];
+  const BY_EAX = 0xc5;
+  const BY_ECX = 0xcd;
+  /** `n` of the three case bodies, as table entries plus the bodies themselves. */
+  const bodies = (n = CASES.length) => {
+    const parts: Record<number, number[]> = {
+      [TABLE]: CASES.slice(0, n).flatMap((c) => le32(BASE + c)),
+    };
+    for (const c of CASES) parts[c] = [0x90, 0xc3];
+    return parts;
+  };
+  const detect32 = (img: Uint8Array) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), { entryPoint: BASE });
+  const targetsOf = (img: Uint8Array) => detect32(img).jumpTables.map(([, t]) => t);
+  const allCases = CASES.map((c) => BASE + c);
+
+  it("refuses a bound whose `cmp` names a register the dispatch does not index", () => {
+    // THE DEFECT. `cmp ecx, 2` says nothing about EAX, so there is no statement
+    // of this table's length and no cases may be reported from it.
+    const img = image(LEN, {
+      0x00: [0x83, 0xf9, 0x02], // cmp ecx, 2
+      0x03: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("reads a mask of the index as a bound", () => {
+    // `and eax, 3` bounds the index EXACTLY, where a `cmp` bounds it only
+    // together with the sense of the branch below it. Three entries resolve, so
+    // the clip still decides the answer.
+    const img = image(LEN, {
+      0x00: [0x83, 0xe0, 0x03], // and eax, 3
+      0x03: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    expect(targetsOf(img)).toEqual([allCases]);
+  });
+
+  it("refuses a mask of a register the dispatch does not index", () => {
+    const img = image(LEN, {
+      0x00: [0x83, 0xe1, 0x03], // and ecx, 3
+      0x03: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses a bound the index is written after", () => {
+    // A bound on a value the register no longer holds is not a bound — the rule
+    // `conditionSpoiled` applies to a guard.
+    const img = image(LEN, {
+      0x00: [0x83, 0xf8, 0x02], // cmp eax, 2
+      0x03: [0x83, 0xc0, 0x00], // add eax, 0
+      0x06: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("refuses a bound a string primitive's implicit write crosses", () => {
+    // `rep movsd` writes ECX, ESI and EDI while naming none of them.
+    const img = image(LEN, {
+      0x00: [0x83, 0xf9, 0x02], // cmp ecx, 2
+      0x03: [0xf3, 0xa5], // rep movsd
+      0x05: dispatch(BY_ECX),
+      ...bodies(),
+    });
+    expect(detect32(img).jumpTables).toEqual([]);
+  });
+
+  it("recovers the same dispatch when nothing writes across the bound", () => {
+    // The control for the two refusals above: the same shape without the write.
+    const img = image(LEN, {
+      0x00: [0x83, 0xf9, 0x02], // cmp ecx, 2
+      0x03: dispatch(BY_ECX),
+      ...bodies(),
+    });
+    expect(targetsOf(img)).toEqual([allCases]);
+  });
+
+  it("reads a table a previous dispatch already read, with no bound of its own", () => {
+    // MSVC's memcpy tails are reached by `jmp`, so the addresses in front of one
+    // are not the instructions that ran and the `and <index>, 3` that bounds
+    // them is out of linear reach at all but the first. The same bytes at the
+    // same base hold the same entries however they are reached, so nothing new
+    // is claimed: t32.exe 0x40b836/0x40b85c/0x40b87a/0x40b8e7 are read this way.
+    const img = image(LEN, {
+      0x00: [0x83, 0xe0, 0x03], // and eax, 3
+      0x03: dispatch(BY_EAX),
+      0x0a: [0x83, 0xc0, 0x00], // add eax, 0 — the second dispatch has no bound
+      0x0d: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    expect(targetsOf(img)).toEqual([allCases, allCases]);
+  });
+
+  it("never lengthens a table it is reusing", () => {
+    // The first reading's own evidence bounded it at two. A third entry resolves,
+    // and taking it would be a length claim the second dispatch has no evidence
+    // for — so the reuse is of the entries, never of a longer run.
+    const img = image(LEN, {
+      0x00: [0x83, 0xe0, 0x01], // and eax, 1
+      0x03: dispatch(BY_EAX),
+      0x0a: [0x83, 0xc0, 0x00], // add eax, 0
+      0x0d: dispatch(BY_EAX),
+      ...bodies(),
+    });
+    const two = allCases.slice(0, 2);
+    expect(targetsOf(img)).toEqual([two, two]);
+  });
+
+  it("does not reuse a base no dispatch has read", () => {
+    // The first dispatch's table is at TABLE; the second names four bytes past
+    // it, which is a base nothing has resolved. Reuse is keyed on the base.
+    const img = image(LEN, {
+      0x00: [0x83, 0xe0, 0x03], // and eax, 3
+      0x03: dispatch(BY_EAX),
+      0x0a: [0x83, 0xc0, 0x00], // add eax, 0
+      0x0d: dispatch(BY_EAX, BASE + TABLE + 4),
+      ...bodies(),
+    });
+    expect(targetsOf(img)).toEqual([allCases]);
   });
 });
 

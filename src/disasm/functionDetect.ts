@@ -295,9 +295,6 @@ function makeImageReader(windows: DataWindow[]): ImageReader {
  */
 const MAX_JUMP_TABLE_CASES = 512;
 
-/** How far back the legacy (operand-named table) path looks for its bounds check. */
-const CMP_LOOKBACK = 8;
-
 /** How far back the x64 chain walk looks. `lea`/load/`add`/`jmp` plus the check. */
 const MAX_RECENT = 16;
 
@@ -554,19 +551,107 @@ function recoverX64RvaChain(
 }
 
 /**
+ * The register a scaled memory operand subscripts with — the *index*.
+ *
+ * `dword ptr [edx*4 + 0x40b8f0]` and `byte ptr [ecx + edx*4 + 8]` both answer
+ * `rdx`. An x86 operand carries at most one scale, so a single match is the
+ * whole answer, and the family rather than the spelling is returned for the
+ * reason {@link REG_FAMILY} exists: the bound is routinely compared at a
+ * different width from the subscript.
+ */
+function scaledIndexRegister(opStr: string): string | null {
+  const m = opStr.match(/\b([a-z][a-z0-9]*)\s*\*\s*[1248]\b/i);
+  return m ? regFamily(m[1]) : null;
+}
+
+/**
+ * Base mnemonics of the x86 string primitives, which write RSI/RDI implicitly —
+ * and RCX as well under a `rep` prefix — without naming them in an operand.
+ *
+ * They matter to {@link boundedCaseCount} only as *refusals*: a bound found
+ * across one of these is a bound on a value the register no longer holds. The
+ * SSE `movsd`/`cmpsd` share two of the spellings and write no general register
+ * at all, so this over-refuses for them; over-refusing costs a table that is
+ * not read, which is the direction every refusal here errs in.
+ */
+const STRING_PRIMITIVES = new Set([
+  "movs",
+  "movsb",
+  "movsw",
+  "movsd",
+  "movsq",
+  "stos",
+  "stosb",
+  "stosw",
+  "stosd",
+  "stosq",
+  "lods",
+  "lodsb",
+  "lodsw",
+  "lodsd",
+  "lodsq",
+  "scas",
+  "scasb",
+  "scasw",
+  "scasd",
+  "scasq",
+  "cmps",
+  "cmpsb",
+  "cmpsw",
+  "cmpsd",
+  "cmpsq",
+]);
+
+/** `"rep movsd"` → `"movsd"`. Capstone spells a string prefix into the mnemonic. */
+function withoutRepPrefix(mnemonic: string): string {
+  const parts = mnemonic.toLowerCase().split(/\s+/);
+  return parts.length > 1 && parts[0].startsWith("rep") ? parts[parts.length - 1] : parts[0];
+}
+
+/**
  * Upper bound on case count from the bounds check in front of a dispatch.
  *
- * The check has to be about the index register, so a `mov`/`movsxd` that copied
- * the index from somewhere else is followed one step at a time back to whatever
- * the compare actually named. Without a check there is no length, and a table
- * with no length is not read at all.
+ * THE ONE DECLARATION OF WHAT BOUNDS A JUMP TABLE. It used to be two:
+ * {@link readAbsoluteTable} walked back to the *first* `cmp` it met, read its
+ * immediate and stopped — never asking which register was compared — while this
+ * function tracked the index register but could not read a bound carried in a
+ * register. So the two paths disagreed about the same question in *both*
+ * directions, and each was wrong where the other was right (peek-a-bin-padl).
  *
- * An index *loaded from memory* therefore ends the search with no count. That
- * is MSVC's dense two-table form (`movzx idx, byte ptr [...]` selecting into
- * the wide table), and no count is the right answer *for this function*: the
- * index it was asked about is an entry number, and entry numbers are not
+ * Three things count as a bound, all of them about the index register:
+ *
+ *  - `cmp <index>, <imm>` — `imm + 1`, an upper bound whichever way the `jcc`
+ *    below it reads (`ja` admits `0..imm`, `jb` only `0..imm-1`).
+ *  - `cmp <index>, <reg>` where the register provably holds a constant. MSVC
+ *    spells a small bound `push 7` / `pop ecx` and compares against that, two
+ *    bytes cheaper than `cmp eax, 7`; see {@link constantRegisterValue}
+ *    (peek-a-bin-mk42).
+ *  - `and <index>, <imm>` — `imm + 1`. A mask states the index's range
+ *    *exactly*, where a `cmp` states it only together with the sense of the
+ *    branch, so this is the stronger of the two forms rather than a weaker
+ *    substitute for one. CLAUDE.md records `overlappedTableExtent` refusing a
+ *    mask, and that refusal stands: there the question was which BYTES are
+ *    opcode, which a mask says nothing about, and admitting it would have
+ *    widened the vocabulary at every dispatch. Here the question is the index's
+ *    range, which is the question this function already asks, and the mask
+ *    counts only for the register the dispatch actually subscripts with.
+ *
+ * A `mov`/`movsxd`/`movzx`/`movsx` that copied the index from somewhere else is
+ * followed one step at a time back to whatever the check named. **Any other
+ * write of the sought register ends the search**, because a bound on a value the
+ * register no longer holds is not a bound — the rule `conditionSpoiled` applies
+ * to a guard. An index *loaded from memory* therefore ends it with no count:
+ * that is MSVC's dense two-table form (`movzx idx, byte ptr [...]` selecting
+ * into the wide table), and no count is the right answer *for this function* —
+ * the index it was asked about is an entry number, and entry numbers are not
  * bounded by anything. The bound that form does have is on the *case* value one
  * step further back, and {@link recoverDenseByteTable} is what goes and gets it.
+ *
+ * `cmp`, `test` and `push` are the read-only forms: none writes a register, so
+ * naming the sought register as their first operand is not a clobber.
+ *
+ * Without a bound there is no length, and a table with no length yields no
+ * cases — see {@link readAbsoluteTable}, whose answer is then the bytes alone.
  *
  * `before` is the position of the table load, not of the jump: the load's
  * destination is routinely the index register itself (`movsxd rax, [rdx +
@@ -577,12 +662,21 @@ function boundedCaseCount(indexReg: string, recent: StackInsn[], before: number)
   for (let ri = before - 1; ri >= 0; ri--) {
     const p = recent[ri];
     const mn = p.mnemonic.toLowerCase();
+    // A call clobbers every register a bound could be about, as in
+    // `constantRegisterValue` and the chain walk.
+    if (mn === "call") return 0;
     if (mn === "cmp") {
-      if (destReg(p.opStr) === sought) {
-        const imm = cmpImmediate(p.opStr);
-        return imm === null ? 0 : imm + 1;
-      }
-      continue;
+      if (destReg(p.opStr) !== sought) continue;
+      const imm = cmpImmediate(p.opStr);
+      if (imm !== null) return imm + 1;
+      const pair = regPair(p.opStr);
+      const bound = pair ? constantRegisterValue(pair[1], recent, ri) : null;
+      return bound === null ? 0 : bound + 1;
+    }
+    if (mn === "and") {
+      if (destReg(p.opStr) !== sought) continue;
+      const imm = cmpImmediate(p.opStr);
+      return imm === null ? 0 : imm + 1;
     }
     if (mn === "mov" || mn === "movsxd" || mn === "movzx" || mn === "movsx") {
       const pair = regPair(p.opStr);
@@ -591,7 +685,14 @@ function boundedCaseCount(indexReg: string, recent: StackInsn[], before: number)
         continue;
       }
       if (destReg(p.opStr) === sought) return 0;
+      continue;
     }
+    if (mn === "test" || mn === "push") continue;
+    if (STRING_PRIMITIVES.has(withoutRepPrefix(p.mnemonic))) {
+      if (sought === "rsi" || sought === "rdi" || sought === "rcx") return 0;
+      continue;
+    }
+    if (destReg(p.opStr) === sought) return 0;
   }
   return 0;
 }
@@ -675,6 +776,13 @@ interface TableRead {
   spans: [number, number][];
   dataOnly?: true;
   deferredBase?: number;
+  /**
+   * The table base this reading was about, whenever one was identified — which
+   * is what lets the sweep remember a table it has already read, for the
+   * dispatches further on that name the same base with no bound of their own in
+   * reach. See {@link readAbsoluteTable}'s `knownTables` (peek-a-bin-padl).
+   */
+  base?: number;
 }
 
 /** The "nothing was recovered" answer, built fresh so no refusal aliases another. */
@@ -890,12 +998,28 @@ function overlappedTableExtent(
  * MAX_JUMP_TABLE_CASES} ceiling, and every entry having to resolve into the
  * code window — applies unchanged.
  *
- * With no bound at all there are no cases, and the answer is
- * {@link unboundedTableExtent}'s: where the bytes are, and nothing about what
- * they mean. That fallback is deliberately restricted to the *indexed* form —
- * the operand naming a scale, i.e. an actual array subscript. A plain
- * `jmp dword ptr [0x40f0a8]` is an import thunk, not a one-entry switch, and
- * scanning a run of words out of the IAT is not a question worth asking.
+ * The bound is {@link boundedCaseCount}'s answer and is about the register the
+ * dispatch subscripts with. It used not to be: this function walked back to the
+ * first `cmp` it met and read its immediate whatever register it named, which at
+ * 9 dispatches per 32-bit corpus binary took the bound from an unrelated
+ * register (peek-a-bin-padl).
+ *
+ * With no bound at all there are no cases *of this dispatch's own evidence*, and
+ * `knownTables` is asked before giving up: a base another dispatch has already
+ * read as a table of N entries holds those same N entries however it is reached,
+ * so nothing new is claimed and no length is guessed at. Only the bytes at the
+ * base are being reused — never a longer list than the first reading took, which
+ * would be a length claim this dispatch has no evidence for. That is what keeps
+ * the four MSVC memcpy/memset tails per 32-bit binary whose mask is out of
+ * linear reach, and it is the only route by which the two dispatches that follow
+ * the *unrolled* copy (t32 `0x40b8e7`, `0x40ba83`) are read at all.
+ *
+ * Failing that the answer is {@link unboundedTableExtent}'s: where the bytes
+ * are, and nothing about what they mean. That fallback is deliberately
+ * restricted to the *indexed* form — the operand naming a scale, i.e. an actual
+ * array subscript. A plain `jmp dword ptr [0x40f0a8]` is an import thunk, not a
+ * one-entry switch, and scanning a run of words out of the IAT is not a question
+ * worth asking.
  */
 function readAbsoluteTable(
   insn: StackInsn,
@@ -904,6 +1028,7 @@ function readAbsoluteTable(
   is64: boolean,
   codeStart: number,
   codeEnd: number,
+  knownTables?: ReadonlyMap<number, number[]>,
 ): TableRead {
   let tableBase = 0;
   const scaleMatch = insn.opStr.match(/\[.*\*\d\s*\+\s*0x([0-9a-fA-F]+)\]/);
@@ -916,21 +1041,8 @@ function readAbsoluteTable(
   if (!tableBase) return noTable();
 
   const ptrSize = is64 ? 8 : 4;
-  let maxCases = 0;
-  for (let ri = recent.length - 1; ri >= Math.max(0, recent.length - CMP_LOOKBACK); ri--) {
-    const prev = recent[ri];
-    if (prev.mnemonic === "cmp") {
-      const imm = cmpImmediate(prev.opStr);
-      if (imm !== null) {
-        maxCases = imm + 1;
-      } else {
-        const pair = regPair(prev.opStr);
-        const bound = pair ? constantRegisterValue(pair[1], recent, ri) : null;
-        if (bound !== null) maxCases = bound + 1;
-      }
-      break;
-    }
-  }
+  const indexReg = scaledIndexRegister(insn.opStr);
+  const maxCases = indexReg ? boundedCaseCount(indexReg, recent, recent.length) : 0;
   // A count above the ceiling is a claim not to be trusted, and not an
   // invitation to go looking for a second reading — same rule as readRvaTable.
   if (maxCases > MAX_JUMP_TABLE_CASES) return noTable();
@@ -943,7 +1055,21 @@ function readAbsoluteTable(
     targets.push(target);
   }
   if (targets.length >= 2) {
-    return { targets, spans: [[tableBase, tableBase + targets.length * ptrSize]] };
+    return {
+      targets,
+      spans: [[tableBase, tableBase + targets.length * ptrSize]],
+      base: tableBase,
+    };
+  }
+  // The same bytes, read once. A base already recovered as a table is a table,
+  // and this dispatch reads it — no bound of its own is needed to say so.
+  const known = indexed ? knownTables?.get(tableBase) : undefined;
+  if (known && known.length >= 2) {
+    return {
+      targets: [...known],
+      spans: [[tableBase, tableBase + known.length * ptrSize]],
+      base: tableBase,
+    };
   }
   // No switch was recovered — either nothing bounded the index, or the bound
   // read fewer than two cases forward from the named base, which is not a
@@ -1950,6 +2076,19 @@ export function detectFunctions(
    * see {@link overlappedTableExtent} (peek-a-bin-xqxy).
    */
   const pendingOverlaps: number[] = [];
+  /**
+   * Case lists of the tables already read, keyed by base — so a later dispatch
+   * naming a base this sweep has already resolved reads the same entries rather
+   * than needing a bound of its own in linear reach. MSVC's memcpy tails are
+   * reached by `jmp`, so the eight addresses in front of one are not the eight
+   * instructions that ran, and the `and <index>, 3` that bounds them is out of
+   * reach at all but the first (peek-a-bin-padl).
+   *
+   * First reading wins: it is the one whose own evidence bounded the table, and
+   * overwriting it with a later, longer read would be taking a length claim from
+   * a dispatch that has none.
+   */
+  const tablesByBase = new Map<number, number[]>();
   const reader = makeImageReader([{ base: baseAddress, bytes }, ...(options?.dataWindows ?? [])]);
   // Unlike `disassemble`/`hybridDisassemble`/`buildAllXrefs`, this stage keeps
   // its no-decoder branch rather than throwing (peek-a-bin-cen). Its answer is
@@ -2030,11 +2169,22 @@ export function detectFunctions(
           const table =
             is64 && regFamily(insn.opStr)
               ? readRvaTable(insn, recentInsns, reader, baseAddress, endAddress)
-              : readAbsoluteTable(insn, recentInsns, reader, is64, baseAddress, endAddress);
+              : readAbsoluteTable(
+                  insn,
+                  recentInsns,
+                  reader,
+                  is64,
+                  baseAddress,
+                  endAddress,
+                  tablesByBase,
+                );
           const hasCases = table.targets.length >= 2;
           if (hasCases) {
             jumpTables.set(insn.address, table.targets);
             for (const t of table.targets) jumpTableTargets.add(t);
+            if (table.base !== undefined && !tablesByBase.has(table.base)) {
+              tablesByBase.set(table.base, table.targets);
+            }
           }
           // The two questions are separate, and an unbounded dispatch answers
           // only the second: `dataOnly` carries an extent with no case list,
