@@ -154,8 +154,25 @@ function fakeCs() {
           emit("push", imm(bytes[i + 1]), 2);
           continue;
         }
+        if (b >= 0x50 && b <= 0x57) {
+          emit("push", R32[b & 7], 1);
+          continue;
+        }
         if (b >= 0x58 && b <= 0x5f) {
           emit("pop", R32[b & 7], 1);
+          continue;
+        }
+        // 8B /r with mod=01 rm=101 — `mov r32, dword ptr [ebp + disp8]`, the
+        // register reload an MSVC x86 `__finally` funclet's UNWINDER entry
+        // performs in front of the body its parent calls directly. `memOperand`
+        // reads SIB forms only, so this needs its own arm. Verified against the
+        // shipped decoder on t32.exe: `8b 75 08` prints as
+        // `mov esi, dword ptr [ebp + 8]` and `8b 75 e4` as
+        // `mov esi, dword ptr [ebp - 0x1c]`.
+        if (b === 0x8b && (bytes[i + 1] & 0xc7) === 0x45 && i + 2 < bytes.length) {
+          const disp = (bytes[i + 2] << 24) >> 24;
+          const text = disp < 0 ? `- ${imm(-disp)}` : `+ ${imm(disp)}`;
+          emit("mov", `${R32[(bytes[i + 1] >> 3) & 7]}, dword ptr [ebp ${text}]`, 3);
           continue;
         }
         // FF /6 with mod=01 — `push dword ptr [ebp + disp8]`, the first
@@ -901,8 +918,95 @@ describe("detectFunctions — a start reading a frame it did not establish (peek
     // `push 0xa; call _unlock; pop ecx; ret` is the same funclet family and is
     // deliberately NOT touched: an immediate says nothing about whose frame is
     // in scope, so the only evidence left would be the sole caller — which a
-    // helper laid out right after its one caller also has.
+    // helper laid out right after its one caller also has. Sixteen such starts
+    // per 32-bit binary at `cc45263`, and the callee really is a shared helper:
+    // t32's `_unlock` at 0x406cc0 has 21 call sites of its own.
     const img = filled(0x20, { ...parent, [FUNCLET]: [0x6a, 0x0a, 0x40, 0xc3] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps a funclet that pushes a callee-saved register it never wrote", () => {
+    // `push ebx; call; pop ecx; ret` — six per 32-bit binary at `cc45263`, and
+    // the second half of the funclet family the record described as one shape.
+    // It LOOKS like the frame case: no x86 convention passes EBX, so an entry
+    // point cannot mean anything by reading one either. It is refused because
+    // the same instruction already has a reading in this tree and it is the
+    // opposite one — `peek-a-bin-6lmh` established, against this corpus, that a
+    // `push` of a callee-saved register the function has not yet written is a
+    // register SAVE, which is what stops `collectArgs32` walking into a
+    // prologue. Withdrawing on the value reading would put two contradictory
+    // readings of one instruction in the tree; separating them needs the whole
+    // body (there is no `pop ebx`, so the stack is balanced by the `pop ecx`
+    // and the push was an argument), which is a kind of reasoning this pass
+    // does not do. The cost of refusing is measured and small: the emitted C is
+    // `sub_4038F7() { eax = sub_4023CD(); }` — 6lmh drops the push, so the
+    // argument is missing rather than wrong, and the callee is a `sub_` that
+    // `corpus/arity.ts` cannot see.
+    const img = filled(0x20, { ...parent, [FUNCLET]: [0x53, ...callTo(FUNCLET + 1, BASE), 0x59] });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("withdraws a start the previous function RUNS INTO from a frame read", () => {
+    // The fourth admission, and the shape the other three kept missing: every
+    // funclet in this family has TWO entries. MSVC emits the register reloads
+    // only the unwinder needs, then the body; the parent's own `call` names the
+    // BODY, past the reloads, because the parent already has the register
+    // loaded. So the body is what gets detected and the reload falls to the
+    // previous function, where it is a dead assignment whose only consumer is
+    // now in another function — `t32!sub_40388B` ended `loc_4038F4: esi = arg_0;`
+    // and nothing else, while `sub_4038F7` called `sub_4023CD()` with no
+    // argument at all. Withdrawn, that one line becomes
+    // `eax = sub_4023CD(arg_0); return eax;`.
+    //
+    // 12 starts per 32-bit binary at `cc45263`, and all 24 are funclet bodies —
+    // no false positive over 558 detected starts.
+    //
+    //   0x0d  8b 75 08   ; mov esi, dword ptr [ebp + 8] — the unwinder's entry
+    //   0x10  6a 0d ...  ; the body the parent calls
+    const img = filled(0x20, {
+      ...parent,
+      0x0d: [0x8b, 0x75, 0x08],
+      [FUNCLET]: [0x6a, 0x0d, 0x40, 0xc3],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+  });
+
+  it("keeps it when the instruction running into it reads no frame", () => {
+    // The frame test is the fourth admission's whole restriction, and it is
+    // negative-controlled by OUTPUT rather than by a count. Relaxed to "the
+    // predecessor is not a terminator", the rule also takes `t32!0x4037b2` /
+    // `w32!0x403a06`, whose predecessor is `call _invalid_parameter_noinfo` — a
+    // call that does not return — and the merge appends
+    // `eax = sub_406CC0(7); return eax;` to the arm containing it, stating that
+    // control flows out of a `noreturn` call. It takes five more per binary
+    // besides, for which there is no evidence at all. Every gate in
+    // `npm run corpus` reports the relaxed version as clean; the discriminator is
+    // reading the parent's emitted C.
+    //
+    //   0x0b  e8 .. .. .. ..   ; call BASE — a `noreturn` helper, for all this knows
+    //   0x10  6a 0d ...        ; the candidate
+    const img = filled(0x20, {
+      ...parent,
+      0x0b: callTo(0x0b, BASE),
+      [FUNCLET]: [0x6a, 0x0d, 0x40, 0xc3],
+    });
+    expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps a start whose predecessor is merely unreached", () => {
+    // The looser sibling of the rule above — "the code in front of it runs into
+    // it" with no test of WHAT that code does — and it is refused on
+    // measurement rather than on principle. At `cc45263` it fires on 8 starts
+    // per 32-bit binary and two of them are real functions: `t32!sub_40E1D8`,
+    // which opens with a full `mov edi, edi; push ebp; mov ebp, esp; push ebx`
+    // hot-patch prologue and has two callers, and the six-byte thunk
+    // `t32!sub_40BEBA` (`call 0x406196; ret`). w32 has both shapes at 0x40c7f8
+    // and 0x4050f4. Withdrawing either deletes real code with nothing said.
+    const img = filled(0x20, {
+      ...parent,
+      0x0d: [0x40, 0x40, 0x40],
+      [FUNCLET]: [0x6a, 0x0d, 0x40, 0xc3],
+    });
     expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
   });
 

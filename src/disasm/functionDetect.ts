@@ -1284,6 +1284,51 @@ function firstInstructionOperands(
 }
 
 /**
+ * The operand text of the instruction that ends exactly at `boundary`, decoded
+ * on the previous function's own grid — or null where nothing lands there.
+ *
+ * This is the counterpart of {@link firstInstructionOperands} and the two
+ * anchor differently on purpose. That one is asked about an address a `call`
+ * names, so it decodes *from* the address, which provably is an instruction
+ * boundary. Nothing names the address this one is asked about, so there is no
+ * such anchor: the only grid available is the linear one from `prev`, which is
+ * itself a detected start, walked forward until an instruction ends on
+ * `boundary`. Landing exactly on `boundary` — an address a `call` does name —
+ * is the self-consistency check that makes the walk worth trusting: a
+ * misaligned grid would have to survive the whole previous function and then
+ * come down precisely on a known boundary.
+ *
+ * A window that fails to decode advances a byte, as everywhere else here; the
+ * search simply finds nothing, which is the null answer.
+ */
+function precedingOperands(
+  prev: number,
+  boundary: number,
+  bytes: Uint8Array,
+  baseAddress: number,
+  scan: CapstoneScan,
+): string | null {
+  const lo = prev - baseAddress;
+  const hi = boundary - baseAddress;
+  if (lo < 0 || hi > bytes.length || hi <= lo) return null;
+  let offset = lo;
+  let found: string | null = null;
+  while (offset < hi) {
+    const insns = scan.decode(bytes, offset, hi, baseAddress + offset);
+    if (insns.length === 0) {
+      offset += 1;
+      continue;
+    }
+    for (const insn of insns) {
+      if (insn.address + insn.size === boundary) found = insn.opStr;
+    }
+    const last = insns[insns.length - 1];
+    offset += last.address - (baseAddress + offset) + last.size;
+  }
+  return found;
+}
+
+/**
  * Detected starts that the function in front of them conditionally jumps over.
  *
  * Sizes here are "distance to the next detected start", so one false start in
@@ -1379,7 +1424,60 @@ function firstInstructionOperands(
  * the "no caller outside the previous function" test withdraws it, and no gate
  * in `npm run corpus` reports that (see the CHANGELOG entry for the measurement).
  *
- * Two exemptions bound all three, and both are the linker's record outranking
+ * **The fourth admission: the instruction that RUNS INTO the start reads a frame
+ * it did not establish.** The third admission asks that of the boundary itself
+ * and so only ever sees a funclet MSVC laid out with no unwinder entry in front
+ * of it. But **every one of these funclets has two entries**, and that is the
+ * shape the first three admissions kept missing. MSVC emits the register reloads
+ * only the unwinder needs, and then the body; the *parent's* own `call` names the
+ * body, past the reloads, because the parent already has the register loaded. So
+ * the body is what gets detected, and the reload falls to the previous function,
+ * where it is a dead assignment whose only consumer is now in another function —
+ * `t32!sub_40388B` ended `loc_4038F4: esi = arg_0;` and nothing else, with
+ * `sub_4023CD(esi)` a separate function that passed no argument at all.
+ *
+ * The evidence is the second and third admissions composed, asked one
+ * instruction earlier: the instruction ending at the boundary reads memory
+ * through the frame register, so nothing there established a frame, and it falls
+ * into the boundary. Code running on a frame it did not establish, falling into
+ * a body every caller of which is inside the same function, is that function's
+ * `__finally`/`__except` funclet — the same conclusion as the third admission,
+ * reached from the head of the funclet rather than from its body.
+ *
+ * Four things about it:
+ *
+ *  * **The frame test is the whole restriction and it is negative-controlled by
+ *    OUTPUT, not by a count.** Relax it to "the predecessor is not a terminator"
+ *    and the rule additionally takes `t32!0x4037b2` / `w32!0x403a06`, whose
+ *    predecessor is `call _invalid_parameter_noinfo` — a call that does not
+ *    return — and the merge appends `eax = sub_406CC0(7); return eax;` to the arm
+ *    containing it, stating that control flows out of a `noreturn` call. Relaxing
+ *    it also takes five more per binary for which there is no evidence at all.
+ *    Every gate in `npm run corpus` reports the relaxed version as clean.
+ *  * **Reachability is deliberately NOT tested, and that is measured rather than
+ *    assumed.** All 12 predecessors per binary are unreached — only the unwinder
+ *    enters them — so the conjunct would contribute nothing, and it is not kept
+ *    as a bound because the case it would exclude is *stronger*, not weaker: a
+ *    reachable instruction falling into the boundary means the previous
+ *    function's own execution crosses it.
+ *  * **The grid is the previous function's**, since nothing names the
+ *    predecessor's address — see {@link precedingOperands} for why landing
+ *    exactly on `boundary` is what makes that walk trustworthy. This is the one
+ *    place here that reads an instruction it cannot decode *from*.
+ *  * Measured at `cc45263`: 12 starts per 32-bit binary and **all 24 are funclet
+ *    bodies — no false positive over 558 detected starts**. `functions` 280 → 268
+ *    and 278 → 266, instructions unmoved, t64/w64 byte-identical.
+ *
+ * The remaining residue is refused, and `__tests__/functionDetect.test.ts`
+ * pins each refusal beside the reason: 16 `push <imm>; call; pop ecx; ret`
+ * funclets per binary whose predecessor is a `ret` (an immediate says nothing
+ * about whose frame is in scope, and neither does a `ret`), and the six that
+ * `push` a callee-saved register (`peek-a-bin-6lmh` already reads that
+ * instruction the opposite way, as a register save). The sound rule for those is
+ * the SEH scope table read as a funclet-of-parent relation — see the last
+ * paragraph, and note it is a relation and never `strong` (peek-a-bin-qe8z).
+ *
+ * Two exemptions bound all four, and both are the linker's record outranking
  * this inference: a start in `strong` is never withdrawn, and a previous function
  * whose extent `.pdata` states is never extended. The second is why this is a
  * PE32 rule in practice — a `.pdata` image states where the parent ends.
@@ -1458,11 +1556,15 @@ function interiorBranchedOverStarts(
       continue;
     }
 
-    // The third admission. Reaching here means every direct caller — if there
-    // is one at all — is inside the previous function.
+    // The third and fourth admissions. Reaching here means every direct caller —
+    // if there is one at all — is inside the previous function.
     if (callers !== undefined && callers.length > 0) {
       const ops = firstInstructionOperands(boundary, windowEnd, bytes, baseAddress, scan);
-      if (ops !== null && FRAME_MEMORY_OPERAND.test(ops)) {
+      const before = precedingOperands(prev, boundary, bytes, baseAddress, scan);
+      if (
+        (ops !== null && FRAME_MEMORY_OPERAND.test(ops)) ||
+        (before !== null && FRAME_MEMORY_OPERAND.test(before))
+      ) {
         interior.add(boundary);
         // As below: `prev` stays put, so the next boundary is measured from the
         // function this one was just folded back into.
