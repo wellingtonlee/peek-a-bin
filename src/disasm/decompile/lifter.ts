@@ -582,6 +582,88 @@ function spoiledCompareCapture(
 }
 
 /**
+ * The capture the *predecessor's* own lift already placed at `compareAddr`, when
+ * this block's spoiled cross-block compare can be read through it — or null.
+ *
+ * **The value is already on the page; nothing new is placed here.**
+ * `spoiledCompareCapture` above is block-local because `liftBlock` returns one
+ * block's statements, and the standing reading of that was that a cross-block
+ * owner needs a capture *placed in the predecessor* — a second placement rule,
+ * a `pipeline.ts` pass of its own, and `pushBeforeTerminator`. Measured over the
+ * four corpus binaries at `16f1633`, that is not what the population is: all
+ * 2/0/0/1 cross-block spoiled owners are spoiled on the **predecessor's** side
+ * of the edge, and in every one of them the predecessor's *own* trailing jcc
+ * reads the same compare — so the predecessor is itself a block-local spoiled
+ * site and its lift has already emitted `flg_<compareAddr>_N` at the compare.
+ * All three sites are one MSVC `_output` shape, `cmp [ebp-X], 0 / … stores … /
+ * jge L` with `L: jne M`, where the emitted C reads
+ * `flg_404957_0 = var_40C; … if (flg_404957_0 >= 0) { if (__unrecovered_3) {` —
+ * the admitted guard one line below the value it needed (peek-a-bin-zylv).
+ *
+ * So this is a *lookup*, not a placement, and that is what makes it small:
+ *
+ * - **Recomputing is provably the predecessor's own answer, not an
+ *   approximation.** `spoiledCompareCapture` is called here with no
+ *   `flagPred` of its own, and it need not have one: a non-null answer means
+ *   `flagOwnerBefore` over the predecessor's own instructions found a compare,
+ *   and `flagPredecessor` returns undefined for exactly that block — its first
+ *   test is that the block's own scan reports `{none, no-owner}`. So the
+ *   predecessor's real lift saw the same stream and built the same statements.
+ *   A null answer likewise agrees: a predecessor with no local owner takes the
+ *   `fromPredecessor` path and builds nothing.
+ * - **The names are the whole channel.** The returned `left`/`right` are freshly
+ *   built `IRVar`s with the same names and widths as the statements the
+ *   predecessor emitted, and an `IRVar` is a leaf for `renameVariables`, so the
+ *   read binds to that variable across the edge with no versioning or phi
+ *   involved. No statement is emitted here — a second assignment would sit
+ *   *below* the clobber and be the defect this recovers from.
+ *
+ * Two refusals, and they are `peek-a-bin-6ilz`'s first refusal and its
+ * successor test asked of a *read* rather than of a definition:
+ *
+ * 1. **Exactly one predecessor**, and it is the one the flags came from. Since
+ *    `peek-a-bin-xdxt` a unanimous *several* may answer for the flags, and that
+ *    is sound for a condition re-read off the machine text — but each of those
+ *    predecessors holds its own compare at its own address, so a capture exists
+ *    on one edge only and reading it would name a variable the other paths never
+ *    assign. There is no phi to build: `IRVar` is not in SSA. All three corpus
+ *    sites have one predecessor, so this costs nothing measured.
+ * 2. **The capture must be at the compare this jump reads** (`at ===
+ *    compareAddr`). Both walks are forward and last-writer-wins over the same
+ *    stream, so they agree by construction; asking makes it a property rather
+ *    than an argument, exactly as `branchFor`'s block-local arm does.
+ *
+ * **What stays refused, and why that is the honest half.** A cross-block owner
+ * spoiled on the *reading* side of the edge — the predecessor's compare intact,
+ * this block overwriting what names it — has no capture to reuse, because the
+ * predecessor had no reason to take one. That is the case that would need the
+ * new placement, and its corpus population is **0**;
+ * `pipeline.test.ts`'s "refuses a predecessor's compare that the reading block
+ * overwrote" pins it. A `result` or `bittest` owner is untouched for
+ * `spoiledCompareCapture`'s reason 2.
+ *
+ * **Stated limitation.** "One predecessor" is `buildCFG`'s answer, so a block
+ * an external transfer can also reach is read as singly-entered — the
+ * assumption every stage here makes about a detected function's boundaries
+ * (`matchedStackSlots` states the same one). And that the definition is *emitted*
+ * above the read is dominance plus `structureCFG`'s walk rather than a property
+ * this function can assert; the instrument for a read whose definition was not
+ * emitted is `peek-a-bin-x54q`'s count of invented `long flg_…;` prelude
+ * declarations, which stays at 0.
+ */
+function reusablePredecessorCapture(
+  block: BasicBlock,
+  flagPred: BasicBlock | undefined,
+  compareAddr: number,
+  is64: boolean,
+): SpoiledCompareCapture | null {
+  if (!flagPred) return null;
+  if (block.preds.length !== 1 || block.preds[0] !== flagPred.id) return null;
+  const capture = spoiledCompareCapture(flagPred, is64);
+  return capture && capture.at === compareAddr ? capture : null;
+}
+
+/**
  * The `IRBranch` a block's trailing jump becomes, or null when no condition can
  * be spelled for it.
  *
@@ -665,10 +747,27 @@ function branchFor(
   let condition: IRExpr;
   let capturedAt: number | undefined;
   if (owned.owner.kind === "compare") {
+    // Read out before the branch below: `canSpellCondition` is a type guard, so
+    // its false arm narrows a compare owner to `never` and the spoiled path
+    // cannot reach the owner's own fields through it.
+    const compareAddr = owned.owner.address;
     if (owned.fromPredecessor) {
-      if (!canSpellCondition(owned.owner)) return null;
       const state = new RegState();
-      if (!setFlagsFromCompare(state, owned.owner.insn, owned.owner.mnemonic, is64)) return null;
+      if (canSpellCondition(owned.owner)) {
+        if (!setFlagsFromCompare(state, owned.owner.insn, owned.owner.mnemonic, is64)) return null;
+      } else {
+        // Spoiled, and the compare is a block away — so this block cannot place
+        // a capture for it. It does not have to: where the *predecessor's* own
+        // trailing jcc reads the same compare, the predecessor's lift has
+        // already put one at that compare's program point, and this jump is
+        // downstream of it. `reusablePredecessorCapture` asks whether that
+        // happened; a null answer leaves the refusal exactly as it was
+        // (peek-a-bin-zylv).
+        const reused = reusablePredecessorCapture(block, flagPred, compareAddr, is64);
+        if (!reused) return null;
+        state.setFlags(reused.mnemonic, reused.left, reused.right);
+        capturedAt = reused.at;
+      }
       condition = state.getCondition(jcc);
     } else if (capture && capture.at === owned.owner.address) {
       // Something overwrote an operand between the compare and this jump, and

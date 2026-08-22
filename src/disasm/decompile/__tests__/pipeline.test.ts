@@ -6162,16 +6162,26 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
   // The predecessor's compare is spoiled by a store in its own tail, which is
   // the `staleGuards` class exactly: `cmp dword ptr [ebp - 0x18], 0` followed by
   // `mov dword ptr [ebp - 0x18], edx` compares the OLD slot, and the store is
-  // emitted above the guard. 3 of the 19 corpus refusals.
+  // emitted above the guard.
   //
-  // The `jg` is in the compare's OWN block, so peek-a-bin-xskz materialises the
-  // slot for it and that guard is recovered. The `je` — the one this test is
-  // about — is a block away, and the capture is deliberately NOT extended across
-  // the edge: `liftBlock` returns one block's statements and has no predecessor
-  // list to place a statement in, so a cross-block owner stays refused by
-  // `branchFor`'s `canSpellCondition` filter. 2/0/0/1 spoiled owners are
-  // cross-block at `97249dc`, against 52/9/6/37 block-local.
-  it("refuses a predecessor's compare that the predecessor's own tail spoiled", () => {
+  // BOTH jccs are answered, and the second one is the point. The `jg` is in the
+  // compare's OWN block, so peek-a-bin-xskz materialises the slot for it. The
+  // `je` is a block away and this used to be refused, on the reading that a
+  // cross-block owner would need a capture PLACED in the predecessor — which
+  // `liftBlock` cannot do. It does not need one: the predecessor's own trailing
+  // jcc reads the same compare, so the capture is already there, and the `je` is
+  // downstream of it. `reusablePredecessorCapture` looks it up rather than
+  // placing anything (peek-a-bin-zylv). All 2/0/0/1 cross-block spoiled owners
+  // in the corpus at `16f1633` are this shape.
+  //
+  // THIS FIXTURE IS THE DISCRIMINATOR, and the corpus is not. On all three real
+  // sites the spoiling stores write OTHER slots — `spoils` refuses on any store,
+  // with no alias analysis — so simply bypassing the refusal and reading the raw
+  // operands recovers the same 3 guards with the same text, and every gate stays
+  // flat. Here the store overwrites the compared slot itself, so that variant
+  // emits `if (var_18 == 0)` below `var_18 = edx;` and the last two assertions
+  // fail.
+  it("reads a predecessor's spoiled compare through the capture the predecessor took", () => {
     const code = run(
       seq(0x401000, [
         ["cmp", "dword ptr [ebp - 0x18], 0"],
@@ -6187,13 +6197,46 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
       ]),
     );
 
-    // Two jccs, and only the block-local one is answered. Neither guard may
-    // name the slot itself, which is the value the store replaced.
-    expect(guardTexts(code)).toEqual(["flg_401000_0 > 0", "<unrecovered>"]);
+    // Both guards read the materialised value, and the cross-block one is spelled
+    // from the SAME capture — one statement, at the compare, read twice.
+    expect(guardTexts(code)).toEqual(["flg_401000_0 > 0", "flg_401000_0 == 0"]);
     // The load of the slot is emitted ABOVE the store that replaces it, which is
     // the whole claim; neither guard names the slot itself.
     expect(code.indexOf("flg_401000_0 = var_18;")).toBeGreaterThan(-1);
     expect(code.indexOf("flg_401000_0 = var_18;")).toBeLessThan(code.indexOf("var_18 = edx;"));
+    expect(code).not.toContain("if (var_18");
+    // Exactly one capture statement: the reading block reuses the predecessor's
+    // rather than emitting a second one, which would sit BELOW the store.
+    expect(code.split("flg_401000_0 = var_18;").length - 1).toBe(1);
+    expect(code).not.toContain("__unrecovered");
+  });
+
+  // …and the reuse is refused when the predecessor took no capture, which is the
+  // half of this that keeps it a lookup rather than an assumption. The
+  // predecessor's tail spoils its compare exactly as above, but the predecessor
+  // ends in `jmp` — it reads no flags, so its own lift had no guard to answer and
+  // materialised nothing. There is no statement to read and the guard stays
+  // admitted. `reusablePredecessorCapture` finds that out by re-asking
+  // `spoiledCompareCapture` of the predecessor rather than by assuming the
+  // spoiling implies a capture (peek-a-bin-zylv).
+  it("refuses a predecessor's spoiled compare when the predecessor took no capture", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "dword ptr [ebp - 0x18], 0"],
+        ["mov", "dword ptr [ebp - 0x18], edx"],
+        ["jmp", "0x401014"],
+        ["mov", "ecx, 9"],
+        ["ret"],
+        ["je", "0x40101c"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+      ]),
+    );
+
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
+    // Nothing was materialised, so there is nothing for the guard to have read.
+    expect(code).not.toContain("flg_401000_0");
     expect(code).not.toContain("if (var_18");
   });
 
