@@ -241,22 +241,33 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**The whole-tree figures below were last taken from ONE run at `97bbebe`**, which is what makes
+**The whole-tree figures below were last taken from ONE run at `74879a1`**, which is what makes
 them mutually consistent: eight changes measured in parallel against the same base each re-stamped
 this section with numbers true of *their* base and of no single tree, which is the state
-`6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **268/279/275/266
-functions**, 18025/16844/15111/16601 instructions, **15/0/0/13** jump tables, gcc **1088/1088 clean**,
-`offsetof` **342/301/303/355 fields over 55/54/53/56 definitions, every ratio 1.00**, polarity
-anchor-A **517/574/497/441 correct with 0 inverted and 0 mismatch**, statements dropped **0** of
-7280/7764/6893/6723 lifted, unrecovered values **36/12/11/33**, loop shape **`for` 6/6/6/6,
-`while` 111/106/99/98, `do/while` 78/77/76/77, `if` 1987/1938/1719/1759**, and **0 on every
-gate** —
-popReads (now gated on both counts, with 151/5/5/146 of 1095/350/328/1043 pops paired beside it),
-staleReads, staleGuards, lostDefs, armExits, unencodableNames, wildBranches, arity over, callees
-lost, loops short, throws, plus the three audits added since the last stamp — `undefinedCallees`
-(report-only, 25/0/0/23 internal and 7/3/3/7 external), `emptyCaseBodies` (report-only, 0 of
-80/0/0/62 case labels) and `memberNameAgreement` (a gate, 0 disagreeing of 597/599/587/579
-members).
+`6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **260/279/275/258
+functions**, 18025/16844/15111/16601 instructions, **15/0/0/13** jump tables, gcc **1072/1072 clean**,
+`offsetof` **307/297/297/318 fields over 51/59/57/55 definitions, every ratio 1.00**, polarity
+anchor-A **522/578/501/446 correct with 0 inverted and 0 mismatch**, unrecovered values
+**36/12/11/33**, loop shape **`for` 6/6/6/6, `while` 111/106/99/98, `do/while` 78/77/76/77,
+`if` 1987/1938/1719/1759**, and **0 on every gate** — popReads, staleReads, staleGuards, lostDefs,
+armExits, unencodableNames, wildBranches, memberNameAgreement, emptyCaseBodies, **`guard lines
+unparsed`** (new — see `corpus/guardShape.ts`), arity over, callees lost, loops short, throws.
+Report-only rows worth knowing: `undefinedCallees` **33/0/0/31 internal** and 7/3/3/7 external,
+`structOverlaps` **0 on all four** (and that zero is a LOWER bound on fabrication, not a clean
+bill of health — see `peek-a-bin-slkh`), `guard-shaped lines` 2104/2050/1824/1863 braced with
+**0 inline**.
+
+**Two rows fell against the `97bbebe` stamp and both are `peek-a-bin-z8q7`, which is a
+REFINEMENT rather than a loss.** `offsetof` fields 342/301/303/355 → 307/297/297/318 and
+definitions 55/54/53/56 → 51/59/57/55, every ratio still 1.00; `functions` 268/266 → 260/258 is
+`peek-a-bin-d827`'s fifth admission. Keying a struct base on the *value* a register holds rather
+than on its name split fabricated objects apart, so `->field_0x` occurrences fall 2343 → 1871
+corpus-wide. That count is **report-only in both directions** — it rises with correct recovery and
+with fabrication alike — and the fall is the intended direction: the new key contains the old one
+as a prefix, so the grouping can only ever split and provably cannot invent an object. It also
+*gained* polarity coverage (517/574/497/441 → 522/578/501/446, `only-base 0` on all four, so no
+guard left the audited set). The one measured cost is the label rule, `peek-a-bin-slkh` at P2.
+
 
 **`peek-a-bin-d827` moved FOUR of those rows and the stamp above is deliberately NOT rewritten** —
 it was re-derived at `f3b89ec` figure for figure before the change. The deltas, base `f3b89ec`:
