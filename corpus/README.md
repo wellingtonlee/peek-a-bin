@@ -1216,13 +1216,13 @@ of maximum cardinality over the same extents, by exhaustive search. `peek-a-bin-
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
-## `corpus/comments.ts` — separate, and the only ARM64 coverage here
+## `corpus/comments.ts` — separate, like every ARM64 audit here
 
-`npm run corpus` drives **t32, t64, w64, w32** and nothing else. The ARM64 half of this project
-has no coverage in it at all: not one of the audits above loads `t64-arm.exe` or `w64-arm.exe`,
-and `preflight.ts`'s `BinKey` does not name them. `corpus/comments.ts` is the exception, and it is
-run on its own (`npm run corpus:comments`) precisely so that this run's header keeps naming the
-four binaries the standing numbers are measured against.
+`npm run corpus` drives **t32, t64, w64, w32** and nothing else, and not one of the audits above
+loads `t64-arm.exe` or `w64-arm.exe`. There are now two ARM64 harnesses and both are separately
+invoked: this one, and `corpus/arm64.ts` (`npm run corpus:arm64`) below. `preflight.ts` names the
+pair as **`ARM_BINS`**, deliberately apart from `ALL_BINS` and `BinKey` — see that section for why
+folding them in would be a defect rather than an improvement.
 
 It also audits something no gate above can see. Every gate here reads emitted C or the IR behind
 it, and an inline `Instruction.comment` reaches neither — so gcc, polarity, `offsetof`, arity, the
@@ -1245,6 +1245,170 @@ Two questions, one per architecture, and they are not the same question:
   operand really can carry an absolute address — so there is nothing to judge and the audit prints
   an md5 over every commented instruction instead. That is the byte-identity instrument for any
   change to the shared `mapInsn` path: run it at both commits and the four digests must not move.
+
+## `corpus/arm64.ts` — the ARM64 audits, and why they are not folded in
+
+`npm run corpus:arm64`. Over `t64-arm.exe` and `w64-arm.exe`: **35 gate assertions and 14 reported
+rows**, drawn from 14 distinct gates and 6 distinct reports asked per image, plus a decode-rate
+calibration asked once over all six binaries and a sweep-cache differential asked per image. Missing
+binaries skip cleanly and name themselves; exit 1 on any red gate. The last line is
+`35 of 35 gates green, 14 rows reported. OK`.
+
+### Why it is a separate run, and not four more keys in `ALL_BINS`
+
+Two reasons, and the first is the same one CLAUDE.md gives for never putting a Go binary in the
+corpus directory.
+
+**Every summed figure would move, silently.** The audits iterate over whatever `requestedBins()`
+names, so adding two keys changes the population of every gate above and the denominator of every
+total — `gcc 1072/1072`, `offsetof 946/946 fields across 162 definitions`, `polarity 1588/1588` are
+all sums over the binaries the run happened to find. A reader comparing against CLAUDE.md would be
+comparing against a different population with no notice that it had changed.
+
+**And it would buy nothing but vacuous zeros.** The decompiler refuses for any image that is not
+x86 — `mcp/tools.ts` returns `unsupportedOnArch("Decompilation", af.arch)` *before* the address is
+even resolved, and its own comment says what running it anyway would produce — so there is no
+emitted C and no IR for an ARM64 image at all. gcc, `offsetof`, polarity, arity, `staleReads`,
+`staleGuards`, `popReads`, `lostDefs`, `armExits`, `selfAssigns`, `unencodableNames`,
+`crossEdgeGuards`, `guardShape`, `structOverlaps` and `undefinedCallees` would every one report a
+green 0 drawn from an empty population. That is the failure mode this file already records for
+`armExits` on the two x64 binaries and `unencodableNames` on x64: a green row that says nothing.
+
+So `ARM_BINS` lives in `preflight.ts` beside `ALL_BINS` and outside it, `DOC_BINS` is untouched,
+and the gated run's header still names exactly four binaries. Proof that this held: `npm run corpus`
+at `87a8499` and with this change applied produce reports that are **identical line for line apart
+from the label and the artifact path**, with emitted C byte-identical on all four binaries
+(260/279/258/275 functions) and `CHANGED 0 / only-base 0 / only-change 0` on each.
+
+### What it audits, and what it refuses to
+
+Every row has an oracle outside the code under test, and every row carries a liveness half —
+a population count — because a population-based audit fails by silently matching nothing.
+
+| row | status | oracle | at `87a8499` (t64-arm / w64-arm) |
+|---|---|---|---|
+| sweep: unaligned address | GATE | A64 is 4-byte aligned | 0 / 0 of 27428 / 24393 insns |
+| sweep: width not 4 | GATE | A64 is fixed-width | 0 / 0 |
+| sweep: address not increasing | GATE | a sweep is monotone | 0 / 0 |
+| sweep: outside code section | GATE | the section bounds | 0 / 0 |
+| sweep: decode rate | report | — | 97.4% / 97.7% of 28160 / 24960 words |
+| pdata: begin with no instruction | GATE | `.pdata` is the linker's record | 0 / 0 of 419 / 381 extents |
+| pdata: unaligned begin / end | GATE | A64 alignment | 0 / 0 |
+| pdata: empty extent | GATE | an extent has a length | 0 / 0 |
+| pdata: words in extents that do not decode | report | — | **169 / 111** of 25336 / 22423 |
+| wild branch inside a `.pdata` extent | GATE | the linker resolves its own branches | 0 / 0 of 5830 / 5053 |
+| wild branch outside every extent | report | — | 1 / 1 of 426 / 384 |
+| unreachable decoded word in a `.pdata` extent | report | reachability | **2 / 2** of 6 / 6 eligible |
+| ref: target outside the `adrp` page | GATE | `adrp` + `imm12` cannot leave the page | 0 / 0 of 682 / 679 refs |
+| ref: `adrp` page not 4 KiB aligned | GATE | `adrp` zeroes the low 12 bits | 0 / 0 |
+| ref: `adr` target beyond ±1 MiB | GATE | `adr`'s 21-bit displacement | 0 / 0 of 18 / 12 `adr` |
+| ref: attributed to a non-instruction | GATE | the sweep's own answer | 0 / 0 |
+| jump table: case target is not an instruction | GATE | the sweep's own answer | 0 / 0 of 350 / 222 cases |
+| jump table: case outside the dispatch's function | report | — | 0 / 0 |
+| jump table: table words presented as instructions | report | the tool's own recovered table | **9 / 9** of 255 / 139 |
+| floor: ARM64 image below the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
+| floor: non-ARM64 image at or above the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
+| floor: section too small to be evidence | GATE | `ARM64_MIN_MEASURED_WORDS` | 0 over 6 binaries |
+| sweep cache: shared answer differs from re-taken | GATE | the uncached path | 0 / 0 |
+| sweep cache: no Capstone calls saved | GATE | the uncached path | 0 / 0 |
+| sweep cache: calls saved | report | — | **4083 → 1361** / **3393 → 1131** |
+| load: image could not be analysed | GATE | — | absent (only emitted when red) |
+| sweep cache: could not be exercised | GATE | — | absent (only emitted when red) |
+
+Beside those: **539 / 494 functions**, **14 / 10 jump tables**, `br` split **table 14 /
+runtime-pointer 12 / unrecognised 1** on t64-arm and **10 / 12 / 1** on w64-arm.
+
+Three of the rows deserve reading rather than scanning.
+
+**`wild branch inside a .pdata extent` gates and the same count outside an extent does not**, and
+the restriction is what makes it an oracle rather than a census. A64 has no gap fill — the
+fixed-width sweep decodes every word of the section whatever it holds — so outside every `.pdata`
+extent the sweep is reading literal pools and padding as code *by design*, and a target outside the
+image there is the expected consequence. Inside an extent the linker vouched the bytes are code and
+resolved every branch it emitted, so a target outside `[imageBase, +sizeOfImage)` is provably
+fiction. Same reasoning as `corpus/wildBranches.ts`, same restriction pattern as
+`unencodableNames`' PE32-only population.
+
+**`unreachable decoded word` and `table words presented as instructions` are the two data-as-code
+instruments, and both are REPORT-ONLY because both are non-zero.** Every row either can print is
+nonetheless provably data, so both are gateable at 0 the moment an ARM64 data-marking pass lands —
+the standing upgrade `arity over` carried before it became a gate. The first is deliberately the
+*strict* reading: a pool word that happens to decode and sits directly after another decoded word
+is not reported, because fallthrough cannot be ruled out, so it is a **lower bound** and its
+`flanked` count says how many words were even eligible to be judged. Its two rows per binary are
+`peek-a-bin-56q` item 2's own witness — `0x1400016fc stxrb w9, w11, [x16]`, re-derived here from
+reachability rather than by eye — plus `0x1400018b8 madd w4, w9, w30, w8`, which is inside a table
+the tool itself recovered.
+
+**The decode-rate floor gates in BOTH directions**, which is what makes it a calibration rather
+than a restatement: an accepted 0xAA64 image must be above the floor and every 0x014C / 0x8664
+image must be below it, so moving the floor either way turns a row red. The table it prints
+re-derives `ARM64_MIN_DECODE_FRACTION`'s docstring figure for figure (28160/27428, 24960/24393,
+15360/4209, 13824/3858, 13824/3016) and adds w32 at 12288/2743, which that docstring never had.
+
+### What it refuses to audit, and why
+
+- **Everything decompiler- or emitter-shaped.** See above: no emitted C, so a green row is drawn
+  from an empty population.
+- **Stack frames and signatures.** `analyzeStackFrame` and `inferSignature` have no ARM64 path at
+  all (`peek-a-bin-56q` item 1). There is nothing to audit; auditing an absence is not an audit.
+- **Data marking.** There is no ARM64 pass (`peek-a-bin-56q` item 2). What this does instead is
+  *census the population* such a pass would have to cover — the three report rows above — which is
+  the instrument a fix would be judged with.
+- **Inline comments.** `corpus/comments.ts` already gates that; it is not duplicated.
+
+### Negative controls
+
+Ten gates can be made red by perturbing this repo's own code, and were:
+
+| control | rows it turns red |
+|---|---|
+| the probe advances 2 bytes instead of 4 after an undecodable word | sweep unaligned **31 / 29**, pdata begin with no instruction **1 / 1**, jump-table case not an instruction **2 / 2** |
+| floor 0.5 → 0.2 | non-ARM64 image at or above the floor **4** |
+| floor 0.5 → 0.99 | ARM64 image below the floor **2**, plus both load and both cache rows |
+| `adrp`/`add` target off by one page | target outside the `adrp` page **433 / 428** |
+| `adr` target pushed past its reach | `adr` beyond ±1 MiB **18 / 12** |
+| a reference attributed one byte off | attributed to a non-instruction **433 / 428** |
+| a direct branch target read 256 MiB high | wild branch inside a `.pdata` extent **1052 / 888** |
+| `readArm64Table` drops its alignment guard and reads two bytes off | case target not an instruction **350 / 222** |
+| the cache returns a truncated decode on a hit | shared answer differs **1 / 1** |
+| the cache never stores | no Capstone calls saved **1 / 1** (4083 → 4083, 3393 → 3393) |
+
+The rest — instruction width, monotonicity, section bounds, `.pdata` alignment and emptiness,
+`adrp` page alignment, and the section-too-small guard — are properties of Capstone's own output,
+of the `.pdata` the linker wrote, or of the section's size. **Nothing in this repo can make them
+false**, so running the audit does not exercise them, and CLAUDE.md is emphatic that an unexercised
+gate is not evidence. They are negative-controlled in `build/arm64Audit.test.ts` instead, exactly
+as `build/selfAssignAudit.test.ts` controls `corpus/selfAssigns.ts`' two never-observed rows: the
+judging functions in `corpus/arm64.ts` take plain data and are exported for that purpose, and each
+row is asked twice — once over well-formed input where it must be 0, because a test that only
+checks the red direction passes against an audit that has stopped looking, and once over input
+carrying exactly the defect. Disabling any one check fails exactly one test, which is the check
+that the tests are not passing vacuously.
+
+**One control that turned out to be INERT, and it is worth knowing why**: restoring
+`ARM64_DECODE_WINDOW` to its pre-fix `0x10000` moves nothing. `createScan` in `capstoneWindow.ts`
+clamps every window to the shared `CS_WINDOW_BYTES` (0x2000), so the ARM64 constant is no longer
+the only bound between this sweep and the ~65.6 KiB WASM stack cliff. Do not read a green run as
+evidence that the ARM64 window is load-bearing.
+
+### What ARM64 coverage still does not exist
+
+- **No ARM32, ARM64EC or ARM64X binary is on this machine.** The decode-rate refusal is calibrated
+  against real ARM64 and real x86 only. An ARM64X image is half genuine A64 and may sit above the
+  floor; that is a stated limitation, not something measured.
+- **Nothing has rendered an ARM64 view.** `source: "recursive"` / `"gap-fill"`, the `db`/`dd`
+  rendering, the jump arrows and the CFG on an A64 function are verified by typecheck and reading.
+- **No ARM64 decompilation, so nothing about ARM64 semantics is checked at all** — only that
+  instructions, boundaries, references and tables are what the file says they are.
+- **`.pdata` unwind CODES are not audited.** Begin, end, unwind-info address and handler agree with
+  an independently written reader (419/419 and 381/381); the unwind opcodes themselves are not read
+  by anything here.
+- **The `bl` call graph is counted, not verified.** 373 / 331 nodes and 1259 / 1086 edges are
+  reported by `FileSession`; nothing cross-checks an edge against the image.
+- **Performance is measured only in Capstone call counts.** The `~130 ms` and `407 → 166 ms`
+  figures in `Arm64SweepCache`'s docstring are not re-derived here; the call counts are, and they
+  reproduce `peek-a-bin-kis` exactly.
 
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
@@ -1650,7 +1814,10 @@ remaining gap and is not implemented.
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent. Reads only emitted text. Report-only in both directions. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
-| `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. |
+| `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
+| `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
+| `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
+| `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
 | `artifacts/<label>/unrecovered_<key>.jsonl` | Every `__unrecovered_N`, per site: note, cause, use site, originating jcc where one could be named. |
@@ -1730,8 +1897,12 @@ program from the one production emits.
 
 ## Things that will trip you up
 
-- **`tsx` does not work on this machine** (Node 18, `ERR_REQUIRE_ESM`). That is why the audits are
-  vitest files and `compare.mjs` is plain node. Do not "fix" this by reaching for tsx.
+- **`tsx` works here now, and the note saying it does not is stale.** This bullet used to read
+  "`tsx` does not work on this machine (Node 18, `ERR_REQUIRE_ESM`)"; the machine is on Node 22 and
+  all three separately-invoked harnesses (`corpus:arm64`, `corpus:comments`, `corpus:jumptables`)
+  are plain `tsx` scripts that run. The gated audits are vitest files for a different and still-good
+  reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
+  against artifacts without a toolchain at all.
 - **Vitest's default reporter discards `console.log` from inside a test** but passes
   `process.stdout.write` through. The report uses the latter, and is also written to `report.txt`.
 - **These must never join `npm test`.** They are named `*.audit.ts` so vitest's default include
@@ -1740,3 +1911,13 @@ program from the one production emits.
   `*.test.ts` would make every CI run try to disassemble binaries it does not have.
 - **A run takes a few minutes**, most of it gcc. There is no sampling mode on purpose: an audit
   over a sample answers a different question.
+- **`ARM_BINS` must stay out of `ALL_BINS`.** `preflight.ts`'s `resolveCorpus` was widened to
+  `readonly string[]` so an ARM64 name can be looked for by the same search; that is a type
+  widening and nothing more. Putting `t64-arm` or `w64-arm` into `ALL_BINS`, `DOC_BINS` or
+  `requestedBins()` changes the population of every gate above and the denominator of every summed
+  figure in CLAUDE.md, and adds a dozen vacuous zeros from audits that have no ARM64 population —
+  see the `corpus/arm64.ts` section.
+- **`npm run corpus:arm64` writes no artifacts, so `compare.mjs` cannot diff it.** Comparing two
+  commits means running it at both and reading the two reports. That is deliberate: its gates are
+  absolutes rather than ratios against a moving denominator, so a red row is a red row without a
+  base to compare against.

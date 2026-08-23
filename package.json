@@ -27,6 +27,7 @@
     "corpus": "vitest run --config vitest.corpus.config.ts",
     "corpus:compare": "node corpus/compare.mjs",
     "corpus:comments": "tsx corpus/comments.ts",
+    "corpus:arm64": "tsx corpus/arm64.ts",
     "corpus:jumptables": "tsx corpus/jumpTableReach.ts",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:setup": "tsx src/mcp/index.ts setup"

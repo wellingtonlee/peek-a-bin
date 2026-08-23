@@ -37,10 +37,7 @@ import { join } from "node:path";
 import { classifyArm64Branch, findArm64AddressRefs } from "../src/disasm/arm64Operands";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
-import { ALL_BINS, corpusDir, corpusDirSource } from "./preflight";
-
-/** The two ARM64 launchers, which `BinKey` does not cover. */
-const ARM_BINS = ["t64-arm", "w64-arm"] as const;
+import { ALL_BINS, ARM_BINS, corpusDir, corpusDirSource } from "./preflight";
 
 interface Loaded {
   instructions: Instruction[];

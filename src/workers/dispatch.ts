@@ -326,8 +326,12 @@ export async function dispatch(
         } satisfies DetectResult;
       }
       if (arch === "arm64") {
-        // No jump-table reader on ARM64 — a `br` through a table is not the
-        // pattern `readRvaTable` models — so the windows would go unread.
+        // `dataWindows` is deliberately not forwarded: the A64 dispatch reader
+        // (`findArm64JumpTables`) reads its table out of the CODE section, off
+        // an `adr` base, so the `.rdata` windows `readRvaTable` needs would go
+        // unread. There IS a jump-table reader on ARM64 — this comment used to
+        // say there was not, which stopped being true when
+        // `findArm64JumpTables` landed.
         return detectArm64Functions(
           args.bytes,
           args.baseAddress,

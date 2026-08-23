@@ -1064,7 +1064,15 @@ export function detectArm64Functions(
     }
   }
 
-  // No jump-table reader on this architecture, so no table bytes are known to
-  // be data — an empty span list is the whole truth here, not a degradation.
+  // `jumpTableSpans` is empty and that is now a SHORTFALL rather than the whole
+  // truth: `findArm64JumpTables` above recovers the tables, so their extents
+  // ARE known, and this drops them. It costs nothing in the instruction stream —
+  // A64 has no gap fill, the fixed-width sweep decodes every word of the section
+  // whatever any span says — but it costs the VIEW, because nothing tells
+  // `dataView.ts` those words are a table and they render as whatever they
+  // happen to decode as. Measured at 87a8499 by `npm run corpus:arm64`: 9 words
+  // of 255 in recovered table extents on t64-arm.exe, and 9 of 139 on
+  // w64-arm.exe, are presented as instructions (peek-a-bin-56q item 3's
+  // residue; the row is gateable at 0 once the spans are published).
   return { functions, jumpTables: Array.from(jumpTables.entries()), jumpTableSpans: [], omitted };
 }

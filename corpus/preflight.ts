@@ -67,6 +67,28 @@ export const DOC_BINS = ["t32", "t64", "w64"] as const;
 export type BinKey = (typeof ALL_BINS)[number];
 
 /**
+ * The two real ARM64 launchers, which {@link BinKey} deliberately does NOT
+ * cover.
+ *
+ * They live in the same directory as the four x86 binaries and are found by the
+ * same search, but they are kept out of `ALL_BINS` on purpose: `npm run corpus`
+ * iterates over whatever `requestedBins()` names, so adding them there would
+ * silently change the population of every gate and the denominator of every
+ * figure in CLAUDE.md's Verification section — the same hazard that section
+ * records for putting a Go binary in the corpus directory. Almost nothing in
+ * that run has an ARM64 population anyway: the decompiler, the emitter and the
+ * x86 operand grammars all refuse on ARM64 by design, so a folded-in ARM64 key
+ * would contribute a dozen vacuous zeros.
+ *
+ * The ARM64 audits are therefore separately invoked — `npm run corpus:arm64`
+ * and `npm run corpus:comments` — and this is the one declaration of which two
+ * files they mean.
+ */
+export const ARM_BINS = ["t64-arm", "w64-arm"] as const;
+
+export type ArmBinKey = (typeof ARM_BINS)[number];
+
+/**
  * `.env`, parsed. Deliberately hand-rolled and deliberately tiny: this is one
  * key on a developer machine, not a reason to take a dependency, and nothing
  * else in the repo reads `.env` at runtime. Unparseable lines are ignored
@@ -173,7 +195,7 @@ export interface CorpusResolution {
 
 const NO_SUCH_DIR = "no such directory";
 
-function probeCandidate(c: CorpusCandidate, bins: readonly BinKey[]): CorpusProbe {
+function probeCandidate(c: CorpusCandidate, bins: readonly string[]): CorpusProbe {
   let isDir = false;
   try {
     isDir = statSync(c.dir).isDirectory();
@@ -193,7 +215,7 @@ function probeCandidate(c: CorpusCandidate, bins: readonly BinKey[]): CorpusProb
  * `missing` names files in a real place rather than an imaginary one; failing
  * that, the first candidate, so there is always a concrete path to print.
  */
-export function resolveCorpus(bins: readonly BinKey[] = ALL_BINS): CorpusResolution {
+export function resolveCorpus(bins: readonly string[] = ALL_BINS): CorpusResolution {
   const probes = corpusCandidates().map((c) => probeCandidate(c, bins));
   const hit = probes.find((p) => p.complete);
   if (hit) return { dir: hit.dir, source: hit.source, found: true, probes };
@@ -239,6 +261,50 @@ export function binPath(key: BinKey): string {
   return join(corpusDir(), `${key}.exe`);
 }
 
+/** What an ARM64 harness found, and what it must say when it found nothing. */
+export interface ArmCorpus {
+  /** Directory the search settled on, for the report header. */
+  dir: string;
+  /** Provenance of `dir`. */
+  source: string;
+  /** `[key, path]` for every ARM64 binary that is present. */
+  present: [ArmBinKey, string][];
+  /** `<key>.exe` for every one that is not. */
+  missing: string[];
+  /** The multi-line "here is how to say where they are" block, or "". */
+  detail: string;
+}
+
+/**
+ * Locate the ARM64 pair, using the same candidate search as everything else.
+ *
+ * Deliberately its own entry point rather than a flag on {@link preflight}:
+ * `preflight()` answers for the gated run, and its `haveBins` is what makes
+ * that run skip. An ARM64 harness must not be able to make the x86 gate skip,
+ * and vice versa, so the two questions are asked separately over one search.
+ *
+ * No C compiler is probed. Nothing on the ARM64 path emits C — the decompiler
+ * refuses for any image that is not x86 (`mcp/tools.ts`) — so a missing `gcc`
+ * is not a reason to skip here.
+ */
+export function resolveArmCorpus(): ArmCorpus {
+  const res = resolveCorpus(ARM_BINS);
+  const present: [ArmBinKey, string][] = [];
+  const missing: string[] = [];
+  for (const key of ARM_BINS) {
+    const p = join(res.dir, `${key}.exe`);
+    if (existsSync(p)) present.push([key, p]);
+    else missing.push(`${key}.exe`);
+  }
+  return {
+    dir: res.dir,
+    source: res.source,
+    present,
+    missing,
+    detail: missing.length === 0 ? "" : discoveryHelp(res, ARM_BINS),
+  };
+}
+
 /**
  * CROSS-SUBSTITUTION. A directory of `jumpTables_<key>.json` artifacts from
  * ANOTHER run, to be used in place of the ones this commit's detection found.
@@ -280,7 +346,7 @@ export interface Preflight {
 }
 
 /** The multi-line "here is how to tell me where they are" block. */
-function discoveryHelp(res: CorpusResolution, bins: readonly BinKey[]): string {
+function discoveryHelp(res: CorpusResolution, bins: readonly string[]): string {
   const L: string[] = [];
   L.push(`  Looked for ${bins.map((b) => `${b}.exe`).join(", ")} in:`);
   for (const p of res.probes) L.push(`    ${p.dir}  — ${p.note}  [${p.source}]`);
