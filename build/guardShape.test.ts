@@ -2,8 +2,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   emptyGuardShapeCensus,
+  forHeaderCond,
   guardShape,
   noteGuardShape,
+  splitForHeader,
 } from "../corpus/guardShape";
 
 /**
@@ -197,6 +199,65 @@ describe("guardShape", () => {
     });
   });
 
+  /**
+   * THE `for` HEADER'S CLAUSES, which are the one thing a caller wants out of a
+   * guard line that is not the condition. `sweep.ts` judges the middle clause
+   * against a jcc and `selfAssigns.ts` reads the init and the update as
+   * statements; both ask here, so neither can be right about a header shape the
+   * other is wrong about (peek-a-bin-hfsq).
+   */
+  describe("a for header's clauses", () => {
+    it("splits the three clauses at top-level semicolons", () => {
+      const shape = guardShape("    for (eax = 0; eax < 8; eax++) {");
+      const cond = forHeaderCond(shape);
+      expect(cond).toBe("eax = 0; eax < 8; eax++");
+      expect(splitForHeader(cond ?? "")).toEqual(["eax = 0", " eax < 8", " eax++"]);
+    });
+
+    it("is not confused by a call in a clause", () => {
+      expect(splitForHeader("eax = f(a, b); eax < g(c); eax++")).toEqual([
+        "eax = f(a, b)",
+        " eax < g(c)",
+        " eax++",
+      ]);
+    });
+
+    it("refuses a header without exactly two top-level semicolons", () => {
+      expect(splitForHeader("eax = 0; eax < 8")).toBeNull();
+      expect(splitForHeader("eax < 8")).toBeNull();
+    });
+
+    /**
+     * `forHeaderCond` is the predicate a caller asks instead of re-spelling
+     * `kind === "braced" && kw === "for"`. It answers for BOTH spellings,
+     * because an inline `for` still carries its three clauses on the line — and
+     * for nothing else, so an `if` or a `while` cannot be split as one.
+     */
+    it("answers for both spellings of a for and for nothing else", () => {
+      expect(forHeaderCond(guardShape("  for (a = 0; a < 2; a++) {"))).toBe("a = 0; a < 2; a++");
+      expect(forHeaderCond(guardShape("  for (a = 0; a < 2; a++) break;"))).toBe(
+        "a = 0; a < 2; a++",
+      );
+      expect(forHeaderCond(guardShape("  if (eax == 0) {"))).toBeNull();
+      expect(forHeaderCond(guardShape("  while (eax == 0) {"))).toBeNull();
+      expect(forHeaderCond(guardShape("  } while (eax == 0);"))).toBeNull();
+      expect(forHeaderCond(guardShape("  eax = 0;"))).toBeNull();
+    });
+
+    /**
+     * The whitespace the pattern this replaces encoded. `selfAssigns.ts`'s
+     * `FOR_HEADER` was `/^\s*for \((.*)\) \{\s*$/`, so one space after `for`
+     * and exactly one before the brace were part of what it took a `for` header
+     * to be; each of these three lines defeated it.
+     */
+    it.each(["  for(a = 0; a < 2; a++) {", "  for  (a = 0; a < 2; a++) {", "  for (a = 0; a < 2; a++)  {"])(
+      "reads %s regardless of spacing",
+      (line) => {
+        expect(forHeaderCond(guardShape(line))).toBe("a = 0; a < 2; a++");
+      },
+    );
+  });
+
   describe("the census", () => {
     it("counts each shape and names every refusal", () => {
       const c = emptyGuardShapeCensus();
@@ -243,10 +304,20 @@ describe("guardShape", () => {
  * or more guard keywords — no ordinary TypeScript contains `if|while` — which is
  * what every previous copy of this pattern in `sweep.ts` was spelled with.
  *
- * `selfAssigns.ts`'s `FOR_HEADER` is deliberately NOT caught by this: it names
- * one keyword, reads a `for` header for its own reason (the update clause), and
- * has the same brittleness with no census behind it. Widening it as a side
- * effect of this change was refused; it is recorded in CLAUDE.md instead.
+ * `selfAssigns.ts`'s `FOR_HEADER` was NOT caught by this — it named one keyword,
+ * so it had no alternation to see — and `peek-a-bin-hfsq` brought it under the
+ * grammar instead of widening the guard. Widening it was measured and refused:
+ * the tell would have to be a guard keyword beside an open paren, and the three
+ * survivors under `corpus/` that trips are all asking a DIFFERENT question.
+ * `sweep.ts`'s `OPENER` asks whether a line opens a block at all, which is
+ * broader (`{`, `__try`, a bare `} else`); its `siteOf` buckets an unrecovered
+ * value's site descriptively, and that file says in terms that the buckets are
+ * not load-bearing; and `clobbered.whiles`/`fors` are raw `while (`/`for (`
+ * match counts kept deliberately raw so artifact directories from before the
+ * do/while split still compare (CLAUDE.md records that). None of the three
+ * gates anything, and none reads a guard HEADER as a whole line, which is the
+ * shape that goes silent. The class worth catching is a second reader feeding a
+ * gate, and there is now none.
  */
 describe("one grammar", () => {
   it("is the only place under corpus/ that alternates guard keywords", () => {

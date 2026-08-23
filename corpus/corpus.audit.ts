@@ -757,9 +757,21 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(sa.wrong).toBe(0);
         expect(sa.unresolved).toBe(0);
         expect(sa.lines).toBeGreaterThan(0);
+        // A `for` header the grammar recognises and cannot split is a clause the
+        // scan did not read — an instrument-integrity failure of exactly
+        // `unresolved`'s character, since `emit.ts` always writes three clauses
+        // (peek-a-bin-hfsq). The matching liveness half, `forHeaders > 0`, is
+        // asserted over the corpus below rather than per binary.
+        expect(sa.forHeadersUnsplit).toBe(0);
         identity += sa.identity;
       }
       expect(identity).toBeGreaterThan(0);
+      // LIVENESS for the `for`-header half. Asked over the corpus for the same
+      // reason `identity` is: a binary whose emitted C contains no `for` at all
+      // is a legitimate state, and this corpus emits 6 per binary.
+      let forHeaders = 0;
+      for (const r of results.values()) forHeaders += r.selfAssigns.forHeaders;
+      expect(forHeaders).toBeGreaterThan(0);
     });
 
     /**
@@ -1386,7 +1398,9 @@ function renderReport(): string {
       `  self-assignments            ${sa.wrong} wrong, ${sa.unresolved} unresolved, ` +
         `${sa.openOperand} open-operand (${sa.openZeroCorroborated} zero-corroborated), ` +
         `${sa.identity} machine identities, over ${sa.funcsAffected} functions` +
-        (sa.inForHeader > 0 ? ` (${sa.inForHeader} in a for header)` : ""),
+        (sa.inForHeader > 0 ? ` (${sa.inForHeader} in a for header)` : "") +
+        `; ${sa.forHeaders} for headers read` +
+        (sa.forHeadersUnsplit > 0 ? `, ${sa.forHeadersUnsplit} UNSPLITTABLE` : ""),
     );
     L.push("    `eax = eax;` is noise where the instruction is an identity (`lea ecx,[ecx+0x0]`,");
     L.push("    `or al,al`, `add eax,0x0`) and a LOST OPERAND where it is not — `add edi, esi`");

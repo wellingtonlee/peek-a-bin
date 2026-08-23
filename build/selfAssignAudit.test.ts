@@ -327,6 +327,65 @@ describe("selfAssigns: the text scan", () => {
     auditSelfAssigns(out, "bin", "f", 0x1000, code, [[1, 0x2000]], [insn(0x2000, "nop", "")], false);
     expect(out.inForHeader).toBe(1);
     expect(out.identity).toBe(1);
+    expect(out.forHeaders).toBe(1);
+    expect(out.forHeadersUnsplit).toBe(0);
+  });
+
+  /**
+   * THE FOR HEADER IS READ THROUGH `guardShape`, NOT WITH A PATTERN OF ITS OWN
+   * (peek-a-bin-hfsq).
+   *
+   * It used to be `/^\s*for \((.*)\) \{\s*$/` — a second hand-rolled
+   * guard-header pattern, in a file whose `wrong` and `unresolved` columns gate
+   * at 0, encoding one space after `for` and a trailing brace. A formatting
+   * change to either would have taken rows out of a gate silently, and a gate
+   * that stops looking reads as a clean tree. The whitespace cases below all
+   * FAILED against the old pattern.
+   */
+  it.each([
+    "  for(eax = eax; ecx < 4; ecx++) {",
+    "  for  (eax = eax; ecx < 4; ecx++) {",
+    "  for (eax = eax; ecx < 4; ecx++)  {",
+  ])("reads %s however it is spaced", (line) => {
+    const out = run(line, [insn(0x2000, "nop", "")], 0x2000);
+    expect(out.forHeaders).toBe(1);
+    expect(out.inForHeader).toBe(1);
+    expect(out.identity).toBe(1);
+  });
+
+  /**
+   * A `for` whose clauses cannot be split is a clause the scan did not read, and
+   * it is counted rather than dropped — `forHeadersUnsplit` gates at 0 in
+   * `corpus.audit.ts` for the same reason `unresolved` does. `emit.ts` always
+   * writes three clauses, so this shape does not occur; it is pinned here or
+   * nowhere.
+   */
+  it("counts a for header it recognises and cannot split", () => {
+    const out = run("  for (eax = eax) {", [insn(0x2000, "nop", "")], 0x2000);
+    expect(out.forHeaders).toBe(1);
+    expect(out.forHeadersUnsplit).toBe(1);
+    expect(out.rows).toHaveLength(0);
+  });
+
+  /**
+   * A one-lined guard's body is read as the STATEMENT it is. No such assignment
+   * occurs today — `peek-a-bin-0qib` one-lines terminators only — and this is
+   * what stops the guard being taken as the destination if that ever widens.
+   * With the guard glued on, `stmt[1]` is `if (ecx == 0) eax` and the row is
+   * lost from a scan that gates at 0.
+   */
+  it("reads a one-lined guard's body as its own statement", () => {
+    const out = run("  if (ecx == 0) eax = eax;", [insn(0x2000, "nop", "")], 0x2000);
+    expect(out.identity).toBe(1);
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].name).toBe("eax");
+    expect(out.forHeaders).toBe(0);
+  });
+
+  /** …and a one-lined guard whose body is a terminator is not an assignment. */
+  it("finds nothing in a one-lined guard whose body is a terminator", () => {
+    const out = run("  if (eax == 0) goto loc_401038;", [insn(0x2000, "nop", "")], 0x2000);
+    expect(out.rows).toHaveLength(0);
   });
 
   it("counts a function once however many self-assignments it has", () => {

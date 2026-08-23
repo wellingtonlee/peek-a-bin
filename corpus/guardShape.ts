@@ -38,10 +38,11 @@
  * `doTail` below and is part of the census, because it is a guard whose
  * condition the same audit judges. A function-definition header
  * (`undefinedCallees.ts`'s `DEF_HEADER`) and a `switch (` are not: neither
- * carries a condition anyone judges. `selfAssigns.ts`'s `FOR_HEADER` reads a
- * `for` header for its own reason — the update clause — and has the same
- * brittleness with no census behind it; it is left alone here rather than
- * widened as a side effect.
+ * carries a condition anyone judges. `selfAssigns.ts` reads a `for` header for its
+ * own reason — the clauses, which are statements a self-assignment can hide in
+ * — and it asks `forHeaderCond` and `splitForHeader` below for it
+ * (`peek-a-bin-hfsq`): the grammar answers what the LINE is, and what a caller
+ * wants out of it stays the caller's business.
  */
 
 /** The three top-tested constructs whose condition the polarity audit judges. */
@@ -158,6 +159,51 @@ export function guardShape(line: string): GuardShape | null {
 export function statementOnLine(line: string): string {
   const shape = guardShape(line);
   return shape !== null && shape.kind === "inline" ? shape.body : line.trim();
+}
+
+/**
+ * The three clauses of a `for` header, from the condition text `guardShape`
+ * returned — `[init, cond, update]`, each with its own whitespace and no
+ * trailing semicolon, or null if the header does not hold exactly two top-level
+ * `;`.
+ *
+ * It lives here rather than in either caller because both want it for their own
+ * reason and neither is entitled to its own answer: `sweep.ts` judges the middle
+ * clause against a jcc, and `selfAssigns.ts` reads the init and the update as
+ * statements. `emit.ts` always writes all three, so null is a refusal rather
+ * than a shape — and both callers count it, because a clause silently not read
+ * is a row leaving a scan.
+ *
+ * Depth is counted on parentheses only. A `;` cannot occur inside `[...]` in a C
+ * expression, so tracking brackets as well would change no answer.
+ */
+export function splitForHeader(cond: string): [string, string, string] | null {
+  let depth = 0;
+  const cuts: number[] = [];
+  for (let i = 0; i < cond.length; i++) {
+    const c = cond[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === ";" && depth === 0) cuts.push(i);
+  }
+  if (cuts.length !== 2) return null;
+  return [cond.slice(0, cuts[0]), cond.slice(cuts[0] + 1, cuts[1]), cond.slice(cuts[1] + 1)];
+}
+
+/**
+ * A `for` header's condition text, of either spelling, or null if the line is
+ * not one.
+ *
+ * A named predicate so that no caller has to re-spell
+ * `kind === "braced" && kw === "for"` — which is exactly the shape
+ * `selfAssigns.ts` had hand-rolled as `/^\s*for \((.*)\) \{\s*$/`, a pattern
+ * that also encoded single-space formatting and a trailing brace and would have
+ * gone silent on either.
+ */
+export function forHeaderCond(shape: GuardShape | null): string | null {
+  if (shape === null) return null;
+  if (shape.kind !== "braced" && shape.kind !== "inline") return null;
+  return shape.kw === "for" ? shape.cond : null;
 }
 
 /**

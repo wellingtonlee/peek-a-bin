@@ -125,6 +125,7 @@ import { writtenRegsOfInsn } from "../src/disasm/callSummary";
 import { withoutLockPrefix } from "../src/disasm/decompile/flagModel";
 import { canonReg, isKnownRegister } from "../src/disasm/decompile/ir";
 import type { Instruction } from "../src/disasm/types";
+import { forHeaderCond, guardShape, splitForHeader, statementOnLine } from "./guardShape";
 
 /** One `X = X` in the emitted C, with the instruction it was resolved to. */
 export interface SelfAssignRec {
@@ -170,6 +171,19 @@ export interface SelfAssignResult {
   lines: number;
   /** Self-assignments found inside a `for` header rather than on their own line. */
   inForHeader: number;
+  /**
+   * `for` headers read. Instrument liveness for the clause scan, which has its
+   * own way of matching nothing: this scan's `wrong` and `unresolved` columns
+   * gate at 0, and a header shape it stopped recognising would take rows out of
+   * a gate silently (`peek-a-bin-hfsq`).
+   */
+  forHeaders: number;
+  /**
+   * `for` headers recognised as such and then refused by `splitForHeader`.
+   * `emit.ts` always writes three clauses, so a non-zero here is a header whose
+   * init and update were not read at all. Expect 0.
+   */
+  forHeadersUnsplit: number;
 }
 
 export const emptySelfAssigns = (): SelfAssignResult => ({
@@ -182,17 +196,25 @@ export const emptySelfAssigns = (): SelfAssignResult => ({
   funcsAffected: 0,
   lines: 0,
   inForHeader: 0,
+  forHeaders: 0,
+  forHeadersUnsplit: 0,
 });
 
 /**
  * An emitted assignment statement. The first ` = ` cannot fall inside `==`,
  * `!=`, `<=`, `>=` or a compound `|=`/`+=`, since each of those puts a non-space
  * immediately on one side of the `=`.
+ *
+ * It is asked of the STATEMENT a line carries, not of the line, so `guardShape`
+ * decides where the statement starts. That costs nothing today — the emitter
+ * one-lines only terminators, and none of those contains a ` = ` — and it is
+ * what stops the guard being read as the destination if that ever changes
+ * (`peek-a-bin-0qib`, `peek-a-bin-hfsq`).
  */
 const ASSIGN_LINE = /^\s*(.+?) = (.+);\s*$/;
 
-/** `for (<init>; <cond>; <update>) {`, whose init and update are statements. */
-const FOR_HEADER = /^\s*for \((.*)\) \{\s*$/;
+/** A `for` clause: `X = Y` with no trailing semicolon, so it needs its own test. */
+const FOR_CLAUSE = /^\s*(.+?) = (.+?)\s*$/;
 
 /** The spellings a zero immediate can take, and nothing else. */
 function isZeroImmediate(op: string): boolean {
@@ -476,37 +498,55 @@ export function everyWriteZeroes(
   return writes > 0;
 }
 
-/** Every `X = X` this line states. */
-function selfAssignsOnLine(line: string): string[] {
-  const found: string[] = [];
-  const stmt = ASSIGN_LINE.exec(line);
-  if (stmt) {
-    if (stmt[1].trim() === stmt[2].trim()) found.push(stmt[1].trim());
-    return found;
+/** What one emitted line states, as far as this audit is concerned. */
+interface LineReading {
+  /** Every `X = X` the line states, whether as a statement or as a `for` clause. */
+  names: string[];
+  /** How many of those came from a `for` header's clauses. */
+  inForHeader: number;
+  /** Whether the line IS a `for` header, whatever it contains. Liveness. */
+  forHeader: boolean;
+  /** Whether it is a `for` header whose clauses could not be split. Expect false. */
+  forUnsplit: boolean;
+}
+
+/**
+ * Every `X = X` this line states.
+ *
+ * TWO KINDS OF SITE, and neither may be read with its own hand-rolled pattern.
+ * A statement of its own is `ASSIGN_LINE` over `statementOnLine`, so a one-lined
+ * guard's body is read as the statement it is rather than with the guard glued
+ * to the front of the destination. A `for` header holds its init and its update
+ * as statements too, and that is `guardShape` plus `splitForHeader` — where it
+ * used to be `/^\s*for \((.*)\) \{\s*$/`, a second hand-rolled guard-header
+ * pattern in a file whose `wrong` and `unresolved` columns GATE at 0, encoding
+ * single-space formatting and a trailing brace that a formatting change would
+ * have taken rows out of the gate on, silently (`peek-a-bin-hfsq`).
+ *
+ * The two are asked independently rather than one-or-the-other: a `for` header
+ * ends in `{` so `ASSIGN_LINE` cannot match it, and an inline `for` — a shape
+ * the emitter does not write — would carry both its clauses and a body
+ * statement, each of which is a real site.
+ */
+function selfAssignsOnLine(line: string): LineReading {
+  const out: LineReading = { names: [], inForHeader: 0, forHeader: false, forUnsplit: false };
+  const cond = forHeaderCond(guardShape(line));
+  if (cond !== null) {
+    out.forHeader = true;
+    const clauses = splitForHeader(cond);
+    if (clauses === null) out.forUnsplit = true;
+    else
+      for (const cl of clauses) {
+        const m = FOR_CLAUSE.exec(cl);
+        if (m && m[1].trim() === m[2].trim()) {
+          out.names.push(m[1].trim());
+          out.inForHeader++;
+        }
+      }
   }
-  const hdr = FOR_HEADER.exec(line);
-  if (!hdr) return found;
-  // The three clauses of a `for` header, split on `;` at depth 0. A clause is
-  // `X = Y` with no trailing semicolon, so it needs its own test.
-  let depth = 0;
-  let cur = "";
-  const clauses: string[] = [];
-  for (const c of hdr[1]) {
-    if (c === "(" || c === "[") depth++;
-    else if (c === ")" || c === "]") depth--;
-    if (c === ";" && depth === 0) {
-      clauses.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += c;
-  }
-  clauses.push(cur);
-  for (const cl of clauses) {
-    const m = /^\s*(.+?) = (.+?)\s*$/.exec(cl);
-    if (m && m[1].trim() === m[2].trim()) found.push(m[1].trim());
-  }
-  return found;
+  const stmt = ASSIGN_LINE.exec(statementOnLine(line));
+  if (stmt && stmt[1].trim() === stmt[2].trim()) out.names.push(stmt[1].trim());
+  return out;
 }
 
 /**
@@ -535,10 +575,14 @@ export function auditSelfAssigns(
   let hits = 0;
 
   for (let i = 0; i < lines.length; i++) {
-    const names = selfAssignsOnLine(lines[i]);
-    if (names.length === 0) continue;
-    if (FOR_HEADER.test(lines[i])) out.inForHeader += names.length;
-    for (const name of names) {
+    const read = selfAssignsOnLine(lines[i]);
+    // Counted before the early return: the liveness halves are about the lines
+    // the scan RECOGNISED, not about the ones that turned out to hold a row.
+    if (read.forHeader) out.forHeaders++;
+    if (read.forUnsplit) out.forHeadersUnsplit++;
+    if (read.names.length === 0) continue;
+    out.inForHeader += read.inForHeader;
+    for (const name of read.names) {
       hits++;
       const addr = addrOfLine.get(i);
       if (byAddr === null) {

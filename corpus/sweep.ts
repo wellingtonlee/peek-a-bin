@@ -37,6 +37,7 @@ import {
   type GuardShapeCensus,
   guardShape,
   noteGuardShape,
+  splitForHeader,
   statementOnLine,
 } from "./guardShape";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
@@ -186,20 +187,6 @@ function topOp(cond: string): string | null {
     }
   }
   return ops.length === 1 ? ops[0] : null;
-}
-
-/** Split a `for` header's three clauses at top-level `;`. */
-function splitFor(header: string): [string, string, string] | null {
-  let depth = 0;
-  const cuts: number[] = [];
-  for (let i = 0; i < header.length; i++) {
-    const c = header[i];
-    if (c === "(") depth++;
-    else if (c === ")") depth--;
-    else if (c === ";" && depth === 0) cuts.push(i);
-  }
-  if (cuts.length !== 2) return null;
-  return [header.slice(0, cuts[0]), header.slice(cuts[0] + 1, cuts[1]), header.slice(cuts[1] + 1)];
 }
 
 /**
@@ -1751,7 +1738,7 @@ function auditGuardsAndLoops(
     if (shape.kind === "braced" || shape.kind === "inline") {
       const inline = shape.kind === "inline";
       if (shape.kw === "for") {
-        const parts = splitFor(shape.cond);
+        const parts = splitForHeader(shape.cond);
         if (!parts) {
           skip("for", "unsplittable-header");
           continue;

@@ -567,6 +567,27 @@ for (const b of bins) {
       (a, c) => c === 0 && a > 0,
       "THE SCAN STOPPED READING EMITTED C AT ALL",
     );
+    // The `for`-header half has its own way of matching nothing, and it is the
+    // half whose pattern was hand-rolled (peek-a-bin-hfsq). A fall means a
+    // header shape the grammar no longer recognises; a rise in `unsplittable`
+    // means one it recognises and whose clauses it did not read. Both take rows
+    // out of a scan that gates at 0 on `wrong` and `unresolved`.
+    if (B.selfAssigns.forHeaders !== undefined && C.selfAssigns.forHeaders !== undefined) {
+      row(
+        "  for headers read",
+        (x) => x.selfAssigns.forHeaders,
+        (a, c) => c < a,
+        "THE FOR-HEADER SCAN RECOGNISES FEWER LINES",
+      );
+      row(
+        "  for headers unsplittable",
+        (x) => x.selfAssigns.forHeadersUnsplit,
+        (a, c) => c > a,
+        "A FOR HEADER'S CLAUSES WERE NOT READ",
+      );
+    } else {
+      note("  for headers read              NOT MEASURED on both sides (a run predating it)");
+    }
   } else {
     note("  self-assignments              NOT MEASURED on both sides (a run predating the audit)");
   }
