@@ -1246,6 +1246,93 @@ Two questions, one per architecture, and they are not the same question:
   an md5 over every commented instruction instead. That is the byte-identity instrument for any
   change to the shared `mapInsn` path: run it at both commits and the four digests must not move.
 
+## `corpus/jumpTableReach.ts` — separate, and it takes a path
+
+`npm run corpus:jumptables -- <path-to-pe>` censuses the indirect dispatches in **any** PE and
+reports how many of them `detectFunctions` recovered a table for. It is not part of
+`npm run corpus`, and the reason is the whole point of it: the standing run drives the four MSVC
+binaries every figure here is measured against, and this exists to look at a binary that is *not*
+one of them. CLAUDE.md carries a standing instruction never to put such a file in the corpus
+directory — the audits iterate over whatever they find there, so an extra binary silently changes
+the population of every gate and every number in the Verification section — so this takes the path
+instead and reads the file where it lies.
+
+It exists because **`peek-a-bin-2q5` and `peek-a-bin-6rge` are both blocked on the same thing**:
+no x64 PE with a table-dispatched switch is available here, so the two x64 readers are exercised
+by synthetic fixtures only. That is a block closed by *pointing at a binary*, not by writing code,
+and this is what you point.
+
+What it reports, all of it derived from the image:
+
+- **Dispatch sites by shape**, in the terms the readers are written in — and the shape *is* the
+  structural answer to "which reader was reached", so no counters are bolted into
+  `functionDetect.ts` to find out. `literal-indexed` (`jmp [reg*N + 0xIMM]`, or a rip-relative
+  operand on x64) is `readAbsoluteTable`'s. `register` (`jmp reg`) is `recoverX64RvaChain`'s, and
+  is the **only** route to `readDenseRvaTable` / `recoverDenseByteTable` — so a zero there, or a
+  non-zero with nothing recovered, means the dense two-table reader did not run.
+  `register-base-indexed` (`jmp [reg + reg*N]`, base in a register, no displacement) is the shape
+  **no reader takes at all**. `unscaled-memory` is an import thunk.
+- **`lea-base` and `bounded`** — how many sites have a rip-relative `lea` writing the base
+  register within reach, and how many have a `cmp`/`and` of an immediate against the subscript
+  register. These are *evidence present*, never *table confirmed*: a `lea` to an array of function
+  pointers plus an unrelated nearby `cmp` has both and is not a switch.
+- **Where the table bases lie** relative to the code section. This is the column that decides
+  whether an unread table is *harmful*: the gap fill only decodes the code section, so a table in
+  `.rdata` is never read as code however badly it is understood.
+- **The unread-but-bounded rows**, and for them, **how many of their case targets are not already
+  decoded as instruction starts**. Zero there means recovering them would add CFG edges only — no
+  byte of the image is currently being read as the wrong thing, which is a very different
+  situation from `peek-a-bin-y1di` and `peek-a-bin-xqxy`, where the unread bytes were being
+  gap-filled into fiction.
+
+**Calibrate on the MSVC pair before reading an UNREAD row as a defect.** t32 reports 15 of 20 and
+w32 13 of 18, and all ten of the remainder are refusals this project made on purpose and wrote
+down: t32 `0x40b7f1` / `0x40b985` and w32 `0x409491` / `0x409625` are `overlappedTableExtent`'s
+Shape 1, whose `and <index>, 3` is deliberately not read as a bound there; t32 `0x40b7f8` and w32
+`0x409498` are its Shape 2, the *negative*-index dispatch whose apparent base is a case body and
+which CLAUDE.md says in terms must not be "fixed". The row says what the tool declined and what
+stood beside it. The adjudication is still a human reading `objdump`.
+
+### Regenerating the Go image, rather than storing one
+
+The only compiler on this machine that produces a Windows/amd64 PE containing real table
+dispatches is `go` (1.26.0, `/usr/bin/go`). The binary is **not** stored — it is 2.4 MB, it is not
+MSVC output, and it must not go in the corpus directory — so here is how to make another. Anywhere
+outside the repo and outside the corpus directory:
+
+```sh
+mkdir /tmp/gope && cd /tmp/gope
+cat > go.mod <<'EOF'
+module x
+
+go 1.21
+EOF
+cat > main.go <<'EOF'
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func main() {
+	n, _ := strconv.Atoi(os.Args[1])
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d %s %v %q\n", n, os.Args, n > 3, os.Args[0])
+	fmt.Println(strings.ToUpper(b.String()))
+}
+EOF
+GOOS=windows GOARCH=amd64 GOFLAGS=-trimpath go build -o x64.exe .
+npm run corpus:jumptables -- /tmp/gope/x64.exe   # from the repo
+```
+
+The `fmt` and `strconv` imports are what matter: **a hand-written dense switch does not compile to
+a table** — Go picks a comparison chain — so every dispatch found this way is inside the runtime
+and the standard library, and the program only has to pull enough of them in. Addresses move with
+the Go version and with the source, which is exactly why nothing here is tabulated.
+
 ## What the standing set does NOT catch
 
 **None of the gates above catches a wrong-value defect** — a statement that is emitted, is
