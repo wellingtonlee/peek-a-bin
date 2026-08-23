@@ -1568,6 +1568,32 @@ evidence that the ARM64 window is load-bearing.
   figures in `Arm64SweepCache`'s docstring are not re-derived here; the call counts are, and they
   reproduce `peek-a-bin-kis` exactly.
 
+## `corpus/rpcUploadCost.ts` — separate, takes a path, and is a stopwatch
+
+`npm run corpus:uploadcost -- <path-to-pe> [...]` answers what re-sending one code section to the
+worker costs, for **any** PE. It times the three decode-bound RPCs through the real `dispatch` with
+real Capstone handles, times the real `prepareBinaryArgs` slice beside them, and prints the ratio.
+Takes a path, and is outside `npm run corpus`, for `jumpTableReach.ts`' reason below.
+
+**Read the last column, never the milliseconds.** Both the copy and the work it feeds are linear in
+the size of the section, so the ratio is a property of the tool rather than of the file, and it is
+the only thing that extrapolates. Wall clock on a loaded machine moves by tens of percent between
+runs; the order of magnitude does not.
+
+It exists because `peek-a-bin-9a8` proposed uploading each region once under a handle on the
+strength of a figure taken on a 253 MiB file that has never existed on this machine — and its own
+staleness audit recorded the timings as "NOT measurable here". They are measurable now. Measured at
+`decbea4`, the saving is **0.0075%–0.087%** of the work over seven images spanning two
+architectures and a 14× size range, so the proposal was refused; the argument is in
+`src/workers/transfer.ts` and in CLAUDE.md. The same run says where the leverage is instead
+(`peek-a-bin-x40u`): on x86 the section is re-*decoded* four times per load, not merely re-sent.
+
+It also re-derives the premise it depends on rather than asserting it — that the four sends are of
+**one region** — by building the three views the way `App.tsx` and `useDisassemblyRows.ts` do and
+reporting that they are distinct view objects over one `(buffer, offset, length)`. That distinction
+decides the design: keying a cache on view identity collapses 2 of the 4 sends, keying it on the
+triple collapses all four.
+
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
 `npm run corpus:jumptables -- <path-to-pe>` censuses the indirect dispatches in **any** PE and
@@ -1975,6 +2001,7 @@ remaining gap and is not implemented.
 | `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, PC-relative literal pools, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
+| `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -2057,7 +2084,8 @@ program from the one production emits.
 
 - **`tsx` works here now, and the note saying it does not is stale.** This bullet used to read
   "`tsx` does not work on this machine (Node 18, `ERR_REQUIRE_ESM`)"; the machine is on Node 22 and
-  all three separately-invoked harnesses (`corpus:arm64`, `corpus:comments`, `corpus:jumptables`)
+  all four separately-invoked harnesses (`corpus:arm64`, `corpus:comments`,
+  `corpus:jumptables`, `corpus:uploadcost`)
   are plain `tsx` scripts that run. The gated audits are vitest files for a different and still-good
   reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
   against artifacts without a toolchain at all.
