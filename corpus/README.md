@@ -831,6 +831,61 @@ being unexercised:
 > corroborates nothing at all**. Exactly two tests in `build/selfAssignAudit.test.ts` fail under it
 > and pass under the correct rule.
 
+**A frame-relative operand after the frame register has been repurposed** — `frameRepurpose.ts`,
+**0 on all four binaries**, over 2792/427/355/2300 frame-relative operands in 204/20/18/201 framed
+functions. `src/disasm/stack.ts` establishes the frame displacement from the **prologue** and stops
+at the first later write of the frame register, so a mid-body *reload* is never seen — while
+`promote.ts`'s `frameRegisterAliases` and `structs.ts`'s `stackDerivedBases` both rest on that
+register being invariant for the whole body, and `matchStackAccess` resolves `[<fp> ± N]` to
+`arg_N` / `var_N` at any address with no program point at all. `peek-a-bin-633s` found the
+counterexample, measured the repair at that layer to be catastrophic, refused it, and left the hole
+open on the grounds that it is latent. **Nothing automatic modelled that**: the fact was
+hand-audited at `99203fb`, `fe244dc` and `84eed6e` and held every time, only because somebody
+remembered to look. This row is that hand audit (`peek-a-bin-nhw0`).
+
+| Count | What it is |
+|---|---|
+| `after` | Frame-relative operands at an address past a repurposing. **GATE at 0.** |
+| `repurposings` | Writes of the frame register past the prologue that are *not* epilogue restores. **1/0/0/1** — the two MSVC `longjmp` reloads. The gate's own precondition, asserted `> 0` over the corpus. |
+| `framed` | Functions with a recovered displacement — the population. **204/20/18/201**, of which 31/0/0/29 helper-framed. |
+| `writes` / `restores` | **206/18/16/205** and **205/18/16/204**. The classifier discriminating rather than refusing everything. |
+| `operands` | `[<fp>]`, `[<fp> + N]`, `[<fp> - N]` in framed functions. **2792/427/355/2300**. The operand scan matching at all. |
+
+**THE X64 PAIR'S ZERO IS STRUCTURAL.** `repurposings` is 0 on t64 and w64, so those two rows say
+nothing whatever — the same vacuous green `armExits` shows on the two binaries that recover no jump
+table. Only the PE32 pair demonstrates anything.
+
+**THE WRITE IS CLASSIFIED, NOT MERELY FOUND, and that is the whole difficulty.** `pop <fp>` and
+`leave` write the frame register, and MSVC lays a **mid-function epilogue before code that executes
+later** — this is the same address-order fact that made `633s` refuse the repair inside `stack.ts`.
+Measured as a control: classifying them as repurposings makes `npm run corpus` exit 1 at
+**264/81/79/264 operands over 168/18/16/167 functions**. So `pop <fp>`, `leave` and `popa`/`popad`
+are *restores* and open no window; anything else that writes the register is a repurposing. The one
+exception is MSVC's `push <imm>` / `pop <reg>` size idiom, which is `mov <reg>, <imm>` and is paired
+by `stackIdiom.ts`'s `pushedImmediate` — 0 occurrences here, so a bound rather than a saving.
+
+**A ROW IS "NAMED WITH NO EVIDENCE", NOT "PROVABLY WRONG".** The scan is address-ordered, because
+that is the order available and the order `633s` hand-measured in; address order is not execution
+order. What a row states is that the tool resolves a frame slot at a point where nothing has shown a
+frame to be in scope — which is enough to gate, since the tool never makes the reachability claim
+either.
+
+**Negative-controlled, and the positive control is the one to trust.** Reversing the address
+comparison — operands *before* a repurposing rather than after — makes the run exit 1 and name
+exactly `t32!sub_40A810` 0x40a820 `push dword ptr [ebp + 8]` after 0x40a851 and its w32 twin
+0x4092c0 after 0x4092f1: the "1 each before it" `633s` hand-counted, figure for figure. So the
+operand scan, the classifier and the attribution all reach the witness function and the 0 is a real
+0. `build/frameRepurposeAudit.test.ts` carries the rest, because three of the classifier's four arms
+(`push <imm>`/`pop`, `popa`/`popad`, `enter`) have **no occurrence in this corpus** and the gate
+itself has never fired.
+
+**What it does not cover.** A function `stack.ts` reports as *unframed*: `analyzeStackFrame` records
+`[<fp> - N]` as a local with no `frameDelta` gate, so `var_N` names appear there too — but there is
+no established frame for a repurposing to invalidate, and the wrongness is that the register was
+never a frame pointer. That is `633s`'s "`frameDelta` is the wrong lever" paragraph and a different
+class; measured, 1 such function per binary, whose RBP is a scratch byte register
+(`t64!sub_140003B44`'s `setne bpl` / `lea eax, [rbp - 1]`).
+
 ### Baselines — reported, never gated
 
 **Line map coverage**, per instruction and per CFG block. Read the name literally: it measures

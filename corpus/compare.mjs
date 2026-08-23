@@ -592,6 +592,50 @@ for (const b of bins) {
     note("  self-assignments              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── A frame slot named after the frame register was repurposed. ──────────
+  //
+  // Gated at 0 in the run, so a rise here names which binary and which write.
+  // The liveness rows are the ones to read on a green gate: `repurposings` is
+  // the gate's own precondition and is 1/0/0/1 (MSVC `longjmp`), so a FALL to
+  // zero leaves the gate demonstrating nothing at all, and `framed`,
+  // `restores` and `operands` each go to zero if the population, the classifier
+  // or the operand scan stops matching. A RISE in `restores` alone is ordinary
+  // — it moves with detection like any instruction count.
+  if (B.frameRepurpose && C.frameRepurpose) {
+    row(
+      "frame ops after repurpose",
+      (x) => x.frameRepurpose.after,
+      (a, c) => c > a,
+      "A FRAME SLOT IS NAMED AGAINST A FRAME THE MACHINE HAS THROWN AWAY",
+    );
+    row(
+      "  repurposings found",
+      (x) => x.frameRepurpose.repurposings,
+      (a, c) => c < a,
+      "THE GATE'S OWN PRECONDITION POPULATION SHRANK",
+    );
+    row(
+      "  framed functions",
+      (x) => x.frameRepurpose.framed,
+      (a, c) => c === 0 && a > 0,
+      "THE FRAMED POPULATION IS EMPTY",
+    );
+    row(
+      "  epilogue restores",
+      (x) => x.frameRepurpose.restores,
+      (a, c) => c === 0 && a > 0,
+      "THE WRITE CLASSIFIER STOPPED SEEING THE EPILOGUE",
+    );
+    row(
+      "  frame-relative operands",
+      (x) => x.frameRepurpose.operands,
+      (a, c) => c === 0 && a > 0,
+      "THE OPERAND SCAN STOPPED MATCHING",
+    );
+  } else {
+    note("  frame ops after repurpose     NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A call whose callee the output defines nowhere (undefinedCallees.ts). ──
   //
   // REPORT-ONLY in the run, so a RISE here is the whole signal. The two halves

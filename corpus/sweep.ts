@@ -33,6 +33,11 @@ import {
   emptyCrossEdgeGuards,
 } from "./crossEdgeGuards";
 import {
+  auditFrameRepurpose,
+  emptyFrameRepurpose,
+  type FrameRepurposeResult,
+} from "./frameRepurpose";
+import {
   emptyGuardShapeCensus,
   type GuardShapeCensus,
   guardShape,
@@ -605,6 +610,19 @@ export interface BinResult {
    * `corpus/selfAssigns.ts`.
    */
   selfAssigns: SelfAssignResult;
+  /**
+   * A FRAME-RELATIVE OPERAND STANDING AFTER THE FRAME REGISTER WAS REPURPOSED.
+   *
+   * A GATE at 0 on `after`. `stack.ts` reads the frame displacement off the
+   * PROLOGUE and never asks whether the frame register survives, while
+   * `promote.ts` and `structs.ts` both rest on its invariance — so a mid-body
+   * reload (MSVC `longjmp`, 1/0/0/1 here) leaves every later `[<fp> +- N]`
+   * named against a frame the machine has thrown away. Latent in this corpus,
+   * hand-audited three times before this row existed. `framed` and
+   * `repurposings` are the liveness halves and the x64 pair's zero is
+   * STRUCTURAL. See `corpus/frameRepurpose.ts`.
+   */
+  frameRepurpose: FrameRepurposeResult;
   structOverlaps: StructOverlapResult;
   funcs: FuncRec[];
 }
@@ -774,6 +792,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     armExits: emptyArmExits(),
     wildBranches: emptyWildBranches(),
     selfAssigns: emptySelfAssigns(),
+    frameRepurpose: emptyFrameRepurpose(),
     structOverlaps: emptyStructOverlaps(),
     funcs: [],
   };
@@ -810,6 +829,27 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     } catch (e) {
       res.throws++;
       res.throwDetail.push(`prep 0x${func.address.toString(16)}: ${String(e)}`);
+    }
+
+    // A MID-BODY REPURPOSING OF THE FRAME REGISTER, and any frame-relative
+    // operand standing after it. Here rather than below the decompile because
+    // it reads only the machine text and `stack.ts`'s geometry — a function
+    // whose decompilation throws still has a frame and still gets examined,
+    // and putting it after the `threw` guard would silently shrink the
+    // population. See `corpus/frameRepurpose.ts`.
+    if (stackFrame !== null) {
+      auditFrameRepurpose(
+        res.frameRepurpose,
+        key,
+        func.name,
+        insns,
+        // `?? null` for the reason `StackFrame`'s own docstring gives: the
+        // shape crosses a worker boundary, so `undefined` must read as the
+        // refusal rather than as "no frame register was ever established".
+        stackFrame.frameDelta ?? null,
+        stackFrame.frameEstablishedAt ?? null,
+        af.pe.is64,
+      );
     }
 
     let code = "";

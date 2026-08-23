@@ -210,6 +210,15 @@ if (!pre.haveBins || !pre.haveCc) {
           r.selfAssigns.rows.map((x) => JSON.stringify(x)).join("\n") +
             (r.selfAssigns.rows.length > 0 ? "\n" : ""),
         );
+        // Every frame-relative operand standing after the frame register was
+        // repurposed mid-body. Written even when empty, for `wildbranches_`'s
+        // reason: the standing claim IS that it is empty, so an absent file
+        // must not read as a clean run.
+        writeFileSync(
+          join(artifactDir, `framerepurpose_${key}.jsonl`),
+          r.frameRepurpose.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.frameRepurpose.rows.length > 0 ? "\n" : ""),
+        );
         // Every base's overlapping readings and how the first-by-offset rule
         // settled each one. Written even when empty: the standing claim is that
         // the population is small and stable, and an absent file must not read
@@ -249,6 +258,7 @@ if (!pre.haveBins || !pre.haveCc) {
               armExits: { ...r.armExits, rows: r.armExits.rows.length },
               wildBranches: { ...r.wildBranches, rows: r.wildBranches.rows.length },
               selfAssigns: { ...r.selfAssigns, rows: r.selfAssigns.rows.length },
+              frameRepurpose: { ...r.frameRepurpose, rows: r.frameRepurpose.rows.length },
               structOverlaps: { ...r.structOverlaps, rows: r.structOverlaps.rows.length },
               guards: r.guards.length,
               funcs: r.funcs.length,
@@ -772,6 +782,82 @@ if (!pre.haveBins || !pre.haveCc) {
       let forHeaders = 0;
       for (const r of results.values()) forHeaders += r.selfAssigns.forHeaders;
       expect(forHeaders).toBeGreaterThan(0);
+    });
+
+    /**
+     * A GATE at 0, AND IT REPLACES A HAND AUDIT RATHER THAN A DEFECT.
+     *
+     * `src/disasm/stack.ts` establishes the frame displacement from the
+     * PROLOGUE and stops at the first later write of the frame register, so a
+     * mid-body *reload* is never seen — while `promote.ts`'s
+     * `frameRegisterAliases` and `structs.ts`'s `stackDerivedBases` both rest on
+     * that register being invariant for the whole body, and `matchStackAccess`
+     * resolves `[<fp> +- N]` to `arg_N` / `var_N` at any address with no program
+     * point at all. `peek-a-bin-633s` found the counterexample and measured the
+     * repair at that layer to be catastrophic, so it refused it and left the
+     * hole open on the grounds that it is LATENT: `t32!sub_40A810` 0x40a851 and
+     * `w32!sub_4092B0` 0x4092f1 reload EBP out of a `jmp_buf` and no
+     * `[ebp +- N]` follows either. Nothing automatic modelled that. It was
+     * hand-checked at `99203fb`, `fe244dc` and `84eed6e` and held every time,
+     * only because somebody remembered to look (`peek-a-bin-nhw0`).
+     *
+     * WHY IT GATES AT 0 FROM THE DAY IT LANDS. Every row is a slot the tool
+     * names against a frame nothing has shown to be in scope — the register's
+     * last write put something else in it — which is `polarity inverted`'s
+     * character rather than a baseline's. It is 0 on all four binaries.
+     *
+     * THE X64 PAIR'S ZERO IS STRUCTURAL, so say so rather than reading four
+     * green rows: `repurposings` is 1/0/0/1, and with no repurposing at all
+     * t64/w64 have nothing this could report. Same vacuous green `armExits`
+     * shows on the two binaries that recover no jump table.
+     *
+     * THE LIVENESS HALVES ARE THE POINT, because the trap here is an audit that
+     * reads 0 by no longer looking. `framed` is the population (204/20/18/201),
+     * `writes`/`restores` show the classifier discriminating rather than
+     * refusing everything, and `operands` shows the operand scan matching. The
+     * classification is what the gate turns on: `pop <fp>` and `leave` are
+     * epilogue restores and MSVC lays a mid-function epilogue BEFORE code that
+     * executes later, so a rule that merely found a write reports 264/81/79/264
+     * operands over 168/18/16/167 functions. `repurposings` is asserted
+     * over the corpus rather than per binary, since a binary with no `longjmp`
+     * in it is a legitimate state. See `corpus/frameRepurpose.ts`, and
+     * `build/frameRepurposeAudit.test.ts` for the controls the corpus cannot
+     * run — three of the classifier's four arms have no occurrence here.
+     */
+    it("never resolves a frame slot after the frame register has been repurposed", () => {
+      let repurposings = 0;
+      for (const r of results.values()) {
+        const fr = r.frameRepurpose;
+        expect(
+          `${r.key} frame-after-repurpose: ${fr.rows
+            .slice(0, 5)
+            .map(
+              (x) =>
+                `${x.func} 0x${x.addr.toString(16)} ${x.mnemonic} ${x.opStr}` +
+                ` after 0x${x.repurposedAt.toString(16)} ${x.repurposeInsn}`,
+            )
+            .join("; ")}`,
+        ).toBe(`${r.key} frame-after-repurpose: `);
+        expect(fr.after).toBe(0);
+        // Liveness, per binary: every one of these images is full of framed
+        // functions reading their own slots, so unlike `repurposings` below
+        // these need no per-binary escape.
+        expect(fr.framed).toBeGreaterThan(0);
+        expect(fr.operands).toBeGreaterThan(0);
+        // The classifier discriminating at all. `writes > restores` would mean
+        // a repurposing was found; `writes === restores` is the expected state
+        // and `writes === 0` would mean the write model stopped seeing the
+        // epilogue, which is how this gate would go quietly blind.
+        expect(fr.writes).toBeGreaterThan(0);
+        expect(fr.restores).toBeGreaterThan(0);
+        repurposings += fr.repurposings;
+      }
+      // LIVENESS for the gate's own precondition, asked over the corpus: with 0
+      // repurposings anywhere, `after` is 0 for want of a window and the gate
+      // has demonstrated nothing. The two MSVC `longjmp` reloads are what make
+      // it non-vacuous, and if they ever leave the corpus this assertion is
+      // what says so instead of the row silently going green.
+      expect(repurposings).toBeGreaterThan(0);
     });
 
     /**
@@ -1415,6 +1501,24 @@ function renderReport(): string {
     L.push(
       "    FAINT trace: only 2 of 3axd's 97 wrong reads left one. In selfassigns_<bin>.jsonl.",
     );
+    const fr = r.frameRepurpose;
+    L.push(
+      `  frame ops after repurpose   ${fr.after} of ${fr.operands} frame-relative operands, ` +
+        `after ${fr.repurposings} repurposings over ${fr.funcsRepurposed} functions ` +
+        `(${fr.writes} frame-register writes past the prologue, ${fr.restores} of them ` +
+        `epilogue restores), over ${fr.framed} framed functions ` +
+        `(${fr.helperFramed} helper-framed)`,
+    );
+    L.push("    `stack.ts` reads the frame displacement off the PROLOGUE and never asks whether");
+    L.push("    the frame register survives, while `promote.ts` and `structs.ts` both rest on");
+    L.push("    its invariance — so a mid-body reload leaves every later `[<fp> +- N]` named");
+    L.push("    against a frame the machine has thrown away. GATED at 0 on `after`. THE WRITE IS");
+    L.push("    CLASSIFIED, not merely found: `pop <fp>`/`leave` are epilogue restores and MSVC");
+    L.push("    lays a mid-function epilogue before code that runs later, so `any write` reads");
+    L.push("    264/81/79/264 operands over 168/18/16/167 functions. `repurposings` is 1/0/0/1 —");
+    L.push("    MSVC longjmp's `mov ebp,[eax+0x10]` — so THE X64 PAIR'S ZERO IS STRUCTURAL and");
+    L.push("    says nothing at all. Address-ordered, so a row is `named with no evidence the");
+    L.push("    frame is in scope`, not `provably wrong`. In framerepurpose_<bin>.jsonl.");
     const so = r.structOverlaps;
     L.push(
       `  overlapping struct reads    ${so.rows.length} overlaps ` +
