@@ -50,7 +50,7 @@ describe("analyzeStackFrame — slot identity", () => {
       ["mov", "dword ptr [rbp - 0x10], ecx"],
       ["mov", "qword ptr [rsp + 0x10], rdx"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame).not.toBeNull();
 
     const at10 = frame!.vars.filter((v) => v.offset === 0x10);
@@ -87,7 +87,7 @@ describe("analyzeStackFrame — slot identity", () => {
       ["mov", "eax, dword ptr [rbp + 0x30]"],
       ["mov", "dword ptr [rsp + 0x30], ecx"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame).not.toBeNull();
 
     const names = frame!.vars.map((v) => v.name);
@@ -105,7 +105,7 @@ describe("analyzeStackFrame — slot identity", () => {
       ["mov", "dword ptr [rbp - 0x8], eax"],
       ["mov", "dword ptr [rbp - 0x8], ecx"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     const v = frame!.vars.find((x) => x.key === stackVarKey("bp", -0x8));
     expect(v).toBeDefined();
     expect(v!.accessCount).toBe(3);
@@ -129,7 +129,7 @@ describe("analyzeStackFrame — slot identity", () => {
       ["mov", "eax, dword ptr [rbp + 0x10]"],
       ["mov", "ecx, dword ptr [rbp + 0x18]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame!.frameSize).toBe(0x28);
     expect(frame!.vars.map((v) => v.name)).toEqual(["var_4", "var_8", "arg_0", "arg_1"]);
   });
@@ -144,7 +144,7 @@ describe("analyzeStackFrame — slot identity", () => {
       ["mov", "dword ptr [esp + 0xC], ecx"],
       ["mov", "eax, dword ptr [ebp + 0x8]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, false);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false);
     const keys = frame!.vars.map((v) => v.key);
     expect(keys).toContain(stackVarKey("bp", -0xc));
     expect(keys).toContain(stackVarKey("sp", 0xc));
@@ -161,7 +161,9 @@ describe("analyzeStackFrame — argument numbering", () => {
     // The function never reads its first argument. The counter called this one
     // arg_0; it is [ebp+0xC], the second argument.
     const insns = body(...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0xC]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_1"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_1",
+    ]);
   });
 
   it("leaves a gap for an argument the function never touches", () => {
@@ -172,7 +174,7 @@ describe("analyzeStackFrame — argument numbering", () => {
       ["mov", "eax, dword ptr [ebp + 0x8]"],
       ["mov", "ecx, dword ptr [ebp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
       "arg_0",
       "arg_2",
     ]);
@@ -196,7 +198,7 @@ describe("analyzeStackFrame — argument numbering", () => {
       ["mov", "rax, qword ptr [rbp + 0x18]"],
       ["mov", "rcx, qword ptr [rbp + 0x28]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
       "arg_1",
       "arg_3",
     ]);
@@ -217,7 +219,7 @@ describe("analyzeStackFrame — argument numbering", () => {
       ["mov", "rax, qword ptr [rbp + 0x10]"],
       ["mov", "rcx, qword ptr [rbp + 0x30]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
       "arg_0",
       "arg_4",
     ]);
@@ -235,7 +237,7 @@ describe("analyzeStackFrame — argument numbering", () => {
       ["mov", "eax, dword ptr [ebp + 0x8]"],
       ["mov", "edx, dword ptr [ebp + 0xC]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
       "arg_0",
       "arg_1",
     ]);
@@ -245,7 +247,9 @@ describe("analyzeStackFrame — argument numbering", () => {
     // [ebp+0xA] is the third byte of argument 0. It divides into no argument
     // index, so it does not get one.
     const insns = body(...PROLOGUE_32, ["mov", "al, byte ptr [ebp + 0xA]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0xA"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0xA",
+    ]);
   });
 });
 
@@ -275,7 +279,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
 
   it("records no parameter for a home slot the function never filled", () => {
     const insns = body(...PROLOGUE_64, ["mov", "rax, qword ptr [rbp + 0x10]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([]);
   });
 
   it("indexes a home slot the function spills its own argument into", () => {
@@ -284,7 +288,9 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "qword ptr [rbp + 0x10], rcx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
+      "arg_0",
+    ]);
   });
 
   it("reads a spill through the stack pointer before the frame exists", () => {
@@ -303,7 +309,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
     // [rbp+0x10], argument 0's home slot is [rbp+0x18] and argument 1's is
     // [rbp+0x20] — the pushes shift both by two slots from the canonical
     // 0x10/0x18, which is the whole of what `D` is for.
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
       "arg_0",
       "arg_1",
     ]);
@@ -320,7 +326,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "qword ptr [rbp + 0x10], rbx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([]);
   });
 
   it("indexes a home slot spilled at a narrower width", () => {
@@ -333,7 +339,9 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "rbp, rsp"],
       ["movzx", "eax, word ptr [rbp + 0x28]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_3"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
+      "arg_3",
+    ]);
   });
 
   it("records no parameter for a slot written at an address inside a home slot", () => {
@@ -345,7 +353,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "rbp, rsp"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([]);
   });
 
   it("records no parameter for a sub-slot byte of an unfilled home slot", () => {
@@ -355,7 +363,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
     // occurs in the corpus, so this is the rule pinned rather than measured —
     // the reading it replaces named it `arg_0x12` and declared it a parameter.
     const insns = body(...PROLOGUE_64, ["mov", "al, byte ptr [rbp + 0x12]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([]);
   });
 
   it("keeps a sub-slot byte of a FILLED home slot, named by its offset", () => {
@@ -368,7 +376,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "qword ptr [rbp + 0x10], rcx"],
       ["mov", "al, byte ptr [rbp + 0x12]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
       "arg_0",
       "arg_0x12",
     ]);
@@ -386,7 +394,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "qword ptr [rbp + 0x10], rcx"],
       ["mov", "rax, qword ptr [rbp + 0x10]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([]);
   });
 
   it("indexes the caller's own argument area with no spill anywhere", () => {
@@ -398,7 +406,7 @@ describe("analyzeStackFrame — the x64 home space", () => {
       ["mov", "rax, qword ptr [rbp + 0x30]"],
       ["mov", "rcx, qword ptr [rbp + 0x38]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
       "arg_4",
       "arg_5",
     ]);
@@ -409,7 +417,9 @@ describe("analyzeStackFrame — the x64 home space", () => {
     // `D` alone names every slot. This is why both PE32 binaries are the
     // byte-identical control for the whole home-space rule.
     const insns = body(...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0x8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0",
+    ]);
   });
 });
 
@@ -425,7 +435,9 @@ describe("analyzeStackFrame — the x64 home space", () => {
 describe("analyzeStackFrame — displacements Capstone printed in decimal", () => {
   it("records the argument at [ebp + 8], written without a 0x", () => {
     const insns = body(...PROLOGUE_32, ["push", "dword ptr [ebp + 8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0",
+    ]);
   });
 
   it("numbers a decimal and a hex slot on the same scale", () => {
@@ -435,7 +447,7 @@ describe("analyzeStackFrame — displacements Capstone printed in decimal", () =
       ["mov", "eax, dword ptr [ebp + 8]"],
       ["mov", "edx, dword ptr [ebp + 0xC]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual([
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
       "arg_0",
       "arg_1",
     ]);
@@ -447,7 +459,7 @@ describe("analyzeStackFrame — displacements Capstone printed in decimal", () =
       ["mov", "dword ptr [ebp - 4], eax"],
       ["mov", "dword ptr [ebp - 8], ecx"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, false)!;
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false)!;
     expect(frame.vars.map((v) => v.name)).toEqual(["var_4", "var_8"]);
     expect(frame.vars.map((v) => v.signedOffset)).toEqual([-4, -8]);
   });
@@ -457,7 +469,7 @@ describe("analyzeStackFrame — displacements Capstone printed in decimal", () =
     // `[rsp + 0x8]` is the same slot, but a decimal `[rsp + 10]` — which
     // Capstone never prints — would be byte 10, not byte 16.
     const insns = body(["mov", "rax, qword ptr [rsp + 8]"], ["mov", "rcx, qword ptr [rsp + 0x8]"]);
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true)!;
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true)!;
     expect(frame.vars).toHaveLength(1);
     expect(frame.vars[0].offset).toBe(8);
     expect(frame.vars[0].accessCount).toBe(2);
@@ -477,7 +489,7 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "rax, qword ptr [rbp + 0x10]"],
       ["mov", "rcx, qword ptr [rbp + 0x18]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(argNames(frame)).toEqual([]);
     // Not renamed to a local either: nothing knows what the slot is, so the
     // deref is left exactly as it stands.
@@ -493,7 +505,7 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "rbp, rcx"],
       ["mov", "rax, qword ptr [rbp + 0x18]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(argNames(frame)).toEqual([]);
     // And the refusal is PUBLISHED, because it is also what stops `promote.ts`
     // from following a copy of RBP to a slot of a frame that does not exist —
@@ -518,7 +530,9 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
     // it is no parameter either (peek-a-bin-g186). 0x1A60 is index 4, above the
     // home space, where the caller had no register to pass in and the slot is
     // an argument by construction. Both refusals in one fixture.
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, true))).toEqual(["arg_4"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", true))).toEqual([
+      "arg_4",
+    ]);
   });
 
   it("keeps an argument reached over intervening pushes", () => {
@@ -537,7 +551,7 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "rax, qword ptr [rbp + 0x40]"],
       ["mov", "rcx, qword ptr [rbp + 0x10]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     // 0x10 is below the return address at 0x18, so it is not an argument.
     expect(argNames(frame)).toEqual(["arg_4"]);
     // The displacement is PUBLISHED, and this asserted a `framed` of false until
@@ -566,7 +580,7 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["lea", "rbp, [rsp + 0x30]"],
       ["mov", "rax, qword ptr [rbp + 0x50]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(argNames(frame)).toEqual(["arg_4"]);
     // Not the canonical geometry, which is a different question — and one that
     // is no longer a boolean: `promote.ts`'s `frameRegisterAliases` needs only
@@ -590,13 +604,17 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
       ["mov", "eax, dword ptr [ebp + 0x8]"],
       ["mov", "ecx, dword ptr [ebp + 0xC]"],
     );
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0",
+    ]);
   });
 
   it("sees through hot-patch padding before the prologue", () => {
     // `mov edi, edi` is MSVC's hot-patch pad and is not part of the frame.
     const insns = body(["mov", "edi, edi"], ...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0x8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0",
+    ]);
   });
 
   // This asserted ["arg_0x8"] until peek-a-bin-ikd, on the reasoning that the
@@ -607,7 +625,9 @@ describe("analyzeStackFrame — frame-pointer verification", () => {
   // return address, `[ebp + 8]` argument 0.
   it("numbers an argument whatever register the frame push saved", () => {
     const insns = body(["push", "esi"], ["mov", "ebp, esp"], ["mov", "eax, dword ptr [ebp + 0x8]"]);
-    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, false))).toEqual(["arg_0"]);
+    expect(argNames(analyzeStackFrame(func(insns.length * 4), insns, "x86", false))).toEqual([
+      "arg_0",
+    ]);
   });
 });
 
@@ -619,7 +639,7 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
   // address of the write that set `D` and of nothing else.
   it("reports the address of the mov that establishes the frame", () => {
     const insns = body(...PROLOGUE_64, ["mov", "dword ptr [rbp - 0x10], eax"]);
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     // `body` lays the instructions out four bytes apart, so the establishing
     // `mov rbp, rsp` is the second of them.
     expect(frame!.frameDelta).toBe(8);
@@ -634,7 +654,7 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
     // [ebp+4] is argument 0 for this geometry, which is what pins that D
     // itself is right and not merely well-signed (peek-a-bin-f28y).
     const insns = body(["mov", "ebp, esp"], ["mov", "eax, dword ptr [ebp + 4]"]);
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, false);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false);
     expect(frame!.frameDelta).toBe(0);
     expect(Object.is(frame!.frameDelta, -0)).toBe(false);
     expect(argNames(frame)).toEqual(["arg_0"]);
@@ -651,7 +671,7 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
       ["lea", "rbp, [rsp + 0x30]"],
       ["mov", "rax, qword ptr [rbp + 0x50]"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame!.frameDelta).toBe(0x20);
     expect(frame!.frameEstablishedAt).toBe(0x100c);
   });
@@ -664,7 +684,7 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
       ["mov", "rbp, rcx"],
       ["mov", "dword ptr [rsp + 0x18], eax"],
     );
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame!.frameDelta).toBeNull();
     expect(frame!.frameEstablishedAt).toBeNull();
   });
@@ -674,7 +694,7 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
     // is this. Naming the later instruction would point `promote.ts` at a
     // statement that does not define the frame.
     const insns = body(...PROLOGUE_64, ["mov", "dword ptr [rbp - 0x10], eax"], ["mov", "rbp, rcx"]);
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, true);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
     expect(frame!.frameDelta).toBe(8);
     expect(frame!.frameEstablishedAt).toBe(0x1004);
   });
@@ -694,6 +714,7 @@ describe("signed offsets", () => {
         ["mov", "ecx, dword ptr [ebp + 0x8]"],
         ["ret", ""],
       ),
+      "x86",
       false,
     );
 
@@ -705,6 +726,7 @@ describe("signed offsets", () => {
     const frame = analyzeStackFrame(
       func(0x40),
       body(...PROLOGUE_32, ["mov", "eax, dword ptr [esp + 0x10]"], ["ret", ""]),
+      "x86",
       false,
     );
     expect(frame!.vars.find((v) => v.offset === 0x10)?.signedOffset).toBe(0x10);
@@ -754,7 +776,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
 
   function argsOf(caller: [string, string][], helper?: [string, string][]): string[] {
     const { func: f, instructions } = withHelper(caller, helper);
-    return argNames(analyzeStackFrame(f, instructions, false));
+    return argNames(analyzeStackFrame(f, instructions, "x86", false));
   }
 
   it("numbers the arguments of a function whose frame __SEH_prolog4 established", () => {
@@ -777,7 +799,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ...HELPER_CALL,
       ["mov", "ebx, dword ptr [ebp + 0x8]"],
     ]);
-    const frame = analyzeStackFrame(f, instructions, false);
+    const frame = analyzeStackFrame(f, instructions, "x86", false);
     expect(frame!.frameDelta).toBe(4);
     expect(frame!.frameEstablishedAt).toBeNull();
   });
@@ -848,7 +870,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["call", "0x9000"],
       ["mov", "ebx, dword ptr [ebp + 0x8]"],
     ]);
-    expect(argNames(analyzeStackFrame(f, instructions, false))).toEqual([]);
+    expect(argNames(analyzeStackFrame(f, instructions, "x86", false))).toEqual([]);
   });
 
   it("applies the same arithmetic on x64, where the slot is 8 bytes", () => {
@@ -879,7 +901,7 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["ret", ""],
     ];
     const { func: f, instructions } = withHelper(callerInsns, helper);
-    expect(argNames(analyzeStackFrame(f, instructions, true))).toEqual(["arg_4"]);
+    expect(argNames(analyzeStackFrame(f, instructions, "x86", true))).toEqual(["arg_4"]);
   });
 
   // The helper is itself detected as a function — t32!sub_404170 and
@@ -898,8 +920,66 @@ describe("analyzeStackFrame — a frame established by a prologue helper", () =>
       ["ret", ""],
     ];
     const insns = asOwnFunction.map(([mn, op], i) => insn(0x1000 + i * 4, mn, op));
-    const frame = analyzeStackFrame(func(insns.length * 4), insns, false);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", false);
     expect(frame!.frameDelta).toBe(-8);
     expect(argNames(frame)).toEqual([]);
   });
+});
+
+/**
+ * THE ARCHITECTURE REFUSAL (`peek-a-bin-56q` item 1).
+ *
+ * Written as differentials — same instructions, same `is64`, only `arch`
+ * differs — because that is the only shape that discriminates here. Feeding A64
+ * operand text and asserting null would pass against a function that had merely
+ * failed to match anything, which is precisely the accidental silence being
+ * replaced: measured over t64-arm.exe and w64-arm.exe at `cc70fe6`, this
+ * function ALREADY returned null for all 1033 detected A64 functions, because
+ * `rbp`/`rsp`/`ebp`/`esp` do not occur in A64 operand text.
+ *
+ * SO THE REFUSAL IS UNFALSIFIABLE ON THAT CORPUS AND THESE TESTS ARE THE WHOLE
+ * OF ITS EVIDENCE, which is the status CLAUDE.md gives `pop esp` and the
+ * `rip`/`rsp` refusals: a bound on the rule rather than a measured saving. What
+ * it buys is that teaching this file a second grammar has to say which
+ * architecture it is for, rather than inheriting the x86 one by default.
+ */
+describe("analyzeStackFrame — architecture refusal", () => {
+  const FRAMED_64: [string, string][] = [
+    ...PROLOGUE_64,
+    ["sub", "rsp, 0x20"],
+    ["mov", "dword ptr [rbp - 0x10], ecx"],
+    ["mov", "eax, dword ptr [rbp + 0x10]"],
+    ["ret", ""],
+  ];
+
+  it("recovers the frame for x86, which is the liveness half of every test below", () => {
+    const insns = body(...FRAMED_64);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, "x86", true);
+    expect(frame).not.toBeNull();
+    expect(frame!.vars.length).toBeGreaterThan(0);
+  });
+
+  it("refuses ARM64 on the same instructions the x86 frame was recovered from", () => {
+    const insns = body(...FRAMED_64);
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "arm64", true)).toBeNull();
+  });
+
+  it("refuses a machine type the engine has no grammar for", () => {
+    const insns = body(...FRAMED_64);
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "unsupported", true)).toBeNull();
+  });
+
+  it("refuses 32-bit callers too, so the refusal is not a property of is64", () => {
+    const insns = body(...PROLOGUE_32, ["mov", "eax, dword ptr [ebp + 0x8]"], ["ret", ""]);
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "x86", false)).not.toBeNull();
+    expect(analyzeStackFrame(func(insns.length * 4), insns, "arm64", false)).toBeNull();
+  });
+
+  // WHERE the refusal sits relative to the instruction scan is deliberately NOT
+  // asserted here, because it is unobservable: `analyzeStackFrame` answers null
+  // for a function with no instructions in range on *every* architecture, so
+  // both orderings produce the same result at every input. A test of it would
+  // pass against either and pin nothing — written, run as a control, and
+  // removed for that reason. `inferSignature`'s sibling test IS discriminating,
+  // because its empty-instruction path invents a convention from `is64` alone.
 });

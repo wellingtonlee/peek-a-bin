@@ -805,8 +805,8 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     let stackFrame = null;
     let signature = null;
     try {
-      stackFrame = analyzeStackFrame(func, af.instructions, af.pe.is64, funcInsnMap);
-      signature = inferSignature(func, af.instructions, af.pe.is64, funcInsnMap);
+      stackFrame = analyzeStackFrame(func, af.instructions, af.arch, af.pe.is64, funcInsnMap);
+      signature = inferSignature(func, af.instructions, af.arch, af.pe.is64, funcInsnMap);
     } catch (e) {
       res.throws++;
       res.throwDetail.push(`prep 0x${func.address.toString(16)}: ${String(e)}`);

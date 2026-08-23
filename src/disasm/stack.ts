@@ -1,3 +1,4 @@
+import type { ImageArch } from "./arch";
 import { canonReg, isKnownRegister, regSize } from "./decompile/ir";
 import { collectFuncInsns, getFuncInsns } from "./funcInsns";
 import { loneImmediate, STACK_TRAFFIC } from "./stackIdiom";
@@ -774,12 +775,57 @@ function inUnfilledHomeSpace(
   return !homed.has(Math.floor(above / slotSize));
 }
 
+/**
+ * The frame of one function, or null when there is nothing to say about it.
+ *
+ * `arch` comes before `is64` because it outranks it: the architecture chooses
+ * the grammar, and `is64` only chooses the *width* within the x86 one. Reading
+ * a width as an architecture is the defect this parameter exists to make
+ * impossible — an ARM64 image is PE32+, so `is64` is true for one, and every
+ * operand pattern in this file (`[rbp - N]`, `[rsp + N]`, `sub rsp, N`) is an
+ * x86 grammar that would then be applied to A64 operand text.
+ *
+ * REFUSAL, AND WHY IT IS `null` RATHER THAN A THROW. CLAUDE.md's rule is
+ * deliberately asymmetric: a stage whose entire output is instructions throws,
+ * because an empty instruction list is indistinguishable from a correct answer;
+ * a stage whose remaining answer is still valuable returns empty. This is the
+ * second kind twice over. `null` is *already* this function's vocabulary for
+ * "no frame here" — an x86 function under frame-pointer omission gets it too —
+ * so the refusal makes no claim, and the caller's existing null path (the
+ * detail panel simply renders no stack section) is the honest rendering of "not
+ * analysed". A throw would take out a side panel of an image whose disassembly,
+ * xrefs and strings are all correct, which is exactly the trade the asymmetry
+ * refuses. `unsupportedOnArch` is deliberately not called: there is no channel
+ * to carry a message through a `StackFrame | null`, and inventing one would be
+ * the parallel machinery CLAUDE.md warns against.
+ *
+ * MEASURED, AND UNFALSIFIABLE ON THIS CORPUS. Over t64-arm.exe and w64-arm.exe
+ * at `cc70fe6` this function already returned null for **all 1033** detected
+ * A64 functions — the x86 register names it looks for simply do not occur in
+ * A64 operand text — so the refusal changes no output that exists today. It is
+ * a bound on the rule and not a saving: what it buys is that a future change
+ * teaching this file a second grammar has to say which architecture it is for.
+ * Do not read a green corpus as evidence that it fires. `stack.test.ts` pins it
+ * (`peek-a-bin-56q` item 1).
+ *
+ * ARM64 IS A REFUSAL HERE AND NOT AN ABSENCE OF EVIDENCE. The linker records
+ * the A64 frame in `.pdata`, and it is richer than this refusal implies — see
+ * `peek-a-bin-hof0` for the census. Recovering it is a second grammar, not
+ * a relaxation of this one.
+ */
 export function analyzeStackFrame(
   func: DisasmFunction,
   instructions: Instruction[],
+  arch: ImageArch,
   is64: boolean,
   funcInsnMap?: Map<number, Instruction[]>,
 ): StackFrame | null {
+  // Every pattern below is an x86 instruction grammar. `"unsupported"` is
+  // covered by the same test deliberately: `unsupportedOnArch` takes the wide
+  // type for exactly this reason, so a call site refusing on `!== "x86"` needs
+  // no edit when a fourth machine type turns up.
+  if (arch !== "x86") return null;
+
   // Find instructions within this function
   const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 

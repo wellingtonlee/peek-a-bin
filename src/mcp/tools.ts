@@ -211,8 +211,8 @@ export function registerTools(server: McpServer, session: FileSession): void {
           (i) => i.address >= func.address && i.address < endAddr,
         );
 
-        const stackFrame = analyzeStackFrame(func, af.instructions, af.pe.is64);
-        const signature = inferSignature(func, af.instructions, af.pe.is64);
+        const stackFrame = analyzeStackFrame(func, af.instructions, af.arch, af.pe.is64);
+        const signature = inferSignature(func, af.instructions, af.arch, af.pe.is64);
 
         const funcMap = new Map(
           af.functions.map((f) => [

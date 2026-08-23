@@ -1,5 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { archForMachine } from "../disasm/arch";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { canonReg } from "../disasm/decompile/ir";
 import { type FunctionSignature, inferSignature } from "../disasm/signatures";
@@ -299,10 +300,20 @@ export function DisassemblyView() {
     return m;
   }, [loops]);
 
-  // Function signature inference
+  // Function signature inference.
+  //
+  // The architecture is what selects the grammar; `pe.is64` is only the width
+  // within the x86 one, and it is true for an ARM64 image too. Before this was
+  // threaded, every A64 function reported `fastcall, 0 params` here and
+  // `InstructionDetail` rendered it (peek-a-bin-56q item 1).
   const currentFuncSig = useMemo((): FunctionSignature | null => {
     if (!currentFunc || instructions.length === 0 || !pe) return null;
-    return inferSignature(currentFunc, instructions, pe.is64);
+    return inferSignature(
+      currentFunc,
+      instructions,
+      archForMachine(pe.coffHeader.machine),
+      pe.is64,
+    );
   }, [currentFunc, instructions, pe]);
 
   // Lazy per-label signature cache (only compute for visible labels)
@@ -317,7 +328,8 @@ export function DisassemblyView() {
     if (!pe || instructions.length === 0) return null;
     const cached = sigCacheRef.current.cache.get(fn.address);
     if (cached) return cached;
-    const sig = inferSignature(fn, instructions, pe.is64);
+    const sig = inferSignature(fn, instructions, archForMachine(pe.coffHeader.machine), pe.is64);
+    if (sig === null) return null;
     if (sig.paramCount > 0) sigCacheRef.current.cache.set(fn.address, sig);
     return sig.paramCount > 0 ? sig : null;
   };
@@ -325,8 +337,16 @@ export function DisassemblyView() {
   // Stack frame analysis (lazy, only when detail panel is open)
   const stackFrame = useMemo(() => {
     if (!showDetail || !currentFunc || instructions.length === 0) return null;
-    return analyzeStackFrame(currentFunc, instructions, pe?.is64 ?? true);
-  }, [showDetail, currentFunc, instructions, pe?.is64]);
+    // `archForMachine(undefined)` is the documented "the caller never told us"
+    // default and answers x86, which is what the `pe?.is64 ?? true` beside it
+    // has always assumed.
+    return analyzeStackFrame(
+      currentFunc,
+      instructions,
+      archForMachine(pe?.coffHeader.machine),
+      pe?.is64 ?? true,
+    );
+  }, [showDetail, currentFunc, instructions, pe]);
 
   // Current instruction for detail panel
   const curInsnForDetail = useMemo((): Instruction | null => {

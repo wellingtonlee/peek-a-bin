@@ -19,8 +19,16 @@ function func(address: number, insnCount: number): DisasmFunction {
   return { name: "f", address, size: insnCount * INSN_SIZE };
 }
 
+/**
+ * Every test below this line is about the **x86** grammar, so the architecture
+ * is fixed here and the non-null assertion is a statement about that: on x86
+ * `inferSignature` always answers. The refusal for every other architecture is
+ * asserted directly against the export, at the bottom of this file.
+ */
 function sig(list: [string, string][], is64: boolean) {
-  return inferSignature(func(START, list.length), makeInsns(START, list), is64);
+  const s = inferSignature(func(START, list.length), makeInsns(START, list), "x86", is64);
+  if (s === null) throw new Error("inferSignature refused an x86 image");
+  return s;
 }
 
 const sig64 = (list: [string, string][]) => sig(list, true);
@@ -177,7 +185,7 @@ describe("inferSignature — x64 (Windows fastcall)", () => {
   });
 
   it("returns a zero-parameter fastcall for a function with no instructions", () => {
-    expect(inferSignature(func(START, 4), [], true)).toEqual({
+    expect(inferSignature(func(START, 4), [], "x86", true)).toEqual({
       convention: "fastcall",
       paramCount: 0,
     });
@@ -193,7 +201,7 @@ describe("inferSignature — x64 (Windows fastcall)", () => {
       ["mov", "rax, r9"], // belongs to the next function
     ]);
     const ours: DisasmFunction = { name: "f", address: START + 2 * INSN_SIZE, size: 2 * INSN_SIZE };
-    expect(inferSignature(ours, insns, true).paramCount).toBe(0);
+    expect(inferSignature(ours, insns, "x86", true)?.paramCount).toBe(0);
   });
 
   describe("zeroing idioms", () => {
@@ -546,9 +554,84 @@ describe("inferSignature — x86", () => {
   });
 
   it("returns a zero-parameter cdecl for a function with no instructions", () => {
-    expect(inferSignature(func(START, 4), [], false)).toEqual({
+    expect(inferSignature(func(START, 4), [], "x86", false)).toEqual({
       convention: "cdecl",
       paramCount: 0,
     });
+  });
+});
+
+/**
+ * THE ARCHITECTURE REFUSAL (`peek-a-bin-56q` item 1).
+ *
+ * These are the only tests in this file that vary the architecture, and each
+ * one is written as a *differential*: the same instructions, the same `is64`,
+ * only `arch` differs. That is what makes them discriminating — a test that
+ * merely fed A64 text and asserted null would pass against a function that had
+ * simply failed to match anything, which is exactly the accidental silence this
+ * change replaces with a structural one.
+ *
+ * Measured before the refusal existed: over t64-arm.exe and w64-arm.exe at
+ * `cc70fe6` this function answered `{ convention: "fastcall", paramCount: 0 }`
+ * for all **1033** detected A64 functions, and `InstructionDetail` renders that
+ * string unconditionally. Both halves are false — A64 is AAPCS64, and a
+ * function taking arguments in x0..x7 was reported as taking none.
+ */
+describe("inferSignature — architecture refusal", () => {
+  const X86_BODY: [string, string][] = [
+    ["mov", "rax, rcx"],
+    ["mov", "rbx, rdx"],
+    ["ret", ""],
+  ];
+
+  it("answers for x86, which is the liveness half of every test below", () => {
+    const f = func(START, X86_BODY.length);
+    expect(inferSignature(f, makeInsns(START, X86_BODY), "x86", true)).toEqual({
+      convention: "fastcall",
+      paramCount: 2,
+    });
+  });
+
+  it("refuses ARM64 on the same instructions the x86 answer was taken from", () => {
+    const f = func(START, X86_BODY.length);
+    expect(inferSignature(f, makeInsns(START, X86_BODY), "arm64", true)).toBeNull();
+  });
+
+  it("refuses a machine type the engine has no grammar for", () => {
+    const f = func(START, X86_BODY.length);
+    expect(inferSignature(f, makeInsns(START, X86_BODY), "unsupported", true)).toBeNull();
+  });
+
+  it("refuses 32-bit callers too, so the refusal is not a property of is64", () => {
+    const f = func(START, X86_BODY.length);
+    expect(inferSignature(f, makeInsns(START, X86_BODY), "arm64", false)).toBeNull();
+  });
+
+  /**
+   * The refusal has to precede the empty-instruction early return, or a
+   * function whose instructions are not in the array still gets a convention
+   * invented for it from `is64` alone. That early return is the one path that
+   * answers without looking at a single instruction, so it is the one that
+   * would keep claiming `fastcall` on an A64 image.
+   */
+  it("refuses before the no-instructions fallback invents a convention", () => {
+    expect(inferSignature(func(START, 4), [], "arm64", true)).toBeNull();
+    expect(inferSignature(func(START, 4), [], "unsupported", false)).toBeNull();
+    // …and still answers there for x86, so the assertion above is about the
+    // architecture and not about the empty array.
+    expect(inferSignature(func(START, 4), [], "x86", true)).not.toBeNull();
+  });
+
+  /**
+   * The measured falsehood, stated as itself: whatever else changes, an A64
+   * image must never be told it uses the Microsoft x64 calling convention.
+   */
+  it("never names an x86 calling convention for an ARM64 image", () => {
+    const f = func(START, X86_BODY.length);
+    const s = inferSignature(f, makeInsns(START, X86_BODY), "arm64", true);
+    expect(s?.convention).not.toBe("fastcall");
+    expect(s?.convention).not.toBe("cdecl");
+    expect(s?.convention).not.toBe("thiscall");
+    expect(s?.convention).not.toBe("stdcall");
   });
 });

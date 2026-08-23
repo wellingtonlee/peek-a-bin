@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
+import { archForMachine } from "../disasm/arch";
 import { inferSignature } from "../disasm/signatures";
 import { analyzeStackFrame } from "../disasm/stack";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -92,8 +93,11 @@ export function useDecompileTabs({
 
     dispatch({ type: "BEGIN_LOAD", tab: "low" });
     try {
-      const sf = analyzeStackFrame(currentFunc, instructions, pe.is64);
-      const sig = inferSignature(currentFunc, instructions, pe.is64);
+      // The architecture, not the pointer width: an ARM64 image is PE32+, so
+      // `pe.is64` is true for one and both of these are x86 grammars.
+      const arch = archForMachine(pe.coffHeader.machine);
+      const sf = analyzeStackFrame(currentFunc, instructions, arch, pe.is64);
+      const sig = inferSignature(currentFunc, instructions, arch, pe.is64);
       const funcEntries: [number, { name: string; address: number }][] = [];
       for (const fn of functions) {
         funcEntries.push([fn.address, { name: getDisplayName(fn, renames), address: fn.address }]);

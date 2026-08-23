@@ -7,6 +7,7 @@
  * three features have different token budgets; it stays a parameter.
  */
 
+import { archForMachine } from "../disasm/arch";
 import { inferSignature } from "../disasm/signatures";
 import { analyzeStackFrame } from "../disasm/stack";
 import type { DisasmFunction } from "../disasm/types";
@@ -61,8 +62,10 @@ export async function decompileForLLM(
       base: pe.optionalHeader.imageBase,
       size: pe.optionalHeader.sizeOfImage,
     });
-    const sf = analyzeStackFrame(fn, instructions, pe.is64);
-    const sig = inferSignature(fn, instructions, pe.is64);
+    // Architecture, not pointer width — see `analyzeStackFrame`'s docstring.
+    const arch = archForMachine(pe.coffHeader.machine);
+    const sf = analyzeStackFrame(fn, instructions, arch, pe.is64);
+    const sig = inferSignature(fn, instructions, arch, pe.is64);
     const funcEntries: [number, { name: string; address: number }][] = functions.map((f) => [
       f.address,
       { name: getDisplayName(f, renames), address: f.address },

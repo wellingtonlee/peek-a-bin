@@ -1,3 +1,4 @@
+import type { ImageArch } from "./arch";
 import { getFuncInsns } from "./funcInsns";
 import type { DisasmFunction, Instruction } from "./types";
 
@@ -285,12 +286,51 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
   return { convention, paramCount };
 }
 
+/**
+ * The calling convention and argument count of one function, or null when this
+ * engine has no signature grammar for the image's architecture.
+ *
+ * `arch` comes before `is64` because it outranks it — see the same note on
+ * `analyzeStackFrame`. Both conventions this file knows, and every register
+ * name in `LEGACY_REGS`, are x86.
+ *
+ * REFUSAL, AND WHY THE RETURN TYPE HAD TO WIDEN. This is the one of the pair
+ * that was making a **false statement**, which is why `null` here is a fix and
+ * not merely a bound. `FunctionSignature` has no way to say "unknown": the
+ * fields are a convention name and a count, both required. So an ARM64 image
+ * came back `{ convention: "fastcall", paramCount: 0 }` — measured, for **all
+ * 1033** detected functions of t64-arm.exe and w64-arm.exe at `cc70fe6` — and
+ * `InstructionDetail` renders that string unconditionally, so the detail panel
+ * read `| fastcall, 0 params` over every A64 function. Both halves are wrong:
+ * A64 uses AAPCS64, not the Microsoft x64 fastcall, and a function taking three
+ * arguments in x0/x1/x2 was reported as taking none. Widening to
+ * `FunctionSignature | null` is what lets the answer be silence, and both render
+ * sites already had the null path wired (`DisassemblyRows` via `getSigForFunc`,
+ * `InstructionDetail` via `signature ? … : ""`), so nothing new had to be
+ * taught how to say nothing.
+ *
+ * NOT a throw, for `analyzeStackFrame`'s reason: the rest of the answer — the
+ * disassembly, the xrefs, the strings — is correct and valuable, and the caller
+ * is a `useMemo` in a view that must still render. `decompileFunction` already
+ * declares `signature: FunctionSignature | null`, so the null propagates into
+ * the one consumer that is not a view with no change at all.
+ *
+ * A NAME IS NOT A REFUSAL. Answering `{ convention: "aapcs64", paramCount: 0 }`
+ * was considered and is worse: the count is the false half, and spelling the
+ * convention correctly would dress an unanalysed function as an analysed one.
+ * `peek-a-bin-56q` item 1; a real A64 signature is `peek-a-bin-hof0`.
+ */
 export function inferSignature(
   func: DisasmFunction,
   instructions: Instruction[],
+  arch: ImageArch,
   is64: boolean,
   funcInsnMap?: Map<number, Instruction[]>,
-): FunctionSignature {
+): FunctionSignature | null {
+  // `"unsupported"` takes the same branch on purpose — see the note on
+  // `analyzeStackFrame`'s own refusal.
+  if (arch !== "x86") return null;
+
   const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
   if (funcInsns.length === 0) {
