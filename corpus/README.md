@@ -1640,6 +1640,39 @@ reporting that they are distinct view objects over one `(buffer, offset, length)
 decides the design: keying a cache on view identity collapses 2 of the 4 sends, keying it on the
 triple collapses all four.
 
+## `corpus/decompileRpcCost.ts` — separate, takes a path, and is a stopwatch
+
+`npm run corpus:decompilecost -- <path-to-pe> [...]` answers what **one decompile request** costs
+and how much of that is payload rather than decompiling, for any **x86** PE. An ARM64 image is
+declined rather than reported at zero: `dispatch` and `mcp/tools.ts` both refuse decompilation
+above address resolution, so there is no request to cost. It builds the exact payload
+`useDecompileTabs.decompileLow` and `disasmClient.decompileFunction` build between them — driving
+the real `detectFunctions`, `hybridDisassemble` and `buildTypedXrefMap` for the members — clones
+each member with `structuredClone`, which is the algorithm `postMessage` runs, and times the real
+`decompileFunction` through the real `dispatch` beside it.
+
+**Read the shares, never the milliseconds**, for `rpcUploadCost.ts`' reason. `(sum of parts)`
+sitting a few percent either side of `WHOLE PAYLOAD` is run-to-run noise and not a missing member;
+the two big components are medianed over fewer repetitions than the small ones.
+
+It exists because `peek-a-bin-yavq` — the decompile RPC re-sending every function's names and
+extents on every request — said of itself "WORTH MEASURING BEFORE FIXING, and nothing here can",
+the corpus binaries being ~280 functions where all of it is noise. It is measurable now, on the
+`go` image below (1973 functions, 155531 instructions). Measured at `1198f4a`, **`funcExtents` is
+0.107%–0.190% of a decompile request** across all five images, flat over a 7.4× function count,
+and **0.29× `funcEntries`**, which cannot be removed at all because it carries renames. The bead
+was refused; the argument, including why the PE32-only one-liner that looks stronger is also
+refused, is in the harness's own docstring.
+
+The same run said where the cost is instead, exactly as `rpcUploadCost.ts`' did: **the payload is
+94–99% of a request and the instruction array alone is 72–89 points of it** — 481 ms against 5.7 ms
+of decompiling on the `go` image. That is `peek-a-bin-yavq`'s option (b), worker-side *instruction*
+residency, and it is a different question from `peek-a-bin-9a8`, which is about the section's
+**bytes** and was refused at ~0.03%. The two have opposite answers and must not be argued from each
+other. It also re-derives the one premise it reads rather than measures — that `prepareBinaryArgs`
+finds nothing binary at the top level of these args, so the whole payload including one tiny buffer
+per instruction crosses by clone — and prints it per image.
+
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
 `npm run corpus:jumptables -- <path-to-pe>` censuses the indirect dispatches in **any** PE and
@@ -2047,6 +2080,7 @@ remaining gap and is not implemented.
 | `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, PC-relative literal pools, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
+| `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch, never a gate. Writes no artifacts. |
 | `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
@@ -2131,7 +2165,8 @@ program from the one production emits.
 - **`tsx` works here now, and the note saying it does not is stale.** This bullet used to read
   "`tsx` does not work on this machine (Node 18, `ERR_REQUIRE_ESM`)"; the machine is on Node 22 and
   all four separately-invoked harnesses (`corpus:arm64`, `corpus:comments`,
-  `corpus:jumptables`, `corpus:uploadcost`)
+  `corpus:jumptables`, `corpus:uploadcost`,
+  `corpus:decompilecost`)
   are plain `tsx` scripts that run. The gated audits are vitest files for a different and still-good
   reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
   against artifacts without a toolchain at all.

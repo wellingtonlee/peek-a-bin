@@ -30,6 +30,7 @@
     "corpus:arm64": "tsx corpus/arm64.ts",
     "corpus:jumptables": "tsx corpus/jumpTableReach.ts",
     "corpus:uploadcost": "tsx corpus/rpcUploadCost.ts",
+    "corpus:decompilecost": "tsx corpus/decompileRpcCost.ts",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:setup": "tsx src/mcp/index.ts setup"
   },
