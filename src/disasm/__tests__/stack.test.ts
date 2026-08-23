@@ -626,6 +626,20 @@ describe("analyzeStackFrame — the establishing instruction's address", () => {
     expect(frame!.frameEstablishedAt).toBe(0x1004);
   });
 
+  it("reports a frame established with no push ahead of it as +0, not -0", () => {
+    // `mov ebp, esp` as the first instruction: V == E, so D == 0. Plain
+    // negation yields -0 here, and `Object.is(-0, 0)` is false, so `toBe(0)`
+    // IS the negative control -- it fails on the unnormalised value while
+    // every relational consumer behaves identically either way. The slot at
+    // [ebp+4] is argument 0 for this geometry, which is what pins that D
+    // itself is right and not merely well-signed (peek-a-bin-f28y).
+    const insns = body(["mov", "ebp, esp"], ["mov", "eax, dword ptr [ebp + 4]"]);
+    const frame = analyzeStackFrame(func(insns.length * 4), insns, false);
+    expect(frame!.frameDelta).toBe(0);
+    expect(Object.is(frame!.frameDelta, -0)).toBe(false);
+    expect(argNames(frame)).toEqual(["arg_0"]);
+  });
+
   it("reports the address of a lea that establishes a shifted frame", () => {
     // t64!sub_1400027C8's geometry, and the shape whose IR copy carries a
     // *binary* source — which is why `frameRegisterAliases` reads the address

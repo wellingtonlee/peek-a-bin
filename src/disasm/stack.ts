@@ -307,7 +307,14 @@ function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry
       if (mn === "mov" || mn === "lea") {
         const v = entryRelative(ops[1] ?? "", sp, spDelta, spAlias, mn === "lea");
         if (v !== null) {
-          delta = -v;
+          // `v === 0` is `mov <fp>, <sp>` with nothing pushed ahead of it, and
+          // `-0` is what plain negation yields there. Every consumer uses `D`
+          // arithmetically or relationally, where -0 behaves as 0, so this is
+          // inert today — but `Object.is(-0, 0)` is false, so a test asserting
+          // `toBe(0)` fails on that shape and any future `=== 0` special case
+          // would disagree with the relational tests beside it. Normalised at
+          // the one site that can produce it (peek-a-bin-f28y).
+          delta = v === 0 ? 0 : -v;
           establishedAt = insn.address;
           spAlias.set(fpCanon, v);
           continue;
