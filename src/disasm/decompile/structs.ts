@@ -457,12 +457,51 @@ function exprKey(expr: IRExpr): string {
  * cannot invent an object. What it can do is split a group below the two-field
  * minimum, and that cost is what the corpus figures are for.
  *
- * THE WALK IS TREE ORDER WITH CONSERVATIVE JOINS, not a reaching-definitions
- * fixpoint. Every construct that merges control flow ends by minting a fresh
- * generation for each key any of its arms assigned — which is what an SSA phi
- * would name — and a `label` mints one for *every* live key, because a jump
- * target is reached from somewhere this walk does not model. Each of those is an
- * over-split relative to the ideal, i.e. the benign direction.
+ * THE WALK IS TREE ORDER WITH CONSERVATIVE JOINS. Every construct that merges
+ * control flow ends by minting a fresh generation for each key any of its arms
+ * assigned — which is what an SSA phi would name — and that is an over-split
+ * relative to the ideal, i.e. the benign direction.
+ *
+ * A `label` IS RESOLVED FROM ITS OWN INCOMING EDGES, and that is the one place
+ * this walk does reach a fixpoint. It used to mint a fresh generation for every
+ * live key, on the grounds that a jump target is reached from somewhere tree
+ * order does not model — sound, and a measured cost of 109 field accesses
+ * corpus-wide, of which the sampled ones were all splits of ONE REAL OBJECT
+ * (`t32!sub_4041D0`'s `EXCEPTION_REGISTRATION`, read against `objdump`, went
+ * from 10 member accesses to 1 with its EBX loaded exactly once). But tree
+ * order does model those edges: `structureCFG` spells every transfer it cannot
+ * fall through as a `goto` naming its target, so the predecessors of a label
+ * are the states at the `goto`s that name it plus the fall-through, and the
+ * join over them is the same phi the constructs above already stand in for.
+ *
+ * THREE THINGS MAKE IT SOUND, and each is load-bearing:
+ *
+ *   * A label NO `goto` NAMES resets every key, unconditionally. `structureCFG`
+ *     ends in `pruneLabels`, which drops any label nothing jumps to unless it is
+ *     `pinned` — so a label with no `goto` in the tree this pass receives is
+ *     precisely a leftover region's head, i.e. a block with no CFG predecessor
+ *     at all. Those are not dead code: an MSVC `__except`/`__finally`
+ *     continuation or a 32-bit SEH scope handler is entered by the UNWINDER
+ *     (peek-a-bin-d3z, 1160 such blocks in this corpus), which is an edge no
+ *     statement in the tree expresses, so a generation carried into one would
+ *     be a value the unwinder never established.
+ *   * The edge set used is a SUPERSET of the real one everywhere else, so an
+ *     error in it can only add conflicts, i.e. reset more. A fall-through is
+ *     counted whenever the preceding sibling is not a terminator, which over-
+ *     counts for a goto-named leftover region the pass above appended after a
+ *     region that did not end in one; such a block is CFG-reachable by
+ *     construction — the `goto` naming it is its real predecessor — so the
+ *     extra state is spurious rather than missing.
+ *   * A generation is a TOKEN NAMING THE TREE NODE that produced it, not a
+ *     counter. A counter's ids depend on how many `fresh` calls a pass made, so
+ *     they mean different things on different passes and the fixpoint could not
+ *     compare two of them; `a<n>`/`j<n>`/`L<n>` are stable, which is what makes
+ *     "both edges carry the same value" a question with an answer.
+ *
+ * The fixpoint is monotone by construction: a (label, key) goes absent → kept
+ * → conflicted and never back, so it terminates. `LABEL_FIXPOINT_PASSES` is a
+ * belt-and-braces cap, and exceeding it falls back to resetting at every label,
+ * which is the pre-`peek-a-bin-slkh` behaviour and always sound.
  *
  * GENERATIONS ARE TRACKED PER NAME AND SHARED PER OBJECT, which is why `cur` is
  * keyed on the raw `exprKey` while the grouping is keyed on the alias-resolved
@@ -479,134 +518,284 @@ function exprKey(expr: IRExpr): string {
  * `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing), so a base
  * redefined by an unlifted instruction still groups across it.
  */
-function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<IRExpr, number> {
-  const gen = new Map<IRExpr, number>();
-  /** Raw name key → the generation in flight. Absent means the entry value. */
-  const cur = new Map<string, number>();
-  let next = 1;
+/**
+ * How many times the label fixpoint may re-walk one function before giving up.
+ *
+ * Each (label, key) moves absent → kept → conflicted at most once, so the loop
+ * cannot run longer than twice the number of pairs; this is a guard against a
+ * bug in that argument, not against the argument. Exceeding it falls back to
+ * resetting every key at every label, which is what this walk did before
+ * `peek-a-bin-slkh` and is sound at any precision.
+ */
+const LABEL_FIXPOINT_PASSES = 24;
 
-  const genOf = (key: string): number => cur.get(key) ?? 0;
-  const fresh = (key: string): void => {
-    cur.set(key, next);
-    next++;
-  };
+/** The generation a key holds before anything in the function assigns it. */
+const ENTRY_GENERATION = "0";
 
-  /** Annotate every register and variable node in `expr` with its generation. */
-  function read(expr: IRExpr): void {
-    walkExpr(expr, (e) => {
-      if (e.kind === "reg" || e.kind === "var") gen.set(e, genOf(exprKey(e)));
-    });
-  }
+/** A statement that control cannot fall out of the bottom of. */
+function isTerminatorStmt(s: IRStmt): boolean {
+  return s.kind === "return" || s.kind === "goto" || s.kind === "break" || s.kind === "continue";
+}
 
-  /** Every key an assignment anywhere under `stmts` defines. */
-  function assigned(stmts: IRStmt[], out: Set<string>): Set<string> {
+function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<IRExpr, string> {
+  // A stable name for every statement, so a generation token identifies the
+  // tree node that produced it and means the same thing on every pass.
+  const stmtId = new Map<IRStmt, number>();
+  const numberStmts = (stmts: IRStmt[]): void => {
     for (const s of stmts) {
-      if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
-        out.add(exprKey(s.dest));
-      }
+      stmtId.set(s, stmtId.size);
       // init and update are single statements, so `bodiesOf` does not reach them.
-      if (s.kind === "for") assigned([s.init, s.update], out);
-      for (const b of bodiesOf(s)) assigned(b, out);
+      if (s.kind === "for") numberStmts([s.init, s.update]);
+      for (const b of bodiesOf(s)) numberStmts(b);
     }
-    return out;
-  }
+  };
+  numberStmts(body);
 
-  /** A merge point: every key an arm may have redefined holds a new value here. */
-  function join(arms: IRStmt[][]): void {
-    const keys = new Set<string>();
-    for (const arm of arms) assigned(arm, keys);
-    for (const k of keys) fresh(k);
-  }
-
-  function visit(stmts: IRStmt[]): void {
+  /** Every label name a `goto` anywhere in the tree names. */
+  const gotoTargets = new Set<string>();
+  const collectGotos = (stmts: IRStmt[]): void => {
     for (const s of stmts) {
-      switch (s.kind) {
-        case "assign": {
-          read(s.src);
-          if (s.dest.kind === "reg" || s.dest.kind === "var") {
-            const dk = exprKey(s.dest);
-            // A copy `buildAliasMap` already folded onto one key restates the
-            // value rather than redefining it — the same test
-            // `linkNestedStructFields` makes, for the same reason — so the
-            // destination takes the source's generation rather than a new one.
-            const folded =
-              (s.src.kind === "reg" || s.src.kind === "var") &&
-              canonKey(s.src) === canonKey(s.dest);
-            if (folded) cur.set(dk, genOf(exprKey(s.src)));
-            else fresh(dk);
-            gen.set(s.dest, genOf(dk));
-          } else {
-            read(s.dest);
-          }
-          break;
+      if (s.kind === "goto") gotoTargets.add(s.label);
+      if (s.kind === "for") collectGotos([s.init, s.update]);
+      for (const b of bodiesOf(s)) collectGotos(b);
+    }
+  };
+  collectGotos(body);
+
+  /** Label name → key → the generation every incoming edge agrees it holds. */
+  let keep = new Map<string, Map<string, string>>();
+  /** Label name → keys two incoming edges disagreed about. Never shrinks. */
+  const conflicted = new Map<string, Set<string>>();
+  /** Set once the cap is hit: reset at every label, the pre-slkh behaviour. */
+  let blunt = false;
+  /** True on the first pass, which carries every key through to collect states. */
+  let probe = true;
+
+  /** One tree-order pass. Returns the annotations and the states seen at each label. */
+  function walk(): {
+    gen: Map<IRExpr, string>;
+    incoming: Map<string, Map<string, string>[]>;
+  } {
+    const gen = new Map<IRExpr, string>();
+    /** Raw name key → the generation in flight. Absent means the entry value. */
+    const cur = new Map<string, string>();
+    const incoming = new Map<string, Map<string, string>[]>();
+
+    const genOf = (key: string): string => cur.get(key) ?? ENTRY_GENERATION;
+    const arriveAt = (name: string): void => {
+      const list = incoming.get(name);
+      if (list) list.push(new Map(cur));
+      else incoming.set(name, [new Map(cur)]);
+    };
+
+    /** Annotate every register and variable node in `expr` with its generation. */
+    function read(expr: IRExpr): void {
+      walkExpr(expr, (e) => {
+        if (e.kind === "reg" || e.kind === "var") gen.set(e, genOf(exprKey(e)));
+      });
+    }
+
+    /** Every key an assignment anywhere under `stmts` defines. */
+    function assigned(stmts: IRStmt[], out: Set<string>): Set<string> {
+      for (const s of stmts) {
+        if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
+          out.add(exprKey(s.dest));
         }
-        case "store":
-          read(s.address);
-          read(s.value);
-          break;
-        case "call_stmt":
-          read(s.call);
-          break;
-        case "return":
-          if (s.value) read(s.value);
-          break;
-        case "branch":
-          read(s.condition);
-          break;
-        case "if":
-          read(s.condition);
-          visit(s.thenBody);
-          if (s.elseBody) visit(s.elseBody);
-          join(bodiesOf(s));
-          break;
-        case "while":
-          // The header phi first: the condition is re-evaluated after every
-          // iteration, so what it reads is the merge and not the entry value.
-          join([s.body]);
-          read(s.condition);
-          visit(s.body);
-          join([s.body]);
-          break;
-        case "do_while":
-          join([s.body]);
-          visit(s.body);
-          read(s.condition);
-          join([s.body]);
-          break;
-        case "for":
-          visit([s.init]);
-          join([s.body, [s.update]]);
-          read(s.condition);
-          visit(s.body);
-          visit([s.update]);
-          join([s.body, [s.update]]);
-          break;
-        case "switch":
-          read(s.expr);
-          for (const c of s.cases) visit(c.body);
-          if (s.defaultBody) visit(s.defaultBody);
-          join(bodiesOf(s));
-          break;
-        case "try":
-          visit(s.body);
-          visit(s.handler);
-          if (s.filterExpr) read(s.filterExpr);
-          join(bodiesOf(s));
-          break;
-        case "label":
-          // A jump target. What reaches it is not something this walk models,
-          // so nothing in flight survives it.
-          for (const k of [...cur.keys()]) fresh(k);
-          break;
-        case "phi":
-          for (const op of s.operands) read(op.value);
-          break;
+        // init and update are single statements, so `bodiesOf` does not reach them.
+        if (s.kind === "for") assigned([s.init, s.update], out);
+        for (const b of bodiesOf(s)) assigned(b, out);
+      }
+      return out;
+    }
+
+    /** A merge point: every key an arm may have redefined holds a new value here. */
+    function join(at: IRStmt, which: number, arms: IRStmt[][]): void {
+      const keys = new Set<string>();
+      for (const arm of arms) assigned(arm, keys);
+      for (const k of keys) cur.set(k, `j${stmtId.get(at)}.${which}:${k}`);
+    }
+
+    /**
+     * The state at label `s`, given what the fixpoint has settled so far.
+     *
+     * The first pass is a PROBE and changes nothing: every key carries through,
+     * which is what makes the iteration optimistic — it starts from "the label
+     * costs nothing" and only ever adds conflicts. Starting pessimistic instead
+     * was implemented and measured, and it locks in the first pass's own
+     * artifacts: a key that agrees on every real edge disagrees on the probe
+     * pass purely because one edge came through another label that reset it, so
+     * the conflict is recorded and never revisited. It reaches +13 field
+     * accesses corpus-wide against the +109 the optimistic order recovers.
+     */
+    function atLabel(s: IRStmt & { kind: "label" }): void {
+      if (probe) return;
+      const reset = (k: string): string => `L${stmtId.get(s)}:${k}`;
+      const kept = blunt ? undefined : keep.get(s.name);
+      const next = new Map<string, string>();
+      // Anything the settled state does not name is reset — including a key
+      // left in flight by code above a label nothing falls into, which is not
+      // an incoming edge at all.
+      for (const k of cur.keys()) next.set(k, kept?.get(k) ?? reset(k));
+      if (kept) for (const [k, v] of kept) next.set(k, v);
+      cur.clear();
+      for (const [k, v] of next) cur.set(k, v);
+    }
+
+    function visit(stmts: IRStmt[]): void {
+      for (let i = 0; i < stmts.length; i++) {
+        const s = stmts[i];
+        switch (s.kind) {
+          case "assign": {
+            read(s.src);
+            if (s.dest.kind === "reg" || s.dest.kind === "var") {
+              const dk = exprKey(s.dest);
+              // A copy `buildAliasMap` already folded onto one key restates the
+              // value rather than redefining it — the same test
+              // `linkNestedStructFields` makes, for the same reason — so the
+              // destination takes the source's generation rather than a new one.
+              const folded =
+                (s.src.kind === "reg" || s.src.kind === "var") &&
+                canonKey(s.src) === canonKey(s.dest);
+              cur.set(dk, folded ? genOf(exprKey(s.src)) : `a${stmtId.get(s)}`);
+              gen.set(s.dest, genOf(dk));
+            } else {
+              read(s.dest);
+            }
+            break;
+          }
+          case "store":
+            read(s.address);
+            read(s.value);
+            break;
+          case "call_stmt":
+            read(s.call);
+            break;
+          case "return":
+            if (s.value) read(s.value);
+            break;
+          case "branch":
+            read(s.condition);
+            break;
+          case "if":
+            read(s.condition);
+            visit(s.thenBody);
+            if (s.elseBody) visit(s.elseBody);
+            join(s, 0, bodiesOf(s));
+            break;
+          case "while":
+            // The header phi first: the condition is re-evaluated after every
+            // iteration, so what it reads is the merge and not the entry value.
+            join(s, 0, [s.body]);
+            read(s.condition);
+            visit(s.body);
+            join(s, 1, [s.body]);
+            break;
+          case "do_while":
+            join(s, 0, [s.body]);
+            visit(s.body);
+            read(s.condition);
+            join(s, 1, [s.body]);
+            break;
+          case "for":
+            visit([s.init]);
+            join(s, 0, [s.body, [s.update]]);
+            read(s.condition);
+            visit(s.body);
+            visit([s.update]);
+            join(s, 1, [s.body, [s.update]]);
+            break;
+          case "switch":
+            read(s.expr);
+            for (const c of s.cases) visit(c.body);
+            if (s.defaultBody) visit(s.defaultBody);
+            join(s, 0, bodiesOf(s));
+            break;
+          case "try":
+            visit(s.body);
+            visit(s.handler);
+            if (s.filterExpr) read(s.filterExpr);
+            join(s, 0, bodiesOf(s));
+            break;
+          case "goto":
+            arriveAt(s.label);
+            break;
+          case "label":
+            // A label no `goto` names is a leftover region's head, entered by
+            // the unwinder rather than by any edge in this tree, so nothing in
+            // flight survives it. Everything else is resolved from its own
+            // predecessors — the fall-through, when the statement above it is
+            // not a terminator, and every `goto` naming it.
+            if (gotoTargets.has(s.name)) {
+              if (i === 0 || !isTerminatorStmt(stmts[i - 1])) arriveAt(s.name);
+              atLabel(s);
+            } else {
+              for (const k of [...cur.keys()]) cur.set(k, `L${stmtId.get(s)}:${k}`);
+            }
+            break;
+          case "phi":
+            for (const op of s.operands) read(op.value);
+            break;
+        }
       }
     }
+
+    visit(body);
+    return { gen, incoming };
   }
 
-  visit(body);
-  return gen;
+  for (let pass = 0; ; pass++) {
+    const { gen, incoming } = walk();
+    if (blunt) return gen;
+    probe = false;
+
+    // Re-derive each label's resolution from the states its own edges carried.
+    // A key two edges disagree about, or one whose agreed value moved since the
+    // last pass, is conflicted from here on — which is what makes this monotone
+    // and so terminating.
+    let changed = false;
+    const next = new Map<string, Map<string, string>>();
+    for (const [name, states] of incoming) {
+      let bad = conflicted.get(name);
+      if (!bad) {
+        bad = new Set<string>();
+        conflicted.set(name, bad);
+      }
+      const agreed = new Map<string, string>();
+      const keys = new Set<string>();
+      for (const st of states) for (const k of st.keys()) keys.add(k);
+      for (const k of keys) {
+        if (bad.has(k)) continue;
+        let value: string | null = null;
+        for (const st of states) {
+          const t = st.get(k) ?? ENTRY_GENERATION;
+          if (value === null) value = t;
+          else if (value !== t) {
+            value = null;
+            break;
+          }
+        }
+        const was = keep.get(name)?.get(k);
+        if (value === null || (was !== undefined && was !== value)) {
+          bad.add(k);
+          changed = true;
+          continue;
+        }
+        if (was === undefined) changed = true;
+        agreed.set(k, value);
+      }
+      // A key kept last pass that no edge mentions now is not stable either.
+      for (const k of keep.get(name)?.keys() ?? []) {
+        if (!agreed.has(k) && !bad.has(k)) {
+          bad.add(k);
+          changed = true;
+        }
+      }
+      next.set(name, agreed);
+    }
+    if (!changed) return gen;
+    keep = next;
+    if (pass + 1 >= LABEL_FIXPOINT_PASSES) blunt = true;
+  }
 }
 
 // ── Stack-Frame Bases ──
@@ -1309,7 +1498,7 @@ export function synthesizeStructs(
   // `baseGenerations` for why one register is not one object.
   const baseGen = baseGenerations(func.body, canonBase);
   function accessKey(expr: IRExpr): string {
-    return `${canonBase(expr)}#${baseGen.get(expr) ?? 0}`;
+    return `${canonBase(expr)}#${baseGen.get(expr) ?? ENTRY_GENERATION}`;
   }
 
   // Group accesses by canonical base and generation. An access whose

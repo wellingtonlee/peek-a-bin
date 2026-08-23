@@ -344,6 +344,22 @@ arithmetic**, and that is the price of the fix rather than a side effect of it. 
 must not become one: the count rises with correct recovery *and* with fabrication, which is the
 whole reason `structOverlaps` exists.
 
+**`peek-a-bin-slkh` then took two thirds of what `z8q7`'s label rule cost, and the stamp above is
+deliberately NOT rewritten** — it was re-derived at `87a8499` figure for figure before the change.
+The delta, base `87a8499`: `->field_0x` occurrences **1871 → 1936** (t32/t64/w64/w32 507/445/426/493
+→ **528/457/438/513**), `offsetof` **307/297/297/318 → 299/286/291/310 fields** over
+**51/59/57/55 → 52/56/55/56 distinct definitions**, every ratio 1.00, overlapping struct reads **0
+on all four either way**, bases 679/556/534/669 → 626/518/496/617 and candidates 109/80/75/107 →
+99/77/72/97. `compare.mjs` reports **8 rows and they are four facts**: `polarity guards audited`
+falls by 1 on each binary and `guards w/o single compare` rises by 1 or 2, which is **six guards
+leaving the ledger with their text still on the page** — every one a deref that became a member
+access, read and listed in the gotcha below. Emitted C changed in 49/48/41/45 functions, of which
+only **25** moved a field-access count and **not one of the 25 fell**; the rest are `struct_N`
+renumbers. Everything else flat — gcc clean, `member name vs brackets` 0, polarity 0 inverted and
+0 mismatch with every verdict `OK`, arity exact/under/over, statements dropped, unrecovered values,
+callees lost, loops short, staleReads, staleGuards, popReads, lostDefs, armExits, wildBranches,
+unencodableNames, self-assigns, undefined callees, loop shape and `if` counts.
+
 
 - **A register is never named for a value it no longer holds — and the blind spot that used to qualify that sentence is closed.** Every surviving read of a register's SSA *entry* value is checked against the writes that dominate it: **0 wrong names and 0 spoiled entry-value copies on all four binaries**, over **33/182/181/34 sites** (t32/t64/w64/w32) at `82ed61e`, from 28/78/28/78 and 13/19/13/18 at `cee6f91`. A gate, not a baseline — see `corpus/README.md` on why this one gates when the statement-drop and unrecovered-value counts do not. **What is gated is every surviving *version-0* read whose register a dominating write has changed *under the name the read uses*.** Both halves of that were wrong until `peek-a-bin-fppy` and `peek-a-bin-pzws` were fixed together, and the pair is worth understanding because each hid the other:
   - **The site filter could not see a definition phi lowering had relocated.** It attributed a phi's definition to the phi's own block, while `destroySSA` materialises the copy in each *predecessor* — and a predecessor routinely dominates blocks the phi block does not. Where the only dominating writer was a relocated phi copy the site was discarded before it was ever judged, so the gate printed **0 over 12 provably wrong reads**. Noting the phi at each operand's block as well takes the site count 28/159/158/28 → 33/182/181/34 and the gate red at 12 (six in `t64!sub_1400045DC`, six in `w64!sub_14000496C`, all `r9`, 0x140004883-0x140004898).
@@ -512,7 +528,7 @@ taken at**, exactly as this section does.
   - **`internalLabelled` is the row that decided `peek-a-bin-pf5g`** — 8 of 25 and 6 of 23 — and it is why the repair was refused rather than merely unattempted. See the Gotchas entry. **THAT DECISION HAS SINCE BEEN RE-OPENED, and the figures above are `d8d2d02`'s.** `peek-a-bin-d827`'s fifth admission added one internal row per folded funclet, so at `74879a1` the count is **33/0/0/31 internal over 64 rows**, and `internalLabelled` is **15 of 33 and 13 of 31** — the nameable-label fraction went from 32% to 45%, because the scope-table rule folds funclets whose body IS the block leader. `peek-a-bin-pf5g` is open again at P2 for exactly that: the refusal was sound at 32% and has to be re-argued at 45%, not inherited. `compare.mjs` flags the rise and exits 1, which it did on the `d827` integration, correctly.
   - **Nothing else here sees the class and `gcc` is blind STRUCTURALLY.** `ccSyntaxCheck` compiles one function per file with no prototypes, so *every* callee in the corpus is an implicit declaration and `-std=gnu89` accepts one **silently — gcc 15.2.0 emits no diagnostic for it at all, with or without `-w`**, so there is not even a warning for `preludeFor` to be consulted about and this leaves **no invented prelude declaration either** and `peek-a-bin-k8i`'s instrument is blind too. (The bead had recorded the mechanism as `preludeFor` inventing `long sub_4038F7();`; measured, it does not — the file compiles first try.) `distinct callees lost` asks only whether the name is on the page, which is CLAUDE.md's own `__SEH_epilog4` camouflage; `wildBranches` judges targets outside the *image* and these are inside it.
   - **Negative-controlled, and the control is the change that created the population.** Reverting `peek-a-bin-d827`'s fourth admission (the `precedingOperands` disjunct in `interiorBranchedOverStarts`) takes `internal` **25 → 13** on t32 and **23 → 11** on w32 while `functions` rises 268 → 280 and 266 → 278 — exactly the twelve funclet starts that admission withdraws per binary — with `external` **unmoved at 7** and `internalLabelled` unmoved at 8 and 6, so all 12 land in the unlabelled class. Run the other way, `compare.mjs` flags the rise on both 32-bit binaries and exits 1: the row would have been red at `21ea66e`, which is why the bead exists. The classifier's own rules are pinned in `build/undefinedCalleeAudit.test.ts`, since the corpus populates each half with one shape apiece and cannot separate them.
-- **Which of two OVERLAPPING readings of a struct base became a field is counted, and no column of it is a gate**: `corpus/structOverlaps.ts`, **12 overlaps over 1231 bases at `f3b89ec`** (3 per binary; 6 contained, 6 partial; 8 reaching a declaration; `notMaximal` 0, `ambiguous` 10, `narrowedOut` 10), measured over the same run that reads `offsetof` **946/946 fields across 162 definitions**. It is the only instrument here that can see the class at all, and it is report-only in both directions because neither answer is provably wrong — see the `candidateFields` paragraph under **Struct synthesis** for the adjudication and for the two defects it uncovered. **BOTH OF THOSE ARE NOW FIXED AND THE POPULATION IS 0 ON ALL FOUR BINARIES at `74879a1`** — `peek-a-bin-z8q7` re-keyed the base and `peek-a-bin-iz8j` dissolved as a consequence — so a run today reports 0 overlaps and that is the expected reading, not a broken scan (`groups`/`candidates`/`extents` are the liveness halves and rose exactly where the rows fell). **Its zero is a LOWER BOUND on fabrication and not a clean bill of health**: `z8q7` found a fabricated base (`t64!sub_14000EE7C`, combining `*_errno()` with another object's flag word) that produced no overlap row at all, which is why `peek-a-bin-slkh`'s residual class needs the emitted C read against `objdump` rather than this instrument. `groups`/`candidates` are the liveness halves and `corpus.audit.ts` asserts them, since a structure-scraping census fails by silently matching nothing (`peek-a-bin-k6hh`).
+- **Which of two OVERLAPPING readings of a struct base became a field is counted, and no column of it is a gate**: `corpus/structOverlaps.ts`, **12 overlaps over 1231 bases at `f3b89ec`** (3 per binary; 6 contained, 6 partial; 8 reaching a declaration; `notMaximal` 0, `ambiguous` 10, `narrowedOut` 10), measured over the same run that reads `offsetof` **946/946 fields across 162 definitions**. It is the only instrument here that can see the class at all, and it is report-only in both directions because neither answer is provably wrong — see the `candidateFields` paragraph under **Struct synthesis** for the adjudication and for the two defects it uncovered. **BOTH OF THOSE ARE NOW FIXED AND THE POPULATION IS 0 ON ALL FOUR BINARIES at `74879a1`** — `peek-a-bin-z8q7` re-keyed the base and `peek-a-bin-iz8j` dissolved as a consequence — so a run today reports 0 overlaps and that is the expected reading, not a broken scan (`groups`/`candidates`/`extents` are the liveness halves and rose exactly where the rows fell). **Its zero is a LOWER BOUND on fabrication and not a clean bill of health**: `z8q7` found a fabricated base (`t64!sub_14000EE7C`, combining `*_errno()` with another object's flag word) that produced no overlap row at all, which is why `peek-a-bin-slkh` was adjudicated against `objdump` rather than against this instrument — and it was decisive there, the "delete the reset" ceiling fabricating an object at `t32!sub_4041D0` with **0 rows here in both runs**. `groups`/`candidates` are the liveness halves and `corpus.audit.ts` asserts them, since a structure-scraping census fails by silently matching nothing (`peek-a-bin-k6hh`).
 - **An ARM64 inline comment naming an address the instruction does not reference is counted, and it is the only audit here that reads `Instruction.comment` at all**: `corpus/comments.ts`, **0 coincidences on both ARM64 binaries**, from 248 of 248 and 253 of 253 at `91085f3`. Every row it can report is a comment about an address the instruction provably does not reference, so it has a gate's character; it is *reported* rather than gated only because it is not wired into `npm run corpus` (that run's header names the four x86 binaries, and this needs the two ARM64 ones `preflight.ts` does not model — run `npm run corpus:comments`). Its x86 half is not a judgement but a **digest** of every commented instruction, which is the byte-identity instrument for any change to the shared comment path — and **the digest now has a recorded baseline, without which it could only be used by someone who ran both sides themselves**. Re-measured at `f3b89ec`: ARM64 **275 of 275 and 290 of 290 comments justified, 0 coincidences**, 146 and 157 distinct texts, over 27428 and 24393 instructions — i.e. unmoved from the `peek-a-bin-vg3` fix. x86 digest at the same commit: t32 284 commented / md5 `ebeee5898bcc`, t64 325 / `dc41107568eb`, w64 332 / `92a1c5b0f848`, w32 297 / `3f4e9eb11bdc`. These four md5s **must not move** unless the change is meant to touch the x86 comment path; if it is, restamp them here and say why. Neither half is covered by `npm run corpus`: a comment reaches neither the emitted C nor the IR, so gcc, polarity, `offsetof`, arity and the stale-read gates are all structurally blind to it (`peek-a-bin-vg3`).
 - **A guard-shaped line the polarity audit does not understand is a gate, and it is the only gate here that judges the AUDIT rather than the output**: `guardShape` / `guardShapeCensus` in `corpus/guardShape.ts`, reported per binary as `guard-shaped lines` and **0 unparsed on all four binaries**, over **2104/2050/1824/1863 braced headers, 0 inline and 78/77/76/77 `do/while` tails** at `baa7f61`. Every other instrument here asks whether the emitted C says something true; this asks whether the audit can still see the emitted C at all, and it exists because the polarity denominator *is* whatever the line walk recognised. `braced` and `doTail` are the liveness halves — a text-scraping audit fails by silently matching nothing — and `inline` is 0 today, so it is a bound on the grammar pinned by `build/guardShape.test.ts` rather than anything measured. See the gotcha below for the population it protects and the three controls it was proved with (`peek-a-bin-vwr5`).
 - **The practical file-size ceiling is disassembly, not parsing** — performance envelope in `docs/architecture.md`.
@@ -676,7 +692,7 @@ kind gets a cast spelling.
 
 **API signatures** (`apitypes.ts`): **209** Win32/NT API type signatures at `e22ba6e` (the long-standing "~130" here was stale), none of them variadic — which is what makes the table usable as `corpus/arity.ts`'s arity oracle. Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T, etc.) for consistency. Return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
 
-**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns, including a top-level `base - const` (folded to a negative offset; subtracting a *register* is not an offset and still returns null). 2+ distinct offsets on same base → struct candidate. A "base" is a canonical register **plus the generation of the value it holds** (`baseGenerations` / `accessKey`) — see the gotcha; the register alone is not an object.
+**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns, including a top-level `base - const` (folded to a negative offset; subtracting a *register* is not an offset and still returns null). 2+ distinct offsets on same base → struct candidate. A "base" is a canonical register **plus the generation of the value it holds** (`baseGenerations` / `accessKey`) — see the gotcha; the register alone is not an object. A `label` takes the join of the states its own `goto`s and its fall-through carry, at a fixpoint, and resets every key only when no `goto` names it.
 
 Scale ∈ {1,2,4,8} → `IRArrayAccess`, whether or not the function has a struct candidate. A function with no candidate but an indexed access takes a rewrite-only path; one with neither is returned by identity.
 
@@ -735,18 +751,12 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
   hands its source's generation over rather than minting one, and the two names then move apart.
   Worth **+64 field accesses** corpus-wide (1807 → 1871).
 - **A merge point mints a fresh generation for every key an arm assigned** — an SSA phi by another
-  name — and a `label` mints one for every key in flight, because a jump target is reached from
-  somewhere this walk does not model. **THE LABEL RULE IS THE ONE THAT COSTS SOMETHING AND IT WAS
-  MEASURED BOTH WAYS**: dropping it recovers **109 more field accesses** (1871 → 1980), reaches the
-  same 0 overlap rows, and in 4 of 4 hand-sampled diffs the split it avoids was of one real object
-  (`t32!sub_4041D0`'s `EXCEPTION_REGISTRATION` `{0x8, 0xC}`, the `memcpy` byte tail's three names
-  for one buffer, `t64!sub_1400043DC`'s `field_0x0`). It is kept anyway, for a reason that is
-  structural rather than measured: without it the rule cannot be stated in one sentence, the residual
-  hole is in the *same class* as the defect being fixed, and `structOverlaps` cannot see that class —
-  it reports only *overlapping* readings, and `t64!sub_14000EE7C`'s `struct_31 {0x0, 0xC8}`,
-  combining `*_errno()` with another object's flag word, produced **no row at all**. Do not read
-  "0 overlap rows" as "no fabrication". The refinement that would recover the 109 soundly is
-  `peek-a-bin-slkh`: resolve each label from the states its own `goto`s carry.
+  name — and **a `label` is resolved from its own incoming edges**, which is the one place this walk
+  reaches a fixpoint. It used to mint one for every key in flight, on the grounds that a jump target
+  is reached from somewhere tree order does not model; that was sound and cost **109 field accesses**
+  (1871 → 1980 with it dropped), and it is now `peek-a-bin-slkh` — see the gotcha below for the rule,
+  the three refusals that make it sound, and why **deleting the reset outright is the wrong answer
+  even though it scores higher**.
 - **A stride walk must keep grouping, and that is what the loop-header phi buys.** `eax += 0x40`
   through an array of `ioinfo` is a redefinition, but the accesses are at the loop *head*, so they
   read the header phi — one generation for every element. A key sharp enough to separate them by
@@ -758,6 +768,77 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
   so a base redefined by one still groups across it. Resetting on every `raw` was refused because
   `t32!sub_40667A`'s own correct `ioinfo` recovery sits either side of a
   `/* unlifted: sbb eax, eax */`.
+
+- **…and a `label` is resolved from the states its own `goto`s carry, not reset blindly — but the
+  ceiling that reaching for it suggests is a FABRICATION, measured on the very witness that
+  motivated the change.** `structureCFG` spells every transfer it cannot fall through as a `goto`
+  naming its target, so the predecessors of a label *are* expressible in tree order: the states at
+  the `goto`s that name it, plus the fall-through. The join over them is the same phi the constructs
+  above already stand in for, and `baseGenerations` now takes it to a fixpoint. **`t32!sub_4041D0`
+  is the adjudicated witness and it goes from 1 member access to 3**: ESI is established once, by
+  `mov esi,[ebx+8]` / `xor esi,ds:0x412284` at 0x4041dd–0x4041e0, and nothing writes it again, so
+  all three `[esi]` reads — 0x4041e7, 0x404278, 0x40430e — are one object and now say so.
+  Six things (`peek-a-bin-slkh`):
+  - **A label NO `goto` NAMES still resets every key, unconditionally, and that asymmetry is the
+    whole soundness argument.** `structureCFG` ends in `pruneLabels`, which drops any label nothing
+    jumps to *unless* it is `pinned` — so a label with no `goto` in the tree this pass receives is
+    precisely a leftover region's head, i.e. a block with no CFG predecessor at all. Those are not
+    dead code: an MSVC `__except`/`__finally` continuation or a 32-bit SEH scope handler is entered
+    by the **unwinder** (`peek-a-bin-d3z`, 1160 such blocks here), an edge no statement in the tree
+    expresses, so a generation carried into one would be a value the unwinder never established.
+    `structs.test.ts` pins it at a shape whose edges *would* agree, so the test fails if the arm is
+    removed rather than merely being satisfied by accident.
+  - **The edge set is a SUPERSET of the real one everywhere else, so an error in it can only reset
+    MORE.** The fall-through is counted whenever the preceding sibling is not a `return`/`goto`/
+    `break`/`continue`, which over-counts for a goto-named leftover region the pass above appended
+    after a region that did not end in one — and such a block is CFG-reachable by construction (the
+    `goto` naming it *is* its predecessor), so the extra state is spurious rather than missing.
+  - **A generation is a TOKEN NAMING THE TREE NODE, not a counter, and without that the fixpoint
+    cannot be written.** A counter's ids depend on how many `fresh` calls a pass made, so the same
+    id means different things on two passes and "did both edges carry the same value" has no
+    answer. `a<n>`/`j<n>.<k>`/`L<n>` are functions of a pre-order statement numbering, hence stable.
+  - **The iteration must start OPTIMISTIC — from "the label costs nothing" — and starting the other
+    way was implemented and measured.** Conflicts are what accumulate, so a pessimistic first pass
+    locks in its own artifacts: a key that agrees on every real edge disagrees on that pass purely
+    because one edge came through another label that reset it. That order reaches **+13** field
+    accesses against the optimistic order's **+65**, and *no unit test separates the two* — it is a
+    precision choice measured by the corpus, and `structs.test.ts`'s "does not let one label's reset
+    spoil the next label's edges" is the shape that pins it. Termination is monotone by construction
+    (each (label, key) goes absent → kept → conflicted and never back); `LABEL_FIXPOINT_PASSES` is a
+    belt-and-braces cap whose fallback is the pre-slkh blunt rule.
+  - **DELETING THE RESET REACHES 1980 AND FABRICATES AT THE WITNESS ITSELF.** The bead recorded the
+    ceiling as costing nothing on `structOverlaps` and being a split of one real object in 4 of 4
+    samples; built as a control at `87a8499` it reproduces 1980 exactly (541/466/447/526) — and on
+    `t32!sub_4041D0` its extra `struct_9 {0x8, 0xC}` over EBX groups `[ebx+0xC]` at **0x404344**,
+    which sits inside `loc_40433F`, a label entered both from 0x404220 (`jne`, EBX = `arg_1`, the
+    `EXCEPTION_REGISTRATION`) **and** by fall-through from 0x40433a, where EBX has been redefined at
+    0x40422f (`mov ebx,[ebx+0xc]`) and again at 0x40426b. So the ceiling merges a read through
+    `arg_1` with a read through `[arg_1+0xC]`: `z8q7`'s own defect class, at the site whose loss
+    justified reopening the question, and invisible to `structOverlaps` in both runs. **1980 is not
+    the target.** The join takes 65 of the 109 and refuses that one.
+  - **What is measured, and what the sample was.** 25 functions moved a field-access count and
+    **none of the 25 fell**; 6 were hand-read against `objdump -d -M intel` and all 6 are correct —
+    `t32!sub_4041D0` (ESI single-def), `t32!sub_402D75` (EDI single-def at 0x402d7f, 6 accesses,
+    with `field_0x4` correctly turning signed off `cmp/jge`), `t64!sub_1400043DC` (RBX between
+    `lea rbx,[rdi+rax*8+0xc]` at 0x140004438 and `add rbx,0x10` at 0x1400044f3, so all four
+    `[rbx+…]` reads are one value), `t32!sub_4038FF` and its x64 twin `t64!sub_140003F84` (a global
+    loaded once, two flag bytes 0x44/0x84 and 0x60/0xB8), and `t32!sub_40E2C0` (ESI single-def).
+    The other 19 are **counted, not read** — including the `w32`/`w64` members of families whose
+    `t32`/`t64` twin was read. **Six guards left the polarity ledger with their text still on the
+    page**, four of them anchor-A: each is a deref that became a member access the auditor cannot
+    anchor (`*(int32_t*)(edi + 4) < 0` → `((struct_3 *)edi)->field_0x4 < 0` on the PE32 pair,
+    `*(int32_t*)(rcx_0 + 8) < 0` → `->field_0x8 < 0` on the x64 pair, `*(uint8_t*)(esi) != 0` →
+    `->field_0x0 != 0` on the PE32 pair), which is the same benign shape `peek-a-bin-c33` records.
+  - **The residual 44 are NOT this rule's to take, and the mechanism is now identified**:
+    `visit` shares one `cur` across an `if`'s two arms with no save and restore, so a reset (or an
+    assignment) in the `then` arm leaks into the `else` arm. That is what still costs
+    `t32!sub_4041D0` its EBX `{0x8, 0xC}` — `loc_40433F` is the first statement of the `then` arm and
+    its reset reaches the `else` arm's `[ebx+0xC]`. It is also a **fabrication** hazard in its own
+    right (`if (c) { rax = load(A); use(*rax) } else { use(*(rax+8)) }` gives the `else` read the
+    `then` arm's generation). Isolating the arms naively reaches 1966 and `t32!sub_4041D0` = 5 — and
+    **produces 1 `structOverlaps` row per binary** (`t32!sub_40DD37`, `reg:rax#a4`, `0x0:4` over
+    `0x2:2`), because `join` mints for keys the arms *assign* and not for keys a label inside an arm
+    reset. So it is a real defect with a known trap, filed as `peek-a-bin-9fp5`, not folded in here.
 - **THREE TESTS PINNED THE DEFECT AS THE RULE.** `structs.test.ts`'s "does not credit accesses to
   the last base a register was ever copied from" asserted all three offsets of an RBX that holds
   RCX's object and then RDX's in **one** declaration, with a comment saying "the grouping survives";

@@ -345,9 +345,13 @@ Use type shorthands (`PVOID`, `HANDLE_T`, `NTSTATUS_T`, etc.) for consistency.
   `baseGenerations` — a stand-in for the SSA version `destroySSA` collapsed away. One register is
   not one object: keyed on the name alone, every access through any value EAX held anywhere in a
   function grouped together, which fabricated an object out of two unrelated pointers. The
-  generation changes at a redefinition, at every control-flow merge (an SSA phi by another name) and
-  at a `label`; a copy the alias map folded hands its source's generation over instead. See
-  CLAUDE.md's gotcha for what that costs and what it cannot see
+  generation changes at a redefinition and at every control-flow merge (an SSA phi by another name);
+  a copy the alias map folded hands its source's generation over instead. At a **`label`** it is the
+  join of the states the label's own `goto`s and its fall-through carry, taken to a fixpoint — a
+  label no `goto` names resets everything, because `pruneLabels` keeps an unreferenced label only
+  when it is `pinned`, i.e. a leftover region entered by the unwinder rather than by any edge in the
+  tree. See CLAUDE.md's two gotchas for what that costs, why *deleting* the label rule fabricates,
+  and what no instrument here can see
 
 ### Features
 

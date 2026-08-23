@@ -2117,9 +2117,13 @@ describe("synthesizeStructs — base value generations", () => {
     expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
   });
 
-  it("does not group across a label", () => {
-    // A jump target is reached from somewhere this walk does not model, so
-    // nothing in flight survives it.
+  it("does not group across a label no goto names", () => {
+    // `structureCFG` ends in `pruneLabels`, which keeps an unreferenced label
+    // only when it is `pinned` — a leftover region's head, entered by the
+    // unwinder rather than by any edge in this tree. So nothing in flight
+    // survives it, even though both readings here are of one RAX that nothing
+    // redefines: the join below would keep it, and that is the point of the
+    // asymmetry.
     const out = run([
       assign(irReg("rax", 8), at(RCX, 0x18, 8)),
       assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
@@ -2127,6 +2131,142 @@ describe("synthesizeStructs — base value generations", () => {
       assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
     ]);
     expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("groups across a label whose incoming edges agree about the base", () => {
+    // The fall-through and the one `goto` both carry the RAX the load above
+    // established, so the label states nothing new about it. This is the
+    // shape `t32!sub_4041D0` is: an ESI set once, read through on both sides
+    // of `loc_404278`.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [{ kind: "goto", label: "loc_401020" }],
+      },
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 0x40]);
+  });
+
+  it("does not group across a label two incoming edges disagree about", () => {
+    // The negative control for the test above: the arm that jumps loads a
+    // different object into RAX first, so no single value reaches the label.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("rax", 8), at(RDX, 0x20, 8)),
+          { kind: "goto", label: "loc_401020" },
+        ],
+      },
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("resolves a label nothing falls into from the goto that reaches it", () => {
+    // The statement above the label is a `return`, so the fall-through is not
+    // an edge and the code between the `goto` and the label cannot spoil it —
+    // which is why the terminator test is asked of the preceding sibling and
+    // not assumed away. Without it the RDX load below would be an incoming
+    // state and the two readings would split.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+          { kind: "goto", label: "loc_401020" },
+        ],
+      },
+      assign(irReg("rax", 8), at(RDX, 0x20, 8)),
+      { kind: "return" },
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 0x40]);
+  });
+
+  it("counts the fall-through into a label as an incoming edge", () => {
+    // The same body with the `return` removed. Control now does reach the
+    // label from above, carrying the RDX-derived RAX, so the two readings are
+    // of different objects and must not share a declaration.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+          { kind: "goto", label: "loc_401020" },
+        ],
+      },
+      assign(irReg("rax", 8), at(RDX, 0x20, 8)),
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("resolves a label from a goto below it, not only from the ones above", () => {
+    // THE TEST THAT NEEDS THE FIXPOINT. The only edge that disagrees is a
+    // BACKWARD `goto` — textually after the label — so a walk that resolved
+    // each label from the states it had already seen would keep RAX here and
+    // group an access through `[rcx+0x18]`'s object with one through
+    // `[rdx+0x20]`'s. One access sits above the label and one below it, which
+    // is what makes the two answers distinguishable in the output at all.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("rax", 8), at(RDX, 0x20, 8)),
+          { kind: "goto", label: "loc_401020" },
+        ],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("does not let one label's reset spoil the next label's edges", () => {
+    // THE TEST THAT PINS THE OPTIMISTIC ORDER. Every edge here really does
+    // carry the one RAX the load establishes, so both readings are of one
+    // object. A fixpoint that STARTS by resetting sees `loc_401010`'s own reset
+    // on the fall-through into `loc_401020` and its own on the backward `goto`,
+    // records the disagreement, and — because conflicts are what accumulate —
+    // never revisits it. Corpus-wide that order reaches +13 field accesses
+    // where starting from "the label costs nothing" reaches +65.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      { kind: "label", name: "loc_401010" },
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [{ kind: "goto", label: "loc_401010" }],
+      },
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(1)),
+        thenBody: [{ kind: "goto", label: "loc_401020" }],
+      },
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 0x40]);
   });
 
   it("does not group an arm's accesses with the ones below the join", () => {
