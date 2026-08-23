@@ -1125,11 +1125,15 @@ extent:
 
 | | t32 | t64 | w64 | w32 |
 |---|---|---|---|---|
-| internal (inside the caller's extent) | 25 | 0 | 0 | 23 |
-| … of those, target has a `loc_` label | 8 | 0 | 0 | 6 |
+| internal (inside the caller's extent) | 33 | 0 | 0 | 31 |
+| … of those, target has a `loc_` label | 15 | 0 | 0 | 13 |
+| … of those, target's hex anywhere in the function | 15 | 0 | 0 | 13 |
+| … of those, **nothing at all to follow** | 18 | 0 | 0 | 18 |
 | external (outside it) | 7 | 3 | 3 | 7 |
 
-Measured at `d8d2d02`. The split is the whole point, because the two halves have different owners.
+Measured at `84eed6e` (25/0/0/23 internal, 8/0/0/6 labelled at `d8d2d02`). The split is the whole
+point, because the two halves have different owners — and among the internal rows, **the last line
+is the one that means reader harm**, not the first.
 
 **INTERNAL** is a body that *is* in the output, in this same function, further down under a `loc_`
 label — the call and the body are simply not connected. In this corpus every one of the 48 rows is
@@ -1151,18 +1155,48 @@ with no IAT entry, where the minted name is the **pointer's** address and not th
 **Report-only in both directions, and not gateable at 0.** `sub_4038F7();` is an
 *incompleteness*, not a falsehood — the machine really does call that address and the name is
 derived from it — so the row has `offsetNamedArgs`' character rather than `unencodableNames`'. The
-external half is doubly ungateable. If a change ever connects the internal half and drives it to 0,
-gating that half becomes worth re-arguing; at 25/0/0/23 a gate is unavailable on the count alone.
+external half is doubly ungateable. If a change ever connects the bodies the reader cannot reach
+and drives **`internalUnlabelled`** to 0, gating that half becomes worth re-arguing; `internal`
+reaching 0 is the stronger and more distant condition, and at 33/0/0/31 a gate is unavailable on
+the count alone.
 
 **`internalLabelled` is the row that decided `peek-a-bin-pf5g`, so read it before proposing a
 repair.** A comment at the call site naming the label the body sits under is available only where
-the target is a block leader `structureCFG` labelled — 8 of 25 and 6 of 23. At 16 of each the
-leader is the **unwinder's own entry** three to six bytes earlier, because MSVC emits the register
-reloads only the unwinder needs and the parent's `call` names the body past them: at t32 0x405f1a
-the label is `loc_405F17` and the line under it is `esi = arg_0`, a reload the call does *not*
-execute, so naming that label would state something false. At one site per binary (t32 0x4063b8,
-w32 0x40224b) the funclet body is a **fallthrough continuation** of the parent's own code and
-carries no label at all.
+the target is a block leader `structureCFG` labelled — 15 of 33 and 13 of 31 at `84eed6e`, from 8
+of 25 and 6 of 23 at `d8d2d02`. At the others the leader is the **unwinder's own entry** three to
+six bytes earlier, because MSVC emits the register reloads only the unwinder needs and the parent's
+`call` names the body past them: at t32 0x405f1a the label is `loc_405F17` and the line under it is
+`esi = arg_0`, a reload the call does *not* execute, so naming that label would state something
+false. At one site per binary (t32 0x4063b8, w32 0x40224b) the funclet body is a **fallthrough
+continuation** of the parent's own code and carries no label at all.
+
+**`internalThreaded` beside it is why that repair is not worth making, and it is what refused
+`peek-a-bin-pf5g` the SECOND time, at the higher ratio.** It asks the wider question — does the
+target's address, spelled as bare hex, occur anywhere else in this function's emitted text, label
+or constant or anything — because that is what decides whether a reader who searches the
+identifier's own hex reaches the body. `resolveNamedTarget` mints `sub_<HEX>` and `labelNameFor`
+mints `loc_<HEX>` from the same `addr.toString(16).toUpperCase()`, so the two rows agree in **both
+directions on all 64 rows**: every labelled site has a thread, and every unlabelled site has none —
+the hex occurs nowhere in the function but in the call itself. A comment naming the label would
+therefore fire exactly where the call can already be followed and stay silent exactly where nothing
+leads anywhere: coverage perfectly anti-correlated with need.
+
+The two are derived independently — one scrapes `loc_<hex>:` lines, the other the bare hex with
+hex-digit boundaries and the `sub_` spellings excluded — so their agreement is a **differential**,
+not a restatement, and only `threaded >= labelled` holds by construction. The corpus cannot
+demonstrate that they are different questions at all (they agree on every row), so both directions
+of the difference are pinned in `build/undefinedCalleeAudit.test.ts` over shapes the corpus does not
+contain, with three negative controls that each fail their own tests: answering `threaded` from
+`labelled`; dropping the `sub_` exclusion, which makes **every** internal row read as threaded and
+the harm figure structurally 0; and dropping the hex-digit boundaries.
+
+**So read `internalUnlabelled` and not `internal` when judging a rise.** Between `d8d2d02` and
+`84eed6e` the class grew 25/23 → 33/31 while the unfollowable residue grew **17/17 → 18/18**:
+`peek-a-bin-d827`'s scope-table rule folds the funclets MSVC emits with *no* unwinder-only reload,
+whose body is therefore its own block leader, so 7 of the 8 starts it withdrew per binary arrive
+already followable. `compare.mjs` flags both rows and marks them differently, so replaying that
+integration now reads `internal 25 → 33` beside `NOTHING to follow 17 → 18` rather than as eight
+lost calls.
 
 **Nothing else here sees the class, and `gcc` is blind structurally rather than incidentally.**
 `ccSyntaxCheck` compiles one function per file with no prototypes, so *every* callee in the corpus
@@ -1858,7 +1892,7 @@ remaining gap and is not implemented.
 | `armExits.ts` | How every switch arm was closed, and whether `break` was true of the block. Reads the tap's observations; recomputes nothing. |
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
-| `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent. Reads only emitted text. Report-only in both directions. |
+| `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent and, for an internal one, by whether the reader has any thread to the body (`internalLabelled`, `internalThreaded`, `internalUnlabelled`). Reads only emitted text. Report-only in both directions. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
 | `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |

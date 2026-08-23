@@ -1440,7 +1440,9 @@ function renderReport(): string {
       L.push(
         `  calls with no definition    ${uc.internal} internal ` +
           `(${uc.internalDistinct} distinct targets over ${uc.internalFuncs} functions, ` +
-          `${uc.internalLabelled} with a loc_ label to name), ` +
+          `${uc.internalLabelled} with a loc_ label to name, ` +
+          `${uc.internalThreaded} with the target's hex anywhere in the function, ` +
+          `${uc.internalUnlabelled} with NOTHING to follow), ` +
           `${uc.external} external (${uc.externalDistinct} distinct over ${uc.externalFuncs}), ` +
           `of ${uc.calls} sub_ calls scanned`,
       );
@@ -1451,14 +1453,20 @@ function renderReport(): string {
       L.push("    INTERNAL means the target is inside the caller's own extent, so the callee's");
       L.push("    body IS in the output, further down under a `loc_` label, merely unconnected;");
       L.push("    in this corpus all of them are MSVC `__finally` funclets the detector folded");
-      L.push("    into their parents (peek-a-bin-qe8z, peek-a-bin-d827), 25/0/0/23 at d8d2d02.");
+      L.push("    into their parents (peek-a-bin-qe8z, peek-a-bin-d827), 33/0/0/31 at 84eed6e.");
       L.push("    EXTERNAL is detection's or the IAT's business, not the emitter's: a tail `jmp`");
       L.push("    to a function detection never produced, or an indirect call through a data");
-      L.push("    pointer with no IAT entry, where the name is the POINTER's address. `label`");
-      L.push("    is what decides whether a comment could name the body: only where the target");
-      L.push("    is a block leader, 8 of 25 and 6 of 23 here — elsewhere the leader is the");
-      L.push("    UNWINDER's entry a few bytes earlier and naming it would claim a reload the");
-      L.push("    call does not execute. gcc is structurally blind (one function per file, no");
+      L.push("    pointer with no IAT entry, where the name is the POINTER's address.");
+      L.push("    READ THE LAST TWO INTERNAL FIGURES AND NOT THE FIRST. `loc_ label` is what a");
+      L.push("    comment at the call site could name; `hex anywhere` is whether a reader who");
+      L.push("    searches the identifier's own hex reaches the body. They AGREE on all 64 rows");
+      L.push("    in both directions — a labelled site always has a thread, an unlabelled one");
+      L.push("    never has any — so such a comment would fire only where the call can already");
+      L.push("    be followed. `NOTHING to follow` is therefore the harm, and it went 17/17 ->");
+      L.push("    18/18 while `internal` went 25/23 -> 33/31: d827's scope-table rule folds the");
+      L.push("    funclets MSVC emits with no unwinder-only reload, whose body is its own block");
+      L.push("    leader, so they arrive already followable (peek-a-bin-pf5g, re-adjudicated).");
+      L.push("    gcc is structurally blind (one function per file, no");
       L.push("    prototypes, so every callee is an implicit declaration `gnu89` accepts) and so");
       L.push("    is `distinct callees lost`, which asks only whether the name is on the page.");
       L.push(

@@ -604,6 +604,16 @@ for (const b of bins) {
   // so a row is an incompleteness rather than a false statement. `calls` is the
   // liveness half, and a FALL in it to zero is a text scan that stopped
   // matching — the only way this reads clean for the wrong reason.
+  //
+  // TWO ROWS ARE FLAGGED AND THE SECOND IS THE ONE THAT MEANS READER HARM.
+  // `internal` is the class and a rise in it is worth seeing, but a folded
+  // funclet whose body is its own block leader arrives with a `loc_<hex>:` label
+  // whose hex IS the identifier's hex, so the call can be followed by searching
+  // it — measured over all 64 corpus rows, `labelled` and `hex thread` agree in
+  // both directions. `nothing to follow` is the complement, and it is what rose
+  // by 1 per binary while `internal` rose by 8 (`peek-a-bin-pf5g`, re-adjudicated
+  // at `84eed6e`). A run predating the split leaves both new rows unmeasured
+  // rather than reading them as zero.
   if (B.undefinedCallees && C.undefinedCallees) {
     row(
       "undefined callees, internal",
@@ -612,6 +622,22 @@ for (const b of bins) {
       "MORE CALLS TO A BODY THAT IS IN THIS FUNCTION BUT NOT CONNECTED TO THE CALL",
     );
     row("  of those, target labelled", (x) => x.undefinedCallees.internalLabelled);
+    if (
+      B.undefinedCallees.internalUnlabelled !== undefined &&
+      C.undefinedCallees.internalUnlabelled !== undefined
+    ) {
+      row("  of those, hex thread in fn", (x) => x.undefinedCallees.internalThreaded);
+      row(
+        "  of those, NOTHING to follow",
+        (x) => x.undefinedCallees.internalUnlabelled,
+        (a, c) => c > a,
+        "MORE CALLS WHOSE BODY THE READER HAS NO WAY TO REACH",
+      );
+    } else {
+      note(
+        "  of those, NOTHING to follow   NOT MEASURED on both sides (a run predating the split)",
+      );
+    }
     row("  distinct internal targets", (x) => x.undefinedCallees.internalDistinct);
     row("  functions affected", (x) => x.undefinedCallees.internalFuncs);
     row(
