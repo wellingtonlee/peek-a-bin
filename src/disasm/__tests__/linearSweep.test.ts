@@ -15,8 +15,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { CapstoneHandle, RawInsn } from "../capstoneWindow";
-import { sweepX86, X86SweepCache } from "../linearSweep";
+import {
+  type CapstoneHandle,
+  type CapstoneScan,
+  createScan,
+  type RawInsn,
+} from "../capstoneWindow";
+import { gridScan, type SweptInsn, sweepX86, X86SweepCache } from "../linearSweep";
 import { SectionMemo, sameBytes } from "../sectionMemo";
 
 /**
@@ -220,5 +225,203 @@ describe("X86SweepCache", () => {
     cache.sweep(bytes(), BASE, cs64, "b");
 
     expect(cs64.calls).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * peek-a-bin-iqzu — `hybridDisassemble` decodes through the held sweep.
+ *
+ * It is the last RPC of an x86 load that still ran Capstone over `.text` for
+ * itself, and it is the largest: 765 ms of a 1666 ms load on a 669 KiB `.text`.
+ * It is not a transcription of the sweep — recursive descent over a BFS queue
+ * plus a gap fill produces a different, annotated, smaller stream — so what is
+ * shared is the decoder underneath, {@link gridScan}, which answers from the
+ * grid where the grid has an instruction at that address and delegates where it
+ * does not.
+ *
+ * The measured coincidence rate is what justifies the mechanism (99.9-100.0%
+ * of 222137 instructions over five real images, 100.0% agreeing in mnemonic,
+ * operands and size). These pin the three ways it can be wrong, which no
+ * measurement over agreeing images could ever exercise: a miss, a discontinuity
+ * and a window bound. The fourth — a served `bytes` that is a *view* onto the
+ * section — is the one whose harm is invisible here and catastrophic in the
+ * reply's structured clone.
+ */
+describe("gridScan", () => {
+  /** Absolute addresses; the grid is what a sweep of `[1,2,3,4]` at BASE says. */
+  const contiguous: SweptInsn[] = [
+    { address: BASE, mnemonic: "op1", opStr: "", size: 1 },
+    { address: BASE + 1, mnemonic: "op2", opStr: "", size: 1 },
+    { address: BASE + 2, mnemonic: "op3", opStr: "", size: 1 },
+    { address: BASE + 3, mnemonic: "op4", opStr: "", size: 1 },
+  ];
+
+  /** The real scan, so a delegation is observable as a decoder entry. */
+  function backed(grid: SweptInsn[]): { scan: CapstoneScan; cs: ReturnType<typeof byteDecoder> } {
+    const cs = byteDecoder();
+    return { scan: gridScan(grid, createScan(cs, "t")), cs };
+  }
+
+  it("answers a hit without entering the decoder at all", () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const { scan, cs } = backed(contiguous);
+
+    const out = scan.decode(bytes, 0, bytes.length, BASE);
+
+    expect(cs.calls).toBe(0);
+    expect(out.map((i) => i.address)).toEqual([BASE, BASE + 1, BASE + 2, BASE + 3]);
+    expect(out.map((i) => i.mnemonic)).toEqual(["op1", "op2", "op3", "op4"]);
+  });
+
+  it("delegates an address the grid has no instruction at", () => {
+    // Recursive descent knows boundaries a linear sweep can miss — 26 such
+    // addresses on t32 — and the two reasons the grid can lack one (the sweep
+    // stepped over it; the decoder refused it) are indistinguishable from here.
+    // Decoding is the right answer to both.
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const { scan, cs } = backed([{ address: BASE, mnemonic: "op1", opStr: "", size: 1 }]);
+
+    const out = scan.decodeOne(bytes, 1, 2, BASE + 1);
+
+    expect(cs.calls).toBe(1);
+    expect(out.map((i) => i.mnemonic)).toEqual(["op2"]);
+  });
+
+  it("stops a run where the grid stops being contiguous", () => {
+    // `cs_disasm` returns instructions until it meets a byte it cannot decode.
+    // A hole in the grid IS that byte, recorded; serving across it would invent
+    // instructions over bytes the sweep refused.
+    const holed: SweptInsn[] = [
+      { address: BASE, mnemonic: "op1", opStr: "", size: 1 },
+      { address: BASE + 2, mnemonic: "op3", opStr: "", size: 1 },
+    ];
+    const { scan, cs } = backed(holed);
+
+    const out = scan.decode(new Uint8Array([1, 0xff, 3]), 0, 3, BASE);
+
+    expect(out.map((i) => i.address)).toEqual([BASE]);
+    expect(cs.calls).toBe(0);
+  });
+
+  it("does not serve an instruction that would extend past the caller's limit", () => {
+    // `createScan` clamps every call to the caller's `limit`, and Capstone never
+    // returns an instruction crossing that end — so neither may this, or the
+    // caller's `offset` advance differs from what it advanced by before.
+    const wide: SweptInsn[] = [{ address: BASE, mnemonic: "wide", opStr: "", size: 4 }];
+    const { scan } = backed(wide);
+
+    const out = scan.decode(new Uint8Array([1, 2, 3, 4]), 0, 2, BASE);
+
+    // Nothing servable, so it delegates, and the four-byte entry is nowhere in
+    // the answer — the stub reads the two in-limit bytes one at a time.
+    expect(out.map((i) => i.size)).toEqual([1, 1]);
+    expect(out.some((i) => i.mnemonic === "wide")).toBe(false);
+  });
+
+  it("returns one instruction for decodeOne even where the grid could give more", () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const { scan } = backed(contiguous);
+
+    expect(scan.decodeOne(bytes, 0, bytes.length, BASE)).toHaveLength(1);
+    expect(scan.decode(bytes, 0, bytes.length, BASE)).toHaveLength(4);
+  });
+
+  it("gives each served instruction its OWN bytes buffer", () => {
+    // The hazard with no visible symptom: `RawInsn.bytes` becomes
+    // `Instruction.bytes` and crosses `postMessage` in the reply. A `subarray`
+    // here would read identically and would make the reply's structured clone
+    // serialise the whole `.text` once per instruction. capstone-wasm builds
+    // its own small buffer with `HEAPU8.slice`; so does this.
+    const section = new Uint8Array(4096);
+    section.set([1, 2, 3, 4]);
+    const { scan } = backed(contiguous);
+
+    const out = scan.decode(section, 0, section.length, BASE);
+
+    for (const insn of out) {
+      expect(insn.bytes.buffer).not.toBe(section.buffer);
+      expect(insn.bytes.buffer.byteLength).toBe(insn.size);
+    }
+    expect(Array.from(out.map((i) => i.bytes[0]))).toEqual([1, 2, 3, 4]);
+  });
+
+  it("serves out of a subarray at the right offset", () => {
+    // The gap fill hands `disassemble` a *subarray* of the section with its own
+    // base address, so the grid's absolute addresses have to be resolved against
+    // the caller's `(offset, address)` pair rather than against the section.
+    const section = new Uint8Array([9, 9, 1, 2, 3, 4]);
+    const gap = section.subarray(2);
+    const { scan } = backed(contiguous);
+
+    const out = scan.decode(gap, 0, gap.length, BASE);
+
+    expect(out.map((i) => i.bytes[0])).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe("SectionMemo.peek", () => {
+  it("answers a held entry without computing", () => {
+    const memo = new SectionMemo<number>();
+    const bytes = () => new Uint8Array([1, 2]);
+    memo.get(bytes(), BASE, "cs", () => 7);
+
+    expect(memo.peek(bytes(), BASE, "cs")).toBe(7);
+  });
+
+  it("declines rather than computing when nothing is held", () => {
+    // The whole reason `hybridDisassemble` peeks: the memo has ONE slot, so a
+    // `get` here would both pay for a sweep this method does not need and evict
+    // the section the other RPCs share.
+    const memo = new SectionMemo<number>();
+    let computed = 0;
+
+    const out = memo.peek(new Uint8Array([1, 2]), BASE, "cs");
+
+    expect(out).toBeUndefined();
+    expect(computed).toBe(0);
+    // ...and it did not store, so a later `get` still computes.
+    expect(memo.get(new Uint8Array([1, 2]), BASE, "cs", () => ++computed)).toBe(1);
+  });
+
+  it("declines a different section at the same address", () => {
+    const memo = new SectionMemo<number>();
+    memo.get(new Uint8Array([1, 2]), BASE, "cs", () => 7);
+
+    expect(memo.peek(new Uint8Array([3, 4]), BASE, "cs")).toBeUndefined();
+  });
+
+  it("leaves the held entry alone", () => {
+    const memo = new SectionMemo<number>();
+    const cs = "cs";
+    memo.get(new Uint8Array([1, 2]), BASE, cs, () => 7);
+    let recomputed = 0;
+
+    // A peek that misses must not displace what is held — this is a hex patch:
+    // a different byte array over the same region, which the content key
+    // declines and which must not cost the next caller its hit.
+    memo.peek(new Uint8Array([3, 4]), BASE, cs);
+
+    expect(memo.get(new Uint8Array([1, 2]), BASE, cs, () => ++recomputed)).toBe(7);
+    expect(recomputed).toBe(0);
+  });
+});
+
+describe("X86SweepCache.peek", () => {
+  it("hands over the sweep another RPC already paid for", () => {
+    const cs = byteDecoder();
+    const cache = new X86SweepCache();
+    const bytes = () => new Uint8Array([1, 2, 3, 4]);
+    const swept = cache.sweep(bytes(), BASE, cs, "detect");
+    const afterSweep = cs.calls;
+
+    expect(cache.peek(bytes(), BASE, cs)).toBe(swept);
+    expect(cs.calls).toBe(afterSweep);
+  });
+
+  it("declines when there is no decoder at all", () => {
+    const cache = new X86SweepCache();
+    cache.sweep(new Uint8Array([1, 2]), BASE, byteDecoder(), "detect");
+
+    expect(cache.peek(new Uint8Array([1, 2]), BASE, undefined)).toBeUndefined();
   });
 });

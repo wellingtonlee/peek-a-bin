@@ -95,6 +95,31 @@ export class SectionMemo<T> {
   }
 
   /**
+   * The held value for exactly these bytes, or `undefined` — never computing.
+   *
+   * For a consumer that *benefits* from the entry but must not create it.
+   * {@link get} is the wrong call for one of those in two ways, and both are
+   * hazards rather than inefficiencies: it would store, and this holds ONE
+   * slot, so a consumer that may be handed a sub-range would evict the whole
+   * section the other consumers share; and it would compute, so a consumer
+   * arriving first would pay for a derivation it did not need. Peeking makes
+   * the optimisation strictly additive — a miss leaves the caller doing exactly
+   * what it did before, and leaves the slot exactly as it found it.
+   */
+  peek(bytes: Uint8Array, baseAddress: number, decoder: unknown): T | undefined {
+    const hit = this.entry;
+    if (
+      hit &&
+      hit.baseAddress === baseAddress &&
+      hit.decoder === decoder &&
+      sameBytes(hit.bytes, bytes)
+    ) {
+      return hit.value;
+    }
+    return undefined;
+  }
+
+  /**
    * Forget the held section.
    *
    * Memory hygiene, not correctness: the content key above already makes a

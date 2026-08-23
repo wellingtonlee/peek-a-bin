@@ -31,6 +31,7 @@
     "corpus:jumptables": "tsx corpus/jumpTableReach.ts",
     "corpus:uploadcost": "tsx corpus/rpcUploadCost.ts",
     "corpus:decompilecost": "tsx corpus/decompileRpcCost.ts",
+    "corpus:gridserve": "tsx corpus/hybridGridServe.ts",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:setup": "tsx src/mcp/index.ts setup"
   },

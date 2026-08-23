@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
-import { sweepX86 } from "../../disasm/linearSweep";
+import { type SweptInsn, sweepX86 } from "../../disasm/linearSweep";
 import type { Instruction } from "../../disasm/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
@@ -1134,6 +1134,15 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
    * from `bytes[0]`, the second a `mov` naming {@link STRING_ADDR}, the rest
    * `nop`. It counts its own entries, since an instruction count cannot
    * distinguish a memo hit from a miss and a decode count can.
+   *
+   * **Both mnemonics are chosen by ABSOLUTE address, not by offset within the
+   * window** — the property every real decoder has and the one this whole
+   * scheme rests on, that what an address decodes to does not depend on where
+   * the window handed to Capstone happened to start. It was written as
+   * `i === 4` and that made the stub answer differently for a whole-section
+   * sweep than for `hybridDisassemble`'s 15-byte per-address windows, so
+   * peek-a-bin-iqzu's serve and the decode it replaces provably disagreed —
+   * about the stub, not about any file. Do not put an `i`-relative rule back.
    */
   function countingX86() {
     const stub = {
@@ -1154,10 +1163,10 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
           const first = options.address + i === TEXT_BASE;
           out.push({
             address: options.address + i,
-            mnemonic: first ? "call" : i === 4 ? "mov" : "nop",
+            mnemonic: first ? "call" : options.address + i === TEXT_BASE + 4 ? "mov" : "nop",
             opStr: first
               ? `0x${callee.toString(16)}`
-              : i === 4
+              : options.address + i === TEXT_BASE + 4
                 ? `eax, 0x${STRING_ADDR.toString(16)}`
                 : "",
             size: 4,
@@ -1212,6 +1221,8 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
     xr1: { callGraph: [number, number[]][]; stringXrefs: [number, number[]][] };
     xr2: { callGraph: [number, number[]][]; stringXrefs: [number, number[]][] };
     decodes: number;
+    hybridDecodes: number;
+    sweeps: number;
   }> {
     const { client, worker } = await loadClient();
     client.setImage(AMD64);
@@ -1229,7 +1240,9 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
     ]);
 
     const det = await dispatch("detectFunctions", worker.received[0].args, s);
+    const afterDetect = cs.calls;
     const insns = await dispatch("hybridDisassemble", worker.received[1].args, s);
+    const afterHybrid = cs.calls;
     const xr1 = (await dispatch("buildAllXrefs", worker.received[2].args, s)) as {
       callGraph: [number, number[]][];
       stringXrefs: [number, number[]][];
@@ -1238,7 +1251,17 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
       callGraph: [number, number[]][];
       stringXrefs: [number, number[]][];
     };
-    return { det, insns, xr1, xr2, decodes: cs.calls };
+    // Split, because peek-a-bin-iqzu made the third and fourth RPCs of this
+    // load stop decoding too: `sweeps` is this bead's saving alone.
+    return {
+      det,
+      insns,
+      xr1,
+      xr2,
+      decodes: cs.calls,
+      hybridDecodes: afterHybrid - afterDetect,
+      sweeps: cs.calls - afterHybrid,
+    };
   }
 
   /**
@@ -1265,8 +1288,11 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
 
     expect(withMemo.decodes).toBeLessThan(without.decodes);
     // Two of the three sweeps are gone. The section is 0x40 bytes, one window,
-    // so a sweep is exactly one decode here.
-    expect(without.decodes - withMemo.decodes).toBe(2);
+    // so a sweep is exactly one decode here. Counted after `hybridDisassemble`,
+    // because peek-a-bin-iqzu stopped that method decoding as well and the two
+    // savings must stay separately attributable.
+    expect(without.sweeps - withMemo.sweeps).toBe(2);
+    expect(withMemo.sweeps).toBe(0);
   });
 
   it("answers exactly what it answered when each RPC swept for itself", async () => {
@@ -1416,5 +1442,268 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
     );
 
     expect(cs.calls).toBe(afterSection + 1);
+  });
+});
+
+/**
+ * peek-a-bin-iqzu — `hybridDisassemble` decodes through the sweep the load has
+ * already paid for, instead of running Capstone over `.text` for itself.
+ *
+ * peek-a-bin-x40u shared the sweep between `detectFunctions` and both
+ * `buildAllXrefs` calls and deliberately left this one out, because it is not a
+ * transcription of the sweep: recursive descent over a BFS work queue plus a
+ * gap fill produces a different, annotated, smaller stream, one instruction at a
+ * time at addresses a *caller* named. It left the number that decides it
+ * untaken. Taken: over the four corpus binaries and a 669 KiB-`.text` `go`
+ * image, **99.9-100.0% of the 222137 instructions this method decodes are at an
+ * address the grid also holds an instruction at, and 100.0% of those agree in
+ * mnemonic, operands and size**. So the decoder underneath is shared
+ * (`gridScan`) while all three phases keep their own stepping. Measured through
+ * this path with real Capstone, both sides pinned in one process: hybrid
+ * 798 ms to 192 on the `go` image, 135 to 26 on t32, 73 to 12 on w64, with the
+ * returned `Instruction[]` identical element for element and field for field
+ * — `bytes` and `source` and `comment` included — on all five.
+ *
+ * These drive the real client answered by the real dispatch, for the reason x40u
+ * records: no corpus harness drives the worker RPC path at all. Two negative
+ * controls in opposite directions, plus the one that is specific to peeking —
+ * that a miss must leave the slot exactly as it found it.
+ */
+describe("DisasmWorkerClient — hybridDisassemble decodes through the held sweep", () => {
+  const TEXT_BASE = 0x401000;
+  const AMD64 = 0x8664;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A decoder whose answer depends on the section's bytes, so a stale grid is
+   * distinguishable from a correct one, and which counts its own entries, since
+   * an instruction count cannot tell a serve from a decode and a decode count
+   * can.
+   */
+  function countingX86() {
+    const stub = {
+      calls: 0,
+      disasm(bytes: Uint8Array, options: { address: number; count?: number }) {
+        stub.calls++;
+        const out: {
+          address: number;
+          mnemonic: string;
+          opStr: string;
+          size: number;
+          bytes: Uint8Array;
+        }[] = [];
+        const limit = options.count ?? Number.POSITIVE_INFINITY;
+        for (let i = 0; i + 4 <= bytes.length && out.length < limit; i += 4) {
+          out.push({
+            address: options.address + i,
+            // A function of the CONTENT, so two sections of the same length at
+            // the same address decode to different operand text.
+            mnemonic: bytes[i] === 0x5a ? "nop" : "hlt",
+            opStr: `0x${bytes[i].toString(16)}`,
+            size: 4,
+            bytes: bytes.subarray(i, i + 4),
+          });
+        }
+        if (out.length === 0) throw new Error("Failed to disassemble");
+        return out;
+      },
+    };
+    return stub;
+  }
+
+  function workerState(cs: ReturnType<typeof countingX86>): WorkerState {
+    return Object.assign(createWorkerState(Promise.resolve()), {
+      cs32: cs,
+      cs64: cs,
+      csArm64: cs,
+      arch: "x86" as const,
+    });
+  }
+
+  /** A fresh view of the section, as `prepareBinaryArgs` hands each RPC. */
+  const section = (fill = 0x5a) => new Uint8Array(0x40).fill(fill);
+
+  /**
+   * Detect then disassemble, in App.tsx's own order and through the real client.
+   *
+   * That order is structural rather than lucky: `useDisassemblyRows.ts` posts
+   * `hybridDisassemble` only when `state.functions` is non-empty, i.e. only
+   * after `detectFunctions` has answered — which is what fills the slot.
+   */
+  async function load(
+    s: WorkerState,
+    fill = 0x5a,
+  ): Promise<{ insns: Instruction[]; sweepDecodes: number; hybridDecodes: number }> {
+    const { client, worker } = await loadClient();
+    client.setImage(AMD64);
+    void client.detectFunctions(section(fill), TEXT_BASE, true, { entryPoint: TEXT_BASE });
+    void client.hybridDisassemble(section(fill), TEXT_BASE, true, [TEXT_BASE]);
+    expect(worker.received.map((m) => m.method)).toEqual(["detectFunctions", "hybridDisassemble"]);
+
+    const cs = s.cs64 as unknown as ReturnType<typeof countingX86>;
+    await dispatch("detectFunctions", worker.received[0].args, s);
+    const sweepDecodes = cs.calls;
+    const insns = (await dispatch(
+      "hybridDisassemble",
+      worker.received[1].args,
+      s,
+    )) as Instruction[];
+    return { insns, sweepDecodes, hybridDecodes: cs.calls - sweepDecodes };
+  }
+
+  /**
+   * The negative control for the saving: a memo that holds nothing, i.e. the
+   * tree before this change, where detection swept and this method could not see
+   * the result.
+   */
+  function neverHolds(s: WorkerState): WorkerState {
+    s.x86Sweep.peek = () => undefined;
+    return s;
+  }
+
+  it("runs the decoder not at all, where before it ran it for every instruction", async () => {
+    const cs = countingX86();
+    const shared = await load(workerState(cs));
+
+    const alone = countingX86();
+    const without = await load(neverHolds(workerState(alone)));
+
+    expect(shared.hybridDecodes).toBe(0);
+    expect(without.hybridDecodes).toBeGreaterThan(0);
+  });
+
+  it("answers exactly what it answered when it decoded for itself", async () => {
+    // The claim the whole change rests on, and the one a coincidence rate cannot
+    // make on its own: the served stream must be the decoded stream. Compared
+    // field for field, `bytes` included, because a served instruction builds its
+    // own record rather than passing Capstone's through.
+    const shared = await load(workerState(countingX86()));
+    const without = await load(neverHolds(workerState(countingX86())));
+
+    expect(shared.insns).toEqual(without.insns);
+    expect(shared.insns.length).toBeGreaterThan(0);
+  });
+
+  it("gives every served instruction its own bytes buffer", async () => {
+    // A `subarray` of the section would read identically here and would make
+    // the reply's structured clone serialise the whole `.text` once per
+    // instruction. There is no other check for it: the values are right either
+    // way.
+    const { insns } = await load(workerState(countingX86()));
+
+    for (const insn of insns) {
+      expect(insn.bytes.buffer.byteLength).toBe(insn.size);
+    }
+  });
+
+  it("would answer about the wrong bytes under a length-and-address key", async () => {
+    // The other negative control. The grid this method now reads is the same
+    // entry `buildAllXrefs` reads, so the content key is load-bearing here too:
+    // weakened to what a cheap `(buffer, offset, length)` scheme could afford,
+    // the second file's disassembly is the FIRST file's — complete, plausible,
+    // and about bytes the image does not contain.
+    const cs = countingX86();
+    const s = workerState(cs);
+    const held = new Map<string, SweptInsn[]>();
+    s.x86Sweep.sweep = ((bytes: Uint8Array, base: number, handle: never, where: string) => {
+      const key = `${base}:${bytes.length}`;
+      const hit = held.get(key);
+      if (hit) return hit;
+      const value = sweepX86(bytes, base, handle, where);
+      held.set(key, value);
+      return value;
+    }) as typeof s.x86Sweep.sweep;
+    s.x86Sweep.peek = ((bytes: Uint8Array, base: number) =>
+      held.get(`${base}:${bytes.length}`)) as typeof s.x86Sweep.peek;
+
+    const first = await load(s, 0x5a);
+    const second = await load(s, 0xa5);
+
+    expect(first.insns[0].mnemonic).toBe("nop");
+    // Correct would be "hlt": these are different bytes.
+    expect(second.insns[0].mnemonic).toBe("nop");
+  });
+
+  it("does not serve one file's grid to another with the same address and length", async () => {
+    // The same pair, with the real key. This is the assertion the control above
+    // exists to give meaning to.
+    const s = workerState(countingX86());
+
+    const first = await load(s, 0x5a);
+    const second = await load(s, 0xa5);
+
+    expect(first.insns[0].mnemonic).toBe("nop");
+    expect(second.insns[0].mnemonic).toBe("hlt");
+  });
+
+  it("does not evict the section when it is handed different bytes", async () => {
+    // PEEK, not `sweep`, and this is the case that makes the difference visible:
+    // a hex patch hands this method a modified copy of the section while the
+    // slot holds the original. It must decode for itself AND leave the slot
+    // alone, or the next `buildAllXrefs` of the same load pays for a sweep the
+    // memo had already bought.
+    const cs = countingX86();
+    const s = workerState(cs);
+    const common = { baseAddress: TEXT_BASE, is64: true, machine: AMD64 };
+
+    await dispatch(
+      "detectFunctions",
+      { ...common, bytes: section(), options: { entryPoint: TEXT_BASE } },
+      s,
+    );
+    const afterDetect = cs.calls;
+
+    const patched = section();
+    patched[0] = 0xa5;
+    const patchedInsns = (await dispatch(
+      "hybridDisassemble",
+      { ...common, bytes: patched, seeds: [TEXT_BASE] },
+      s,
+    )) as Instruction[];
+    const afterHybrid = cs.calls;
+
+    // It read the patch rather than the held grid...
+    expect(patchedInsns[0].mnemonic).toBe("hlt");
+    // ...it decoded to do so...
+    expect(afterHybrid).toBeGreaterThan(afterDetect);
+
+    // ...and the section is STILL what the slot holds, so the xref build that
+    // follows is a hit and adds no decode. Under `sweep` instead of `peek` the
+    // patch would have taken the slot and this would sweep again.
+    await dispatch(
+      "buildAllXrefs",
+      { ...common, bytes: section(), stringAddrs: [], iatAddrs: [] },
+      s,
+    );
+
+    expect(cs.calls).toBe(afterHybrid);
+  });
+
+  it("never consults the x86 grid on the ARM64 path", async () => {
+    const cs = countingX86();
+    const s = Object.assign(workerState(cs), { arch: "arm64" as const });
+    let consulted = 0;
+    const real = s.x86Sweep.peek.bind(s.x86Sweep);
+    s.x86Sweep.peek = (...a: Parameters<typeof real>) => {
+      consulted++;
+      return real(...a);
+    };
+
+    await dispatch(
+      "hybridDisassemble",
+      {
+        bytes: section(),
+        baseAddress: 0x140001000,
+        is64: true,
+        machine: 0xaa64,
+        seeds: [],
+      },
+      s,
+    );
+
+    expect(consulted).toBe(0);
   });
 });

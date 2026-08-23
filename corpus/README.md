@@ -1672,6 +1672,44 @@ residency, and it is a different question from `peek-a-bin-9a8`, which is about 
 other. It also re-derives the one premise it reads rather than measures — that `prepareBinaryArgs`
 finds nothing binary at the top level of these args, so the whole payload including one tiny buffer
 per instruction crosses by clone — and prints it per image.
+## `corpus/hybridGridServe.ts` — separate, takes a path, and answers one number
+
+`npm run corpus:gridserve -- <path-to-pe> [...]` answers whether `hybridDisassemble` decodes at
+addresses the linear sweep already holds an instruction at — **the coincidence rate**, the number
+`peek-a-bin-x40u` said would decide whether that method could share the sweep and then closed
+without taking. Outside `npm run corpus` for `rpcUploadCost.ts`' and `jumpTableReach.ts`' reason,
+and the image most worth pointing it at is the `go` build below.
+
+It reports three things and only one of them is a yes/no:
+
+- **The coincidence rate, split by phase.** `.pdata` bulk, BFS, gap fill. The phases have different
+  reasons to coincide and the mechanism predicts nothing: the gap fill walks linearly, which is what
+  a sweep does, while the BFS jumps to call and branch targets — which are function *starts*, and a
+  function start is exactly where a linear sweep is most likely to be aligned. At `1198f4a` it is
+  **99.9–100.0% over 222137 instructions**, 100.0% of them agreeing in mnemonic, operands and size.
+  A sweep walks into data and comes out misaligned, so its grid is a *superset* almost everywhere
+  (186281 entries against the 155531 the method wants on the `go` image) rather than a sparser one.
+- **The differential**, and this is the row that protects something. A rate says the addresses line
+  up, not that the instructions do. Both paths run through the real `dispatch` with real Capstone
+  and the two `Instruction[]` are compared element for element and field for field — `bytes`,
+  `source` and `comment` included. **Non-zero is a defect whatever the rate says**, and it is the
+  only row here that could reasonably become a gate. Beside it, `own bytes buffers` asks whether a
+  served `bytes` aliases the section: it would read identically in every field and would make the
+  reply's structured clone serialise the whole `.text` once per instruction, and nothing else in the
+  repo would catch it. Note the property is *not aliasing*, not "the buffer is exactly `size` long"
+  — capstone-wasm backs each of its own records with a fixed 24-byte `HEAPU8.slice`, so an exact
+  test reports all 18045 of t32's decoded instructions as defects, which is what a first draft did.
+- **The timing**, both sides pinned in one process, because the only honest before-and-after is one
+  that cannot be a comparison between two machine loads.
+
+The handle is **wrapped** rather than counted inside `capstoneWindow.ts` — `corpus/arm64.ts`' rule
+for its sweep-cache differential, that an instrument belongs outside the code it judges — so nothing
+here replicates `hybridDisassemble`'s three loops and nothing can drift from them.
+
+Negative-controlled in three directions: serving a `subarray` of the section turns `own bytes
+buffers` to NO; serving a wrong mnemonic takes `differing` to 18046 and 16845; and asking the census
+about a grid shifted one byte takes the rate to 18.8% and 5.3%, which is what makes the 100% a
+measurement rather than a tautology.
 
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
@@ -2082,6 +2120,7 @@ remaining gap and is not implemented.
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
 | `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch, never a gate. Writes no artifacts. |
 | `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
+| `hybridGridServe.ts` | **Separately invoked** (`npm run corpus:gridserve -- <path>`). Whether `hybridDisassemble` decodes at addresses the linear sweep already holds, plus a served-against-decoded differential and the timing. Drives the real `dispatch` with a wrapped Capstone handle. A census and a stopwatch; only the differential could become a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
 | `artifacts/<label>/drops_<key>.jsonl` | Every dropped statement, per site. Empty file = audit ran and found none. |
@@ -2167,6 +2206,7 @@ program from the one production emits.
   all four separately-invoked harnesses (`corpus:arm64`, `corpus:comments`,
   `corpus:jumptables`, `corpus:uploadcost`,
   `corpus:decompilecost`)
+  `corpus:jumptables`, `corpus:uploadcost`, `corpus:gridserve`)
   are plain `tsx` scripts that run. The gated audits are vitest files for a different and still-good
   reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
   against artifacts without a toolchain at all.

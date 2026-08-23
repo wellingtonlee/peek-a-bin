@@ -7,7 +7,7 @@
 import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
-import { type SweptInsn, sweepX86, type X86SweepCache } from "./linearSweep";
+import { gridScan, type SweptInsn, sweepX86, type X86SweepCache } from "./linearSweep";
 import { resolveRipTarget } from "./ripRelative";
 import { MAX_SEH32_HEAD_INSNS, type Seh32Reader, seh32FuncletsOfPrologue } from "./seh32";
 import { pushedImmediate, type StackInsn } from "./stackIdiom";
@@ -134,6 +134,7 @@ export function disassemble(
   baseAddress: number,
   is64: boolean,
   ctx: DisasmContext,
+  scanOverride?: CapstoneScan,
 ): Instruction[] {
   // `requireCapstone`, not `if (!cs) return []`: this function's entire output
   // is what the decoder produced, so an empty list is a complete-looking answer
@@ -143,7 +144,11 @@ export function disassemble(
   // theoretical.
   const cs = requireCapstone(is64 ? ctx.cs64 : ctx.cs32, "linear disassembly");
   const instructions: Instruction[] = [];
-  const scan = createScan(cs, "linear disassembly");
+  // `hybridDisassemble` passes its own scan here so the gap fill is served from
+  // the same held sweep the rest of it is — see {@link gridScan}. It is the
+  // caller's scan and not a caller's *decoder*, so this function still cannot
+  // reach `cs.disasm` by any route (`capstoneWindow.test.ts` scrapes for that).
+  const scan = scanOverride ?? createScan(cs, "linear disassembly");
   let offset = 0;
 
   while (offset < bytes.length) {
@@ -2611,13 +2616,20 @@ export function hybridDisassemble(
   ctx: DisasmContext,
   pdataRanges?: { beginAddress: number; endAddress: number }[],
   jumpTableSpans?: [number, number][],
+  grid?: SweptInsn[],
 ): Instruction[] {
   // See `disassemble` — same reasoning, same silent-empty shape.
   const cs = requireCapstone(is64 ? ctx.cs64 : ctx.cs32, "hybrid disassembly");
   const visited = new Set<number>();
   const instructionMap = new Map<number, Instruction>();
   const endAddress = baseAddress + bytes.length;
-  const scan = createScan(cs, "hybrid disassembly");
+  // The linear sweep of this same section, if the session already has one. All
+  // three phases below decode through this one scan, so a grid hit costs a
+  // binary search instead of a `cs_disasm` and a miss costs the search plus the
+  // decode it would have paid anyway. Omitting it is the pre-existing
+  // behaviour, instruction for instruction — see {@link gridScan}.
+  const real = createScan(cs, "hybrid disassembly");
+  const scan = grid ? gridScan(grid, real) : real;
 
   const terminators = new Set(["ret", "retn", "int3", "ud2"]);
   const conditionalJumps = new Set([
@@ -2782,7 +2794,7 @@ export function hybridDisassemble(
         if (!allPadding) {
           const gapBytes = bytes.subarray(gapStart, gapEnd);
           const gapBaseAddr = baseAddress + gapStart;
-          const gapInsns = disassemble(gapBytes, gapBaseAddr, is64, ctx);
+          const gapInsns = disassemble(gapBytes, gapBaseAddr, is64, ctx, scan);
           for (const gi of gapInsns) {
             if (!instructionMap.has(gi.address)) {
               gi.source = "gap-fill";

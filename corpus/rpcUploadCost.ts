@@ -71,6 +71,13 @@ const SENDS_PER_LOAD = 4;
  * column below is now the resolve alone — so the ratio this harness prints got
  * slightly *worse* for residency while the absolute load got much better, which
  * is the shape of the argument in `src/workers/transfer.ts`.
+ *
+ * `peek-a-bin-iqzu` did it again to the `hybrid` column, which is served from
+ * the same held sweep and fell by 74-88%. Still 4: the section crosses the wire
+ * once per RPC whatever the worker then does with it. The denominator is now
+ * roughly a third of what it was when residency was first asked about, and the
+ * last column is still under a tenth of one percent (0.0547% on the `go` image,
+ * 0.0275% on t32).
  */
 
 /** Median of `n` samples, which is what to read off a loaded machine. */

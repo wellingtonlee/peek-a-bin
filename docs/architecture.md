@@ -185,17 +185,18 @@ IAT map and driver mode on. The x86 path never consults it: `buildAllXrefs` and 
 disassemblers own their decode inside `functionDetect.ts`, and the four x86 corpus binaries emit
 byte-identical C across the change.
 
-**x86 shares one sweep too, but between two RPCs rather than three — and the difference is the
-design, not an oversight.** A64 is fixed-width, so there the sweep *is* the disassembly and all
-three callers want the same array. On x86 `detectFunctions` and `buildAllXrefs` each contained a
-linear sweep of the whole section, in loops that were copy-paste identical down to the offset
-arithmetic — checked element for element over t32/t64/w32/w64 and a 669 KiB-`.text` Windows/amd64
-`go` image, the two produce the same stream with no first difference — so `disasm/linearSweep.ts`
-declares it once (`sweepX86`) and memoises it in `WorkerState.x86Sweep`. `hybridDisassemble` is
-**not** routed through it: it is recursive descent over a BFS work queue plus a gap fill, decoding
-one instruction at a time at addresses a caller named, and the sweep's grid need not have an
-instruction at any of them. Measured at `6f2ce28` by replaying a load's RPCs against the real
-dispatch, milliseconds:
+**x86 shares one sweep too, and the way it reaches the third RPC is different from the way it
+reaches the other two.** A64 is fixed-width, so there the sweep *is* the disassembly and all three
+callers want the same array. On x86 `detectFunctions` and `buildAllXrefs` each contained a linear
+sweep of the whole section, in loops that were copy-paste identical down to the offset arithmetic —
+checked element for element over t32/t64/w32/w64 and a 669 KiB-`.text` Windows/amd64 `go` image, the
+two produce the same stream with no first difference — so `disasm/linearSweep.ts` declares it once
+(`sweepX86`) and memoises it in `WorkerState.x86Sweep`. `hybridDisassemble` cannot take the array,
+because it is recursive descent over a BFS work queue plus a gap fill and produces a different,
+annotated, smaller stream; what it takes instead is the **decoder underneath**, `gridScan`, which
+answers each decode from the held sweep where the grid has an instruction at that address and
+delegates to Capstone where it does not, leaving all three of its phases stepping exactly as they
+did. Measured at `6f2ce28` by replaying a load's RPCs against the real dispatch, milliseconds:
 
 | | detect | hybrid | xrefs | xrefs again | load |
 |---|---|---|---|---|---|
@@ -206,8 +207,8 @@ dispatch, milliseconds:
 | w64.exe (54 KiB, 15504) | 66 → 70 | 63 → 65 | 65 → **7** | 61 → **6** | 255 → **148** |
 
 The fourth column is the rebuild `App.tsx` posts when string extraction lands after detection. The
-`detect` and `hybrid` columns are unchanged work and their movement is this machine's run-to-run
-spread. Taken apart directly, `buildAllXrefs` on the `go` image is 802 ms whole, **754 of it the
+`detect` column is unchanged work and its movement is this machine's run-to-run spread; the `hybrid`
+column was unchanged work *then* and is the subject of the table below now. Taken apart directly, `buildAllXrefs` on the `go` image is 802 ms whole, **754 of it the
 sweep and 67 the resolve**, and the byte-compare that replaces the sweep on a hit is **0.918 ms** —
 a margin of 820x, which is the test `workers/transfer.ts` sets for whether such a memo may exist at
 all. The key rule is shared with `Arm64SweepCache` in `disasm/sectionMemo.ts` and has three parts:
@@ -217,6 +218,52 @@ not need, since x86-32 and x86-64 disagree about what a byte string means. Reten
 already holds for the same section (`SweptInsn` is four fields and no `bytes` view, which is most
 of the difference). The MCP path passes no memo, so `npm run corpus` is a control and is
 byte-identical (`peek-a-bin-x40u`).
+
+**Whether that grid is any use to `hybridDisassemble` is a measured number, and x40u closed without
+taking it.** A grid hit serves the instruction from memory; a miss pays a binary search *and* the
+Capstone call it would have paid anyway. The gap fill walks linearly, which is what a sweep does,
+while recursive descent jumps to call and branch targets — but those are function *starts*, and a
+function start is exactly where a linear sweep is most likely to be aligned, so the mechanism
+predicts nothing. Measured by `npm run corpus:gridserve -- <path>`, which wraps the Capstone handle
+and drives the real `dispatch`: of the **222137** instructions the method decodes over the four
+corpus binaries and the `go` image, **99.9–100.0% are at an address the grid also holds an
+instruction at, and 100.0% of those agree in mnemonic, operands and size.** Per phase it is 100.0%
+for `.pdata`, 100.0% for the BFS and 99.0–100.0% for the gap fill; the whole residue is 26
+instructions on t32 and 22 on w32 and zero on the three x64 images. A sweep walks into data and
+comes out misaligned, so its grid is a *superset* almost everywhere (186281 entries against the
+155531 this method wants on the `go` image) rather than a sparser one — which is why the earlier
+guess of 96–97% was too pessimistic.
+
+The same harness reports the differential and the timing, both sides pinned in one process. Served
+against decoded, the returned `Instruction[]` is identical element for element and field for field —
+`bytes`, `source` and `comment` included — **0 differing on all five images**. Milliseconds, medians
+of five:
+
+| | grid | hybrid insns | decoded | served |
+|---|---|---|---|---|
+| `go` x64 | 186281 | 155531 | 770 | **203** |
+| t32.exe | 18280 | 18045 | 133 | **22** |
+| t64.exe | 17238 | 16844 | 71 | **20** |
+| w32.exe | 16814 | 16606 | 115 | **14** |
+| w64.exe | 15504 | 15111 | 62 | **10** |
+
+Replayed as whole loads against the real dispatch, in three modes — every RPC sweeping for itself,
+the x40u tree, and this one — the x40u row reproduces the stamped totals above to within run-to-run
+spread, which is what makes the third row comparable: `go` 2961 → 1654 → **1018**, t32 363 → 241 →
+**128**, t64 283 → 164 → **96**, w32 343 → 206 → **117**, w64 241 → 137 → **82**. So this is a
+further 38–47% off a load on top of x40u's 32–47%.
+
+Three things about the mechanism. It **peeks** the memo rather than getting it: the memo holds one
+slot, so computing here would both pay for a sweep this method does not need and evict the section
+the other two RPCs share — and a miss must leave the slot exactly as it found it. Peeking costs
+nothing in practice because the ordering is structural rather than lucky: `useDisassemblyRows.ts`
+posts `hybridDisassemble` only once `state.functions` is non-empty, i.e. only after
+`detectFunctions` has filled the slot. The live miss is a **hex patch**, which hands this method a
+modified copy of the section; the content key declines it and the fall-back is the whole of the fix.
+And a served instruction's `bytes` is a private `.slice()`, never a `subarray` of the section: it
+reaches the view as `Instruction.bytes` and therefore crosses `postMessage` in the reply, where a
+view would make the structured clone serialise the whole `.text` once per instruction. Nothing else
+would catch that — the values are identical either way (`peek-a-bin-iqzu`).
 
 **An A64 instruction's inline comment comes from the address idiom, not from its operand.**
 `mapInsn` in `functionDetect.ts` resolves a reference with `resolveRipTarget` and, failing that,

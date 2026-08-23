@@ -38,14 +38,21 @@
  *
  * This is `peek-a-bin-kis`' `Arm64SweepCache` on the other architecture, and
  * unlike that one it is *not* a transcription: A64 is fixed-width, so there the
- * sweep IS the disassembly and all three RPCs want the same array. Here only two
- * of the three do — `hybridDisassemble` is recursive descent over a BFS work
- * queue plus a gap fill, producing a different and annotated stream — so it is
- * deliberately not routed through this.
+ * sweep IS the disassembly and all three RPCs want the same *array*. Here only
+ * two of the three do — `hybridDisassemble` is recursive descent over a BFS work
+ * queue plus a gap fill, producing a different, annotated, smaller stream. It
+ * shares this sweep all the same, one level down: {@link gridScan} makes the
+ * held grid the *decoder* underneath that method, so a decode at an address the
+ * grid has costs a binary search instead of a `cs_disasm` and every phase keeps
+ * its own stepping. See that function for the coincidence rate that justifies
+ * it and for the three ways it could be wrong (peek-a-bin-iqzu).
  *
  * End to end through the real `dispatch`, four RPCs in App.tsx's order
  * (detect, hybrid, xrefs, xrefs again with the extracted string set), one memo
- * against a memo that never stores:
+ * against a memo that never stores. **The `hybrid` column is this table's
+ * historical figure and has since fallen by a further 74-88%** — it was
+ * unchanged work when this was taken and is `gridScan`'s subject now; the
+ * current totals are `go` 1018, t32 128, t64 96, w32 117, w64 82:
  *
  * | image  | mode   | detect | hybrid | xrefs | xrefs2 | total |
  * |--------|--------|--------|--------|-------|--------|-------|
@@ -95,7 +102,14 @@
  * rolling window straight through with no cast and no conversion.
  */
 
-import { type CapstoneHandle, createScan } from "./capstoneWindow";
+import {
+  type CapstoneHandle,
+  type CapstoneScan,
+  CS_MAX_INSNS_PER_CALL,
+  CS_WINDOW_BYTES,
+  createScan,
+  type RawInsn,
+} from "./capstoneWindow";
 import { SectionMemo } from "./sectionMemo";
 
 /**
@@ -184,8 +198,147 @@ export class X86SweepCache {
     return this.memo.get(bytes, baseAddress, cs, () => sweepX86(bytes, baseAddress, cs, where));
   }
 
+  /**
+   * The held sweep of exactly these bytes, or `undefined` — never sweeping.
+   *
+   * `hybridDisassemble`'s call. See {@link SectionMemo.peek} for why a
+   * consumer that must not evict the slot has to peek rather than `get`, and
+   * {@link gridScan} for what it does with the answer.
+   */
+  peek(
+    bytes: Uint8Array,
+    baseAddress: number,
+    cs: CapstoneHandle | undefined,
+  ): SweptInsn[] | undefined {
+    return this.memo.peek(bytes, baseAddress, cs);
+  }
+
   /** Forget the held section. See {@link SectionMemo.clear}. */
   clear(): void {
     this.memo.clear();
   }
+}
+
+/**
+ * The index of the entry at exactly `address`, or `-1`.
+ *
+ * {@link sweepX86} emits strictly ascending addresses — it advances past the
+ * instruction it just decoded, or by one byte when the decoder refused — so a
+ * binary search is available with **no second structure over the same bytes**.
+ * That is the point: a `Map<number, SweptInsn>` would be a third array over the
+ * section (measured at ~0.13 µs/insn to build and tens of megabytes to hold on
+ * a large image), where 18 comparisons cost 0.076 µs against the 3.7 µs decode
+ * they replace.
+ */
+function indexOfAddress(grid: SweptInsn[], address: number): number {
+  let lo = 0;
+  let hi = grid.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const at = grid[mid].address;
+    if (at === address) return mid;
+    if (at < address) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/**
+ * A scan that answers from an already-computed sweep where it can, and from the
+ * decoder where it cannot.
+ *
+ * ## Why this is the shape, rather than a map consulted by each phase
+ *
+ * `hybridDisassemble` decodes in three quite different ways — a bulk pass over
+ * each `.pdata` extent, a BFS asking for one instruction at a time at addresses
+ * a *caller* named, and a linear fill of every gap the first two left — and each
+ * has its own rule for how far to advance and when to stop. Interposing at the
+ * **decoder** rather than at the three call sites means all three keep their
+ * loops verbatim, so the stepping cannot come apart from the stepping this
+ * replaces. It is `Arm64SweepCache`'s division exactly: only the decode is
+ * served, and everything the caller does with it — `mapInsn`'s annotation, the
+ * `source` marking, the coverage bitmap — is redone per call.
+ *
+ * ## Why it is sound
+ *
+ * A decode at an address is a function of the bytes at that address, and the
+ * grid was produced from the same section, at the same load address, by the same
+ * handle — which is exactly what {@link SectionMemo}'s three-part key
+ * guarantees, and why the caller must obtain the grid by peeking that memo
+ * rather than by sweeping for itself. Measured over the four corpus binaries and
+ * a 669 KiB-`.text` `go` image: of the 222137 instructions `hybridDisassemble`
+ * decodes, **99.9-100.0% are at an address the grid also has an instruction at,
+ * and 100.0% of those agree in mnemonic, operands and size** (peek-a-bin-iqzu).
+ *
+ * The residue is 26 instructions on t32 and 22 on w32 and zero on the three x64
+ * images, and it is not a defect in either direction: a linear sweep walks into
+ * data and comes out misaligned, so it has *more* instructions than this method
+ * wants (186281 against 155531 on the `go` image) and occasionally lacks one at
+ * an address recursive descent knows to be a boundary. Every such address simply
+ * misses and is decoded.
+ *
+ * ## The three rules, each of which is a way to be wrong
+ *
+ *  * **A miss delegates.** An address the grid has no entry at is either one the
+ *    sweep stepped over or one the decoder refused; the two are indistinguishable
+ *    from the grid, and in both cases the real scan gives the right answer.
+ *  * **A run stops where the grid stops being contiguous.** `cs_disasm` returns
+ *    instructions until it meets a byte it cannot decode; a discontinuity in the
+ *    grid is that byte, recorded. Serving past it would invent instructions
+ *    across a hole the caller is entitled to see.
+ *  * **The caller's window still bounds the run.** `createScan` clamps every call
+ *    to {@link CS_WINDOW_BYTES}, to the caller's `limit` and to the buffer, and
+ *    Capstone never returns an instruction extending past that end. So an entry
+ *    that would straddle the window ends the run here too, or the caller's
+ *    `offset` advance would differ from what it advanced by before.
+ *
+ * ## `bytes` is a private copy, and that is not a detail
+ *
+ * `RawInsn.bytes` reaches the view as `Instruction.bytes` (the hex column) and
+ * therefore crosses `postMessage` in the reply. capstone-wasm builds it with
+ * `HEAPU8.slice`, i.e. its own small buffer; a `subarray` of the section here
+ * would look identical and would make the reply's structured clone serialise the
+ * **whole `.text` once per instruction**. `.slice()`, always — pinned by a test.
+ */
+export function gridScan(grid: SweptInsn[], real: CapstoneScan): CapstoneScan {
+  function serve(
+    bytes: Uint8Array,
+    offset: number,
+    limit: number,
+    address: number,
+    maxInsns: number,
+  ): RawInsn[] | null {
+    // `createScan.run`'s own bound, restated: a served run must end where a
+    // decoded one would have.
+    const end = Math.min(offset + CS_WINDOW_BYTES, limit, bytes.length);
+    if (end <= offset) return null;
+    let i = indexOfAddress(grid, address);
+    if (i < 0) return null;
+    const out: RawInsn[] = [];
+    let expect = address;
+    while (i < grid.length && out.length < maxInsns) {
+      const g = grid[i];
+      if (g.address !== expect) break;
+      const at = offset + (g.address - address);
+      if (at + g.size > end) break;
+      out.push({
+        address: g.address,
+        bytes: bytes.slice(at, at + g.size),
+        mnemonic: g.mnemonic,
+        opStr: g.opStr,
+        size: g.size,
+      });
+      expect = g.address + g.size;
+      i++;
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  return {
+    decode: (bytes, offset, limit, address) =>
+      serve(bytes, offset, limit, address, CS_MAX_INSNS_PER_CALL) ??
+      real.decode(bytes, offset, limit, address),
+    decodeOne: (bytes, offset, limit, address) =>
+      serve(bytes, offset, limit, address, 1) ?? real.decodeOne(bytes, offset, limit, address),
+  };
 }

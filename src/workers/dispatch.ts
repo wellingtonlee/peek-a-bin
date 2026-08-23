@@ -327,17 +327,31 @@ export async function dispatch(
           args.jumpTableSpans,
         );
       }
-      // Deliberately NOT routed through `state.x86Sweep`, and this is the one
-      // place the x86 and ARM64 stories genuinely differ. A64 is fixed-width,
-      // so there the sweep IS the disassembly and all three RPCs want the same
-      // array. Here this method is recursive descent over a BFS work queue plus
-      // a gap fill: it decodes one instruction at a time at addresses a *caller*
-      // named, and the linear sweep's grid need not have an instruction at any
-      // of them. Serving it from the sweep would mean an address-keyed map with
-      // a per-address fallback — sound, since a decode at an address is a
-      // function of the bytes there, but a different mechanism with its own cost
-      // and its own measurement. See peek-a-bin-x40u for the coincidence rate
-      // that would decide whether it is worth it.
+      // Served from `state.x86Sweep` where it can be, and this is where the x86
+      // and ARM64 stories converge without becoming the same story. A64 is
+      // fixed-width, so there the sweep IS the disassembly and the cache hands
+      // over the whole array. Here the method is recursive descent over a BFS
+      // work queue plus a gap fill, producing a different and annotated stream —
+      // so what is shared is the *decoder underneath it*: `gridScan` answers
+      // each decode from the held sweep where the grid has an instruction at
+      // that address and delegates to Capstone where it does not, and all three
+      // phases keep their own stepping.
+      //
+      // THE COINCIDENCE RATE, which peek-a-bin-x40u deferred and
+      // peek-a-bin-iqzu took: of the 222137 instructions this method decodes
+      // over the four corpus binaries and a 669 KiB-`.text` `go` image,
+      // 99.9-100.0% are at an address the grid also holds an instruction at, and
+      // 100.0% of those agree in mnemonic, operands and size.
+      //
+      // PEEK, never `sweep`. A miss must leave this method doing exactly what it
+      // did before and must leave the slot exactly as it found it: the memo has
+      // one slot, and computing here would both pay for a sweep this method does
+      // not need and evict the section the other two RPCs share. It costs
+      // nothing in practice because the order is structural rather than lucky —
+      // `useDisassemblyRows.ts` only calls this when `state.functions` is
+      // non-empty, i.e. after `detectFunctions` has already filled the slot.
+      // A hex patch is the live miss: it hands us a *different* byte array, the
+      // content key declines it, and the fall-back is the whole of the fix.
       return _hybridDisassemble(
         args.bytes,
         args.baseAddress,
@@ -348,6 +362,11 @@ export async function dispatch(
         // Byte ranges detection recovered as jump tables. Data, so the gap fill
         // leaves them alone rather than decoding case addresses as code.
         args.jumpTableSpans,
+        // The same handle `detectFunctions` swept under — the memo's third key
+        // part, so a 32-bit reading can never be served to a 64-bit request. No
+        // handle at all cannot match anything, and `_hybridDisassemble` throws
+        // for it on its own first line exactly as it always did.
+        state.x86Sweep.peek(args.bytes, args.baseAddress, args.is64 ? state.cs64 : state.cs32),
       );
     }
 

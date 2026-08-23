@@ -93,6 +93,18 @@
  * smaller now, is it worth it yet" therefore has the answer measured twice, on
  * both architectures: no.
  *
+ * **`peek-a-bin-iqzu` shrank the denominator again and the answer did not
+ * change.** `hybridDisassemble` was the last x86 RPC still running Capstone over
+ * `.text` for itself and is now served from the same held sweep, taking a whole
+ * `go` load from ~1654 ms to ~1018 and t32's from ~241 to ~128. So a load now
+ * does four sends against *one* sweep plus three resolves — the copy is a larger
+ * fraction of a much smaller total. Re-measured with the same harness:
+ * **0.0547% on the `go` image and 0.0275% on t32**, from 0.0357% and 0.0072%.
+ * Still under a tenth of one percent after the denominator has been cut roughly
+ * threefold twice over, which is the point — both terms are linear in the
+ * section, so the ratio is a property of the tool rather than of the file.
+ * Three measurements, one answer: no.
+ *
  * **The bead's headline figure describes the cost this module already removed.**
  * "116-192 ms of memcpy per send" is the *cloned view* column of the table
  * above, i.e. the pre-`peek-a-bin-7mf` behaviour. What a send costs now is the
