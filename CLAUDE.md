@@ -987,15 +987,60 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
   - **A `try`'s handler enters from the BODY'S MERGE**, not from the pre-construct state and not from
     the body's end state: the unwinder enters mid-body (`peek-a-bin-d3z`'s 1160 blocks are the same
     fact one storey up).
-  - **Loop *exit* joins use the changed set; loop *headers* keep the syntactic `assigned()`**, and
-    that is a stated limitation rather than an oversight — the body has not been walked when the
-    header join is taken, so closing it needs a per-loop fixpoint nested inside the label one
-    (2^depth walks). Callee clobbers need nothing: SSA already spells them `clobbered_<reg>_<n>`,
+  - **Loop *exit* joins use the changed set; loop *headers* used to keep the syntactic
+    `assigned()`.** That was recorded as needing a per-loop fixpoint nested inside the label one
+    (2^depth walks); **`peek-a-bin-mvc2` closed it in ONE pass and no second fixpoint** — see the
+    bullet below. Callee clobbers need nothing: SSA already spells them `clobbered_<reg>_<n>`,
     which are distinct keys.
   - **The `try` and loop-exit rules are INERT on this corpus** — an ablation reverting both leaves
     the emitted C byte-identical on all four binaries — so they are bounds pinned by unit test, the
     status `pop esp` and the `rip`/`rsp` refusals have, and not measured savings. Five negative
     controls, each failing only its own test (`peek-a-bin-9fp5`).
+
+- **…and a LOOP HEADER is answered in one pass after all, exactly — the nested fixpoint it was
+  filed as needing is not required, and the population it closes is real but INERT here.** The
+  header is the one merge that cannot diff against the pre-construct state, because its back edge
+  is a body the walk has not reached, so `join` minted over `assigned()` alone. The set is now the
+  body's *definitions* plus what a `label` in the body would re-value, and the reason no iteration
+  is needed is a boundedness argument rather than a measurement: **a key enters `cur` only through
+  an `assign`, a `call_stmt` result, a `mint`, or a `label` reset, and the last two only ever
+  re-value keys `cur` already holds** — so every key the body can change is already in flight at
+  the header or is one a syntactic walk names. Five things (`peek-a-bin-mvc2`, measured at
+  `1198f4a`, both sides pinned):
+  - **THE FILED SHAPE — a label the body resets — WAS NOT THE WHOLE POPULATION, and the half nobody
+    had noticed is `peek-a-bin-9fp5`'s own fact.** `assigned()` read `assign` destinations and not
+    `call_stmt.resultDest`, so a loop whose body calls anything failed to mint the **accumulator**
+    at its own header — `t32!sub_40DD37`'s defect, at a loop. Census over the four binaries:
+    **50/53/47/38 of 187/188/180/174 loop headers** (t32/t64/w64/w32) had a key the body changed and
+    the header missed; adding call results fixes 30/33/31/22 of those headers, and the residue is
+    **20/20/16/16 headers, every single one of which contains a `label`**. That 100% is what makes
+    the two-part rule provably complete rather than a pair of patches.
+  - **What the label contributes is `atLabel`'s own rule read FORWARDS, never "every key in
+    flight".** A label no `goto` names resets all of them, so for that shape the union is exact; a
+    `goto`-named one leaves a key the fixpoint settled exactly as it found it, and `labelResets`
+    compares the settled value against the header's rather than assuming. It mirrors `atLabel`
+    branch for branch — the `probe` pass, the `blunt` fallback, and the kept-key-not-in-flight arm —
+    because two readings of one label is how they come to disagree.
+  - **THE BLUNT VERSION WAS IMPLEMENTED AND MEASURED, AND IT COSTS `t32!sub_4041D0`** — the
+    single-definition ESI `peek-a-bin-slkh` adjudicated against `objdump`. Minting every in-flight
+    key whenever the body holds a label moves emitted C in **50/10/8/47** functions, of which
+    **2/1/1/2** are substantive once `struct_N` renumbering is normalised out, and two of those are
+    slkh's witness and its w32 twin losing a member access each (`->field_0x` 531→529 and
+    516→514). Every gate stays green through that variant — `structOverlaps` 0, `offsetof` 1.00,
+    verdict "no regression" — so **the corpus cannot tell the blunt rule from the exact one** and
+    only reading the emitted C separates them. The precision half is pinned by its own test.
+  - **The gap is now provably CLOSED, not narrowed, and the instrument says so.** Instrumented over
+    the whole corpus, keys a loop body changes that its own header did not mint go
+    **328/681/448/215 → 0/0/0/0**, while the header key sets grow **635→958, 785→1460, 685→1127,
+    578→788** across **49/52/46/37** headers (+30/34/32/22 from call results, +293/641/410/188 from
+    labels). So the rule is *reached* — the reason to report both numbers is that a rule adding
+    nothing and a rule never consulted read the same.
+  - **And not one of those extra phis moves anything.** Emitted C **byte-identical on all four
+    binaries**, `report.txt` identical line for line, the `cc/` and `offsetof/` artifact trees
+    identical under `diff -r`, `CHANGED 0 / only-base 0 / only-change 0`, `structOverlaps` 0,
+    `offsetof` 393/282/287/309 at ratio 1.00, `->field_0x` 531/459/440/516 unmoved. It is therefore
+    a **bound pinned by unit test rather than a measured saving**, the status the `try` and
+    loop-exit rules above already have. Three negative controls, each failing exactly one test.
 
 - **…and a `label` is resolved from the states its own `goto`s carry, not reset blindly — but the
   ceiling that reaching for it suggests is a FABRICATION, measured on the very witness that

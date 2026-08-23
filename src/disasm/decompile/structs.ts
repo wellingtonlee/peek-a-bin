@@ -557,20 +557,16 @@ function exprKey(expr: IRExpr): string {
  * object outright. So a folded copy *hands its source's generation over* rather
  * than minting one, and the two names then move independently.
  *
- * TWO STATED LIMITATIONS, both pre-existing rather than introduced:
+ * ONE STATED LIMITATION, pre-existing rather than introduced: a `raw`
+ * statement's register writes are not modelled anywhere in this IR (see
+ * `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing), so a
+ * base redefined by an unlifted instruction still groups across it.
  *
- *   * A `raw` statement's register writes are not modelled anywhere in this IR
- *     (see `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing),
- *     so a base redefined by an unlifted instruction still groups across it.
- *   * A LOOP HEADER is minted from `assigned` and not from what the body
- *     changed, because the body has not been walked when the header phi has to
- *     exist. A key only a `label` inside the body resets is therefore not
- *     minted there, so a read above that label carries the pre-loop generation
- *     although iteration two holds the label's value. Closing it needs the body
- *     walked before the header is minted — a per-loop fixpoint nested inside
- *     the label one, 2^depth walks for nested loops — which is a separate
- *     change with a cost of its own to measure. The loop EXIT joins do use the
- *     changed set, so nothing the body left in flight carries past the loop.
+ * A LOOP HEADER is the one merge that cannot diff the state against the one
+ * before the construct, because its back edge is a body the walk has not
+ * reached; it is answered in one pass from the body's text plus the state in
+ * flight, exactly, and `loopHeader` carries the argument for why that is a
+ * bound rather than a guess.
  */
 /**
  * How many times the label fixpoint may re-walk one function before giving up.
@@ -580,6 +576,15 @@ function exprKey(expr: IRExpr): string {
  * bug in that argument, not against the argument. Exceeding it falls back to
  * resetting every key at every label, which is what this walk did before
  * `peek-a-bin-slkh` and is sound at any precision.
+ *
+ * THIS IS STILL THE ONLY FIXPOINT, and `loopHeader` reading `keep` does not add
+ * a second one. Its key set is a pure function of the settled state, so a pass
+ * whose header mints moved records different states at the labels below it —
+ * and a state that moved can only take a (label, key) further along
+ * absent → kept → conflicted, never back, because `conflicted` only grows and a
+ * conflicted key is skipped outright. Once `keep` is stable the walk is a
+ * function of it alone and reproduces itself. So the bound above is unchanged,
+ * and in particular a loop header costs one pass and not a nested iteration.
  */
 const LABEL_FIXPOINT_PASSES = 24;
 
@@ -649,17 +654,70 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
       });
     }
 
-    /** Every key an assignment anywhere under `stmts` defines. */
-    function assigned(stmts: IRStmt[], out: Set<string>): Set<string> {
+    /**
+     * Every key a statement under `stmts` DEFINES, and whether any of them is
+     * a `label`.
+     *
+     * Both halves are what a loop header needs and neither is a free choice.
+     * A `call_stmt` defines its `resultDest` exactly as an `assign` defines its
+     * destination — that is the accumulator write `peek-a-bin-9fp5` added to
+     * this walk — so omitting it here left every loop whose body calls
+     * something failing to mint the accumulator at its own header. A `label` is
+     * reported rather than resolved because what it resets is a property of the
+     * walk's state and not of the text; the caller turns that into a key set
+     * from the state it has (see `loopHeader`).
+     */
+    function definedIn(
+      stmts: IRStmt[],
+      out: Set<string>,
+      labels: (IRStmt & { kind: "label" })[],
+    ): void {
       for (const s of stmts) {
         if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
           out.add(exprKey(s.dest));
         }
+        if (s.kind === "call_stmt") {
+          const d = s.resultDest;
+          if (d && (d.kind === "reg" || d.kind === "var")) out.add(exprKey(d));
+        }
+        if (s.kind === "label") labels.push(s);
         // init and update are single statements, so `bodiesOf` does not reach them.
-        if (s.kind === "for") assigned([s.init, s.update], out);
-        for (const b of bodiesOf(s)) assigned(b, out);
+        if (s.kind === "for") definedIn([s.init, s.update], out, labels);
+        for (const b of bodiesOf(s)) definedIn(b, out, labels);
       }
-      return out;
+    }
+
+    /**
+     * The keys `s` — a `label` somewhere inside a loop body — would re-value,
+     * asked from the header.
+     *
+     * This is `atLabel`'s own rule read forwards, and it has to be, or the two
+     * disagree about the same label: what a label resets is a property of the
+     * settled `keep` map and of the walk's mode, not of the label's text. A
+     * `goto`-named label whose incoming edges the fixpoint agreed about leaves
+     * its key exactly as it found it, and minting for that at the header is the
+     * one merge too many — it costs `t32!sub_4041D0` the single-definition ESI
+     * `peek-a-bin-slkh` adjudicated against `objdump`, which is the reason this
+     * is not simply "every key in flight".
+     *
+     * It is asked with the state at the HEADER, where the label will see the
+     * state at itself. The difference cannot lose a key: they differ only on
+     * keys the body assigns between the two points, and those are already in
+     * `definedIn`.
+     */
+    function labelResets(s: IRStmt & { kind: "label" }, out: Set<string>): void {
+      if (!gotoTargets.has(s.name)) {
+        // Resets every key in flight, unconditionally — nothing survives it.
+        for (const k of cur.keys()) out.add(k);
+        return;
+      }
+      // The probe pass leaves a `goto`-named label alone, so nothing moves.
+      if (probe) return;
+      const kept = blunt ? undefined : keep.get(s.name);
+      const reset = `L${stmtId.get(s)}:`;
+      for (const k of cur.keys()) if ((kept?.get(k) ?? reset + k) !== genOf(k)) out.add(k);
+      // A key the settled state names that is not in flight arrives here too.
+      if (kept) for (const [k, v] of kept) if (v !== genOf(k)) out.add(k);
     }
 
     /** Overwrite `cur` with `state`. */
@@ -689,21 +747,40 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
     }
 
     /**
-     * A merge point over statements the walk has NOT reached yet — a loop
-     * header, whose incoming back edge is the body below it.
+     * A merge point over statements the walk has NOT reached yet — a LOOP
+     * HEADER, whose incoming back edge is the body below it.
      *
-     * The key set has to be syntactic here, and that is the one place this walk
-     * still under-mints: a key only a `label` inside the body resets is not in
-     * `assigned`, so a read above that label carries the pre-loop generation
-     * although iteration two holds the label's value. Closing it needs the body
-     * walked before the header is minted, i.e. a per-loop fixpoint nested
-     * inside the label one, and that is a separate change with a cost
-     * (2^depth walks for nested loops) that has to be measured on its own.
+     * Every other merge in this walk diffs the state against the one before the
+     * construct (`changedSince`), which cannot be done here: the back edge is
+     * the body, and the body has not been walked when the header phi has to
+     * exist. The set is therefore derived from the body's text plus the state
+     * in flight, and the derivation is exact rather than a guess, because the
+     * keys `cur` can hold anywhere inside the body are bounded:
+     *
+     *   * A key enters `cur` only through an `assign`, a `call_stmt` result, a
+     *     `mint`, or a `label` reset — and the last two only ever re-value keys
+     *     `cur` already holds. So every key in flight anywhere in the body is
+     *     already in `cur` here or is one `definedIn` names, and the union of
+     *     the two is a superset of whatever the body could change.
+     *   * With NO `label` in the body that superset collapses to `definedIn`
+     *     alone, which is then exactly the changed set — nothing else can move
+     *     a key. This is the common case and it costs nothing.
+     *   * With a label, the keys in flight are in scope for a reset, and which
+     *     of them a given label actually re-values is `labelResets`' question —
+     *     `atLabel`'s own rule, asked forwards. Answering it "every key in
+     *     flight" instead is sound but blunt, and measurably so: it costs
+     *     `t32!sub_4041D0` the single-definition ESI `peek-a-bin-slkh`
+     *     adjudicated against `objdump`.
+     *
+     * So the header is answered in ONE pass, with no per-loop fixpoint nested
+     * inside the label one — which is what the cost of this was thought to be.
      */
-    function join(at: IRStmt, which: number, arms: IRStmt[][]): void {
+    function loopHeader(at: IRStmt, arms: IRStmt[][]): void {
       const keys = new Set<string>();
-      for (const arm of arms) assigned(arm, keys);
-      mint(at, which, keys);
+      const labels: (IRStmt & { kind: "label" })[] = [];
+      for (const arm of arms) definedIn(arm, keys, labels);
+      for (const l of labels) labelResets(l, keys);
+      mint(at, 0, keys);
     }
 
     /**
@@ -832,7 +909,7 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
           case "while": {
             // The header phi first: the condition is re-evaluated after every
             // iteration, so what it reads is the merge and not the entry value.
-            join(s, 0, [s.body]);
+            loopHeader(s, [s.body]);
             read(s.condition);
             // A `while` leaves through the header test, so the state at the
             // exit is the header's for every key the body did not touch — the
@@ -845,7 +922,7 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
             break;
           }
           case "do_while": {
-            join(s, 0, [s.body]);
+            loopHeader(s, [s.body]);
             const pre = new Map(cur);
             visit(s.body);
             // The condition is tested after the body, so it reads the body's
@@ -858,7 +935,7 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
           }
           case "for": {
             visit([s.init]);
-            join(s, 0, [s.body, [s.update]]);
+            loopHeader(s, [s.body, [s.update]]);
             read(s.condition);
             const pre = new Map(cur);
             visit(s.body);

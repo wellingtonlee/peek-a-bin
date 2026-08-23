@@ -2476,6 +2476,95 @@ describe("synthesizeStructs — base value generations", () => {
     ]);
     expect(out.typedefs ?? []).toHaveLength(0);
   });
+
+  // ── A loop HEADER's key set is the body's, not its assignments (mvc2) ──
+
+  it("mints a call result at the loop header that writes it in the body", () => {
+    // The back edge carries the CALL's value, so a read of the accumulator
+    // above the call is a different object on iteration two — `peek-a-bin-9fp5`
+    // added exactly that fact for a straight-line call and the loop header,
+    // whose key set was `assign` destinations only, did not have it.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+      {
+        kind: "while",
+        condition: irBinary("!=", RDX, irConst(0)),
+        body: [
+          assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+          callResult("sub_401200", irReg("rax", 8)),
+        ],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("leaves a base a call in the loop body does not write alone", () => {
+    // The negative half of the rule above: only `resultDest` is redefined, so a
+    // header that split every base at every call it contains would recover
+    // nothing from any loop that calls anything.
+    const out = run([
+      assign(irReg("rbx", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rbx", 8), 0)),
+      {
+        kind: "while",
+        condition: irBinary("!=", RDX, irConst(0)),
+        body: [
+          assign(irReg("r9d", 4), at(irReg("rbx", 8), 8)),
+          callResult("sub_401200", irReg("rax", 8)),
+        ],
+      },
+    ]);
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([[0, 8]]);
+  });
+
+  it("mints at the loop header for a key only a label in the body resets", () => {
+    // The same shape `peek-a-bin-9fp5` fixed at an `if`, at a loop header. The
+    // body assigns nothing, so the header used to mint nothing at all; the
+    // label no `goto` names is entered by the unwinder, so on iteration two the
+    // base holds its token and the read above it is a second object.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+      {
+        kind: "while",
+        condition: irBinary("!=", RDX, irConst(0)),
+        body: [
+          assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+          { kind: "label", name: "loc_401040" },
+        ],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("does not mint at the loop header for a label whose edges agree", () => {
+    // THE PRECISION HALF, and the reason the header does not simply mint every
+    // key in flight whenever the body holds a label. RAX is established once
+    // and nothing writes it again, so both edges into `loc_401040` — the
+    // `goto` and the fall-through — carry the same value and the label leaves
+    // it alone; the two reads are one object. This is `t32!sub_4041D0` in
+    // miniature, the single-definition ESI `peek-a-bin-slkh` adjudicated
+    // against `objdump`, and the blunt rule costs it.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+      {
+        kind: "while",
+        condition: irBinary("!=", RDX, irConst(0)),
+        body: [
+          {
+            kind: "if",
+            condition: irBinary("!=", RDX, irConst(1)),
+            thenBody: [{ kind: "goto", label: "loc_401040" }],
+          },
+          { kind: "label", name: "loc_401040" },
+          assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+        ],
+      },
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
 });
 
 /**
