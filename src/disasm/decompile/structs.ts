@@ -1,7 +1,16 @@
 import type { ApiFuncType } from "./apitypes";
 import { API_TYPES } from "./apitypes";
 import type { IRCall, IRExpr, IRFunction, IRStmt } from "./ir";
-import { canonReg, irArrayAccess, irConst, irFieldAccess, irReg, walkStmts } from "./ir";
+import {
+  bodiesOf,
+  canonReg,
+  irArrayAccess,
+  irConst,
+  irFieldAccess,
+  irReg,
+  walkExpr,
+  walkStmts,
+} from "./ir";
 import type { DecompType } from "./typeInfer";
 import { meetTypes } from "./typeInfer";
 
@@ -417,6 +426,187 @@ function exprKey(expr: IRExpr): string {
     default:
       return `?:${JSON.stringify(expr)}`;
   }
+}
+
+// ── Base Value Generations ──
+
+/**
+ * Which *value* of a base register each access reads, as a generation number
+ * per `reg`/`var` node.
+ *
+ * `exprKey` names a base by its canonical register and nothing else, which is
+ * version-blind *and* program-point-blind — so every access through any dynamic
+ * value one register held anywhere in the function grouped as one object. The
+ * fabrication that buys is not subtle: `t32!sub_40667A` (MSVC `_ioinit`) emitted
+ * a `struct_26` whose `field_0x0` is `*(DWORD*)StartupInfo.lpReserved2` and
+ * whose `field_0x1F`/`field_0x33` are `ioinfo` members read through a
+ * `__pioinfo` element pointer, three full redefinitions of EAX apart. Neither
+ * reading is wrong about its own bytes; the *object* is a fiction, and there is
+ * no gate that can see it — `offsetof` compiles and runs the layout, which
+ * proves it self-consistent and never that it is one object's.
+ *
+ * `buildAliasMap` already refuses to state a *copy* chain whose source changes
+ * (its `ambiguous` set). This is the same reasoning applied to the base itself,
+ * and the answer is a refinement rather than a refusal: a generation number
+ * standing in for the SSA version that `destroySSA` collapsed away.
+ *
+ * WHAT MAKES IT SAFE, and it is a property rather than a measurement: the
+ * scoped key *determines* the unscoped one, so the grouping this produces is a
+ * partition REFINEMENT of the old one. Two accesses grouped apart before cannot
+ * be brought together by it — the change can only split, never merge, so it
+ * cannot invent an object. What it can do is split a group below the two-field
+ * minimum, and that cost is what the corpus figures are for.
+ *
+ * THE WALK IS TREE ORDER WITH CONSERVATIVE JOINS, not a reaching-definitions
+ * fixpoint. Every construct that merges control flow ends by minting a fresh
+ * generation for each key any of its arms assigned — which is what an SSA phi
+ * would name — and a `label` mints one for *every* live key, because a jump
+ * target is reached from somewhere this walk does not model. Each of those is an
+ * over-split relative to the ideal, i.e. the benign direction.
+ *
+ * GENERATIONS ARE TRACKED PER NAME AND SHARED PER OBJECT, which is why `cur` is
+ * keyed on the raw `exprKey` while the grouping is keyed on the alias-resolved
+ * one. `buildAliasMap` folds `rcx_0` (a `splitStaleReads` repair variable) onto
+ * `reg:rcx`, correctly — they denote the same object at the copy — but a later
+ * `rcx = *(rcx_0 + 8)` redefines only RCX, and `rcx_0` still holds what it was
+ * given. Tracking the generation on the folded key made every read of `rcx_0`
+ * take RCX's newest generation and cost `t64!sub_14000CB64` a four-offset
+ * object outright. So a folded copy *hands its source's generation over* rather
+ * than minting one, and the two names then move independently.
+ *
+ * ONE STATED LIMITATION, pre-existing rather than introduced: a `raw`
+ * statement's register writes are not modelled anywhere in this IR (see
+ * `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing), so a base
+ * redefined by an unlifted instruction still groups across it.
+ */
+function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<IRExpr, number> {
+  const gen = new Map<IRExpr, number>();
+  /** Raw name key → the generation in flight. Absent means the entry value. */
+  const cur = new Map<string, number>();
+  let next = 1;
+
+  const genOf = (key: string): number => cur.get(key) ?? 0;
+  const fresh = (key: string): void => {
+    cur.set(key, next);
+    next++;
+  };
+
+  /** Annotate every register and variable node in `expr` with its generation. */
+  function read(expr: IRExpr): void {
+    walkExpr(expr, (e) => {
+      if (e.kind === "reg" || e.kind === "var") gen.set(e, genOf(exprKey(e)));
+    });
+  }
+
+  /** Every key an assignment anywhere under `stmts` defines. */
+  function assigned(stmts: IRStmt[], out: Set<string>): Set<string> {
+    for (const s of stmts) {
+      if (s.kind === "assign" && (s.dest.kind === "reg" || s.dest.kind === "var")) {
+        out.add(exprKey(s.dest));
+      }
+      // init and update are single statements, so `bodiesOf` does not reach them.
+      if (s.kind === "for") assigned([s.init, s.update], out);
+      for (const b of bodiesOf(s)) assigned(b, out);
+    }
+    return out;
+  }
+
+  /** A merge point: every key an arm may have redefined holds a new value here. */
+  function join(arms: IRStmt[][]): void {
+    const keys = new Set<string>();
+    for (const arm of arms) assigned(arm, keys);
+    for (const k of keys) fresh(k);
+  }
+
+  function visit(stmts: IRStmt[]): void {
+    for (const s of stmts) {
+      switch (s.kind) {
+        case "assign": {
+          read(s.src);
+          if (s.dest.kind === "reg" || s.dest.kind === "var") {
+            const dk = exprKey(s.dest);
+            // A copy `buildAliasMap` already folded onto one key restates the
+            // value rather than redefining it — the same test
+            // `linkNestedStructFields` makes, for the same reason — so the
+            // destination takes the source's generation rather than a new one.
+            const folded =
+              (s.src.kind === "reg" || s.src.kind === "var") &&
+              canonKey(s.src) === canonKey(s.dest);
+            if (folded) cur.set(dk, genOf(exprKey(s.src)));
+            else fresh(dk);
+            gen.set(s.dest, genOf(dk));
+          } else {
+            read(s.dest);
+          }
+          break;
+        }
+        case "store":
+          read(s.address);
+          read(s.value);
+          break;
+        case "call_stmt":
+          read(s.call);
+          break;
+        case "return":
+          if (s.value) read(s.value);
+          break;
+        case "branch":
+          read(s.condition);
+          break;
+        case "if":
+          read(s.condition);
+          visit(s.thenBody);
+          if (s.elseBody) visit(s.elseBody);
+          join(bodiesOf(s));
+          break;
+        case "while":
+          // The header phi first: the condition is re-evaluated after every
+          // iteration, so what it reads is the merge and not the entry value.
+          join([s.body]);
+          read(s.condition);
+          visit(s.body);
+          join([s.body]);
+          break;
+        case "do_while":
+          join([s.body]);
+          visit(s.body);
+          read(s.condition);
+          join([s.body]);
+          break;
+        case "for":
+          visit([s.init]);
+          join([s.body, [s.update]]);
+          read(s.condition);
+          visit(s.body);
+          visit([s.update]);
+          join([s.body, [s.update]]);
+          break;
+        case "switch":
+          read(s.expr);
+          for (const c of s.cases) visit(c.body);
+          if (s.defaultBody) visit(s.defaultBody);
+          join(bodiesOf(s));
+          break;
+        case "try":
+          visit(s.body);
+          visit(s.handler);
+          if (s.filterExpr) read(s.filterExpr);
+          join(bodiesOf(s));
+          break;
+        case "label":
+          // A jump target. What reaches it is not something this walk models,
+          // so nothing in flight survives it.
+          for (const k of [...cur.keys()]) fresh(k);
+          break;
+        case "phi":
+          for (const op of s.operands) read(op.value);
+          break;
+      }
+    }
+  }
+
+  visit(body);
+  return gen;
 }
 
 // ── Stack-Frame Bases ──
@@ -1011,7 +1201,11 @@ function collectCallArgSlots(
 export interface StructGroupReport {
   func: string;
   funcAddr: number;
-  /** Canonical base key — see `exprKey`. Version-blind; that is its own story. */
+  /**
+   * The grouping key: canonical base register plus the generation of the value
+   * the accesses read (`#0` is the register's entry value). See
+   * `baseGenerations`.
+   */
   baseKey: string;
   /** Offset, width, and the stride of an index that reached it (0 for none). */
   accesses: { offset: number; size: number; scale: number }[];
@@ -1102,23 +1296,33 @@ export function synthesizeStructs(
   // 4b. Build alias map
   const aliasMap = buildAliasMap(func.body);
 
-  // Resolve base to canonical form
+  // Resolve base to canonical form. Register-level and generation-blind: the
+  // three passes below ask which *register* is a frame pointer or a parameter,
+  // which is a fact about the name and not about a value it held.
   function canonBase(expr: IRExpr): string {
     const key = exprKey(expr);
     return aliasMap.get(key) ?? key;
   }
 
-  // Group accesses by canonical base. An access whose displacement cannot be a
-  // member's offset is not evidence about this base's shape at all — see
-  // isFieldOffset — so it is left out of the grouping entirely rather than
-  // becoming a field nothing can declare.
-  const groups = new Map<string, { base: IRExpr; accesses: AccessPattern[] }>();
+  // 4b'. Which value of that register each access reads. `accessKey` is the
+  // grouping key from here on and `canonBase` is its register half — see
+  // `baseGenerations` for why one register is not one object.
+  const baseGen = baseGenerations(func.body, canonBase);
+  function accessKey(expr: IRExpr): string {
+    return `${canonBase(expr)}#${baseGen.get(expr) ?? 0}`;
+  }
+
+  // Group accesses by canonical base and generation. An access whose
+  // displacement cannot be a member's offset is not evidence about this base's
+  // shape at all — see isFieldOffset — so it is left out of the grouping
+  // entirely rather than becoming a field nothing can declare.
+  const groups = new Map<string, { base: IRExpr; regKey: string; accesses: AccessPattern[] }>();
   for (const p of patterns) {
     if (!isFieldOffset(p.offset)) continue;
-    const key = canonBase(p.base);
+    const key = accessKey(p.base);
     let group = groups.get(key);
     if (!group) {
-      group = { base: p.base, accesses: [] };
+      group = { base: p.base, regKey: canonBase(p.base), accesses: [] };
       groups.set(key, group);
     }
     group.accesses.push(p);
@@ -1134,9 +1338,9 @@ export function synthesizeStructs(
   // access contained in another one's bytes is a second reading of the same
   // field rather than a second field, and a base with nothing else is no more a
   // struct candidate than a base accessed at one offset is.
-  const candidates = new Map<string, { base: IRExpr; fields: StructField[] }>();
+  const candidates = new Map<string, { base: IRExpr; regKey: string; fields: StructField[] }>();
   for (const [key, group] of groups) {
-    if (frameBases.has(key)) continue;
+    if (frameBases.has(group.regKey)) continue;
     const fields = candidateFields(group.accesses);
     if (observe) {
       observe({
@@ -1152,7 +1356,7 @@ export function synthesizeStructs(
       });
     }
     if (fields.length >= 2) {
-      candidates.set(key, { base: group.base, fields });
+      candidates.set(key, { base: group.base, regKey: group.regKey, fields });
     }
   }
 
@@ -1162,7 +1366,7 @@ export function synthesizeStructs(
     // reachable only for functions that happened to have a struct elsewhere.
     const hasIndexedAccess = patterns.some((p) => p.index !== null && ARRAY_SCALES.has(p.scale));
     if (!hasIndexedAccess) return func;
-    return { ...func, body: rewriteStmts(func.body, new Map(), canonBase) };
+    return { ...func, body: rewriteStmts(func.body, new Map(), accessKey) };
   }
 
   // 4c. Build StructDefs
@@ -1177,8 +1381,8 @@ export function synthesizeStructs(
     // parameter, then the callee's own reading of each slot this base is passed
     // in. Either is direct evidence of identity; shape agreement is the
     // fallback, not the first resort.
-    const paramIdx = ownParamIdx.get(key);
-    const outgoing = callArgSlots.get(key) ?? [];
+    const paramIdx = ownParamIdx.get(group.regKey);
+    const outgoing = callArgSlots.get(group.regKey) ?? [];
     const linked: string[] = [];
     if (paramIdx !== undefined) {
       const fromCaller = registry.getParamStruct(func.address, paramIdx);
@@ -1202,15 +1406,15 @@ export function synthesizeStructs(
   }
 
   // 4d. Enhanced field type inference from usage context
-  inferFieldTypesFromUsage(func.body, baseToStruct, canonBase, registry);
+  inferFieldTypesFromUsage(func.body, baseToStruct, accessKey, registry);
 
   // 4e. Fields that point at another struct. After 4d, whose PVOID guess this
   // refines; before the rewrite, which turns the loads it reads into field
   // accesses.
-  linkNestedStructFields(func.body, baseToStruct, canonBase);
+  linkNestedStructFields(func.body, baseToStruct, accessKey);
 
   // 4f. IR Rewrite (struct fields + array access)
-  const rewrittenBody = rewriteStmts(func.body, baseToStruct, canonBase);
+  const rewrittenBody = rewriteStmts(func.body, baseToStruct, accessKey);
 
   // Collect typedefs for this function
   const usedStructIds = new Set<string>();

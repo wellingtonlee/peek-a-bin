@@ -811,13 +811,23 @@ if (!pre.haveBins || !pre.haveCc) {
      * What IS asserted is that the audit looked. A structure-scraping census
      * fails by silently matching nothing — the observer stops being passed, or
      * `synthesizeStructs` stops calling it — and then a zero population reads as
-     * a clean tree rather than as an absent instrument. `groups` and
-     * `candidates` are non-vacuous on all four binaries: every one of them
+     * a clean tree rather than as an absent instrument. `groups`, `candidates`
+     * and `extents` are non-vacuous on all four binaries: every one of them
      * recovers dozens of struct definitions, so unlike the switch-arm
      * denominator this needs no per-binary condition. `peek-a-bin-k6hh`.
+     *
+     * THE ROW COUNT IS NO LONGER PART OF THAT, and the reason is the whole of
+     * `peek-a-bin-z8q7`. This used to assert `rows > 0` — "the population is
+     * small and has never been empty" — which was true when it was written and
+     * stopped being true at `9b1de0a`: every one of the twelve rows at
+     * `baa7f61` was at a base that pooled two unrelated values of one register,
+     * and keying the grouping on the value rather than on the register name
+     * emptied the population. Asserting a non-zero row count would now gate
+     * red on the fix. The three counters above are what carry the liveness, and
+     * they are the sturdier statement anyway: they rose (t32 318 → 675 bases,
+     * 86 → 107 candidates, 633 → 994 offsets) exactly where the rows fell.
      */
     it("looks at every struct base's overlapping readings", () => {
-      let rows = 0;
       for (const r of results.values()) {
         const so = r.structOverlaps;
         expect(so.groups).toBeGreaterThan(0);
@@ -826,11 +836,7 @@ if (!pre.haveBins || !pre.haveCc) {
         // Every row must be judgeable in both directions, or the two counters
         // that split it are silently dropping rows.
         expect(so.contained + so.partial).toBe(so.rows.length);
-        rows += so.rows.length;
       }
-      // The population is small and has never been empty. A zero here is far
-      // more likely to be the observer going quiet than the class going away.
-      expect(rows).toBeGreaterThan(0);
     });
 
     /**

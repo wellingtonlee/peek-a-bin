@@ -549,10 +549,15 @@ describe("decompileFunction — nested struct fields", () => {
     expect(code).toContain("struct struct_2 {");
   });
 
-  it("leaves the field alone when the register holds two different objects", () => {
-    // ESI is loaded from field 8 and then from field 0x10. The struct grouping
-    // is already flow-insensitive enough to pool both objects' accesses; naming
-    // either one as field 8's pointee on top of that would be a guess.
+  it("names each field's own pointee when the register is reloaded in between", () => {
+    // ESI is loaded from field 8, dereferenced, then reloaded from field 0x10
+    // and dereferenced again. Two values, so two bases, and each field's
+    // pointee is unambiguous — this used to assert `uint32_t` for both, which
+    // was a consequence of the grouping pooling both objects under `reg:rsi`
+    // and not of any evidence (peek-a-bin-z8q7). The two objects share one
+    // declaration because their shapes are identical, which is
+    // `findOrCreate`'s fingerprint match and is documented in
+    // `linkNestedStructFields`.
     const code = runWithStructs(
       seq(0x401000, [
         ["mov", "dword ptr [ebx + 0x10], 1"],
@@ -562,6 +567,29 @@ describe("decompileFunction — nested struct fields", () => {
         ["mov", "esi, dword ptr [ebx + 0x10]"],
         ["mov", "dword ptr [esi], 5"],
         ["mov", "dword ptr [esi + 4], 6"],
+        ["ret"],
+      ]),
+    );
+
+    expect(declaredType(code, "field_0x8")).toBe("struct_1*");
+    expect(declaredType(code, "field_0x10")).toBe("struct_1*");
+  });
+
+  it("leaves the field alone when two paths load the register from different fields", () => {
+    // The two loads are on opposite arms, so what reaches the dereference below
+    // the join is neither of them by itself. `baseGenerations` mints a fresh
+    // generation at the join — an SSA phi by another name — and no field is
+    // named as that base's source, which is the refusal
+    // `linkNestedStructFields`' `record`-to-null exists for.
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["cmp", "eax, 0"],
+        ["je", "0x401014"],
+        ["mov", "esi, dword ptr [ebx + 8]"],
+        ["jmp", "0x401018"],
+        ["mov", "esi, dword ptr [ebx + 0x10]"],
+        ["mov", "dword ptr [esi], 7"],
+        ["mov", "dword ptr [esi + 4], 9"],
         ["ret"],
       ]),
     );

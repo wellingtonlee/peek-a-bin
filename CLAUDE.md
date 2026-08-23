@@ -309,6 +309,31 @@ unrecovered values **38/12/11/34 → 36/12/11/33**, token occurrences 76/24/22/6
 declarations they no longer need. Everything else held, `if`/`while`/`do-while`/`for` included.
 
 
+**`peek-a-bin-z8q7` moved struct recovery on all four binaries and the stamp above is deliberately
+NOT rewritten** — it was re-derived at `baa7f61` figure for figure before the change. The delta,
+base `baa7f61`: `offsetof` **342/301/303/355 → 307/297/297/318 fields** over **55/54/53/56 →
+51/59/57/55 distinct definitions**, every ratio 1.00; overlapping struct reads **3/3/3/3 = 12 rows
+→ 0 on all four** over **318/304/296/313 → 679/556/534/669 bases** (86/73/69/82 → 109/80/75/107
+candidates); polarity correct **517/574/497/441 → 522/578/501/446** with 0 inverted, 0 mismatch and
+`only-base 0` on all four. `compare.mjs` verdict "no regression". Everything else flat — functions
+260/279/275/258, instructions, gcc clean, `member name vs brackets` 0 disagreeing, arity
+exact/under/over, statements dropped, unrecovered values, callees lost, loops short, staleReads,
+staleGuards, popReads, lostDefs, armExits, wildBranches, unencodableNames, self-assigns, loop
+shape and `if` counts.
+
+**Read that `offsetof` fall as MERGING, not as loss — and the instrument that answers the recovery
+question is not in `npm run corpus` at all.** `offsetof` sums fields over *distinct definitions*,
+so three functions sharing one declaration count its fields once; `peek-a-bin-z8q7` both removed
+fabricated definitions and changed which bases merge, and the two move the total in opposite
+directions. What actually measures recovery is the count of **field accesses reaching the page** —
+`->field_0x` occurrences in `artifacts/<label>/cc/<bin>/*.c` — and it is **2343 → 1871** corpus-wide
+(t32/t64/w64/w32 635/564/535/609 → 507/445/426/493), with `->array_0x` 18 → 10 and plain
+`*(uintN_t*)(` derefs 7082 → 7562. So **472 accesses that read as a member now read as byte
+arithmetic**, and that is the price of the fix rather than a side effect of it. It is not a gate and
+must not become one: the count rises with correct recovery *and* with fabrication, which is the
+whole reason `structOverlaps` exists.
+
+
 - **A register is never named for a value it no longer holds — and the blind spot that used to qualify that sentence is closed.** Every surviving read of a register's SSA *entry* value is checked against the writes that dominate it: **0 wrong names and 0 spoiled entry-value copies on all four binaries**, over **33/182/181/34 sites** (t32/t64/w64/w32) at `82ed61e`, from 28/78/28/78 and 13/19/13/18 at `cee6f91`. A gate, not a baseline — see `corpus/README.md` on why this one gates when the statement-drop and unrecovered-value counts do not. **What is gated is every surviving *version-0* read whose register a dominating write has changed *under the name the read uses*.** Both halves of that were wrong until `peek-a-bin-fppy` and `peek-a-bin-pzws` were fixed together, and the pair is worth understanding because each hid the other:
   - **The site filter could not see a definition phi lowering had relocated.** It attributed a phi's definition to the phi's own block, while `destroySSA` materialises the copy in each *predecessor* — and a predecessor routinely dominates blocks the phi block does not. Where the only dominating writer was a relocated phi copy the site was discarded before it was ever judged, so the gate printed **0 over 12 provably wrong reads**. Noting the phi at each operand's block as well takes the site count 28/159/158/28 → 33/182/181/34 and the gate red at 12 (six in `t64!sub_1400045DC`, six in `w64!sub_14000496C`, all `r9`, 0x140004883-0x140004898).
   - **Those 12 were one defect: `registerSpeller` gave one name to two live ranges of different widths.** Fixed by per-live-range naming — see the `ssadestroy.ts` gotcha below. It is **not** the "no value-level audit can see this" class it was once filed as: this half *is* value-level and the gate does see it now.
@@ -640,7 +665,7 @@ kind gets a cast spelling.
 
 **API signatures** (`apitypes.ts`): **209** Win32/NT API type signatures at `e22ba6e` (the long-standing "~130" here was stale), none of them variadic — which is what makes the table usable as `corpus/arity.ts`'s arity oracle. Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T, etc.) for consistency. Return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
 
-**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns, including a top-level `base - const` (folded to a negative offset; subtracting a *register* is not an offset and still returns null). 2+ distinct offsets on same base → struct candidate.
+**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset` patterns, including a top-level `base - const` (folded to a negative offset; subtracting a *register* is not an offset and still returns null). 2+ distinct offsets on same base → struct candidate. A "base" is a canonical register **plus the generation of the value it holds** (`baseGenerations` / `accessKey`) — see the gotcha; the register alone is not an object.
 
 Scale ∈ {1,2,4,8} → `IRArrayAccess`, whether or not the function has a struct candidate. A function with no candidate but an indexed access takes a rewrite-only path; one with neither is returned by identity.
 
@@ -664,6 +689,75 @@ Both merge directions scan `fingerprintIndex` in insertion order and take the fi
 - **Every one of the 10 groups is a base the grouping should not have formed.** `exprKey` keys a register base on `canonReg(name)` — version-blind and program-point-blind — so t32 `sub_40667A`'s `reg:rax` merges the `_ioinit` element pointer (`eax` = ioinfo + 5, hence the shifted origin and the negative offsets `isFieldOffset` refuses) with a read through `StartupInfo.lpReserved2`; `struct_26` is a fiction either way, and the row where the offset-order winner IS wrong and the loser IS a real field (`{0x0:4}` kept over `{0x3:4}`, the genuine `lockinitflag`) is a symptom of that, not of the tie-break — no policy over the extents could separate two 4-byte readings that give the same cardinality. The same function's *correctly* based reading of the same object is emitted beside it as `struct_6` / `struct_4`, with three right fields.
 
 So the order-dependence is real, live at 7 of 10 bases, and **changes the answer at exactly one row per 32-bit binary — where both answers describe an object that does not exist.** `peek-a-bin-k6hh` closes as adjudicated-not-a-defect; the two live defects it uncovered are the same-offset width rule and the version-blind base key, and neither is a tie-break question.
+
+**One register is not one object: a base is keyed on the *value* it holds, not on its
+name.** `exprKey` answered `reg:${canonReg(name)}` for a register base — version-blind and
+program-point-blind — so every access through any dynamic value one register held anywhere in the
+function grouped as one object. `t32!sub_40667A` (MSVC `_ioinit`) emitted a `struct_26` whose
+`field_0x0` is `*(DWORD*)StartupInfo.lpReserved2` and whose `field_0x1F`/`field_0x33` are `ioinfo`
+members read through a `__pioinfo` element pointer, three full redefinitions of EAX apart — and
+the fabricated `field_0x0` *displaced* the real `[eax+3]` access, which the overlap rule then
+dropped. `baseGenerations` (`structs.ts`) is the fix: a generation number per `reg`/`var` node
+standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
+`canonBase(expr) + "#" + generation`. Seven things (`peek-a-bin-z8q7`):
+
+- **It cannot invent an object, and that is a property rather than a measurement.** The scoped key
+  *determines* the unscoped one, so the grouping is a partition **refinement** of the old one: two
+  accesses grouped apart before cannot be brought together. What it can do is split a group below
+  the two-field minimum, which is the cost, and the *registry* re-unifies the honest shapes where
+  they agree — `findOrCreate`'s fingerprint match is what turns two generations of one type back
+  into one declaration.
+- **`canonBase` stays register-level and three passes keep asking it.** `stackDerivedBases`,
+  `paramIndexByBase` and `collectCallArgSlots` ask which *register* is a frame pointer or a
+  parameter, which is a fact about the name and not about a value it held; each group therefore
+  carries `regKey` beside its scoped key. Everything on the *access* side — `rewriteStmts`,
+  `inferFieldTypesFromUsage`, `linkNestedStructFields`, `fieldAtAddress` — takes `accessKey`, and
+  it reaches them with no signature change because every one of them already called the resolver
+  on `decomp.base`, a node the walk annotates.
+- **Generations are tracked per NAME and handed over per OBJECT.** `cur` is keyed on the raw
+  `exprKey` while the grouping is keyed on the alias-resolved one, because `buildAliasMap` folds
+  `rcx_0` (a `splitStaleReads` repair variable) onto `reg:rcx` — correctly, they denote the same
+  object at the copy — but a later `rcx = *(rcx_0 + 8)` redefines only RCX. Tracking the generation
+  on the *folded* key made every read of `rcx_0` take RCX's newest generation and cost
+  `t64!sub_14000CB64` a four-offset object outright, along with its share of the 87-field
+  `_locale_t`-ish declaration (emitted in 4 functions → 1 → 3 as this was fixed). So a folded copy
+  hands its source's generation over rather than minting one, and the two names then move apart.
+  Worth **+64 field accesses** corpus-wide (1807 → 1871).
+- **A merge point mints a fresh generation for every key an arm assigned** — an SSA phi by another
+  name — and a `label` mints one for every key in flight, because a jump target is reached from
+  somewhere this walk does not model. **THE LABEL RULE IS THE ONE THAT COSTS SOMETHING AND IT WAS
+  MEASURED BOTH WAYS**: dropping it recovers **109 more field accesses** (1871 → 1980), reaches the
+  same 0 overlap rows, and in 4 of 4 hand-sampled diffs the split it avoids was of one real object
+  (`t32!sub_4041D0`'s `EXCEPTION_REGISTRATION` `{0x8, 0xC}`, the `memcpy` byte tail's three names
+  for one buffer, `t64!sub_1400043DC`'s `field_0x0`). It is kept anyway, for a reason that is
+  structural rather than measured: without it the rule cannot be stated in one sentence, the residual
+  hole is in the *same class* as the defect being fixed, and `structOverlaps` cannot see that class —
+  it reports only *overlapping* readings, and `t64!sub_14000EE7C`'s `struct_31 {0x0, 0xC8}`,
+  combining `*_errno()` with another object's flag word, produced **no row at all**. Do not read
+  "0 overlap rows" as "no fabrication". The refinement that would recover the 109 soundly is
+  `peek-a-bin-slkh`: resolve each label from the states its own `goto`s carry.
+- **A stride walk must keep grouping, and that is what the loop-header phi buys.** `eax += 0x40`
+  through an array of `ioinfo` is a redefinition, but the accesses are at the loop *head*, so they
+  read the header phi — one generation for every element. A key sharp enough to separate them by
+  iteration recovers nothing from any array-of-struct walk, which is most of what this pass is for;
+  `structs.test.ts` pins that direction and an over-sharp control (one generation per read) fails 54
+  tests.
+- **`raw` does not reset, and it is the one stated hole.** An unlifted instruction's register writes
+  are not modelled anywhere in this IR (`fold.ts`'s `blockLiveOut` reads a `raw` as reading nothing),
+  so a base redefined by one still groups across it. Resetting on every `raw` was refused because
+  `t32!sub_40667A`'s own correct `ioinfo` recovery sits either side of a
+  `/* unlifted: sbb eax, eax */`.
+- **THREE TESTS PINNED THE DEFECT AS THE RULE.** `structs.test.ts`'s "does not credit accesses to
+  the last base a register was ever copied from" asserted all three offsets of an RBX that holds
+  RCX's object and then RDX's in **one** declaration, with a comment saying "the grouping survives";
+  the grouping was the fiction. `pipeline.test.ts`'s "leaves the field alone when the register holds
+  two different objects" asserted `uint32_t` for both fields *because* "the struct grouping is
+  already flow-insensitive enough to pool both objects' accesses" — now each field names its own
+  pointee, and a new test asserts the refusal at the shape that still deserves it (two arms loading
+  the register from different fields, where the join leaves no single source). The third was the
+  observer's `baseKey`, now `reg:rcx#0`. `corpus.audit.ts`'s `rows > 0` liveness assertion also had
+  to go: its population is now empty *because* of the fix, and `groups`/`candidates`/`extents` carry
+  the liveness instead — they rose exactly where the rows fell.
 
 **`stackDerivedBases`' copy chain sees only `assign` with a register or variable
 destination, so what `promoteVars` promotes decides how far stack-derivation

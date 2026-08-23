@@ -835,9 +835,12 @@ describe("synthesizeStructs — base aliasing", () => {
   });
 
   // The reassigned register is dropped from the alias map, so its accesses are
-  // no longer credited to whichever base it happened to hold last. RCX and RDX
-  // have no accesses of their own here, so all three offsets still group under
-  // RBX itself — the grouping survives, the misattribution does not.
+  // no longer credited to whichever base it happened to hold last — and since
+  // peek-a-bin-z8q7 they are no longer credited to each OTHER either. RBX holds
+  // RCX's object for the first two accesses and RDX's for the third, so 0x10 is
+  // not a member of the object 0 and 8 belong to. This used to assert all three
+  // offsets in one declaration, on the reasoning that "the grouping survives";
+  // the grouping was the fiction.
   it("does not credit accesses to the last base a register was ever copied from", () => {
     const out = run([
       assign(irReg("rbx", 8), RCX),
@@ -847,7 +850,7 @@ describe("synthesizeStructs — base aliasing", () => {
       assign(irReg("edi", 4), at(irReg("rbx", 8), 0x10)),
     ]);
     expect(out.typedefs).toHaveLength(1);
-    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8, 0x10]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
   });
 
   // The map is flow-insensitive — one entry per name, no program point — so a
@@ -2037,6 +2040,120 @@ describe("synthesizeStructs — nested struct fields", () => {
 });
 
 /**
+ * One register is not one object — `baseGenerations`.
+ *
+ * The tests that matter most here are the ones asserting the key does NOT
+ * split. Splitting is the benign direction (two declarations instead of one
+ * wrongly shared), but a key sharp enough to give every access its own group
+ * recovers nothing at all, since a candidate needs two fields.
+ */
+describe("synthesizeStructs — base value generations", () => {
+  const run = (body: IRStmt[]) => synthesizeStructs(fn(body), new StructRegistry());
+
+  it("does not group accesses through two unrelated values of one register", () => {
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      assign(irReg("rax", 8), at(RDX, 0x20, 8)),
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    // One field per generation, so neither is a candidate. The fabricated
+    // `{0x0, 0x40}` this used to declare was `t32!sub_40667A`'s struct_26 in
+    // miniature (peek-a-bin-z8q7).
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("keeps one object when the same value is read at several offsets", () => {
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 0x40]);
+  });
+
+  it("keeps one object across a loop that advances the base by a stride", () => {
+    // The accesses are at the loop head, so what they read is the header phi —
+    // element 0 on the first iteration and element N on the last, all of one
+    // type. A key that separated them by iteration would recover nothing from
+    // any array-of-struct walk, which is most of what this pass is for.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      {
+        kind: "while",
+        condition: irBinary("!=", irReg("rax", 8), irConst(0)),
+        body: [
+          assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+          assign(irReg("edi", 4), at(irReg("rax", 8), 8)),
+          assign(irReg("rax", 8), irBinary("+", irReg("rax", 8), irConst(0x40))),
+        ],
+      },
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
+
+  it("does not group across a copy the alias map refused to fold", () => {
+    // RBX is written twice with different sources, so `buildAliasMap` drops it;
+    // the generations then keep the two objects' accesses apart as well.
+    const out = run([
+      assign(irReg("rbx", 8), at(RCX, 0x18, 8)),
+      assign(irReg("eax", 4), at(irReg("rbx", 8), 0)),
+      assign(irReg("rbx", 8), at(RCX, 0x20, 8)),
+      assign(irReg("esi", 4), at(irReg("rbx", 8), 0x10)),
+    ]);
+    // The one declaration is RCX's own two loads; RBX contributes neither a
+    // `{0x0, 0x10}` object nor a field to anything else.
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([[0x18, 0x20]]);
+  });
+
+  it("groups across a copy the alias map did fold", () => {
+    // A copy restates the value rather than redefining it, so it inherits the
+    // source's generation — the same test `linkNestedStructFields` makes.
+    const out = run([
+      assign(irReg("rbx", 8), RCX),
+      assign(irReg("eax", 4), at(irReg("rbx", 8), 0)),
+      assign(irReg("esi", 4), at(RCX, 8)),
+    ]);
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
+
+  it("does not group across a label", () => {
+    // A jump target is reached from somewhere this walk does not model, so
+    // nothing in flight survives it.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+      { kind: "label", name: "loc_401020" },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("does not group an arm's accesses with the ones below the join", () => {
+    const out = run([
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+          assign(irReg("ebx", 4), at(irReg("rax", 8), 0)),
+        ],
+      },
+      assign(irReg("edi", 4), at(irReg("rax", 8), 0x40)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("still reaches an access through a register nothing in the function writes", () => {
+    // Generation 0 is the entry value, and a parameter register never assigned
+    // has exactly one — the common case, and the one an off-by-one in the
+    // annotation would break silently.
+    const out = run(twoFieldBody());
+    expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
+});
+
+/**
  * The observer `corpus/structOverlaps.ts` reads. Its whole value is that the
  * report is RAW — every access, not the fields the rule chose — so an audit can
  * re-derive both the same-offset width rule and first-by-offset for itself and
@@ -2058,7 +2175,9 @@ describe("synthesizeStructs — group observer", () => {
       (g) => seen.push(g),
     );
     expect(seen).toHaveLength(1);
-    expect(seen[0].baseKey).toBe("reg:rcx");
+    // `#0` is the generation: RCX is never assigned here, so every access reads
+    // its entry value. See `baseGenerations`.
+    expect(seen[0].baseKey).toBe("reg:rcx#0");
     expect(seen[0].accesses.map((a) => [a.offset, a.size])).toEqual([
       [0, 2],
       [0, 1],

@@ -341,12 +341,19 @@ Use type shorthands (`PVOID`, `HANDLE_T`, `NTSTATUS_T`, etc.) for consistency.
 `decomposeAddress()` breaks `base + idx * scale + offset` patterns:
 - 2+ distinct offsets on same base → struct candidate
 - Scale in {1, 2, 4, 8} without struct match → `IRArrayAccess`
+- A **base** is a canonical register (or variable) *plus the generation of the value it holds*, from
+  `baseGenerations` — a stand-in for the SSA version `destroySSA` collapsed away. One register is
+  not one object: keyed on the name alone, every access through any value EAX held anywhere in a
+  function grouped together, which fabricated an object out of two unrelated pointers. The
+  generation changes at a redefinition, at every control-flow merge (an SSA phi by another name) and
+  at a `label`; a copy the alias map folded hands its source's generation over instead. See
+  CLAUDE.md's gotcha for what that costs and what it cannot see
 
 ### Features
 
 - Fingerprint-based dedup and subset merging (subset merges need 3+ fields and no overlapping extents; a call-site *provenance* match may ignore the field-count guard but never the boundary conflict)
 - Field type inference (signedness from comparisons, pointer from derefs, float from XMM), refined through `meetTypes()` rather than overwritten, and consulting `apitypes.ts` first
-- Alias-aware base grouping. A verified frame base is **excluded** — two offsets off a frame pointer are two stack slots, not two fields
+- Alias- and generation-aware base grouping. A verified frame base is **excluded** — two offsets off a frame pointer are two stack slots, not two fields
 - Call-site parameter linking for cross-function struct propagation
 - Nested struct detection: a field whose loaded value is used as a struct base is declared `struct_N*`, and typedef collection follows those references transitively
 - **Emission is forward-declared tag form plus `#pragma pack(push, 1)` and explicit `_pad_0xNN` members** — the field names record recovered offsets, so a declaration C would not lay out that way states something false. Verified by compiling and running an `offsetof` probe: 145/145 definitions and 819/819 fields, from 18/149 and 318/852. Forward declarations rather than a topological sort, because synthesis produces cycles (a linked-list node) and `typedefs` only snapshots the structs one function touched
