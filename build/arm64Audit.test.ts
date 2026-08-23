@@ -25,6 +25,7 @@
 import { describe, expect, it } from "vitest";
 import {
   auditJumpTables,
+  auditLiteralPools,
   auditOrphans,
   auditPdata,
   auditRefs,
@@ -417,5 +418,73 @@ describe("corpus/arm64 jump-table gate", () => {
     const r = row(rows, "jump table: case outside the dispatch's function");
     expect(r.value).toBe(1);
     expect(r.gate).toBe(false);
+  });
+});
+
+/**
+ * Row 9 — a PC-relative literal pool's bytes surviving in the stream the view
+ * renders (peek-a-bin-qiws).
+ *
+ * With the pass landed the corpus population is 0 on both ARM64 binaries, so
+ * running the audit cannot demonstrate that this row discriminates at all —
+ * the situation `build/selfAssignAudit.test.ts` is in, and the reason both
+ * directions are asked here.
+ *
+ * Note what this row is and is not. It imports `findArm64LiteralPools`, so it
+ * is a WIRING gate: it asks whether every datum the production grammar names
+ * has actually been withheld. If the grammar itself broke and returned nothing,
+ * this row would go vacuously green — and row 5 would go RED, because the four
+ * words would come back into the stream and reachability would find one of them
+ * inside a `.pdata` extent with nothing able to arrive at it. That is the
+ * division of labour: row 5 judges the answer, row 9 judges the wiring.
+ */
+describe("auditLiteralPools", () => {
+  const POOL = BASE + 0x20;
+  const load = insn(BASE, "ldr", `q1, #0x${POOL.toString(16)}`);
+
+  it("reports nothing when every word of the pool has been withheld", () => {
+    const insns = [load, insn(BASE + 4, "ret")];
+    const rows = auditLiteralPools(insns, byAddress(insns));
+    const r = row(rows, "literal pool: pool word presented as an instruction");
+
+    expect(r.gate).toBe(true);
+    expect(r.value).toBe(0);
+    // The liveness half. A 0 above means something only because the walk found
+    // the pool and asked about all four of its words.
+    expect(row(rows, "literal pool: words of pool").value).toBe(4);
+    expect(r.live).toBe("1 literal loads, 4 words of pool");
+  });
+
+  it("names a pool word the stream still presents as an instruction", () => {
+    // t64-arm.exe 0x1400016fc, in miniature: the third word of a 16-byte pool,
+    // decoding as a plausible store.
+    const insns = [load, insn(BASE + 4, "ret"), insn(POOL + 8, "stxrb", "w9, w11, [x16]")];
+    const r = row(
+      auditLiteralPools(insns, byAddress(insns)),
+      "literal pool: pool word presented as an instruction",
+    );
+
+    expect(r.value).toBe(1);
+    expect(r.rows[0]).toContain((POOL + 8).toString(16));
+  });
+
+  it("counts a word once however many loads name it", () => {
+    // Two dispatches sharing one table is the shape peek-a-bin-gb40 records;
+    // two loads sharing one constant is the same thing here, and double
+    // counting would make the gate's value a function of the call sites.
+    const second = insn(BASE + 8, "ldr", `q2, #0x${POOL.toString(16)}`);
+    const insns = [load, second, insn(POOL + 4, "nop")];
+    const rows = auditLiteralPools(insns, byAddress(insns));
+
+    expect(row(rows, "literal pool: pool word presented as an instruction").value).toBe(1);
+    expect(row(rows, "literal pool: words of pool").value).toBe(4);
+  });
+
+  it("finds no pool, and says so, in a stream that names none", () => {
+    // The vacuous-zero case, pinned so the liveness figure is known to move.
+    const rows = auditLiteralPools(CLEAN, byAddress(CLEAN));
+
+    expect(row(rows, "literal pool: pool word presented as an instruction").value).toBe(0);
+    expect(row(rows, "literal pool: words of pool").value).toBe(0);
   });
 });

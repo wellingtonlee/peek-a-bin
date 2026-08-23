@@ -358,3 +358,87 @@ export function findArm64AddressRefs(insns: readonly Arm64AddrInsn[]): Arm64Addr
 
   return refs;
 }
+
+// ── PC-relative literal pools ──────────────────────────────────────────────
+
+/** A datum an `ldr`-literal names, as a byte range: `[target, target + size)`. */
+export interface Arm64LiteralPool {
+  /** Address of the load that names it. */
+  from: number;
+  /** First byte of the datum. Always 4-byte aligned — the encoding says so. */
+  target: number;
+  /** Its width in bytes, from the destination register: 4, 8 or 16. */
+  size: number;
+}
+
+/**
+ * Destination-register spellings of `LDR (literal)`, and the datum width each
+ * one reads. `zr` is legal in the encoding and Capstone spells it that way.
+ */
+const LITERAL_DEST = /^(?:([wxsdq])(?:\d{1,2})|([wx])zr)$/;
+const LITERAL_WIDTH: Readonly<Record<string, number>> = { w: 4, s: 4, x: 8, d: 8, q: 16 };
+
+/**
+ * The literal pools an A64 instruction stream names.
+ *
+ * `LDR (literal)` — `ldr q1, #0x1400016f8` — is the ISA's own way of saying
+ * "the bytes at this address are a constant, not an instruction". The encoding
+ * carries a signed 19-bit WORD offset from the load's own address, and the
+ * destination register states the width: 4 bytes for `w`/`s`, 8 for `x`/`d`,
+ * 16 for `q`. So a pool is read off one instruction with no inference at all —
+ * which is what separates this from every other data-marking rule in the tree,
+ * and why it is an oracle rather than a heuristic.
+ *
+ * On A64 that matters more than it would on x86, because there is no gap fill:
+ * the fixed-width sweep decodes every word of the section whatever it holds, so
+ * a pool word that happens to be a valid encoding is rendered as a plausible
+ * instruction. t64-arm.exe's `strlen` ends `ldr q1, #0x1400016f8` over the
+ * 16-byte lane vector `0f 0e 0d … 01 00`, and its third word decodes as
+ * `stxrb w9, w11, [x16]` (peek-a-bin-qiws, peek-a-bin-56q item 2).
+ *
+ * Two refusals, and both err SHORT — the direction this project takes, since
+ * over-reporting marks real code as data and deletes instructions from the view
+ * with nothing said:
+ *
+ *  * **A misaligned target is not parsed.** The offset is in words, so the
+ *    target of a real `LDR (literal)` is always 4-byte aligned; a misaligned
+ *    one means this reader misread the operand, not that the compiler emitted
+ *    an odd pool.
+ *  * **`prfm <prfop>, <label>` is refused**, although it shares the encoding
+ *    class. It names a cache line rather than a datum, so there is no width to
+ *    claim and any width chosen would be invented.
+ *
+ * Bracketed operands are excluded first: `ldr x0, [x1, #8]` is a register-based
+ * load and belongs to {@link findArm64AddressRefs}, which is the other half of
+ * this module's address grammar and reads the two-instruction `adrp` idiom.
+ */
+export function findArm64LiteralPools(insns: readonly Arm64AddrInsn[]): Arm64LiteralPool[] {
+  const pools: Arm64LiteralPool[] = [];
+  for (const insn of insns) {
+    if (insn.mnemonic !== "ldr" && insn.mnemonic !== "ldrsw") continue;
+    // A memory operand means a base register, not a literal.
+    if (insn.opStr.includes("[")) continue;
+    const parts = fields(insn.opStr);
+    if (parts.length !== 2) continue;
+    const target = parts[1].match(TARGET_FIELD);
+    if (!target) continue;
+    const value = Number(target[1]);
+    // The 19-bit immediate counts words, so a real target cannot be off the
+    // grid. If it is, the operand was not what this reader took it for.
+    if (value % 4 !== 0) continue;
+
+    let size: number;
+    if (insn.mnemonic === "ldrsw") {
+      // `ldrsw xN, <label>` reads four bytes and sign-extends them to eight.
+      // The datum is the four.
+      if (!/^x(?:\d{1,2}|zr)$/.test(parts[0])) continue;
+      size = 4;
+    } else {
+      const dest = parts[0].match(LITERAL_DEST);
+      if (!dest) continue;
+      size = LITERAL_WIDTH[dest[1] ?? dest[2]];
+    }
+    pools.push({ from: insn.address, target: value, size });
+  }
+  return pools;
+}

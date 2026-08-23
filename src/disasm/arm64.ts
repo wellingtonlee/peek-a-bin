@@ -17,7 +17,7 @@
  * `unsupportedOnArch` in ./arch.ts.
  */
 
-import { findArm64AddressRefs } from "./arm64Operands";
+import { findArm64AddressRefs, findArm64LiteralPools } from "./arm64Operands";
 import { type CapstoneHandle, createScan, requireCapstone } from "./capstoneWindow";
 import { type DetectPass, type DetectResult, mapInsn, stringComment } from "./functionDetect";
 import type { DisasmFunction, Instruction } from "./types";
@@ -299,6 +299,32 @@ function arm64Comments(
 }
 
 /**
+ * `(addr, size) => do these bytes belong to a PC-relative literal pool`.
+ *
+ * Two passes over {@link findArm64LiteralPools}' answer. The first collects
+ * every pool any `ldr`-literal claims; the second honours only the loads that
+ * are not themselves inside one of those claims, because a pool word that
+ * happens to decode as a literal load is not a load. See
+ * {@link decorateArm64Sweep} for why one pass and not a fixpoint.
+ *
+ * The interval form of {@link rangeTest} is used for consistency with the
+ * jump-table test and NOT because it is load-bearing here: the grammar refuses
+ * a misaligned target and every width it reports is a whole number of words, so
+ * a pool is always an exact run of words and a point test at the word's own
+ * address would answer the same. That is a bound on the rule rather than a
+ * measured saving — unlike a table, which really can end mid-word.
+ */
+function literalPoolTest(raw: readonly Instruction[]): (addr: number, size?: number) => boolean {
+  const asRanges = (pools: readonly { target: number; size: number }[]) =>
+    pools.map((p) => ({ beginAddress: p.target, endAddress: p.target + p.size }));
+  const candidates = findArm64LiteralPools(raw);
+  if (candidates.length === 0) return () => false;
+  const inCandidate = rangeTest(asRanges(candidates));
+  const honoured = candidates.filter((p) => !inCandidate(p.from, ARM64_INSN_SIZE));
+  return rangeTest(asRanges(honoured));
+}
+
+/**
  * Annotate a raw sweep: string/IAT/IOCTL comments, and `.pdata` classification.
  *
  * Always builds fresh {@link Instruction} objects — `mapInsn` constructs rather
@@ -329,6 +355,26 @@ function arm64Comments(
  * dropping one changes what is *presented*, never what was read
  * (peek-a-bin-gb40). The raw decode is untouched, so {@link Arm64SweepCache}
  * stays sound: two callers passing different spans still share one decode.
+ *
+ * **Literal pools are withheld too, and they are NOT a caller's fact** — they
+ * are read off `raw` here, by {@link findArm64LiteralPools}. `ldr q1, #0x…` is
+ * the ISA saying that the bytes at that address are a constant, and the
+ * destination register states its width, so the answer is a function of the
+ * very stream being decorated and every caller must get the same one. Deriving
+ * it here rather than threading it in is what gives it to the callers a
+ * `DetectResult` field would miss — `mcp/disasm.ts`'s xref fallback sweep among
+ * them — with no forwarding to keep in step. {@link sweepArm64} and
+ * {@link Arm64SweepCache} are still untouched, which is the invariant that
+ * matters: the raw decode is shared, only what is *presented* differs
+ * (peek-a-bin-qiws, peek-a-bin-56q item 2).
+ *
+ * A load sitting inside another load's pool is dropped before its own claim is
+ * honoured. Pool bytes are arbitrary, so one that happens to decode as
+ * `ldr x0, #0x…` would claim eight further bytes on no evidence; a real load is
+ * an instruction, so it is not in anyone's pool. One pass rather than a
+ * fixpoint, deliberately: re-admitting a load once its coverer is dropped could
+ * only mark MORE, and short is the direction to err. 0 occurrences on both
+ * ARM64 binaries, so it is a bound on the rule and not a measured saving.
  */
 export function decorateArm64Sweep(
   raw: readonly Instruction[],
@@ -345,10 +391,12 @@ export function decorateArm64Sweep(
   const isTableByte = rangeTest(
     jumpTableSpans?.map(([beginAddress, endAddress]) => ({ beginAddress, endAddress })),
   );
+  const isPoolByte = literalPoolTest(raw);
   const comments = arm64Comments(raw, ctx.stringMap, ctx.iatMap);
   const out: Instruction[] = [];
   for (let i = 0; i < raw.length; i++) {
     if (isTableByte(raw[i].address, raw[i].size)) continue;
+    if (isPoolByte(raw[i].address, raw[i].size)) continue;
     const mapped = mapInsn(raw[i], EMPTY_STRINGS, EMPTY_IAT, ctx.driverMode);
     const comment = comments.get(raw[i].address);
     if (comment !== undefined) mapped.comment = comment;

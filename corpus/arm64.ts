@@ -42,7 +42,10 @@
  *     fiction. The extent restriction is what makes it an oracle — outside every
  *     extent nothing vouches that the bytes are code at all, so the same count
  *     there is reported and not gated.
- *  5. **Unreachable decoded words**, the data-as-code instrument. REPORT-ONLY.
+ *  5. **Unreachable decoded words**, the data-as-code instrument. GATE, since
+ *     `peek-a-bin-qiws` — and the INDEPENDENT half of the literal-pool claim,
+ *     because reachability shares no rule with reading a pool off an
+ *     `ldr`-literal's encoding.
  *  6. **The `adrp`/`adr` reference grammar**, against the ISA's own reach and
  *     page alignment. GATE.
  *  7. **A64 switch dispatch** — `findArm64JumpTables`, which had never been
@@ -52,6 +55,10 @@
  *  8. **`Arm64SweepCache`**, differentially: three RPCs through the real
  *     `dispatch` must answer identically whether the sweep is shared or
  *     re-taken, and the shared run must actually save Capstone calls. GATE.
+ *  9. **PC-relative literal pools** — `LDR (literal)` names a datum and its
+ *     width outright, so the bytes it names are provably not instructions. GATE
+ *     on one of them surviving in the stream the view renders. A WIRING gate:
+ *     it imports the production grammar, so row 5 is what judges the answer.
  *
  * WHAT IS DELIBERATELY NOT AUDITED, because a green row would be vacuous:
  *
@@ -64,12 +71,17 @@
  *  * Stack frames and function signatures. `analyzeStackFrame` and
  *    `inferSignature` have no ARM64 path at all (`peek-a-bin-56q` item 1), so
  *    there is nothing to audit; auditing an absence is not an audit.
- *  * A general data-marking pass. `peek-a-bin-gb40` marked the one population
- *    the tool can already identify — the bytes of a recovered dispatch table —
- *    and row 7 gates that at 0. Everything else `peek-a-bin-56q` item 2 names is
- *    still unmarked: literal pools, and padding inside a `.pdata` extent. What
- *    this can do about those is census them, which is rows 3 and 5's report
- *    halves, and those are the instrument a fix would be judged with.
+ *  * The REST of a general data-marking pass. Two populations the tool can name
+ *    are now marked and gated — a recovered dispatch table's bytes
+ *    (`peek-a-bin-gb40`, row 7) and a PC-relative literal pool
+ *    (`peek-a-bin-qiws`, row 9) — and between them they take row 5 to 0. What
+ *    stays unmarked is everything NO instruction names: alignment padding
+ *    inside a `.pdata` extent, and any pool reached by a means other than
+ *    `LDR (literal)`. Row 3's report half is the census of that residue — 172
+ *    and 114 words inside extents that do not decode, of which 29 per binary
+ *    are explained by a literal pool — and it is the instrument a further fix
+ *    would be judged with. Note it RISES when a pass lands, which is the
+ *    honest counterpart of a word becoming data rather than a regression.
  *  * Inline comments. `corpus/comments.ts` already gates that at 0 coincidences
  *    and is not duplicated here.
  *
@@ -88,7 +100,11 @@ import {
   classifyArm64Br,
   sweepArm64,
 } from "../src/disasm/arm64";
-import { classifyArm64Branch, findArm64AddressRefs } from "../src/disasm/arm64Operands";
+import {
+  classifyArm64Branch,
+  findArm64AddressRefs,
+  findArm64LiteralPools,
+} from "../src/disasm/arm64Operands";
 import type { CapstoneHandle } from "../src/disasm/capstoneWindow";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
@@ -374,18 +390,26 @@ export function auditWildBranches(
  * being rendered as an instruction: `peek-a-bin-56q` item 2, and the shape of its
  * `stxrb w9, w11, [x16]` witness.
  *
- * REPORT-ONLY, because it is 1 per binary rather than 0 and there is no fix for
- * the remainder. It was 2 until `peek-a-bin-gb40` marked the recovered jump
- * tables: 0x1400018b8 was inside one, which is this row and row 7 agreeing about
- * a word from two independent directions, and the survivor is 0x1400016fc.
- * Every row it can print is nonetheless provably data, so this is gateable at 0
- * the moment a literal-pool marking pass lands — the same standing upgrade
- * `arity over` carried before it became a gate, and row 7 has now taken.
+ * A GATE at 0, flipped by `peek-a-bin-qiws` — the standing upgrade this row had
+ * carried since it was written, and the last of the three the data-as-code
+ * instruments were holding. It was 2 per binary until `peek-a-bin-gb40` marked
+ * the recovered jump tables (0x1400018b8 was inside one, this row and row 7
+ * agreeing about a word from two independent directions), and 1 until the
+ * literal-pool pass marked 0x1400016fc.
+ *
+ * **This is the INDEPENDENT oracle for that pass, and row 9 is not.** What is
+ * asked here is reachability — a rule sharing nothing with the production one,
+ * which reads the pool straight off an `ldr`-literal's own encoding — so a zero
+ * here is evidence about the answer rather than about the wiring. Row 9 asks
+ * the wiring question and imports the grammar to do it.
  *
  * It is deliberately the strict reading. A pool word that happens to decode AND
  * sits directly after another decoded word is not reported, because fallthrough
  * cannot be ruled out; so this is a LOWER bound on data rendered as code, and
  * `flanked` beside it says how many words were even eligible to be judged.
+ * `flanked` is the liveness half and falls 5 -> 4 with the fix, since the word
+ * this gate was reporting has left the stream: a rule that drove the count to 0
+ * by no longer looking would take `flanked` with it.
  */
 export function auditOrphans(
   insns: readonly Instruction[],
@@ -415,12 +439,61 @@ export function auditOrphans(
     }
   }
   return [
-    report(
+    gate(
       "unreachable decoded word in a .pdata extent",
       orphans.length,
       `${flanked} words after an undecodable one, of ${extentWords} in extents`,
       orphans,
     ),
+  ];
+}
+
+// ── 9. literal pools ───────────────────────────────────────────────────────
+
+/**
+ * A word of a PC-relative literal pool that the same tool presents as an
+ * instruction.
+ *
+ * `findArm64LiteralPools` is imported rather than re-implemented, so this is a
+ * WIRING gate and not an oracle over the answer: it asks whether every datum
+ * the production grammar names has actually been withheld from the stream the
+ * view renders. That is the class `peek-a-bin-gb40` found by negative control —
+ * spans computed correctly and one caller not forwarding them — and here it
+ * additionally covers every ARM64 entry point at once, since the filter is
+ * derived inside `decorateArm64Sweep` from the stream it is decorating rather
+ * than threaded through `DetectResult`.
+ *
+ * The oracle over the *answer* is row 5, whose reachability rule shares nothing
+ * with this one, plus the four sites read by hand against the bytes: t64-arm's
+ * 0x1400016f8 is the 16-byte lane vector `0f 0e … 01 00` behind
+ * `ldr q1`, 0x140003858 and 0x140003860 are the 64-bit constants
+ * 0x2b992ddfa232/…33, and 0x14001ae00 is the double 0x3ea8a93728719535.
+ *
+ * `pools` and `words` are the liveness halves. A grammar that stopped matching
+ * would drive this to 0 by finding no pools at all, which is how a population
+ * audit fails; `poolWords` is what makes that visible.
+ */
+export function auditLiteralPools(
+  insns: readonly Instruction[],
+  byAddr: ReadonlyMap<number, Instruction>,
+): Row[] {
+  const pools = findArm64LiteralPools(insns);
+  // A pool is an exact run of words: the grammar refuses a misaligned target and
+  // every width it reports is a multiple of four, so no rounding is needed here
+  // and a word is covered exactly when its own address is inside the datum.
+  const covered = new Set<number>();
+  for (const p of pools) {
+    for (let a = p.target; a < p.target + p.size; a += ARM64_INSN_SIZE) covered.add(a);
+  }
+  const asCode: string[] = [];
+  for (const a of covered) {
+    const insn = byAddr.get(a);
+    if (insn !== undefined) asCode.push(at(insn));
+  }
+  const live = `${pools.length} literal loads, ${covered.size} words of pool`;
+  return [
+    gate("literal pool: pool word presented as an instruction", asCode.length, live, asCode),
+    report("literal pool: words of pool", covered.size, live),
   ];
 }
 
@@ -814,6 +887,7 @@ async function auditImage(key: ArmBinKey, file: string): Promise<Row[]> {
     ),
     ...auditRefs(insns, byAddr),
     ...auditJumpTables(insns, af.jumpTables, byAddr, ex),
+    ...auditLiteralPools(insns, byAddr),
   ];
 }
 
@@ -836,7 +910,7 @@ async function main(): Promise<void> {
     for (const row of rows) findings.push({ bin, row });
   };
 
-  console.log(`\n── 1,3-7. per-image audits ${"─".repeat(41)}`);
+  console.log(`\n── 1,3-7,9. per-image audits ${"─".repeat(41)}`);
   for (const [key, file] of arm.present) {
     try {
       add(key, await auditImage(key, file));

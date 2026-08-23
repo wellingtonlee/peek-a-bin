@@ -205,6 +205,86 @@ describe("disassembleArm64", () => {
     expect(insns.filter((i) => i.source === "gap-fill")).toHaveLength(4);
   });
 
+  /**
+   * peek-a-bin-qiws / peek-a-bin-56q item 2. A64 has no gap fill, so a literal
+   * pool is swept as code and a pool word that is a valid encoding renders as a
+   * plausible instruction. `ldr q1, #<pool>` is the ISA saying otherwise, and
+   * unlike the jump-table spans this is derived HERE, from the stream being
+   * decorated, because it is a fact about that stream rather than the caller's.
+   */
+  describe("withholds the literal pools the stream itself names", () => {
+    /** `ldr <reg>, #<pool>` at BASE, then filler, with `pool` decodable. */
+    const withPool = (dest: string, poolOff: number, poolWords: number) => {
+      const words = new Map<number, { mnemonic: string; opStr: string }>();
+      words.set(BASE, { mnemonic: "ldr", opStr: `${dest}, #0x${(BASE + poolOff).toString(16)}` });
+      words.set(BASE + 4, { mnemonic: "ret", opStr: "" });
+      for (let i = 0; i < poolWords; i++) {
+        words.set(BASE + poolOff + i * 4, { mnemonic: "stxrb", opStr: "w9, w11, [x16]" });
+      }
+      return words;
+    };
+
+    it("withholds all four words a `ldr q` names", () => {
+      // 16 bytes, which is the whole point of the width coming from the
+      // register: a point test on the load's target would keep three of them.
+      const insns = disassembleArm64(
+        new Uint8Array(0x40),
+        BASE,
+        ctx(fakeCs(withPool("q1", 0x20, 4))),
+      );
+
+      expect(insns.map((i) => i.address - BASE)).toEqual([0, 4]);
+    });
+
+    it("withholds exactly the width the destination register states", () => {
+      // `ldr w0` reads four bytes, so the second pool word is NOT its datum and
+      // stays in the stream. Marking it would delete an instruction on no
+      // evidence, which is the direction this project refuses in.
+      const insns = disassembleArm64(
+        new Uint8Array(0x40),
+        BASE,
+        ctx(fakeCs(withPool("w0", 0x20, 2))),
+      );
+
+      expect(insns.map((i) => i.address - BASE)).toEqual([0, 4, 0x24]);
+    });
+
+    it("keeps a word no literal load names", () => {
+      const insns = disassembleArm64(new Uint8Array(32), BASE, ctx(fakeCs(code(8))));
+
+      expect(insns).toHaveLength(8);
+    });
+
+    it("does not honour a load that is itself inside another load's pool", () => {
+      // Pool bytes are arbitrary and one may decode as `ldr x0, #…`; it is not
+      // a load, so its claim on eight further bytes is worth nothing. Without
+      // this the spurious claim would delete the `ret` at BASE + 0x30.
+      const words = new Map<number, { mnemonic: string; opStr: string }>();
+      words.set(BASE, { mnemonic: "ldr", opStr: `q1, #0x${(BASE + 0x20).toString(16)}` });
+      words.set(BASE + 4, { mnemonic: "ret", opStr: "" });
+      // Third word of the real pool, decoding as a literal load of its own.
+      words.set(BASE + 0x28, { mnemonic: "ldr", opStr: `x0, #0x${(BASE + 0x30).toString(16)}` });
+      words.set(BASE + 0x30, { mnemonic: "ret", opStr: "" });
+
+      const insns = disassembleArm64(new Uint8Array(0x40), BASE, ctx(fakeCs(words)));
+
+      expect(insns.map((i) => i.address - BASE)).toEqual([0, 4, 0x30]);
+    });
+
+    it("leaves the raw sweep and the cache untouched", () => {
+      // The filter is decoration. Two callers share one decode, so a pool must
+      // never reach `sweepArm64` or `Arm64SweepCache` — the invariant
+      // peek-a-bin-gb40 established and peek-a-bin-kis depends on.
+      const cs = fakeCs(withPool("q1", 0x20, 4));
+      const cache = new Arm64SweepCache();
+      const bytes = new Uint8Array(0x40);
+
+      expect(disassembleArm64(bytes, BASE, ctx(cs), undefined, cache)).toHaveLength(2);
+      // The cached decode still holds every word it read, pool included.
+      expect(cache.sweep(bytes, BASE, cs)).toHaveLength(6);
+    });
+  });
+
   it("leaves source unset when no .pdata is available to judge against", () => {
     const insns = disassembleArm64(new Uint8Array(16), BASE, ctx(fakeCs(code(4))));
 

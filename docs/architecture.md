@@ -170,12 +170,13 @@ bytes. Measured at `7082e66` by replaying a load's RPCs against the real dispatc
 | w64-arm.exe (98 KiB `.text`, 24393 insns) | 3393 → **1131** | 6.51 → **2.17 MiB** | 328 → **129 ms** |
 
 Those insn counts are the RAW sweep's, which is what the cache holds and what Capstone was asked
-for. The `hybridDisassemble` RPC returns fewer — 27419 and 24384 — because it withholds the bytes
-of a recovered jump table so the view renders them as data (`peek-a-bin-gb40`); the decode is
-unmoved either way, since A64 has no gap fill and the sweep reads every word of the section
-regardless.
+for. The `hybridDisassemble` RPC returns fewer — **27415 and 24380** — because it withholds two
+kinds of bytes so the view renders them as data: those of a recovered jump table
+(`peek-a-bin-gb40`, 9 words per binary) and those a PC-relative `LDR (literal)` names
+(`peek-a-bin-qiws`, 4 more). The decode is unmoved either way, since A64 has no gap fill and the
+sweep reads every word of the section regardless.
 
-Only the decode is shared. Comments, the `.pdata` `source` classification and the jump-table
+Only the decode is shared. Comments, the `.pdata` `source` classification and both kinds of data
 masking are reapplied per caller (~5 ms on 27428 instructions, plus 2.5 ms for the
 `findArm64AddressRefs` pass the comments are resolved from — see below), so what each RPC returns
 is unchanged — verified

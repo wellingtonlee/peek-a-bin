@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyArm64Branch,
   findArm64AddressRefs,
+  findArm64LiteralPools,
   isArm64ConditionalBranch,
   isArm64JumpMnemonic,
 } from "../arm64Operands";
@@ -370,5 +371,104 @@ describe("findArm64AddressRefs — one adrp can serve several uses", () => {
       insn(0x140002408, "ldr", "x1, [x8, #0x18]"),
     ]);
     expect(refs.map((r) => r.target)).toEqual([0x140024010]);
+  });
+});
+
+/**
+ * peek-a-bin-qiws — `LDR (literal)`, the ISA's own data marking.
+ *
+ * Every operand string here is Capstone's spelling from t64-arm.exe or
+ * w64-arm.exe. The four real pools this reads on that corpus were adjudicated
+ * against the bytes: 0x1400016f8 is `strlen`'s 16-byte lane vector
+ * `0f 0e 0d … 01 00`, 0x140003858/0x140003860 are the 64-bit constants
+ * 0x2b992ddfa232 and …33, and 0x14001ae00 is the double 0x3ea8a93728719535.
+ *
+ * The refusals carry as much weight as the matches. Marking a byte as data
+ * removes an instruction from the view with nothing said, so every rule here
+ * errs SHORT and each refusal is pinned in both directions.
+ */
+describe("findArm64LiteralPools", () => {
+  const insn = (address: number, mnemonic: string, opStr: string) => ({
+    address,
+    mnemonic,
+    opStr,
+  });
+
+  it("reads the 16-byte pool a `ldr q` names", () => {
+    // t64-arm.exe 0x1400016ac, verbatim.
+    expect(findArm64LiteralPools([insn(0x1400016ac, "ldr", "q1, #0x1400016f8")])).toEqual([
+      { from: 0x1400016ac, target: 0x1400016f8, size: 16 },
+    ]);
+  });
+
+  it("takes the datum width from the destination register", () => {
+    const widths = findArm64LiteralPools([
+      insn(0x140001000, "ldr", "w0, #0x140002000"),
+      insn(0x140001004, "ldr", "s0, #0x140002000"),
+      insn(0x140001008, "ldr", "x19, #0x140002000"),
+      insn(0x14000100c, "ldr", "d29, #0x140002000"),
+      insn(0x140001010, "ldr", "q1, #0x140002000"),
+    ]).map((p) => p.size);
+    // `w`/`s` read four bytes, `x`/`d` eight, `q` sixteen. That is the
+    // encoding, and it is the only thing that states the pool's extent.
+    expect(widths).toEqual([4, 4, 8, 8, 16]);
+  });
+
+  it("reads `ldrsw` as the FOUR bytes it loads, not the eight it produces", () => {
+    // The sign extension happens in the register; the datum is a word.
+    expect(findArm64LiteralPools([insn(0x140001000, "ldrsw", "x8, #0x140002000")])).toEqual([
+      { from: 0x140001000, target: 0x140002000, size: 4 },
+    ]);
+  });
+
+  it("reads the zero-register spelling, which the encoding permits", () => {
+    expect(findArm64LiteralPools([insn(0x140001000, "ldr", "xzr, #0x140002000")])).toEqual([
+      { from: 0x140001000, target: 0x140002000, size: 8 },
+    ]);
+  });
+
+  it("names no pool for a bracketed operand, which is a register-based load", () => {
+    // `findArm64AddressRefs` owns that form. Conflating the two would let any
+    // `ldr x0, [x1, #8]` claim eight bytes of whatever address it computed.
+    expect(
+      findArm64LiteralPools([
+        insn(0x140001000, "ldr", "x0, [x1, #8]"),
+        insn(0x140001004, "ldr", "q1, [x9], #16"),
+        insn(0x140001008, "ldr", "x16, [x16]"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("refuses a misaligned target, which means the operand was misread", () => {
+    // The immediate counts WORDS, so a real target is 4-byte aligned. This is
+    // a self-consistency check on the reader, not a claim about compilers.
+    expect(findArm64LiteralPools([insn(0x140001000, "ldr", "x0, #0x140002002")])).toEqual([]);
+  });
+
+  it("refuses `prfm`, which names a cache line and states no width", () => {
+    // It shares the LDR-literal encoding class, so it is refused explicitly
+    // rather than by omission. Any width chosen for it would be invented.
+    expect(findArm64LiteralPools([insn(0x140001000, "prfm", "pldl1keep, #0x140002000")])).toEqual(
+      [],
+    );
+  });
+
+  it("refuses a destination register spelling it does not know", () => {
+    expect(
+      findArm64LiteralPools([
+        insn(0x140001000, "ldr", "v0, #0x140002000"),
+        insn(0x140001004, "ldr", "b3, #0x140002000"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("refuses an operand that is not a resolved address", () => {
+    expect(
+      findArm64LiteralPools([
+        insn(0x140001000, "ldr", "x0, #8"),
+        insn(0x140001004, "ldr", "x0"),
+        insn(0x140001008, "ldr", "x0, x1, #0x140002000"),
+      ]),
+    ).toEqual([]);
   });
 });

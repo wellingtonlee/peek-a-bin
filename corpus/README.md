@@ -1283,14 +1283,17 @@ Two questions, one per architecture, and they are not the same question:
 ## `corpus/arm64.ts` — the ARM64 audits, and why they are not folded in
 
 `npm run corpus:arm64`. Over `t64-arm.exe` and `w64-arm.exe`: **39 gate assertions and 12 reported
-rows**, drawn from 16 distinct gates and 5 distinct reports asked per image, plus a decode-rate
+rows**, drawn from 18 distinct gates and 5 distinct reports asked per image, plus a decode-rate
 calibration asked once over all six binaries and a sweep-cache differential asked per image. Missing
 binaries skip cleanly and name themselves; exit 1 on any red gate. The last line is
-`39 of 39 gates green, 12 rows reported. OK`.
+`43 of 43 gates green, 12 rows reported. OK`.
 
 It was 35 and 14 until `peek-a-bin-gb40`, which published the recovered jump tables' byte extents
 and flipped `table words presented as instructions` from a report at 9 / 9 to a gate at 0, adding
-`reader's table not re-derived here` beside it as the liveness half.
+`reader's table not re-derived here` beside it as the liveness half. `peek-a-bin-qiws` then made it
+43 and 12: it marked the PC-relative literal pools, which flipped `unreachable decoded word in a
+.pdata extent` from a report at 1 / 1 to a gate at 0 and added `literal pool: pool word presented
+as an instruction` beside it, with `literal pool: words of pool` as that one's liveness half.
 
 ### Why it is a separate run, and not four more keys in `ALL_BINS`
 
@@ -1333,10 +1336,10 @@ a population count — because a population-based audit fails by silently matchi
 | pdata: begin with no instruction | GATE | `.pdata` is the linker's record | 0 / 0 of 419 / 381 extents |
 | pdata: unaligned begin / end | GATE | A64 alignment | 0 / 0 |
 | pdata: empty extent | GATE | an extent has a length | 0 / 0 |
-| pdata: words in extents that do not decode | report | — | **171 / 113** of 25336 / 22423 |
+| pdata: words in extents that do not decode | report | — | **172 / 114** of 25336 / 22423 |
 | wild branch inside a `.pdata` extent | GATE | the linker resolves its own branches | 0 / 0 of 5830 / 5053 |
 | wild branch outside every extent | report | — | 0 / 0 of 425 / 383 |
-| unreachable decoded word in a `.pdata` extent | report | reachability | **1 / 1** of 5 / 5 eligible |
+| unreachable decoded word in a `.pdata` extent | GATE | reachability | 0 / 0 of 4 / 4 eligible |
 | ref: target outside the `adrp` page | GATE | `adrp` + `imm12` cannot leave the page | 0 / 0 of 682 / 679 refs |
 | ref: `adrp` page not 4 KiB aligned | GATE | `adrp` zeroes the low 12 bits | 0 / 0 |
 | ref: `adr` target beyond ±1 MiB | GATE | `adr`'s 21-bit displacement | 0 / 0 of 18 / 12 `adr` |
@@ -1345,6 +1348,8 @@ a population count — because a population-based audit fails by silently matchi
 | jump table: case outside the dispatch's function | report | — | 0 / 0 |
 | jump table: table words presented as instructions | GATE | the tool's own recovered table | 0 / 0 of 255 / 139 |
 | jump table: reader's table not re-derived here | GATE | the reader's published tables | 0 / 0 of 14 / 10 |
+| literal pool: pool word presented as an instruction | GATE | `LDR (literal)`, i.e. the A64 encoding | 0 / 0 of 100 / 98 words |
+| literal pool: words of pool | report | — | 100 / 98 over 69 / 69 loads |
 | floor: ARM64 image below the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
 | floor: non-ARM64 image at or above the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
 | floor: section too small to be evidence | GATE | `ARM64_MIN_MEASURED_WORDS` | 0 over 6 binaries |
@@ -1368,8 +1373,8 @@ resolved every branch it emitted, so a target outside `[imageBase, +sizeOfImage)
 fiction. Same reasoning as `corpus/wildBranches.ts`, same restriction pattern as
 `unencodableNames`' PE32-only population.
 
-**`unreachable decoded word` and `table words presented as instructions` are the two data-as-code
-instruments, and one of them has been taken.** `table words presented as instructions` was 9 / 9
+**`unreachable decoded word` and `table words presented as instructions` were the two data-as-code
+instruments, and BOTH have now been taken.** `table words presented as instructions` was 9 / 9
 and REPORT-ONLY solely because it was non-zero; `peek-a-bin-gb40` published the extents
 `findArm64JumpTables` had been discarding, and it is a **GATE at 0**. Every row it can print is
 provably data — the tool cannot both recover a table at those bytes and present them as
@@ -1396,15 +1401,31 @@ Negative-controlled three ways, all at `peek-a-bin-gb40`: restore `jumpTableSpan
 again; judge `d.count` instead of `targets.length` and exactly one `build/arm64Audit.test.ts` case
 fails.
 
-`unreachable decoded word` is still REPORT-ONLY, now at 1 / 1. It is deliberately the *strict*
+`unreachable decoded word` is a **GATE at 0** since `peek-a-bin-qiws`, and it is the one to read,
+because its rule — reachability — shares nothing with either production marking rule and it is
+therefore the independent oracle over both. It is deliberately the *strict*
 reading: a pool word that happens to decode and sits directly after another decoded word is not
 reported, because fallthrough cannot be ruled out, so it is a **lower bound** and its `flanked`
-count says how many words were even eligible to be judged. Its surviving row per binary is
-`peek-a-bin-56q` item 2's own witness — `0x1400016fc stxrb w9, w11, [x16]`, re-derived here from
-reachability rather than by eye. The row it lost is `0x1400018b8 madd w4, w9, w30, w8`, which was
-inside a table the tool itself recovered: two independent oracles agreeing about one word, and
-`peek-a-bin-gb40` withdrew it from the instruction stream. It is gateable at 0 the moment a
-literal-pool marking pass lands.
+count says how many words were even eligible to be judged — 5 / 5 before the fix, 4 / 4 after, the
+fall being the word that left the stream, so a rule reaching 0 by no longer looking would show up
+here.
+
+It was 2 / 2, then 1 / 1, then 0 / 0. `peek-a-bin-gb40` withdrew `0x1400018b8 madd w4, w9, w30, w8`,
+which sat inside a table the tool itself recovered — two independent oracles agreeing about one
+word. `peek-a-bin-qiws` withdrew `0x1400016fc stxrb w9, w11, [x16]`, which is `peek-a-bin-56q`
+item 2's own recorded witness and is the third word of the 16-byte SIMD lane vector
+`0f 0e 0d … 01 00` that `0x1400016ac ldr q1, #0x1400016f8` loads.
+
+**`literal pool: pool word presented as an instruction` is that fix's own row, and it is a WIRING
+gate rather than an oracle.** It imports `findArm64LiteralPools`, so what it asks is whether every
+datum the production grammar names has actually been withheld from the stream the view renders —
+the class gb40 found by negative control, where the spans were computed correctly and one caller
+did not forward them. The oracle over the *answer* is `unreachable decoded word` above, plus the
+four sites read by hand against the bytes (the lane vector, two 64-bit constants at
+`0x140003858`/`0x140003860`, and the double `0x3ea8a93728719535` at `0x14001ae00`). `words of pool`
+beside it is the liveness half and is what makes the division of labour checkable: silence the
+grammar and this row goes vacuously green at `0 literal loads, 0 words of pool` while the
+unreachability row goes red.
 
 **The decode-rate floor gates in BOTH directions**, which is what makes it a calibration rather
 than a restatement: an accepted 0xAA64 image must be above the floor and every 0x014C / 0x8664
@@ -1443,6 +1464,8 @@ Ten gates can be made red by perturbing this repo's own code, and were:
 | the cache never stores | no Capstone calls saved **1 / 1** (4083 → 4083, 3393 → 3393) |
 | `detectArm64Functions` returns `jumpTableSpans: []` again | table words presented as instructions **9 / 9** |
 | the spans are published but `mcp/disasm.ts` stops forwarding them | table words presented as instructions **9 / 9** |
+| `decorateArm64Sweep` stops withholding literal-pool words | unreachable decoded word **1 / 1** AND pool word presented as an instruction **4 / 4** |
+| `findArm64LiteralPools` returns nothing | unreachable decoded word **1 / 1**; the pool row goes VACUOUSLY GREEN at `0 literal loads` |
 
 The last two are `peek-a-bin-gb40`'s, and they separate the two halves of that fix: publishing the
 extents and consuming them are each necessary on their own. Two more of its controls are outside
@@ -1894,7 +1917,7 @@ remaining gap and is not implemented.
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent and, for an internal one, by whether the reader has any thread to the body (`internalLabelled`, `internalThreaded`, `internalUnlabelled`). Reads only emitted text. Report-only in both directions. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
-| `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
+| `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, PC-relative literal pools, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
