@@ -857,6 +857,18 @@ const FRAME_POINTER_KEY = `reg:${canonReg("rbp")}`;
  * on the stack, the value is whatever was stored there. That matters because an
  * epilogue's `pop rbp` is otherwise the one write that would make every framed
  * function look ambiguous.
+ *
+ * The exclusion is a claim about the whole body while both pieces of evidence
+ * are about the prologue, and the corpus holds two counterexamples: EBP is
+ * repurposed mid-body by `longjmp` in `t32!sub_40A810` and `w32!sub_4092B0`
+ * (peek-a-bin-633s), so after 0x40a851 / 0x4092f1 the register holds an object
+ * pointer this pass nevertheless keeps excluded. Note the direction — here the
+ * stale premise costs *recovery*, never correctness: a field access that reads
+ * as byte arithmetic, which is the benign side of this pass's own trade. It
+ * costs nothing measured, because neither function has an access through EBP
+ * after its reload. See `inlineFrameGeometry` in `../stack.ts` for why the
+ * obvious repair — asking whether the frame register survives to the returns —
+ * is refused, and for the numbers.
  */
 function stackDerivedBases(func: IRFunction, canonBase: (e: IRExpr) => string): Set<string> {
   // Both the raw key and whatever the alias map resolves it to: a function that

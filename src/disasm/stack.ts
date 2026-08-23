@@ -249,6 +249,46 @@ function homedSlot(
  * alternative, tracking which argument registers are still live, would need a
  * second register-write grammar here and would have to be right about `cdq`,
  * `mul` and `xchg` to be worth anything.
+ *
+ * THERE IS DELIBERATELY NO CHECK HERE THAT THE FRAME REGISTER SURVIVES THE BODY,
+ * and the reason is a measurement rather than an oversight (peek-a-bin-633s).
+ *
+ * `inlineFrameGeometry` reads the prologue and stops at the first later write of
+ * the frame register, so a mid-body *repurposing* is never seen — and one
+ * exists: `t32!sub_40A810` 0x40a851 and `w32!sub_4092B0` 0x4092f1 are
+ * `mov ebp, dword ptr [eax + 0x10]`, MSVC `longjmp` reloading the caller's EBP
+ * out of a `jmp_buf`, in two functions this file reports as canonically framed.
+ * Both are latent — `0` `[ebp +- N]` operands follow either reload — but they
+ * are the counterexample to the invariance premise `decompile/promote.ts`'s
+ * `frameRegisterAliases` and `decompile/structs.ts`'s `stackDerivedBases` rest
+ * on, and the obvious repair is to ask `fpSurvivesToReturn` about the function
+ * itself. Measured at `84eed6e`, that repair is catastrophic, for a reason that
+ * generalises to *any* survival question asked here:
+ *
+ * **THIS FILE HAS NO CFG, SO IT CAN ONLY ASK IN ADDRESS ORDER, AND MSVC LAYS A
+ * MID-FUNCTION EPILOGUE BEFORE CODE THAT EXECUTES EARLIER.** An epilogue restore
+ * is a write of the frame register, so "no write between the prologue and the
+ * `ret`" refuses essentially every framed function: `declared params scanned`
+ * goes **430 -> 0 on t32 and 415 -> 0 on w32**, 78% of emitted functions change,
+ * and `offsetof` on t32 goes 299 fields / 52 definitions -> **319 / 57** as the
+ * frame register stops being excluded from struct bases and shapes are
+ * fabricated. Excluding the restore does not rescue it either: the bead's own
+ * "no load of `<fp>` before the last read of `[<fp> + N]`" refuses 59 functions
+ * and 1123 `[<fp>]` operands (379/200/165/379) and **does not refuse either
+ * target function**, whose one `[ebp + 8]` operand precedes every load.
+ *
+ * **AND `frameDelta` IS THE WRONG LEVER ANYWAY.** Nulling it only for the two
+ * repurposing functions costs one correct `arg_0` each and still leaves the
+ * hazard open, because the `bpLocalRe` arm below records `[<fp> - N]` with no
+ * `addressesOwnFrame` gate and `matchStackAccess` resolves a bare frame-register
+ * deref: with `frameDelta` nulled on `t32!sub_4026E8` the bare-register sites
+ * still print `var_8`. Closing the class needs a program-point rule in
+ * `promote.ts`, which has no per-expression address, for 0 measured benefit.
+ *
+ * **NOTE FOR ANYONE WIDENING THIS.** Every gate in `npm run corpus` stays green
+ * through both wrong versions above; the numbers that move are
+ * `declared params scanned` and `offsetof`'s denominators, and `compare.mjs`
+ * flags them. Read those rows, not the exit code.
  */
 function inlineFrameGeometry(insns: Instruction[], is64: boolean): FrameGeometry {
   const fp = is64 ? "rbp" : "ebp";

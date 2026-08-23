@@ -222,14 +222,56 @@ interface StackAccess {
  *    program point other than its own.
  *
  * The invariance is a claim about the whole body and this pass sees only the
- * prologue's arithmetic, so it was checked rather than assumed: over all four
- * corpus binaries, **no** function with a recovered displacement writes its
- * frame register anywhere between establishing it and the epilogue's
- * `pop`/`leave` restore — 18 + 16 shifted-frame functions on the x64 pair and 1
- * on each PE32 binary. The two counterexamples in the corpus (`t32!sub_40A810`
- * and `w32!sub_4092B0`, `longjmp` reloading EBP from a `jmp_buf`) are both
- * *canonical*, so they were already inside this pass's reach before the gate was
- * widened; see peek-a-bin-633s.
+ * prologue's arithmetic, so it was checked rather than assumed, and re-derived
+ * at `84eed6e` figure for figure against the `99203fb` measurement even though
+ * function detection moved 288/285 -> 260/258 underneath it: over all four
+ * corpus binaries there are **exactly two** functions with a recovered
+ * displacement that write their frame register between establishing it and the
+ * epilogue's `pop`/`leave` restore, `t32!sub_40A810` 0x40a851 and
+ * `w32!sub_4092B0` 0x4092f1, both `mov ebp, dword ptr [eax + 0x10]` — MSVC
+ * `longjmp` reloading the caller's EBP out of a `jmp_buf`. The framed
+ * populations are 204/20/18/201 (t32/t64/w64/w32), of which 203/2/2/200 are
+ * canonical, and the cvri-widened shifted-frame population contributes **0**.
+ * Both counterexamples are canonical, so both were inside this pass's reach
+ * before the gate was widened.
+ *
+ * WHY THAT IS LATENT IS A STRONGER FACT THAN "no `ebp_N` site", AND THE ALIAS IS
+ * NOT WHAT WOULD MAKE IT LIVE. `matchStackAccess` resolves a **bare** `ebp`
+ * deref with no program-point awareness at all, so the alias set only widens a
+ * population the register itself is already in: the condition is *any*
+ * `[<fp> +- N]` operand after the reload, aliased or not, and that is **0** in
+ * both functions (1 each before it, `push dword ptr [ebp + 8]` at 0x40a820 /
+ * 0x4092c0, which is correct — EBP is still this frame's there).
+ *
+ * THE FIX peek-a-bin-633s PROPOSES IS REFUTED BY MEASUREMENT AT `84eed6e` AND
+ * MUST NOT BE RE-ATTEMPTED AT THIS LAYER. It asks `inlineFrameGeometry` to
+ * report whether the frame register survives to the function's returns, reusing
+ * `fpSurvivesToReturn`. Three separate reasons, each measured by executing the
+ * wrong version rather than reasoning about it:
+ *
+ *  - **`stack.ts` has no CFG, so any survival question there is asked in
+ *    ADDRESS order, and MSVC lays a mid-function epilogue before code that runs
+ *    earlier.** `fpSurvivesToReturn`'s own semantics — any post-establish write
+ *    invalidates — refuses the frame of every function with an epilogue, i.e.
+ *    `declared params scanned` **430 -> 0 on t32 and 415 -> 0 on w32**, 578 ->
+ *    557 and 565 -> 544 on the x64 pair, with only 56/260 and 58/258 functions
+ *    of emitted C unchanged and `offsetof` t32 299/52 -> **319/57** as EBP
+ *    stops being excluded from struct bases and shapes are fabricated. Every
+ *    corpus gate stays GREEN through all of that.
+ *  - **The bead's own weaker formulation — "no load of `<fp>` before the last
+ *    read of `[<fp> + N]`" — does not refuse either target function**, since
+ *    their single `[ebp + 8]` operand precedes every load, while refusing 59
+ *    other functions and 1123 `[<fp>]` operands (379/200/165/379). It costs
+ *    everything and fixes nothing.
+ *  - **`frameDelta` IS THE WRONG LEVER EVEN WHERE IT FIRES.** Nulling it for the
+ *    two functions alone costs exactly one correct `arg_0` each (`arg_0` ->
+ *    `*(int32_t*)(ebp + 8)`, the parameter withdrawn from the signature) and
+ *    still would not close the hazard: `analyzeStackFrame` records a
+ *    `[<fp> - N]` local with **no** `addressesOwnFrame` gate, so with
+ *    `frameDelta` nulled on `t32!sub_4026E8` the bare-register sites still print
+ *    `var_8 = ecx;` while only the `ebp_1`-spelled ones fall back to derefs.
+ *    Closing it needs a program-point rule inside this file, which has no
+ *    per-expression address, for 0 measured benefit.
  *
  * The evidence is the body's own assignments, and there are THREE shapes of it
  * because `swapDefWithCopy` writes the prologue as `ebp_1 = esp; ebp = ebp_1;` —
