@@ -459,8 +459,52 @@ function exprKey(expr: IRExpr): string {
  *
  * THE WALK IS TREE ORDER WITH CONSERVATIVE JOINS. Every construct that merges
  * control flow ends by minting a fresh generation for each key any of its arms
- * assigned — which is what an SSA phi would name — and that is an over-split
+ * CHANGED — which is what an SSA phi would name — and that is an over-split
  * relative to the ideal, i.e. the benign direction.
+ *
+ * SIBLING ARMS ARE ISOLATED, and each is visited from the state before the
+ * construct. One mutable `cur` shared across an `if`'s two arms made the then
+ * arm's end state the else arm's incoming state, which is not a path the
+ * machine has: a read of the value the construct was ENTERED with took the
+ * token of an assignment on a branch that did not run, and a label inside the
+ * then arm reset keys for the else arm's reads as well. That is `z8q7`'s own
+ * "one register is not one object" one construct in, and it cost
+ * `t32!sub_4041D0` its `EXCEPTION_REGISTRATION` pair: EBX is loaded once at
+ * 0x4041d9 and `[ebx+8]` (0x4041dd) and `[ebx+0xC]` (0x40422f) are one object,
+ * while the `[ebx+0xC]` at 0x404344 inside `loc_40433F` is not — and only the
+ * first two now group (`peek-a-bin-9fp5`).
+ *
+ * THE JOIN'S KEY SET IS WHAT AN ARM CHANGED, NOT WHAT IT ASSIGNS, and the
+ * difference is exactly the keys a `label` inside the arm reset. A syntactic
+ * walk cannot report those: a non-`goto`-named label resets whatever is in
+ * flight, which is a property of the walk's state rather than of the arm's
+ * text. Isolating the arms while still minting only `assigned` is measurably
+ * WORSE than leaving them shared — the post-construct state reverts to the
+ * pre-construct value, which is wrong on the path that entered through the
+ * label — so the two halves have to land together.
+ *
+ * A CALL REDEFINES ITS RESULT REGISTER. `liftBlock` gives every `call_stmt` a
+ * `resultDest`, and until `peek-a-bin-9fp5` this walk read straight past it, so
+ * a read of the accumulator below a call carried the generation of whatever the
+ * register held BEFORE it. The shared `cur` above was masking that: the then
+ * arm's last assignment happened to stand between the two readings, and
+ * isolating the arms without this makes the fabrication visible —
+ * `t32!sub_402AB0` grouped `*_errno() = EINVAL` with `*(arg_0 + 0x10)` as one
+ * object, and `t32!sub_40DD37` grouped `[eax]` at 0x40dd65 with `[eax+2]` at
+ * 0x40dd8c across the `eax = sub_401EB8(...)` at 0x40dd72 that replaces it. The
+ * registers the CALLEE clobbers need nothing here: SSA versions those and
+ * `destroySSA` spells each as its own `clobbered_<reg>_<n>`, already a distinct
+ * key. The cost is that a callee which happens to PRESERVE the accumulator is
+ * split from anyway — `t32!sub_404360` loses one member across
+ * `__security_check_cookie` (0x401da4, a `cmp`/`repz ret` that touches no
+ * register) — and there is no evidence available at the site to do better,
+ * since `IRCall.clobbers` deliberately never lists RAX.
+ *
+ * A `try` HANDLER IS NOT A SIBLING ARM. It is entered by the unwinder from an
+ * arbitrary point inside the body (`peek-a-bin-d3z`), so neither the state
+ * before the `try` nor the state after the body holds there; its incoming
+ * state is the body's own merge, and the handler's changes then join with the
+ * body's for what follows.
  *
  * A `label` IS RESOLVED FROM ITS OWN INCOMING EDGES, and that is the one place
  * this walk does reach a fixpoint. It used to mint a fresh generation for every
@@ -513,10 +557,20 @@ function exprKey(expr: IRExpr): string {
  * object outright. So a folded copy *hands its source's generation over* rather
  * than minting one, and the two names then move independently.
  *
- * ONE STATED LIMITATION, pre-existing rather than introduced: a `raw`
- * statement's register writes are not modelled anywhere in this IR (see
- * `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing), so a base
- * redefined by an unlifted instruction still groups across it.
+ * TWO STATED LIMITATIONS, both pre-existing rather than introduced:
+ *
+ *   * A `raw` statement's register writes are not modelled anywhere in this IR
+ *     (see `fold.ts`'s `blockLiveOut`, which reads a `raw` as reading nothing),
+ *     so a base redefined by an unlifted instruction still groups across it.
+ *   * A LOOP HEADER is minted from `assigned` and not from what the body
+ *     changed, because the body has not been walked when the header phi has to
+ *     exist. A key only a `label` inside the body resets is therefore not
+ *     minted there, so a read above that label carries the pre-loop generation
+ *     although iteration two holds the label's value. Closing it needs the body
+ *     walked before the header is minted — a per-loop fixpoint nested inside
+ *     the label one, 2^depth walks for nested loops — which is a separate
+ *     change with a cost of its own to measure. The loop EXIT joins do use the
+ *     changed set, so nothing the body left in flight carries past the loop.
  */
 /**
  * How many times the label fixpoint may re-walk one function before giving up.
@@ -608,11 +662,87 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
       return out;
     }
 
-    /** A merge point: every key an arm may have redefined holds a new value here. */
+    /** Overwrite `cur` with `state`. */
+    function restoreTo(state: Map<string, string>): void {
+      cur.clear();
+      for (const [k, v] of state) cur.set(k, v);
+    }
+
+    /**
+     * Every key whose generation now differs from the one it had in `pre`.
+     *
+     * This is what an arm CHANGED, and it is deliberately a superset of what
+     * `assigned` reports over the same statements: it also carries every key a
+     * `label` INSIDE the arm reset, which is the half a syntactic walk cannot
+     * see — a non-`goto`-named label resets whatever is in flight, which is a
+     * property of the walk's state and not of the arm's text.
+     */
+    function changedSince(pre: Map<string, string>, out: Set<string>): Set<string> {
+      for (const [k, v] of cur) if ((pre.get(k) ?? ENTRY_GENERATION) !== v) out.add(k);
+      for (const [k, v] of pre) if (!cur.has(k) && v !== ENTRY_GENERATION) out.add(k);
+      return out;
+    }
+
+    /** A merge point: each of `keys` holds a value no single path determines. */
+    function mint(at: IRStmt, which: number, keys: Iterable<string>): void {
+      for (const k of keys) cur.set(k, `j${stmtId.get(at)}.${which}:${k}`);
+    }
+
+    /**
+     * A merge point over statements the walk has NOT reached yet — a loop
+     * header, whose incoming back edge is the body below it.
+     *
+     * The key set has to be syntactic here, and that is the one place this walk
+     * still under-mints: a key only a `label` inside the body resets is not in
+     * `assigned`, so a read above that label carries the pre-loop generation
+     * although iteration two holds the label's value. Closing it needs the body
+     * walked before the header is minted, i.e. a per-loop fixpoint nested
+     * inside the label one, and that is a separate change with a cost
+     * (2^depth walks for nested loops) that has to be measured on its own.
+     */
     function join(at: IRStmt, which: number, arms: IRStmt[][]): void {
       const keys = new Set<string>();
       for (const arm of arms) assigned(arm, keys);
-      for (const k of keys) cur.set(k, `j${stmtId.get(at)}.${which}:${k}`);
+      mint(at, which, keys);
+    }
+
+    /**
+     * Visit sibling arms — an `if`'s two, a `switch`'s cases — each from the
+     * state BEFORE the construct, and merge what they changed.
+     *
+     * Sharing one `cur` across the arms let the first arm's writes and its
+     * labels' resets stand as the second arm's incoming state, which is wrong
+     * twice over: it costs the second arm every grouping the label reset, and
+     * it hands a read of the value the construct was ENTERED with the token of
+     * an assignment on a path that did not run — `peek-a-bin-z8q7`'s "one
+     * register is not one object", one construct in (`peek-a-bin-9fp5`).
+     *
+     * The merge is over what each arm changed rather than over what it
+     * assigns, so a key a label inside an arm reset is minted here. Isolating
+     * the arms without that is measurably worse than leaving them shared: the
+     * post-construct state reverts to the pre-construct value, which is wrong
+     * on the path that entered through the label.
+     *
+     * A construct whose arms do not cover every path — an `if` with no `else`,
+     * a `switch` with no `default` — contributes the pre-construct state as
+     * one more incoming edge for free, since a key no arm changed carries
+     * through untouched.
+     *
+     * `switch` arms are treated as independent because `structureSwitch` closes
+     * every one of them with its own terminator (`armExit`, gated at 0 false
+     * breaks by `corpus/armExits.ts`), so there is no fall-through path from
+     * one case body into the next for the isolation to lose.
+     */
+    function visitArms(at: IRStmt, which: number, arms: IRStmt[][]): void {
+      const pre = new Map(cur);
+      const changed = new Set<string>();
+      for (const arm of arms) {
+        restoreTo(pre);
+        visit(arm);
+        changedSince(pre, changed);
+      }
+      restoreTo(pre);
+      mint(at, which, changed);
     }
 
     /**
@@ -667,9 +797,28 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
             read(s.address);
             read(s.value);
             break;
-          case "call_stmt":
+          case "call_stmt": {
             read(s.call);
+            // A CALL WRITES THE ACCUMULATOR, and `resultDest` is where
+            // `liftBlock` records that — every `call_stmt` carries one. Without
+            // it the call is transparent to this walk, so a read of the result
+            // register below a call carries the generation of whatever was in
+            // that register BEFORE it, and accesses through two unrelated
+            // objects group as one. `t32!sub_40DD37` is the witness: `eax =
+            // arg_0` at 0x40dd3f, `*(int32_t*)(eax)` at 0x40dd65, then
+            // `eax = sub_401EB8(...)` at 0x40dd72 and `*(uint16_t*)(eax + 2)`
+            // at 0x40dd8c — one grouped base spanning a call that replaces it.
+            // The registers the CALLEE clobbers need nothing here: SSA versions
+            // those separately and `destroySSA` spells each as its own
+            // `clobbered_<reg>_<n>`, so they are already distinct keys.
+            const dest = s.resultDest;
+            if (dest && (dest.kind === "reg" || dest.kind === "var")) {
+              const dk = exprKey(dest);
+              cur.set(dk, `c${stmtId.get(s)}`);
+              gen.set(dest, genOf(dk));
+            }
             break;
+          }
           case "return":
             if (s.value) read(s.value);
             break;
@@ -678,44 +827,73 @@ function baseGenerations(body: IRStmt[], canonKey: (e: IRExpr) => string): Map<I
             break;
           case "if":
             read(s.condition);
-            visit(s.thenBody);
-            if (s.elseBody) visit(s.elseBody);
-            join(s, 0, bodiesOf(s));
+            visitArms(s, 0, bodiesOf(s));
             break;
-          case "while":
+          case "while": {
             // The header phi first: the condition is re-evaluated after every
             // iteration, so what it reads is the merge and not the entry value.
             join(s, 0, [s.body]);
             read(s.condition);
+            // A `while` leaves through the header test, so the state at the
+            // exit is the header's for every key the body did not touch — the
+            // body's leftovers must not carry past the loop.
+            const pre = new Map(cur);
             visit(s.body);
-            join(s, 1, [s.body]);
+            const changed = changedSince(pre, new Set<string>());
+            restoreTo(pre);
+            mint(s, 1, changed);
             break;
-          case "do_while":
+          }
+          case "do_while": {
             join(s, 0, [s.body]);
+            const pre = new Map(cur);
             visit(s.body);
+            // The condition is tested after the body, so it reads the body's
+            // own end state rather than the merge.
             read(s.condition);
-            join(s, 1, [s.body]);
+            const changed = changedSince(pre, new Set<string>());
+            restoreTo(pre);
+            mint(s, 1, changed);
             break;
-          case "for":
+          }
+          case "for": {
             visit([s.init]);
             join(s, 0, [s.body, [s.update]]);
             read(s.condition);
+            const pre = new Map(cur);
             visit(s.body);
             visit([s.update]);
-            join(s, 1, [s.body, [s.update]]);
+            const changed = changedSince(pre, new Set<string>());
+            restoreTo(pre);
+            mint(s, 1, changed);
             break;
+          }
           case "switch":
             read(s.expr);
-            for (const c of s.cases) visit(c.body);
-            if (s.defaultBody) visit(s.defaultBody);
-            join(s, 0, bodiesOf(s));
+            visitArms(s, 0, bodiesOf(s));
             break;
-          case "try":
+          case "try": {
+            // The handler is NOT a sibling arm and must not be visited as one.
+            // It is entered by the unwinder from an arbitrary point inside the
+            // body (peek-a-bin-d3z), so neither the state before the `try` nor
+            // the state after the body is what holds on entry to it: nothing
+            // the body may have written is known there. Its incoming state is
+            // therefore the body's own merge, and the handler's changes then
+            // join with the body's for what follows the construct.
+            const pre = new Map(cur);
+            const changed = new Set<string>();
             visit(s.body);
+            changedSince(pre, changed);
+            restoreTo(pre);
+            mint(s, 0, changed);
+            const atHandler = new Map(cur);
             visit(s.handler);
+            changedSince(atHandler, changed);
             if (s.filterExpr) read(s.filterExpr);
-            join(s, 0, bodiesOf(s));
+            restoreTo(pre);
+            mint(s, 1, changed);
             break;
+          }
           case "goto":
             arriveAt(s.label);
             break;

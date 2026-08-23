@@ -385,6 +385,32 @@ renumbers. Everything else flat — gcc clean, `member name vs brackets` 0, pola
 callees lost, loops short, staleReads, staleGuards, popReads, lostDefs, armExits, wildBranches,
 unencodableNames, self-assigns, undefined callees, loop shape and `if` counts.
 
+**`peek-a-bin-9fp5` then moved struct grouping again, and the stamp above is deliberately NOT
+rewritten** — it was re-derived at `bef7882` figure for figure before the change. The deltas, base
+`bef7882`: `->field_0x` occurrences **1936 → 1946** (t32/t64/w64/w32 528/457/438/513 →
+**531/459/440/516**), `offsetof` **299/286/291/310 → 393/282/287/309 fields** over
+**52/56/55/56 → 50/55/54/52 distinct definitions**, every ratio 1.00, overlapping struct reads **0
+on all four either way** with the liveness *risen* (bases 626/518/496/617 → 659/531/515/652), and
+`compare.mjs` verdict **no regression** with `only-base 0 / only-change 0` on all four — the
+2/4/2/4 `CHANGED` guards are pure `struct_N` renumbers with identical text, operator, verdict and
+anchor. Every gate flat: gcc clean, polarity anchor-A 0 inverted and 0 mismatch, 0 throws, 0
+statements dropped, 0 callees lost, 0 loops short, arity exact/under/over unmoved, staleReads,
+staleGuards, popReads, lostDefs, armExits, wildBranches, unencodableNames, memberNameAgreement and
+`guard lines unparsed` all 0.
+
+**READ THE `offsetof` RISE AS A DECLARATION EFFECT, NOT AS RECOVERY, AND NOTE IT POINTS THE
+OPPOSITE WAY FROM `z8q7`'s FALL.** t32's +94 fields against −2 definitions is one 86-field layout
+that **stopped merging across functions** and is therefore counted at both sites; the recovery
+question is answered by field accesses reaching the page, which moved **+3 on t32 and +10
+corpus-wide**. That is the same instrument `z8q7` and `slkh` are read with, and the same warning:
+`offsetof` at ratio 1.00 proves a declaration self-consistent and can never see a wrong identity,
+which is why the sixteen moved functions were hand-read against `objdump -d -M intel` instead.
+**Two of them are FABRICATIONS REMOVED** — `t32!sub_402AB0` / `w32!sub_402D04` and
+`t32!sub_405745` / `w32!sub_405AA6` grouped `*_errno() = EINVAL` with `*(arg_0 + 0x10)`, i.e.
+`z8q7`'s own class — and one is an honest over-split: `sub_404360` / `sub_4045C0` calls
+`__security_check_cookie` (`cmp` / `jne` / `repz ret`), which preserves EAX, but `IRCall.clobbers`
+deliberately never lists RAX so no evidence of that is available to this pass.
+
 
 - **A register is never named for a value it no longer holds — and the blind spot that used to qualify that sentence is closed.** Every surviving read of a register's SSA *entry* value is checked against the writes that dominate it: **0 wrong names and 0 spoiled entry-value copies on all four binaries**, over **33/182/181/34 sites** (t32/t64/w64/w32) at `82ed61e`, from 28/78/28/78 and 13/19/13/18 at `cee6f91`. A gate, not a baseline — see `corpus/README.md` on why this one gates when the statement-drop and unrecovered-value counts do not. **What is gated is every surviving *version-0* read whose register a dominating write has changed *under the name the read uses*.** Both halves of that were wrong until `peek-a-bin-fppy` and `peek-a-bin-pzws` were fixed together, and the pair is worth understanding because each hid the other:
   - **The site filter could not see a definition phi lowering had relocated.** It attributed a phi's definition to the phi's own block, while `destroySSA` materialises the copy in each *predecessor* — and a predecessor routinely dominates blocks the phi block does not. Where the only dominating writer was a relocated phi copy the site was discarded before it was ever judged, so the gate printed **0 over 12 provably wrong reads**. Noting the phi at each operand's block as well takes the site count 28/159/158/28 → 33/182/181/34 and the gate red at 12 (six in `t64!sub_1400045DC`, six in `w64!sub_14000496C`, all `r9`, 0x140004883-0x140004898).
@@ -921,6 +947,40 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
   `t32!sub_40667A`'s own correct `ioinfo` recovery sits either side of a
   `/* unlifted: sbb eax, eax */`.
 
+- **A construct's ARMS are visited in isolation, and the regression that blocked doing so was a
+  `call_stmt` that never minted — not the join's key set.** `baseGenerations` visited an `if` as
+  `visit(thenBody); visit(elseBody); join(...)` over ONE mutable `cur`, so the else arm started from
+  whatever the then arm left behind: a precision loss (a label's reset inside one arm leaks into the
+  other) and a **fabrication** hazard of `peek-a-bin-z8q7`'s own class, one construct in. Isolating
+  the arms naively produces **1 `structOverlaps` row per binary** where the shipping tree has 0, and
+  `peek-a-bin-9fp5` recorded the cause as `join` minting only for keys an arm ASSIGNS and not for
+  keys a label inside an arm RESET. **That prescription was implemented and the regression survives
+  it** (1964 and still 1 row per binary), so the filed diagnosis is refuted. Six things:
+  - **The real cause is that a `call_stmt`'s `resultDest` never minted a generation.** In
+    `t32!sub_40DD37` the else arm opens with `call_stmt@40dd72` (`eax = sub_401EB8(...)`), so
+    `[eax+2]` at 0x40dd8c kept the token `assign@40dd3f` gave it and grouped with `[eax]` at
+    0x40dd65 — two objects, one base. The shared `cur` was **masking** it, because the then arm's
+    `eax = 0xFFFFFFFF` happened to stand between the two readings. **No join rule can reach it**: the
+    bad read is *inside* an arm, not at the merge.
+  - **Both halves are needed and neither suffices.** Isolation alone is 1966 with 1 row per binary;
+    call minting alone is 1918 with 0 rows; together **1946 with 0 rows**. Attribution measured with
+    all four runs pinned.
+  - **The join key set is what an arm CHANGED, not what it assigns** — a dynamic diff, which
+    subsumes the label-reset set the bead asked for. Isolation with the old syntactic `assigned()`
+    key set is measurably *worse* than sharing the arms.
+  - **A `try`'s handler enters from the BODY'S MERGE**, not from the pre-construct state and not from
+    the body's end state: the unwinder enters mid-body (`peek-a-bin-d3z`'s 1160 blocks are the same
+    fact one storey up).
+  - **Loop *exit* joins use the changed set; loop *headers* keep the syntactic `assigned()`**, and
+    that is a stated limitation rather than an oversight — the body has not been walked when the
+    header join is taken, so closing it needs a per-loop fixpoint nested inside the label one
+    (2^depth walks). Callee clobbers need nothing: SSA already spells them `clobbered_<reg>_<n>`,
+    which are distinct keys.
+  - **The `try` and loop-exit rules are INERT on this corpus** — an ablation reverting both leaves
+    the emitted C byte-identical on all four binaries — so they are bounds pinned by unit test, the
+    status `pop esp` and the `rip`/`rsp` refusals have, and not measured savings. Five negative
+    controls, each failing only its own test (`peek-a-bin-9fp5`).
+
 - **…and a `label` is resolved from the states its own `goto`s carry, not reset blindly — but the
   ceiling that reaching for it suggests is a FABRICATION, measured on the very witness that
   motivated the change.** `structureCFG` spells every transfer it cannot fall through as a `goto`
@@ -991,6 +1051,9 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
     **produces 1 `structOverlaps` row per binary** (`t32!sub_40DD37`, `reg:rax#a4`, `0x0:4` over
     `0x2:2`), because `join` mints for keys the arms *assign* and not for keys a label inside an arm
     reset. So it is a real defect with a known trap, filed as `peek-a-bin-9fp5`, not folded in here.
+    **`peek-a-bin-9fp5` HAS SINCE LANDED, AND THE DIAGNOSIS ABOVE IS WRONG — see the gotcha below.**
+    The naive isolation's `structOverlaps` row is not the join's key set at all; it is a `call_stmt`
+    that never minted.
 - **THREE TESTS PINNED THE DEFECT AS THE RULE.** `structs.test.ts`'s "does not credit accesses to
   the last base a register was ever copied from" asserted all three offsets of an RBX that holds
   RCX's object and then RDX's in **one** declaration, with a comment saying "the grouping survives";

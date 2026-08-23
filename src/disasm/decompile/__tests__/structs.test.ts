@@ -37,6 +37,13 @@ const callStmt = (target: string, args: IRExpr[] = [], display?: string): IRStmt
   call: { kind: "call", target, args, display },
 });
 
+/** A call that lands its result in `dest`, which `liftBlock` always records. */
+const callResult = (target: string, dest: IRExpr, args: IRExpr[] = []): IRStmt => ({
+  kind: "call_stmt",
+  call: { kind: "call", target, args },
+  resultDest: dest,
+});
+
 /** `*(base + offset)` */
 const at = (base: IRExpr, offset: number, size = 4): IRExpr =>
   irDeref(offset === 0 ? base : irBinary("+", base, irConst(offset)), size);
@@ -2290,6 +2297,184 @@ describe("synthesizeStructs — base value generations", () => {
     // annotation would break silently.
     const out = run(twoFieldBody());
     expect(out.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
+  });
+
+  // ── Sibling arms are isolated (peek-a-bin-9fp5) ──
+
+  it("does not credit an else arm's read to an assignment only the then arm makes", () => {
+    // THE FABRICATION HALF. RAX holds one object on the way in; the then arm
+    // replaces it. Sharing one `cur` across the arms made the then arm's end
+    // state the else arm's incoming state, so the else arm's read of the
+    // ENTRY value took the token of a load on a branch that did not run and
+    // the two objects grouped as one — `peek-a-bin-z8q7` one construct in.
+    const out = run([
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+          assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+        ],
+        elseBody: [assign(irReg("r9d", 4), at(irReg("rax", 8), 8))],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("gives an else arm the state the construct was entered with", () => {
+    // THE PRECISION HALF, and `t32!sub_4041D0` in miniature: EBX is loaded once
+    // at 0x4041d9 and `[ebx+8]` (0x4041dd, above the `if`) and `[ebx+0xC]`
+    // (0x40422f, in the else arm) are one object. A label inside the THEN arm
+    // used to reset the key for the else arm's read as well.
+    const out = run([
+      assign(irReg("rbx", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rbx", 8), 8)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [
+          { kind: "label", name: "loc_40433F" },
+          assign(irReg("r9d", 4), at(irReg("rbx", 8), 0xc)),
+        ],
+        elseBody: [assign(irReg("r10d", 4), at(irReg("rbx", 8), 0xc))],
+      },
+    ]);
+    // The else arm's 0xC joins the 0x8 above the `if`; the then arm's 0xC is
+    // past a label the unwinder enters, so it is a third value and no field.
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([[8, 0xc]]);
+  });
+
+  it("mints at the join for a key only a label inside an arm reset", () => {
+    // THE TRAP, and the reason isolation cannot land on its own. `assigned`
+    // walks an arm's text, and the arm here assigns nothing — the label is what
+    // moves RAX on. Mint from that syntactic set and the post-`if` state
+    // reverts to the pre-`if` value, which is wrong on the path that entered
+    // through the label, and all four readings below collapse into one
+    // fabricated object.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+      assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+      {
+        kind: "if",
+        condition: irBinary("!=", RDX, irConst(0)),
+        thenBody: [{ kind: "label", name: "loc_401030" }],
+      },
+      assign(irReg("r10d", 4), at(irReg("rax", 8), 0x20)),
+      assign(irReg("r11d", 4), at(irReg("rax", 8), 0x28)),
+    ]);
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([
+      [0, 8],
+      [0x20, 0x28],
+    ]);
+  });
+
+  it("isolates a switch's case bodies from one another", () => {
+    // `structureSwitch` closes every arm with its own terminator, so a case
+    // body is never the next one's incoming state either.
+    const out = run([
+      {
+        kind: "switch",
+        expr: RDX,
+        cases: [
+          {
+            values: [0],
+            body: [
+              assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+              assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+            ],
+          },
+          { values: [1], body: [assign(irReg("r9d", 4), at(irReg("rax", 8), 8))] },
+        ],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  // ── A call redefines its result register (peek-a-bin-9fp5) ──
+
+  it("does not group a read of the accumulator below a call with one above it", () => {
+    // `t32!sub_40DD37`: `[eax]` at 0x40dd65 and `[eax+2]` at 0x40dd8c, with
+    // `eax = sub_401EB8(...)` at 0x40dd72 between them. Reading past the call
+    // grouped two unrelated objects, and `corpus/structOverlaps.ts` reported
+    // the overlap the moment the arms stopped masking it.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+      callResult("sub_401200", irReg("rax", 8)),
+      assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("leaves a base the call does not write alone", () => {
+    // Only `resultDest` is redefined. The registers the CALLEE clobbers are
+    // versioned by SSA and spelled `clobbered_<reg>_<n>` by `destroySSA`, so
+    // they are already distinct keys and need nothing here — and a rule that
+    // split every base at every call would recover nothing across one.
+    const out = run([
+      assign(irReg("rbx", 8), at(RCX, 0x18, 8)),
+      assign(irReg("r8d", 4), at(irReg("rbx", 8), 0)),
+      callResult("sub_401200", irReg("rax", 8)),
+      assign(irReg("r9d", 4), at(irReg("rbx", 8), 8)),
+    ]);
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([[0, 8]]);
+  });
+
+  // ── A try handler is entered from the body's merge (peek-a-bin-9fp5) ──
+
+  it("does not give a try handler the state the try was entered with", () => {
+    // The handler is entered by the unwinder from an arbitrary point inside the
+    // body, so the pre-`try` value is not what holds there any more than the
+    // body's end state is: RAX is replaced part-way through the body, and the
+    // handler's read of it must group with neither reading.
+    const out = run([
+      assign(irReg("rax", 8), at(RDX, 0x30, 8)),
+      {
+        kind: "try",
+        body: [
+          assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+          assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+        ],
+        handler: [assign(irReg("r9d", 4), at(irReg("rax", 8), 8))],
+      },
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
+  });
+
+  it("carries a base the try body never touches into the handler", () => {
+    // The liveness half: the merge must mint for what the body changed and for
+    // nothing else, or a handler recovers no field at all.
+    const out = run([
+      {
+        kind: "try",
+        body: [assign(irReg("r8d", 4), at(RCX, 0x18, 8))],
+        handler: [assign(irReg("r9d", 4), at(RCX, 0x20, 8))],
+      },
+    ]);
+    expect(out.typedefs?.map((d) => d.fields.map((f) => f.offset))).toEqual([[0x18, 0x20]]);
+  });
+
+  // ── A loop's exit is its header, not its body's end (peek-a-bin-9fp5) ──
+
+  it("does not carry what a loop body left in flight past the loop", () => {
+    // A `while` leaves through the header test, so the value at the exit is the
+    // header's and never the one a label part-way down the body established.
+    // The body assigns nothing, so a join over `assigned` mints nothing and the
+    // label's token used to reach the statement below the loop.
+    const out = run([
+      assign(irReg("rax", 8), at(RCX, 0x18, 8)),
+      {
+        kind: "while",
+        condition: irBinary("!=", RDX, irConst(0)),
+        body: [
+          { kind: "label", name: "loc_401040" },
+          assign(irReg("r8d", 4), at(irReg("rax", 8), 0)),
+        ],
+      },
+      assign(irReg("r9d", 4), at(irReg("rax", 8), 8)),
+    ]);
+    expect(out.typedefs ?? []).toHaveLength(0);
   });
 });
 
