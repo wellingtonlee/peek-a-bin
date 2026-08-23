@@ -169,9 +169,16 @@ bytes. Measured at `7082e66` by replaying a load's RPCs against the real dispatc
 | t64-arm.exe (110 KiB `.text`, 27428 insns) | 4083 → **1361** | 7.32 → **2.44 MiB** | 407 → **166 ms** |
 | w64-arm.exe (98 KiB `.text`, 24393 insns) | 3393 → **1131** | 6.51 → **2.17 MiB** | 328 → **129 ms** |
 
-Only the decode is shared. Comments and the `.pdata` `source` classification are reapplied per
-caller (~5 ms on 27428 instructions, plus 2.5 ms for the `findArm64AddressRefs` pass the comments
-are resolved from — see below), so what each RPC returns is unchanged — verified
+Those insn counts are the RAW sweep's, which is what the cache holds and what Capstone was asked
+for. The `hybridDisassemble` RPC returns fewer — 27419 and 24384 — because it withholds the bytes
+of a recovered jump table so the view renders them as data (`peek-a-bin-gb40`); the decode is
+unmoved either way, since A64 has no gap fill and the sweep reads every word of the section
+regardless.
+
+Only the decode is shared. Comments, the `.pdata` `source` classification and the jump-table
+masking are reapplied per caller (~5 ms on 27428 instructions, plus 2.5 ms for the
+`findArm64AddressRefs` pass the comments are resolved from — see below), so what each RPC returns
+is unchanged — verified
 element-by-element against an uncached run on both binaries, with real extracted strings, a real
 IAT map and driver mode on. The x86 path never consults it: `buildAllXrefs` and the two x86
 disassemblers own their decode inside `functionDetect.ts`, and the four x86 corpus binaries emit

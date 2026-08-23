@@ -283,15 +283,22 @@ export async function dispatch(
         // covers the whole section rather than only what a BFS could reach.
         // `pdataRanges` still arrives, and marks which words the image itself
         // vouches for.
-        // The annotation and the `.pdata` marking are redone here whether or
-        // not the sweep itself came from the cache, so what the view gets is
-        // byte-identical either way; only the Capstone pass is skipped.
+        // The annotation, the `.pdata` marking and the jump-table masking are
+        // redone here whether or not the sweep itself came from the cache, so
+        // what the view gets is byte-identical either way; only the Capstone
+        // pass is skipped.
+        //
+        // `jumpTableSpans` is forwarded for the same reason the x86 branch
+        // below takes it, with a different effect: there it keeps the gap fill
+        // off a table, here the sweep has already decoded every word and this
+        // is what withholds the table's own from the view (peek-a-bin-gb40).
         return disassembleArm64(
           args.bytes,
           args.baseAddress,
           armCtx(state),
           args.pdataRanges,
           state.arm64Sweep,
+          args.jumpTableSpans,
         );
       }
       return _hybridDisassemble(

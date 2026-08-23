@@ -1248,11 +1248,15 @@ Two questions, one per architecture, and they are not the same question:
 
 ## `corpus/arm64.ts` — the ARM64 audits, and why they are not folded in
 
-`npm run corpus:arm64`. Over `t64-arm.exe` and `w64-arm.exe`: **35 gate assertions and 14 reported
-rows**, drawn from 14 distinct gates and 6 distinct reports asked per image, plus a decode-rate
+`npm run corpus:arm64`. Over `t64-arm.exe` and `w64-arm.exe`: **39 gate assertions and 12 reported
+rows**, drawn from 16 distinct gates and 5 distinct reports asked per image, plus a decode-rate
 calibration asked once over all six binaries and a sweep-cache differential asked per image. Missing
 binaries skip cleanly and name themselves; exit 1 on any red gate. The last line is
-`35 of 35 gates green, 14 rows reported. OK`.
+`39 of 39 gates green, 12 rows reported. OK`.
+
+It was 35 and 14 until `peek-a-bin-gb40`, which published the recovered jump tables' byte extents
+and flipped `table words presented as instructions` from a report at 9 / 9 to a gate at 0, adding
+`reader's table not re-derived here` beside it as the liveness half.
 
 ### Why it is a separate run, and not four more keys in `ALL_BINS`
 
@@ -1285,9 +1289,9 @@ from the label and the artifact path**, with emitted C byte-identical on all fou
 Every row has an oracle outside the code under test, and every row carries a liveness half —
 a population count — because a population-based audit fails by silently matching nothing.
 
-| row | status | oracle | at `87a8499` (t64-arm / w64-arm) |
+| row | status | oracle | at `peek-a-bin-gb40` (t64-arm / w64-arm) |
 |---|---|---|---|
-| sweep: unaligned address | GATE | A64 is 4-byte aligned | 0 / 0 of 27428 / 24393 insns |
+| sweep: unaligned address | GATE | A64 is 4-byte aligned | 0 / 0 of 27419 / 24384 insns |
 | sweep: width not 4 | GATE | A64 is fixed-width | 0 / 0 |
 | sweep: address not increasing | GATE | a sweep is monotone | 0 / 0 |
 | sweep: outside code section | GATE | the section bounds | 0 / 0 |
@@ -1295,17 +1299,18 @@ a population count — because a population-based audit fails by silently matchi
 | pdata: begin with no instruction | GATE | `.pdata` is the linker's record | 0 / 0 of 419 / 381 extents |
 | pdata: unaligned begin / end | GATE | A64 alignment | 0 / 0 |
 | pdata: empty extent | GATE | an extent has a length | 0 / 0 |
-| pdata: words in extents that do not decode | report | — | **169 / 111** of 25336 / 22423 |
+| pdata: words in extents that do not decode | report | — | **171 / 113** of 25336 / 22423 |
 | wild branch inside a `.pdata` extent | GATE | the linker resolves its own branches | 0 / 0 of 5830 / 5053 |
-| wild branch outside every extent | report | — | 1 / 1 of 426 / 384 |
-| unreachable decoded word in a `.pdata` extent | report | reachability | **2 / 2** of 6 / 6 eligible |
+| wild branch outside every extent | report | — | 0 / 0 of 425 / 383 |
+| unreachable decoded word in a `.pdata` extent | report | reachability | **1 / 1** of 5 / 5 eligible |
 | ref: target outside the `adrp` page | GATE | `adrp` + `imm12` cannot leave the page | 0 / 0 of 682 / 679 refs |
 | ref: `adrp` page not 4 KiB aligned | GATE | `adrp` zeroes the low 12 bits | 0 / 0 |
 | ref: `adr` target beyond ±1 MiB | GATE | `adr`'s 21-bit displacement | 0 / 0 of 18 / 12 `adr` |
 | ref: attributed to a non-instruction | GATE | the sweep's own answer | 0 / 0 |
 | jump table: case target is not an instruction | GATE | the sweep's own answer | 0 / 0 of 350 / 222 cases |
 | jump table: case outside the dispatch's function | report | — | 0 / 0 |
-| jump table: table words presented as instructions | report | the tool's own recovered table | **9 / 9** of 255 / 139 |
+| jump table: table words presented as instructions | GATE | the tool's own recovered table | 0 / 0 of 255 / 139 |
+| jump table: reader's table not re-derived here | GATE | the reader's published tables | 0 / 0 of 14 / 10 |
 | floor: ARM64 image below the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
 | floor: non-ARM64 image at or above the floor | GATE | `coffHeader.machine` | 0 over 6 binaries |
 | floor: section too small to be evidence | GATE | `ARM64_MIN_MEASURED_WORDS` | 0 over 6 binaries |
@@ -1330,15 +1335,42 @@ fiction. Same reasoning as `corpus/wildBranches.ts`, same restriction pattern as
 `unencodableNames`' PE32-only population.
 
 **`unreachable decoded word` and `table words presented as instructions` are the two data-as-code
-instruments, and both are REPORT-ONLY because both are non-zero.** Every row either can print is
-nonetheless provably data, so both are gateable at 0 the moment an ARM64 data-marking pass lands —
-the standing upgrade `arity over` carried before it became a gate. The first is deliberately the
-*strict* reading: a pool word that happens to decode and sits directly after another decoded word
-is not reported, because fallthrough cannot be ruled out, so it is a **lower bound** and its
-`flanked` count says how many words were even eligible to be judged. Its two rows per binary are
+instruments, and one of them has been taken.** `table words presented as instructions` was 9 / 9
+and REPORT-ONLY solely because it was non-zero; `peek-a-bin-gb40` published the extents
+`findArm64JumpTables` had been discarding, and it is a **GATE at 0**. Every row it can print is
+provably data — the tool cannot both recover a table at those bytes and present them as
+instructions — which is `polarity inverted`'s character rather than a baseline's.
+
+Two rules inside it are worth knowing, and **neither is exercised by running it**:
+
+- **It judges the extent READ, not the extent claimed.** `readArm64Table` stops at the first entry
+  failing its range or alignment test, so a bound can claim more entries than the table has; the
+  length comes from the reader's own `targets`, exactly as the published span does. Judging
+  `Arm64Dispatch.count` instead would name the unread tail, which is bytes nothing has shown to be
+  data, and the gate would be red on correct output. Measured: **every table on both binaries reads
+  to its bound**, so the two readings are identical here and only
+  `build/arm64Audit.test.ts` holds the rule.
+- **`reader's table not re-derived here` is the liveness half and gates too.** This walk re-derives
+  each dispatch from the instruction stream with a `recent` window of its own, so anything that
+  made the stream unreadable — including simply removing the words the window needs — would empty
+  the population and drive the gate above to 0 by no longer looking. Requiring every `br` the
+  reader published to be re-derived here is what makes 255 / 139 an assertion rather than a caption.
+
+Negative-controlled three ways, all at `peek-a-bin-gb40`: restore `jumpTableSpans: []` in
+`detectArm64Functions` and the gate is **RED at exactly 9 / 9**; drop the forwarding in
+`mcp/disasm.ts`, so the spans are published and nothing consumes them, and it is **RED at 9 / 9**
+again; judge `d.count` instead of `targets.length` and exactly one `build/arm64Audit.test.ts` case
+fails.
+
+`unreachable decoded word` is still REPORT-ONLY, now at 1 / 1. It is deliberately the *strict*
+reading: a pool word that happens to decode and sits directly after another decoded word is not
+reported, because fallthrough cannot be ruled out, so it is a **lower bound** and its `flanked`
+count says how many words were even eligible to be judged. Its surviving row per binary is
 `peek-a-bin-56q` item 2's own witness — `0x1400016fc stxrb w9, w11, [x16]`, re-derived here from
-reachability rather than by eye — plus `0x1400018b8 madd w4, w9, w30, w8`, which is inside a table
-the tool itself recovered.
+reachability rather than by eye. The row it lost is `0x1400018b8 madd w4, w9, w30, w8`, which was
+inside a table the tool itself recovered: two independent oracles agreeing about one word, and
+`peek-a-bin-gb40` withdrew it from the instruction stream. It is gateable at 0 the moment a
+literal-pool marking pass lands.
 
 **The decode-rate floor gates in BOTH directions**, which is what makes it a calibration rather
 than a restatement: an accepted 0xAA64 image must be above the floor and every 0x014C / 0x8664
@@ -1352,9 +1384,11 @@ re-derives `ARM64_MIN_DECODE_FRACTION`'s docstring figure for figure (28160/2742
   from an empty population.
 - **Stack frames and signatures.** `analyzeStackFrame` and `inferSignature` have no ARM64 path at
   all (`peek-a-bin-56q` item 1). There is nothing to audit; auditing an absence is not an audit.
-- **Data marking.** There is no ARM64 pass (`peek-a-bin-56q` item 2). What this does instead is
-  *census the population* such a pass would have to cover — the three report rows above — which is
-  the instrument a fix would be judged with.
+- **General data marking.** `peek-a-bin-gb40` marked the one population the tool can already
+  identify — the bytes of a recovered dispatch table — and that row now gates at 0. Everything else
+  `peek-a-bin-56q` item 2 names is still unmarked: literal pools, and padding inside a `.pdata`
+  extent. What this does about those is *census the population* a pass would have to cover — the
+  two surviving report rows above — which is the instrument a fix would be judged with.
 - **Inline comments.** `corpus/comments.ts` already gates that; it is not duplicated.
 
 ### Negative controls
@@ -1373,6 +1407,18 @@ Ten gates can be made red by perturbing this repo's own code, and were:
 | `readArm64Table` drops its alignment guard and reads two bytes off | case target not an instruction **350 / 222** |
 | the cache returns a truncated decode on a hit | shared answer differs **1 / 1** |
 | the cache never stores | no Capstone calls saved **1 / 1** (4083 → 4083, 3393 → 3393) |
+| `detectArm64Functions` returns `jumpTableSpans: []` again | table words presented as instructions **9 / 9** |
+| the spans are published but `mcp/disasm.ts` stops forwarding them | table words presented as instructions **9 / 9** |
+
+The last two are `peek-a-bin-gb40`'s, and they separate the two halves of that fix: publishing the
+extents and consuming them are each necessary on their own. Two more of its controls are outside
+this harness entirely, and the second is a real gap in what this harness reaches. Judging
+`Arm64Dispatch.count` instead of the reader's `targets.length` fails exactly one
+`build/arm64Audit.test.ts` case and **no corpus row**, because every table on both binaries reads
+to its bound. And **this harness drives `FileSession`, i.e. the `mcp/disasm.ts` path, so the
+`workers/dispatch.ts` forwarding it needs is not covered here at all** — the worker could stop
+passing the spans with every row above still green; `src/workers/__tests__/dispatch.test.ts`
+carries that one, negative-controlled the same way.
 
 The rest — instruction width, monotonicity, section bounds, `.pdata` alignment and emptiness,
 `adrp` page alignment, and the section-too-small guard — are properties of Capstone's own output,

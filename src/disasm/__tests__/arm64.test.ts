@@ -423,6 +423,46 @@ describe("detectArm64Functions", () => {
     expect(functions.map((f) => f.address)).toEqual([BASE]);
   });
 
+  /**
+   * peek-a-bin-gb40. The extents go out with the tables. Nothing else tells
+   * `dataView.ts` those bytes are data, and until this was published 9 words of
+   * 255 in recovered table extents on t64-arm.exe rendered as instructions —
+   * one of them a `cbz` aiming outside the image.
+   */
+  it("publishes the byte extent of each recovered table", () => {
+    const words = new Map<number, { mnemonic: string; opStr: string }>();
+    const set = (off: number, mnemonic: string, opStr: string) =>
+      words.set(BASE + off, { mnemonic, opStr });
+    set(0x00, "cmp", "w1, #1");
+    set(0x04, "b.hi", `#0x${(BASE + 0x40).toString(16)}`);
+    set(0x08, "adr", `x9, #0x${(BASE + 0x20).toString(16)}`);
+    set(0x0c, "ldrb", "w8, [x9, w1, uxtw]");
+    set(0x10, "add", "x8, x9, x8, lsl #2");
+    set(0x14, "br", "x8");
+
+    const img = new Uint8Array(0x60);
+    img[0x20] = 2;
+    img[0x21] = 4;
+
+    const { jumpTableSpans } = detectArm64Functions(img, BASE, ctx(fakeCs(words)), {
+      pdataFunctions: [{ beginAddress: BASE, endAddress: BASE + 0x40 }],
+    });
+
+    // Two one-byte entries at BASE + 0x20.
+    expect(jumpTableSpans).toEqual([[BASE + 0x20, BASE + 0x22]]);
+  });
+
+  it("publishes no extents where no table was recovered", () => {
+    const { jumpTableSpans } = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      ctx(fakeCs(code(16))),
+      { pdataFunctions: pdata },
+    );
+
+    expect(jumpTableSpans).toEqual([]);
+  });
+
   it("finds nothing at all in an image with no recorded starts and no calls", () => {
     // Notably it does NOT fall back to a prologue byte scan — that is the x86
     // heuristic this module exists to avoid running on ARM64 bytes.
@@ -529,8 +569,9 @@ describe("findArm64JumpTables", () => {
   ];
   const brAddr = BASE + 5 * ARM64_INSN_SIZE;
 
+  /** The case lists alone; `spans` has its own describe block below. */
   const find = (rows: [string, string][], img: Uint8Array) =>
-    findArm64JumpTables(stream(rows), img, BASE);
+    findArm64JumpTables(stream(rows), img, BASE).tables;
 
   it("recovers the one-adr, byte-entry dispatch", () => {
     // Entries are offsets from the table base in instruction-sized units.
@@ -551,7 +592,7 @@ describe("findArm64JumpTables", () => {
       ["add", "x8, x9, x8, lsl #2"],
       ["br", "x8"],
     ];
-    const tables = findArm64JumpTables(stream(rows), imageWith([2, 5], 4), BASE);
+    const tables = findArm64JumpTables(stream(rows), imageWith([2, 5], 4), BASE).tables;
     expect(tables.get(BASE + 6 * ARM64_INSN_SIZE)).toEqual([caseBase + 8, caseBase + 20]);
   });
 
@@ -579,7 +620,7 @@ describe("findArm64JumpTables", () => {
   it("reads unsigned entries as unsigned", () => {
     // The same byte under `ldrb` is 255, i.e. 0x3fc bytes forward.
     const img = imageWith([0xff, 1], 1, 0x1000);
-    expect(findArm64JumpTables(stream(twoCases()), img, BASE).get(brAddr)).toEqual([
+    expect(findArm64JumpTables(stream(twoCases()), img, BASE).tables.get(brAddr)).toEqual([
       TABLE + 0x3fc,
       TABLE + 4,
     ]);
@@ -681,7 +722,9 @@ describe("findArm64JumpTables", () => {
       ["add", "x8, x9, x8, lsl #2"],
       ["br", "x8"],
     ];
-    expect(findArm64JumpTables(stream(rows), imageWith([1, 2, 3, 4]), BASE)).toEqual(new Map());
+    expect(findArm64JumpTables(stream(rows), imageWith([1, 2, 3, 4]), BASE).tables).toEqual(
+      new Map(),
+    );
   });
 
   it("refuses an `add` with no shift, whose entry unit is unstated", () => {
@@ -716,7 +759,7 @@ describe("findArm64JumpTables", () => {
       ["ldar", "x9, [x8]"],
       ["br", "x9"],
     ];
-    expect(findArm64JumpTables(stream(rows), imageWith([1, 2]), BASE)).toEqual(new Map());
+    expect(findArm64JumpTables(stream(rows), imageWith([1, 2]), BASE).tables).toEqual(new Map());
   });
 
   it("refuses when the table register is rewritten between its `adr` and the load", () => {
@@ -728,7 +771,9 @@ describe("findArm64JumpTables", () => {
       ["add", "x8, x9, x8, lsl #2"],
       ["br", "x8"],
     ];
-    expect(findArm64JumpTables(stream(rows), imageWith([1, 2, 3, 4]), BASE)).toEqual(new Map());
+    expect(findArm64JumpTables(stream(rows), imageWith([1, 2, 3, 4]), BASE).tables).toEqual(
+      new Map(),
+    );
   });
 
   it("stops at the first entry pointing outside the code section", () => {
@@ -770,6 +815,83 @@ describe("findArm64JumpTables", () => {
     const tables = find(rows, imageWith([1, 2, 3, 4]));
     expect(tables.has(brAddr)).toBe(true);
     expect(tables.has(BASE + 7 * ARM64_INSN_SIZE)).toBe(false);
+  });
+
+  /**
+   * peek-a-bin-gb40. The bytes a table was read out of, so the view can call
+   * them data instead of decoding them.
+   */
+  describe("the spans it reports are the bytes it actually read", () => {
+    const spansOf = (rows: [string, string][], img: Uint8Array) =>
+      findArm64JumpTables(stream(rows), img, BASE).spans;
+
+    it("reports one span per accepted table, sized by its entry width", () => {
+      expect(spansOf(byteEntryChain, imageWith([1, 2, 3, 4]))).toEqual([[TABLE, TABLE + 4]]);
+    });
+
+    it("sizes a word-entry table by its own width, not by the word size", () => {
+      const caseBase = BASE + 0x20;
+      const rows: [string, string][] = [
+        ["cmp", "w10, #1"],
+        ["b.hi", `#0x${(BASE + 0x80).toString(16)}`],
+        ["adr", `x9, #0x${TABLE.toString(16)}`],
+        ["ldrsw", "x8, [x9, w10, uxtw #2]"],
+        ["adr", `x9, #0x${caseBase.toString(16)}`],
+        ["add", "x8, x9, x8, lsl #2"],
+        ["br", "x8"],
+      ];
+      expect(spansOf(rows, imageWith([2, 5], 4))).toEqual([[TABLE, TABLE + 8]]);
+    });
+
+    /**
+     * THE RULE THIS ROW EXISTS FOR. `readArm64Table` stops at the first entry
+     * failing its range or alignment test, so the bound can claim more entries
+     * than the table has. Reporting the claimed extent would hand the caller
+     * bytes nothing has shown to be data, and `disassembleArm64` would then
+     * withhold real instructions from the view — the direction this project
+     * refuses in. Both corpus binaries read every table to its bound, so this
+     * case does not occur there and only this test holds the rule.
+     */
+    it("reports the SHORT extent when the read stops before the bound", () => {
+      // `cmp w1, #3` claims four entries; 0x40 * 4 lands past a 0x100 image, so
+      // the third entry ends the read and only two bytes were ever a table.
+      const img = imageWith([1, 2, 0x40, 4]);
+      expect(find(byteEntryChain, img).get(brAddr)).toHaveLength(2);
+      expect(spansOf(byteEntryChain, img)).toEqual([[TABLE, TABLE + 2]]);
+    });
+
+    it("claims no bytes for a dispatch it refuses", () => {
+      // A one-entry read is not a table, so its byte is not table data either.
+      const rows = byteEntryChain.map((r) =>
+        r[0] === "cmp" ? (["cmp", "w1, #0"] as [string, string]) : r,
+      );
+      expect(spansOf(rows, imageWith([1]))).toEqual([]);
+    });
+
+    it("reports one span for two dispatches reading the same table the same way", () => {
+      // A span is about the bytes, not about the `br` that reached them.
+      const rows: [string, string][] = [...byteEntryChain, ...byteEntryChain];
+      const found = findArm64JumpTables(stream(rows), imageWith([1, 2, 3, 4]), BASE);
+      expect(found.tables.size).toBe(2);
+      expect(found.spans).toEqual([[TABLE, TABLE + 4]]);
+    });
+
+    it("keeps both spans where two dispatches read the same base to different lengths", () => {
+      // t64-arm.exe's 0x140001df0, read over 17 entries by one `br` and 8 by
+      // another. Their union is the marked region either way.
+      const shorter = byteEntryChain.map((r) =>
+        r[0] === "cmp" ? (["cmp", "w1, #1"] as [string, string]) : r,
+      );
+      const found = findArm64JumpTables(
+        stream([...byteEntryChain, ...shorter]),
+        imageWith([1, 2, 3, 4]),
+        BASE,
+      );
+      expect(found.spans).toEqual([
+        [TABLE, TABLE + 4],
+        [TABLE, TABLE + 2],
+      ]);
+    });
   });
 
   /**
@@ -1103,6 +1225,91 @@ describe("sweepArm64 / decorateArm64Sweep", () => {
     expect(() => sweepArm64(new Uint8Array(0x2000), BASE, fakeCs(code(1, 400)))).toThrow(
       Arm64DecodeRateError,
     );
+  });
+
+  /**
+   * peek-a-bin-gb40. A word the tool has already called a jump-table entry is
+   * not an instruction, and this is where it stops being presented as one. The
+   * decode is untouched — A64 has no gap fill, so the sweep read every word
+   * either way — which is why this is a decoration-side filter and not a change
+   * to {@link sweepArm64} or to what {@link Arm64SweepCache} holds.
+   */
+  describe("jump-table bytes are withheld from the decorated answer", () => {
+    const cs = () => fakeCs(code(6));
+    const addrs = (insns: Instruction[]) => insns.map((i) => i.address);
+
+    it("changes nothing when no spans are supplied", () => {
+      // "Nobody said where the tables are" is not "there are none".
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      expect(addrs(decorateArm64Sweep(raw, ctx(null)))).toEqual(addrs([...raw]));
+    });
+
+    it("drops a word that lies inside a span", () => {
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      const out = decorateArm64Sweep(raw, ctx(null), undefined, [[BASE + 8, BASE + 12]]);
+      expect(addrs(out)).toEqual([BASE, BASE + 4, BASE + 12, BASE + 16, BASE + 20]);
+    });
+
+    /**
+     * The real corpus shape: t64-arm.exe's table at 0x1400018b0 is 33 entries
+     * of one byte, so it ends at 0x1400018d1 and its last word owns exactly one
+     * table byte. Note this case does NOT need the interval test — the word's
+     * own address is inside the span — so a point test passes it too. The case
+     * that separates them is the next one.
+     */
+    it("drops a word that owns only the first byte of an unaligned span end", () => {
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      const out = decorateArm64Sweep(raw, ctx(null), undefined, [[BASE + 4, BASE + 9]]);
+      expect(addrs(out)).toEqual([BASE, BASE + 12, BASE + 16, BASE + 20]);
+    });
+
+    it("keeps the word that ends exactly where a span begins", () => {
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      const out = decorateArm64Sweep(raw, ctx(null), undefined, [[BASE + 4, BASE + 8]]);
+      expect(addrs(out)).toEqual([BASE, BASE + 8, BASE + 12, BASE + 16, BASE + 20]);
+    });
+
+    /**
+     * THE CASE THAT MAKES THIS AN INTERVAL TEST, and the only one. A span whose
+     * start is past the word's own address is invisible to a point test, so
+     * that word would be kept although it holds table bytes. It does not occur
+     * on either corpus binary — every table base there is 4-byte aligned, so
+     * `npm run corpus:arm64` is green with a point test too (measured) — which
+     * makes this test the only thing holding the rule.
+     */
+    it("drops a word a span sits strictly inside", () => {
+      // Two one-byte entries at an unaligned base is the smallest table there
+      // can be, and it fits between one word's boundaries.
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      const out = decorateArm64Sweep(raw, ctx(null), undefined, [[BASE + 5, BASE + 7]]);
+      expect(addrs(out)).toEqual([BASE, BASE + 8, BASE + 12, BASE + 16, BASE + 20]);
+    });
+
+    it("handles overlapping spans, which two dispatches sharing a table produce", () => {
+      const raw = sweepArm64(new Uint8Array(24), BASE, cs());
+      const out = decorateArm64Sweep(raw, ctx(null), undefined, [
+        [BASE + 4, BASE + 16],
+        [BASE + 4, BASE + 8],
+      ]);
+      expect(addrs(out)).toEqual([BASE, BASE + 16, BASE + 20]);
+    });
+
+    it("masks on the caller's spans while the cache still shares one decode", () => {
+      // The masking is a fact about the caller, so a cached raw sweep must serve
+      // a masked and an unmasked caller without either seeing the other's.
+      const handle = cs();
+      const cache = new Arm64SweepCache();
+      const bytes = new Uint8Array(24);
+      const masked = disassembleArm64(bytes, BASE, ctx(handle), undefined, cache, [
+        [BASE + 8, BASE + 12],
+      ]);
+      const plain = disassembleArm64(bytes, BASE, ctx(handle), undefined, cache);
+      expect(addrs(masked)).not.toContain(BASE + 8);
+      expect(addrs(plain)).toContain(BASE + 8);
+      expect(plain).toHaveLength(6);
+      // One decode served both.
+      expect(handle.calls).toHaveLength(1);
+    });
   });
 });
 

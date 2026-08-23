@@ -126,8 +126,22 @@ export interface CodeRange {
   endAddress: number;
 }
 
-/** `addr => is addr inside one of these ranges`, for marking speculative code. */
-function rangeTest(ranges: CodeRange[] | undefined): (addr: number) => boolean {
+/**
+ * `(addr, size) => does [addr, addr + size) meet one of these ranges`.
+ *
+ * Used for two things, and the second is why it takes a size. Marking
+ * speculative code asks about one address, which is the `size = 1` default and
+ * is exactly what this did before. Marking a jump table's bytes asks whether a
+ * four-byte *word* overlaps a byte range that need not be word-aligned at
+ * either end — t64-arm.exe's table at 0x1400018b0 is 33 entries of one byte, so
+ * it ends at 0x1400018d1 and its last word shares three bytes with whatever
+ * follows. A point test at the word's own address would keep that word, and it
+ * is not an instruction (peek-a-bin-gb40).
+ *
+ * One declaration rather than two: the interval test at `size = 1` *is* the
+ * point test, so a second copy could only drift.
+ */
+function rangeTest(ranges: CodeRange[] | undefined): (addr: number, size?: number) => boolean {
   if (!ranges || ranges.length === 0) return () => false;
   const sorted = [...ranges].sort((a, b) => a.beginAddress - b.beginAddress);
   const starts = new Float64Array(sorted.length);
@@ -138,13 +152,19 @@ function rangeTest(ranges: CodeRange[] | undefined): (addr: number) => boolean {
     running = Math.max(running, sorted[i].endAddress);
     maxEnds[i] = running;
   }
-  return (addr: number): boolean => {
+  return (addr: number, size = 1): boolean => {
+    // The last range that starts before the interval ends; `maxEnds` is the
+    // running maximum, so that one range answers for every range at or below
+    // it — which is what makes overlapping ranges safe here, and two dispatches
+    // reading one table do overlap (0x140001df0 is read over 17 entries by one
+    // `br` and over 8 by another).
+    const last1 = addr + size - 1;
     let lo = 0;
     let hi = starts.length - 1;
     let last = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >>> 1;
-      if (starts[mid] <= addr) {
+      if (starts[mid] <= last1) {
         last = mid;
         lo = mid + 1;
       } else {
@@ -299,22 +319,41 @@ function arm64Comments(
  * beside `comment` and `source` rather than inside {@link Arm64SweepCache}.
  * Measured 2.5 ms over t64-arm.exe's 27428 instructions and 4.5 ms over
  * w64-arm.exe's 24393, against a ~130 ms sweep.
+ *
+ * `jumpTableSpans` is the other thing that belongs here rather than in the
+ * cache, and for the same reason: it is a fact the *caller* supplies. A word
+ * overlapping one of those byte ranges is dropped, because the tool has already
+ * decided those bytes are a dispatch table and a byte cannot be both. Unlike
+ * the x86 analogues this costs nothing in coverage — A64 has no gap fill, so
+ * the sweep decoded every word of the section whatever any span says, and
+ * dropping one changes what is *presented*, never what was read
+ * (peek-a-bin-gb40). The raw decode is untouched, so {@link Arm64SweepCache}
+ * stays sound: two callers passing different spans still share one decode.
  */
 export function decorateArm64Sweep(
   raw: readonly Instruction[],
   ctx: Arm64Context,
   pdataRanges?: CodeRange[],
+  jumpTableSpans?: readonly [number, number][],
 ): Instruction[] {
   const isKnownCode = rangeTest(pdataRanges);
   const marks = pdataRanges !== undefined && pdataRanges.length > 0;
+  // MEETS, not contains: a table's last word routinely shares bytes with the
+  // padding or code after it, because an entry width of one byte puts the end
+  // of the extent off the word grid. A word holding even one table byte did not
+  // start where an instruction starts.
+  const isTableByte = rangeTest(
+    jumpTableSpans?.map(([beginAddress, endAddress]) => ({ beginAddress, endAddress })),
+  );
   const comments = arm64Comments(raw, ctx.stringMap, ctx.iatMap);
-  const out: Instruction[] = new Array(raw.length);
+  const out: Instruction[] = [];
   for (let i = 0; i < raw.length; i++) {
+    if (isTableByte(raw[i].address, raw[i].size)) continue;
     const mapped = mapInsn(raw[i], EMPTY_STRINGS, EMPTY_IAT, ctx.driverMode);
     const comment = comments.get(raw[i].address);
     if (comment !== undefined) mapped.comment = comment;
     if (marks) mapped.source = isKnownCode(raw[i].address) ? "recursive" : "gap-fill";
-    out[i] = mapped;
+    out.push(mapped);
   }
   return out;
 }
@@ -407,6 +446,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * bytes — see {@link Arm64SweepCache}. The annotation is redone either way, so
  * the returned array is the same whether or not one is passed; omitting it is
  * exactly the behaviour every caller had before the cache existed.
+ *
+ * `jumpTableSpans` — `DetectResult.jumpTableSpans`, the tables detection
+ * actually read — withholds those bytes from the result, so the view renders
+ * them as data instead of as whatever they happen to decode as. Omitting it
+ * keeps the old behaviour, deliberately: "nobody said where the tables are" is
+ * not "there are none", which is the rule the x86 side already states for
+ * `hybridDisassemble`.
  */
 export function disassembleArm64(
   bytes: Uint8Array,
@@ -414,11 +460,12 @@ export function disassembleArm64(
   ctx: Arm64Context,
   pdataRanges?: CodeRange[],
   cache?: Arm64SweepCache,
+  jumpTableSpans?: readonly [number, number][],
 ): Instruction[] {
   const raw = cache
     ? cache.sweep(bytes, baseAddress, ctx.cs)
     : sweepArm64(bytes, baseAddress, ctx.cs);
-  return decorateArm64Sweep(raw, ctx, pdataRanges);
+  return decorateArm64Sweep(raw, ctx, pdataRanges, jumpTableSpans);
 }
 
 /** `bl #0x140001018` — the only call form whose target is known statically. */
@@ -887,7 +934,39 @@ function readArm64Table(d: Arm64Dispatch, bytes: Uint8Array, baseAddress: number
 }
 
 /**
- * Every A64 dispatch table in `insns`, keyed by the address of its `br`.
+ * What {@link findArm64JumpTables} found: the case lists, and the bytes they
+ * were read out of.
+ */
+export interface Arm64JumpTables {
+  /** Case targets, keyed by the address of the `br` that dispatches through them. */
+  tables: Map<number, number[]>;
+  /**
+   * `[start, end)` of the table bytes each accepted dispatch actually read.
+   *
+   * **The extent READ, never the extent the bounds check claimed.**
+   * {@link readArm64Table} stops at the first entry that fails its range or
+   * alignment test, so a table shorter than its `cmp` said yields fewer targets
+   * — and the words past that point are bytes nothing has shown to be data.
+   * Reporting them would mark real code as data, which is the direction this
+   * project refuses in (`peek-a-bin-y1di`'s rule, stated for x86 and no
+   * different here). So the length comes from `targets.length` and not from
+   * `Arm64Dispatch.count`.
+   *
+   * Deduped by byte range, because a span is about the bytes and not about the
+   * `br` that reached them: t64-arm.exe's `br 0x140001a34` and `br 0x140001db0`
+   * both read 0x140001df0. Two dispatches reading the same base over
+   * *different* lengths keep both entries — their union is the marked region
+   * either way, and merging them would be a second rule with nothing to decide.
+   *
+   * A dispatch this reader refuses contributes nothing, including the one-entry
+   * read below: bytes are only claimed as data where a table was claimed too.
+   */
+  spans: [number, number][];
+}
+
+/**
+ * Every A64 dispatch table in `insns`, keyed by the address of its `br`, and
+ * the byte extents they were read from.
  *
  * Exported for the tests: the walk has enough steps that testing it only
  * through `detectArm64Functions` would mean building a whole image for each
@@ -897,8 +976,10 @@ export function findArm64JumpTables(
   insns: Instruction[],
   bytes: Uint8Array,
   baseAddress: number,
-): Map<number, number[]> {
+): Arm64JumpTables {
   const tables = new Map<number, number[]>();
+  const spans: [number, number][] = [];
+  const spanKeys = new Set<string>();
   const recent: Instruction[] = [];
   for (const insn of insns) {
     // Only the plain `br`. The pointer-authenticated forms (`braa`, `brab`, …)
@@ -909,7 +990,16 @@ export function findArm64JumpTables(
         const targets = readArm64Table(br.dispatch, bytes, baseAddress);
         // One target is a jump, not a switch: it says nothing the CFG could not
         // already see, and two is the least a table can distinguish.
-        if (targets.length >= 2) tables.set(insn.address, targets);
+        if (targets.length >= 2) {
+          tables.set(insn.address, targets);
+          const lo = br.dispatch.table;
+          const hi = lo + targets.length * br.dispatch.width;
+          const key = `${lo}:${hi}`;
+          if (!spanKeys.has(key)) {
+            spanKeys.add(key);
+            spans.push([lo, hi]);
+          }
+        }
       }
       // The other two kinds contribute nothing, and that is the answer rather
       // than a shortfall: a `runtime-pointer` has no static target for any
@@ -919,7 +1009,7 @@ export function findArm64JumpTables(
     recent.push(insn);
     if (recent.length > ARM64_MAX_RECENT) recent.shift();
   }
-  return tables;
+  return { tables, spans };
 }
 
 /**
@@ -1006,6 +1096,8 @@ export function detectArm64Functions(
   // The same sweep feeds the switch-dispatch reader, so the section is decoded
   // once for both.
   let jumpTables = new Map<number, number[]>();
+  /** Byte extents of the tables above — see {@link Arm64JumpTables.spans}. */
+  let jumpTableSpans: [number, number][] = [];
   // Kept, unlike `disassembleArm64` above, because the evidence already in
   // `addrSet` is the file's own and does not come from the decoder. What it
   // costs is stated rather than left for the caller to guess (peek-a-bin-4s9):
@@ -1032,7 +1124,9 @@ export function detectArm64Functions(
         if (!inSection(target) || insidePdata(target)) continue;
         addrSet.add(target);
       }
-      jumpTables = findArm64JumpTables(insns, bytes, baseAddress);
+      const found = findArm64JumpTables(insns, bytes, baseAddress);
+      jumpTables = found.tables;
+      jumpTableSpans = found.spans;
     } catch (err) {
       // The section is not A64 (peek-a-bin-2t1). The *disassembly* declines
       // loudly, because instructions are all it has; detection does not have to
@@ -1064,15 +1158,18 @@ export function detectArm64Functions(
     }
   }
 
-  // `jumpTableSpans` is empty and that is now a SHORTFALL rather than the whole
-  // truth: `findArm64JumpTables` above recovers the tables, so their extents
-  // ARE known, and this drops them. It costs nothing in the instruction stream —
-  // A64 has no gap fill, the fixed-width sweep decodes every word of the section
-  // whatever any span says — but it costs the VIEW, because nothing tells
-  // `dataView.ts` those words are a table and they render as whatever they
-  // happen to decode as. Measured at 87a8499 by `npm run corpus:arm64`: 9 words
-  // of 255 in recovered table extents on t64-arm.exe, and 9 of 139 on
-  // w64-arm.exe, are presented as instructions (peek-a-bin-56q item 3's
-  // residue; the row is gateable at 0 once the spans are published).
-  return { functions, jumpTables: Array.from(jumpTables.entries()), jumpTableSpans: [], omitted };
+  // `jumpTableSpans` carries the byte extents the dispatch reader above actually
+  // read. What they buy on this architecture is the VIEW and nothing else: A64
+  // has no gap fill, so the fixed-width sweep decodes every word of the section
+  // whatever any span says and no instruction is invented or eaten either way —
+  // but without them nothing tells `dataView.ts` those words are a table, and
+  // they rendered as whatever they happened to decode as. Measured at 87a8499,
+  // when this returned `[]`: 9 words of 255 in recovered table extents on
+  // t64-arm.exe and 9 of 139 on w64-arm.exe were presented as instructions, one
+  // of them a `cbz` aiming outside the image. `npm run corpus:arm64` gates that
+  // row at 0 (peek-a-bin-gb40, peek-a-bin-56q item 3's residue).
+  //
+  // Empty still is not "no tables": a `br` whose chain this reader cannot
+  // follow, and a table read down to a single entry, both claim no bytes.
+  return { functions, jumpTables: Array.from(jumpTables.entries()), jumpTableSpans, omitted };
 }

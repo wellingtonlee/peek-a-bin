@@ -139,11 +139,19 @@ export function hybridDisassembleBytes(
   if (arch === "arm64") {
     // No seeds: recursive descent is what resolves a variable-length encoding's
     // ambiguous boundaries, and A64 has none. See disassembleArm64.
+    //
+    // `jumpTableSpans` IS forwarded, and means something different here than on
+    // x86: there it stops the gap fill decoding a table as code, and here the
+    // sweep has already decoded it — so what it does is withhold those words
+    // from the answer, which is the only thing between a recovered table and
+    // the view rendering its bytes as instructions (peek-a-bin-gb40).
     return disassembleArm64(
       bytes,
       baseAddress,
       makeArm64Ctx(stringMap, iatMap, driverMode),
       pdataRanges,
+      undefined,
+      jumpTableSpans,
     );
   }
   return hybridDisassemble(

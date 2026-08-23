@@ -302,6 +302,110 @@ describe("corpus/arm64 jump-table gate", () => {
     expect(r.rows[0]).toContain("0x140001006");
   });
 
+  /**
+   * peek-a-bin-gb40. The words of a table the tool itself recovered, presented
+   * by the same tool as instructions. A GATE since the spans were published;
+   * these hold the two rules that make it one, neither of which the corpus can
+   * exercise — both real binaries read every table to its bound, and both
+   * re-derive every published dispatch.
+   */
+  describe("table words presented as instructions", () => {
+    /** `cmp`/`b.hi`/`adr`/`ldrb`/`add`/`br` over a byte table at `TBL`. */
+    const TBL = BASE + 0x20;
+    const dispatch = (bound: number, from = BASE): Instruction[] => [
+      insn(from, "cmp", `w1, #${bound}`),
+      insn(from + 4, "b.hi", `#0x${(BASE + 0x100).toString(16)}`),
+      insn(from + 8, "adr", `x9, #0x${TBL.toString(16)}`),
+      insn(from + 12, "ldrb", "w8, [x9, w1, uxtw]"),
+      insn(from + 16, "add", "x8, x9, x8, lsl #2"),
+      insn(from + 20, "br", "x8"),
+    ];
+    const BR = BASE + 20;
+    /** Two case targets, which is the least a table can distinguish. */
+    const CASES = [BASE + 4, BASE + 8];
+    const gb = (rows: readonly Row[]) =>
+      row(rows, "jump table: table words presented as instructions");
+
+    it("is a gate, and reads 0 when no table word decoded", () => {
+      const rows = auditJumpTables(dispatch(3), new Map([[BR, CASES]]), byAddress(dispatch(3)), ex);
+      const r = gb(rows);
+      expect(r.gate).toBe(true);
+      expect(r.value).toBe(0);
+      // Liveness: the population is the table's own words, and it is not empty.
+      expect(r.live).toBe("1 words in recovered table extents");
+    });
+
+    it("names a table word the sweep presented as an instruction", () => {
+      // A word at the table base, in the same stream: two claims about one byte.
+      const insns = [...dispatch(3), insn(TBL, "madd", "w4, w9, w30, w8")];
+      const r = gb(auditJumpTables(insns, new Map([[BR, CASES]]), byAddress(insns), ex));
+      expect(r.value).toBe(1);
+      expect(r.rows[0]).toContain("0x140001020");
+    });
+
+    /**
+     * THE RULE THE CORPUS CANNOT EXERCISE. `readArm64Table` stops at the first
+     * entry failing its range or alignment test, so a bound of 32 entries over
+     * a table that read 2 claims 32 bytes and owns 2. Judging the claimed
+     * extent would name the words after it — real code, in the general case —
+     * and the gate would be red on correct output. The length comes from the
+     * published `targets`, which is what the published span is sized by too.
+     */
+    it("judges the extent READ, not the extent the bound claimed", () => {
+      // Bound 31 -> 32 claimed entries -> 8 claimed words; 2 targets -> 1 word.
+      const insns = [...dispatch(31), insn(TBL + 4, "madd", "w4, w9, w30, w8")];
+      const r = gb(auditJumpTables(insns, new Map([[BR, CASES]]), byAddress(insns), ex));
+      expect(r.value).toBe(0);
+      expect(r.live).toBe("1 words in recovered table extents");
+    });
+
+    it("still names a word inside the extent that was read", () => {
+      // The same claimed table, but the decoded word is the base itself, which
+      // the read did cover. Without this the test above would pass against an
+      // audit that had stopped looking altogether.
+      const insns = [...dispatch(31), insn(TBL, "madd", "w4, w9, w30, w8")];
+      const r = gb(auditJumpTables(insns, new Map([[BR, CASES]]), byAddress(insns), ex));
+      expect(r.value).toBe(1);
+    });
+
+    it("counts a word once where two dispatches share one table", () => {
+      // t64-arm.exe's `br 0x140001a34` and `br 0x140001db0` both read
+      // 0x140001df0. A word is a word.
+      const second = dispatch(3, BASE + 0x40);
+      const insns = [...dispatch(3), ...second, insn(TBL, "madd", "w4, w9, w30, w8")];
+      const tables = new Map([
+        [BR, CASES],
+        [BASE + 0x54, CASES],
+      ]);
+      const r = gb(auditJumpTables(insns, tables, byAddress(insns), ex));
+      expect(r.value).toBe(1);
+      expect(r.live).toBe("1 words in recovered table extents");
+    });
+
+    /**
+     * The liveness half, and it gates. This walk re-derives each dispatch from
+     * the instruction stream with a `recent` window of its own, so anything that
+     * made the stream unreadable would empty the population and drive the gate
+     * above to 0 by no longer looking.
+     */
+    it("names a published table this walk could not re-derive", () => {
+      const r = row(
+        // A `br` with no chain in front of it: the reader published a table for
+        // it, this walk finds none.
+        auditJumpTables(CLEAN, new Map([[BASE + 12, CASES]]), byAddress(CLEAN), ex),
+        "jump table: reader's table not re-derived here",
+      );
+      expect(r.gate).toBe(true);
+      expect(r.value).toBe(1);
+      expect(r.rows[0]).toContain("0x14000100c");
+    });
+
+    it("reports nothing to re-derive when every published table is found again", () => {
+      const rows = auditJumpTables(dispatch(3), new Map([[BR, CASES]]), byAddress(dispatch(3)), ex);
+      expect(row(rows, "jump table: reader's table not re-derived here").value).toBe(0);
+    });
+  });
+
   it("reports a case target in another function without gating on it", () => {
     // A tail-merged or ICF-shared case body legitimately lives elsewhere, so
     // this is a question and not a verdict — which is why it is a report.

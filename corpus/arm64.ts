@@ -46,7 +46,9 @@
  *  6. **The `adrp`/`adr` reference grammar**, against the ISA's own reach and
  *     page alignment. GATE.
  *  7. **A64 switch dispatch** — `findArm64JumpTables`, which had never been
- *     measured at all. GATE on a case target that is not an instruction.
+ *     measured at all. GATE on a case target that is not an instruction, and
+ *     GATE on a word of a table the tool recovered that the same tool presents
+ *     as an instruction (`peek-a-bin-gb40`).
  *  8. **`Arm64SweepCache`**, differentially: three RPCs through the real
  *     `dispatch` must answer identically whether the sweep is shared or
  *     re-taken, and the shared run must actually save Capstone calls. GATE.
@@ -62,10 +64,12 @@
  *  * Stack frames and function signatures. `analyzeStackFrame` and
  *    `inferSignature` have no ARM64 path at all (`peek-a-bin-56q` item 1), so
  *    there is nothing to audit; auditing an absence is not an audit.
- *  * A data-marking pass. There is none (`peek-a-bin-56q` item 2). What this can
- *    do instead is census the population such a pass would have to cover, which
- *    is rows 3, 5 and 7's report halves — and those are the instrument a fix
- *    would be judged with.
+ *  * A general data-marking pass. `peek-a-bin-gb40` marked the one population
+ *    the tool can already identify — the bytes of a recovered dispatch table —
+ *    and row 7 gates that at 0. Everything else `peek-a-bin-56q` item 2 names is
+ *    still unmarked: literal pools, and padding inside a `.pdata` extent. What
+ *    this can do about those is census them, which is rows 3 and 5's report
+ *    halves, and those are the instrument a fix would be judged with.
  *  * Inline comments. `corpus/comments.ts` already gates that at 0 coincidences
  *    and is not duplicated here.
  *
@@ -370,10 +374,13 @@ export function auditWildBranches(
  * being rendered as an instruction: `peek-a-bin-56q` item 2, and the shape of its
  * `stxrb w9, w11, [x16]` witness.
  *
- * REPORT-ONLY, because it is 2 per binary rather than 0 and there is no fix in
- * this commit. Every row it can print is nonetheless provably data, so this is
- * gateable at 0 the moment an ARM64 data-marking pass lands — the same standing
- * upgrade `arity over` carried before it became a gate.
+ * REPORT-ONLY, because it is 1 per binary rather than 0 and there is no fix for
+ * the remainder. It was 2 until `peek-a-bin-gb40` marked the recovered jump
+ * tables: 0x1400018b8 was inside one, which is this row and row 7 agreeing about
+ * a word from two independent directions, and the survivor is 0x1400016fc.
+ * Every row it can print is nonetheless provably data, so this is gateable at 0
+ * the moment a literal-pool marking pass lands — the same standing upgrade
+ * `arity over` carried before it became a gate, and row 7 has now taken.
  *
  * It is deliberately the strict reading. A pool word that happens to decode AND
  * sits directly after another decoded word is not reported, because fallthrough
@@ -503,17 +510,37 @@ export function auditRefs(
  * ICF-shared body legitimately does not, so a row is a question and not a
  * verdict.
  *
- * `tableWordsDecodedAsCode` is the one that matters and is also REPORT-ONLY: the
- * words of a table this tool itself recovered, which the sweep nonetheless
- * presents as instructions because `detectArm64Functions` returns
- * `jumpTableSpans: []`. Every row is provably data rendered as code, so it is
- * gateable at 0 once those spans are published (`peek-a-bin-56q` item 3's
- * residue) — it is a report today only because there is no fix in this commit.
+ * `tableWordsDecodedAsCode` is the one that matters and is now a GATE: a word of
+ * a table this tool itself recovered, presented by the same tool as an
+ * instruction. Every row is provably data rendered as code — the two claims
+ * cannot both hold — which is `polarity inverted`'s character rather than a
+ * baseline's. It was REPORT-ONLY at 9/9 while `detectArm64Functions` returned
+ * `jumpTableSpans: []`, carrying the standing upgrade `arity over` carried
+ * before it; `peek-a-bin-gb40` published the spans and the row was flipped in
+ * the same commit.
  *
- * The `br` census beside it is the liveness half, and it is also the one place
- * the three `Arm64BrKind`s are counted: "no static target exists" and "this
- * reader could not follow the chain" are different answers, which is the whole
- * reason that type is not a nullable dispatch.
+ * THE EXTENT IS THE ONE READ, NOT THE ONE CLAIMED, and that is the difference
+ * between a gate and a false alarm. `readArm64Table` stops at the first entry
+ * failing its range or alignment test, so a table can be shorter than its
+ * bounds check says — the length here is `targets.length`, out of the reader's
+ * own answer, exactly as the published span is. Judging the *claimed* extent
+ * (`Arm64Dispatch.count`) would report the unread tail, which is bytes nothing
+ * has shown to be data, and would gate red on correct output. Measured at
+ * 84eed6e: the two readings are identical on both binaries — every table here
+ * reads to its bound — so this is a bound on the rule and not a saving, and
+ * `build/arm64Audit.test.ts` is where the short-table case is exercised.
+ *
+ * `tablesNotReDerived` is the liveness half and gates too. This walk re-derives
+ * each dispatch from the instruction stream with its own `recent` window, so a
+ * change that made the stream unreadable — or simply removed the words the
+ * window needs — would empty `tableWords` and drive the gate above to 0 by no
+ * longer looking. Requiring every `br` the reader published to be re-derived
+ * here is what makes 255/139 an assertion rather than a caption.
+ *
+ * The `br` census beside it is the other liveness half, and it is also the one
+ * place the three `Arm64BrKind`s are counted: "no static target exists" and
+ * "this reader could not follow the chain" are different answers, which is the
+ * whole reason that type is not a nullable dispatch.
  */
 export function auditJumpTables(
   insns: readonly Instruction[],
@@ -545,13 +572,18 @@ export function auditJumpTables(
   // it once per reader would overstate both halves of the ratio.
   const tableWords = new Set<number>();
   const asCode = new Set<number>();
+  /** The `br`s this walk re-derived a table for — see `tablesNotReDerived`. */
+  const reDerived = new Set<number>();
   for (const insn of insns) {
     if (insn.mnemonic.toLowerCase() === "br") {
       const k = classifyArm64Br(insn.opStr, recent);
       kinds.set(k.kind, (kinds.get(k.kind) ?? 0) + 1);
-      if (k.kind === "table" && jumpTables.has(insn.address)) {
+      const targets = jumpTables.get(insn.address);
+      if (k.kind === "table" && targets) {
+        reDerived.add(insn.address);
         const d = k.dispatch;
-        const hi = d.table + d.count * d.width;
+        // `targets.length`, never `d.count`: the extent READ. See the docstring.
+        const hi = d.table + targets.length * d.width;
         for (let a = d.table - (d.table % ARM64_INSN_SIZE); a < hi; a += ARM64_INSN_SIZE) {
           tableWords.add(a);
           if (byAddr.has(a)) asCode.add(a);
@@ -566,17 +598,18 @@ export function auditJumpTables(
     .slice(0, SAMPLE)
     .map((a) => at(byAddr.get(a) as Instruction));
 
+  const missing = [...jumpTables.keys()]
+    .filter((br) => !reDerived.has(br))
+    .map((br) => `br ${fmt(br)} published a table this walk did not re-derive`);
+
   const brs = [...kinds].map(([k, n]) => `${k} ${n}`).join(", ") || "no br";
   const live = `${jumpTables.size} tables, ${cases} cases; br: ${brs}`;
+  const words = `${tableWords.size} words in recovered table extents`;
   return [
     gate("jump table: case target is not an instruction", notInsn.length, live, notInsn),
     report("jump table: case outside the dispatch's function", otherFn.length, live, otherFn),
-    report(
-      "jump table: table words presented as instructions",
-      asCode.size,
-      `${tableWords.size} words in recovered table extents`,
-      codeRows,
-    ),
+    gate("jump table: table words presented as instructions", asCode.size, words, codeRows),
+    gate("jump table: reader's table not re-derived here", missing.length, words, missing),
   ];
 }
 

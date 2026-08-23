@@ -980,6 +980,37 @@ describe("dispatch — architecture routing", () => {
       ).rejects.toThrow(/Decompilation is not supported for ARM64/);
     });
 
+    /**
+     * peek-a-bin-gb40. `detectFunctions` publishes the byte extents of the
+     * dispatch tables it recovered; this branch is what turns them into words
+     * the view never sees. The corpus harness drives `FileSession`, i.e. the
+     * `mcp/disasm.ts` path, so nothing there covers this forwarding — without
+     * this test the worker could stop passing them and every gate would stay
+     * green.
+     */
+    it("withholds recovered jump-table bytes from the ARM64 view", async () => {
+      const s = armState();
+      const args = {
+        bytes: new Uint8Array(16),
+        baseAddress: 0x140001000,
+        is64: true,
+        seeds: [],
+        machine: ARM64_MACHINE,
+      };
+
+      const all = (await dispatch("hybridDisassemble", args, s)) as Instruction[];
+      const masked = (await dispatch(
+        "hybridDisassemble",
+        { ...args, jumpTableSpans: [[0x140001004, 0x140001008]] as [number, number][] },
+        s,
+      )) as Instruction[];
+
+      expect(all.map((i) => i.address)).toEqual([
+        0x140001000, 0x140001004, 0x140001008, 0x14000100c,
+      ]);
+      expect(masked.map((i) => i.address)).toEqual([0x140001000, 0x140001008, 0x14000100c]);
+    });
+
     it("falls back to the session for a request that names none", async () => {
       // The pre-existing contract, and what every un-threaded caller relies on.
       const s = armState();
