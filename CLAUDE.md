@@ -242,33 +242,50 @@ Every suite in `src/` is synthetic. Real binaries were first driven through the 
 `t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. Keep this section
 honest — the distinction between *measured* and *reasoned* is the point of it.
 
-**The whole-tree figures below were last taken from ONE run at `74879a1`**, which is what makes
+**The whole-tree figures below were last taken from ONE run at `6d95b10`**, which is what makes
 them mutually consistent: eight changes measured in parallel against the same base each re-stamped
 this section with numbers true of *their* base and of no single tree, which is the state
 `6d7bb36` had to repair once already. Per binary (t32/t64/w64/w32) at that commit: **260/279/275/258
 functions**, 18025/16844/15111/16601 instructions, **15/0/0/13** jump tables, gcc **1072/1072 clean**,
-`offsetof` **307/297/297/318 fields over 51/59/57/55 definitions, every ratio 1.00**, polarity
-anchor-A **522/578/501/446 correct with 0 inverted and 0 mismatch**, unrecovered values
+`offsetof` **299/286/291/310 fields over 52/56/55/56 definitions, every ratio 1.00**, polarity
+anchor-A **521/577/500/445 correct with 0 inverted and 0 mismatch**, unrecovered values
 **36/12/11/33**, loop shape **`for` 6/6/6/6, `while` 111/106/99/98, `do/while` 78/77/76/77,
-`if` 1987/1938/1719/1759**, and **0 on every gate** — popReads, staleReads, staleGuards, lostDefs,
-armExits, unencodableNames, wildBranches, memberNameAgreement, emptyCaseBodies, **`guard lines
-unparsed`** (new — see `corpus/guardShape.ts`), arity over, callees lost, loops short, throws.
-Report-only rows worth knowing: `undefinedCallees` **33/0/0/31 internal** and 7/3/3/7 external,
-`structOverlaps` **0 on all four** (and that zero is a LOWER bound on fabrication, not a clean
-bill of health — see `peek-a-bin-slkh`), `guard-shaped lines` 2104/2050/1824/1863 top-tested,
-which `peek-a-bin-0qib` re-split as **1532/1500/1312/1348 braced and 572/550/512/515 inline**
-with the sum on each binary unmoved.
+`if` 1987/1938/1719/1759**, guard-shaped lines **1532/1500/1312/1348 braced and 572/550/512/515
+inline** (the split is new — see `peek-a-bin-0qib`), and **0 on every gate** — popReads, staleReads,
+staleGuards, lostDefs, armExits, unencodableNames, wildBranches, memberNameAgreement,
+emptyCaseBodies, `guard lines unparsed`, `for headers unsplittable`, arity over, callees lost,
+loops short, throws. Report-only rows worth knowing: `undefinedCallees` **33/0/0/31 internal** and
+7/3/3/7 external, `structOverlaps` **0 on all four** (a LOWER bound on fabrication, not a clean
+bill of health), `for headers read` 6 per binary.
 
-**Two rows fell against the `97bbebe` stamp and both are `peek-a-bin-z8q7`, which is a
-REFINEMENT rather than a loss.** `offsetof` fields 342/301/303/355 → 307/297/297/318 and
-definitions 55/54/53/56 → 51/59/57/55, every ratio still 1.00; `functions` 268/266 → 260/258 is
-`peek-a-bin-d827`'s fifth admission. Keying a struct base on the *value* a register holds rather
-than on its name split fabricated objects apart, so `->field_0x` occurrences fall 2343 → 1871
-corpus-wide. That count is **report-only in both directions** — it rises with correct recovery and
-with fabrication alike — and the fall is the intended direction: the new key contains the old one
-as a prefix, so the grouping can only ever split and provably cannot invent an object. It also
-*gained* polarity coverage (517/574/497/441 → 522/578/501/446, `only-base 0` on all four, so no
-guard left the audited set). The one measured cost is the label rule, `peek-a-bin-slkh` at P2.
+**THE ARM64 HALF NOW HAS ITS OWN GATED RUN, and it is deliberately NOT part of the figures
+above.** `npm run corpus:arm64` (`corpus/arm64.ts`) drives `t64-arm.exe` / `w64-arm.exe`:
+**35 gate assertions, all 0**, over 27428 of 28160 and 24393 of 24960 decoded words, 539/494
+functions, 419/381 `.pdata` extents and 14/10 jump tables. It is separate for the reason a Go
+binary must stay out of the corpus directory — the x86 audits iterate over whatever keys they are
+given, so two more would move every summed figure above — and because folding it in would buy only
+vacuous zeros: 15 of the existing audits read emitted C or the IR, and the decompiler declines on
+A64, so they have no ARM64 population at all. **The decode-rate floor is now gated in BOTH
+directions over all six binaries**, which is the one place the two halves meet: the ARM64 pair sits
+at 97.4% and 97.7% (1.95x the floor) and all four x86 images are REFUSED at 21.8/27.4/27.9/22.3%,
+re-deriving the table in `disassembleArm64`'s docstring figure for figure. Report-only and honest
+gaps: **169/111 `.pdata` words that do not decode**, 2/2 unreachable decoded words in an extent,
+and 9/9 table words presented as instructions — that last is `peek-a-bin-gb40` (P2), where
+`detectArm64Functions` returns `jumpTableSpans: []` at `arm64.ts:1077` although
+`findArm64JumpTables` recovered the extents at :896.
+
+**Three rows moved against the `74879a1` stamp, all `peek-a-bin-slkh`.** `offsetof` fields
+307/297/297/318 → **299/286/291/310** and definitions 51/59/57/55 → **52/56/55/56**, ratio 1.00
+throughout; polarity anchor-A 522/578/501/446 → **521/577/500/445**, where six guards left the
+audited set with **their text still on the page** — each a deref that became a member access the
+auditor cannot anchor (`*(int32_t*)(edi + 4) < 0` → `((struct_3 *)edi)->field_0x4 < 0`), 0
+inverted, all `OK`, and one of them an outright improvement because the same function was already
+spelling that slot `->field_0x8` at a neighbouring site. `->field_0x` occurrences rose 1871 → 1936.
+**`peek-a-bin-0qib` moved no figure at all**: re-expanding its 572/550/512/515 one-lined guards
+reproduces the previous emitted C **byte for byte on all 1072 functions**, so the diff is provably
+nothing but the join — note that `compare.mjs`'s `emitted C identical` row reads only 130/260 on
+t32 for it and badly overstates a cosmetic change.
+
 
 
 **`peek-a-bin-d827` moved FOUR of those rows and the stamp above is deliberately NOT rewritten** —
