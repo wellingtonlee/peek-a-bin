@@ -738,9 +738,20 @@ for (const b of bins) {
   // THE POPULATION THE TWO ROWS ABOVE ARE DRAWN FROM. `polarity guards audited`
   // falling says guards left the audited set; this says whether the audit still
   // recognises the lines they came from at all. A guard-shaped line the grammar
-  // refuses is `unparsed` and gates at 0 in the run itself, but a fall in
-  // `braced` with no matching rise in `inline` is the other half of the same
-  // question and is only visible between two pinned runs (peek-a-bin-vwr5).
+  // refuses is `unparsed` and gates at 0 in the run itself, but a guard line
+  // leaving the census ALTOGETHER is the other half of the same question and is
+  // only visible between two pinned runs (peek-a-bin-vwr5).
+  //
+  // WHAT IS FLAGGED IS THE SUM, which is what that sentence has always meant:
+  // `braced` and `inline` are two spellings of one top-tested guard, so a guard
+  // moving between them loses nothing. The predicate was `braced` alone, which
+  // does not match the rule its own comment stated, and `peek-a-bin-0qib` is the
+  // first change to make `braced` fall legitimately — 572/550/512/515 lines with
+  // `inline` rising by exactly the same, flagged as four regressions that were
+  // not one. It is a widening and not a weakening: the hazard vwr5 measured as
+  // control 1 (one-lining with the old grammar, `braced` down 572 and `inline`
+  // still 0) takes the sum down by 572 and is still flagged, and a shape the
+  // grammar refuses outright is `unparsed`, which gates at 0 in the run itself.
   if (B.guardShapes && C.guardShapes) {
     row(
       "guard lines unparsed",
@@ -749,11 +760,12 @@ for (const b of bins) {
       "THE GUARD SCAN STOPPED UNDERSTANDING A LINE",
     );
     row(
-      "guard lines seen (braced)",
-      (x) => x.guardShapes.topTested,
+      "guard lines seen (top-tested)",
+      (x) => x.guardShapes.topTested + x.guardShapes.inline,
       (a, c) => c < a,
-      "FEWER GUARD LINES RECOGNISED — read `inline` beside it",
+      "FEWER GUARD LINES RECOGNISED",
     );
+    row("  of which braced", (x) => x.guardShapes.topTested);
     row("  of which brace-less", (x) => x.guardShapes.inline);
     row("  do/while tails seen", (x) => x.guardShapes.doTail);
   } else {

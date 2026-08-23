@@ -987,7 +987,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     );
 
     // The guard is the jump target's, so it is the un-negated taken sense.
-    expect(code).toContain("if (eax == 0) {");
+    expect(code).toContain("if (eax == 0) return eax;");
     expect(code).not.toContain("__unrecovered");
   });
 
@@ -1006,7 +1006,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     // `eax` has been masked by the time the test runs, so `eax == 0` *is*
     // `(eax_before & 3) == 0` — and the mask is right there above the guard.
     expect(code).toContain("eax &= 3;");
-    expect(code).toContain("if (eax == 0) {");
+    expect(code).toContain("if (eax == 0) return eax;");
     expect(code).not.toContain("__unrecovered");
   });
 
@@ -1022,7 +1022,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    expect(code).toContain("if (eax != 0) {");
+    expect(code).toContain("if (eax != 0) return eax;");
     expect(code).not.toContain("__unrecovered");
   });
 
@@ -1039,7 +1039,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     );
 
     expect(code).toContain("eax++;");
-    expect(code).toContain("if (eax == 0) {");
+    expect(code).toContain("if (eax == 0) return eax;");
   });
 
   it("reads `xor` + `jne` as the exclusive-or being non-zero", () => {
@@ -1054,7 +1054,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    expect(code).toContain("if (eax != 0) {");
+    expect(code).toContain("if (eax != 0) return eax;");
   });
 
   it("reads `neg` + `je` as the negated value being zero", () => {
@@ -1069,7 +1069,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    expect(code).toContain("if (eax == 0) {");
+    expect(code).toContain("if (eax == 0) return eax;");
   });
 
   it("reads `js` after arithmetic as the result's sign", () => {
@@ -1086,7 +1086,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
 
     // SF is the top bit of the result, so `js` is exactly "the decremented
     // value is negative".
-    expect(code).toContain("if (eax < 0) {");
+    expect(code).toContain("if (eax < 0) return eax;");
   });
 
   it("reads a shift by an immediate, which sets ZF from its result", () => {
@@ -1101,7 +1101,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
       ]),
     );
 
-    expect(code).toContain("if (eax != 0) {");
+    expect(code).toContain("if (eax != 0) return eax;");
   });
 
   it("leaves a shift by CL unrecovered, since a count of 0 sets no flags", () => {
@@ -1252,7 +1252,7 @@ describe("decompileFunction — conditions from flag-setting arithmetic", () => 
     );
 
     // The `cmp` is what the `jne` reads; the `dec` before it is not.
-    expect(code).toContain("if (ecx != 5) {");
+    expect(code).toContain("if (ecx != 5) return eax;");
   });
 
   // The protection DCE applies is keyed off the same predicate the structurer
@@ -1909,8 +1909,8 @@ describe("decompileFunction — control-flow structuring", () => {
     );
 
     // Both tests are inside the loop, and the loop repeats only when both hold.
-    expect(code).toMatch(/if \(edi <= esi\) \{\n\s+break;/);
-    expect(code).toMatch(/if \(eax == 0\) \{\n\s+break;/);
+    expect(code).toContain("if (edi <= esi) break;");
+    expect(code).toContain("if (eax == 0) break;");
     // …and the one thing it must never say is that `eax` alone decides.
     expect(code).not.toMatch(/while \(eax != 0\) \{/);
   });
@@ -3143,9 +3143,11 @@ describe("decompileFunction — a switch states what it switches on", () => {
     const code = runTables(armThatTests(), armTable);
 
     expect(code).toContain("switch (eax)");
-    // The arm's own statements, then its test — not a `break` in between.
+    // The arm's own statements, then its test — not a `break` in between. The
+    // test's body is a lone `goto`, so it sits on the guard's own line
+    // (peek-a-bin-0qib).
     expect(code).toMatch(
-      /case (0|VAL_0x0):\s*\n\s*(eax = )?sub_402004\(\);\s*\n\s*if \(ecx != 5\)\s*\{\s*\n\s*goto loc_401038;/,
+      /case (0|VAL_0x0):\s*\n\s*(eax = )?sub_402004\(\);\s*\n\s*if \(ecx != 5\) goto loc_401038;/,
     );
     // Both sides of the test are named: the taken edge and the fallthrough.
     expect(code).toContain("goto loc_401018;");
@@ -4959,7 +4961,10 @@ describe("decompileFunction — a register's entry value outlives a write to the
 
   it("does not name the register for a value a dominating block overwrote", () => {
     const code = run(parked());
-    const returns = code.split("\n").filter((l) => l.trim().startsWith("return"));
+    // Read the RETURN STATEMENT, not the line it is on: one of the two is the
+    // body of a guard the emitter one-lines, so a line-start anchor sees one
+    // where there are two (peek-a-bin-0qib).
+    const returns = code.split("\n").flatMap((l) => l.match(/return\b[^;]*;/) ?? []);
     expect(returns).toHaveLength(2);
     // One arm returns the global the machine loaded into ECX; the other returns
     // the value ECX held on entry. Two `return ecx;` lines cannot be both.

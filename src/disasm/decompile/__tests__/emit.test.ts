@@ -485,3 +485,170 @@ describe("emitFunction — spoiled-compare captures are declared", () => {
     expect(code).toContain("return flg_401000_0;");
   });
 });
+
+/**
+ * A GUARD WHOSE WHOLE BODY IS ONE TERMINATOR GOES ON ONE LINE (peek-a-bin-0qib).
+ *
+ * The shape is `if (c) break;` — three emitted lines collapsed to one, at
+ * 552/540/502/499 sites on t32/t64/w64/w32 as emitted at `87a8499`. It was
+ * refused once, in `peek-a-bin-252`, because `corpus/sweep.ts`'s guard scan
+ * matched an `if` only when the line ended in `{` and a one-lined guard stopped
+ * being a guard at all; `peek-a-bin-vwr5` made `corpus/guardShape.ts` the one
+ * grammar for a guard line, taught it this shape and gated the lines it cannot
+ * read at 0, which is what makes the change safe to make.
+ *
+ * The tests below split into the rule, its four refusals, and the line map —
+ * and the line map is the load-bearing half.
+ */
+describe("a guard whose whole body is one terminator", () => {
+  const ret = (addr: number): IRStmt => ({ kind: "return", value: irReg("eax", 4), addr });
+
+  it("puts a break, a continue, a goto and a return on the guard's own line", () => {
+    const bodies: [IRStmt, string][] = [
+      [{ kind: "break" }, "break;"],
+      [{ kind: "continue" }, "continue;"],
+      [{ kind: "goto", label: "loc_401038" }, "goto loc_401038;"],
+      [ret(0x401010), "return eax;"],
+    ];
+    for (const [body, text] of bodies) {
+      const code = emitFunction(
+        fn([
+          {
+            kind: "if",
+            condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+            thenBody: [body],
+          },
+        ]),
+      ).code;
+      expect(code).toContain(`if (eax == 0) ${text}`);
+      expect(code).not.toContain("if (eax == 0) {");
+    }
+  });
+
+  /**
+   * The four refusals. Each is a shape whose body is not the whole of the arm,
+   * so a one-lined guard would state something the machine does not do — or, for
+   * the assignment, a shape `corpus/selfAssigns.ts`'s `ASSIGN_LINE` reads at
+   * statement position and would hand the guard as the destination.
+   */
+  it("keeps the braced form for a body that is not a terminator", () => {
+    const code = emitFunction(
+      fn([
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "assign", dest: irReg("ecx", 4), src: irConst(1, 4), addr: 0x401010 }],
+        },
+      ]),
+    ).code;
+    expect(code).toContain("if (eax == 0) {");
+    expect(code).toContain("ecx = 1;");
+  });
+
+  it("keeps the braced form for two statements, and for an else", () => {
+    const two = emitFunction(
+      fn([
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "goto", label: "loc_A" }, { kind: "break" }],
+        },
+      ]),
+    ).code;
+    expect(two).toContain("if (eax == 0) {");
+    const withElse = emitFunction(
+      fn([
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "break" }],
+          elseBody: [{ kind: "continue" }],
+        },
+      ]),
+    ).code;
+    expect(withElse).toContain("if (eax == 0) {");
+    expect(withElse).toContain("} else {");
+  });
+
+  /**
+   * The last arm of an else-if chain is one-lined too, and the chain's own
+   * shape is what `guardShape`'s `} else ` prefix exists for. The address the
+   * combined line inherits is still the BODY's — `emitStmt`'s chain arm copies
+   * `addrs[0]` from the nested `if`, and for a one-lined one that entry IS the
+   * terminator's.
+   */
+  it("one-lines the last arm of an else-if chain", () => {
+    const { code, lineMap } = emitFunction(
+      fn([
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "assign", dest: irReg("ecx", 4), src: irConst(1, 4), addr: 0x401000 }],
+          elseBody: [
+            {
+              kind: "if",
+              condition: irBinary("==", irReg("eax", 4), irConst(1, 4)),
+              thenBody: [ret(0x401010)],
+            },
+          ],
+        },
+      ]),
+    );
+    const lines = code.split("\n");
+    const at = lines.findIndex((l) => l.includes("} else if (eax == 1) return eax;"));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lineMap.get(at)).toBe(0x401010);
+  });
+
+  /**
+   * THE LINE MAP IS THE CONTRACT, and it is what `corpus/sweep.ts` anchors an
+   * inline guard's arm by. The line must carry the BODY statement's address:
+   * the guard's own block would be the jcc one decision earlier, which is the
+   * `peek-a-bin-8r0` / `peek-a-bin-lbz` class of false INVERTED.
+   *
+   * `IRIf` carries no `addr` field at all, so there is no guard address to
+   * attach by mistake and `oneLinedGuard` is handed the body's own `EmitResult`
+   * rather than a string — but that is a structural argument, and this is the
+   * measurement of it.
+   */
+  it("attaches the body statement's address to the one-lined line", () => {
+    const { code, lineMap } = emitFunction(
+      fn([
+        { kind: "assign", dest: irReg("ecx", 4), src: irConst(7, 4), addr: 0x401000 },
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [ret(0x401010)],
+        },
+      ]),
+    );
+    const lines = code.split("\n");
+    const at = lines.findIndex((l) => l.includes("if (eax == 0) return eax;"));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lineMap.get(at)).toBe(0x401010);
+    // …and not the address of the statement above it, which is the only other
+    // address in the function.
+    expect(lineMap.get(at)).not.toBe(0x401000);
+  });
+
+  /**
+   * A `break`, a `continue` and a `goto` carry no address in either shape, so
+   * the one-lined line has no line-map entry and `inlineBodyAddr` skips the
+   * guard exactly as it skips an address-less braced body. That is why only the
+   * `return` bodies — 19/9/9/19 of the 2093 sites at `87a8499` — are anchorable.
+   */
+  it("leaves the line address-less when the terminator has no address", () => {
+    const { code, lineMap } = emitFunction(
+      fn([
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "break" }],
+        },
+      ]),
+    );
+    const at = code.split("\n").findIndex((l) => l.includes("if (eax == 0) break;"));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lineMap.has(at)).toBe(false);
+  });
+});

@@ -1500,6 +1500,39 @@ interface EmitResult {
   addrs: (number | undefined)[];
 }
 
+/**
+ * The statement kinds an `if` may carry on its own line.
+ *
+ * All four are terminators: they end the arm, so a one-lined guard states the
+ * whole of it and nothing can follow on the line. Deliberately NOT an
+ * assignment or a call — `corpus/selfAssigns.ts`'s `ASSIGN_LINE` reads
+ * `<dest> = <src>;` at statement position, and a one-lined assignment would
+ * hand it the guard as the destination; widening this needs that audit measured
+ * first, which `peek-a-bin-0qib` did not do.
+ */
+const ONE_LINE_BODY = new Set<IRStmt["kind"]>(["break", "continue", "goto", "return"]);
+
+/**
+ * `if (c) <terminator>;` — a guard whose whole body is one terminator, on one
+ * line.
+ *
+ * THE LINE MUST CARRY THE BODY'S ADDRESS, and this function exists so that it
+ * cannot carry anything else: it is handed the body's own `EmitResult` and the
+ * guard is not in its scope at all, so there is no guard address available to
+ * attach by mistake. That is a contract `corpus/guardShape.ts` depends on —
+ * `bodyAddrAt`'s `inlineBodyAddr` anchors an inline guard's arm by this line's
+ * address, and the guard's own block would be the jcc one decision earlier,
+ * which is the `peek-a-bin-8r0` / `peek-a-bin-lbz` class of false INVERTED
+ * (`peek-a-bin-vwr5`).
+ *
+ * Returns null unless the body emitted as exactly one line, which is a bound on
+ * the shape rather than a saving: all four kinds emit one line today.
+ */
+function oneLinedGuard(pad: string, cond: string, body: EmitResult): EmitResult | null {
+  if (body.lines.length !== 1) return null;
+  return { lines: [`${pad}if (${cond}) ${body.lines[0].trim()}`], addrs: [body.addrs[0]] };
+}
+
 function emitStmt(stmt: IRStmt, level: number): EmitResult {
   const pad = indent(level);
   const lines: string[] = [];
@@ -1581,6 +1614,20 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
     case "if": {
       const cond = emitExpr(stmt.condition, 0);
+      // A guard whose whole body is a single terminator goes on one line. See
+      // `oneLinedGuard`, which owns the line-map contract this rests on.
+      if (
+        (stmt.elseBody === undefined || stmt.elseBody.length === 0) &&
+        stmt.thenBody.length === 1 &&
+        ONE_LINE_BODY.has(stmt.thenBody[0].kind)
+      ) {
+        const inlined = oneLinedGuard(pad, cond, emitStmt(stmt.thenBody[0], level + 1));
+        if (inlined !== null) {
+          lines.push(...inlined.lines);
+          addrs.push(...inlined.addrs);
+          break;
+        }
+      }
       push(`${pad}if (${cond}) {`);
       for (const s of stmt.thenBody) {
         const r = emitStmt(s, level + 1);
