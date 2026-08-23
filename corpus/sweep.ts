@@ -32,6 +32,13 @@ import {
   type CrossEdgeGuardResult,
   emptyCrossEdgeGuards,
 } from "./crossEdgeGuards";
+import {
+  emptyGuardShapeCensus,
+  type GuardShapeCensus,
+  guardShape,
+  noteGuardShape,
+  statementOnLine,
+} from "./guardShape";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
@@ -341,6 +348,17 @@ export interface BinResult {
     onlyB: number;
   };
   skipReasons: Record<string, number>;
+  /**
+   * THE SHAPE CENSUS BEHIND THE GUARD POPULATION. `unparsed` is a GATE at 0.
+   *
+   * The polarity audit's denominator is whatever its line walk recognised, so a
+   * formatting change the grammar does not model does not fail — it shrinks the
+   * population, and CLAUDE.md's rule that a guard leaving the audited set is
+   * flagged only helps once someone reads the row. This says out loud how many
+   * guard-shaped lines were seen and how many were not understood, so the
+   * shrink is a named line rather than a smaller number (peek-a-bin-vwr5).
+   */
+  guardShapes: GuardShapeCensus;
   guards: GuardRec[];
   loops: { seen: number; audited: number; short: number; skipped: number };
   loopSkip: Record<string, number>;
@@ -715,6 +733,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       onlyB: 0,
     },
     skipReasons: {},
+    guardShapes: emptyGuardShapeCensus(),
     guards: [],
     loops: { seen: 0, audited: 0, short: 0, skipped: 0 },
     loopSkip: {},
@@ -1435,6 +1454,31 @@ function auditGuardsAndLoops(
   const lines = code.split("\n");
   const indentOf = (s: string) => (s.match(/^ */) ?? [""])[0].length;
 
+  /** An address the emitted line map carries, normalised to its CFG block. */
+  const normalised = (a: number): { addr: number; exact: boolean } => {
+    const start = blockStartOf.get(a);
+    if (start === undefined || start === a) return { addr: a, exact: true };
+    return { addr: start, exact: false };
+  };
+
+  /**
+   * A body on the guard's OWN line — `if (c) break;`.
+   *
+   * The address is the guard line's own line-map entry, which is the body
+   * statement's address by the contract `guardShape.ts` documents: an emitter
+   * that one-lines a guard must attach the BODY's address to the line, because
+   * that address is what identifies the arm. Attaching the guard's own block
+   * instead would anchor to the jcc one decision earlier, which is the
+   * `peek-a-bin-8r0` / `peek-a-bin-lbz` class of false INVERTED. Absent, the
+   * guard is skipped and counted, exactly as an address-less braced body is —
+   * `break;` and `continue;` carry no address in either shape.
+   */
+  const inlineBodyAddr = (i: number): { addr: number; exact: boolean } | { why: string } => {
+    const a = lineAddr.get(i);
+    if (a === undefined) return { why: "inline-body-has-no-address" };
+    return normalised(a);
+  };
+
   const bodyAddrAt = (
     j0: number,
     d: number,
@@ -1450,9 +1494,7 @@ function auditGuardsAndLoops(
     if (OPENER.test(lines[j])) return { why: "body-is-nested-guard" };
     const a = lineAddr.get(j);
     if (a === undefined) return { why: "body-has-no-address" };
-    const start = blockStartOf.get(a);
-    if (start === undefined || start === a) return { addr: a, exact: true };
-    return { addr: start, exact: false };
+    return normalised(a);
   };
 
   const afterLoopAddr = (
@@ -1468,9 +1510,7 @@ function auditGuardsAndLoops(
     if (OPENER.test(lines[j])) return { why: "after-loop-is-guard" };
     const a = lineAddr.get(j);
     if (a === undefined) return { why: "after-loop-has-no-address" };
-    const start = blockStartOf.get(a);
-    if (start === undefined || start === a) return { addr: a, exact: true };
-    return { addr: start, exact: false };
+    return normalised(a);
   };
 
   const closingBrace = (openLine: number, d: number): number => {
@@ -1594,8 +1634,8 @@ function auditGuardsAndLoops(
   };
 
   /** Anchor A: the guard's body identifies the block that runs when it holds. */
-  const resolveBody = (i: number, d: number): Anchored => {
-    const b = bodyAddrAt(i + 1, d);
+  const resolveBody = (i: number, d: number, inline: boolean): Anchored => {
+    const b = inline ? inlineBodyAddr(i) : bodyAddrAt(i + 1, d);
     if ("why" in b) return b;
     const cands = reaching(b.addr);
     if (cands.length !== 1) {
@@ -1684,11 +1724,14 @@ function auditGuardsAndLoops(
     skip(kind, `${(a as { why: string }).why}|${(b as { why: string }).why}`);
   };
 
-  const auditTopTested = (kind: string, cond: string, i: number, d: number) => {
-    const a = resolveBody(i, d);
+  const auditTopTested = (kind: string, cond: string, i: number, d: number, inline: boolean) => {
+    const a = resolveBody(i, d, inline);
     let b: Anchored = { why: "no-anchorB-for-if" };
     if (kind !== "if") {
-      const close = closingBrace(i, d);
+      // A brace-less loop closes on its own line, so the statement after it is
+      // the next sibling — the same question `closingBrace` answers for the
+      // braced shape, asked of the header line itself.
+      const close = inline ? i : closingBrace(i, d);
       b = close < 0 ? { why: "no-closing-brace" } : resolveAfterLoop(close, d);
     }
     reconcile(kind, cond, a, b);
@@ -1697,20 +1740,26 @@ function auditGuardsAndLoops(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    const mIf = line.match(/^(\s*)(?:\}\s*else\s+)?(if|while)\s*\((.*)\)\s*\{\s*$/);
-    if (mIf) {
-      auditTopTested(mIf[2], mIf[3], i, mIf[1].length);
-      continue;
-    }
+    // ONE grammar for every guard-shaped line, and a census beside it. A line
+    // this refuses is `unparsed` and gates at 0, so a formatting change the
+    // grammar does not model fails the run instead of quietly emptying the
+    // population (peek-a-bin-vwr5).
+    const shape = guardShape(line);
+    noteGuardShape(res.guardShapes, shape, `${func.name}:${i + 1}`, line);
+    if (shape === null || shape.kind === "doOpen" || shape.kind === "unparsed") continue;
 
-    const mFor = line.match(/^(\s*)for\s*\((.*)\)\s*\{\s*$/);
-    if (mFor) {
-      const parts = splitFor(mFor[2]);
-      if (!parts) {
-        skip("for", "unsplittable-header");
+    if (shape.kind === "braced" || shape.kind === "inline") {
+      const inline = shape.kind === "inline";
+      if (shape.kw === "for") {
+        const parts = splitFor(shape.cond);
+        if (!parts) {
+          skip("for", "unsplittable-header");
+          continue;
+        }
+        auditTopTested("for", parts[1].trim(), i, shape.indent, inline);
         continue;
       }
-      auditTopTested("for", parts[1].trim(), i, mFor[1].length);
+      auditTopTested(shape.kw, shape.cond, i, shape.indent, inline);
       continue;
     }
 
@@ -1718,10 +1767,8 @@ function auditGuardsAndLoops(
     // repeats when control returns to the loop top, so `c` must be the
     // taken-sense operator of the unique conditional jump that targets the
     // loop-top address from inside the loop.
-    const mDo = line.match(/^(\s*)\}\s*while\s*\((.*)\)\s*;\s*$/);
-    if (!mDo) continue;
-    const d = mDo[1].length;
-    const cond = mDo[2];
+    const d = shape.indent;
+    const cond = shape.cond;
     let openLine = -1;
     for (let k = i - 1; k >= 0; k--) {
       if (new RegExp(`^ {${d}}do\\s*\\{\\s*$`).test(lines[k])) {
@@ -1800,7 +1847,6 @@ function auditLoopExits(
   landing: (a: number) => number,
   closingBrace: (openLine: number, d: number) => number,
 ): void {
-  const loopOpen = /^(\s*)(?:\}\s*else\s+)?(while|for)\s*\((.*)\)\s*\{\s*$/;
   const isInner = (L: { bodyAddrs: Set<number> }) =>
     !machineLoops.some(
       (o) =>
@@ -1810,15 +1856,29 @@ function auditLoopExits(
     );
 
   for (let i = 0; i < lines.length; i++) {
-    const m = loopOpen.exec(lines[i]);
-    const mDoOpen = /^(\s*)do\s*\{\s*$/.exec(lines[i]);
-    if (!m && !mDoOpen) continue;
+    // The same grammar the guard scan reads, so the two cannot disagree about
+    // what a loop header is — and so a header shape neither models is refused
+    // in one place rather than being invisible to this pass alone.
+    const shape = guardShape(lines[i]);
+    if (shape === null) continue;
+    const isLoopHeader =
+      shape.kind === "doOpen" ||
+      ((shape.kind === "braced" || shape.kind === "inline") && shape.kw !== "if");
+    if (!isLoopHeader) continue;
     res.loops.seen++;
-    const d = (m ? m[1] : (mDoOpen as RegExpExecArray)[1]).length;
+    const d = shape.indent;
     const bump = (k: string) => {
       res.loopSkip[k] = (res.loopSkip[k] ?? 0) + 1;
       res.loops.skipped++;
     };
+
+    // A brace-less loop has no block to collect body addresses from, so the
+    // exit count cannot be asked of it. Counted as a named skip rather than
+    // dropped, which is the whole point of routing this through one grammar.
+    if (shape.kind === "inline") {
+      bump("inline-loop-body");
+      continue;
+    }
 
     const close = closingBrace(i, d);
     if (close < 0) {
@@ -1861,9 +1921,14 @@ function auditLoopExits(
 
     // Emitted ways out. The loop's own test is one; a `goto` counts only when
     // the label it names is outside the loop.
+    //
+    // A terminator is a way out whether it stands on its own line or is the
+    // body of a guard on that line — `if (c) break;` is a break. That is
+    // `statementOnLine`'s question, asked through the same grammar the guard
+    // scan above reads, so the two cannot disagree about what a line says.
     let emitted = 1;
     for (let j = i + 1; j < close; j++) {
-      const t = lines[j].trim();
+      const t = statementOnLine(lines[j]);
       if (/^break\s*;/.test(t) || /^return\b/.test(t)) emitted++;
       const g = /^goto\s+loc_([0-9A-Fa-f]+)\s*;/.exec(t);
       if (g && !L.bodyAddrs.has(Number.parseInt(g[1], 16))) emitted++;
@@ -1876,7 +1941,7 @@ function auditLoopExits(
         fn: func.address,
         fname: func.name,
         line: i + 1,
-        kind: m ? m[2] : "do_while",
+        kind: shape.kind === "doOpen" ? "do_while" : shape.kw,
         machineExits: exits.length,
         emittedExits: emitted,
         exits: exits.map((e) => `${e.insn.mnemonic}@0x${e.insn.address.toString(16)}`),

@@ -9,6 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { statementOnLine } from "./guardShape";
 import type { FuncRec } from "./sweep";
 
 /**
@@ -626,7 +627,15 @@ export function gotoCheck(sets: { funcs: FuncRec[] }[]): GotoResult {
   for (const { funcs } of sets) {
     for (const r of funcs) {
       const code = r.code ?? "";
-      const g = [...code.matchAll(/^\s*goto ([A-Za-z_]\w*);/gm)].map((m) => m[1]);
+      // Read per line through `statementOnLine`, not with a multiline anchor: a
+      // `goto` that is the body of a one-lined guard is still a goto, and a
+      // line-start anchor would take the whole population out of this scan and
+      // report `dangling` 0 because it stopped looking (peek-a-bin-vwr5).
+      const g: string[] = [];
+      for (const line of code.split("\n")) {
+        const m = /^goto ([A-Za-z_]\w*);/.exec(statementOnLine(line));
+        if (m) g.push(m[1]);
+      }
       if (g.length === 0) continue;
       const defined = new Set([...code.matchAll(/^\s*(loc_[0-9A-F]+):$/gm)].map((m) => m[1]));
       out.fnWithGoto++;

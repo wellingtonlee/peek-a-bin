@@ -735,6 +735,31 @@ for (const b of bins) {
     note("  guards w/o single compare     NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // THE POPULATION THE TWO ROWS ABOVE ARE DRAWN FROM. `polarity guards audited`
+  // falling says guards left the audited set; this says whether the audit still
+  // recognises the lines they came from at all. A guard-shaped line the grammar
+  // refuses is `unparsed` and gates at 0 in the run itself, but a fall in
+  // `braced` with no matching rise in `inline` is the other half of the same
+  // question and is only visible between two pinned runs (peek-a-bin-vwr5).
+  if (B.guardShapes && C.guardShapes) {
+    row(
+      "guard lines unparsed",
+      (x) => x.guardShapes.unparsed,
+      (a, c) => c > a,
+      "THE GUARD SCAN STOPPED UNDERSTANDING A LINE",
+    );
+    row(
+      "guard lines seen (braced)",
+      (x) => x.guardShapes.topTested,
+      (a, c) => c < a,
+      "FEWER GUARD LINES RECOGNISED — read `inline` beside it",
+    );
+    row("  of which brace-less", (x) => x.guardShapes.inline);
+    row("  do/while tails seen", (x) => x.guardShapes.doTail);
+  } else {
+    note("  guard lines unparsed          NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // Ratios. A denominator moving is fine; the fraction falling is not.
   const ratio = (name, num, den) => {
     const a = den(B) === 0 ? 1 : num(B) / den(B);

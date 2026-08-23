@@ -763,6 +763,40 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * A GATE at 0 ON THE AUDIT ITSELF, which is what makes it different from
+     * everything else here: it judges no property of the emitted C, it judges
+     * whether the polarity audit still SEES the emitted C.
+     *
+     * The polarity denominator is whatever `sweep.ts`'s line walk recognised.
+     * Its header pattern used to end `\)\s*\{\s*$`, so a guard whose body moved
+     * onto the header's own line stopped being a guard at all — not skipped,
+     * not reported, absent. Measured at `baa7f61`, one-lining only the guards
+     * whose body is a single terminator would have removed **572/550/512/515**
+     * of them (t32/t64/w64/w32) with 19/9/9/19 anchored verdicts going with
+     * them, and the only trace would have been `polarity guards audited`
+     * falling. `guardShape` now refuses such a line loudly instead:
+     * `unparsed` counts every line that begins with a guard keyword and an open
+     * paren and was not understood, and it gates at 0.
+     *
+     * `topTested` and `doTail` are the liveness halves. A text-scraping audit
+     * fails by silently matching nothing, so a run with either at 0 is not a
+     * clean run — it is a run that saw no guards. `inline` is 0 on all four
+     * binaries as emitted at `baa7f61` (`emit.ts` always opens a block) and is
+     * deliberately NOT asserted either way: it is the shape this grammar exists
+     * to be ready for, pinned by `build/guardShape.test.ts` rather than by the
+     * corpus. `peek-a-bin-vwr5`.
+     */
+    it("understands every guard-shaped line it walks past", () => {
+      for (const r of results.values()) {
+        const g = r.guardShapes;
+        expect(g.unparsedDetail).toEqual([]);
+        expect(g.unparsed).toBe(0);
+        expect(g.topTested).toBeGreaterThan(0);
+        expect(g.doTail).toBeGreaterThan(0);
+      }
+    });
+
+    /**
      * NOT A GATE. A LIVENESS ASSERTION over a report-only census, and the
      * distinction is the point.
      *
@@ -1124,6 +1158,11 @@ function renderReport(): string {
         `anchor B (heuristic)  ${r.polarity.weakOk}/${r.polarity.weakChecked}`,
     );
     L.push(
+      `    guard-shaped lines        ${r.guardShapes.topTested} braced, ` +
+        `${r.guardShapes.inline} inline, ${r.guardShapes.doTail} do/while tail, ` +
+        `${r.guardShapes.unparsed} unparsed — UNPARSED is GATED at 0`,
+    );
+    L.push(
       `  loop exit coverage          ${r.loops.audited} audited, ${r.loops.short} short of the machine`,
     );
     L.push(`  distinct callees lost       ${r.callees.lost} of ${r.callees.pairs}`);
@@ -1440,6 +1479,17 @@ function renderReport(): string {
   L.push("    report at all. The PE32 residue is detection over-production, where the prologue");
   L.push("    is outside the range and the frame register is the enclosing function's.");
   L.push("    Nothing else here sees this class: it is a well-typed name gcc compiles.");
+  L.push("  guard-shaped lines — detail:");
+  L.push("    THE ONLY ROW HERE THAT JUDGES THE AUDIT RATHER THAN THE OUTPUT. The polarity");
+  L.push("    denominator is whatever the line walk recognised, and its header pattern used to");
+  L.push("    end `)\\s*{$` — so a guard whose body moved onto the header line stopped being a");
+  L.push("    guard at all: not skipped, not reported, absent. Measured at `baa7f61`, one-lining");
+  L.push("    the single-terminator bodies alone would have removed 572/550/512/515 guards with");
+  L.push("    19/9/9/19 anchored verdicts, leaving only `polarity guards audited` falling as the");
+  L.push("    trace. `unparsed` counts every line starting with a guard keyword and an open");
+  L.push("    paren that the grammar refused, and GATES at 0; `braced` and `do/while tail` are");
+  L.push("    the liveness halves. `inline` is 0 today and is a bound on the grammar, pinned by");
+  L.push("    build/guardShape.test.ts rather than by this corpus (peek-a-bin-vwr5).");
   L.push("  member name vs brackets — detail:");
   L.push("    A struct member whose identifier and whose brackets disagree: `field_0x8[]` says");
   L.push("    scalar member in the name and array in the extent. The field names carry what the");
