@@ -20,6 +20,7 @@
 import { findArm64AddressRefs, findArm64LiteralPools } from "./arm64Operands";
 import { type CapstoneHandle, createScan, requireCapstone } from "./capstoneWindow";
 import { type DetectPass, type DetectResult, mapInsn, stringComment } from "./functionDetect";
+import { SectionMemo } from "./sectionMemo";
 import type { DisasmFunction, Instruction } from "./types";
 
 /** Every A64 instruction is exactly four bytes, always 4-byte aligned. */
@@ -415,8 +416,10 @@ export function decorateArm64Sweep(
  * and measured on t64-arm.exe that was 3 x ~130 ms of Capstone for one answer.
  * Re-decorating a remembered sweep costs ~6 ms instead (peek-a-bin-kis).
  *
- * **The key is the bytes themselves, not their address or their length.** A hit
- * requires the same `baseAddress` and a byte-for-byte equal section, so there is
+ * **The key is the bytes themselves, not their address or their length** — the
+ * rule is {@link SectionMemo}'s, shared with the x86 sweep memo so that there is
+ * one declaration of it. A hit
+ * requires the same `baseAddress`, the same decoder and a byte-for-byte equal section, so there is
  * no cross-file hazard to reason about: an entry can only be served to a request
  * whose decode would be identical by construction. That matters because the
  * worker cannot trust message *order* — a decode for the newly loaded file can
@@ -438,7 +441,7 @@ export function decorateArm64Sweep(
  * a cached empty answer.
  */
 export class Arm64SweepCache {
-  private entry?: { bytes: Uint8Array; baseAddress: number; insns: Instruction[] };
+  private memo = new SectionMemo<Instruction[]>();
 
   /** The decode of exactly these bytes, from memory when possible. */
   sweep(
@@ -446,11 +449,7 @@ export class Arm64SweepCache {
     baseAddress: number,
     cs: CapstoneHandle | null | undefined,
   ): Instruction[] {
-    const hit = this.entry;
-    if (hit && hit.baseAddress === baseAddress && sameBytes(hit.bytes, bytes)) return hit.insns;
-    const insns = sweepArm64(bytes, baseAddress, cs);
-    this.entry = { bytes, baseAddress, insns };
-    return insns;
+    return this.memo.get(bytes, baseAddress, cs, () => sweepArm64(bytes, baseAddress, cs));
   }
 
   /**
@@ -461,18 +460,8 @@ export class Arm64SweepCache {
    * outliving it in a session that goes on to load another.
    */
   clear(): void {
-    this.entry = undefined;
+    this.memo.clear();
   }
-}
-
-/** Byte-for-byte equality; short-circuits on the first difference. */
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 /**

@@ -1626,8 +1626,13 @@ strength of a figure taken on a 253 MiB file that has never existed on this mach
 staleness audit recorded the timings as "NOT measurable here". They are measurable now. Measured at
 `decbea4`, the saving is **0.0075%–0.087%** of the work over seven images spanning two
 architectures and a 14× size range, so the proposal was refused; the argument is in
-`src/workers/transfer.ts` and in CLAUDE.md. The same run says where the leverage is instead
-(`peek-a-bin-x40u`): on x86 the section is re-*decoded* four times per load, not merely re-sent.
+`src/workers/transfer.ts` and in CLAUDE.md. The same run said where the leverage was instead, and
+`peek-a-bin-x40u` took it: on x86 the section was re-*decoded* four times per load, not merely
+re-sent, and two of those four decodes were provably the same linear sweep. `src/disasm/linearSweep.ts`
+now declares that sweep once and memoises it on the section's bytes, which this harness measures as
+`buildAllXrefs` **777 ms → 59** on the 669 KiB-`.text` `go` image and **77 → 13** on t32. Re-run it
+after any change to the sweep or to xref building; the `xrefs` column reading the same order as
+`detect` again means the memo has stopped being consulted.
 
 It also re-derives the premise it depends on rather than asserting it — that the four sends are of
 **one region** — by building the three views the way `App.tsx` and `useDisassemblyRows.ts` do and

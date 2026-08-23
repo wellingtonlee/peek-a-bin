@@ -39,6 +39,7 @@ import {
   type DetectResult,
   type DisasmContext,
 } from "../disasm/functionDetect";
+import { X86SweepCache } from "../disasm/linearSweep";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import { extractStrings } from "../pe/parser";
@@ -122,6 +123,26 @@ export interface WorkerState {
    */
   arm64Sweep: Arm64SweepCache;
   /**
+   * The x86 linear sweep of one code section, remembered across RPCs.
+   *
+   * The same shape as `arm64Sweep` above and for the same reason, but it serves
+   * two of the load's RPCs rather than three, and that difference is the design
+   * rather than an oversight. `detectFunctions` and `buildAllXrefs` sweep `.text`
+   * end to end in loops that were provably the same loop — verified element for
+   * element over five real images — so they share one, in `../disasm/linearSweep.ts`.
+   * `hybridDisassemble` does not: it is recursive descent over a BFS work queue
+   * plus a gap fill, and the stream it produces is a different one, annotated.
+   *
+   * Worth ~640 ms of the `go` image's ~2300 ms load and ~65 of t32's ~320, and
+   * again as much when late-arriving strings provoke a second `buildAllXrefs`
+   * (peek-a-bin-x40u).
+   *
+   * Keyed on the section's bytes, its load address and the decoder handle — the
+   * last because x86-32 and x86-64 disagree about what a byte string means, which
+   * is a part of the key `arm64Sweep` does not need. See {@link SectionMemo}.
+   */
+  x86Sweep: X86SweepCache;
+  /**
    * Per-callee written-register summaries for the loaded image, built on the
    * first `decompileFunction` that asks for them.
    *
@@ -155,6 +176,7 @@ export function createWorkerState(ready: Promise<void>): WorkerState {
     jumpTableMap: new Map(),
     structRegistry: new StructRegistry(),
     arm64Sweep: new Arm64SweepCache(),
+    x86Sweep: new X86SweepCache(),
     callSummaries: new CallSummaryCache(),
     ready,
   };
@@ -233,6 +255,10 @@ export async function dispatch(
       // produce a wrong answer.
       if (args.machine !== undefined) {
         state.arm64Sweep.clear();
+        // Same rule, same reason, for the x86 sweep: the content key already
+        // makes a stale hit impossible, so this only stops one file's decode
+        // from outliving it.
+        state.x86Sweep.clear();
         // Same guard, same reason: `configure` is sent twice per file and only
         // the first names a machine, so clearing unconditionally would drop a
         // summary the second call has no reason to invalidate. Hygiene only —
@@ -301,6 +327,17 @@ export async function dispatch(
           args.jumpTableSpans,
         );
       }
+      // Deliberately NOT routed through `state.x86Sweep`, and this is the one
+      // place the x86 and ARM64 stories genuinely differ. A64 is fixed-width,
+      // so there the sweep IS the disassembly and all three RPCs want the same
+      // array. Here this method is recursive descent over a BFS work queue plus
+      // a gap fill: it decodes one instruction at a time at addresses a *caller*
+      // named, and the linear sweep's grid need not have an instruction at any
+      // of them. Serving it from the sweep would mean an address-keyed map with
+      // a per-address fallback — sound, since a decode at an address is a
+      // function of the bytes there, but a different mechanism with its own cost
+      // and its own measurement. See peek-a-bin-x40u for the coincidence rate
+      // that would decide whether it is worth it.
       return _hybridDisassemble(
         args.bytes,
         args.baseAddress,
@@ -353,7 +390,16 @@ export async function dispatch(
       // reader wants and costs no further copy.
       const dataWindows = unpackDataWindows(args.dataBytes, args.dataSpans);
       const options = dataWindows ? { ...args.options, dataWindows } : args.options;
-      return _detectFunctions(args.bytes, args.baseAddress, args.is64, ctx(state), options);
+      // Detection is the first RPC of a load to sweep `.text`, so this is where
+      // the memo gets filled for the `buildAllXrefs` below (peek-a-bin-x40u).
+      return _detectFunctions(
+        args.bytes,
+        args.baseAddress,
+        args.is64,
+        ctx(state),
+        options,
+        state.x86Sweep,
+      );
     }
 
     case "buildTypedXrefMap":
@@ -399,6 +445,13 @@ export async function dispatch(
         );
       }
       const cs = args.is64 ? state.cs64 : state.cs32;
+      // The x86 counterpart of the ARM64 sharing just above, and the reason it
+      // took its own bead: the decode is ~all of this method's cost (637 of
+      // 681 ms on a 669 KiB `.text`) and it is the SAME sweep `detectFunctions`
+      // ran a moment ago. What is left on a hit is the resolve — the string,
+      // import, data and call-graph sets — which is also why the second call of
+      // a load, the one a late-arriving string set provokes, is nearly free
+      // (peek-a-bin-x40u).
       return _buildAllXrefs(
         args.bytes,
         args.baseAddress,
@@ -408,6 +461,7 @@ export async function dispatch(
         cs,
         args.funcEntries,
         args.dataSections,
+        state.x86Sweep,
       );
     }
 

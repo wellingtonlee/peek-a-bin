@@ -7,6 +7,7 @@
 import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
+import { type SweptInsn, sweepX86, type X86SweepCache } from "./linearSweep";
 import { resolveRipTarget } from "./ripRelative";
 import { MAX_SEH32_HEAD_INSNS, type Seh32Reader, seh32FuncletsOfPrologue } from "./seh32";
 import { pushedImmediate, type StackInsn } from "./stackIdiom";
@@ -1893,6 +1894,14 @@ export function detectFunctions(
      */
     dataWindows?: DataWindow[];
   },
+  /**
+   * The session's memo of this section's linear sweep. Detection is the first
+   * of a load's RPCs to sweep `.text`, so passing one here is what fills it for
+   * the `buildAllXrefs` that follows — and for the second `buildAllXrefs` a
+   * late-arriving string set provokes. Omitting it sweeps unconditionally, as
+   * this always did (peek-a-bin-x40u).
+   */
+  sweepCache?: X86SweepCache,
 ): DetectResult {
   const addrSet = new Set<number>();
   const nameMap = new Map<number, string>();
@@ -2253,126 +2262,150 @@ export function detectFunctions(
     ? []
     : ["call-targets", "jump-tables", "thunk-names", "tail-calls"];
   if (cs) {
-    const scan = createScan(cs, "function detection");
-    let offset = 0;
     let prevWasUnconditional = false;
     const recentInsns: StackInsn[] = [];
-    while (offset < len) {
-      const insns = scan.decode(bytes, offset, len, baseAddress + offset);
-      for (const insn of insns) {
-        if (insn.mnemonic === "call") {
-          const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
-          if (m) {
-            const target = parseInt(m[1], 16);
-            if (target >= baseAddress && target < endAddress) {
-              addrSet.add(target);
-              callTargets.add(target);
-              const sites = callSites.get(target);
-              if (sites) sites.push(insn.address);
-              else callSites.set(target, [insn.address]);
-            }
-          }
-        } else if (insn.mnemonic.startsWith("j")) {
-          const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
-          if (m) {
-            const target = parseInt(m[1], 16);
-            if (target >= baseAddress && target < endAddress) branchTargets.add(target);
-            if (target > insn.address && target < endAddress) {
-              if (insn.mnemonic === "jmp") forwardJumps.push(insn.address, target);
-              else forwardCondJumps.push(insn.address, target);
-            }
+    /**
+     * End address of the previous decoded instruction, so a gap is visible.
+     *
+     * The sweep drops every byte the decoder refused, so two adjacent elements
+     * of its array are not necessarily adjacent in the image, and the loop this
+     * replaced answered that by watching for an empty decode — it reset
+     * `prevWasUnconditional` there. Preserved here so the refactor is
+     * behaviour-preserving *by construction* rather than only on the images it
+     * was differentially checked against. `-1` before the first instruction,
+     * which no address can equal, so the first one correctly has no predecessor.
+     *
+     * **It is unfalsifiable from outside, because the one reader of
+     * `prevWasUnconditional` is provably inert.** That reader adds
+     * `insn.address` to `addrSet` when it is a known call target — and the call
+     * branch above puts every in-section call target into `addrSet` on the line
+     * before it puts it into `callTargets`, so `callTargets` is a subset of
+     * `addrSet` and the add can never be new. Measured as well as argued: over
+     * t32/t64/w32/w64 and a 669 KiB-`.text` `go` image the guard fires 156, 34,
+     * 146, 35 and 1 times and adds a new address **0** times, and dropping this
+     * reset leaves every `DetectResult` in that set byte-identical. So no test
+     * can pin it (see `linearSweep.test.ts`, which pins the sweep's side of the
+     * contract instead — that a gap is visible at all) and the subsumed
+     * heuristic is peek-a-bin-7lue, not something to delete in passing.
+     */
+    let prevEnd = -1;
+    // One sweep, shared with `buildAllXrefs`; see ./linearSweep.ts for why the
+    // two loops that used to do this separately were provably the same loop,
+    // and for what the memo holds.
+    const swept = sweepCache
+      ? sweepCache.sweep(bytes, baseAddress, cs, "function detection")
+      : sweepX86(bytes, baseAddress, cs, "function detection");
+    for (const insn of swept) {
+      if (insn.address !== prevEnd) prevWasUnconditional = false;
+      prevEnd = insn.address + insn.size;
+      if (insn.mnemonic === "call") {
+        const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+        if (m) {
+          const target = parseInt(m[1], 16);
+          if (target >= baseAddress && target < endAddress) {
+            addrSet.add(target);
+            callTargets.add(target);
+            const sites = callSites.get(target);
+            if (sites) sites.push(insn.address);
+            else callSites.set(target, [insn.address]);
           }
         }
-        if (prevWasUnconditional && callTargets.has(insn.address)) {
-          addrSet.add(insn.address);
+      } else if (insn.mnemonic.startsWith("j")) {
+        const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+        if (m) {
+          const target = parseInt(m[1], 16);
+          if (target >= baseAddress && target < endAddress) branchTargets.add(target);
+          if (target > insn.address && target < endAddress) {
+            if (insn.mnemonic === "jmp") forwardJumps.push(insn.address, target);
+            else forwardCondJumps.push(insn.address, target);
+          }
         }
+      }
+      if (prevWasUnconditional && callTargets.has(insn.address)) {
+        addrSet.add(insn.address);
+      }
 
-        // A deferred base is settled by the sweep walking onto it. The list is
-        // address-monotone with the sweep, so an instruction starting at or
-        // after a pending base is proof no instruction can still contain it:
-        // that base is dropped rather than carried, which is what keeps this
-        // list to a handful of entries and its cost to nothing. Answered here
-        // rather than at the top of the loop so the current instruction is not
-        // yet in the list and cannot settle itself.
-        for (let p = pendingOverlaps.length - 1; p >= 0; p--) {
-          const base = pendingOverlaps[p];
-          if (insn.address >= base) {
-            pendingOverlaps.splice(p, 1);
-            continue;
-          }
-          if (insn.address + insn.size <= base) continue;
+      // A deferred base is settled by the sweep walking onto it. The list is
+      // address-monotone with the sweep, so an instruction starting at or
+      // after a pending base is proof no instruction can still contain it:
+      // that base is dropped rather than carried, which is what keeps this
+      // list to a handful of entries and its cost to nothing. Answered here
+      // rather than at the top of the loop so the current instruction is not
+      // yet in the list and cannot settle itself.
+      for (let p = pendingOverlaps.length - 1; p >= 0; p--) {
+        const base = pendingOverlaps[p];
+        if (insn.address >= base) {
           pendingOverlaps.splice(p, 1);
-          const overlapped = overlappedTableExtent(
-            base,
-            insn.address + insn.size,
-            reader,
-            is64 ? 8 : 4,
-            baseAddress,
-            endAddress,
-          );
-          if (overlapped.dataOnly) recordSpans(overlapped);
+          continue;
         }
+        if (insn.address + insn.size <= base) continue;
+        pendingOverlaps.splice(p, 1);
+        const overlapped = overlappedTableExtent(
+          base,
+          insn.address + insn.size,
+          reader,
+          is64 ? 8 : 4,
+          baseAddress,
+          endAddress,
+        );
+        if (overlapped.dataOnly) recordSpans(overlapped);
+      }
 
-        // Jump table detection
-        if (insn.mnemonic === "jmp" && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
-          const table =
-            is64 && regFamily(insn.opStr)
-              ? readRvaTable(insn, recentInsns, reader, baseAddress, endAddress)
-              : readAbsoluteTable(
-                  insn,
-                  recentInsns,
-                  reader,
-                  is64,
-                  baseAddress,
-                  endAddress,
-                  tablesByBase,
-                );
-          const hasCases = table.targets.length >= 2;
-          if (hasCases) {
-            jumpTables.set(insn.address, table.targets);
-            for (const t of table.targets) jumpTableTargets.add(t);
-            if (table.base !== undefined && !tablesByBase.has(table.base)) {
-              tablesByBase.set(table.base, table.targets);
-            }
-          }
-          // The two questions are separate, and an unbounded dispatch answers
-          // only the second: `dataOnly` carries an extent with no case list,
-          // because a table with no bounds check has no *length* and reporting
-          // targets would be inventing one (peek-a-bin-7lb9).
-          if (hasCases || table.dataOnly) recordSpans(table);
-          // A base that is not an address at all may still be a table base whose
-          // entry 0 shares bytes with the instruction in front of it, and that
-          // instruction is at a HIGHER address than the dispatch — so the
-          // question cannot be answered here, only remembered. A base a
-          // recovered table already dispatches to is code and is never one of
-          // these (peek-a-bin-xqxy).
-          else if (
-            table.deferredBase !== undefined &&
-            !jumpTableTargets.has(table.deferredBase) &&
-            pendingOverlaps.length < MAX_PENDING_OVERLAP_BASES
-          ) {
-            pendingOverlaps.push(table.deferredBase);
+      // Jump table detection
+      if (insn.mnemonic === "jmp" && !insn.opStr.match(/^0x[0-9a-fA-F]+$/)) {
+        const table =
+          is64 && regFamily(insn.opStr)
+            ? readRvaTable(insn, recentInsns, reader, baseAddress, endAddress)
+            : readAbsoluteTable(
+                insn,
+                recentInsns,
+                reader,
+                is64,
+                baseAddress,
+                endAddress,
+                tablesByBase,
+              );
+        const hasCases = table.targets.length >= 2;
+        if (hasCases) {
+          jumpTables.set(insn.address, table.targets);
+          for (const t of table.targets) jumpTableTargets.add(t);
+          if (table.base !== undefined && !tablesByBase.has(table.base)) {
+            tablesByBase.set(table.base, table.targets);
           }
         }
+        // The two questions are separate, and an unbounded dispatch answers
+        // only the second: `dataOnly` carries an extent with no case list,
+        // because a table with no bounds check has no *length* and reporting
+        // targets would be inventing one (peek-a-bin-7lb9).
+        if (hasCases || table.dataOnly) recordSpans(table);
+        // A base that is not an address at all may still be a table base whose
+        // entry 0 shares bytes with the instruction in front of it, and that
+        // instruction is at a HIGHER address than the dispatch — so the
+        // question cannot be answered here, only remembered. A base a
+        // recovered table already dispatches to is code and is never one of
+        // these (peek-a-bin-xqxy).
+        else if (
+          table.deferredBase !== undefined &&
+          !jumpTableTargets.has(table.deferredBase) &&
+          pendingOverlaps.length < MAX_PENDING_OVERLAP_BASES
+        ) {
+          pendingOverlaps.push(table.deferredBase);
+        }
+      }
 
-        const mn = insn.mnemonic;
-        prevWasUnconditional = mn === "ret" || mn === "retn" || mn === "jmp";
-        recentInsns.push({
-          address: insn.address,
-          mnemonic: insn.mnemonic,
-          opStr: insn.opStr,
-          size: insn.size,
-        });
-        if (recentInsns.length > MAX_RECENT) recentInsns.shift();
-      }
-      if (insns.length === 0) {
-        offset += 1;
-        prevWasUnconditional = false;
-      } else {
-        const lastInsn = insns[insns.length - 1];
-        const decoded = lastInsn.address - (baseAddress + offset) + lastInsn.size;
-        offset += decoded;
-      }
+      const mn = insn.mnemonic;
+      prevWasUnconditional = mn === "ret" || mn === "retn" || mn === "jmp";
+      // Copied rather than pushed by reference: the sweep's elements may be a
+      // memo entry shared with `buildAllXrefs`, and this window is handed to
+      // the table readers. A copy costs one small object and makes it
+      // impossible for anything downstream to write through into the cache.
+      recentInsns.push({
+        address: insn.address,
+        mnemonic: insn.mnemonic,
+        opStr: insn.opStr,
+        size: insn.size,
+      });
+      if (recentInsns.length > MAX_RECENT) recentInsns.shift();
     }
   }
 
@@ -2942,6 +2975,15 @@ export function buildAllXrefs(
   cs: any,
   funcEntries?: [number, number][],
   dataSections?: { va: number; size: number }[],
+  /**
+   * The session's memo of this section's linear sweep — see
+   * {@link X86SweepCache}. The decode is 637 of this function's 681 ms on a
+   * 669 KiB `.text`, so on a hit what is left is the resolve below: 44 ms,
+   * with no Capstone at all. That is also what makes a second call with a
+   * larger string set nearly free, which is the one App.tsx posts when string
+   * extraction lands after detection (peek-a-bin-x40u).
+   */
+  sweepCache?: X86SweepCache,
 ): {
   stringXrefs: [number, number[]][];
   importXrefs: [number, number[]][];
@@ -2952,7 +2994,6 @@ export function buildAllXrefs(
   // strings, no imports and nothing in its data sections", which is false of
   // every real image. See `disassemble` (peek-a-bin-cen).
   requireCapstone(cs, "xref building");
-  const scan = createScan(cs, "xref building");
   const stringSet = new Set(stringAddrs);
   const iatSet = new Set(iatAddrs);
   const strXrefs = new Map<number, number[]>();
@@ -2991,94 +3032,92 @@ export function buildAllXrefs(
     return -1;
   };
 
-  let offset = 0;
+  // The decode, and then the resolve — separately, which is the whole point.
+  // This is the same sweep `detectFunctions` runs, one declaration of it in
+  // ./linearSweep.ts, so with a memo in hand the loop below reads instructions
+  // somebody else already paid for. Everything under it is a pure function of
+  // the sweep and of the four address sets, so re-answering for a bigger string
+  // set costs the resolve and nothing more.
+  const swept: SweptInsn[] = sweepCache
+    ? sweepCache.sweep(bytes, baseAddress, cs, "xref building")
+    : sweepX86(bytes, baseAddress, cs, "xref building");
 
-  while (offset < bytes.length) {
-    const insns = scan.decode(bytes, offset, bytes.length, baseAddress + offset);
-    for (const insn of insns) {
-      const resolvedTargets: number[] = [];
+  for (const insn of swept) {
+    const resolvedTargets: number[] = [];
 
-      const target = resolveRipTarget(insn);
-      if (target !== null) {
-        resolvedTargets.push(target);
-        if (stringSet.has(target)) {
-          let arr = strXrefs.get(target);
+    const target = resolveRipTarget(insn);
+    if (target !== null) {
+      resolvedTargets.push(target);
+      if (stringSet.has(target)) {
+        let arr = strXrefs.get(target);
+        if (!arr) {
+          arr = [];
+          strXrefs.set(target, arr);
+        }
+        arr.push(insn.address);
+      }
+      if (iatSet.has(target)) {
+        let arr = impXrefs.get(target);
+        if (!arr) {
+          arr = [];
+          impXrefs.set(target, arr);
+        }
+        arr.push(insn.address);
+      }
+    }
+    const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
+    if (addrMatches) {
+      for (const addrStr of addrMatches) {
+        const addr = parseInt(addrStr, 16);
+        resolvedTargets.push(addr);
+        if (stringSet.has(addr)) {
+          let arr = strXrefs.get(addr);
           if (!arr) {
             arr = [];
-            strXrefs.set(target, arr);
+            strXrefs.set(addr, arr);
           }
           arr.push(insn.address);
         }
-        if (iatSet.has(target)) {
-          let arr = impXrefs.get(target);
+        if (iatSet.has(addr)) {
+          let arr = impXrefs.get(addr);
           if (!arr) {
             arr = [];
-            impXrefs.set(target, arr);
+            impXrefs.set(addr, arr);
           }
           arr.push(insn.address);
         }
       }
-      const addrMatches = insn.opStr.match(/0x([0-9a-fA-F]+)/g);
-      if (addrMatches) {
-        for (const addrStr of addrMatches) {
-          const addr = parseInt(addrStr, 16);
-          resolvedTargets.push(addr);
-          if (stringSet.has(addr)) {
-            let arr = strXrefs.get(addr);
-            if (!arr) {
-              arr = [];
-              strXrefs.set(addr, arr);
-            }
-            arr.push(insn.address);
-          }
-          if (iatSet.has(addr)) {
-            let arr = impXrefs.get(addr);
-            if (!arr) {
-              arr = [];
-              impXrefs.set(addr, arr);
-            }
-            arr.push(insn.address);
-          }
-        }
-      }
+    }
 
-      if (insn.mnemonic === "call" && funcBounds.length > 0) {
-        const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
-        if (directMatch) {
-          const callTarget = parseInt(directMatch[1], 16);
-          if (funcAddrSet.has(callTarget)) {
-            const callerFunc = findContainingFunc(insn.address);
-            if (callerFunc >= 0) {
-              let callees = callGraphMap.get(callerFunc);
-              if (!callees) {
-                callees = new Set();
-                callGraphMap.set(callerFunc, callees);
-              }
-              callees.add(callTarget);
+    if (insn.mnemonic === "call" && funcBounds.length > 0) {
+      const directMatch = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
+      if (directMatch) {
+        const callTarget = parseInt(directMatch[1], 16);
+        if (funcAddrSet.has(callTarget)) {
+          const callerFunc = findContainingFunc(insn.address);
+          if (callerFunc >= 0) {
+            let callees = callGraphMap.get(callerFunc);
+            if (!callees) {
+              callees = new Set();
+              callGraphMap.set(callerFunc, callees);
             }
-          }
-        }
-      }
-
-      if (hasDataSections) {
-        for (const target of resolvedTargets) {
-          if (!stringSet.has(target) && !iatSet.has(target) && isInDataSection(target)) {
-            let arr = dataXrefs.get(target);
-            if (!arr) {
-              arr = [];
-              dataXrefs.set(target, arr);
-            }
-            arr.push(insn.address);
+            callees.add(callTarget);
           }
         }
       }
     }
-    if (insns.length === 0) {
-      offset += 1;
-    } else {
-      const lastInsn = insns[insns.length - 1];
-      const decoded = lastInsn.address - (baseAddress + offset) + lastInsn.size;
-      offset += decoded;
+
+    if (hasDataSections) {
+      for (const target of resolvedTargets) {
+        if (!stringSet.has(target) && !iatSet.has(target) && isInDataSection(target)) {
+          let arr = dataXrefs.get(target);
+          if (!arr) {
+            arr = [];
+            dataXrefs.set(target, arr);
+          }
+          arr.push(insn.address);
+        }
+      }
     }
   }
 

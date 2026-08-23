@@ -85,10 +85,13 @@
  * The two ARM64 rows are the hostile case and were measured on purpose: there
  * `Arm64SweepCache` (peek-a-bin-kis) has already removed the Capstone work from
  * two of the three RPCs, so the denominator collapses and this is as good as the
- * trade ever gets. It is still under a tenth of one percent — and they are also
- * a preview of the x86 world *after* `peek-a-bin-x40u`, since that is the same
- * cache on the other architecture. So a future agent arriving with "the work is
- * much smaller now, is it worth it yet" already has the answer measured: no.
+ * trade ever gets. It is still under a tenth of one percent. **`peek-a-bin-x40u`
+ * has since put x86 in the same place** — `X86SweepCache` shares one linear
+ * sweep between `detectFunctions` and both `buildAllXrefs` calls — so the
+ * hostile case is now the ordinary one, and re-measured after it the `go` image
+ * reads 0.0357% and t32 0.0072%. A future agent arriving with "the work is much
+ * smaller now, is it worth it yet" therefore has the answer measured twice, on
+ * both architectures: no.
  *
  * **The bead's headline figure describes the cost this module already removed.**
  * "116-192 ms of memcpy per send" is the *cloned view* column of the table
@@ -134,18 +137,27 @@
  * minted fresh by a decode. Here the work saved *is* a linear pass over the
  * bytes, so there is no room underneath it for any key at all.
  *
- * ### Where the leverage actually is
+ * ### Where the leverage was, and what taking it changed here
  *
- * The same measurement says what to do instead. On x86 the section is not
- * merely re-*sent* four times, it is re-*decoded*: `detectFunctions`,
- * `hybridDisassemble` and both `buildAllXrefs` calls each open their own
- * `createScan` over the identical bytes. On the `go` image that is 792 + 757 +
- * 687 ms; on the ARM64 pair, where `peek-a-bin-kis` shares one sweep, the
- * second and third RPCs cost 13 and 21 ms against a 150 ms first. An x86
- * counterpart of that cache is worth ~1000 ms per MiB of `.text` — roughly a
- * thousand times this proposal — and it can afford a **content** key, because
- * there the compare is four orders of magnitude below what it skips. That is
- * `peek-a-bin-x40u`.
+ * The same measurement said what to do instead, and `peek-a-bin-x40u` did it. On
+ * x86 the section was not merely re-*sent* four times, it was re-*decoded*:
+ * `detectFunctions`, `hybridDisassemble` and both `buildAllXrefs` calls each
+ * opened their own `createScan` over the identical bytes. Two of those loops
+ * were provably the same loop, so `../disasm/linearSweep.ts` now declares it
+ * once and memoises it on the section's **bytes** — the key this module refuses
+ * for itself, affordable there because it costs 0.9 ms on a 669 KiB section to
+ * skip 754 ms of Capstone, a margin of 820x. Measured: `buildAllXrefs` 777 ms to
+ * 59 on the `go` image and 77 to 13 on t32, and a whole four-RPC load 3130 ms to
+ * 1666.
+ *
+ * **That does not move this module's conclusion, and it is worth saying why it
+ * makes it stronger.** The copy is unchanged and the work it feeds is smaller,
+ * so the fraction rises — 0.0367% to 0.0357% on the `go` image is within the
+ * noise of a wall clock, because the sweep that went away was one of three over
+ * the same bytes and `hybridDisassemble` still pays for its own decode. The
+ * `.text` still crosses four times and each crossing is still a slice. What
+ * would change the answer is a decode cost of the same order as a memcpy, and
+ * nothing here is within three orders of that.
  */
 
 /** An args object rewritten for posting, with the buffers it now owns. */

@@ -185,6 +185,39 @@ IAT map and driver mode on. The x86 path never consults it: `buildAllXrefs` and 
 disassemblers own their decode inside `functionDetect.ts`, and the four x86 corpus binaries emit
 byte-identical C across the change.
 
+**x86 shares one sweep too, but between two RPCs rather than three — and the difference is the
+design, not an oversight.** A64 is fixed-width, so there the sweep *is* the disassembly and all
+three callers want the same array. On x86 `detectFunctions` and `buildAllXrefs` each contained a
+linear sweep of the whole section, in loops that were copy-paste identical down to the offset
+arithmetic — checked element for element over t32/t64/w32/w64 and a 669 KiB-`.text` Windows/amd64
+`go` image, the two produce the same stream with no first difference — so `disasm/linearSweep.ts`
+declares it once (`sweepX86`) and memoises it in `WorkerState.x86Sweep`. `hybridDisassemble` is
+**not** routed through it: it is recursive descent over a BFS work queue plus a gap fill, decoding
+one instruction at a time at addresses a caller named, and the sweep's grid need not have an
+instruction at any of them. Measured at `6f2ce28` by replaying a load's RPCs against the real
+dispatch, milliseconds:
+
+| | detect | hybrid | xrefs | xrefs again | load |
+|---|---|---|---|---|---|
+| `go` x64 (669 KiB `.text`, 186281 insns) | 857 → 761 | 800 → 765 | 729 → **76** | 744 → **64** | 3130 → **1666** |
+| t32.exe (54 KiB, 18280) | 117 → 100 | 137 → 125 | 73 → **10** | 82 → **9** | 409 → **243** |
+| t64.exe (60 KiB, 17238) | 90 → 83 | 72 → 70 | 73 → **7** | 71 → **5** | 307 → **165** |
+| w32.exe (48 KiB, 16814) | 96 → 94 | 116 → 123 | 62 → **6** | 62 → **5** | 336 → **228** |
+| w64.exe (54 KiB, 15504) | 66 → 70 | 63 → 65 | 65 → **7** | 61 → **6** | 255 → **148** |
+
+The fourth column is the rebuild `App.tsx` posts when string extraction lands after detection. The
+`detect` and `hybrid` columns are unchanged work and their movement is this machine's run-to-run
+spread. Taken apart directly, `buildAllXrefs` on the `go` image is 802 ms whole, **754 of it the
+sweep and 67 the resolve**, and the byte-compare that replaces the sweep on a hit is **0.918 ms** —
+a margin of 820x, which is the test `workers/transfer.ts` sets for whether such a memo may exist at
+all. The key rule is shared with `Arm64SweepCache` in `disasm/sectionMemo.ts` and has three parts:
+the bytes, the load address, and the decoder handle by identity — the last being a part ARM64 does
+not need, since x86-32 and x86-64 disagree about what a byte string means. Retention is the price:
+~135 B/instruction, 24 MB for the `go` image, against the 55.2 MB of `Instruction[]` the app
+already holds for the same section (`SweptInsn` is four fields and no `bytes` view, which is most
+of the difference). The MCP path passes no memo, so `npm run corpus` is a control and is
+byte-identical (`peek-a-bin-x40u`).
+
 **An A64 instruction's inline comment comes from the address idiom, not from its operand.**
 `mapInsn` in `functionDetect.ts` resolves a reference with `resolveRipTarget` and, failing that,
 by scanning the operand string for a `0x…` literal that is a known string or IAT address — both

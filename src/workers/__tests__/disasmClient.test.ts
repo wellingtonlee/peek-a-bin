@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
+import { sweepX86 } from "../../disasm/linearSweep";
 import type { Instruction } from "../../disasm/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
@@ -1093,5 +1094,327 @@ describe("DisasmWorkerClient — the decompile request carries the callee-clobbe
     const tokens = worker.received.map((m) => m.args.insnsToken);
     expect(tokens[0]).toBe(tokens[1]);
     expect(tokens[2]).not.toBe(tokens[0]);
+  });
+});
+
+/**
+ * peek-a-bin-x40u — one x86 load sweeps `.text` once, not three times.
+ *
+ * `detectFunctions` and `buildAllXrefs` swept the section end to end in loops
+ * that were provably the same loop (verified element for element over five real
+ * images), and App.tsx posts a *second* `buildAllXrefs` when string extraction
+ * lands after detection — so a load paid for three identical sweeps. They now
+ * share one, held in `WorkerState.x86Sweep` and keyed on the section's bytes.
+ * Measured through this same path with real Capstone at `6f2ce28`: `buildAllXrefs`
+ * 729 ms to 76 on a 669 KiB `.text`, and the whole load 3130 ms to 1666.
+ *
+ * These drive the real client and answer with the real dispatch, because the
+ * bead's own verification gap was that **no harness drives the worker RPC path
+ * at all** — the corpus suite goes through `FileSession`, which has no worker and
+ * no session state. Two negative controls, in opposite directions: a memo that
+ * never stores (so the saving is provably the memo's) and a memo that serves a
+ * stale entry (so the content key is provably load-bearing).
+ */
+describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
+  const TEXT_BASE = 0x401000;
+  const AMD64 = 0x8664;
+  const ARM64_MACHINE = 0xaa64;
+  /** Where the emitted `mov` points, and what the second xref build calls a string. */
+  const STRING_ADDR = TEXT_BASE + 0x30;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A stub x86 decoder whose *answer depends on the section's bytes*, which is
+   * what lets a stale hit be told from a correct one.
+   *
+   * Four bytes per instruction: the first is a `call` whose target is derived
+   * from `bytes[0]`, the second a `mov` naming {@link STRING_ADDR}, the rest
+   * `nop`. It counts its own entries, since an instruction count cannot
+   * distinguish a memo hit from a miss and a decode count can.
+   */
+  function countingX86() {
+    const stub = {
+      calls: 0,
+      disasm(bytes: Uint8Array, options: { address: number }) {
+        stub.calls++;
+        const out: {
+          address: number;
+          mnemonic: string;
+          opStr: string;
+          size: number;
+          bytes: Uint8Array;
+        }[] = [];
+        // The call target is a function of the content, so two sections of the
+        // same length at the same address decode to different call graphs.
+        const callee = TEXT_BASE + (bytes[0] & 0x30);
+        for (let i = 0; i + 4 <= bytes.length; i += 4) {
+          const first = options.address + i === TEXT_BASE;
+          out.push({
+            address: options.address + i,
+            mnemonic: first ? "call" : i === 4 ? "mov" : "nop",
+            opStr: first
+              ? `0x${callee.toString(16)}`
+              : i === 4
+                ? `eax, 0x${STRING_ADDR.toString(16)}`
+                : "",
+            size: 4,
+            bytes: bytes.subarray(i, i + 4),
+          });
+        }
+        return out;
+      },
+    };
+    return stub;
+  }
+
+  function workerState(cs: ReturnType<typeof countingX86>): WorkerState {
+    return Object.assign(createWorkerState(Promise.resolve()), {
+      cs32: cs,
+      cs64: cs,
+      csArm64: cs,
+      arch: "x86" as const,
+    });
+  }
+
+  /** A fresh view of the section, as `prepareBinaryArgs` hands each RPC. */
+  const section = (fill = 0x5a) => new Uint8Array(0x40).fill(fill);
+
+  /**
+   * The extents the xref build needs to draw a call edge at all: it records one
+   * only when the target is a known function start and the call site is inside
+   * one. Both call targets the stub can produce are listed, so a wrong sweep
+   * shows up as the wrong edge rather than as no edge.
+   */
+  const EXTENTS: [number, number][] = [
+    [TEXT_BASE, 0x10],
+    [TEXT_BASE + 0x10, 0x10],
+    [TEXT_BASE + 0x20, 0x20],
+  ];
+
+  /**
+   * One load's worth of x86 RPCs, posted through the real client and answered
+   * by the real dispatch in the order a serially-servicing worker sees them.
+   *
+   * Four calls, App.tsx's own sequence: detect, the view, the xref build the
+   * detection chain posts, and the rebuild the strings effect posts when
+   * detection got there first.
+   */
+  async function load(
+    cs: ReturnType<typeof countingX86>,
+    s: WorkerState,
+    fill = 0x5a,
+  ): Promise<{
+    det: unknown;
+    insns: unknown;
+    xr1: { callGraph: [number, number[]][]; stringXrefs: [number, number[]][] };
+    xr2: { callGraph: [number, number[]][]; stringXrefs: [number, number[]][] };
+    decodes: number;
+  }> {
+    const { client, worker } = await loadClient();
+    client.setImage(AMD64);
+    void client.detectFunctions(section(fill), TEXT_BASE, true, { entryPoint: TEXT_BASE });
+    void client.hybridDisassemble(section(fill), TEXT_BASE, true, [TEXT_BASE]);
+    void client.buildAllXrefs(section(fill), TEXT_BASE, true, [], [], EXTENTS);
+    // The second build differs from the first only in its string set — the whole
+    // reason it exists, and the reason it must still re-run the resolve.
+    void client.buildAllXrefs(section(fill), TEXT_BASE, true, [STRING_ADDR], [], EXTENTS);
+    expect(worker.received.map((m) => m.method)).toEqual([
+      "detectFunctions",
+      "hybridDisassemble",
+      "buildAllXrefs",
+      "buildAllXrefs",
+    ]);
+
+    const det = await dispatch("detectFunctions", worker.received[0].args, s);
+    const insns = await dispatch("hybridDisassemble", worker.received[1].args, s);
+    const xr1 = (await dispatch("buildAllXrefs", worker.received[2].args, s)) as {
+      callGraph: [number, number[]][];
+      stringXrefs: [number, number[]][];
+    };
+    const xr2 = (await dispatch("buildAllXrefs", worker.received[3].args, s)) as {
+      callGraph: [number, number[]][];
+      stringXrefs: [number, number[]][];
+    };
+    return { det, insns, xr1, xr2, decodes: cs.calls };
+  }
+
+  /**
+   * The negative control for the saving: a memo that computes every time and
+   * remembers nothing, i.e. exactly the tree before this change.
+   */
+  function neverStores(s: WorkerState): WorkerState {
+    s.x86Sweep.clear();
+    const real = s.x86Sweep.sweep.bind(s.x86Sweep);
+    s.x86Sweep.sweep = (...args: Parameters<typeof real>) => {
+      const out = real(...args);
+      s.x86Sweep.clear();
+      return out;
+    };
+    return s;
+  }
+
+  it("sweeps the section once for detect and both xref builds", async () => {
+    const shared = countingX86();
+    const withMemo = await load(shared, workerState(shared));
+
+    const alone = countingX86();
+    const without = await load(alone, neverStores(workerState(alone)));
+
+    expect(withMemo.decodes).toBeLessThan(without.decodes);
+    // Two of the three sweeps are gone. The section is 0x40 bytes, one window,
+    // so a sweep is exactly one decode here.
+    expect(without.decodes - withMemo.decodes).toBe(2);
+  });
+
+  it("answers exactly what it answered when each RPC swept for itself", async () => {
+    const shared = countingX86();
+    const withMemo = await load(shared, workerState(shared));
+
+    const alone = countingX86();
+    const without = await load(alone, neverStores(workerState(alone)));
+
+    expect(withMemo.det).toEqual(without.det);
+    expect(withMemo.insns).toEqual(without.insns);
+    expect(withMemo.xr1).toEqual(without.xr1);
+    expect(withMemo.xr2).toEqual(without.xr2);
+  });
+
+  it("re-runs the resolve on a hit, so a larger string set still finds more", async () => {
+    // The saving must be the decode and nothing else: the second build's whole
+    // purpose is that its string set grew, and a memo that short-circuited the
+    // resolve would silently answer the first build's question twice.
+    const cs = countingX86();
+    const { xr1, xr2 } = await load(cs, workerState(cs));
+
+    expect(xr1.stringXrefs).toEqual([]);
+    expect(xr2.stringXrefs).toEqual([[STRING_ADDR, [TEXT_BASE + 4]]]);
+    expect(xr2.callGraph).toEqual(xr1.callGraph);
+  });
+
+  it("does not serve one file's sweep to another with the same address and length", async () => {
+    // The content key, doing the work it exists for. Both sections are 0x40
+    // bytes at 0x401000 and decode differently, which is the collision a cheap
+    // `(buffer, offset, length)` key cannot see — see src/workers/transfer.ts
+    // for why that key was refused outright.
+    const cs = countingX86();
+    const s = workerState(cs);
+
+    const first = await load(cs, s, 0x5a);
+    const second = await load(cs, s, 0xa5);
+
+    expect(first.xr1.callGraph).toEqual([[TEXT_BASE, [TEXT_BASE + 0x10]]]);
+    expect(second.xr1.callGraph).toEqual([[TEXT_BASE, [TEXT_BASE + 0x20]]]);
+  });
+
+  it("would serve a stale answer under a length-and-address key", async () => {
+    // The other negative control, and the one that makes the assertion above
+    // mean something: with the key weakened to what a cheap scheme could
+    // afford, the second file's xrefs are the FIRST file's — a complete,
+    // plausible answer about bytes the image does not contain.
+    const cs = countingX86();
+    const s = workerState(cs);
+    const held = new Map<string, unknown>();
+    s.x86Sweep.sweep = ((bytes: Uint8Array, base: number, handle: unknown, where: string) => {
+      const key = `${base}:${bytes.length}`;
+      const hit = held.get(key);
+      if (hit) return hit;
+      const value = sweepX86(bytes, base, handle as never, where);
+      held.set(key, value);
+      return value;
+    }) as typeof s.x86Sweep.sweep;
+
+    await load(cs, s, 0x5a);
+    const second = await load(cs, s, 0xa5);
+
+    expect(second.xr1.callGraph).toEqual([[TEXT_BASE, [TEXT_BASE + 0x10]]]);
+  });
+
+  it("drops the held sweep when configure declares a machine type", async () => {
+    const cs = countingX86();
+    const s = workerState(cs);
+    const args = { bytes: section(), baseAddress: TEXT_BASE, is64: true, machine: AMD64 };
+
+    await dispatch("buildAllXrefs", { ...args, stringAddrs: [], iatAddrs: [] }, s);
+    const afterFirst = cs.calls;
+    await dispatch("configure", { stringEntries: [], iatEntries: [], machine: AMD64 }, s);
+    await dispatch(
+      "buildAllXrefs",
+      { ...args, bytes: section(), stringAddrs: [], iatAddrs: [] },
+      s,
+    );
+
+    expect(cs.calls).toBeGreaterThan(afterFirst);
+  });
+
+  it("keeps the held sweep across a configure that declares no machine type", async () => {
+    // The second `configure` of a load re-sends the strings and knows nothing
+    // about the machine. It is not a new file and must not cost a re-sweep —
+    // which is precisely the moment the second `buildAllXrefs` is posted.
+    const cs = countingX86();
+    const s = workerState(cs);
+    const args = { bytes: section(), baseAddress: TEXT_BASE, is64: true, machine: AMD64 };
+
+    await dispatch("buildAllXrefs", { ...args, stringAddrs: [], iatAddrs: [] }, s);
+    const afterFirst = cs.calls;
+    await dispatch("configure", { stringEntries: [], iatEntries: [] }, s);
+    await dispatch(
+      "buildAllXrefs",
+      { ...args, bytes: section(), stringAddrs: [], iatAddrs: [] },
+      s,
+    );
+
+    expect(cs.calls).toBe(afterFirst);
+  });
+
+  it("never consults the x86 memo on the ARM64 path", async () => {
+    const cs = countingX86();
+    const s = Object.assign(workerState(cs), { arch: "arm64" as const });
+    let consulted = 0;
+    const real = s.x86Sweep.sweep.bind(s.x86Sweep);
+    s.x86Sweep.sweep = (...a: Parameters<typeof real>) => {
+      consulted++;
+      return real(...a);
+    };
+    const common = {
+      bytes: section(),
+      baseAddress: TEXT_BASE,
+      is64: true,
+      machine: ARM64_MACHINE,
+      seeds: [],
+    };
+
+    await dispatch("detectFunctions", { ...common, options: {} }, s);
+    await dispatch("hybridDisassemble", common, s);
+    await dispatch("buildAllXrefs", { ...common, stringAddrs: [], iatAddrs: [] }, s);
+
+    expect(consulted).toBe(0);
+  });
+
+  it("does not let a single-function decode evict the section", async () => {
+    // `disassemble` may be handed a sub-range and is deliberately not routed
+    // through the memo, exactly as on the ARM64 side: the memo holds one
+    // section, so a 16-byte decode taking its slot would cost the next xref
+    // build a whole sweep.
+    const cs = countingX86();
+    const s = workerState(cs);
+    const common = { baseAddress: TEXT_BASE, is64: true, machine: AMD64 };
+
+    await dispatch(
+      "buildAllXrefs",
+      { ...common, bytes: section(), stringAddrs: [], iatAddrs: [] },
+      s,
+    );
+    const afterSection = cs.calls;
+    await dispatch("disassemble", { ...common, bytes: new Uint8Array(0x10).fill(0x5a) }, s);
+    await dispatch(
+      "buildAllXrefs",
+      { ...common, bytes: section(), stringAddrs: [], iatAddrs: [] },
+      s,
+    );
+
+    expect(cs.calls).toBe(afterSection + 1);
   });
 });

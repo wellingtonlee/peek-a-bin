@@ -62,6 +62,17 @@ import { prepareBinaryArgs } from "../src/workers/transfer";
  */
 const SENDS_PER_LOAD = 4;
 
+/*
+ * Still 4 after `peek-a-bin-x40u`, deliberately. That change shares the *decode*
+ * between `detectFunctions` and both `buildAllXrefs` calls (see
+ * `src/disasm/linearSweep.ts`); it does not change how many times the section
+ * crosses the wire, which is what this constant counts and what an upload-once
+ * scheme would collapse. What it does change is the denominator — the `xrefs`
+ * column below is now the resolve alone — so the ratio this harness prints got
+ * slightly *worse* for residency while the absolute load got much better, which
+ * is the shape of the argument in `src/workers/transfer.ts`.
+ */
+
 /** Median of `n` samples, which is what to read off a loaded machine. */
 function median(fn: () => number, n: number): number {
   fn();
