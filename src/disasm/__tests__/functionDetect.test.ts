@@ -154,6 +154,14 @@ function fakeCs() {
           emit("push", imm(bytes[i + 1]), 2);
           continue;
         }
+        // 68 dd dd dd dd — `push imm32`, which is how an MSVC x86 SEH prologue
+        // passes its scope-table address: `push 0xc; push 0x411050;
+        // call __SEH_prolog4` at `t32!sub_401DB3`. Capstone prints the
+        // immediate in hex at that magnitude, which `imm` already does.
+        if (b === 0x68 && i + 4 < bytes.length) {
+          emit("push", imm(readI32(bytes, i + 1) >>> 0), 5);
+          continue;
+        }
         if (b >= 0x50 && b <= 0x57) {
           emit("push", R32[b & 7], 1);
           continue;
@@ -945,12 +953,17 @@ describe("detectFunctions — a start reading a frame it did not establish (peek
   });
 
   it("keeps a funclet whose first instruction reads no frame", () => {
-    // `push 0xa; call _unlock; pop ecx; ret` is the same funclet family and is
-    // deliberately NOT touched: an immediate says nothing about whose frame is
-    // in scope, so the only evidence left would be the sole caller — which a
-    // helper laid out right after its one caller also has. Sixteen such starts
-    // per 32-bit binary at `cc45263`, and the callee really is a shared helper:
-    // t32's `_unlock` at 0x406cc0 has 21 call sites of its own.
+    // `push 0xa; call _unlock; pop ecx; ret` is the same funclet family and this
+    // rule does NOT touch it: an immediate says nothing about whose frame is in
+    // scope, so the only evidence left would be the sole caller — which a helper
+    // laid out right after its one caller also has, and the callee really is a
+    // shared helper (t32's `_unlock` at 0x406cc0 has 21 call sites of its own).
+    //
+    // The FIFTH admission reaches most of that family, on the linker's own
+    // evidence rather than on the shape: 10 of them are detected per 32-bit
+    // binary at `f3b89ec`, and 7 are named as `__finally` handlers by their
+    // parent's SEH scope table. This test's candidate is named by nothing, which
+    // is still the honest refusal — see the `peek-a-bin-d827` block below.
     const img = filled(0x20, { ...parent, [FUNCLET]: [0x6a, 0x0a, 0x40, 0xc3] });
     expect(detect(img).map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
   });
@@ -1025,13 +1038,19 @@ describe("detectFunctions — a start reading a frame it did not establish (peek
 
   it("keeps a start whose predecessor is merely unreached", () => {
     // The looser sibling of the rule above — "the code in front of it runs into
-    // it" with no test of WHAT that code does — and it is refused on
-    // measurement rather than on principle. At `cc45263` it fires on 8 starts
-    // per 32-bit binary and two of them are real functions: `t32!sub_40E1D8`,
-    // which opens with a full `mov edi, edi; push ebp; mov ebp, esp; push ebx`
-    // hot-patch prologue and has two callers, and the six-byte thunk
-    // `t32!sub_40BEBA` (`call 0x406196; ret`). w32 has both shapes at 0x40c7f8
-    // and 0x4050f4. Withdrawing either deletes real code with nothing said.
+    // it" with no test of WHAT that code does — and it is refused on measurement
+    // rather than on principle. At `cc45263` it fires on 8 starts per 32-bit
+    // binary, and `t32!sub_40E1D8` is why: it opens with a full
+    // `mov edi, edi; push ebp; mov ebp, esp; push ebx` hot-patch prologue, has
+    // two callers, is named by no scope table in the image, and withdrawing it
+    // deletes real code with nothing said. w32 has the same shape at 0x40c7f8.
+    //
+    // The record used to name a SECOND counterexample here, the six-byte thunk
+    // `t32!sub_40BEBA` (`call 0x406196; ret`) and its w32 counterpart 0x4050f4.
+    // That was wrong, and the linker settles it: scope table 0x4113f0 — the one
+    // `sub_40BE84` pushes — names 0x40BEBA as its `__finally` handler, its only
+    // caller is at 0x40BEAC inside that parent, and the fifth admission now
+    // withdraws it (peek-a-bin-d827).
     const img = filled(0x20, {
       ...parent,
       0x0d: [0x40, 0x40, 0x40],
@@ -1044,6 +1063,200 @@ describe("detectFunctions — a start reading a frame it did not establish (peek
     const img = filled(0x20, parent);
     const funcs = detect(img, { exports: [{ name: "f", address: BASE + FUNCLET }] });
     expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+});
+
+describe("detectFunctions — the SEH scope table as a funclet relation (peek-a-bin-d827)", () => {
+  // The fifth admission, and the only one that is not an inference. An MSVC x86
+  // function using `__try` opens `push <framesize>; push <scopetable>;
+  // call __SEH_prolog4`, and the table in `.rdata` names the filter and handler
+  // of every scope — addresses MSVC emitted INSIDE that function, running on its
+  // frame. So a detected start the previous function's own table calls a funclet
+  // of it is that function's code, said by the linker rather than deduced from
+  // the bytes around it.
+  //
+  // This is what reaches the residue the other four refuse: 16 starts of the
+  // `push <imm>; call <helper>; pop ecx; ret` shape per 32-bit binary, whose
+  // predecessor is a `ret` and whose immediate says nothing about whose frame is
+  // in scope. Measured at `f3b89ec`, 8 per binary — t32 0x403334 0x4037b2
+  // 0x405c2a 0x405d64 0x406a83 0x406c0d 0x406d90 0x40beba, and the w32
+  // counterparts — every one of them the handler of the function immediately
+  // above it.
+  //
+  //   0x00  6a 0c              ; push 0xc            — the frame size
+  //   0x02  68 00 10 41 00     ; push 0x411000       — the scope table
+  //   0x07  e8 .. call         ; __SEH_prolog4
+  //   0x0c  e8 .. call 0x14    ; the parent calls its own funclet
+  //   0x11  c3  ret
+  //   0x12  cc cc              ; padding
+  //   0x14  6a 0a ... c3       ; the funclet: push 0xa; call; pop ecx; ret
+  //   0x20  ...                ; the next real function
+  const TABLE = 0x411000;
+  const FUNCLET = 0x14;
+  const NEXT = 0x20;
+  /** 0x40 decodes as a one-byte filler, so it starts nothing by itself. */
+  const filled = (len: number, parts: Record<number, number[]>): Uint8Array => {
+    const out = new Uint8Array(len).fill(0x40);
+    for (const [off, bytes] of Object.entries(parts)) out.set(bytes, Number(off));
+    return out;
+  };
+  const pushImm32 = (v: number) => [0x68, ...le32(v)];
+  const prologue = (table: number, at = 0x00) => [
+    0x6a,
+    0x0c,
+    ...pushImm32(table),
+    ...callTo(at + 7, BASE),
+  ];
+  const parent = {
+    0x00: prologue(TABLE),
+    0x0c: callTo(0x0c, BASE + FUNCLET),
+    0x11: [0xc3],
+    0x12: [0xcc, 0xcc],
+    [FUNCLET]: [0x6a, 0x0a, ...callTo(FUNCLET + 2, BASE), 0x59, 0xc3],
+    0x1d: [0xcc, 0xcc, 0xcc],
+    [NEXT]: [0x40, 0xc3],
+  };
+  /** A `.rdata` window holding one `_EH4_SCOPETABLE` with the records given. */
+  const tableWindow = (recs: [number, number, number][], base = TABLE) => {
+    const words = [0xfffffffe, 0, 0xffffffc8, 0];
+    for (const [lvl, filter, handler] of recs) words.push(lvl, filter, handler);
+    const bytes = new Uint8Array(words.length * 4);
+    words.forEach((w, i) => bytes.set(le32(w), i * 4));
+    return [{ base, bytes }];
+  };
+  const detect = (img: Uint8Array, options = {}) =>
+    detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), {
+      entryPoint: BASE,
+      ...options,
+    }).functions;
+
+  it("withdraws a start the previous function's own scope table names", () => {
+    const funcs = detect(filled(0x28, parent), {
+      dataWindows: tableWindow([[-2, 0, BASE + FUNCLET]]),
+    });
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+    expect(funcs[0].size).toBe(NEXT);
+  });
+
+  it("withdraws an `__except` FILTER the table names, not only the handler", () => {
+    // A record says the same thing about both fields — this is the filter and
+    // this is the handler OF THIS SCOPE, IN THIS FUNCTION — so excluding one
+    // would be a narrowing with no evidence behind it. On the corpus it is a
+    // widening with 0 occurrences: all four filter addresses over the two 32-bit
+    // binaries are already folded into their parents.
+    const funcs = detect(filled(0x28, parent), {
+      dataWindows: tableWindow([[-2, BASE + FUNCLET, BASE + 0x02]]),
+    });
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+  });
+
+  it("keeps it when the table belongs to some OTHER function", () => {
+    // `parents.has(prev)` is what makes this a relation rather than a set of
+    // named addresses, and the difference is the whole reason the table is not
+    // fed into `strongStarts`. Here 0x401000's table names 0x401020, but the
+    // function immediately above 0x401020 is 0x401010 — so "interior to the
+    // function in front of it" is not the claim the table makes.
+    //
+    //   0x00  the SEH prologue, pushing a table that names 0x401020
+    //   0x0d  cc cc cc          ; padding, so 0x10 starts a function
+    //   0x10  e8 .. call 0x20   ; a separate function, which calls the candidate
+    //   0x20  6a 0a ... c3      ; the candidate
+    const CAND = 0x20;
+    const END = 0x2c;
+    const img = filled(0x34, {
+      0x00: prologue(TABLE),
+      0x0c: [0xc3],
+      0x0d: [0xcc, 0xcc, 0xcc],
+      0x10: callTo(0x10, BASE + CAND),
+      0x15: [0xc3],
+      0x1d: [0xcc, 0xcc, 0xcc],
+      [CAND]: [0x6a, 0x0a, ...callTo(CAND + 2, BASE), 0x59, 0xc3],
+      0x29: [0xcc, 0xcc, 0xcc],
+      [END]: [0x40, 0xc3],
+    });
+    expect(
+      detect(img, { dataWindows: tableWindow([[-2, 0, BASE + CAND]]) }).map((f) => f.address),
+    ).toEqual([BASE, BASE + 0x10, BASE + CAND, BASE + END]);
+  });
+
+  it("keeps it when nothing supplies the `.rdata` the table lives in", () => {
+    // The pre-existing behaviour, and it is the honest one: "nobody read the
+    // table" is not "the table says nothing". Every refusal the other four
+    // admissions make is still made — this is the `push <imm>` shape, whose
+    // predecessor is a `ret`.
+    expect(detect(filled(0x28, parent)).map((f) => f.address)).toEqual([
+      BASE,
+      BASE + FUNCLET,
+      BASE + NEXT,
+    ]);
+  });
+
+  it("keeps it when the first record is malformed", () => {
+    // Nothing records a table's length, so the walk is bounded by the records'
+    // own well-formedness and record 0's `EnclosingLevel` must be `-2`
+    // (TRYLEVEL_NONE) — scope levels nest, so a level can only name a record
+    // already read, and record 0 has none in front of it. A table that fails
+    // there names nothing at all.
+    expect(
+      detect(filled(0x28, parent), { dataWindows: tableWindow([[0, 0, BASE + FUNCLET]]) }).map(
+        (f) => f.address,
+      ),
+    ).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps it when the pushes are not a call's argument list", () => {
+    // `push <table>` on its own is not a claim about anything: what says the
+    // address is a scope table is that the prologue passes it to a helper.
+    const img = filled(0x28, {
+      ...parent,
+      0x00: [0x6a, 0x0c, ...pushImm32(TABLE), 0x40, 0x40, 0x40, 0x40, 0x40],
+    });
+    expect(
+      detect(img, { dataWindows: tableWindow([[-2, 0, BASE + FUNCLET]]) }).map((f) => f.address),
+    ).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps it when something outside the previous function calls it", () => {
+    // The pre-existing refusal stands in front of all five admissions and is not
+    // relaxed by the table. MSVC shares one funclet body between two parents'
+    // funclets, so its caller is in a third place: t32 0x40618d, 0x406196 and
+    // 0x406c16 (w32 0x402020, 0x402029, 0x4065d3). None of those three is named
+    // by any scope table in either binary — the table names the funclet that
+    // CALLS the shared body — so the two rules agree here and the refusal costs
+    // nothing measured.
+    const img = filled(0x30, {
+      ...parent,
+      [NEXT]: callTo(NEXT, BASE + FUNCLET),
+      0x25: [0xc3],
+    });
+    expect(
+      detect(img, { dataWindows: tableWindow([[-2, 0, BASE + FUNCLET]]) }).map((f) => f.address),
+    ).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("keeps an exported start the table names", () => {
+    // `strong` is the linker-written tables this parser reads, and it outranks
+    // every admission here. Note the reverse — putting the table's HANDLERS into
+    // `strong` — is the thing that must never happen: 0x403276 sits six bytes
+    // inside the funclet the table calls 0x403270, so protecting either address
+    // re-cuts `t32!sub_4031A4` in half (peek-a-bin-g7yp, peek-a-bin-sysf).
+    const funcs = detect(filled(0x28, parent), {
+      exports: [{ name: "f", address: BASE + FUNCLET }],
+      dataWindows: tableWindow([[-2, 0, BASE + FUNCLET]]),
+    });
+    expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + FUNCLET, BASE + NEXT]);
+  });
+
+  it("reads no scope table on an x64 image", () => {
+    // 32-bit only. On x64 the same information is in `.pdata`/`.xdata`, which
+    // `pe/pdata.ts` reads and which arrives here as `pdataFunctions` and
+    // `handlerAddresses`; `__SEH_prolog4` is a 32-bit form and there is no
+    // measurement behind reading one out of a 64-bit image.
+    const funcs = detectFunctions(filled(0x28, parent), BASE, true, ctxOf({ cs64: fakeCs() }), {
+      entryPoint: BASE,
+      dataWindows: tableWindow([[-2, 0, BASE + FUNCLET]]),
+    }).functions;
+    expect(funcs.map((f) => f.address)).toContain(BASE + FUNCLET);
   });
 });
 

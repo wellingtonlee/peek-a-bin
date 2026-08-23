@@ -8,6 +8,7 @@ import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
 import { resolveRipTarget } from "./ripRelative";
+import { MAX_SEH32_HEAD_INSNS, type Seh32Reader, seh32FuncletsOfPrologue } from "./seh32";
 import { pushedImmediate, type StackInsn } from "./stackIdiom";
 import type { DisasmFunction, Instruction, Xref } from "./types";
 
@@ -1455,6 +1456,77 @@ function precedingOperands(
 }
 
 /**
+ * The first few instructions at `addr`, decoded from `addr` itself.
+ *
+ * Same anchoring argument as {@link firstInstructionOperands}: the sweep's grid
+ * is whatever the bytes in front of it produced, and this is asked about a
+ * detected function start, so it decodes from the address rather than reading
+ * the sweep's answer. Bounded by {@link MAX_SEH32_HEAD_INSNS} instructions and
+ * by that many longest-x86-instructions of bytes.
+ */
+function headInstructions(
+  addr: number,
+  windowEnd: number,
+  bytes: Uint8Array,
+  baseAddress: number,
+  scan: CapstoneScan,
+): { mnemonic: string; opStr: string }[] {
+  const lo = addr - baseAddress;
+  const hi = Math.min(windowEnd - baseAddress, lo + MAX_SEH32_HEAD_INSNS * 16);
+  if (lo < 0 || hi > bytes.length || hi <= lo) return [];
+  const out: { mnemonic: string; opStr: string }[] = [];
+  let at = lo;
+  let want = addr;
+  while (out.length < MAX_SEH32_HEAD_INSNS && at < hi) {
+    const insns = scan.decodeOne(bytes, at, hi, baseAddress + at);
+    if (insns.length === 0 || insns[0].address !== want) break;
+    out.push({ mnemonic: insns[0].mnemonic, opStr: insns[0].opStr });
+    at += insns[0].size;
+    want += insns[0].size;
+  }
+  return out;
+}
+
+/**
+ * Which candidate start each function's own SEH scope table calls a funclet of
+ * it — `funclet address -> the starts whose prologue names it`.
+ *
+ * This is the *relation* `seh32.ts`'s header describes, and it is built here
+ * rather than inside {@link interiorBranchedOverStarts} because it is a
+ * different kind of evidence: a linker-written table read once per candidate
+ * start, where that function's four existing admissions are all inferences
+ * about a boundary from the code around it.
+ *
+ * Keyed by funclet rather than by parent because that is how it is consulted —
+ * "is *this* boundary a funclet of the function I am currently accumulating" —
+ * and because a body shared between two parents' scopes would legitimately have
+ * two entries. 32-bit only, and asked of the caller: on x64 the same
+ * information is in `.pdata`/`.xdata`, which `pe/pdata.ts` already reads and
+ * which reaches this file as `pdataFunctions` and `handlerAddresses`.
+ */
+function seh32FuncletRelation(
+  sortedAddrs: number[],
+  endAddress: number,
+  bytes: Uint8Array,
+  baseAddress: number,
+  reader: Seh32Reader,
+  scan: CapstoneScan,
+): Map<number, Set<number>> {
+  const relation = new Map<number, Set<number>>();
+  const isCodeAddress = (addr: number) => addr >= baseAddress && addr < endAddress;
+  for (const start of sortedAddrs) {
+    const head = headInstructions(start, endAddress, bytes, baseAddress, scan);
+    if (head.length === 0) continue;
+    for (const funclet of seh32FuncletsOfPrologue(head, reader, isCodeAddress)) {
+      const parents = relation.get(funclet);
+      if (parents === undefined) relation.set(funclet, new Set([start]));
+      else parents.add(start);
+    }
+  }
+  return relation;
+}
+
+/**
  * Detected starts that the function in front of them conditionally jumps over.
  *
  * Sizes here are "distance to the next detected start", so one false start in
@@ -1594,47 +1666,97 @@ function precedingOperands(
  *    bodies — no false positive over 558 detected starts**. `functions` 280 → 268
  *    and 278 → 266, instructions unmoved, t64/w64 byte-identical.
  *
- * The remaining residue is refused, and `__tests__/functionDetect.test.ts`
- * pins each refusal beside the reason: 16 `push <imm>; call; pop ecx; ret`
- * funclets per binary whose predecessor is a `ret` (an immediate says nothing
- * about whose frame is in scope, and neither does a `ret`), and the six that
- * `push` a callee-saved register (`peek-a-bin-6lmh` already reads that
- * instruction the opposite way, as a register save). The sound rule for those is
- * the SEH scope table read as a funclet-of-parent relation — see the last
- * paragraph, and note it is a relation and never `strong` (peek-a-bin-qe8z).
+ * **The fifth admission: the previous function's own SEH scope table names the
+ * boundary.** The four above are inferences about a boundary from the code
+ * around it. This one is the linker's record: an MSVC x86 function using `__try`
+ * opens `push <framesize>; push <scopetable>; call __SEH_prolog4`, and the table
+ * in `.rdata` names the filter and the handler of every scope — addresses MSVC
+ * emitted INSIDE that function, running on its frame with no prologue of their
+ * own. `seh32.ts` reads it; `seh32FuncletRelation` turns it into
+ * `funclet -> the starts whose prologue names it`; the admission is
+ * `parents.has(prev)`.
  *
- * Two exemptions bound all four, and both are the linker's record outranking
+ * It reaches exactly the residue the other four refuse. Measured at `f3b89ec`,
+ * **8 starts per 32-bit binary**: t32 0x403334, 0x4037b2, 0x405c2a, 0x405d64,
+ * 0x406a83, 0x406c0d, 0x406d90, 0x40beba and w32 0x403588, 0x403a06, 0x404883,
+ * 0x404c91, 0x4050f4, 0x405f8b, 0x406440, 0x4065ca. Every one is the handler of
+ * the function immediately above it, has exactly one direct caller and that
+ * caller is inside that function, and every one was read against
+ * `objdump -d -M intel`. `functions` 268 -> 260 and 266 -> 258, instructions
+ * unmoved, t64/w64 byte-identical, every gate flat.
+ *
+ * Four things about it:
+ *
+ *  * **`parents.has(prev)` is what makes it a relation, and protecting the same
+ *    addresses instead is measurably wrong.** See the `strongStarts` docstring:
+ *    putting them in `strong` re-introduces 9 withdrawn starts on t32 and 7 on
+ *    w32, `sub_4058A6` and `sub_4063B8` among them.
+ *  * **The pre-existing "no caller outside the previous function" refusal still
+ *    runs first, and the table does not relax it.** MSVC shares one funclet body
+ *    between two parents' funclets, so the body is laid out nowhere near its
+ *    caller — t32 0x40618d, 0x406196, 0x406c16 (called from 0x40be90, 0x40beba
+ *    and 0x40233a) and w32 0x402020, 0x402029, 0x4065d3, which stay detected. No
+ *    scope table in either binary names any of those six: the table names the
+ *    funclet that *calls* the shared body, so the two rules agree here and the
+ *    refusal costs nothing measured.
+ *  * **It settles a question this docstring previously got wrong.** t32
+ *    0x40beba / w32 0x4050f4 was recorded here and in CLAUDE.md as "the six-byte
+ *    thunk", a real function whose withdrawal would delete real code. It is the
+ *    `__finally` handler of `sub_40BE84` / `sub_4050BE`, named as such by scope
+ *    table 0x4113f0 / 0x40f2f8, called once from 0x40beac / 0x4050e6 inside that
+ *    parent, and its body is `call <the shared funclet body>; ret`. The two
+ *    counterexamples that are NOT touched are the ones no table names — t32
+ *    `sub_40E1D8` / w32 0x40c7f8 (a hot-patch prologue with two callers) and
+ *    t32 `sub_40660A` / w32 `sub_4054A1` (a four-caller shared helper).
+ *  * **All three bounds inside `seh32.ts` fire 0 times on this corpus** — the
+ *    `call` after the pushes, the `EnclosingLevel` chain, and the table address
+ *    not being code. Dropping any of them leaves the named set at 37 and 35 and
+ *    the withdrawn set at 8. They are bounds that make the claim sound by
+ *    construction rather than measured savings, and each is pinned by a unit
+ *    test in `__tests__/seh32.test.ts` instead.
+ *
+ * What is still refused, and `__tests__/functionDetect.test.ts` pins each
+ * refusal beside its reason: a `push <imm>; call; pop ecx; ret` funclet whose
+ * predecessor is a `ret` and which **no scope table names** (an immediate says
+ * nothing about whose frame is in scope, and neither does a `ret`), and the six
+ * per binary that `push` a callee-saved register (`peek-a-bin-6lmh` already
+ * reads that instruction the opposite way, as a register save). Of the 10
+ * detected members of that family per 32-bit binary at `f3b89ec`, the table
+ * reaches 7 and the three shared bodies stay (peek-a-bin-qe8z,
+ * peek-a-bin-d827).
+ *
+ * Two exemptions bound all five, and both are the linker's record outranking
  * this inference: a start in `strong` is never withdrawn, and a previous function
  * whose extent `.pdata` states is never extended. The second is why this is a
- * PE32 rule in practice — a `.pdata` image states where the parent ends.
+ * PE32 rule in practice — a `.pdata` image states where the parent ends, and it
+ * is also why the scope table is read for 32-bit images only: on x64 the same
+ * information is in `.pdata`/`.xdata`, which `pe/pdata.ts` already reads.
  *
  * **`strong` is "named by a table the parser reads", which is narrower than
- * "named by the file", and the gap is exactly this shape.** MSVC's 32-bit SEH
- * scope table names its `__finally` funclets, and two of the five starts this
- * withdraws on t32 are entries in one: `sub_405745` pushes scope table
- * 0x411218, whose entry at 0x411230 is `{EnclosingLevel -2, Filter NULL,
- * Handler 0x4058A6}`, and `sub_40628D` pushes 0x4112A8, whose entry at 0x4112C0
- * names 0x4063B8. They are absent from `strong` only because nothing reads that
- * table — not because the file was silent about them.
+ * "named by the file", and the gap was exactly this shape.** Two of the five
+ * starts the third admission withdraws on t32 are entries in a scope table:
+ * `sub_405745` pushes 0x411218, whose record at 0x411228 is
+ * `{EnclosingLevel -2, Filter NULL, Handler 0x4058A6}`, and `sub_40628D` pushes
+ * 0x4112A8, whose record at 0x4112B8 names 0x4063B8. (CLAUDE.md quoted 0x411230
+ * and 0x4112C0, which are those records' *handler fields* — the record starts
+ * 8 bytes earlier, verified against the bytes.) A NULL filter beside a handler
+ * is `__finally`, and such a funclet runs on its parent's frame with no prologue
+ * of its own: 0x4063B8 opens `cmp dword ptr [ebp + 0x10], 0`, the *parent's*
+ * third argument. It is part of that function, not another one.
  *
- * Withdrawing them is still right. A NULL filter beside a handler is
- * `__finally`, and a `__finally` funclet runs on its parent's frame with no
- * prologue of its own: 0x4063B8 opens `cmp dword ptr [ebp + 0x10], 0`, the
- * *parent's* third argument. It is part of that function, not another one.
- *
- * So if the scope table is ever parsed, **do not put its handler addresses into
- * `strong`.** That re-breaks `sub_4031A4`: the table names handler 0x403270,
- * and 0x403276 sits six bytes inside it, past the register reloads only the
- * unwinder needs — promoting either one cuts the parent in half again, which is
- * the defect this function exists to prevent. What the scope table actually
- * states is "this address is a funclet **of** that parent", strictly more than
- * "this address is named", so it belongs in a relation attributing the funclet
- * to its parent rather than in a set that protects it from one
- * (peek-a-bin-sysf).
+ * **Do not put the handler addresses into `strong`.** That re-breaks
+ * `sub_4031A4`: the table at 0x411110 names handler 0x403270, and 0x403276 sits
+ * six bytes inside it, past the register reloads only the unwinder needs —
+ * promoting either one cuts the parent in half again, which is the defect this
+ * function exists to prevent. What the scope table states is "this address is a
+ * funclet **of** that parent", strictly more than "this address is named", so it
+ * belongs in a relation attributing the funclet to its parent rather than in a
+ * set that protects it from one (peek-a-bin-sysf).
  */
 function interiorBranchedOverStarts(
   sortedAddrs: number[],
   strong: Set<number>,
+  seh32Funclets: Map<number, Set<number>>,
   callSites: Map<number, number[]>,
   forwardCondJumps: number[],
   forwardJumps: number[],
@@ -1679,6 +1801,26 @@ function interiorBranchedOverStarts(
     const callers = callSites.get(boundary);
     if (callers?.some((c) => c < prev || c >= boundary)) {
       prev = boundary;
+      continue;
+    }
+
+    // **The fifth admission: the previous function's own SEH scope table names
+    // this boundary as one of its funclets.** This is the only one of the five
+    // that is not an inference — it is the linker's record, read out of
+    // `.rdata` by `seh32.ts`, and it says the thing the other four have to
+    // deduce: the address is the filter or handler of a `__try` scope belonging
+    // to that function, so it is code MSVC emitted *inside* it. Consulted first
+    // for that reason.
+    //
+    // `parents.has(prev)` is what makes this a relation rather than a set. A
+    // handler in a set would be *protected* from withdrawal, and `t32!0x403270`
+    // is why that is the wrong shape: 0x403276 sits six bytes inside that
+    // funclet, so promoting either address re-cuts `sub_4031A4` in half
+    // (peek-a-bin-g7yp, peek-a-bin-sysf).
+    if (seh32Funclets.get(boundary)?.has(prev) === true) {
+      interior.add(boundary);
+      // `prev` stays put, as in every other admission here: the next boundary
+      // is measured from the function this one was just folded back into.
       continue;
     }
 
@@ -1784,9 +1926,16 @@ export function detectFunctions(
    *
    * Read the membership rule literally rather than as "everything the file
    * names". MSVC's 32-bit SEH scope table names `__finally` funclet addresses
-   * and is deliberately **not** a source here; see
-   * {@link interiorBranchedOverStarts} for why adding it would reintroduce
-   * peek-a-bin-g7yp rather than sharpen this set.
+   * and is deliberately **not** a source here — it is read by `seh32.ts` and
+   * consumed by {@link interiorBranchedOverStarts} as a *relation*, which says
+   * the opposite thing about the same addresses: they are interior to the
+   * parent, not protected from it.
+   *
+   * That is measured, not argued. Protecting the addresses those tables name
+   * instead re-introduces **9 withdrawn starts on t32 and 7 on w32** at
+   * `f3b89ec` — among them 0x4058A6 and 0x4063B8, the two the fourth admission
+   * withdraws and whose handler entries CLAUDE.md quotes — each of which cuts
+   * its parent in half again. That is peek-a-bin-g7yp (peek-a-bin-d827).
    */
   const strongStarts = new Set<number>();
 
@@ -2275,6 +2424,16 @@ export function detectFunctions(
     ? interiorBranchedOverStarts(
         allStarts,
         strongStarts,
+        is64
+          ? new Map<number, Set<number>>()
+          : seh32FuncletRelation(
+              allStarts,
+              endAddress,
+              bytes,
+              baseAddress,
+              reader,
+              createScan(cs, "SEH scope table relation"),
+            ),
         callSites,
         forwardCondJumps,
         forwardJumps,
