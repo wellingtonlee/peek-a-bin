@@ -4,7 +4,7 @@ import { archForMachine } from "../disasm/arch";
 import { buildCFG, layoutCFG } from "../disasm/cfg";
 import { canonReg } from "../disasm/decompile/ir";
 import { type FunctionSignature, inferSignature } from "../disasm/signatures";
-import { analyzeStackFrame } from "../disasm/stack";
+import { arm64UnwindContext, stackFrameFor } from "../disasm/stackFrame";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { useAIChat } from "../hooks/useAIChat";
 import { useDecompileTabs } from "../hooks/useDecompileTabs";
@@ -340,11 +340,17 @@ export function DisassemblyView() {
     // `archForMachine(undefined)` is the documented "the caller never told us"
     // default and answers x86, which is what the `pe?.is64 ?? true` beside it
     // has always assumed.
-    return analyzeStackFrame(
+    //
+    // `stackFrameFor` rather than `analyzeStackFrame` because this panel is the
+    // one surface an ARM64 frame can reach: the A64 grammar reads the frame out
+    // of `.pdata`, and without the unwind context it would answer null for
+    // every A64 function exactly as before (peek-a-bin-hof0).
+    return stackFrameFor(
       currentFunc,
       instructions,
       archForMachine(pe?.coffHeader.machine),
       pe?.is64 ?? true,
+      pe ? arm64UnwindContext(pe) : undefined,
     );
   }, [showDetail, currentFunc, instructions, pe]);
 

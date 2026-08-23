@@ -562,9 +562,53 @@ describe("parsePE — .pdata schema follows the machine type", () => {
     });
     const pe = parsePE(buffer);
     expect(pe.runtimeFunctions).toEqual([
-      { beginAddress: 0x1000, endAddress: 0x2000, unwindInfoAddress: 0 },
-      { beginAddress: 0x2100, endAddress: 0x2128, unwindInfoAddress: 0x4000 },
+      {
+        beginAddress: 0x1000,
+        endAddress: 0x2000,
+        unwindInfoAddress: 0,
+        // Both entries now carry the frame the record describes
+        // (`peek-a-bin-hof0`). This fixture's packed word has `CR` 0 and
+        // `FrameSize` 0, so the honest answer is "no frame pointer, nothing
+        // allocated" — asserted here rather than admitted with a looser matcher,
+        // because a whole-object `toEqual` is what caught the field being added
+        // at all and that is worth keeping.
+        arm64Frame: {
+          frameDelta: null,
+          frameSize: 0,
+          savedIntRegs: 0,
+          savedFpRegs: 0,
+          homesParams: false,
+          source: "packed",
+        },
+      },
+      {
+        beginAddress: 0x2100,
+        endAddress: 0x2128,
+        unwindInfoAddress: 0x4000,
+        // The `.xdata` record's one code word is zero bytes, i.e. four
+        // `alloc_s #0` codes: no allocation and no `set_fp`.
+        arm64Frame: {
+          frameDelta: null,
+          frameSize: 0,
+          savedIntRegs: 0,
+          savedFpRegs: 0,
+          homesParams: false,
+          source: "xdata",
+        },
+      },
     ]);
+  });
+
+  it("leaves an x64 record with NO arm64Frame — the field is ARM64's alone", () => {
+    // x64's `UNWIND_INFO` is a different structure and nothing here has ever
+    // needed a frame out of it, so `undefined` means "not this schema's
+    // business" rather than "no frame".
+    const buffer = buildMinimalPE64({
+      machine: IMAGE_FILE_MACHINE_AMD64,
+      sections: pdataSections(),
+      dataDirectories: dirs,
+    });
+    expect(parsePE(buffer).runtimeFunctions?.[0].arm64Frame).toBeUndefined();
   });
 
   it("still decodes an x64 image with the x64 schema", () => {

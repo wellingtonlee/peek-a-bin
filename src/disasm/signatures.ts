@@ -318,7 +318,28 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
  * A NAME IS NOT A REFUSAL. Answering `{ convention: "aapcs64", paramCount: 0 }`
  * was considered and is worse: the count is the false half, and spelling the
  * convention correctly would dress an unanalysed function as an analysed one.
- * `peek-a-bin-56q` item 1; a real A64 signature is `peek-a-bin-hof0`.
+ *
+ * **`peek-a-bin-hof0` RECOVERED THE ARM64 FRAME AND DELIBERATELY DID NOT
+ * RECOVER THIS**, so the refusal above is now a decision taken with the evidence
+ * in hand rather than work not yet done. `.pdata` states the frame outright, and
+ * it says NOTHING about arity — two measurements, both over all 800 `.pdata`
+ * functions of the two corpus binaries:
+ *
+ *  - The only field that could bear on it is `H`, "the prologue homes x0-x7",
+ *    which is what a variadic prologue does. **`H` is 0 on all 500 packed
+ *    entries.** The record carries no other argument evidence at all.
+ *  - AAPCS64 passes eight arguments in registers with no home space, so a stack
+ *    argument exists only from the ninth onward, at `[x29 + frameDelta + 8N]`.
+ *    There are **0** frame accesses at or above `frameDelta` in either binary,
+ *    so a positional rule would gate on an empty population — the vacuous-zero
+ *    failure this project records against `armExits` on x64.
+ *
+ * What is left is the x86 rule read across: count reads of x0-x7 that precede
+ * any write. That is a real inference and it may well be right, but it has **no
+ * oracle** — there is no A64 emitted C, no `apitypes.ts` entry for a `sub_`
+ * callee, and no way to match a function against its x86 twin — so landing it
+ * would put an unverifiable count back on the panel this refusal cleared.
+ * `peek-a-bin-56q` item 1; `peek-a-bin-hof0` for the frame that WAS recovered.
  */
 export function inferSignature(
   func: DisasmFunction,

@@ -59,6 +59,15 @@
  *     width outright, so the bytes it names are provably not instructions. GATE
  *     on one of them surviving in the stream the view renders. A WIRING gate:
  *     it imports the production grammar, so row 5 is what judges the answer.
+ * 10. **The `.pdata` FRAME, against the prologue** (`peek-a-bin-hof0`). The
+ *     unwind record states whether `x29` is a frame pointer and how far below
+ *     entry `sp` it sits; the instruction stream states the same thing
+ *     independently, and `readPrologueFrame` here reads it without consulting
+ *     `.pdata` at all. GATE in both directions on whether there is a frame
+ *     pointer and on the delta — 419 and 381 records compared, 376 and 338
+ *     deltas, 0 disagreements. This closes CLAUDE.md's "`.pdata` unwind CODES
+ *     are not read by anything that audits them": the codes are now decoded and
+ *     the decode is judged.
  *
  * WHAT IS DELIBERATELY NOT AUDITED, because a green row would be vacuous:
  *
@@ -68,9 +77,15 @@
  *    `undefinedCallees`. Every one reads emitted C or the IR behind it, and
  *    there is no emitted C for an ARM64 image — measured, not assumed: the
  *    refusal is at `mcp/tools.ts` and it precedes address resolution.
- *  * Stack frames and function signatures. `analyzeStackFrame` and
- *    `inferSignature` have no ARM64 path at all (`peek-a-bin-56q` item 1), so
- *    there is nothing to audit; auditing an absence is not an audit.
+ *  * Function SIGNATURES. `inferSignature` still refuses on A64
+ *    (`peek-a-bin-56q` item 1) and `peek-a-bin-hof0` refused to change that on
+ *    evidence: `.pdata` carries no arity information (`H` is 0 on all 500 packed
+ *    entries) and there are 0 incoming stack arguments in either binary, so any
+ *    positional rule would have an empty population and any register-based one
+ *    would have no oracle. Auditing an absence is not an audit.
+ *  * The stack VAR LIST, which row 10 reports and does not gate. It is the one
+ *    half of a recovered A64 frame that comes from the instruction stream rather
+ *    than from `.pdata`, so the only other record of it is the stream itself.
  *  * The REST of a general data-marking pass. Two populations the tool can name
  *    are now marked and gated — a recovered dispatch table's bytes
  *    (`peek-a-bin-gb40`, row 7) and a PC-relative literal pool
@@ -106,7 +121,8 @@ import {
   findArm64LiteralPools,
 } from "../src/disasm/arm64Operands";
 import type { CapstoneHandle } from "../src/disasm/capstoneWindow";
-import type { Instruction } from "../src/disasm/types";
+import { arm64UnwindContext, stackFrameFor } from "../src/disasm/stackFrame";
+import type { DisasmFunction, Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
 import { parsePE } from "../src/pe/parser";
 import { dataSectionRanges, findCodeSection } from "../src/pe/sections";
@@ -844,6 +860,246 @@ async function auditSweepCache(file: string): Promise<Row[]> {
   ];
 }
 
+// ── 10. the .pdata frame, against the prologue ──────────────────────────────
+
+/**
+ * The prologue, read from the instruction stream — the ORACLE for everything
+ * below, and deliberately written here rather than imported.
+ *
+ * `pe/arm64Unwind.ts` reads the frame out of `.pdata` and never looks at an
+ * instruction; this reads the instructions and never looks at `.pdata`. They are
+ * two independent records of the same fact, which is what makes a disagreement a
+ * defect in one of them rather than a tautology — the same footing the PE parser
+ * is checked on against an independently written from-spec reader.
+ *
+ * It is deliberately SMALL and it STOPS EARLY. The whitelist ends the walk at
+ * the first instruction that is not a prologue shape, and in particular at a
+ * `bl` — which matters, because MSVC's large-frame prologue is
+ * `... / mov x29, sp / bl __chkstk / sub sp, sp, #0x4b0`, and reading past the
+ * call would attribute a probe-guarded allocation to the frame the unwind record
+ * describes. Anything it cannot read it declines to have an opinion about,
+ * rather than guessing; a decline shows up as a report row, never as a green
+ * gate.
+ */
+interface PrologueFrame {
+  /** Bytes of stack the prologue allocates before the walk stops. */
+  alloc: number;
+  /** `E - x29` as the instructions establish it, or null if they never do. */
+  rawDelta: number | null;
+}
+
+/** `#0x10`, `#16`, `#0x1, lsl #12` — the immediate forms a prologue uses. */
+function prologueImm(text: string): number | null {
+  const m = /^#?(0x[0-9a-fA-F]+|\d+)(?:\s*,\s*lsl\s*#(\d+))?$/i.exec(text.trim());
+  if (!m) return null;
+  const v = m[1].startsWith("0x") ? Number.parseInt(m[1].slice(2), 16) : Number.parseInt(m[1], 10);
+  return m[2] ? v << Number.parseInt(m[2], 10) : v;
+}
+
+function readPrologueFrame(insns: readonly Instruction[]): PrologueFrame {
+  let alloc = 0;
+  let rawDelta: number | null = null;
+  for (const insn of insns) {
+    const mn = insn.mnemonic.toLowerCase();
+    const ops = insn.opStr;
+
+    // Pre-index writeback off sp IS the allocation: `stp x19, x20, [sp, #-0x50]!`
+    const wb = /\[\s*sp\s*,\s*#(-?(?:0x[0-9a-fA-F]+|\d+))\s*\]!/i.exec(ops);
+    if ((mn === "stp" || mn === "str") && wb) {
+      const v = prologueImm(wb[1].replace("-", ""));
+      if (v !== null && wb[1].startsWith("-")) alloc += v;
+      continue;
+    }
+    if (mn === "sub") {
+      const m = /^sp\s*,\s*sp\s*,\s*(.+)$/i.exec(ops);
+      if (m) {
+        const v = prologueImm(m[1]);
+        if (v !== null) alloc += v;
+        continue;
+      }
+    }
+    if (mn === "mov" && /^(x29|fp)\s*,\s*sp$/i.test(ops)) {
+      rawDelta = alloc;
+      continue;
+    }
+    if (mn === "add") {
+      const m = /^(?:x29|fp)\s*,\s*sp\s*,\s*(.+)$/i.exec(ops);
+      if (m) {
+        const v = prologueImm(m[1]);
+        if (v !== null) rawDelta = alloc - v;
+        continue;
+      }
+    }
+    // Everything a prologue may contain between those, and nothing else. A
+    // branch, a call or a load ends the walk.
+    if (["stp", "str", "stur", "sub", "add", "mov", "orr", "nop", "adrp", "paciasp"].includes(mn))
+      continue;
+    break;
+  }
+  return { alloc, rawDelta };
+}
+
+/**
+ * `.pdata`'s frame against the prologue's, in both directions.
+ *
+ * The two gates are the whole claim of `peek-a-bin-hof0`, and each row either
+ * can print is provably a contradiction between the linker's record and the
+ * instructions the linker emitted — `polarity inverted`'s character rather than
+ * a baseline's, so both gate at 0.
+ *
+ * The REPORT rows beside them are the populations that make a green gate mean
+ * something, plus the two shapes the record deliberately does not describe. See
+ * `pe/arm64Unwind.ts` for why an allocation below the frame pointer is outside
+ * every unwind record in both encodings.
+ */
+function auditFrames(
+  pe: PEFile,
+  insns: Instruction[],
+  imageBase: number,
+  functions: readonly DisasmFunction[],
+): Row[] {
+  const records = pe.runtimeFunctions ?? [];
+  const byAddr = new Map<number, Instruction[]>();
+  for (const i of insns) {
+    const bucket = byAddr.get(i.address);
+    if (bucket) bucket.push(i);
+    else byAddr.set(i.address, [i]);
+  }
+  const sorted = [...insns].sort((a, b) => a.address - b.address);
+  const sliceOf = (begin: number, end: number): Instruction[] => {
+    let lo = 0;
+    let hi = sorted.length - 1;
+    let at = sorted.length;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (sorted[mid].address >= begin) {
+        at = mid;
+        hi = mid - 1;
+      } else lo = mid + 1;
+    }
+    const out: Instruction[] = [];
+    for (let i = at; i < sorted.length && sorted[i].address < end; i++) out.push(sorted[i]);
+    return out;
+  };
+
+  let decoded = 0;
+  let undecoded = 0;
+  const undecodedRows: string[] = [];
+  let fpPresenceChecked = 0;
+  // Counted apart from the sample, which is capped at SAMPLE. Using the
+  // sample's length AS the count was a real defect in a first draft: the gate
+  // still went red, but it reported 6 for a control that broke 261 records, so
+  // the number said nothing about the size of the damage. Caught by running the
+  // control and predicting its magnitude.
+  let fpPresenceBadCount = 0;
+  const fpPresenceBad: string[] = [];
+  let deltaChecked = 0;
+  let deltaBadCount = 0;
+  const deltaBad: string[] = [];
+  let aboveEntrySp = 0;
+  let allocShort = 0;
+  let allocShortBytes = 0;
+  const allocShortRows: string[] = [];
+
+  for (const rf of records) {
+    const begin = imageBase + rf.beginAddress;
+    const frame = rf.arm64Frame;
+    if (!frame) {
+      undecoded++;
+      if (undecodedRows.length < SAMPLE) undecodedRows.push(fmt(begin));
+      continue;
+    }
+    decoded++;
+    const pro = readPrologueFrame(sliceOf(begin, imageBase + rf.endAddress).slice(0, 32));
+
+    // The oracle applies the SAME refusal the reader does, and for the same
+    // reason: a frame register above entry `sp` is the caller's frame, not this
+    // function's (`peek-a-bin-s7hl`'s rule, reached here from the A64 side). It
+    // is counted separately so the refusal is visible as a live population
+    // rather than as an invisible clause.
+    if (pro.rawDelta !== null && pro.rawDelta < 0) aboveEntrySp++;
+    const streamDelta = pro.rawDelta !== null && pro.rawDelta >= 0 ? pro.rawDelta : null;
+
+    fpPresenceChecked++;
+    if ((frame.frameDelta === null) !== (streamDelta === null)) {
+      fpPresenceBadCount++;
+      if (fpPresenceBad.length < SAMPLE)
+        fpPresenceBad.push(
+          `${fmt(begin)} ${frame.source}: record ${frame.frameDelta === null ? "no fp" : "fp"}, prologue ${streamDelta === null ? "no fp" : "fp"}`,
+        );
+    } else if (frame.frameDelta !== null && streamDelta !== null) {
+      deltaChecked++;
+      if (frame.frameDelta !== streamDelta) deltaBadCount++;
+      if (frame.frameDelta !== streamDelta && deltaBad.length < SAMPLE)
+        deltaBad.push(
+          `${fmt(begin)} ${frame.source}: record ${fmt(frame.frameDelta)}, prologue ${fmt(streamDelta)}`,
+        );
+    }
+
+    if (pro.alloc > frame.frameSize) {
+      allocShort++;
+      allocShortBytes += pro.alloc - frame.frameSize;
+      if (allocShortRows.length < SAMPLE)
+        allocShortRows.push(
+          `${fmt(begin)} ${frame.source}: record ${fmt(frame.frameSize)}, prologue ${fmt(pro.alloc)}`,
+        );
+    }
+  }
+
+  // The vars half, which has NO oracle — see `disasm/arm64Frame.ts`. Reported so
+  // that a grammar which quietly stopped matching is visible, and so that the
+  // population lying outside the recorded frame is a number rather than a
+  // surprise. It is NOT gated: both shapes that put a slot outside the frame are
+  // legitimate and adjudicated in that module's docstring.
+  const ctx = arm64UnwindContext(pe);
+  let framed = 0;
+  let vars = 0;
+  let outsideFrame = 0;
+  let negativeOffset = 0;
+  for (const f of functions) {
+    const sf = stackFrameFor(f, insns, "arm64", true, ctx);
+    if (!sf) continue;
+    framed++;
+    vars += sf.vars.length;
+    for (const v of sf.vars) {
+      if (v.signedOffset < 0) negativeOffset++;
+      else if (v.signedOffset >= sf.frameSize) outsideFrame++;
+    }
+  }
+
+  const live = `${records.length} .pdata records, ${decoded} decoded`;
+  const varLive = `${framed} of ${functions.length} functions framed, ${vars} slots`;
+  return [
+    gate("frame: .pdata record whose unwind data does not decode", undecoded, live, undecodedRows),
+    gate(
+      "frame: record and prologue disagree on whether there is a frame pointer",
+      fpPresenceBadCount,
+      `${fpPresenceChecked} records compared`,
+      fpPresenceBad,
+    ),
+    gate(
+      "frame: record and prologue disagree on the frame delta",
+      deltaBadCount,
+      `${deltaChecked} frame pointers compared`,
+      deltaBad,
+    ),
+    report(
+      "frame: prologue puts the frame register above entry sp (refused by both)",
+      aboveEntrySp,
+      `${fpPresenceChecked} records compared`,
+    ),
+    report(
+      "frame: prologue allocates more than the record describes",
+      allocShort,
+      `${allocShortBytes} bytes over ${decoded} records`,
+      allocShortRows,
+    ),
+    report("frame: stack slots recovered", vars, varLive),
+    report("frame: slot at or beyond the recorded frame size", outsideFrame, varLive),
+    gate("frame: slot at a negative offset", negativeOffset, varLive),
+  ];
+}
+
 // ── the run ────────────────────────────────────────────────────────────────
 
 async function auditImage(key: ArmBinKey, file: string): Promise<Row[]> {
@@ -888,6 +1144,7 @@ async function auditImage(key: ArmBinKey, file: string): Promise<Row[]> {
     ...auditRefs(insns, byAddr),
     ...auditJumpTables(insns, af.jumpTables, byAddr, ex),
     ...auditLiteralPools(insns, byAddr),
+    ...auditFrames(pe, insns, imageBase, af.functions),
   ];
 }
 

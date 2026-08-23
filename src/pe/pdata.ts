@@ -1,3 +1,4 @@
+import { decodePackedArm64Unwind, frameFromUnwindCodes } from "./arm64Unwind";
 import { IMAGE_FILE_MACHINE_ARM64 } from "./constants";
 import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
 import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
@@ -189,6 +190,10 @@ function parseArm64Pdata(
       // There is no unwind-info record to point at. Reporting the raw packed
       // word here would hand consumers an RVA that resolves somewhere real.
       unwindInfoAddress: 0,
+      // The rest of the word IS the frame — see `arm64Unwind.ts`. Decoding it
+      // here costs a handful of shifts on a word already read, which is why
+      // this is eager where the `.xdata` walk below is a few extra byte reads.
+      arm64Frame: decodePackedArm64Unwind(unwindData),
     });
   }
 
@@ -233,9 +238,6 @@ function parseArm64XdataRecord(
     unwindInfoAddress: xdataRVA,
   };
 
-  const hasHandler = ((header >>> 20) & 0x1) === 1;
-  if (!hasHandler) return rf;
-
   const singleEpilog = ((header >>> 21) & 0x1) === 1;
   let epilogCount = (header >>> 22) & 0x1f;
   let codeWords = (header >>> 27) & 0x1f;
@@ -250,7 +252,23 @@ function parseArm64XdataRecord(
   }
 
   if (!singleEpilog) cursor += epilogCount * 4;
-  cursor += codeWords * 4;
+
+  // The unwind codes ARE the prologue, so they are the frame — see
+  // `arm64Unwind.ts`. Read before the handler, because the handler RVA sits
+  // after them and the cursor arithmetic is shared; a record whose codes run
+  // past the buffer yields no frame rather than a truncated one.
+  const codesEnd = cursor + codeWords * 4;
+  if (codesEnd <= view.byteLength) {
+    const codes: number[] = [];
+    for (let i = cursor; i < codesEnd; i++) codes.push(view.getUint8(i));
+    const frame = frameFromUnwindCodes(codes);
+    if (frame) rf.arm64Frame = frame;
+  }
+
+  const hasHandler = ((header >>> 20) & 0x1) === 1;
+  if (!hasHandler) return rf;
+
+  cursor = codesEnd;
   if (cursor + 4 > view.byteLength) return rf;
 
   rf.handlerAddress = view.getUint32(cursor, true);

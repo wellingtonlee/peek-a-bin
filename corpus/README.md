@@ -1488,12 +1488,53 @@ image must be below it, so moving the floor either way turns a row red. The tabl
 re-derives `ARM64_MIN_DECODE_FRACTION`'s docstring figure for figure (28160/27428, 24960/24393,
 15360/4209, 13824/3858, 13824/3016) and adds w32 at 12288/2743, which that docstring never had.
 
+### The `.pdata` frame, against the prologue (`peek-a-bin-hof0`)
+
+`.pdata` on ARM64 is the linker's own statement of every function's stack frame, and until
+`peek-a-bin-hof0` nothing read it: the packed word's frame fields and the `.xdata` unwind CODES were
+both thrown away. `pe/arm64Unwind.ts` decodes them; the instruction stream states the same frame
+independently, and `readPrologueFrame` here reads it **without consulting `.pdata` at all**. Two
+independent records of one fact, which is the footing the PE parser is checked on against an
+independently written from-spec reader.
+
+**Two gates, both at 0.** A record and a prologue that disagree about whether there is a frame
+pointer, and — where both say there is one — about how far below entry `sp` it sits. Every row
+either can print is a contradiction between the linker's record and the instructions the linker
+emitted, which is `polarity inverted`'s character rather than a baseline's. Measured: 419 and 381
+records compared, 376 and 338 deltas, **0 disagreements**. Two more gates keep the instrument
+honest: a record whose unwind data does not decode (0 of 800), and a recovered slot at a negative
+offset (0 of 3575).
+
+**Four report rows, and each is a population rather than a defect.** The prologue putting the frame
+register above entry `sp` (1 per binary — a stack-probe thunk running on its caller's frame, refused
+by the reader and by the oracle alike); the prologue allocating more than the record describes (9
+and 10 entries, 144 and 176 bytes — the area MSVC puts *below* the frame pointer, which no unwind
+record describes in either encoding); the slots recovered; and the slots at or beyond the recorded
+frame size (122 and 95, adjudicated to those same two shapes — 29 of 30 contributing functions
+contain a `bl`).
+
+**Negative-controlled six ways from this repo's own code**, each control reddening its own gate:
+drop the negative-delta refusal (frame-pointer gate 1); read `save_r19r20_x` as `(z + 1) * 16`
+(delta gate 70); add `add_fp`'s displacement instead of subtracting it (1 and 3); test `CR == 1`
+instead of `CR == 3` (frame-pointer gate 261, exactly t64-arm's chained packed count); make `set_fp`
+an unknown code (112 records undecoded, exactly the count whose first code byte is `0xe1`). The
+sixth — reporting the frame DELTA as the frame SIZE — is **green on every gate** and moves only two
+report rows, which is why `src/pe/__tests__/arm64Unwind.test.ts` pins it instead.
+
+
 ### What it refuses to audit, and why
 
 - **Everything decompiler- or emitter-shaped.** See above: no emitted C, so a green row is drawn
   from an empty population.
-- **Stack frames and signatures.** `analyzeStackFrame` and `inferSignature` have no ARM64 path at
-  all (`peek-a-bin-56q` item 1). There is nothing to audit; auditing an absence is not an audit.
+- **Function signatures.** `inferSignature` still refuses on A64 (`peek-a-bin-56q` item 1) and
+  `peek-a-bin-hof0` declined to change that on evidence: `.pdata` carries no arity information (`H`
+  is 0 on all 500 packed entries) and there are 0 incoming stack arguments in either binary, so a
+  positional rule would have an empty population and a register-based one would have no oracle.
+  Auditing an absence is not an audit.
+- **The stack VAR LIST.** The frame itself IS audited — see the `.pdata` frame row below — but the
+  var list is the one half that comes from the instruction stream rather than from `.pdata`, so the
+  only other record of it is the stream it was read from. Reported (1906 and 1669 slots, 0 at a
+  negative offset, 122 and 95 at or beyond the recorded frame size), never gated.
 - **General data marking.** `peek-a-bin-gb40` marked the one population the tool can already
   identify — the bytes of a recovered dispatch table — and that row now gates at 0. Everything else
   `peek-a-bin-56q` item 2 names is still unmarked: literal pools, and padding inside a `.pdata`

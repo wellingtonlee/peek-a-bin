@@ -239,6 +239,16 @@ export interface RuntimeFunction {
   unwindInfoAddress: number; // RVA
   handlerAddress?: number; // RVA of exception handler (if UNW_FLAG_EHANDLER/UHANDLER)
   handlerFlags?: number; // UNWIND_INFO flags byte
+  /**
+   * ARM64 only: the stack frame this record describes, decoded from the packed
+   * `.pdata` word or from the `.xdata` unwind codes — see `pe/arm64Unwind.ts`.
+   *
+   * Absent on x64, whose `UNWIND_INFO` is a different structure this project
+   * has never needed the frame out of, and absent for an ARM64 record whose
+   * codes could not be walked. `undefined` therefore means "the record did not
+   * say", never "there is no frame": `disasm/arm64Frame.ts` refuses on it.
+   */
+  arm64Frame?: import("./arm64Unwind").Arm64UnwindFrame;
 }
 
 export interface ResourceNode {
