@@ -30,7 +30,7 @@ import { StatusBar } from "../StatusBar";
  * `llm/settings`, which reads localStorage. Components reaching
  * `workers/disasmClient` were once unmountable here, because that module
  * constructed a `Worker` at module scope and jsdom has none; since
- * peek-a-bin-s22 it builds on first use, and `DisassemblyView.dom.test.tsx` is
+ * peek-a-bin-z8h1 it builds on first use, and `DisassemblyView.dom.test.tsx` is
  * the counterpart to this file on the other side of that change.
  */
 

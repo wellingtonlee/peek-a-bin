@@ -25,7 +25,7 @@ import {
  * here. Read the boundary before quoting a number:
  *
  *  - **This is a HARNESS, not the real view.** `DisassemblyView` is ~1520 lines
- *    and is lazy-loaded. It is *mountable* since peek-a-bin-s22 made the worker
+ *    and is lazy-loaded. It is *mountable* since peek-a-bin-z8h1 made the worker
  *    lazy (see `DisassemblyView.dom.test.tsx`), but only its early-return
  *    branches have been rendered; nothing has yet driven the populated panel a
  *    render count would have to be counted over. What is

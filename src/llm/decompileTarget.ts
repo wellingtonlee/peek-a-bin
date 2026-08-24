@@ -4,7 +4,7 @@
  * Split out from `decompileForLLM.ts` because that module imports
  * `workers/disasmClient`, which used to construct a real `Worker` at module
  * scope and so could not be imported under vitest at all. It builds on first
- * use now (peek-a-bin-s22), so the split is about import weight rather than
+ * use now (peek-a-bin-z8h1), so the split is about import weight rather than
  * impossibility — keep this file free of heavy imports so the arithmetic below
  * stays testable without dragging in the RPC surface.
  */

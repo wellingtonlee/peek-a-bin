@@ -11,7 +11,7 @@
  * their own modules. Note the *original* reason was stronger and is now spent:
  * the client used to construct its `Worker` at module scope, so importing it
  * spawned a thread and threw outright under vitest. It builds on first use now
- * (peek-a-bin-s22), so this is an import-weight rule rather than a hard one.
+ * (peek-a-bin-z8h1), so this is an import-weight rule rather than a hard one.
  */
 
 /**
