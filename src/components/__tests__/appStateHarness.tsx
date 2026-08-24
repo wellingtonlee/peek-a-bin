@@ -17,9 +17,15 @@ import type { PEFile } from "../../pe/types";
  * include glob on purpose, so this is imported rather than collected.
  *
  * Every dialog covered by those suites reads {@link ../../hooks/usePEFile}'s two
- * contexts and nothing else — none of them touches `workers/disasmClient`, which
- * is what makes them mountable at all (it builds a `Worker` at module scope and
- * jsdom has none). So a provider pair plus a state object is the whole harness.
+ * contexts and nothing else — none of them touches `workers/disasmClient`. So a
+ * provider pair plus a state object is the whole harness.
+ *
+ * That last point used to be load-bearing and is now only descriptive:
+ * `disasmClient.ts` built its `Worker` at module scope, so importing it threw
+ * under jsdom and a component whose graph reached it could not be mounted at all.
+ * It builds on first use since `peek-a-bin-z8h1`, so touching the client no longer
+ * decides whether something is mountable — a heavier component still needs more
+ * than this harness, but for a different reason.
  *
  * The dispatch is the caller's, precisely so it can be a `vi.fn()`: what a
  * dialog *dispatches* is the observable half of most of these components, and
