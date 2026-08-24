@@ -776,17 +776,23 @@ read "all of them compile" as "all of them are right".
   six dialogs (`CommandPalette`, `GoToAddressModal`, `SettingsModal`, `BatchRenameModal`,
   `AIReportPanel`, `KeyboardShortcuts`), plus **`App` itself** — mounted through the real browse
   input, which is where the notice banner's three `isFault` reads and its "Still available:" prose
-  are checked against the tab bar they claim to agree with (`src/__tests__/App.dom.test.tsx`).
+  are checked against the tab bar they claim to agree with (`src/__tests__/App.dom.test.tsx`),
+  plus `SectionTable`, which that file's routing case mounts and asserts on.
   **Still NOT rendered, and this list was MEASURED rather than recalled** — the previous one named
-  three surfaces where a grep of every `*.dom.test.tsx` finds sixteen: the decompile panel
-  (`DecompileView`), the AI chat panel (`AIChatPanel`) and `MarkdownRenderer`; the seven
-  parser-derived tab views `HeaderView` / `SectionTable` / `ImportsView` / `ExportsView` /
-  `StringsView` / `ResourcesView` / `AnomaliesView`, which is the surface
-  `analysisNotice`'s `"no-code-section"` kind exists to send a user to; `XrefPanel`,
-  `BottomPanelContainer`, `CallPanel`, `DataInspector`, `ResizeHandle`, `ErrorBoundary` and
-  `Skeleton`; and the whole a11y pass beyond `Modal`'s, the dialogs' attributes and the palette's
-  listbox (`peek-a-bin-p0qw`). `DisassemblyMinimap` mounts and never paints (jsdom has no 2D
-  context).
+  three surfaces where a per-component grep of every `*.dom.test.tsx` finds fifteen: the decompile
+  panel (`DecompileView`), the AI chat panel (`AIChatPanel`) and `MarkdownRenderer`; six of the
+  seven parser-derived tab views — `HeaderView` / `ImportsView` / `ExportsView` / `StringsView` /
+  `ResourcesView` / `AnomaliesView` — which is the surface `analysisNotice`'s
+  `"no-code-section"` kind exists to send a user to; `XrefPanel`, `BottomPanelContainer`,
+  `CallPanel`, `DataInspector`, `ResizeHandle`, `ErrorBoundary` and `Skeleton`; and the whole a11y
+  pass beyond `Modal`'s, the dialogs' attributes and the palette's listbox (`peek-a-bin-p0qw`).
+  **"Rendered" here means an assertion, not a mount, and the distinction became load-bearing the
+  moment `App` was rendered.** `App` imports the whole component tree, so a transitive-reachability
+  census over the import graph now reports **41 of 41 components reachable from a rendering suite**
+  and is worth nothing — the measured refusal of a drift guard that was about to be built on it.
+  Mounting a component as somebody's child while nothing asserts on its output is the vacuous kind
+  of coverage; `App`'s suite visits exactly two tabs and asserts on both.
+  `DisassemblyMinimap` mounts and never paints (jsdom has no 2D context).
 - **Virtualization is a STAND-IN and a green suite must not be read as covering it.** `virtual-core`
   reads the scroll element's `offsetHeight` (not `getBoundingClientRect`), so in jsdom a
   virtualized list renders **zero** rows, not a short list. `domSetup.ts`'s `stubLayoutRect()` is

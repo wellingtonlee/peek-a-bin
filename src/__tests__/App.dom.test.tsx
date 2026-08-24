@@ -366,5 +366,14 @@ describe("the tab bar routes", () => {
     // Two panes mounted now, exactly one of them shown: the previous tab stays
     // in the tree, which is the behaviour `mountedTabs` exists to produce.
     expect(panes().length).toBeGreaterThan(1);
+
+    // And the pane that is shown has the section in it. Worth asserting rather
+    // than leaving implicit: `App` mounts a tab's component when the tab is
+    // first visited, so this test renders `SectionTable` whether or not it says
+    // so — and a component that mounts as somebody's child while nothing
+    // asserts on its output is exactly the vacuous coverage this repo keeps
+    // finding. One assertion turns the incidental render into a real one.
+    const shown = panes().find((el) => el.className === "h-full");
+    expect(shown?.textContent).toContain(".rsrc");
   });
 });
