@@ -554,6 +554,103 @@ describe("dispatch — architecture routing", () => {
     expect(s.arch).toBe("arm64");
   });
 
+  /**
+   * peek-a-bin-3ucw. The refusal below is the only consumer of
+   * `PEFile.loadConfig.chpeMetadataPointer` in the tree, and the fact has to
+   * survive the client → worker hop to reach it. Verified through the real
+   * `dispatch`, since nothing else drives the worker's session state.
+   *
+   * NOT VERIFIED against a real file: no ARM64EC or ARM64X binary exists on this
+   * machine, and the only two images here that read the field at all read 0
+   * (measured at 11408ac). The non-zero branch is fixture-only.
+   */
+  describe("a declared CHPE pointer reaches the ARM64 decode-rate refusal", () => {
+    /** A handle that decodes one word in four, so a section refuses on rate. */
+    function sparseArm64() {
+      const seen: number[] = [];
+      return {
+        tag: "arm64",
+        seen,
+        disasm(bytes: Uint8Array, options: { address: number }) {
+          seen.push(options.address);
+          if (bytes.length < 4 || (options.address & 0xf) !== 0) {
+            throw new Error("Failed to disassemble");
+          }
+          return [
+            {
+              address: options.address,
+              bytes: bytes.subarray(0, 4),
+              mnemonic: "arm64",
+              opStr: "",
+              size: 4,
+            },
+          ];
+        },
+      };
+    }
+
+    const refuse = async (chpeMetadataPointer?: number) => {
+      const s = state({ cs64: stubCs("x86-64"), csArm64: sparseArm64() });
+      await dispatch(
+        "configure",
+        {
+          stringEntries: [],
+          iatEntries: [],
+          machine: ARM64_MACHINE,
+          chpeMetadataPointer,
+        },
+        s,
+      );
+      // 2048 words, well past ARM64_MIN_MEASURED_WORDS, a quarter of which
+      // decode — the shape of a hybrid image swept as pure A64.
+      const err = await dispatch(
+        "disassemble",
+        { bytes: new Uint8Array(0x2000), baseAddress: 0x140001000, is64: true },
+        s,
+      ).then(
+        () => undefined,
+        (e: Error) => e,
+      );
+      expect(err).toBeDefined();
+      expect(err?.name).toBe("Arm64DecodeRateError");
+      return err as Error;
+    };
+
+    it("says so when configure declared one", async () => {
+      const err = await refuse(0x140020000);
+      expect(err.message).toContain("declares CHPE metadata");
+      expect(err.message).toContain("0x140020000");
+    });
+
+    it("keeps the pre-existing message when configure declared none", async () => {
+      // The narrowing must not become a dependency: an image with no
+      // load-config directory, or a caller that was never threaded, has to get
+      // exactly the message this threw before.
+      expect((await refuse(undefined)).message).not.toContain("CHPE");
+      expect((await refuse(0)).message).not.toContain("CHPE");
+    });
+
+    it("does not carry one file's pointer into the next file's refusal", async () => {
+      // A declared machine type is the load handshake, so the CHPE fact is
+      // replaced by whatever *that* message said — including nothing. Guarding
+      // on the pointer's own presence instead would leave a hybrid image's
+      // declaration attached to the next image loaded in the session.
+      const s = state({ cs64: stubCs("x86-64"), csArm64: sparseArm64() });
+      const conf = (args: Record<string, unknown>) =>
+        dispatch("configure", { stringEntries: [], iatEntries: [], ...args }, s);
+
+      await conf({ machine: ARM64_MACHINE, chpeMetadataPointer: 0x140020000 });
+      expect(s.chpeMetadataPointer).toBe(0x140020000);
+      // The second configure of the *same* file re-sends only the strings and
+      // must leave it alone.
+      await conf({});
+      expect(s.chpeMetadataPointer).toBe(0x140020000);
+      // A new file, with no load config of its own.
+      await conf({ machine: ARM64_MACHINE });
+      expect(s.chpeMetadataPointer).toBeUndefined();
+    });
+  });
+
   it("disassembles with the ARM64 handle, not the x86-64 one", async () => {
     const s = armState();
     await configureAs(s, ARM64_MACHINE);

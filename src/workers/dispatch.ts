@@ -101,6 +101,19 @@ export interface WorkerState {
    * check so a new machine type can never fall through to the x86 path.
    */
   arch: ImageArch;
+  /**
+   * `PEFile.loadConfig.chpeMetadataPointer` for the loaded image, when
+   * `configure` was told one.
+   *
+   * Session state rather than a per-request field, which is the opposite of the
+   * choice `arch` above documents — and the difference is that this decides
+   * nothing. It is read by exactly one thing, the ARM64 decode-rate refusal's
+   * message (`Arm64DecodeRateError`), so peek-a-bin-x4o2's hazard does not apply:
+   * a decode serviced before the `configure` that announced its file simply
+   * throws the message it threw before, which is the same behaviour a caller that
+   * never sends one gets.
+   */
+  chpeMetadataPointer?: number;
   stringMap: Map<number, string>;
   iatMap: Map<number, { lib: string; func: string }>;
   driverMode: boolean;
@@ -219,6 +232,7 @@ function armCtx(state: WorkerState): Arm64Context {
     stringMap: state.stringMap,
     iatMap: state.iatMap,
     driverMode: state.driverMode,
+    chpeMetadataPointer: state.chpeMetadataPointer,
   };
 }
 
@@ -246,6 +260,15 @@ export async function dispatch(
       // been extracted, which knows nothing about the machine type — so a bare
       // assignment here would reset an ARM64 session to x86 mid-analysis.
       if (args.machine !== undefined) state.arch = archForMachine(args.machine);
+      // Keyed on `machine` being declared rather than on its own presence, and
+      // that is not the same rule. A declared machine type is the load handshake
+      // (the sweep caches below are cleared on it for exactly that reason), so
+      // this takes whatever *that* message said about the load config — including
+      // `undefined`, for a file with no load-config directory. Guarding on its own
+      // presence instead would let the previous file's CHPE pointer survive into
+      // the next one's refusal message; the second `configure` of a file re-sends
+      // only the strings and would still, correctly, leave it alone.
+      if (args.machine !== undefined) state.chpeMetadataPointer = args.chpeMetadataPointer;
       state.structRegistry = new StructRegistry();
       // Memory hygiene only. A declared machine type is the load handshake, so
       // this is where one file's instructions stop being worth holding — but

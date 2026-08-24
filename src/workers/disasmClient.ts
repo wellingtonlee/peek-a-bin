@@ -255,7 +255,7 @@ class DisasmWorkerClient {
   async configure(
     strings: Map<number, string>,
     iat: Map<number, { lib: string; func: string }>,
-    options?: { driverMode?: boolean; machine?: number },
+    options?: { driverMode?: boolean; machine?: number; chpeMetadataPointer?: number },
   ): Promise<void> {
     if (options?.machine !== undefined) this.imageMachine = options.machine;
     this.disasmCache.clear();
@@ -265,6 +265,13 @@ class DisasmWorkerClient {
       iatEntries: Array.from(iat.entries()),
       driverMode: options?.driverMode,
       machine: options?.machine,
+      // `PEFile.loadConfig.chpeMetadataPointer`, and it is read by exactly one
+      // thing on the far side: the ARM64 decode-rate refusal's message, which
+      // can then say the image declares CHPE metadata rather than inferring
+      // hybrid-ness from the rate. Prose only — it selects no decoder and is not
+      // in any cache key — so unlike `machine` it does not have to be on each
+      // request, and a caller that omits it gets the previous message verbatim.
+      chpeMetadataPointer: options?.chpeMetadataPointer,
     });
   }
 

@@ -107,14 +107,52 @@ The refusal is deliberately **asymmetric**, and the split is per stage rather th
 In every dispatch the `"unsupported"` arm is tested **before** the `"arm64"` arm, because the
 tail of that chain is the x86 path.
 
-**ARM64EC and ARM64X carry machine 0xAA64 as well** and hold x64 code (EC) or both (X).
-Distinguishing them properly needs the CHPE metadata pointer from the load-config directory,
-which the parser does not read, so the evidence used is the bytes themselves: an A64 sweep
-decodes 97.4% / 97.7% of the two real ARM64 binaries against 21.8–27.9% of four x86/x64 ones —
-about a quarter of arbitrary x86 bytes decode as *something* in A64, which is exactly why the
-failure was silent. `disassembleArm64` throws `Arm64DecodeRateError` below a 50% floor on
+**The two hybrid formats arrive on different arms of `archForMachine`, and only one of them is
+refused.** This section said for a long time that "ARM64EC and ARM64X carry machine 0xAA64 as
+well", and the ARM64EC half was wrong. Settled against Microsoft's documentation at
+`peek-a-bin-3ucw`, since no such binary exists on this machine:
+
+| format | image machine word | where it goes here |
+|---|---|---|
+| ARM64 | 0xAA64 | the A64 sweep |
+| **ARM64X** | 0xAA64 by default, may be 0x8664 | the A64 sweep (refused by decode rate), or the x86 path |
+| **ARM64EC** | **0x8664** | the x86 path, silently |
+| ARM64EC *object* / lib | 0xA641 | never in a linked image |
+
+Citations: Microsoft's [Arm64EC overview](https://learn.microsoft.com/en-us/windows/arm/arm64ec)
+shows `link /dump /headers` reporting `8664 machine (x64) (ARM64X)` for an Arm64EC image and says
+only the linked EXE or DLL carries "the `8664 (x64) (ARM64X)` or `AA64 (ARM64) (ARM64X)` machine
+value", 0xA641 being an object marker that is "not a valid final PE machine type"; lld writes the
+same (`case ARM64EC: coff->Machine = AMD64`,
+[D149086](https://reviews.llvm.org/D149086)); and
+[Arm64X PE Files](https://learn.microsoft.com/en-us/windows/arm/arm64x-pe) says "By default,
+Arm64X binaries appear to be Arm64 binaries", so Windows 10 on Arm can still load one.
+
+So the decode-rate refusal's real population is **an ARM64X image marked 0xAA64**, plus an image
+whose machine word is not describing its bytes. The evidence is the bytes themselves: an A64
+sweep decodes 97.4% / 97.7% of the two real ARM64 binaries against 21.8–27.9% of four x86/x64
+ones — about a quarter of arbitrary x86 bytes decode as *something* in A64, which is exactly why
+the failure was silent. `disassembleArm64` throws `Arm64DecodeRateError` below a 50% floor on
 sections of 256 words or more, and `detectArm64Functions` catches it and degrades via `omitted`.
-An ARM64X image, half of which is genuine A64, may sit above the floor.
+An ARM64X image, a good share of which is genuine A64, may sit above the floor.
+
+**Where the image declares CHPE metadata the refusal says so**, rather than inferring hybrid-ness
+from the rate. `PEFile.loadConfig.chpeMetadataPointer` is the format's only declaration of it
+(`peek-a-bin-7p5t`; this page used to say the parser does not read it, which is stale) and reaches
+the refusal through `App` → `disasmClient.configure` → `WorkerState` → `Arm64Context`. It is
+optional and **prose only** — an image with no load-config directory, or a caller that was never
+threaded, gets exactly the previous message, and the field selects no decoder and is in no cache
+key — so a wrong CHPE reading cannot start rejecting genuine ARM64. `mcp/disasm.ts` deliberately
+does not thread it. Fixture-verified only: no hybrid binary exists here, and the two real ARM64
+images read the field as 0.
+
+**An ARM64EC image is misclassified as x64 and nothing says so.** Code compiled as Arm64EC is
+native A64 following x64 software conventions, so the x64 decoder reads it as fiction — the same
+silent failure the ARMNT paragraph above describes, since an x86 linear sweep decodes essentially
+any byte string. It is knowingly left alone: routing on CHPE there would be a *decision* taken on
+a field that has never once been read on an x64 image here (at `11408ac`, `t64.exe` and `w64.exe`
+have no load-config data directory at all), and a wrong reading would start refusing ordinary x64
+images.
 
 #### `DetectResult.omitted`
 

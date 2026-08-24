@@ -85,28 +85,69 @@ export const ARM64_MIN_MEASURED_WORDS = 256;
  * module exists to avoid: plausible-looking instructions that are not what the
  * file contains (peek-a-bin-2t1).
  *
- * The likely cause is **ARM64EC or ARM64X**. Both carry machine 0xAA64, the same
- * value pure ARM64 does, and both hold x86-64 code — all of it for EC, some of
- * it for X. Telling the three apart properly needs the CHPE metadata pointer out
- * of the load-config data directory, which `src/pe/parser.ts` does not read; this
- * is the evidence available without it, and it is evidence about the bytes
- * rather than a guess about the header. An ARM64X image is the case this may
- * *not* catch: half its section is genuine A64, which can land above the floor.
+ * The likely cause is **ARM64X**, and that used to read "ARM64EC or ARM64X".
+ * The narrowing is not a guess: a final ARM64EC image is marked
+ * `IMAGE_FILE_MACHINE_AMD64` (0x8664), so `archForMachine` sends it down the x86
+ * path and it never reaches this sweep at all, while an ARM64X image is marked
+ * 0xAA64 by default. Settled against Microsoft's documentation at
+ * peek-a-bin-3ucw — see `./arch.ts` for the citations and for what the x86 arm
+ * costs. So this refusal's whole population is an ARM64X image marked 0xAA64,
+ * plus an image whose machine word is simply not describing its bytes.
+ *
+ * ARM64X is also the case this may *not* catch: an ARM64 process sees an A64
+ * view of such an image, so a good share of the section is genuine A64 and can
+ * land above the floor.
+ *
+ * Two independent pieces of evidence, and only the first is required.
+ *
+ *  - The **decode rate**, which is a fact about the bytes and is what this class
+ *    has always carried. It is available for every section.
+ *  - **`CHPEMetadataPointer`**, which is a fact about the *image* — the format's
+ *    only declaration of hybrid-ness (peek-a-bin-7p5t). Where the caller passes
+ *    it and it is non-zero, the message can say the image declares CHPE metadata
+ *    instead of inferring hybrid-ness from a low rate.
+ *
+ * The second is deliberately **optional**, and that is the design rather than a
+ * convenience. An image with no load-config directory, a structure too short to
+ * reach the field, or a caller that has not been threaded produces exactly the
+ * message this threw before, so nothing depends on the field being readable.
+ * More importantly it is consumed for **prose only** — the throw condition, the
+ * `decoded`/`words` fields and every caller's behaviour are untouched by it — so
+ * the failure mode peek-a-bin-7p5t declined to risk, a wrong CHPE reading that
+ * starts rejecting genuine ARM64, is structurally impossible here.
+ *
+ * NOT VERIFIED: no ARM64EC or ARM64X binary exists on this machine, so the
+ * non-zero branch is exercised by fixture only. Measured at 11408ac, the only
+ * two images here that read the field at all are the genuine ARM64 pair and both
+ * read 0, i.e. the hybrid sentence cannot fire on any file available to test.
  */
 export class Arm64DecodeRateError extends Error {
   constructor(
     readonly decoded: number,
     readonly words: number,
+    /**
+     * `PEFile.loadConfig.chpeMetadataPointer` for the image being swept, if the
+     * caller has it: a number means the field was read, `0` meaning present and
+     * not hybrid, and `undefined` means it could not be — three states that must
+     * not collapse, because only a non-zero value is evidence.
+     */
+    readonly chpeMetadataPointer?: number,
   ) {
     super(
       `Only ${((100 * decoded) / words).toFixed(1)}% of this section decoded as ` +
         `ARM64 instructions (${decoded} of ${words} words); a real ARM64 image ` +
-        `decodes over 97%. The COFF machine type says ARM64, but ARM64EC and ` +
-        `ARM64X images carry that same 0xAA64 and hold x86-64 code, which is what ` +
-        `a rate this low looks like. Disassembling it as ARM64 anyway would ` +
-        `produce a screenful of instructions the file does not contain, so this ` +
-        `stops instead. Distinguishing the three needs the CHPE metadata pointer ` +
-        `from the load-config directory, which is not parsed.`,
+        `decodes over 97%. ` +
+        (chpeMetadataPointer
+          ? `This image declares CHPE metadata in its load-config directory ` +
+            `(CHPEMetadataPointer 0x${chpeMetadataPointer.toString(16)}), so it is a ` +
+            `hybrid image — an ARM64X one, since it is marked ARM64 and a final ` +
+            `ARM64EC image is marked x64 — and part of what this section holds is ` +
+            `x86-64 code. `
+          : `The COFF machine type says ARM64, but an ARM64X image carries that ` +
+            `same 0xAA64 and holds x86-64 code as well as A64, which is what a ` +
+            `rate this low looks like. `) +
+        `Disassembling it as ARM64 anyway would produce a screenful of ` +
+        `instructions the file does not contain, so this stops instead.`,
     );
     this.name = "Arm64DecodeRateError";
   }
@@ -119,6 +160,24 @@ export interface Arm64Context {
   stringMap: Map<number, string>;
   iatMap: Map<number, { lib: string; func: string }>;
   driverMode: boolean;
+  /**
+   * `PEFile.loadConfig.chpeMetadataPointer` for the loaded image, where the
+   * session has it.
+   *
+   * Read by exactly one thing — {@link Arm64DecodeRateError}'s message, so that
+   * a refusal can state a fact about the image instead of inferring one from the
+   * decode rate. Optional on purpose: a caller that omits it gets the message
+   * this threw before, and nothing else in this module consults it, so it cannot
+   * change which sections are refused or what any of them decode to.
+   *
+   * The worker path supplies it (`App` → `disasmClient.configure` →
+   * `WorkerState`); `mcp/disasm.ts` deliberately does not, because its three
+   * entry points are 7-to-10-parameter functions and growing all of them for a
+   * message read by a tool client rather than a person is out of proportion. That
+   * path therefore keeps the rate-only wording, which is inside this field's
+   * contract rather than a gap in it (peek-a-bin-3ucw).
+   */
+  chpeMetadataPointer?: number;
 }
 
 /** A `.pdata`-derived function extent, in virtual addresses. */
@@ -188,13 +247,22 @@ function rangeTest(ranges: CodeRange[] | undefined): (addr: number, size?: numbe
  * same section on every file load (peek-a-bin-kis).
  *
  * Throws {@link Arm64DecodeRateError} exactly where the combined function used
- * to, so the ARM64EC/ARM64X refusal is unmoved and a refused section never
+ * to, so the decode-rate refusal is unmoved and a refused section never
  * becomes a cached empty answer.
  */
 export function sweepArm64(
   bytes: Uint8Array,
   baseAddress: number,
   cs: CapstoneHandle | null | undefined,
+  /**
+   * The image's `CHPEMetadataPointer`, forwarded into
+   * {@link Arm64DecodeRateError} where it is thrown and read nowhere else. It is
+   * not part of the sweep, and deliberately not part of {@link SectionMemo}'s
+   * key either: the section a hit returns is a function of the bytes alone, and
+   * a refused section is never stored, so the only path this value reaches is
+   * the throw.
+   */
+  chpeMetadataPointer?: number,
 ): Instruction[] {
   // Throw rather than return `[]`: this sweep *is* the ARM64 disassembly, so an
   // empty list is a complete-looking answer for a `.text` full of code
@@ -239,7 +307,7 @@ export function sweepArm64(
   // checks that assumption, and it is checkable: see {@link Arm64DecodeRateError}.
   const words = len / ARM64_INSN_SIZE;
   if (words >= ARM64_MIN_MEASURED_WORDS && out.length < words * ARM64_MIN_DECODE_FRACTION) {
-    throw new Arm64DecodeRateError(out.length, words);
+    throw new Arm64DecodeRateError(out.length, words, chpeMetadataPointer);
   }
 
   return out;
@@ -437,7 +505,7 @@ export function decorateArm64Sweep(
  * ever looked at.
  *
  * A section that fails the decode-rate floor throws out of {@link sweepArm64}
- * before anything is stored, so the ARM64EC/ARM64X refusal cannot be turned into
+ * before anything is stored, so the decode-rate refusal cannot be turned into
  * a cached empty answer.
  */
 export class Arm64SweepCache {
@@ -448,8 +516,13 @@ export class Arm64SweepCache {
     bytes: Uint8Array,
     baseAddress: number,
     cs: CapstoneHandle | null | undefined,
+    /** Forwarded to {@link sweepArm64} for its refusal message only — see there
+     *  for why it is not part of the key. */
+    chpeMetadataPointer?: number,
   ): Instruction[] {
-    return this.memo.get(bytes, baseAddress, cs, () => sweepArm64(bytes, baseAddress, cs));
+    return this.memo.get(bytes, baseAddress, cs, () =>
+      sweepArm64(bytes, baseAddress, cs, chpeMetadataPointer),
+    );
   }
 
   /**
@@ -500,8 +573,8 @@ export function disassembleArm64(
   jumpTableSpans?: readonly [number, number][],
 ): Instruction[] {
   const raw = cache
-    ? cache.sweep(bytes, baseAddress, ctx.cs)
-    : sweepArm64(bytes, baseAddress, ctx.cs);
+    ? cache.sweep(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer)
+    : sweepArm64(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer);
   return decorateArm64Sweep(raw, ctx, pdataRanges, jumpTableSpans);
 }
 
@@ -1151,8 +1224,8 @@ export function detectArm64Functions(
       // discarded, and skipping it is also what lets the result be shared with
       // the two callers that decorate differently.
       const insns = cache
-        ? cache.sweep(bytes, baseAddress, ctx.cs)
-        : sweepArm64(bytes, baseAddress, ctx.cs);
+        ? cache.sweep(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer)
+        : sweepArm64(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer);
       for (const insn of insns) {
         if (insn.mnemonic !== "bl") continue;
         const m = insn.opStr.match(BL_TARGET);

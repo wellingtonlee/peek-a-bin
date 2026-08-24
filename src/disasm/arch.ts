@@ -33,11 +33,58 @@
  * and Authenticode are all format-level facts this tool reads correctly for an
  * ARM32 image, and a user should still get every one of them.
  *
- * KNOWN LIMITATION — ARM64EC and ARM64X images also carry machine 0xAA64 but
- * contain x64 code (ARM64EC) or both (ARM64X); telling them apart needs the
- * CHPE metadata pointer out of the load-config directory, which the parser does
- * not read. Such an image is treated as pure ARM64 here and its x64 half will
- * decode to garbage. See peek-a-bin follow-up.
+ * KNOWN LIMITATION — the two hybrid ARM64 formats. This paragraph said for a
+ * long time that "ARM64EC and ARM64X images also carry machine 0xAA64", and
+ * **the ARM64EC half of that was wrong**; the claim is settled here against
+ * Microsoft's own documentation, since no such binary exists on this machine to
+ * check it against (peek-a-bin-3ucw):
+ *
+ *  - A final **ARM64EC** image carries `IMAGE_FILE_MACHINE_AMD64` (0x8664).
+ *    Microsoft's Arm64EC overview shows `link /dump /headers` reporting
+ *    `8664 machine (x64) (ARM64X)` for one and says only the linked EXE or DLL
+ *    carries "the `8664 (x64) (ARM64X)` or `AA64 (ARM64) (ARM64X)` machine
+ *    value" — https://learn.microsoft.com/en-us/windows/arm/arm64ec — and lld
+ *    writes exactly that (`case ARM64EC: coff->Machine = AMD64`,
+ *    https://reviews.llvm.org/D149086).
+ *  - An **ARM64X** image carries 0xAA64 by default, so that Windows 10 on Arm,
+ *    which does not know the format, still loads it into an Arm64 process:
+ *    "By default, Arm64X binaries appear to be Arm64 binaries" —
+ *    https://learn.microsoft.com/en-us/windows/arm/arm64x-pe. It may instead be
+ *    marked 0x8664, which is what makes it launch as emulated x64 by default.
+ *  - `IMAGE_FILE_MACHINE_ARM64EC` (0xA641) and `IMAGE_FILE_MACHINE_ARM64X`
+ *    (0xA64E) are in the PE specification's machine table, but 0xA641 is an
+ *    **object/lib** marker — "not a valid final PE machine type", same page —
+ *    and neither appears in a linked image's machine field. The `(ARM64X)`
+ *    annotation `dumpbin` prints comes from the hybrid metadata, not from this
+ *    word. So `KNOWN` below deliberately does not list either of them.
+ *
+ * What follows for this function is that the two hybrids arrive on *different*
+ * arms and only one of them is refused:
+ *
+ *  - **ARM64X marked 0xAA64** takes the `"arm64"` arm and is refused, by decode
+ *    rate, in `arm64.ts` — see that module's `Arm64DecodeRateError`.
+ *    That refusal's real population is this case plus a mis-detected image; it
+ *    never sees an ARM64EC one, which is a narrower claim than the old comment
+ *    implied.
+ *  - **ARM64EC, and ARM64X marked 0x8664**, take the `"x86"` arm and are
+ *    disassembled as x64 with nothing said. That is a real misclassification
+ *    and not a benign one: code compiled as Arm64EC is *native A64* following
+ *    x64 software conventions, so the x64 decoder reads it as fiction, and an
+ *    x86 linear sweep decodes essentially any byte string — the same silent
+ *    failure this module's ARMNT paragraph above describes. Only the genuinely
+ *    x64 parts of such an image (x64 objects linked in, the entry thunks) come
+ *    out right.
+ *
+ * That second case is **knowingly left alone**, and the reason is evidence
+ * rather than caution. The discriminator exists — `PEFile.loadConfig`
+ * .chpeMetadataPointer, landed by peek-a-bin-7p5t — but routing on it would be
+ * a *decision* taken on a field that has never once been read on an x64 image
+ * here: measured at 11408ac, t64.exe and w64.exe have **no load-config data
+ * directory at all**, so both read `undefined`, and the only two images on this
+ * machine that read the field are the genuine ARM64 pair, which read 0. A wrong
+ * reading would begin refusing or re-routing ordinary x64 images, which is
+ * strictly worse than today. Filed rather than fixed; `arm64.ts` consumes the
+ * same field for *prose only*, where a wrong reading cannot change an answer.
  */
 
 /** An architecture the analysis engine has a decoder and a grammar for. */

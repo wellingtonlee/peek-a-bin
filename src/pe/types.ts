@@ -191,10 +191,18 @@ export interface TLSDirectory {
  *
  * "CHPE" is Compiled Hybrid PE — the marker an ARM64EC or ARM64X image carries,
  * and the only *declaration* of hybrid-ness in the format. Everything else about
- * such an image (machine type 0xAA64, a `.text` that decodes as A64 for some of
- * its length) is shared with an ordinary ARM64 build, which is why
- * `disassembleArm64` currently has to infer the difference from its decode rate
- * — evidence about the bytes rather than an answer about the image.
+ * such an image is shared with a non-hybrid build of the machine type it is
+ * marked with, which is why `disassembleArm64` also weighs its decode rate —
+ * evidence about the bytes rather than an answer about the image.
+ *
+ * The machine type does **not** narrow it to ARM64, and this docstring used to
+ * imply it did by naming 0xAA64. Settled against Microsoft's documentation at
+ * peek-a-bin-3ucw, since no hybrid binary exists on this machine: a final
+ * ARM64EC image is marked `IMAGE_FILE_MACHINE_AMD64` (0x8664), and an ARM64X
+ * image is marked 0xAA64 by default and may be marked 0x8664. So a CHPE
+ * declaration can appear under either word, and 0xA641/0xA64E — the ARM64EC and
+ * ARM64X machine constants — appear in *object* files rather than in a linked
+ * image. See `disasm/arch.ts` for the citations and for what each case costs.
  *
  * Two sizes, both reported, because they disagree in practice and the smaller
  * one is what bounds a read. `directorySize` is what the data directory entry

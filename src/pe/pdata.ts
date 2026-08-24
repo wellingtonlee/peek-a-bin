@@ -5,9 +5,21 @@ import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
 
 /**
  * ARM64 variants that describe their unwind data with the ARM64 schema below:
- * plain ARM64, plus the two hybrid machine types (ARM64EC and ARM64X), whose
- * exception directory is in ARM64 form. Neither hybrid constant is in
+ * plain ARM64, plus the two hybrid machine constants (ARM64EC and ARM64X),
+ * whose exception directory is in ARM64 form. Neither hybrid constant is in
  * `constants.ts` because nothing else in the parser distinguishes them.
+ *
+ * The two hybrid constants are a deliberate **superset** and not a live case:
+ * 0xA641 and 0xA64E identify object files, and a linked ARM64EC or ARM64X image
+ * is marked 0x8664 or 0xAA64 instead (settled against Microsoft's docs at
+ * peek-a-bin-3ucw — see `disasm/arch.ts` for the citations). Accepting them
+ * costs nothing and would be right if either ever reached a `coffHeader`, so
+ * they stay. What they do not do is route a real hybrid image: an ARM64EC one
+ * arrives marked 0x8664 and is therefore read with the **x64** schema below.
+ * Whether that is the right schema for it is *not* established here — a hybrid
+ * image carries more than one view of its exception data, reached through the
+ * CHPE metadata this module does not read — and there is no such binary on this
+ * machine to settle it. Stated rather than assumed either way.
  */
 const IMAGE_FILE_MACHINE_ARM64EC = 0xa641;
 const IMAGE_FILE_MACHINE_ARM64X = 0xa64e;

@@ -112,8 +112,8 @@ function code(
   return m;
 }
 
-function ctx(cs: unknown): Arm64Context {
-  return { cs, stringMap: new Map(), iatMap: new Map(), driverMode: false };
+function ctx(cs: unknown, chpeMetadataPointer?: number): Arm64Context {
+  return { cs, stringMap: new Map(), iatMap: new Map(), driverMode: false, chpeMetadataPointer };
 }
 
 describe("disassembleArm64", () => {
@@ -317,12 +317,17 @@ describe("disassembleArm64", () => {
   });
 
   /**
-   * peek-a-bin-2t1. ARM64EC and ARM64X images carry machine 0xAA64, the same
-   * value pure ARM64 does, and hold x86-64 code. Nothing here can read the CHPE
-   * pointer that tells them apart — it lives in the load-config directory the
-   * PE parser does not parse — but the decode rate is evidence about the bytes
-   * themselves, and it separates cleanly: 97.4% / 97.7% on t64-arm.exe and
-   * w64-arm.exe against 21.8%-27.9% for the x86 and x64 binaries swept as A64.
+   * peek-a-bin-2t1, narrowed by peek-a-bin-3ucw. An **ARM64X** image carries
+   * machine 0xAA64, the same value pure ARM64 does, and holds x86-64 code as
+   * well as A64. ARM64EC is deliberately *not* named here any more: a final
+   * ARM64EC image is marked `IMAGE_FILE_MACHINE_AMD64`, so `archForMachine`
+   * sends it down the x86 path and it never reaches this sweep — see
+   * `disasm/arch.ts` for the citations.
+   *
+   * The decode rate is evidence about the bytes themselves and separates
+   * cleanly: 97.4% / 97.7% on t64-arm.exe and w64-arm.exe against 21.8%-27.9%
+   * for the x86 and x64 binaries swept as A64. `CHPEMetadataPointer`, where the
+   * caller has it, is the stronger evidence and is exercised below.
    */
   describe("a section that does not decode as A64 is refused, not reported", () => {
     const WORDS = ARM64_MIN_MEASURED_WORDS * 2;
@@ -354,7 +359,12 @@ describe("disassembleArm64", () => {
         expect(err).toBeInstanceOf(Arm64DecodeRateError);
         expect((err as Arm64DecodeRateError).decoded).toBe(decoded);
         expect((err as Arm64DecodeRateError).words).toBe(WORDS);
-        expect((err as Error).message).toContain("ARM64EC");
+        // Was `ARM64EC` until peek-a-bin-3ucw. That claim was wrong about the
+        // machine word, and this assertion was pinning it: an ARM64EC image is
+        // marked x64 and can never be the cause of a refusal thrown from an A64
+        // sweep. ARM64X is what carries 0xAA64.
+        expect((err as Error).message).toContain("ARM64X");
+        expect((err as Error).message).not.toContain("CHPE");
       }
     });
 
@@ -369,6 +379,64 @@ describe("disassembleArm64", () => {
       // fixture in this file is under the minimum for exactly that reason.
       const small = (ARM64_MIN_MEASURED_WORDS - 4) * ARM64_INSN_SIZE;
       expect(disassembleArm64(new Uint8Array(small), BASE, ctx(fakeCs(new Map())))).toEqual([]);
+    });
+
+    /**
+     * peek-a-bin-3ucw. `CHPEMetadataPointer` is the format's only *declaration*
+     * that an image is hybrid (peek-a-bin-7p5t), so where the caller has it the
+     * refusal can state a fact about the image instead of inferring one from the
+     * rate. Three states, and only one of them is evidence.
+     *
+     * NOT VERIFIED against a real file: there is no ARM64EC or ARM64X binary on
+     * this machine, and the only two images here that read the field at all are
+     * the genuine ARM64 pair, both of which read 0 (measured at 11408ac). The
+     * non-zero branch is fixture-only.
+     */
+    describe("a declared CHPE pointer narrows the message from the rate to the image", () => {
+      const refuse = (chpe?: number) => {
+        try {
+          disassembleArm64(new Uint8Array(BYTES), BASE, ctx(fakeCs(partial(10)), chpe));
+          expect.unreachable();
+        } catch (err) {
+          expect(err).toBeInstanceOf(Arm64DecodeRateError);
+          return err as Arm64DecodeRateError;
+        }
+      };
+
+      it("says the image declares CHPE metadata when it does", () => {
+        const err = refuse(0x140020000);
+        expect(err?.chpeMetadataPointer).toBe(0x140020000);
+        expect(err?.message).toContain("declares CHPE metadata");
+        // The value itself, so the claim can be checked against the file.
+        expect(err?.message).toContain("0x140020000");
+        // And it names which hybrid, which the rate alone cannot: this sweep is
+        // only reached for an image marked ARM64.
+        expect(err?.message).toContain("ARM64X");
+      });
+
+      it("keeps the rate-only wording for an image that declares none", () => {
+        // Zero is "the field is present and the image is not hybrid" — a real
+        // answer, and not the same as not knowing. Neither says CHPE.
+        expect(refuse(0)?.message).not.toContain("CHPE");
+        expect(refuse(undefined)?.message).not.toContain("CHPE");
+      });
+
+      it("throws on the same condition whatever the pointer says", () => {
+        // Prose only. The field must not be able to refuse a section the rate
+        // accepts, or accept one the rate refuses — which is what makes a wrong
+        // CHPE reading harmless here, unlike in `archForMachine` (peek-a-bin-7p5t).
+        const at = Math.ceil(WORDS * ARM64_MIN_DECODE_FRACTION);
+        for (const chpe of [undefined, 0, 0x140020000]) {
+          expect(
+            disassembleArm64(new Uint8Array(BYTES), BASE, ctx(fakeCs(partial(at)), chpe)),
+          ).toHaveLength(at);
+        }
+      });
+
+      it("reports the same rate either way", () => {
+        expect(refuse(0x140020000)?.decoded).toBe(refuse(undefined)?.decoded);
+        expect(refuse(0x140020000)?.words).toBe(refuse(undefined)?.words);
+      });
     });
 
     it("leaves the real ARM64 rate a long way clear of the floor", () => {
@@ -1167,7 +1235,7 @@ describe("Arm64SweepCache", () => {
   });
 
   it("stores nothing when the section fails the decode-rate floor", () => {
-    // The ARM64EC/ARM64X refusal must not become a cached empty answer: every
+    // The hybrid-image refusal must not become a cached empty answer: every
     // ask has to throw, not just the first one (peek-a-bin-2t1).
     const cs = fakeCs(code(1, 400));
     const cache = new Arm64SweepCache();
@@ -1175,6 +1243,30 @@ describe("Arm64SweepCache", () => {
 
     expect(() => cache.sweep(bytes, BASE, cs)).toThrow(Arm64DecodeRateError);
     expect(() => cache.sweep(bytes, BASE, cs)).toThrow(Arm64DecodeRateError);
+  });
+
+  it("does not put the CHPE pointer in the key, and forwards it to a refusal", () => {
+    // The decode is a function of the bytes, the load address and the decoder
+    // and of nothing else, so adding a fourth argument for a *message* must not
+    // be able to cause a miss — that would make one file's prose cost another
+    // file's sweep (peek-a-bin-3ucw).
+    const cs = fakeCs(code(8));
+    const cache = new Arm64SweepCache();
+    const bytes = section(32, 0x11);
+
+    const first = cache.sweep(bytes, BASE, cs, undefined);
+    const callsAfterFirst = cs.calls.length;
+    expect(cache.sweep(bytes, BASE, cs, 0x140020000)).toBe(first);
+    expect(cs.calls.length).toBe(callsAfterFirst);
+
+    // And it still reaches the throw, which is the only thing that reads it.
+    const refusing = new Arm64SweepCache();
+    try {
+      refusing.sweep(section(0x2000, 0x22), BASE, fakeCs(code(1, 400)), 0x140020000);
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Arm64DecodeRateError).chpeMetadataPointer).toBe(0x140020000);
+    }
   });
 
   it("caches the decode, never the decoration", () => {
@@ -1584,6 +1676,44 @@ describe("archForMachine", () => {
     ["RISC-V 64 (0x5064)", 0x5064],
     ["MIPS R4000 (0x0166)", 0x0166],
   ])("reports %s as unsupported rather than as x86", (_label, machine) => {
+    expect(archForMachine(machine)).toBe("unsupported");
+    expect(isKnownMachine(machine)).toBe(false);
+  });
+
+  /**
+   * peek-a-bin-3ucw, and this is a *documentation* claim pinned as a test
+   * because no hybrid binary exists here to check it against.
+   *
+   * A final ARM64EC image is marked `IMAGE_FILE_MACHINE_AMD64`, and an ARM64X
+   * image is marked 0xAA64 by default and may be marked 0x8664 — so the two
+   * hybrids arrive on *different* arms of this function and only the ARM64-marked
+   * one is ever refused by `arm64.ts`'s decode rate. `arch.ts` carries the
+   * citations and says what the x86 arm costs. Nothing in the machine word
+   * distinguishes a hybrid image from an ordinary one; `CHPEMetadataPointer`
+   * does, and `archForMachine` deliberately does not read it.
+   */
+  it("sends a hybrid image wherever its machine word points, which is not always ARM64", () => {
+    // ARM64EC, and an ARM64X marked x64: the x86 arm, silently.
+    expect(archForMachine(IMAGE_FILE_MACHINE_AMD64)).toBe("x86");
+    // ARM64X in its default marking: the ARM64 arm, where the decode rate
+    // refuses it.
+    expect(archForMachine(IMAGE_FILE_MACHINE_ARM64)).toBe("arm64");
+  });
+
+  /**
+   * 0xA641 and 0xA64E are in the PE specification's machine table, but 0xA641 is
+   * an object/lib marker Microsoft calls "not a valid final PE machine type" and
+   * neither appears in a linked image's machine field. `"unsupported"` is
+   * therefore the honest answer and not a gap: this engine has no decoder for a
+   * word it has never seen in an image, and answering `"arm64"` for 0xA64E would
+   * claim to have recognised an image format nothing here can read.
+   *
+   * `pe/pdata.ts` does accept both, as a deliberate superset — see its docstring.
+   */
+  it.each([
+    ["ARM64EC object marker (0xA641)", 0xa641],
+    ["ARM64X (0xA64E)", 0xa64e],
+  ])("reports %s as unsupported, since no linked image carries it", (_label, machine) => {
     expect(archForMachine(machine)).toBe("unsupported");
     expect(isKnownMachine(machine)).toBe(false);
   });

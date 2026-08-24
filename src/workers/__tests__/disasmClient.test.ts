@@ -747,6 +747,33 @@ describe("DisasmWorkerClient — the architecture travels with the decode reques
 
     expect(worker.received[1].args.machine).toBe(ARM64_MACHINE);
   });
+
+  /**
+   * peek-a-bin-3ucw. `CHPEMetadataPointer` is read on the far side by exactly one
+   * thing — the ARM64 decode-rate refusal's message — so if the client drops it
+   * the narrowing is silently unreachable and every other test still passes.
+   * Unlike `machine` it rides on `configure` alone and is not on each request,
+   * because it decides nothing.
+   */
+  it("carries the CHPE metadata pointer on configure", async () => {
+    const { client, worker } = await loadClient();
+
+    void client.configure(new Map(), new Map(), {
+      machine: ARM64_MACHINE,
+      chpeMetadataPointer: 0x140020000,
+    });
+
+    expect(worker.received[0].method).toBe("configure");
+    expect(worker.received[0].args.chpeMetadataPointer).toBe(0x140020000);
+  });
+
+  it("sends no CHPE pointer for an image whose load config does not declare one", async () => {
+    const { client, worker } = await loadClient();
+
+    void client.configure(new Map(), new Map(), { machine: ARM64_MACHINE });
+
+    expect(worker.received[0].args.chpeMetadataPointer).toBeUndefined();
+  });
 });
 
 /**

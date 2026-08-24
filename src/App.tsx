@@ -313,6 +313,13 @@ export default function App() {
         // src/disasm/arch.ts. Sent on this first configure only; the later one
         // (strings arriving) leaves the worker's architecture alone.
         machine: pe.coffHeader.machine,
+        // Sent alongside it, and read on the far side only by the ARM64
+        // decode-rate refusal's message: a non-zero value is the format's own
+        // declaration that the image is hybrid, so the refusal can state that
+        // instead of inferring it. `undefined` — no load-config directory, or a
+        // structure too short to reach the field — is the ordinary case and
+        // produces exactly the message this threw before.
+        chpeMetadataPointer: pe.loadConfig?.chpeMetadataPointer,
       })
       .then(() =>
         disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {
