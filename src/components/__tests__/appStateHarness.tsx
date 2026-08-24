@@ -11,7 +11,7 @@ import { parsePE } from "../../pe/parser";
 import type { PEFile } from "../../pe/types";
 
 /**
- * Shared scaffolding for the dialog component tests.
+ * Shared scaffolding for the component tests.
  *
  * NOT itself a test file — the name sits outside vitest's `*.{test,spec}`
  * include glob on purpose, so this is imported rather than collected.
@@ -19,6 +19,14 @@ import type { PEFile } from "../../pe/types";
  * Every dialog covered by those suites reads {@link ../../hooks/usePEFile}'s two
  * contexts and nothing else — none of them touches `workers/disasmClient`. So a
  * provider pair plus a state object is the whole harness.
+ *
+ * {@link AppHarness} is now shared beyond the dialogs:
+ * `DisassemblyPanel.dom.test.tsx` mounts the real `DisassemblyView` inside it.
+ * That suite needs a LIVE reducer rather than a `vi.fn()` — the view's behaviour
+ * is a loop through state — and a code-bearing PE that `harnessPE` does not
+ * build, so it supplies both itself and reuses only the provider pair. Keeping
+ * that one piece shared is the point: two spellings of the provider nesting are
+ * two things that can come to disagree about which context wraps which.
  *
  * That last point used to be load-bearing and is now only descriptive:
  * `disasmClient.ts` built its `Worker` at module scope, so importing it threw

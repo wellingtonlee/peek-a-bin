@@ -92,6 +92,102 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = function scrollIntoView() {};
 }
 
+/**
+ * jsdom implements no layout, so it ships **no `ResizeObserver` at all**
+ * (verified against jsdom 28: `typeof ResizeObserver` is `"undefined"`, and
+ * `new ResizeObserver(...)` throws `ResizeObserver is not defined`).
+ *
+ * Three components in the disassembly panel construct one from an effect —
+ * `Breadcrumbs`, `DisassemblyMinimap` and, indirectly, `@tanstack/react-virtual`
+ * via its default `observeElementRect` — and a throw inside a `useEffect` tears
+ * the whole tree down. So without this the populated panel cannot be mounted at
+ * all, for a reason that has nothing to do with any behaviour under test.
+ *
+ * IT NEVER OBSERVES ANYTHING AND IT NEVER FIRES. `observe`, `unobserve` and
+ * `disconnect` are no-ops and the callback is retained only so the shape is
+ * right. That is the honest thing for it to be: jsdom has no layout, so there
+ * is no resize to report and any callback invocation here would be inventing
+ * one. A component that only paints on resize therefore paints once, at mount,
+ * and never again — see the note in `DisassemblyView.dom.test.tsx` about what
+ * the minimap and the breadcrumb fades are and are not covered by.
+ *
+ * WHAT THIS BUYS, EXACTLY: the components' own mount effects run to completion.
+ * It buys **nothing** about sizing, overflow, fade indicators, or whether the
+ * minimap's canvas is the right shape — every one of those is a layout question
+ * jsdom cannot answer.
+ */
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    // No constructor: the callback is accepted and dropped, because this never
+    // fires. Declaring one only to ignore its argument is a Biome warning.
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  };
+}
+
+/**
+ * OPT-IN, and the only thing here that is not installed automatically.
+ *
+ * `@tanstack/react-virtual` renders nothing at all unless its scroll container
+ * reports a non-zero size: `virtual-core@3.13.18` computes its range as
+ * `measurements.length > 0 && outerSize > 0 ? calculateRange(...) : null`, and
+ * `outerSize` comes from one read of the scroll element's `offsetHeight`, taken
+ * when `observeElementRect` subscribes (`getRect` there is
+ * `({ offsetWidth, offsetHeight })` — NOT `getBoundingClientRect`, which is the
+ * obvious guess and the wrong one). jsdom does no layout, so every
+ * rect there is all-zero and a virtualized list renders **zero rows** — not a
+ * short list, an empty one.
+ *
+ * Call this at the TOP LEVEL of a suite that mounts a virtualized list, before
+ * anything renders. It defines `offsetHeight`/`offsetWidth`,
+ * `clientHeight`/`clientWidth` and `getBoundingClientRect` on
+ * `HTMLElement.prototype` — the four things the disassembly panel reads, kept
+ * consistent with each other so no consumer can see two different worlds — for
+ * that file only — vitest gives each test file its own jsdom environment
+ * and its own prototypes, so nothing leaks into another suite. It is not
+ * installed by default precisely because a world in which every element is
+ * {@link height} tall is a lie that most suites have no need of.
+ *
+ * WHAT THIS BUYS, EXACTLY: the virtualizer computes a range, so rows exist in
+ * the document and can be asserted on.
+ *
+ * WHAT IT DOES NOT BUY, AND THIS IS THE IMPORTANT HALF: **it does not make
+ * virtualization real.** Every element reports the same rect, `scrollTop` stays
+ * 0 because jsdom implements no scrolling, and the stub `ResizeObserver` above
+ * never fires — so the range is computed once, from offset 0, and never moves.
+ * Which rows are windowed in, whether `overscan` is right, whether
+ * `scrollToIndex` puts the cursor on screen, and whether anything is *visible*
+ * are all layout questions that stay unanswered. A row being in the document
+ * here is not a row being on screen.
+ */
+export function stubLayoutRect({ height, width = 1200 }: { height: number; width?: number }): void {
+  for (const [prop, value] of [
+    ["offsetHeight", height],
+    ["offsetWidth", width],
+    ["clientHeight", height],
+    ["clientWidth", width],
+  ] as const) {
+    Object.defineProperty(HTMLElement.prototype, prop, { configurable: true, get: () => value });
+  }
+  Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+    configurable: true,
+    writable: true,
+    value: (): DOMRect =>
+      ({
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: width,
+        bottom: height,
+        width,
+        height,
+        toJSON: () => ({}),
+      }) as DOMRect,
+  });
+}
+
 beforeEach(() => {
   // The scroll lock writes inline styles onto <body> and restores what it
   // found. Start every test from the same place, so one leaking test cannot
