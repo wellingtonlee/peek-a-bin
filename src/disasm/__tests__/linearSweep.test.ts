@@ -7,11 +7,15 @@
  * sweep says about a byte the decoder refused, and what the memo's key does and
  * does not consider.
  *
- * The gap question is the one that could go wrong silently. `detectFunctions`'
- * padding heuristic reads "was the previous instruction unconditional", and the
- * loop this replaced answered it by watching for an empty decode; a flat array
- * has to answer it from `address` and `size` instead. So the sweep must leave a
- * gap where one exists, rather than presenting a contiguous stream.
+ * The gap question is the one that could go wrong silently. The loops this
+ * replaced answered "is the next instruction adjacent" by watching for an empty
+ * decode; a flat array has to answer it from `address` and `size` instead, so
+ * the sweep must leave a gap where one exists rather than presenting a
+ * contiguous stream. Its live consumer is `gridScan`, which stops serving a run
+ * where the grid stops being contiguous — a byte the decoder refused is exactly
+ * where `cs_disasm` would stop too. (`detectFunctions`' `prevWasUnconditional`
+ * heuristic was the original consumer and is gone: peek-a-bin-7lue found it
+ * subsumed by the call branch and measurably wrong to revive.)
  */
 
 import { describe, expect, it } from "vitest";
@@ -75,8 +79,8 @@ describe("sweepX86", () => {
   });
 
   it("skips a byte the decoder refuses, and leaves the gap visible", () => {
-    // The property `detectFunctions` reads off the array: two elements are
-    // adjacent in the image only when `address === prev.address + prev.size`.
+    // The property `gridScan` reads off the array: two elements are adjacent in
+    // the image only when `address === prev.address + prev.size`.
     const insns = sweepX86(new Uint8Array([1, 0xff, 3]), BASE, byteDecoder(), "t");
 
     expect(insns.map((i) => i.address)).toEqual([BASE, BASE + 2]);

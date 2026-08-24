@@ -1950,6 +1950,16 @@ export function detectFunctions(
    * `f3b89ec` — among them 0x4058A6 and 0x4063B8, the two the fourth admission
    * withdraws and whose handler entries CLAUDE.md quotes — each of which cuts
    * its parent in half again. That is peek-a-bin-g7yp (peek-a-bin-d827).
+   *
+   * **The same refusal applies to "a call target whose predecessor is a
+   * terminator", and there the cost is larger.** The sweep used to note that
+   * shape (`prevWasUnconditional`) and the obvious thing to do with it is to
+   * promote such a start here. At `11408ac` it names **15 of t32's 33 and 13 of
+   * w32's 32** withdrawn starts, a superset of the 9 and 7 above: a `__finally`
+   * funclet sits at its parent's tail, so "call target after a `ret`" is a
+   * *description of the withdrawn population* rather than evidence against
+   * withdrawing it. See the `callTargets` docstring for the full census and why
+   * the heuristic was deleted rather than given a reader (peek-a-bin-7lue).
    */
   const strongStarts = new Set<number>();
 
@@ -2167,6 +2177,39 @@ export function detectFunctions(
   }
 
   // Call target collection
+  /**
+   * Every in-section target of a direct `call`.
+   *
+   * **A membership here always implies membership in `addrSet`, and that is what
+   * retired the sweep's `prevWasUnconditional` heuristic (peek-a-bin-7lue).**
+   * The call branch below adds the target to `addrSet` on the line *before* it
+   * adds it here, `addrSet` is never deleted from, and this is that set's only
+   * writer — so "a call target immediately after a `ret`/`jmp` is a function
+   * start" had nothing left to contribute. It was a guard reading
+   * `prevWasUnconditional && callTargets.has(insn.address)` and adding an
+   * address that was already there: measured at `11408ac` it fires 156/34/35/146
+   * times on t32/t64/w64/w32 and adds a new address **0** times on all four.
+   *
+   * **Do not revive it as evidence of a STRONGER kind either — that is measured,
+   * and it points the other way.** The tempting reading is that a call target
+   * whose predecessor is a terminator is a start nothing may withdraw, i.e. a
+   * `strongStarts` member. It is the opposite: an MSVC x86 `__finally` funclet is
+   * a call target emitted at the tail of its own parent, so "call target after a
+   * `ret`" describes precisely the population {@link interiorBranchedOverStarts}
+   * exists to fold back in. At `11408ac` the retired guard names **15 of t32's 33
+   * and 13 of w32's 32** withdrawn starts, every one with exactly one direct
+   * caller, 0x4058A6 and 0x40BEBA / 0x4050F4 among them — the very addresses the
+   * `strongStarts` docstring names as its counterexample. Promoting them would
+   * re-cut those parents in half, worse than the 9 and 7 that docstring already
+   * measures and refuses. 3 per 32-bit binary were named on a preceding `jmp`,
+   * which is the ambiguous evidence `interiorBranchedOverStarts` admits only when
+   * the boundary is *unreached* — false by construction for a call target.
+   *
+   * The heuristic's own phrasing was also wrong about the machine: control does
+   * not fall through a `ret` or a `jmp`, so what it read was *layout* adjacency
+   * plus a terminator, i.e. "nothing falls into this address" — a funclet at its
+   * parent's tail exactly.
+   */
   const callTargets = new Set<number>();
   /**
    * Where each direct `call` came from, keyed by its target.
@@ -2267,33 +2310,7 @@ export function detectFunctions(
     ? []
     : ["call-targets", "jump-tables", "thunk-names", "tail-calls"];
   if (cs) {
-    let prevWasUnconditional = false;
     const recentInsns: StackInsn[] = [];
-    /**
-     * End address of the previous decoded instruction, so a gap is visible.
-     *
-     * The sweep drops every byte the decoder refused, so two adjacent elements
-     * of its array are not necessarily adjacent in the image, and the loop this
-     * replaced answered that by watching for an empty decode — it reset
-     * `prevWasUnconditional` there. Preserved here so the refactor is
-     * behaviour-preserving *by construction* rather than only on the images it
-     * was differentially checked against. `-1` before the first instruction,
-     * which no address can equal, so the first one correctly has no predecessor.
-     *
-     * **It is unfalsifiable from outside, because the one reader of
-     * `prevWasUnconditional` is provably inert.** That reader adds
-     * `insn.address` to `addrSet` when it is a known call target — and the call
-     * branch above puts every in-section call target into `addrSet` on the line
-     * before it puts it into `callTargets`, so `callTargets` is a subset of
-     * `addrSet` and the add can never be new. Measured as well as argued: over
-     * t32/t64/w32/w64 and a 669 KiB-`.text` `go` image the guard fires 156, 34,
-     * 146, 35 and 1 times and adds a new address **0** times, and dropping this
-     * reset leaves every `DetectResult` in that set byte-identical. So no test
-     * can pin it (see `linearSweep.test.ts`, which pins the sweep's side of the
-     * contract instead — that a gap is visible at all) and the subsumed
-     * heuristic is peek-a-bin-7lue, not something to delete in passing.
-     */
-    let prevEnd = -1;
     // One sweep, shared with `buildAllXrefs`; see ./linearSweep.ts for why the
     // two loops that used to do this separately were provably the same loop,
     // and for what the memo holds.
@@ -2301,8 +2318,6 @@ export function detectFunctions(
       ? sweepCache.sweep(bytes, baseAddress, cs, "function detection")
       : sweepX86(bytes, baseAddress, cs, "function detection");
     for (const insn of swept) {
-      if (insn.address !== prevEnd) prevWasUnconditional = false;
-      prevEnd = insn.address + insn.size;
       if (insn.mnemonic === "call") {
         const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
         if (m) {
@@ -2326,10 +2341,6 @@ export function detectFunctions(
           }
         }
       }
-      if (prevWasUnconditional && callTargets.has(insn.address)) {
-        addrSet.add(insn.address);
-      }
-
       // A deferred base is settled by the sweep walking onto it. The list is
       // address-monotone with the sweep, so an instruction starting at or
       // after a pending base is proof no instruction can still contain it:
@@ -2398,8 +2409,6 @@ export function detectFunctions(
         }
       }
 
-      const mn = insn.mnemonic;
-      prevWasUnconditional = mn === "ret" || mn === "retn" || mn === "jmp";
       // Copied rather than pushed by reference: the sweep's elements may be a
       // memo entry shared with `buildAllXrefs`, and this window is handed to
       // the table readers. A copy costs one small object and makes it
