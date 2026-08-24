@@ -40,6 +40,32 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   const visiblePanels = panels.filter((p) => p.visible);
   const [height, setHeight] = useState(loadHeight);
   const [activeTab, setActiveTab] = useState<string>("");
+  /**
+   * Which panels are floating, and where. **DELIBERATELY NOT PRUNED when a
+   * panel stops being visible** — a floating panel that is closed and later
+   * reopened comes back FLOATING, at the place the user left it, rather than
+   * docked. That was found by the first render of this component and looked
+   * like an oversight; it is not, and this docstring is the statement that was
+   * missing.
+   *
+   * The argument for keeping it: floating is a choice the user made about that
+   * panel, and closing a panel is not withdrawing it. Discarding the geometry
+   * on close would mean a user who works with the Xrefs panel floating in a
+   * particular corner re-floats it and re-places it every time they close it,
+   * and the only signal for doing that would be that the panel went away —
+   * which is the ordinary way to finish with one. The docked height gets the
+   * same treatment one step further, being persisted to localStorage.
+   *
+   * Why it is not a leak: the keys are the panel ids, which are three string
+   * literals at the single mount site in `DisassemblyView.tsx` ("calls",
+   * "detail", "xrefs"), so the map is bounded at three entries and holds four
+   * numbers each. Pruning would buy nothing back.
+   *
+   * The one edge it does own: a stored `x`/`y` can be off-screen if the window
+   * shrank while the panel was closed. That is the same exposure as dragging a
+   * floating panel off-screen, which nothing clamps either, and it belongs to
+   * the clamp rather than to pruning.
+   */
   const [poppedOut, setPoppedOut] = useState<Map<string, FloatingState>>(new Map());
 
   // Set activeTab to first visible if current is gone.

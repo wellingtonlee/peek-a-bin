@@ -273,11 +273,20 @@ describe("BottomPanelContainer", () => {
     });
 
     /**
-     * PINS CURRENT BEHAVIOUR. `poppedOut` is never pruned when a panel stops
-     * being visible, so a floating panel that is closed and later reopened comes
-     * back FLOATING, at the same place, rather than docked. That reads as
-     * intentional stickiness rather than a defect, but it is a decision nothing
-     * states, so it is pinned here.
+     * WAS A PIN, NOW A SPECIFICATION — and the change is entirely in the
+     * writing. `poppedOut` is not pruned when a panel stops being visible, so a
+     * floating panel closed and later reopened comes back FLOATING at the place
+     * the user left it. That was pinned as odd-but-harmless only because
+     * nothing in the source said it was meant; it now says so, at `poppedOut`'s
+     * declaration in `BottomPanelContainer.tsx`, and this test asserts the
+     * intent rather than recording a shrug.
+     *
+     * The behaviour was RE-ARGUED before being kept, not kept by default:
+     * floating is a choice the user made about that panel and closing it is not
+     * withdrawing that choice, the docked height is persisted one step further
+     * still (to localStorage), and the map cannot grow — its keys are the three
+     * panel-id literals at the single mount site, so it is bounded at three
+     * entries.
      */
     it("remembers that a panel was floating across a close and a reopen", () => {
       const { rerender } = render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
