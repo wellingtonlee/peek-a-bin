@@ -81,7 +81,10 @@ tree's dependency versions; one agent this session also reported a `npm run corp
 a *sibling* worktree before it noticed, and discarded that run. The remedy either way is one line
 before any gate: `npm ci` in the worktree, or symlink the main tree's `node_modules` into it. The
 corpus config is not itself at risk — its `include` is anchored at `corpus/**`, so a run from the
-repo root does not sweep the worktrees the way the default config does.
+repo root does not sweep the worktrees the way the default config does. **Create worktrees yourself rather than
+letting the tool place them, and note the symlink shares ONE `node_modules` across every
+worktree that uses it — see "Working in parallel" below for the recipe and for what that
+sharing forbids.**
 
 **Biome** (`biome.json`) is the linter/formatter. All seven configured `a11y` rules,
 `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` are at **`error`** —
@@ -1886,6 +1889,82 @@ assert the property (`peek-a-bin-l1f`).
 - **`fold.ts` has a `castTypeSize` helper** for double-cast removal. Uses regex to extract bit width from type strings like `int32_t`.
 - **`cleanup.ts`** runs after `structureCFG`, before `inferTypes`. Guard clause flattening is single-level only (not recursive inversion).
 - **`StructRegistry`** persists across decompilation calls in the worker — don't clear it between functions in the same session.
+
+## Working in parallel — use subagents, and how
+
+**Default to farming independent work out to subagents.** This project's changes are
+mostly self-contained — one bead, one measurement, one audit — and each carries a large
+reading cost (`CLAUDE.md` alone, plus a bead's notes, plus the module) that does not need
+to land in the integrator's context. Sessions 6, 9 and 21 each ran three or four agents in
+parallel and cleanly. Session 21 is the worked example: four agents produced a React
+renderer, a 3x decode change, a rebuilt instrument and a documentation audit, and the
+integrator's own context stayed free for reviewing them.
+
+**Reach for one when** the task is a whole bead; a measurement with a stated method; a
+read-heavy audit whose answer is a paragraph and whose *inputs* are hundreds of files; or
+anything you would otherwise do by reading a module you do not already have in context.
+**Do it yourself when** it is a single fact you know where to find, when the work needs the
+integrated tree (integration itself is not delegable), or when briefing would cost more
+than doing — a good brief for this repo runs to a page, because the traps have to be named.
+
+### Give each agent its own worktree, and make it its own
+
+Tool-created worktrees land *inside* the working tree and arrive with no `node_modules` —
+see the paragraph under **Commands** for what that breaks. Create them yourself instead:
+
+```sh
+git worktree add /tmp/pab-wt/NAME -b sNN-NAME <HEAD_SHA>
+ln -sfn /home/taylor/dev/peek-a-bin/node_modules /tmp/pab-wt/NAME/node_modules
+mkdir -p /tmp/pab-wt/NAME/.scratch
+```
+
+- **The symlink means every such worktree SHARES one `node_modules` with the main tree.**
+  Fine for reading; **not** fine for a task that changes `package.json`. An `npm install`
+  there rewrites the shared tree under every sibling agent, and can invalidate a timing
+  measurement one of them is in the middle of taking. For dependency-changing work give
+  that agent a real `npm ci` in its own worktree (~90 s, 333 packages) and tell the others
+  the shared tree is read-only. Session 21 held an `npm install` back until the last
+  measuring agent finished, and checked with `ps` rather than guessing.
+- **Scratch goes in `<worktree>/.scratch/`, never a bare `/tmp/<name>`.** In session 5 one
+  agent's control backup was clobbered mid-run by a sibling using the same filename.
+- **Tell each agent to print `git rev-parse --short HEAD` first and stop if it is wrong.**
+- Remove the worktrees at session close; keep the branches as provenance.
+
+### What every brief needs
+
+- **The gate commands, including the traps** — `npm run check` must not be piped (it
+  truncates before the summary and `tail`'s exit status masks the real one), and `npm run
+  corpus` **skips cleanly and still exits 0** with no corpus directory, so the brief must
+  say "confirm the header names FOUR binaries".
+- **What byte-identical output would mean.** For a pure-performance change it is the whole
+  case, and saying so up front is what stops an agent accepting a diff it should have
+  chased.
+- **Negative controls, asked for explicitly.** This repo has repeatedly found *inert*
+  controls — session 21 alone produced four, in three different agents. A control that does
+  not discriminate is a test that is not testing, and the brief should say to report an
+  inert one rather than quietly tune it away.
+- **"A measured refusal is a fine outcome."** Say it. Two of session 21's best results were
+  an agent declining to land a change and explaining why.
+- **Read-only means read-only.** An audit agent running beside editors must be told not to
+  edit, commit, or touch the tracker, and to hand back a report — otherwise two agents
+  rewrite the same file.
+
+### Integrating
+
+- **Do not take an agent's results at face value.** Re-derive the load-bearing ones: they
+  are cheap next to the work of producing them. In session 21 that meant re-running the
+  corpus comparison, re-checking `structuredClone`'s buffer dedup in `node`, and confirming
+  the documentation findings against the file — all three held, which is what made the rest
+  believable.
+- **Several agents will all touch `CLAUDE.md` and `CHANGELOG.md`.** Cherry-pick in order;
+  `CLAUDE.md` normally auto-merges if each agent stayed in its own sections, and the
+  `CHANGELOG.md` conflict is two additions under one heading — **keep both, newest
+  timestamp first**.
+- **Run the full gate set on the INTEGRATED tree**, not just per branch. Each agent's run
+  was against its own base; only the combination is what ships.
+- **Pin a baseline before the agents start.** One `npm run corpus` on the session's base
+  commit, kept under its own label, is what every later comparison is made against. Note
+  `corpus/compare.mjs` takes **paths**, not labels: `corpus/artifacts/<label>`.
 
 ## Gates
 
