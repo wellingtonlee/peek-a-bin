@@ -154,6 +154,36 @@ describe("pe://{fileId}/imports", () => {
     expect(addrs[0]).toBeGreaterThan(IMAGE_BASE);
     expect(addrs[1] - addrs[0]).toBe(8);
   });
+
+  it("names an ordinal the tables cover, and keeps the ordinal beside it", async () => {
+    // The same `resolveOrdinal` the Imports tab and `computeImphash` use, so no
+    // two surfaces of this tool can disagree about what ws2_32!115 is. The
+    // ordinal is carried rather than folded away: the name is INFERRED FROM A
+    // TABLE, not read out of the file, and an import by ordinal is a different
+    // fact about a binary from an import by name.
+    const pe = parsePE(
+      buildMinimalPE64({
+        directories: {
+          imports: [
+            { libraryName: "WS2_32.dll", functions: [{ ordinal: 115 }, { ordinal: 60000 }] },
+          ],
+        },
+      }),
+    );
+    const { session } = stubSession({ pe } as never);
+    const imports = (await body(
+      captureResources(session).get("pe-imports")!,
+      "imports",
+    )) as unknown as { functions: { name: string; ordinal?: number }[] }[];
+
+    expect(imports[0].functions[0]).toMatchObject({ name: "WSAStartup", ordinal: 115 });
+    // The control, in the same library: ws2_32 has no 60000, so a rule that
+    // invented a name for every ordinal would fail here and one that resolved
+    // nothing would fail above. An unresolved entry reports no `ordinal` at all,
+    // exactly as the tab shows no `#n` for it.
+    expect(imports[0].functions[1].name).toBe("Ordinal_60000");
+    expect(imports[0].functions[1].ordinal).toBeUndefined();
+  });
 });
 
 describe("pe://{fileId}/exports", () => {

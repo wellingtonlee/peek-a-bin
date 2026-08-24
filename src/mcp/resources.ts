@@ -6,6 +6,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { parseOrdinalImport, resolveOrdinal } from "../pe/ordinalTables";
 import type { AnalyzedFile, FileSession } from "./session";
 
 type ResourceResult = {
@@ -108,8 +109,21 @@ export function registerResources(server: McpServer, session: FileSession): void
             // Which call sites actually use this import. The browser's Imports
             // tab has shown this since it existed; here the map was never built.
             const refs = iatAddr !== undefined ? (af.importXrefs.get(iatAddr) ?? []) : [];
+            // An ordinal-only import is named where pefile's `ordlookup` covers
+            // it, through the SAME `resolveOrdinal` the Imports tab and
+            // `computeImphash` use — one lookup, so no two surfaces of this tool
+            // can disagree about what ws2_32!115 is. `ordinal` is carried beside
+            // it rather than folded away: the resolved name is inferred from a
+            // table and not read out of the file, and a consumer that wants the
+            // raw fact (an import by ordinal and one by name are different facts
+            // about a binary) must still be able to get it. An ordinal the
+            // tables do not cover keeps its `Ordinal_<n>` spelling and reports
+            // no `ordinal`, exactly as the tab shows no `#n` for it.
+            const ord = parseOrdinalImport(fn);
+            const resolved = ord === null ? undefined : resolveOrdinal(imp.libraryName, ord);
             return {
-              name: fn,
+              name: resolved ?? fn,
+              ordinal: resolved ? ord : undefined,
               iatAddress: iatAddr !== undefined ? hex(iatAddr) : undefined,
               xrefCount: refs.length,
               xrefs: refs.map(hex),
