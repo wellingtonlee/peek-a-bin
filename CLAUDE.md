@@ -817,12 +817,26 @@ read "all of them compile" as "all of them are right".
   the real `dispatch` — **and nothing has watched any of it cross a real `postMessage`**. The
   build cost is measured only on ~108 KB binaries; a large image is extrapolation. The emitted-C
   effect is measured on the **MCP path** (`FileSession`), not the browser path.
-- **The request watchdog's terminal state has never fired and cannot be made to fire here.**
-  `"timed-out"` is fixture-verified throughout — the minted error class, `analysisRejection`, the
-  notice's rank, its `isFault`, its empty `unavailableTabs` — but no file on this machine is large
-  enough to provoke it (`find / -xdev` for PEs over 2 MB finds nothing, against the ~200 MiB of
-  *code* required). The banner, the status-bar label and the empty-panel case are verified by
-  typecheck, pure tests and reading.
+- **The request watchdog's terminal state HAS now fired, end to end — but never on a real file,
+  and that distinction is the whole of what is still unverified.** The claim here used to be that
+  it "cannot be made to fire here", on the evidence that provoking it needs ~200 MiB of *code* and
+  `find / -xdev` finds no PE over 2 MB on this machine. **That is true of the FILE route and only
+  of it**: `REQUEST_TIMEOUT_MS` is a module constant, so `src/__tests__/App.dom.test.tsx` mocks the
+  budget down to 500 ms — `importActual` and a spread, never a hand-written stub, because
+  `analysisRejection` decides on `err instanceof WorkerTimeoutError` and a lost class identity
+  would make the test prove the opposite of what it claims — leaves `detectFunctions` unanswered,
+  and drives the real `App`, the real client watchdog and the real notice. Three cases: the banner
+  is **red** and spells the budget from the constant rather than hardcoding it; it withholds **no**
+  tab (the `"Still available:"` sentence is absent, which is what `unavailableTabs: []` is for
+  where `buildAllXrefs` is the last stage); and it does **not** say the analysis failed. Three
+  controls, all discriminating — report a timeout as `"failed"` (which reproduces
+  `peek-a-bin-meai`'s defect verbatim: `ANALYSIS FAILED / Analysis failed: … timed out`), give the
+  kind a non-empty `unavailableTabs`, hardcode the budget words. **`App.tsx`'s own catch says
+  "nothing here can be reached by a test, which is why the decision is a pure function elsewhere"
+  — the pure function was the right call and the comment's premise is now false.** What remains
+  unverified is the thing the old sentence was really about: **no real image has ever taken this
+  path**, so the budget's calibration against a genuinely slow stage is still extrapolation, and
+  the status-bar label and empty-panel case remain verified by typecheck, pure tests and reading.
 - **Render COUNT is measured; render COST is not.** Exactly two full-tree renders per cursor
   *move*, for every context consumer, measured against the real `DisassemblyView` and
   negative-controlled. Whether two renders of a virtualized list and a dagre-laid-out graph is

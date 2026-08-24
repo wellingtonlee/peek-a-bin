@@ -5,10 +5,44 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { PARSER_DERIVED_TABS, VIEW_TAB_LABELS } from "../components/analysisNotice";
+import {
+  PARSER_DERIVED_TABS,
+  timeoutBudgetInWords,
+  VIEW_TAB_LABELS,
+} from "../components/analysisNotice";
 import { VIEW_TABS } from "../hooks/usePEFile";
 import { buildMinimalPE64 } from "../pe/__tests__/fixtures";
 import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../pe/constants";
+import { REQUEST_TIMEOUT_MS } from "../workers/requestTimeout";
+
+/**
+ * THE WATCHDOG BUDGET, SHORTENED — the one mock in this file, and the reason it
+ * is worth one.
+ *
+ * `docs/verification.md` records that `"timed-out"` "has never fired and cannot
+ * be made to fire here", on the evidence that provoking it needs ~200 MiB of
+ * code and no such file exists on this machine. That is true of the *file* route
+ * and only of it: the budget is a module constant, so replacing it reaches the
+ * same code path in milliseconds. `App.tsx`'s own catch says "nothing here can
+ * be reached by a test, which is why the decision is a pure function elsewhere"
+ * — the pure function was the right call, and the catch is reachable after all.
+ *
+ * `importActual` and a spread, never a hand-written stub: `analysisRejection`
+ * decides on `err instanceof WorkerTimeoutError`, so the class must keep its
+ * identity or the test would prove a timeout is reported as a *failure* while
+ * appearing to prove the opposite. Only the number changes.
+ *
+ * The other cases are unaffected — every stubbed reply below lands on a
+ * microtask, orders of magnitude inside even this budget.
+ */
+vi.mock("../workers/requestTimeout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workers/requestTimeout")>()),
+  // 500 ms rather than something smaller: `timeoutBudgetInWords` rounds to
+  // whole seconds, so a sub-second budget spells itself "0-minute" and the
+  // derivation assertion below would be checking a string nobody would notice
+  // was wrong. At 500 ms it reads "1-second", which is distinctive.
+  REQUEST_TIMEOUT_MS: 500,
+}));
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -64,6 +98,12 @@ const posted: PostedRequest[] = [];
 let initFails = false;
 
 /**
+ * Whether `detectFunctions` is left unanswered — a worker wedged in a
+ * multi-minute stage, which is what the watchdog exists for.
+ */
+let stallDetect = false;
+
+/**
  * Stands in for `disasm.worker.ts`.
  *
  * Replies on a microtask, not synchronously: a real reply arrives in a later
@@ -92,6 +132,16 @@ class FakeDisasmWorker {
       }
       if (msg.method === "extractStrings") {
         reply({ id: msg.id, result: { strings: [], stringTypes: [] } });
+        return;
+      }
+      if (msg.method === "configure") {
+        reply({ id: msg.id, result: undefined });
+        return;
+      }
+      if (msg.method === "detectFunctions" && stallDetect) {
+        // No reply at all. Not an error reply: an error is a *different* event,
+        // and the whole point of `peek-a-bin-meai` is that the two had been
+        // reported to the user identically.
         return;
       }
       // Anything else is a request this file did not intend to provoke. It is
@@ -142,6 +192,7 @@ function notice(): HTMLElement | null {
 beforeEach(() => {
   posted.length = 0;
   initFails = false;
+  stallDetect = false;
   vi.stubGlobal("Worker", FakeDisasmWorker);
   // `handleFile` calls `saveRecentFile`, which opens IndexedDB. jsdom 28 does
   // not implement it and `fake-indexeddb` is not a dependency here, so the
@@ -375,5 +426,100 @@ describe("the tab bar routes", () => {
     // finding. One assertion turns the incidental render into a real one.
     const shown = panes().find((el) => el.className === "h-full");
     expect(shown?.textContent).toContain(".rsrc");
+  });
+});
+
+describe("a stalled stage is reported as timed out, not as a failed analysis", () => {
+  /**
+   * THIS IS THE FIRST TIME THE WATCHDOG'S TERMINAL STATE HAS FIRED ANYWHERE IN
+   * THIS REPO. Everything about `"timed-out"` was fixture-verified — the minted
+   * error class, `analysisRejection`, the notice's rank, its `isFault`, its
+   * empty `unavailableTabs` — with the banner itself verified "by typecheck,
+   * pure tests and reading". Here the real `App`, the real client watchdog and
+   * the real notice produce it end to end, with a `.text` section present so
+   * detection actually starts and a worker that never answers it.
+   */
+  const codePE = () => buildMinimalPE64();
+
+  it("renders the timeout banner in red, with the budget it actually used", async () => {
+    stallDetect = true;
+    render(<App />);
+    await openFile(codePE(), "big.exe");
+
+    const banner = await waitFor(
+      () => {
+        const n = notice();
+        if (!n) throw new Error("no notice yet");
+        if (!/timed out|took longer/i.test(n.textContent ?? "")) {
+          throw new Error("notice is not the timeout one yet: " + n.textContent);
+        }
+        return n;
+      },
+      { timeout: 4000 },
+    );
+
+    // `isFault: true` — a fault, but not a fault of the file, which is the whole
+    // distinction the kind exists to draw.
+    expect(banner.className).toContain("red");
+    expect(banner.className).not.toContain("amber");
+
+    // The budget is spelled from `REQUEST_TIMEOUT_MS` rather than written out,
+    // "so raising the budget cannot leave the banner claiming the old one".
+    // Asserted against the mocked constant, which is what makes it a test of
+    // the derivation rather than of the number.
+    expect(banner.textContent).toContain(timeoutBudgetInWords(REQUEST_TIMEOUT_MS));
+  });
+
+  it("withholds no tab, because a timeout can leave a full disassembly", async () => {
+    stallDetect = true;
+    render(<App />);
+    await openFile(codePE(), "big.exe");
+
+    const banner = await waitFor(
+      () => {
+        const n = notice();
+        if (!n) throw new Error("no notice yet");
+        if (!/timed out|took longer/i.test(n.textContent ?? "")) {
+          throw new Error("not the timeout notice yet");
+        }
+        return n;
+      },
+      { timeout: 4000 },
+    );
+
+    // `"analysis-timed-out"` is the ONE fault kind whose `unavailableTabs` is
+    // empty, and it is deliberate: `buildAllXrefs` is the last stage, so a
+    // timeout there routinely leaves a complete function list and disassembly
+    // with only the xrefs missing. Naming `DECODER_DERIVED_TABS` would print
+    // "Still available: everything else" over a fully populated panel. App
+    // renders that sentence only when something really is withheld, so its
+    // ABSENCE here is the assertion.
+    expect(banner.textContent).not.toContain("Still available:");
+  });
+
+  it("does not say the analysis failed", async () => {
+    stallDetect = true;
+    render(<App />);
+    await openFile(codePE(), "big.exe");
+
+    const banner = await waitFor(
+      () => {
+        const n = notice();
+        if (!n) throw new Error("no notice yet");
+        if (!/timed out|took longer/i.test(n.textContent ?? "")) {
+          throw new Error("not the timeout notice yet");
+        }
+        return n;
+      },
+      { timeout: 4000 },
+    );
+
+    // The control for the two above, and the defect peek-a-bin-meai fixed: this
+    // is exactly what a truncated file produces, and a user whose large image
+    // merely needed longer was being told the same thing. The timeout's message
+    // is also recorded VERBATIM, without the "Analysis failed: " prefix, or the
+    // notice interpolates those words into the sentence saying it did not fail.
+    expect(banner.textContent).not.toMatch(/analysis failed/i);
+    expect(banner.textContent).not.toMatch(/ANALYSIS FAILED/);
   });
 });
