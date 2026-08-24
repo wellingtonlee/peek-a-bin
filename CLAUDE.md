@@ -131,6 +131,10 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   promotion → struct synthesis → emission.
 - **`components/`** — the disassembly view is split across `DisassemblyView.tsx` (orchestration),
   `DisassemblyRows.tsx` (virtualized rows), `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`. All
+  `XrefPanel.tsx`'s `scopeAvailable()` is the one declaration of "has the caller given this panel
+  the address this scope needs", read by the filter chain *and* by the scope buttons, with
+  `effectiveScope` the thing everything on screen reads — `scopeMode` is the user's preference and
+  may outlive its address. All
   six dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
 - **`hooks/`** — state (`usePEFile`), derived state, rows, search. `useDisassemblyKeyboard.ts` and
@@ -988,7 +992,16 @@ read "all of them compile" as "all of them are right".
   re-reading of these facts.** `npm run corpus:jumptables -- <path>` is the landed census.
 - **The nginx headers and the CSP have never been exercised in a browser** — both are researched
   from code and build output.
-- **The a11y work has never met a screen reader.**
+- **The clipboard's absence has never been produced by a browser.** `copyText`'s branches, the four
+  red-flash sites and two of the fourteen silent ones are covered, but the absence is **manufactured
+  by replacing `navigator`** — a stand-in exactly like `domSetup.ts`'s `offsetParent` shim. Nine
+  unaffordanced sites and `CFGView`'s red/green branch have no test at all: reverting `HexView`'s
+  copy to the unguarded call moves no row, which was reported as an inert control rather than
+  papered over. Belongs in the `peek-a-bin-v2u` pass, over plain `http:` to a non-localhost host.
+- **The a11y work has never met a screen reader.** `XrefPanel` now carries `aria-label`s separating
+  its direction toggle from its "To" sort header — the two shared one accessible name — and states
+  sort direction in words rather than as a bare "▲" glyph, asserted through testing-library's name
+  computation, which is jsdom and not an assistive technology.
 - **MCP → browser WebSocket annotation sync has never been exercised end to end**, in particular
   since the 127.0.0.1 bind change.
 - **`@vitest/coverage-v8` is not installed**, so `npm run test:coverage` fails.
@@ -1235,6 +1248,47 @@ mistake.
 - **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf` / `rewriteBodies`, one declaration each.** `rewriteBodies` was a verbatim copy in `structure.ts` and `cleanup.ts` plus two specialisations under other names — four hand-synced `IRStmt` switches all ending in `default:`, so a new body-carrying kind would be returned unrecursed in every one, silently. Both now end in an exhaustive `never`. `for`'s `init` and `update` are single statements, not lists, so neither reaches inside them; a caller needing that wants `foldStmt`'s shape. (`peek-a-bin-svwt`)
 
 - **`+`, `-` and `*` do not model wraparound, and the const-const fold site has no width evidence to key one on.** `knownWidth` returns null for an `IRConst` deliberately — `IRConst.size` is the CPU *mode*, 8 for every immediate in a 64-bit binary, not the operand's width. Wrapping them with `| 0` / `Math.imul` the way the bitwise arms do **introduces** a defect: those go through `fold64`, these do not, so a correct 64-bit `add rax, 1` over the boundary becomes a negative constant. The class does not occur in this corpus and no gate can see either direction; `is64` is the only sound evidence and `fold.ts` deliberately imports only `ir.ts`. `fold.test.ts` carries `does not wrap an arithmetic fold to int32`. (`peek-a-bin-ivj5`)
+
+- **`navigator.clipboard` is a SECURE-CONTEXT API and this app has an HTTP deployment, so every
+  copy goes through `utils/clipboard.ts`'s `copyText`.** Over plain `http:` on anything but
+  localhost the whole `clipboard` object is absent from `navigator`, so
+  `navigator.clipboard.writeText(…)` is not a call that fails — it is a **TypeError at the property
+  access**, on click. At `09a160e` there were **18 unguarded sites across 9 files** and zero guards,
+  so on the nginx HTTP deployment every Copy affordance in the app was dead. One declaration, for
+  the `pe/sections.ts` reason. Four rules: the feature test names **`writeText`**, not `clipboard`,
+  since the object can be present with a partial surface; `writeText` is called **before the first
+  suspension**, so it stays inside the user gesture — an `await` above it fails in a browser while
+  every ordinary test still passes, and `clipboard.test.ts` asserts the ordering directly; it is
+  called **on** the clipboard object, never through a detached reference, which a native method
+  rejects with `Illegal invocation`; and it returns a **boolean**, never throws. The four sites with
+  a "Copied" tick flash **red** on `false` (`CopyFlash` carries the outcome, which is why
+  `copiedAddr` is not a bare address — the type change is what forces `DisassemblyRows` *and*
+  `CFGView` to be revisited together). **The other fourteen fail silently: the app has no toast
+  mechanism and one was not invented for a bug fix.** A `document.execCommand` fallback was **costed
+  and REFUSED** — deprecated, ~30 lines of selection choreography, a return value that has lied on
+  Safari, unreachable from the two Ctrl+C handlers, and untestable in jsdom, which has neither
+  `execCommand` nor a real `Selection`. **Two controls came back inert and both are recorded in the
+  tests**: removing only the feature test is subsumed by the catch, and — the transferable one —
+  `expect(…).not.toThrow()` around a click is **inert at any site that changes no state after the
+  copy**, because React does not rethrow out of `dispatchEvent`; the unguarded call left
+  `DecompileView` 87/87 green and the instrument had to become a `window` `error` listener.
+  (`peek-a-bin-p0tz`)
+
+- **A cursor-following filter must fall back VISIBLY, and that is the OPPOSITE direction from the
+  `omitted` rule.** `XrefPanel`'s scope chain tested `scopeMode === "function" && currentFuncAddr !=
+  null` per arm, so a scope whose address lapsed fell through: the full list returned, the "Func"
+  button vanished, and "All" was not highlighted either — an unfiltered list with no control
+  claiming it. The house rule this *looks* like a case of (`DetectResult.omitted`,
+  `analysisNotice`) forbids a **narrower** answer wearing a complete one's shape; here the answer
+  was already complete and the **controls** had gone quiet, so widening and *saying so* is the
+  repair. Holding an empty scope and explaining it was refused because these scopes follow the
+  **cursor** rather than being values the user entered — a cursor crossing padding between detected
+  functions would blank and refill the panel for a lapse the user never caused, and PE32 detection
+  is known to under-produce so those gaps are ordinary. The fallback is **derived, not written
+  back**, so the preference survives the lapse and clicking "All" during one makes the widening
+  stick. `scopeAvailable()` is the one declaration of "has the caller given this panel the address
+  this scope needs", read by the filter chain *and* by the buttons, so a scope can never be applied
+  without a button claiming it nor offered without an address. (`peek-a-bin-jvvi`)
 
 - **`Ordinal_<n>` is a WIRE FORMAT, not a label: `parsePE` writes it and `computeImphash` parses it
   back out.** Nothing in the type system connects the two — they are in different files and neither
