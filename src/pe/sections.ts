@@ -63,3 +63,62 @@ export function dataSectionRanges(
     .filter(isDataSection)
     .map((s) => ({ va: imageBase + s.virtualAddress, size: s.virtualSize }));
 }
+
+/**
+ * The section containing a **virtual address**, or `undefined` if none does.
+ *
+ * `imageBase` is subtracted first, so callers pass the VA they already hold —
+ * every one of them was doing that subtraction itself. The extent is
+ * `[virtualAddress, virtualAddress + virtualSize)`, which is the reading the
+ * call sites this replaced used; note it is the *virtual* size, so a section
+ * whose raw data is longer does not claim the excess.
+ */
+export function sectionAtVirtualAddress(
+  sections: readonly SectionHeader[],
+  imageBase: number,
+  va: number,
+): SectionHeader | undefined {
+  const rva = va - imageBase;
+  return sections.find((s) => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize);
+}
+
+/**
+ * True when a virtual address lands in a section this project treats as code.
+ *
+ * The graph view is only meaningful over code, so navigating out of it drops
+ * back to the linear view — and both places that decide this had written the
+ * lookup and the predicate out by hand, with a bare `0x20000000` rather than
+ * the named flag, which is the duplication this module's header is about.
+ *
+ * An address in **no** section answers `false`: the callers' shared shape was
+ * "switch to linear only when we positively found a non-code section", so an
+ * unmapped address leaves the view alone. That is preserved deliberately — see
+ * {@link isAddressOutsideCode}, which is the question they actually ask.
+ */
+export function isAddressInCodeSection(
+  sections: readonly SectionHeader[],
+  imageBase: number,
+  va: number,
+): boolean {
+  const section = sectionAtVirtualAddress(sections, imageBase, va);
+  return section !== undefined && isCodeSection(section);
+}
+
+/**
+ * True when a virtual address is in a section that is **not** code — the
+ * condition under which the graph view has nothing to show and hands back to
+ * the linear one.
+ *
+ * Deliberately NOT `!isAddressInCodeSection(...)`: an address in no section at
+ * all is neither, and answering `true` there would switch the view on an
+ * address nothing is known about. Both call sites already had that asymmetry,
+ * spelled `sec && !(sec.characteristics & 0x20000000)`.
+ */
+export function isAddressOutsideCode(
+  sections: readonly SectionHeader[],
+  imageBase: number,
+  va: number,
+): boolean {
+  const section = sectionAtVirtualAddress(sections, imageBase, va);
+  return section !== undefined && !isCodeSection(section);
+}

@@ -28,6 +28,7 @@ import {
 import { parseBranchTarget } from "../components/shared";
 import type { BasicBlock } from "../disasm/cfg";
 import type { DisasmFunction, Instruction } from "../disasm/types";
+import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { type DisplayRow, rowAddress } from "./useDisassemblyRows";
 import type { UseDisassemblySearchResult } from "./useDisassemblySearch";
@@ -282,14 +283,12 @@ export function useDisassemblyKeyboard({
             navViewStateMapRef.current.set(currentAddress, vs);
 
             // Auto-switch to linear when navigating to non-executable section from graph
-            if (viewMode === "graph" && pe) {
-              const rva = target - pe.optionalHeader.imageBase;
-              const sec = pe.sections.find(
-                (s) => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize,
-              );
-              if (sec && !(sec.characteristics & 0x20000000)) {
-                setViewMode("linear");
-              }
+            if (
+              viewMode === "graph" &&
+              pe &&
+              isAddressOutsideCode(pe.sections, pe.optionalHeader.imageBase, target)
+            ) {
+              setViewMode("linear");
             }
 
             dispatch({ type: "SET_ADDRESS", address: target });

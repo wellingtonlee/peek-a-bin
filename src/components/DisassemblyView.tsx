@@ -19,6 +19,7 @@ import { useGraphSearch } from "../hooks/useGraphSearch";
 import { type ContextMenuState, useInsnContextMenu } from "../hooks/useInsnContextMenu";
 import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { useVulnScanner } from "../hooks/useVulnScanner";
+import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { disasmWorker } from "../workers/disasmClient";
 import { AIChatPanel } from "./AIChatPanel";
@@ -696,14 +697,12 @@ export function DisassemblyView() {
       }
 
       // Auto-switch to linear when navigating to non-executable section from graph
-      if (viewMode === "graph" && pe) {
-        const rva = address - pe.optionalHeader.imageBase;
-        const sec = pe.sections.find(
-          (s) => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize,
-        );
-        if (sec && !(sec.characteristics & 0x20000000)) {
-          setViewMode("linear");
-        }
+      if (
+        viewMode === "graph" &&
+        pe &&
+        isAddressOutsideCode(pe.sections, pe.optionalHeader.imageBase, address)
+      ) {
+        setViewMode("linear");
       }
 
       dispatch({ type: "SET_ADDRESS", address });

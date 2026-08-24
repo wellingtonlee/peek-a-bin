@@ -7,7 +7,15 @@ import {
   IMAGE_SCN_MEM_WRITE,
 } from "../constants";
 import { parsePE } from "../parser";
-import { dataSectionRanges, findCodeSection, isCodeSection, isDataSection } from "../sections";
+import {
+  dataSectionRanges,
+  findCodeSection,
+  isAddressInCodeSection,
+  isAddressOutsideCode,
+  isCodeSection,
+  isDataSection,
+  sectionAtVirtualAddress,
+} from "../sections";
 import type { SectionHeader } from "../types";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
@@ -190,5 +198,69 @@ describe("dataSectionRanges", () => {
     const pe = parsePE(buildMinimalPE32({ imageBase: 0x400000 }));
     const ranges = dataSectionRanges(pe.sections, pe.optionalHeader.imageBase);
     expect(ranges.some((r) => r.va === 0x401000)).toBe(false);
+  });
+});
+
+describe("address-to-section helpers", () => {
+  const BASE = 0x400000;
+  /** .text at rva 0x1000 (exec), .rdata at 0x2000 (not exec), each 0x100 long. */
+  const secs: SectionHeader[] = [
+    { ...header(".text", CODE_FLAGS), virtualAddress: 0x1000, virtualSize: 0x100 },
+    { ...header(".rdata", DATA_FLAGS), virtualAddress: 0x2000, virtualSize: 0x100 },
+  ];
+
+  it("resolves a VA to its section, subtracting the image base", () => {
+    expect(sectionAtVirtualAddress(secs, BASE, BASE + 0x1000)?.name).toBe(".text");
+    expect(sectionAtVirtualAddress(secs, BASE, BASE + 0x2050)?.name).toBe(".rdata");
+  });
+
+  it("treats the extent as half-open on virtualSize", () => {
+    // The last byte is in; the byte after it is not, and falls in no section.
+    expect(sectionAtVirtualAddress(secs, BASE, BASE + 0x10ff)?.name).toBe(".text");
+    expect(sectionAtVirtualAddress(secs, BASE, BASE + 0x1100)).toBeUndefined();
+  });
+
+  it("answers undefined for an address below every section", () => {
+    expect(sectionAtVirtualAddress(secs, BASE, BASE)).toBeUndefined();
+  });
+
+  it("reads an executable section as code and a data section as not", () => {
+    expect(isAddressInCodeSection(secs, BASE, BASE + 0x1000)).toBe(true);
+    expect(isAddressInCodeSection(secs, BASE, BASE + 0x2000)).toBe(false);
+    expect(isAddressOutsideCode(secs, BASE, BASE + 0x2000)).toBe(true);
+    expect(isAddressOutsideCode(secs, BASE, BASE + 0x1000)).toBe(false);
+  });
+
+  /**
+   * THE ASYMMETRY, and it is the whole reason both functions exist. An address
+   * in no section is neither in code nor outside it: the callers switch the view
+   * only when they positively found a NON-code section, so answering `true` here
+   * would move the view on an address nothing is known about.
+   */
+  it("answers FALSE from both for an address in no section at all", () => {
+    const gap = BASE + 0x1800;
+    expect(sectionAtVirtualAddress(secs, BASE, gap)).toBeUndefined();
+    expect(isAddressInCodeSection(secs, BASE, gap)).toBe(false);
+    expect(isAddressOutsideCode(secs, BASE, gap)).toBe(false);
+    // i.e. NOT the negation of one another.
+    expect(isAddressOutsideCode(secs, BASE, gap)).not.toBe(
+      !isAddressInCodeSection(secs, BASE, gap),
+    );
+  });
+
+  /**
+   * The predicate is `isCodeSection`, which is `.text` OR the exec flag — wider
+   * than the bare `characteristics & 0x20000000` the two call sites used to
+   * spell by hand. A `.text` with no exec flag is what separates them, and
+   * `findCodeSection` would pick it, so the graph view must not hand back.
+   */
+  it("counts a .text section with no exec flag as code, unlike the old bare flag test", () => {
+    const odd: SectionHeader[] = [
+      { ...header(".text", IMAGE_SCN_MEM_READ), virtualAddress: 0x1000, virtualSize: 0x100 },
+    ];
+    expect((odd[0].characteristics & IMAGE_SCN_MEM_EXECUTE) !== 0).toBe(false);
+    expect(findCodeSection(odd)?.name).toBe(".text");
+    expect(isAddressInCodeSection(odd, BASE, BASE + 0x1000)).toBe(true);
+    expect(isAddressOutsideCode(odd, BASE, BASE + 0x1000)).toBe(false);
   });
 });
