@@ -2,14 +2,21 @@
  * The decision logic behind {@link ./Modal}, kept out of the component so it can
  * be tested.
  *
- * There is no React renderer in this repo (no jsdom, no @testing-library/react),
- * so a component cannot be mounted and nothing here can be verified through the
- * DOM. What *can* be pinned is the arithmetic — where Tab sends focus, which
- * layout classes each placement produces, which naming attribute the dialog
- * gets, how the scroll lock nests, and which dialogs may be dismissed by
- * accident — so all of that lives here as pure functions over plain values.
- * `focusableWithin` is the one exception: it needs a real element, touches the
- * DOM only when called, and is therefore untested.
+ * What is pinned here is the arithmetic — where Tab sends focus, which layout
+ * classes each placement produces, which naming attribute the dialog gets, how
+ * the scroll lock nests, and which dialogs may be dismissed by accident — as
+ * pure functions over plain values, which is both cheaper than a render and the
+ * only form in which the *rule* can be stated apart from any one dialog.
+ *
+ * There IS a renderer now (jsdom plus @testing-library/react, opted into per
+ * file — see CLAUDE.md's "Component tests"), so these answers are additionally
+ * checked in effect: `Modal.dom.test.tsx` drives the trap, the lock and the
+ * naming through the real component, and the dialog suites beside it check
+ * which arguments each dialog passes to `accidentalDismissAllowed` — the one
+ * thing a pure test of the rule structurally cannot see. `focusableWithin` is
+ * still the one function here that needs a real element; it is exercised only
+ * through those renders, and under jsdom its `offsetParent` filter runs against
+ * a stand-in (see `src/test/domSetup.ts`) rather than against a browser.
  */
 
 /** Vertical placement of the dialog box within the viewport. */

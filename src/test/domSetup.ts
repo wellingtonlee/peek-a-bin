@@ -66,6 +66,32 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
   },
 });
 
+/**
+ * jsdom implements no scrolling at all, so `Element.prototype.scrollIntoView`
+ * is simply **absent** (verified against jsdom 28: `typeof el.scrollIntoView`
+ * is `"undefined"` and calling it throws `is not a function`).
+ *
+ * That is not a curiosity: `CommandPalette` keeps the highlighted row visible
+ * with an effect that calls it on every selection change, and an exception
+ * thrown inside a `useEffect` tears the tree down — so without this, every
+ * arrow-key test of a scrolling list dies on the first ArrowDown, for a reason
+ * that has nothing to do with the behaviour under test.
+ *
+ * A NO-OP, and deliberately not a spy: this file runs before every component
+ * test, and a shared spy would accumulate calls across them. A test that wants
+ * to observe the call can `vi.spyOn` it itself.
+ *
+ * WHAT THIS BUYS, EXACTLY: the component's own effect gets to run to
+ * completion. It buys nothing whatever about scrolling — whether the row ends
+ * up visible, whether the container scrolled, whether `block: "nearest"` was
+ * the right choice — because jsdom performs no layout and every scroll offset
+ * there is a constant 0. Do not write an assertion that reads as being about
+ * visibility.
+ */
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = function scrollIntoView() {};
+}
+
 beforeEach(() => {
   // The scroll lock writes inline styles onto <body> and restores what it
   // found. Start every test from the same place, so one leaking test cannot
