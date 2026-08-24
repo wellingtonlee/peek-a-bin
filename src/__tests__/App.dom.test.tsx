@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../test/domSetup";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
@@ -35,6 +35,26 @@ import { REQUEST_TIMEOUT_MS } from "../workers/requestTimeout";
  * The other cases are unaffected — every stubbed reply below lands on a
  * microtask, orders of magnitude inside even this budget.
  */
+/**
+ * Which tab's component should throw when it renders, or null.
+ *
+ * A flag plus a passthrough rather than a replacement, because the routing test
+ * above asserts on `SectionTable`'s real output: the mock renders the genuine
+ * component whenever it is not asked to fail, so one suite covers both.
+ */
+let boomTab: "sections" | null = null;
+
+vi.mock("../components/SectionTable", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/SectionTable")>();
+  return {
+    ...actual,
+    SectionTable: () => {
+      if (boomTab === "sections") throw new Error("section table exploded");
+      return <actual.SectionTable />;
+    },
+  };
+});
+
 vi.mock("../workers/requestTimeout", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workers/requestTimeout")>()),
   // 500 ms rather than something smaller: `timeoutBudgetInWords` rounds to
@@ -193,6 +213,7 @@ beforeEach(() => {
   posted.length = 0;
   initFails = false;
   stallDetect = false;
+  boomTab = null;
   vi.stubGlobal("Worker", FakeDisasmWorker);
   // `handleFile` calls `saveRecentFile`, which opens IndexedDB. jsdom 28 does
   // not implement it and `fake-indexeddb` is not a dependency here, so the
@@ -521,5 +542,95 @@ describe("a stalled stage is reported as timed out, not as a failed analysis", (
     // notice interpolates those words into the sentence saying it did not fail.
     expect(banner.textContent).not.toMatch(/analysis failed/i);
     expect(banner.textContent).not.toMatch(/ANALYSIS FAILED/);
+  });
+});
+
+describe("a throw in one tab does not take out the others", () => {
+  /**
+   * THE DEFECT THIS PINS, and it lived for the whole life of the component.
+   * `App` wrapped ONE `ErrorBoundary` around `renderMainView()`, which keeps
+   * every visited tab in the tree class-hidden. So a throw in any one of them
+   * replaced the whole main area — every tab the user had ever opened — and
+   * because `hasError` is never cleared and the boundary sat ABOVE the tab
+   * switch, changing tabs could not recover it. The only exit was a page
+   * reload, which discards the parsed image and the worker's disassembly.
+   *
+   * It is one boundary per pane now, so this suite is the blast-radius
+   * assertion: the failing tab shows a fallback that NAMES it, and its
+   * neighbour still renders its own content.
+   *
+   * Only a render can see any of this. `typecheck` accepts a boundary with
+   * neither `getDerivedStateFromError` nor `componentDidCatch`, and
+   * `componentDidCatch` has no signature to inspect (`peek-a-bin-p0qw`).
+   */
+  async function openWithBrokenSections() {
+    boomTab = "sections";
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    await user.click(screen.getByTitle("Sections (3)"));
+    return user;
+  }
+
+  it("shows a fallback that names the tab that failed", async () => {
+    await openWithBrokenSections();
+    const alert = await screen.findByRole("alert");
+    // The label comes from `VIEW_TAB_LABELS`, so the fallback cannot call a tab
+    // something the tab bar does not — the same single-declaration rule the
+    // notice's prose follows.
+    expect(alert.textContent).toContain("Sections");
+    expect(alert.textContent).toContain("section table exploded");
+  });
+
+  it("leaves a neighbouring tab working, which is the whole point", async () => {
+    const user = await openWithBrokenSections();
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByTitle("Headers (2)"));
+
+    // SCOPED TO THE VISIBLE PANE, and the first version of this test was wrong
+    // for the reason this file's header warns about: the broken Sections pane
+    // STAYS MOUNTED — `App` keeps every visited tab in the tree — and its
+    // `hidden` class carries no `display: none` here, because Tailwind is
+    // deliberately out of the test config. So a document-wide
+    // `queryByRole("alert")` still finds the fallback and says nothing about
+    // what is on screen. In a browser it is hidden; here the pane's own class
+    // is the only thing that knows.
+    const shown = await waitFor(() => {
+      const el = Array.from(document.querySelectorAll<HTMLElement>("div.h-full")).find(
+        (d) => d.className === "h-full",
+      );
+      if (!el) throw new Error("no visible pane");
+      return el;
+    });
+    expect(within(shown).queryByRole("alert")).toBeNull();
+    expect(shown.textContent).toMatch(/machine/i);
+
+    // And the fallback is still there, in the hidden pane — the failure is
+    // contained, not erased. Under the single-boundary arrangement there was
+    // only one pane's worth of fallback and it was the one on screen.
+    expect(screen.getByRole("alert").textContent).toContain("Sections");
+  });
+
+  it("recovers the failed tab in place once the fault is gone", async () => {
+    const user = await openWithBrokenSections();
+    await screen.findByRole("alert");
+
+    // "Try again" re-renders that region alone. Nothing in the boundary decides
+    // whether the fault has cleared — the children simply run again — so this
+    // asserts the mechanism, with the fault removed to make the outcome
+    // observable. A deterministic fault would throw straight back, which is the
+    // honest behaviour and cannot loop, since it takes a click.
+    boomTab = null;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+    const shown = Array.from(document.querySelectorAll<HTMLElement>("div.h-full")).find(
+      (el) => el.className === "h-full",
+    );
+    expect(shown?.textContent).toContain(".rsrc");
   });
 });

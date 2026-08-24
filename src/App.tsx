@@ -10,7 +10,12 @@ import {
 } from "react";
 import { detectAnomalies } from "./analysis/anomalies";
 import { detectDriver } from "./analysis/driver";
-import { analysisNotice, analysisRejection, formatTabList } from "./components/analysisNotice";
+import {
+  analysisNotice,
+  analysisRejection,
+  formatTabList,
+  VIEW_TAB_LABELS,
+} from "./components/analysisNotice";
 import { FileLoader } from "./components/FileLoader";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
@@ -24,6 +29,7 @@ import {
   appReducer,
   initialState,
   parseViewTab,
+  type ViewTab,
 } from "./hooks/usePEFile";
 import { loadFontSize } from "./llm/settings";
 import { parsePE } from "./pe/parser";
@@ -706,10 +712,10 @@ export default function App() {
     }
   }, []);
 
-  const mountedTabs = useRef(new Set<string>());
+  const mountedTabs = useRef(new Set<ViewTab>());
   if (state.peFile) mountedTabs.current.add(state.activeTab);
 
-  const tabComponents: { key: string; Component: React.ComponentType; isLazy?: boolean }[] = [
+  const tabComponents: { key: ViewTab; Component: React.ComponentType; isLazy?: boolean }[] = [
     { key: "headers", Component: HeaderView },
     { key: "sections", Component: SectionTable },
     { key: "disassembly", Component: DisassemblyView, isLazy: true },
@@ -758,19 +764,30 @@ export default function App() {
     return tabComponents.map(({ key, Component, isLazy }) =>
       mountedTabs.current.has(key) ? (
         <div key={key} className={state.activeTab === key ? "h-full" : "hidden"}>
-          {isLazy ? (
-            <Suspense
-              fallback={
-                <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-                  Loading...
-                </div>
-              }
-            >
+          {/* ONE BOUNDARY PER PANE, and the placement is the whole point.
+              A single boundary around this map — which is what was here — put
+              every tab behind one `hasError`: a throw in the Hex view replaced
+              headers, sections, disassembly, imports, exports, strings,
+              resources and anomalies with the same fallback, and since the
+              boundary sat ABOVE the tab switch, changing tabs could not recover
+              it either. Every visited tab stays mounted (`mountedTabs`), so the
+              blast radius was every tab the user had ever opened
+              (peek-a-bin-p0qw). */}
+          <ErrorBoundary label={VIEW_TAB_LABELS[key]}>
+            {isLazy ? (
+              <Suspense
+                fallback={
+                  <div className="flex items-center justify-center h-full text-gray-500 text-sm">
+                    Loading...
+                  </div>
+                }
+              >
+                <Component />
+              </Suspense>
+            ) : (
               <Component />
-            </Suspense>
-          ) : (
-            <Component />
-          )}
+            )}
+          </ErrorBoundary>
         </div>
       ) : null,
     );
@@ -867,9 +884,7 @@ export default function App() {
             <GraphOverviewContext.Provider value={graphOverviewState}>
               <div className="flex flex-1 overflow-hidden">
                 <Sidebar />
-                <main className="flex-1 overflow-auto">
-                  <ErrorBoundary>{renderMainView()}</ErrorBoundary>
-                </main>
+                <main className="flex-1 overflow-auto">{renderMainView()}</main>
               </div>
             </GraphOverviewContext.Provider>
             <StatusBar mcpStatus={mcpStatus} />

@@ -159,16 +159,25 @@ describe("ErrorBoundary", () => {
   });
 
   /**
-   * PINS CURRENT BEHAVIOUR, AND THE BEHAVIOUR IS A LIMITATION — see the report
-   * for `src/App.tsx:871`. Once the boundary has caught, `hasError` is never
-   * cleared: re-rendering with a perfectly healthy child keeps the fallback.
-   * That matters at the mount site, where ONE boundary wraps every mounted tab
-   * (App keeps them all in the tree, class-hidden), so a throw anywhere replaces
-   * the whole main area for every tab and switching tabs cannot recover it. The
-   * only exit is the Reload button above. This is deliberately not "fixed" here:
-   * the repair belongs at the mount site, not in these 45 lines.
+   * RE-RENDERING ALONE DOES NOT CLEAR THE ERROR, AND THAT IS NOW A DECISION
+   * RATHER THAN A LIMITATION.
+   *
+   * When this was first written it pinned a real defect: `App` wrapped ONE
+   * boundary around every mounted tab, so a throw anywhere replaced the whole
+   * main area and — because `hasError` is never cleared on a re-render and the
+   * boundary sat above the tab switch — changing tabs could not recover it. The
+   * only exit was a page reload, which discards the parsed image and the
+   * worker's disassembly. **That mount site is repaired**: it is one boundary
+   * per tab pane now, so the blast radius is one tab (`peek-a-bin-p0qw`, and
+   * `src/__tests__/App.dom.test.tsx` is where the blast radius is asserted).
+   *
+   * What this still pins is the boundary's own contract, and keeping it is
+   * deliberate: an automatic reset on every re-render would retry a
+   * deterministic fault on each parent render, flickering the fallback in and
+   * out with no way to read it. Recovery is offered explicitly instead, by the
+   * button the next test presses.
    */
-  it("does NOT recover when its children stop throwing (pins a known limitation)", () => {
+  it("does not clear itself on a re-render, so a deterministic fault cannot flicker", () => {
     const { rerender } = render(
       <ErrorBoundary>
         <Boom />
@@ -182,6 +191,69 @@ describe("ErrorBoundary", () => {
     );
     expect(screen.queryByText("healthy again")).toBeNull();
     expect(screen.getByText("Something went wrong")).toBeTruthy();
+  });
+
+  it("clears the error when Try again is pressed, and renders the children again", () => {
+    // The counterpart to the case above. Nothing in the boundary decides whether
+    // the fault has gone — the children simply run again — so the fixture stops
+    // throwing between the two renders to make the outcome observable. A
+    // deterministic fault throws straight back into the fallback, which is the
+    // honest behaviour and cannot loop, since it takes a click.
+    let boom = true;
+    function Maybe() {
+      if (boom) throw new Error("kaboom");
+      return <div>healthy again</div>;
+    }
+    render(
+      <ErrorBoundary>
+        <Maybe />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText("Something went wrong")).toBeTruthy();
+    boom = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(screen.getByText("healthy again")).toBeTruthy();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
+  });
+
+  it("names the region it was guarding, when it was given one", () => {
+    // The label exists because there is now more than one boundary: it is what
+    // tells the user WHICH of the nine tabs failed, and therefore that the other
+    // eight did not. `App` passes `VIEW_TAB_LABELS[key]`, so the fallback cannot
+    // call a tab something the tab bar does not.
+    render(
+      <ErrorBoundary label="Hex">
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole("alert").textContent).toContain("The Hex view went wrong");
+  });
+
+  it("falls back to a generic sentence with no label", () => {
+    // The control for the case above: a label-shaped sentence that appeared
+    // whatever was passed would satisfy it.
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Something went wrong");
+    expect(alert.textContent).not.toContain("view went wrong");
+  });
+
+  it("marks the fallback as an alert, so a replaced region is announced", () => {
+    // The one a11y assertion in this file, and the reason it is worth one: the
+    // fallback REPLACES a region of the page after the fact, which is precisely
+    // the case a live region exists for. Nothing else here has been near a
+    // screen reader — see CLAUDE.md's standing note that the a11y work has never
+    // met one.
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole("alert")).toBeTruthy();
   });
 });
 

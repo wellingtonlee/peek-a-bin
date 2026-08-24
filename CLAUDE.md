@@ -344,15 +344,25 @@ so a wire value like `call-targets` cannot reach the screen and a fifth pass fai
 **Rendering**: virtual scrolling via `@tanstack/react-virtual`. `DisplayRow` union:
 `label | insn | separator | data`. `DisassemblyView` + `HexView` are lazy-loaded.
 
-**One `ErrorBoundary` wraps all nine mounted tab views, and nothing can clear it.** `App.tsx` puts
-the boundary *outside* `renderMainView()`, which keeps every visited tab in the tree class-hidden —
-so a throw in the Hex view replaces headers, sections, disassembly, imports, exports, strings,
-resources and anomalies as well, and because `hasError` is never reset and the boundary sits above
-the tab switch, changing tabs cannot recover it. The only exit is the fallback's
-`window.location.reload()`. `ErrorBoundary` itself is correct in isolation and is rendered
-(`panelUtilities.dom.test.tsx` pins the sticky behaviour deliberately, as behaviour rather than as
-endorsement); the repair, if taken, is at the mount site — per-tab boundaries or a `key` — and is
-not a change to those 45 lines (`peek-a-bin-p0qw`).
+**There is ONE `ErrorBoundary` PER TAB PANE, and the placement is the whole of what it buys.** A
+single boundary around `renderMainView()` — which is what was there — put every tab behind one
+`hasError`: `App` keeps every visited tab in the tree class-hidden, so a throw in the Hex view
+replaced headers, sections, disassembly, imports, exports, strings, resources and anomalies as
+well, and because `hasError` is never cleared on a re-render and the boundary sat *above* the tab
+switch, changing tabs could not recover it either. The only exit was a page reload, which discards
+the parsed image and the worker's disassembly to recover from what may have been one bad render.
+The boundary takes a **`label`** (`VIEW_TAB_LABELS[key]`, so the fallback cannot call a tab
+something the tab bar does not) and offers **Try again** beside Reload — cheapest exit first.
+**Not clearing on a re-render is a decision, not a leftover**: an automatic reset would retry a
+deterministic fault on every parent render and flicker the fallback in and out with no way to read
+it, so recovery is explicit. Blast radius is asserted in `src/__tests__/App.dom.test.tsx` by
+`vi.mock`ing one tab's component to throw on a flag; nothing static can see any of this, since
+`typecheck` accepts a boundary with neither `getDerivedStateFromError` nor `componentDidCatch` and
+`componentDidCatch` has no signature to inspect. **What is STILL unguarded, and it is filed rather
+than blanketed**: `Sidebar`, `AddressBar`, `StatusBar`, the six dialogs and the panel container sit
+outside every boundary, and `main.tsx` puts none above `<App/>` — so a throw in any of them is a
+blank page. Wrapping each region trades loudness for partial function and is a judgement, not a
+tidy-up (`peek-a-bin-p0qw`).
 
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
