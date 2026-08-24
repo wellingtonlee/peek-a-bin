@@ -154,6 +154,37 @@ a field that has never once been read on an x64 image here (at `11408ac`, `t64.e
 have no load-config data directory at all), and a wrong reading would start refusing ordinary x64
 images.
 
+**A hybrid image has TWO exception tables, and `pe/pdata.ts` reads one of them — the one the
+machine word describes.** Settled against documentation at `peek-a-bin-c71x`, unobserved here for
+the same reason as everything else on this page. An ARM64EC image holds native A64 code following
+x64 conventions *and* genuine x64 code, and each half gets its own table in its own format:
+
+| image, as it lies on disk | `IMAGE_DIRECTORY_ENTRY_EXCEPTION` | CHPE `ExtraRFETable` |
+|---|---|---|
+| ARM64EC (marked 0x8664) | **x64**, 12-byte entries | **ARM64**, 8-byte entries |
+| ARM64X (marked 0xAA64, default) | **ARM64**, 8-byte entries | **x64**, 12-byte entries |
+
+The exception directory always holds the table of the architecture the image presents itself as,
+and `ExtraRFETable` — a field of `IMAGE_ARM64EC_METADATA`, at offset 0x40, reached through
+`loadConfig.chpeMetadataPointer` — always holds the other. For ARM64X the ARM64X dynamic-value
+relocations *swap both* when the image is loaded into an x64/EC process, so its hybrid view is an
+ARM64EC image's layout and its on-disk view, which is what a static reader sees, is the ARM64 one.
+Sources: [lld's COFF writer](https://github.com/llvm/llvm-project/blob/main/lld/COFF/Writer.cpp)
+("ARM64EC (but not ARM64X) contains x86_64 exception table in data directory", plus the
+`IMAGE_DVRT_ARM64X_FIXUP_TYPE_VALUE` relocations over `EXCEPTION_TABLE` and
+`offsetof(chpe_metadata, ExtraRFETable)`);
+[Wine's `RtlLookupFunctionTable`](https://github.com/wine-mirror/wine/blob/master/dlls/ntdll/unwind.c),
+which answers `ExtraRFETable` when `RtlIsEcCode(pc)` and the data directory otherwise; and the
+[Arm64EC ABI page](https://learn.microsoft.com/en-us/windows/arm/arm64ec-abi), which requires
+dynamically added EC unwind entries to "be in Arm64 format".
+
+So `parsePdata`'s machine-keyed choice of schema is **right for every hybrid case and incomplete
+for all of them**. Reading the second table is not attempted: `chpeMetadataPointer` has never been
+observed non-zero on any file here, so the consumer would be unverifiable in both directions.
+Anyone implementing it should note that its schema is the **complement** of the machine word — the
+one thing the machine word can never answer, and the reason `pdata.ts`'s two hybrid *object*
+machine constants (0xA641/0xA64E) were removed rather than repointed.
+
 #### `DetectResult.omitted`
 
 Function detection is the one stage that keeps answering without a decoder, because its evidence

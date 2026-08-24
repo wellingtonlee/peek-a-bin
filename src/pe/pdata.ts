@@ -3,27 +3,6 @@ import { IMAGE_FILE_MACHINE_ARM64 } from "./constants";
 import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
 import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
 
-/**
- * ARM64 variants that describe their unwind data with the ARM64 schema below:
- * plain ARM64, plus the two hybrid machine constants (ARM64EC and ARM64X),
- * whose exception directory is in ARM64 form. Neither hybrid constant is in
- * `constants.ts` because nothing else in the parser distinguishes them.
- *
- * The two hybrid constants are a deliberate **superset** and not a live case:
- * 0xA641 and 0xA64E identify object files, and a linked ARM64EC or ARM64X image
- * is marked 0x8664 or 0xAA64 instead (settled against Microsoft's docs at
- * peek-a-bin-3ucw — see `disasm/arch.ts` for the citations). Accepting them
- * costs nothing and would be right if either ever reached a `coffHeader`, so
- * they stay. What they do not do is route a real hybrid image: an ARM64EC one
- * arrives marked 0x8664 and is therefore read with the **x64** schema below.
- * Whether that is the right schema for it is *not* established here — a hybrid
- * image carries more than one view of its exception data, reached through the
- * CHPE metadata this module does not read — and there is no such binary on this
- * machine to settle it. Stated rather than assumed either way.
- */
-const IMAGE_FILE_MACHINE_ARM64EC = 0xa641;
-const IMAGE_FILE_MACHINE_ARM64X = 0xa64e;
-
 /** UNWIND_INFO flag: the record carries an exception handler. */
 const UNW_FLAG_EHANDLER = 0x1;
 
@@ -40,14 +19,6 @@ const UNW_FLAG_CHAININFO = 0x4;
 const X64_ENTRY_SIZE = 12;
 const ARM64_ENTRY_SIZE = 8;
 
-function isArm64Machine(machine: number): boolean {
-  return (
-    machine === IMAGE_FILE_MACHINE_ARM64 ||
-    machine === IMAGE_FILE_MACHINE_ARM64EC ||
-    machine === IMAGE_FILE_MACHINE_ARM64X
-  );
-}
-
 /**
  * Parse .pdata (Exception Directory).
  *
@@ -58,6 +29,82 @@ function isArm64Machine(machine: number): boolean {
  * of the entries, at addresses that are really other entries' unwind words
  * (peek-a-bin-kwc). Anything but ARM64 is read as x64, which is what every PE32+
  * image the tool has ever been pointed at is.
+ *
+ * **A HYBRID IMAGE HAS TWO FUNCTION TABLES AND THIS READS ONE OF THEM — the
+ * one it reads is the one the machine word describes, which is why keying on the
+ * machine word is right here and could never be right for the other.** Settled
+ * against documentation at peek-a-bin-c71x; there is no ARM64EC or ARM64X binary
+ * on this machine, so none of it is observed. An ARM64EC image contains native
+ * A64 code following x64 software conventions *and* genuine x64 code, and each
+ * half has its own table in its own architecture's format:
+ *
+ * | image, as it lies on disk        | `IMAGE_DIRECTORY_ENTRY_EXCEPTION` | CHPE `ExtraRFETable` |
+ * |----------------------------------|-----------------------------------|----------------------|
+ * | ARM64EC (marked 0x8664)          | **x64**, 12-byte entries          | **ARM64**, 8-byte    |
+ * | ARM64X (marked 0xAA64, default)  | **ARM64**, 8-byte entries         | **x64**, 12-byte     |
+ *
+ * so the invariant is that the exception directory always holds the table of the
+ * architecture the image *presents itself as*, and `ExtraRFETable` — a field of
+ * `IMAGE_ARM64EC_METADATA`, reached through `LoadConfigDirectory`'s
+ * `chpeMetadataPointer` — always holds the other one. For ARM64X the two are
+ * *swapped by the ARM64X dynamic-value relocations* when the image is loaded into
+ * an x64/EC process, so its hybrid view is byte-for-byte an ARM64EC image's
+ * layout; a static reader sees the un-fixed-up view, which is the ARM64 one.
+ *
+ * Three independent sources, none of them a secondary account:
+ *  - lld's COFF writer says it outright — `// ARM64EC (but not ARM64X) contains
+ *    x86_64 exception table in data directory`, over
+ *    `machine == ARM64EC ? hybridPdata : pdata`, where `hybridPdata` is declared
+ *    `// x86_64 .pdata sections on ARM64EC/ARM64X targets` and `mergeSections`
+ *    splits `.pdata` into the two by `chunk->getMachine() == AMD64`. The same
+ *    file points `__arm64x_extra_rfe_table` at the complement
+ *    (`machine == ARM64X ? hybridPdata : pdata`) and, for ARM64X, emits
+ *    `IMAGE_DVRT_ARM64X_FIXUP_TYPE_VALUE` relocations over both the
+ *    `EXCEPTION_TABLE` data directory and `offsetof(chpe_metadata,
+ *    ExtraRFETable)`. https://github.com/llvm/llvm-project/blob/main/lld/COFF/Writer.cpp
+ *  - Wine's loader routes by *code range* rather than by image:
+ *    `RtlLookupFunctionTable` answers `ExtraRFETable`/`ExtraRFETableSize` when
+ *    `RtlIsEcCode(pc)` and `IMAGE_DIRECTORY_ENTRY_EXCEPTION` otherwise, and the
+ *    x64 `RtlLookupFunctionEntry` delegates an EC pc to the ARM64 one, which
+ *    searches `ARM64_RUNTIME_FUNCTION` {BeginAddress, Flag, FunctionLength,
+ *    UnwindData} — the 8-byte form `parseArm64Pdata` decodes.
+ *    https://github.com/wine-mirror/wine/blob/master/dlls/ntdll/unwind.c
+ *  - Microsoft's Arm64EC ABI page requires *dynamically* added EC unwind entries
+ *    to "be in Arm64 format", noting `RUNTIME_FUNCTION` is the x64 shape when
+ *    compiling EC so `ARM64_RUNTIME_FUNCTION` must be named explicitly, and its
+ *    worked entry-thunk listing is ARM64 unwind codes (`E7 save_any_reg`,
+ *    `E6 save_next_pair`, `E1`, `E4 end`).
+ *    https://learn.microsoft.com/en-us/windows/arm/arm64ec-abi
+ *
+ * **So this function's answer is RIGHT for every hybrid case and INCOMPLETE for
+ * all of them**: the directory really does hold what the machine word says, and
+ * the other half of the image's functions is in a table nothing here reads.
+ * Reading it is not attempted, because `chpeMetadataPointer` has never once been
+ * observed non-zero on any file here — measured at 11408ac, t64/w64 have no
+ * load-config directory at all, the ARM64 pair read 0, and the PE32 pair declare
+ * a structure too short to reach the field — so a consumer of it would be
+ * unverifiable in both directions (peek-a-bin-3ucw). What a future reader needs
+ * is here rather than in a half-built reader: `ExtraRFETable` is at **0x40** and
+ * `ExtraRFETableSize` at **0x44** of `IMAGE_ARM64EC_METADATA` (all-`ULONG`
+ * fields, `Version` first), both RVAs; and its schema is the **complement** of
+ * the machine word, never the machine word itself.
+ *
+ * **THE TWO HYBRID MACHINE CONSTANTS ARE GONE, AND ONE OF THEM WAS WRONG RATHER
+ * THAN MERELY UNREACHABLE.** `isArm64Machine` used to send
+ * `IMAGE_FILE_MACHINE_ARM64EC` (0xA641) and `IMAGE_FILE_MACHINE_ARM64X` (0xA64E)
+ * down the ARM64 path as a "deliberate superset", on the reasoning that it would
+ * be right if either ever reached a `coffHeader`. The table above refutes half of
+ * that: 0xA641 means an ARM64EC image, whose exception directory is the **x64**
+ * table, so the arm would have read 12-byte entries at an 8-byte stride — the
+ * peek-a-bin-kwc desynchronisation this docstring opens by warning about, arrived
+ * at from the other direction. 0xA64E's intention was right, and is already
+ * served by 0xAA64, which is the word an ARM64X image actually carries; keeping
+ * an unreachable duplicate of a correct answer beside a refuted one only invites
+ * re-adding both. Neither constant reaches a linked image's machine field
+ * (peek-a-bin-3ucw, citations in `disasm/arch.ts`), so removing them moves no
+ * output — but the reason to remove 0xA641 is that its reading is now known to be
+ * wrong, not that it is dead. `__tests__/pdata.test.ts` pins that, since nothing
+ * measurable can.
  *
  * `index` is the caller's prebuilt section lookup — ntoskrnl-sized images have
  * ~100k entries and each one resolves an unwind RVA, so building it per call
@@ -78,7 +125,7 @@ export function parsePdata(
   if (offset < 0) return [];
 
   const view = new DataView(buffer);
-  return isArm64Machine(machine)
+  return machine === IMAGE_FILE_MACHINE_ARM64
     ? parseArm64Pdata(view, offset, exceptionDir.size, sectionIndex)
     : parseX64Pdata(view, offset, exceptionDir.size, sectionIndex);
 }

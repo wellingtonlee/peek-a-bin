@@ -363,6 +363,56 @@ function xdataHeader(o: {
 /** Packed unwind word: flag in bits 0-1, function length (words) in bits 2-12. */
 const packed = (lengthWords: number, flag = 1) => (flag | (lengthWords << 2)) >>> 0;
 
+/**
+ * peek-a-bin-c71x. `parsePdata` used to route `IMAGE_FILE_MACHINE_ARM64EC`
+ * (0xA641) and `IMAGE_FILE_MACHINE_ARM64X` (0xA64E) to the ARM64 schema as a
+ * "deliberate superset", on the reasoning that it would be right if either ever
+ * reached a `coffHeader`. Neither reaches a linked image (peek-a-bin-3ucw), and
+ * the 0xA641 half of the reasoning is refuted besides: an ARM64EC image's
+ * exception directory holds the **x64** table, and its A64 functions are in the
+ * CHPE `ExtraRFETable` instead. See `pdata.ts` for the citations.
+ *
+ * A documentation claim pinned as a test, because no hybrid binary exists here
+ * and no corpus gate has a population for it. The fixture is deliberately a
+ * *well-formed x64 table*, so the assertion shows what the withdrawn arm would
+ * have done rather than merely that it is gone: at an 8-byte stride these 24
+ * bytes read as one packed entry claiming a 0x1054-byte function at 0x1000 —
+ * fiction, and longer than the whole table describes — plus two entries whose
+ * `.xdata` RVA resolves nowhere and which are dropped.
+ */
+describe("parsePdata — hybrid machine constants", () => {
+  const x64Table = [
+    { begin: 0x1000, end: 0x1055, unwind: 0x4000 },
+    { begin: 0x1060, end: 0x10b9, unwind: 0x4010 },
+  ];
+
+  it.each([
+    ["ARM64EC object marker (0xA641)", 0xa641],
+    ["ARM64X (0xA64E)", 0xa64e],
+  ])("reads an x64 table as x64 under %s, not at the ARM64 stride", (_label, machine) => {
+    const { buffer, sections, dir } = buildPdataBuffer(x64Table);
+    const results = parsePdata(buffer, dir, sections, machine);
+
+    expect(results.map((r) => [r.beginAddress, r.endAddress])).toEqual([
+      [0x1000, 0x1055],
+      [0x1060, 0x10b9],
+    ]);
+    // The withdrawn arm's answer, spelled out so a reinstatement fails here.
+    expect(results).not.toContainEqual(
+      expect.objectContaining({ beginAddress: 0x1000, endAddress: 0x2054 }),
+    );
+  });
+
+  it("still routes the word an ARM64 image actually carries to the ARM64 schema", () => {
+    const { buffer, sections, dir } = buildArm64PdataBuffer([
+      { begin: 0x1000, unwind: packed(4) },
+      { begin: 0x1010, unwind: packed(8) },
+    ]);
+    const results = parsePdata(buffer, dir, sections, IMAGE_FILE_MACHINE_ARM64);
+    expect(results.map((r) => r.beginAddress)).toEqual([0x1000, 0x1010]);
+  });
+});
+
 describe("parsePdata — ARM64", () => {
   it("reads entries at the ARM64 8-byte stride, not the x64 12-byte one", () => {
     const { buffer, sections, dir } = buildArm64PdataBuffer([

@@ -1708,7 +1708,10 @@ describe("archForMachine", () => {
    * word it has never seen in an image, and answering `"arm64"` for 0xA64E would
    * claim to have recognised an image format nothing here can read.
    *
-   * `pe/pdata.ts` does accept both, as a deliberate superset — see its docstring.
+   * `pe/pdata.ts` used to accept both as a deliberate superset and no longer
+   * does: an ARM64EC image's exception directory holds the *x64* table, so
+   * that superset was wrong for 0xA641 rather than merely unreachable
+   * (peek-a-bin-c71x, citations in `pe/pdata.ts`).
    */
   it.each([
     ["ARM64EC object marker (0xA641)", 0xa641],
