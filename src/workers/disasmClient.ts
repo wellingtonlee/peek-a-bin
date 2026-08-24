@@ -5,7 +5,12 @@ import { archForMachine, type ImageArch } from "../disasm/arch";
 import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
 // A value import, but `funcInsns.ts` is address arithmetic over plain data and
 // imports nothing but types, so it adds no edge to Capstone either.
-import { collectFuncInsns, type FuncExtent, funcXrefEntries } from "../disasm/funcInsns";
+import {
+  collectFuncInsns,
+  type FuncExtent,
+  funcExceptionRecord,
+  funcXrefEntries,
+} from "../disasm/funcInsns";
 // Type-only: erased at compile time, so this adds no runtime edge to
 // functionDetect (and none to Capstone through it).
 import type { DetectPass, ImageBounds } from "../disasm/functionDetect";
@@ -512,6 +517,7 @@ class DisasmWorkerClient {
     //
     // Sent only when the caller has them, so an older caller gets exactly the
     // pre-summary behaviour rather than a half-built one (peek-a-bin-s2ws).
+    const pdataRecord = funcExceptionRecord(func, runtimeFunctions);
     const args = this.decoded({
       func,
       funcInsns: collectFuncInsns(func, instructions),
@@ -520,7 +526,18 @@ class DisasmWorkerClient {
       signature,
       is64,
       funcEntries: Array.from(funcMap.entries()),
-      runtimeFunctions,
+      // The one `.pdata` row this function's decompilation can consult, not the
+      // image's table. `wrapExceptionRegions` picks at most one record and
+      // `funcExceptionRecord` is that pick, applied here and again over there —
+      // it is idempotent, so the worker's answer is unchanged and a caller
+      // sending the whole table (the MCP server, `corpus/sweep.ts`) still gets
+      // exactly what it always did. The table is linear in the image: 1641 rows
+      // on a 669 KiB-`.text` `go` build, where cloning it was 1.37 ms — 19% of a
+      // request and 39% of what was left of the payload after peek-a-bin-9gc9 —
+      // against 0.001 ms for the one row, measured at 755ea94. PE32 has no
+      // `.pdata` at all, so this is an x64 saving and the two 32-bit corpus
+      // binaries are the untouched control.
+      runtimeFunctions: pdataRecord ? [pdataRecord] : undefined,
       funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
       insnsToken: functions ? this.insnsToken(instructions) : undefined,
     });

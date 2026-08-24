@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { RuntimeFunction } from "../../pe/types";
 import { buildCFG } from "../cfg";
-import { buildFuncInsnMap, collectFuncInsns, funcXrefEntries, getFuncInsns } from "../funcInsns";
+import {
+  buildFuncInsnMap,
+  collectFuncInsns,
+  funcExceptionRecord,
+  funcXrefEntries,
+  getFuncInsns,
+} from "../funcInsns";
 import type { DisasmFunction, Instruction, Xref } from "../types";
 
 /** Instructions laid out back-to-back, `size` bytes each. */
@@ -299,5 +306,100 @@ describe("buildCFG consults the xref map only inside the function", () => {
     );
     // Non-vacuous: those xrefs really did split the window into blocks.
     expect(a.length).toBeGreaterThan(1);
+  });
+});
+
+describe("funcExceptionRecord", () => {
+  const rf = (o: Partial<RuntimeFunction> & { beginAddress: number }): RuntimeFunction => ({
+    endAddress: o.beginAddress + 0x20,
+    unwindInfoAddress: 0,
+    handlerAddress: 0x500,
+    handlerFlags: 0x1,
+    ...o,
+  });
+
+  it("matches a record whose begin address equals the function's", () => {
+    const rec = rf({ beginAddress: 0x1000 });
+    expect(funcExceptionRecord({ address: 0x1000, size: 0x20 }, [rec])).toBe(rec);
+  });
+
+  it("recovers the image base when the table is in RVAs (peek-a-bin-yrh)", () => {
+    // The real shape: `.pdata` holds RVAs, `DisasmFunction.address` is a VA.
+    const rec = rf({ beginAddress: 0x1000 });
+    expect(funcExceptionRecord({ address: 0x140001000, size: 0x20 }, [rec])).toBe(rec);
+  });
+
+  it("ignores a record with no handler", () => {
+    const rec = rf({ beginAddress: 0x1000, handlerAddress: undefined, handlerFlags: 0 });
+    expect(funcExceptionRecord({ address: 0x140001000, size: 0x20 }, [rec])).toBeUndefined();
+    const flagless = rf({ beginAddress: 0x1000, handlerFlags: 0x4 }); // not E/UHANDLER
+    expect(funcExceptionRecord({ address: 0x140001000, size: 0x20 }, [flagless])).toBeUndefined();
+  });
+
+  it("does not return a record that merely covers the function", () => {
+    // The predicate is a BEGIN-ADDRESS equality, not a containment or an
+    // overlap: a record spanning this function but starting elsewhere describes
+    // some other function's frame.
+    //
+    // THE UNITS HAVE TO AGREE FOR THIS TO TEST ANYTHING, and a first draft of it
+    // did not: with the record in RVAs and the function at a real VA, a
+    // containment test fails on the *offset* rather than on the rule, so
+    // swapping the equality for a containment left every assertion here green.
+    // 0x1010 against 0x1000..0x2000 is the same unit — an image based at 0, or a
+    // caller that normalised the table — so containment would match and
+    // equality must not. 0x10 is not a multiple of 64K either, so the congruent
+    // branch declines it too and `undefined` is the whole answer.
+    const rec = rf({ beginAddress: 0x1000, endAddress: 0x2000 });
+    expect(funcExceptionRecord({ address: 0x1010, size: 0x10 }, [rec])).toBeUndefined();
+    // The same record read as an RVA table, where the function is 64K-congruent
+    // with a *different* row: still not the covering one.
+    expect(funcExceptionRecord({ address: 0x140001010, size: 0x10 }, [rec])).toBeUndefined();
+  });
+
+  it("discards an ambiguous congruent match rather than guessing", () => {
+    // Two records exactly 64K apart are both congruent with one VA, and neither
+    // extent settles it. A wrong `__try` is worse than a missing one.
+    const a = rf({ beginAddress: 0x1000, endAddress: 0x1030 });
+    const b = rf({ beginAddress: 0x11000, endAddress: 0x11030 });
+    expect(funcExceptionRecord({ address: 0x140011000, size: 0x20 }, [a, b])).toBeUndefined();
+  });
+
+  it("breaks a congruent tie on the extent", () => {
+    const a = rf({ beginAddress: 0x1000, endAddress: 0x1030 }); // size 0x30
+    const b = rf({ beginAddress: 0x11000, endAddress: 0x11020 }); // size 0x20
+    expect(funcExceptionRecord({ address: 0x140011000, size: 0x20 }, [a, b])).toBe(b);
+  });
+
+  it("is idempotent — the client may send its own answer back", () => {
+    // THE PROPERTY THE SLICE RESTS ON (peek-a-bin-qmlz): the client applies this
+    // and sends the survivor, and the worker applies it again to that one row.
+    // Asked over each of the three routes into an answer.
+    const cases: [{ address: number; size: number }, RuntimeFunction[]][] = [
+      // same address
+      [{ address: 0x1000, size: 0x20 }, [rf({ beginAddress: 0x1000 })]],
+      // congruent, sole survivor
+      [
+        { address: 0x140001000, size: 0x20 },
+        [rf({ beginAddress: 0x1000 }), rf({ beginAddress: 0x2000 })],
+      ],
+      // congruent, chosen by the extent tie-break
+      [
+        { address: 0x140011000, size: 0x20 },
+        [
+          rf({ beginAddress: 0x1000, endAddress: 0x1030 }),
+          rf({ beginAddress: 0x11000, endAddress: 0x11020 }),
+        ],
+      ],
+    ];
+    for (const [func, table] of cases) {
+      const once = funcExceptionRecord(func, table);
+      expect(once).toBeDefined();
+      expect(funcExceptionRecord(func, [once as RuntimeFunction])).toBe(once);
+    }
+  });
+
+  it("answers undefined for an absent or empty table", () => {
+    expect(funcExceptionRecord({ address: 0x1000, size: 0x20 }, undefined)).toBeUndefined();
+    expect(funcExceptionRecord({ address: 0x1000, size: 0x20 }, [])).toBeUndefined();
   });
 });

@@ -165,19 +165,54 @@
  * two big arrays gone, the `go` image's remaining payload is `funcEntries` 2.18
  * ms (19.5% of a request), `runtimeFunctions` 1.53 ms (13.7%) and `funcExtents`
  * 0.645 ms (5.8%), against `funcInsns` at 0.012 ms and the xref rows at 0.004
- * ms. `funcEntries` still cannot be cached — it carries renames.
- * `runtimeFunctions` is the `.pdata` array, invariant under renames and a
- * property of the image, and has never been examined. `funcExtents` was refused
- * at 0.1-0.2% of a request and is now ~6% of a much smaller one, with the
- * resend protocol it was said to need now built — but its ABSOLUTE cost is
- * unchanged, which is what that refusal rested on, so re-measure rather than
+ * ms. `funcEntries` still cannot be cached — it carries renames. `funcExtents`
+ * was refused at 0.1-0.2% of a request and is now ~6% of a much smaller one,
+ * with the resend protocol it was said to need now built — but its ABSOLUTE cost
+ * is unchanged, which is what that refusal rested on, so re-measure rather than
  * assume.
+ *
+ * ## `peek-a-bin-qmlz` then took `runtimeFunctions`, with no protocol at all
+ *
+ * That member is the `.pdata` table, linear in the image, and reading its
+ * consumer is again what settles it: `decompileFunction` hands it to
+ * `wrapExceptionRegions` and to nothing else, and that picks **at most one**
+ * record — by a *begin-address* match modulo a recovered image base, never by an
+ * extent. So `funcExceptionRecord` (`src/disasm/funcInsns.ts`, beside
+ * `collectFuncInsns` and `funcXrefEntries`) is applied by the client and again by
+ * the worker; it is idempotent, so sending its own answer back is exact. No key,
+ * no cache, nothing retained — which is why `peek-a-bin-9a8`'s rule about a key
+ * being cheaper than the work does not arise.
+ *
+ * Measured at `755ea94`, with the whole table and the one row clocked in the
+ * SAME process so machine noise cancels (two runs):
+ *
+ * | image  | .pdata rows | whole table | one row  | member share    | payload          |
+ * |--------|-------------|-------------|----------|-----------------|------------------|
+ * | t32    |           0 | 0.001 ms    | 0.001 ms | 0.002% -> 0.03% | unmoved          |
+ * | t64    |         240 | 0.193 ms    | 0.001 ms | 7.24% -> 0.032% | 0.670 -> 0.419ms |
+ * | w32    |           0 | 0.001 ms    | 0.001 ms | 0.002% -> 0.03% | unmoved          |
+ * | w64    |         235 | 0.210 ms    | 0.003 ms | 8.69% -> 0.150% | 1.137 -> 0.647ms |
+ * | go x64 |        1641 | 1.369 ms    | 0.001 ms | 18.9% -> 0.012% | 4.162 -> 2.599ms |
+ *
+ * PE32 has no `.pdata` at all, so t32/w32 are the untouched control and their
+ * rising *share* is only the denominator shrinking — the same trap `funcExtents`
+ * sets. w64 is the one image whose median function has a record, so 0.003 ms is
+ * the one-row cost measured and the rest is the cost of cloning `undefined`.
+ *
+ * **THE CENSUS NEEDED A LIVENESS HALF for this member**, which is the `.pdata`
+ * line printed beside it: `runtimeFunctions` is read at one place and its whole
+ * observable effect is a `__try`, so an image emitting none would score a change
+ * that dropped the array entirely as clean. It is **50 on t64 and 46 on w64,
+ * equal under both payloads** — also exactly the handler-bearing row counts, so
+ * the emitted C and the table corroborate each other — 2 on the `go` image, and
+ * **0 on the PE32 pair, which the row labels vacuous rather than reporting as a
+ * pass**.
  */
 
 import { readFileSync } from "node:fs";
 import { Capstone, Const, loadCapstone } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
-import { collectFuncInsns, funcXrefEntries } from "../src/disasm/funcInsns";
+import { collectFuncInsns, funcExceptionRecord, funcXrefEntries } from "../src/disasm/funcInsns";
 import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { DisasmFunction, Instruction, Xref } from "../src/disasm/types";
@@ -243,6 +278,12 @@ interface Row {
   meanOwnXrefs: number;
   /** Functions whose emitted C differs between the two payloads, of `funcs`. */
   differing: number;
+  /** `.pdata` rows in the image, and how many the per-function payload sends. */
+  pdataRows: number;
+  pdataSent: number;
+  /** Functions emitting a `__try`, whole payload and per-function payload. */
+  wholeTries: number;
+  slimTries: number;
   /** Requests it took to decompile every function under the real protocol. */
   messages: number;
 }
@@ -351,11 +392,17 @@ async function measure(path: string): Promise<Row | null> {
   // THE PAYLOAD SINCE peek-a-bin-9gc9, built the way `disasmClient` builds it:
   // this function's own instructions and its own xref rows. `instructions` is
   // absent — it crosses only on the retry the worker asks for, once per file.
+  // `runtimeFunctions` is the one `.pdata` row this function can consult, not
+  // the image's table — the same rule the pipeline applies, so the slice is
+  // exact (peek-a-bin-qmlz). PE32 has no `.pdata`, so on t32/w32 both columns
+  // read the same nothing.
+  const pdataRecord = funcExceptionRecord(func, pe.runtimeFunctions);
   const slimPayload = {
     ...payload,
     instructions: undefined,
     funcInsns: collectFuncInsns(func, instructions),
     xrefEntries: funcXrefEntries(func, xrefMap),
+    runtimeFunctions: pdataRecord ? [pdataRecord] : undefined,
   };
   const slimParts = (Object.keys(slimPayload) as (keyof typeof slimPayload)[]).map((key) => ({
     key:
@@ -416,6 +463,8 @@ async function measure(path: string): Promise<Row | null> {
         base.instructions = undefined;
         base.funcInsns = collectFuncInsns(f, instructions);
         base.xrefEntries = funcXrefEntries(f, xrefMap);
+        const own = funcExceptionRecord(f, pe.runtimeFunctions);
+        base.runtimeFunctions = own ? [own] : undefined;
       }
       msgs++;
       let r = (await dispatch("decompileFunction", base, st)) as {
@@ -439,6 +488,16 @@ async function measure(path: string): Promise<Row | null> {
   const slimCode = await codeFor(true);
   let differing = 0;
   for (let i = 0; i < wholeCode.length; i++) if (wholeCode[i] !== slimCode[i]) differing++;
+  // THE LIVENESS HALF of the census above, and it is what stops "0 differing"
+  // from being a statement about a population of zero. `runtimeFunctions` is
+  // read at exactly one place — `wrapExceptionRegions`, whose whole observable
+  // effect is a `__try` — so if neither run emits one, dropping the array
+  // entirely would also read as 0 differing. PE32 has no `.pdata` at all and
+  // reports 0 here on purpose; on the x64 pair it is the handler-bearing row
+  // count, which is the number the slice has to preserve.
+  const tries = (code: string[]): number => code.filter((c) => /^\s*__try \{/m.test(c)).length;
+  const wholeTries = tries(wholeCode);
+  const slimTries = tries(slimCode);
 
   const meanOwnInsns =
     functions.reduce((a, f) => a + collectFuncInsns(f, instructions).length, 0) / functions.length;
@@ -469,6 +528,10 @@ async function measure(path: string): Promise<Row | null> {
     meanOwnInsns,
     meanOwnXrefs,
     differing,
+    pdataRows: pe.runtimeFunctions?.length ?? 0,
+    pdataSent: pdataRecord ? 1 : 0,
+    wholeTries,
+    slimTries,
     messages: slimMessages,
   };
 }
@@ -510,7 +573,9 @@ function print(rows: Row[]): void {
         `and ${r.meanOwnXrefs.toFixed(1)} xref rows per request, mean over all ${r.funcs} functions`,
     );
     console.log("  component            clone ms   % of a median request");
-    for (const p of [...r.slimParts].sort((a, b) => b.ms - a.ms).slice(0, 6)) {
+    // Every member, not the top few: the payload is small enough now that the
+    // interesting rows are the ones that used to be rounding error.
+    for (const p of [...r.slimParts].sort((a, b) => b.ms - a.ms)) {
       console.log(
         `  ${p.key.padEnd(20)} ${p.ms.toFixed(3).padStart(8)}   ${((p.ms * 100) / slimRequest).toFixed(3).padStart(8)}%`,
       );
@@ -538,6 +603,12 @@ function print(rows: Row[]): void {
       `  EQUIVALENCE: ${r.differing} of ${r.funcs} functions emit different C; ` +
         `${r.messages} messages for ${r.funcs} requests ` +
         `(${r.messages - r.funcs} resend${r.messages - r.funcs === 1 ? "" : "s"})`,
+    );
+    console.log(
+      `  .pdata: ${r.pdataRows} rows in the image, ${r.pdataSent} sent per request; ` +
+        `__try emitted in ${r.wholeTries} functions from the whole table and ` +
+        `${r.slimTries} from the per-function row ` +
+        `(${r.wholeTries === 0 ? "NO POPULATION — the census above is vacuous here" : r.wholeTries === r.slimTries ? "the population the slice must preserve" : "MISMATCH"})`,
     );
     // The two derived quantities the conclusion actually rests on. The first is
     // why the share above is a property of the tool rather than of the file:

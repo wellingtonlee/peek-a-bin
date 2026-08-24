@@ -1,6 +1,7 @@
 import type { RuntimeFunction } from "../../pe/types";
 import type { CalleeClobbers } from "../callSummary";
 import { buildCFG, detectLoops } from "../cfg";
+import { funcExceptionRecord } from "../funcInsns";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
@@ -84,6 +85,13 @@ export function decompileFunction(
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
   registry?: StructRegistry,
+  /**
+   * `.pdata` records. Either the image's whole table (the MCP server,
+   * `corpus/sweep.ts`) or the single row a caller has already picked with
+   * `funcExceptionRecord` (`disasmClient`, which cannot afford to clone a table
+   * linear in the image on every request) — the same answer either way, because
+   * that rule is what `wrapExceptionRegions` applies here and it is idempotent.
+   */
   runtimeFunctions?: RuntimeFunction[],
   tap?: (ev: StructuringTap) => void,
   /**
@@ -280,57 +288,29 @@ export function decompileFunction(
 
 /**
  * Wrap structured statements in __try/__except blocks based on .pdata exception info.
- * Looks for the RuntimeFunction describing the current function, if it has a handler.
  *
- * **Units.** `DisasmFunction.address` is a virtual address — the image base is
- * already in it. `RuntimeFunction.beginAddress` is an RVA, exactly as parsed
- * out of `.pdata`; nothing normalises the array on the way here (the worker and
- * the MCP server both forward `pe.runtimeFunctions` untouched). Comparing the
- * two directly matched nothing at all: on t64.exe all 240 entries match
- * `beginAddress + imageBase` and none match the raw RVA, so `__try` was emitted
- * zero times across 1475 real functions despite 50 handlers being present
- * (peek-a-bin-yrh).
- *
- * The image base is not plumbed this far, so it is recovered here from the pair
- * instead: a VA and its RVA differ by the image base, which the PE spec
- * requires to be a multiple of 64K. That is not by itself a unique test — two
- * functions exactly 64K apart are congruent — so an ambiguous match is
- * *discarded* rather than guessed at. A missing `__try` is a gap; a `__try`
- * attributed to the wrong function is a lie about what the code does.
+ * WHICH record applies to this function is {@link funcExceptionRecord}'s rule —
+ * the units, the recovered image base and the ambiguous-match discard are all
+ * documented there — and it lives in a leaf so the *client* can apply it too and
+ * send the one surviving row instead of a table linear in the image
+ * (peek-a-bin-qmlz). What stays here is what to do with the record once chosen,
+ * which is the only part the emitted C depends on.
  */
 function wrapExceptionRegions(
   body: IRStmt[],
   func: DisasmFunction,
   runtimeFunctions: RuntimeFunction[],
 ): IRStmt[] {
-  const withHandler = runtimeFunctions.filter(
-    (rf) => rf.handlerAddress !== undefined && (rf.handlerFlags ?? 0) & 0x3, // EHANDLER or UHANDLER
-  );
+  const rf = funcExceptionRecord(func, runtimeFunctions);
+  if (!rf) return body;
 
-  // Same unit on both sides: either the caller normalised the array to VAs, or
-  // the image is based at 0.
-  let matching = withHandler.filter((rf) => rf.beginAddress === func.address);
-
-  if (matching.length === 0) {
-    const IMAGE_BASE_ALIGNMENT = 0x10000;
-    const congruent = withHandler.filter((rf) => {
-      const imageBase = func.address - rf.beginAddress;
-      return imageBase > 0 && imageBase % IMAGE_BASE_ALIGNMENT === 0;
-    });
-    // Prefer an entry whose extent is the function's own; only an unambiguous
-    // survivor is used.
-    const exact = congruent.filter((rf) => rf.endAddress - rf.beginAddress === func.size);
-    const candidates = exact.length > 0 ? exact : congruent;
-    matching = candidates.length === 1 ? candidates : [];
-  }
-
-  if (matching.length === 0) return body;
-
-  // For now, wrap the entire function body in a try block for the first matching handler.
-  // The handler body is represented as a comment referencing the handler address.
-  const rf = matching[0];
+  // For now, wrap the entire function body in a try block for the matching
+  // handler. The handler body is represented as a comment referencing the
+  // handler address.
+  //
   // `handlerAddress` is an RVA like `beginAddress`; report it in the same unit
-  // as every other address in the pane, i.e. as a VA.
+  // as every other address in the pane, i.e. as a VA. The difference of the two
+  // is the image base `funcExceptionRecord` recovered to match them at all.
   const handlerAddr = rf.handlerAddress! + (func.address - rf.beginAddress);
   const tryStmt: IRTry = {
     kind: "try",

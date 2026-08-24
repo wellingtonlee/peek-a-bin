@@ -1699,10 +1699,41 @@ summary is built unless `is64`.
 gone, the `go` image's remaining payload is `funcEntries` 2.18 ms (19.5% of a request),
 `runtimeFunctions` 1.53 ms (13.7%) and `funcExtents` 0.645 ms (5.8%), against `funcInsns` at
 0.012 ms and the xref rows at 0.004 ms. `funcEntries` still cannot be cached. `runtimeFunctions` —
-the `.pdata` array, invariant under renames — has never been examined and is now the second-largest
-member. `funcExtents` was refused at 0.1–0.2% of a request and is now ~6% of a much smaller one,
+the `.pdata` array, invariant under renames — was the second-largest member and is taken below.
+`funcExtents` was refused at 0.1–0.2% of a request and is now ~6% of a much smaller one,
 with the resend protocol it was said to need now built; its **absolute** cost is unchanged, which is
 what that refusal rested on, so re-measure rather than assume.
+
+**`peek-a-bin-qmlz` then took `runtimeFunctions`, and it needed no protocol at all.** Reading the
+consumer is again what settles it: `decompileFunction` hands the array to `wrapExceptionRegions` and
+to nothing else, and that picks **at most one** record — matching a *begin address* modulo the
+recovered image base, never an extent — so the client applies the same rule and sends the survivor.
+`funcExceptionRecord` (`src/disasm/funcInsns.ts`, beside `collectFuncInsns` and `funcXrefEntries`)
+is the one declaration, applied on both sides, and it is **idempotent**, which is why sending its own
+answer back is exact rather than approximate. Measured at `755ea94`, with the whole table and the
+one row clocked in the **same process** so machine noise cancels:
+
+| image  | `.pdata` rows | whole table | one row  | member share of a request | payload |
+|--------|---------------|-------------|----------|---------------------------|---------|
+| t32    | 0             | 0.001 ms    | 0.001 ms | 0.002% → 0.031%           | unmoved |
+| t64    | 240           | 0.193 ms    | 0.001 ms | 7.24% → 0.032%            | 0.670 → 0.419 ms |
+| w32    | 0             | 0.001 ms    | 0.001 ms | 0.002% → 0.035%           | unmoved |
+| w64    | 235           | 0.210 ms    | 0.003 ms | 8.69% → 0.150%            | 1.137 → 0.647 ms |
+| go x64 | 1641          | 1.369 ms    | 0.001 ms | 18.94% → 0.012%           | 4.162 → 2.599 ms |
+
+**PE32 has no `.pdata` at all**, so t32 and w32 are the untouched control and this is an x64 saving;
+their rising *share* is the denominator shrinking, which is the same trap `funcExtents` sets. w64 is
+the one image whose median function has a record, so 0.003 ms is the one-row cost measured and the
+other three are the cost of cloning `undefined`.
+
+The harness reports the slice's own liveness beside the census, because **`0 differing` is a
+statement about a population and that population can be empty**: `runtimeFunctions` is read at
+exactly one place and its whole observable effect is a `__try`, so a run emitting none would score a
+change that dropped the array entirely as clean. It prints the `.pdata` row count, how many rows the
+per-function payload sends, and how many functions emit a `__try` under each payload — **50 on t64
+and 46 on w64, equal both ways** (and 0 on the PE32 pair, labelled as vacuous). Those two numbers are
+also exactly the handler-bearing row counts, so the emitted C and the table agree from two
+directions.
 ## `corpus/hybridGridServe.ts` — separate, takes a path, and answers one number
 
 `npm run corpus:gridserve -- <path-to-pe> [...]` answers whether `hybridDisassemble` decodes at

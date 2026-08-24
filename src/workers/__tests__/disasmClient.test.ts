@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
 import { type SweptInsn, sweepX86 } from "../../disasm/linearSweep";
 import type { Instruction, Xref } from "../../disasm/types";
+import type { RuntimeFunction } from "../../pe/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
 // serially-servicing worker would see the messages — which is the only way to
@@ -1861,7 +1862,12 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
   function ask(
     client: DisasmClient,
     func: { name: string; address: number; size: number },
-    opts: { extents?: boolean; is64?: boolean; insns?: Instruction[] } = {},
+    opts: {
+      extents?: boolean;
+      is64?: boolean;
+      insns?: Instruction[];
+      pdata?: RuntimeFunction[];
+    } = {},
   ) {
     return client.decompileFunction(
       func,
@@ -1871,7 +1877,7 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
       null,
       opts.is64 ?? true,
       names,
-      undefined,
+      opts.pdata,
       opts.extents === false ? undefined : [fnA, fnB, fnC],
     );
   }
@@ -2080,4 +2086,223 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
     expect(store).toMatch(/=\s*rcx\s*;/);
     expect(store).not.toMatch(/clobbered_r10_\d+/);
   });
+});
+
+/**
+ * peek-a-bin-qmlz — the decompile request carries ONE `.pdata` row.
+ *
+ * With the two big arrays gone (peek-a-bin-9gc9), `runtimeFunctions` was the
+ * second-largest member of the request and the largest one that *can* be cut:
+ * 1.6 ms on a 669 KiB-`.text` `go` image at 755ea94, 19% of a request and 39%
+ * of what was left of the payload, over a table linear in the image (1641 rows
+ * there, 240 and 235 on t64/w64). `funcEntries` above it carries renames and
+ * cannot be.
+ *
+ * Reading the consumer is what makes a slice available: `decompileFunction`
+ * passes the array to `wrapExceptionRegions` and to nothing else, and that picks
+ * **at most one** record — matching a begin address rather than an extent — so
+ * `funcExceptionRecord` is applied by the client and again by the worker, and it
+ * is idempotent. The rule has one declaration, in `disasm/funcInsns.ts` beside
+ * the other two members of that family, because `disasmClient` cannot import the
+ * pipeline.
+ *
+ * PE32 has no `.pdata` at all, so this is an x64 saving; the two 32-bit corpus
+ * binaries are the untouched control. What has to be pinned here is that the one
+ * row sent is the one the whole table would have chosen, in both directions —
+ * a `__try` kept where the table had one, and none invented where the table
+ * refused.
+ */
+describe("DisasmWorkerClient — a decompile request carries one .pdata row", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const A = 0x140001000;
+  const B = 0x140001100;
+  const C = 0x140001200;
+  const fnA = { name: "sub_140001000", address: A, size: 13 };
+  const fnB = { name: "sub_140001100", address: B, size: 0x8 };
+  const fnC = { name: "sub_140001200", address: C, size: 0x8 };
+
+  const insn = (address: number, mnemonic: string, opStr: string, size: number): Instruction => ({
+    address,
+    mnemonic,
+    opStr,
+    size,
+    bytes: new Uint8Array(size),
+  });
+  const section = (): Instruction[] => [
+    insn(A, "mov", "r10, rcx", 3),
+    insn(A + 3, "call", `0x${B.toString(16)}`, 5),
+    insn(A + 8, "mov", "qword ptr [rsi], r10", 4),
+    insn(A + 12, "ret", "", 1),
+    insn(B, "xor", "r10d, r10d", 3),
+    insn(B + 3, "ret", "", 1),
+    insn(C, "xor", "eax, eax", 2),
+    insn(C + 2, "ret", "", 1),
+  ];
+  const names = new Map([
+    [A, { name: fnA.name, address: A }],
+    [B, { name: fnB.name, address: B }],
+    [C, { name: fnC.name, address: C }],
+  ]);
+
+  /**
+   * `.pdata` as the parser hands it over: RVAs, against functions at VAs. That
+   * unit mismatch is the whole reason the match is a congruence and not an
+   * equality (peek-a-bin-yrh), and a fixture in VAs would test a path no real
+   * x64 image takes.
+   */
+  const rf = (o: Partial<RuntimeFunction> & { beginAddress: number }): RuntimeFunction => ({
+    endAddress: o.beginAddress + 0x20,
+    unwindInfoAddress: 0,
+    handlerAddress: 0x900,
+    handlerFlags: 0x1,
+    ...o,
+  });
+  const A_RVA = A - 0x140000000;
+
+  /**
+   * A table with something to refuse as well as something to find: the row for
+   * A, a row 64K above it (congruent with A, so the extent is what separates
+   * them), a handler-bearing row for C, and a row with no handler at all.
+   */
+  const table = (): RuntimeFunction[] => [
+    // A's row is deliberately NOT first: a client that sent `table()[0]` would
+    // then send the right row by luck and the assertions below would not see it.
+    rf({ beginAddress: A_RVA + 0x10000, endAddress: A_RVA + 0x10000 + 0x40 }),
+    rf({ beginAddress: C - 0x140000000, endAddress: C - 0x140000000 + 8 }),
+    rf({ beginAddress: A_RVA, endAddress: A_RVA + 13 }),
+    rf({ beginAddress: 0x3000, handlerAddress: undefined, handlerFlags: 0 }),
+  ];
+
+  const freshState = () => createWorkerState(Promise.resolve());
+  let shared: Instruction[] = [];
+  beforeEach(() => {
+    shared = section();
+  });
+
+  function ask(
+    client: DisasmClient,
+    func: { name: string; address: number; size: number },
+    pdata?: RuntimeFunction[],
+  ) {
+    return client.decompileFunction(func, shared, new Map(), null, null, true, names, pdata, [
+      fnA,
+      fnB,
+      fnC,
+    ]);
+  }
+
+  it("sends the one row that applies, not the table", async () => {
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnA, table());
+
+    const sent = worker.received[0].args.runtimeFunctions as RuntimeFunction[];
+    expect(sent).toHaveLength(1);
+    expect(sent[0].beginAddress).toBe(A_RVA);
+  });
+
+  it("sends no rows at all when the table has nothing for this function", async () => {
+    // B has no handler-bearing record, so the member is absent rather than an
+    // empty array — the cheapest thing to clone, and the same answer.
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnB, table());
+
+    expect(worker.received[0].args.runtimeFunctions).toBeUndefined();
+  });
+
+  it("gives the same emitted C as the whole table did, and there is a __try to keep", async () => {
+    // The claim, asked of the real dispatch in the direction where the table
+    // finds something. Non-vacuous by assertion: a run in which neither side
+    // emits a `__try` would prove nothing, which is exactly what a window slice
+    // over an RVA table would produce.
+    const { client, worker } = await loadClient();
+
+    const slim = await drive(worker, freshState(), () => ask(client, fnA, table()));
+
+    const whole = (await dispatch(
+      "decompileFunction",
+      // The retry shape: the same request with the section, so the worker can
+      // build the clobber summary and answer rather than asking again.
+      { ...worker.received[0].args, runtimeFunctions: table(), instructions: section() },
+      freshState(),
+    )) as { code: string };
+
+    expect(slim.code).toContain("__try");
+    expect(slim.code).toBe(whole.code);
+  });
+
+  it("invents no __try where the whole table refused an ambiguous match", async () => {
+    // Two records congruent with A and the same extent: the table declines to
+    // guess, so the slice must decline too. The other direction of the same
+    // claim, and the one a client that guessed would get wrong.
+    const { client, worker } = await loadClient();
+    const ambiguous = [
+      rf({ beginAddress: A_RVA, endAddress: A_RVA + 13 }),
+      rf({ beginAddress: A_RVA + 0x10000, endAddress: A_RVA + 0x10000 + 13 }),
+    ];
+
+    const slim = await drive(worker, freshState(), () => ask(client, fnA, ambiguous));
+
+    expect(worker.received[0].args.runtimeFunctions).toBeUndefined();
+    const whole = (await dispatch(
+      "decompileFunction",
+      { ...worker.received[0].args, runtimeFunctions: ambiguous, instructions: section() },
+      freshState(),
+    )) as { code: string };
+    expect(slim.code).not.toContain("__try");
+    expect(slim.code).toBe(whole.code);
+  });
+
+  it("would lose the __try if the client sliced by window instead", async () => {
+    // THE NEGATIVE CONTROL, and the trap this predicate is not. The other two
+    // members of the `funcInsns.ts` family slice on
+    // `[func.address, func.address + func.size)`; applied to a `.pdata` row that
+    // window matches nothing, because the row is an RVA and the function is a
+    // VA. It is `peek-a-bin-yrh` reintroduced one file earlier, and it is silent
+    // — the C still compiles, it just no longer says the function has a handler.
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnA, table());
+    const windowed = table().filter(
+      (r) => r.beginAddress >= fnA.address && r.beginAddress < fnA.address + fnA.size,
+    );
+    expect(windowed).toHaveLength(0);
+
+    const lost = (await dispatch(
+      "decompileFunction",
+      { ...worker.received[0].args, runtimeFunctions: windowed, instructions: section() },
+      freshState(),
+    )) as { code: string };
+
+    expect(lost.code).not.toContain("__try");
+  });
+
+  /** As in the block above: service each posted message with the real dispatch. */
+  async function drive<T>(
+    worker: {
+      posted: PostedMessage[];
+      received: PostedMessage[];
+      reply(id: number, r: unknown): void;
+    },
+    state: WorkerState,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    const from = worker.posted.length;
+    const pending = call();
+    for (let i = from; i < worker.posted.length; i++) {
+      const result = await dispatch(
+        worker.received[i].method as never,
+        worker.received[i].args,
+        state,
+      );
+      worker.reply(worker.posted[i].id, result);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    return pending;
+  }
 });
