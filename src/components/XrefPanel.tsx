@@ -47,6 +47,17 @@ export function XrefPanel({
     clearTimeout(filterTimerRef.current);
     filterTimerRef.current = setTimeout(() => setFilter(value), 250);
   }, []);
+  /**
+   * Cancel a pending debounce on unmount. NO TEST PINS THIS AND ONE CANNOT BE
+   * WRITTEN HERE: without it the timer fires 250ms later and calls `setFilter`
+   * on an unmounted component, which React 19 accepts in silence — no warning,
+   * no error, nothing observable — so any test would be green either way. That
+   * makes this correct-by-inspection rather than verified, and it is worth
+   * having anyway: the panel unmounts whenever its tab is closed, which is a
+   * button press away, and a `setState` on a dead tree is not a thing to leave
+   * lying around on the strength of one React version's tolerance.
+   */
+  useEffect(() => () => clearTimeout(filterTimerRef.current), []);
 
   const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(
     new Set(["call", "jmp", "branch", "data"]),
