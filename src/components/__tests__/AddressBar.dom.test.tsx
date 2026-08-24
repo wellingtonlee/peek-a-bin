@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../../test/domSetup";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
@@ -136,6 +136,67 @@ describe("AddressBar tab bar", () => {
     const anomalies = tabButtons()[VIEW_TABS.indexOf("anomalies")];
     // 1 static + 2 AI. The badge is the only place the two lists are summed.
     expect(anomalies.textContent).toBe(`${VIEW_TAB_LABELS.anomalies}3`);
+  });
+});
+
+describe("AddressBar anomaly badge severity", () => {
+  /**
+   * THE BADGE'S COLOUR HAD NO TEST AT ALL, which is how a third hand-written
+   * severity chain survived beside two declared tables. `AnomaliesView`'s own
+   * docstring named it: "STILL NOT UNIFIED WITH `AddressBar.tsx`'s status dot …
+   * The two agree today. Nothing makes them agree tomorrow."
+   *
+   * Read beside `severity.test.ts`, which is where the combinations live. This
+   * is the half that can only be asked of a render: that the level chosen there
+   * reaches the page as a colour. CLASS NAMES AS STRINGS — Tailwind is
+   * deliberately out of the test config, so `bg-red-500` carries no colour here;
+   * what this discriminates is red from amber from blue, which is the
+   * peek-a-bin-n7q1 distinction.
+   */
+  const badge = () => {
+    const tab = tabButtons()[VIEW_TABS.indexOf("anomalies")];
+    const span = tab.querySelector("span");
+    if (!span) throw new Error("anomalies tab rendered no badge");
+    return span;
+  };
+
+  it("paints the badge in the worst severity present, not the first", () => {
+    renderBar({
+      anomalies: [{ severity: "info", title: "a", detail: "d" }],
+      aiScanResults: [aiFinding("high", "b")],
+    });
+    // THE CROSS-LIST CASE, and the one the old chain had to spell by hand: the
+    // only critical-grade thing here is an AI `high`, a value the anomaly
+    // vocabulary does not even have.
+    expect(badge().className).toContain("bg-red-500");
+    expect(badge().className).not.toContain("amber");
+    expect(badge().textContent).toBe("2");
+  });
+
+  it("paints amber for a medium finding and a warning anomaly alike", () => {
+    renderBar({ aiScanResults: [aiFinding("medium", "b")] });
+    expect(badge().className).toContain("bg-amber-500");
+    cleanup();
+    renderBar({ anomalies: [{ severity: "warning", title: "a", detail: "d" }] });
+    expect(badge().className).toContain("bg-amber-500");
+  });
+
+  it("paints blue when everything present is mild", () => {
+    renderBar({
+      anomalies: [{ severity: "info", title: "a", detail: "d" }],
+      aiScanResults: [aiFinding("low", "b")],
+    });
+    expect(badge().className).toContain("bg-blue-500");
+    expect(badge().className).not.toContain("red");
+  });
+
+  it("renders no badge at all when there is nothing to report", () => {
+    renderBar();
+    const tab = tabButtons()[VIEW_TABS.indexOf("anomalies")];
+    // `maxBadgeLevel` answers `null` here rather than `"info"`, and this is the
+    // difference that makes: an empty result is not a mild result.
+    expect(tab.querySelector("span")).toBeNull();
+    expect(tab.textContent).toBe(VIEW_TAB_LABELS.anomalies);
   });
 });
 

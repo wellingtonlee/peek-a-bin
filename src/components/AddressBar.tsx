@@ -13,6 +13,7 @@ import { serializeState, validateImport } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 import { VIEW_TAB_LABELS } from "./analysisNotice";
 import { focusOnMount } from "./focusOnMount";
+import { type BadgeLevel, maxBadgeLevel } from "./severity";
 import { tabId, tabPanelId } from "./tabIds";
 
 /**
@@ -37,6 +38,22 @@ const TABS: { id: ViewTab; label: string }[] = VIEW_TABS.map((id) => ({
 const TAB_KEYS: Record<string, ViewTab> = Object.fromEntries(
   VIEW_TABS.slice(0, 9).map((id, i) => [String(i + 1), id]),
 );
+
+/**
+ * The tab badge's palette, keyed on the shared {@link BadgeLevel} and NOT on
+ * either severity union.
+ *
+ * A third palette, and legitimately one: this is an 8px dot, so it takes the
+ * `-500` shades where `AnomaliesView` paints a table row in
+ * `-900/20`/`-300`/`-600`. What was duplicated across the three sites was never
+ * the colours but the judgement — which severities are worse than which — and
+ * that lives once now, in `./severity.ts`.
+ */
+const BADGE_DOT: Record<BadgeLevel, string> = {
+  critical: "bg-red-500",
+  warning: "bg-amber-500",
+  info: "bg-blue-500",
+};
 
 interface Suggestion {
   label: string;
@@ -548,24 +565,19 @@ export function AddressBar() {
                 ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
                 : null;
           const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
+          /* The worst severity across BOTH lists, from the one declaration of
+             what "worse" means. This used to be a hand-written
+             `severity === "critical" || severity === "high"` chain — a third
+             spelling of a predicate `AnomaliesView` had already had to convert
+             into two declared tables, and the shape a new union member joins on
+             whichever side the author left open. `severity.ts` maps each union
+             onto the level; only the paint is local, because an 8px dot wants
+             the `-500` shades where a table row wants `-900/20`. */
           const maxSeverity =
             isAnomalies && anomalyCount > 0
-              ? state.anomalies.some((a) => a.severity === "critical") ||
-                state.aiScanResults.some((a) => a.severity === "critical" || a.severity === "high")
-                ? "critical"
-                : state.anomalies.some((a) => a.severity === "warning") ||
-                    state.aiScanResults.some((a) => a.severity === "medium")
-                  ? "warning"
-                  : "info"
+              ? maxBadgeLevel(state.anomalies, state.aiScanResults)
               : null;
-          const badgeColor =
-            maxSeverity === "critical"
-              ? "bg-red-500"
-              : maxSeverity === "warning"
-                ? "bg-amber-500"
-                : maxSeverity === "info"
-                  ? "bg-blue-500"
-                  : "";
+          const badgeColor = maxSeverity ? BADGE_DOT[maxSeverity] : "";
           /* THE ACCESSIBLE NAME, which is not the label.
              The count sits in a `<span>` inside the button with no separator, so
              the Anomalies tab announced itself as the single string "Anomalies3"

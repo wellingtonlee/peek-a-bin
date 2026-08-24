@@ -1,57 +1,42 @@
 import type { Anomaly } from "../analysis/anomalies";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
-import type { AIScanFinding } from "../llm/types";
+import { ANOMALY_BADGE, BADGE_RANK, type BadgeLevel, FINDING_BADGE } from "./severity";
 
 /**
- * A severity's place in the reading order, and the three class names that paint
- * it.
+ * The three-way palette every severity is painted with, keyed on the shared
+ * {@link BadgeLevel} rather than on either severity union.
  *
- * BOTH ARE `Record<Anomaly["severity"], …>` RATHER THAN `Record<string, …>`, and
- * that is the whole instrument for a fourth severity. They used to be keyed by
- * `string`, so adding one to {@link Anomaly} compiled, sorted last behind `info`
- * and rendered in `info`'s blue — a new severity silently painted as the mildest
- * one. Typed this way it fails the build here instead, the way
- * `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do for their own unions.
+ * WHAT MOVED, AND WHY. There were two tables here — one over
+ * `Anomaly["severity"]` and one over `AIScanFinding["severity"]` — declared as
+ * `Record`s rather than the hand-written predicate chains they replaced, because
+ * a chain is what `peek-a-bin-n7q1` shipped: one predicate spelled by hand at
+ * five sites, the fifth missed, and one notice rendering amber and red at the
+ * same time. That docstring then recorded the remaining half of the problem:
+ * `AddressBar`'s tab badge asks the *maximum* over both lists at once and
+ * answered it with a THIRD chain, `severity === "critical" || === "high"`.
+ * "The two agree today. Nothing makes them agree tomorrow."
  *
- * The `??` fallbacks at the two read sites are kept even so: an anomaly can
- * reach `AppState` from outside the type system (the MCP wire, a restored
- * snapshot), and the fallback is what keeps that a blue row rather than a
- * property read on `undefined`.
+ * Something does now. `./severity.ts` holds the one mapping from each union onto
+ * the three levels the UI actually paints, and the one ranking of those levels;
+ * both files read it. The five-member table collapses into this three-member one
+ * because it was never five colours — `high` was always `critical`'s red and
+ * `medium` always `warning`'s amber — and the class names stay HERE because
+ * those really do differ per site: a table row in `-900/20`/`-300`/`-600`
+ * against `AddressBar`'s 8px dot in `-500`. What was duplicated was the
+ * judgement, not the paint.
+ *
+ * `Record<BadgeLevel, …>` keeps the instrument a fourth level would trip, and
+ * `ANOMALY_BADGE`/`FINDING_BADGE` are the ones a fourth anomaly severity or a
+ * sixth finding severity trips. The `??` fallbacks at the read sites are kept
+ * even so: a severity can reach `AppState` from outside the type system (the MCP
+ * wire, a restored snapshot), and the fallback is what keeps that a blue row
+ * rather than a property read on `undefined`. The two fallbacks differ
+ * deliberately — unknown sorts LAST (`?? 9`) and paints BLUE (`?? info`) — which
+ * is why `severity.ts` exports raw lookups rather than one total function.
  */
-const SEVERITY_ORDER: Record<Anomaly["severity"], number> = { critical: 0, warning: 1, info: 2 };
-const SEVERITY_COLORS: Record<Anomaly["severity"], { bg: string; text: string; badge: string }> = {
+const BADGE_COLORS: Record<BadgeLevel, { bg: string; text: string; badge: string }> = {
   critical: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
   warning: { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" },
-  info: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
-};
-
-/**
- * The AI findings' own palette — a SECOND, wider vocabulary, deliberately kept
- * apart from {@link SEVERITY_COLORS} because the two enumerations differ:
- * `AIScanFinding["severity"]` has five members and no `warning`.
- *
- * DECLARED AS A TABLE RATHER THAN THE NESTED TERNARY IT REPLACED. The old
- * spelling was a hand-written predicate chain over the severity string
- * (`=== "critical" || === "high" ? red : === "medium" ? amber : blue`), which is
- * exactly the shape `peek-a-bin-n7q1` shipped: five render sites each spelling
- * `kind === "analysis-failed"` by hand, the fifth missed, and one notice on
- * screen in two colours at once. A `Record` over the union means a sixth
- * severity fails the build.
- *
- * STILL NOT UNIFIED WITH `AddressBar.tsx`'s status dot, which asks a different
- * question of the same union — the *maximum* severity across anomalies and
- * findings together — and answers it with its own hand-written
- * `severity === "critical" || severity === "high"` chain. The two agree today.
- * Nothing makes them agree tomorrow.
- */
-const FINDING_COLORS: Record<
-  AIScanFinding["severity"],
-  { bg: string; text: string; badge: string }
-> = {
-  critical: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
-  high: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
-  medium: { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" },
-  low: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
   info: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
 };
 
@@ -59,7 +44,8 @@ export function AnomaliesView() {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const anomalies = [...state.anomalies].sort(
-    (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
+    (a, b) =>
+      (BADGE_RANK[ANOMALY_BADGE[a.severity]] ?? 9) - (BADGE_RANK[ANOMALY_BADGE[b.severity]] ?? 9),
   );
   const driverInfo = state.driverInfo;
   const irpHandlers = state.irpHandlers;
@@ -81,7 +67,7 @@ export function AnomaliesView() {
           </thead>
           <tbody>
             {anomalies.map((a: Anomaly, i: number) => {
-              const sc = SEVERITY_COLORS[a.severity] ?? SEVERITY_COLORS.info;
+              const sc = BADGE_COLORS[ANOMALY_BADGE[a.severity]] ?? BADGE_COLORS.info;
               return (
                 <tr key={i} className={`${sc.bg} border-b border-gray-800/50`}>
                   <td className="py-1.5 px-2">
@@ -183,7 +169,8 @@ export function AnomaliesView() {
               </thead>
               <tbody>
                 {state.aiScanResults.map((finding, i) => {
-                  const sevColor = FINDING_COLORS[finding.severity] ?? FINDING_COLORS.info;
+                  const sevColor =
+                    BADGE_COLORS[FINDING_BADGE[finding.severity]] ?? BADGE_COLORS.info;
                   return (
                     <tr key={i} className={`${sevColor.bg} border-b border-gray-800/50`}>
                       <td className="py-1.5 px-2">
