@@ -2,12 +2,16 @@
  * The disasm worker's request watchdog: how long a reply may take, and what a
  * caller is handed when it does not arrive.
  *
- * A leaf that imports nothing, deliberately. `disasmClient.ts` constructs its
- * `Worker` singleton at module scope, so anything that needs the budget or the
- * error type — `components/analysisNotice.ts` states the budget in prose, and
- * `App.tsx` has to tell a timeout apart from a failed analysis — would
- * otherwise spawn a worker by importing it, and no test could reach either.
- * Same reason `stackIdiom.ts` and `sectionMemo.ts` are their own modules.
+ * A leaf that imports nothing, deliberately. The budget and the error type have
+ * readers outside the client — `components/analysisNotice.ts` states the budget
+ * in prose, `App.tsx` has to tell a timeout apart from a failed analysis — and
+ * neither should have to import `disasmClient.ts` to get them: that module
+ * pulls in the whole RPC surface and, through `disasm.worker.ts`'s URL, the
+ * worker entry point. Same reason `stackIdiom.ts` and `sectionMemo.ts` are
+ * their own modules. Note the *original* reason was stronger and is now spent:
+ * the client used to construct its `Worker` at module scope, so importing it
+ * spawned a thread and threw outright under vitest. It builds on first use now
+ * (peek-a-bin-s22), so this is an import-weight rule rather than a hard one.
  */
 
 /**

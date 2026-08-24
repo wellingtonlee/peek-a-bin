@@ -24,9 +24,11 @@ import {
  * "no React renderer exists". One now does, so the render COUNT half is settled
  * here. Read the boundary before quoting a number:
  *
- *  - **This is a HARNESS, not the real view.** `DisassemblyView` is ~1520 lines,
- *    is lazy-loaded, and imports `workers/disasmClient`, which constructs a
- *    `Worker` singleton at module scope — there is no `Worker` in jsdom. What is
+ *  - **This is a HARNESS, not the real view.** `DisassemblyView` is ~1520 lines
+ *    and is lazy-loaded. It is *mountable* since peek-a-bin-s22 made the worker
+ *    lazy (see `DisassemblyView.dom.test.tsx`), but only its early-return
+ *    branches have been rendered; nothing has yet driven the populated panel a
+ *    render count would have to be counted over. What is
  *    real here is the reducer (`appReducer`), the state (`initialState`), the
  *    two contexts, and React's own batching. What is a transcription is the
  *    shape: one component holding the cursor effect, one reading the two fields

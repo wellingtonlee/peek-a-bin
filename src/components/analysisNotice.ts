@@ -26,9 +26,9 @@
 import { archForMachine, unsupportedArchMessage } from "../disasm/arch";
 import type { DetectPass } from "../disasm/functionDetect";
 import type { AnalysisPhase, ViewTab } from "../hooks/usePEFile";
-// A leaf that imports nothing, so this adds no edge to the worker singleton
-// `disasmClient.ts` constructs at module scope — see its docstring. The budget
-// is read rather than spelled, so the prose cannot disagree with the watchdog.
+// A leaf that imports nothing, so this adds no edge to `disasmClient.ts` and
+// none to the worker entry point behind it — see its docstring. The budget is
+// read rather than spelled, so the prose cannot disagree with the watchdog.
 import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "../workers/requestTimeout";
 
 /** Display names for the view tabs, for prose that has to name them. */

@@ -26,10 +26,12 @@ import { StatusBar } from "../StatusBar";
  * them: the notice's label is actually on the screen, in the branch that is
  * actually taken.
  *
- * `StatusBar` is one of the few real components mountable here — its heaviest
- * import is `llm/settings`, which reads localStorage. Anything reaching
- * `workers/disasmClient` is not, because that module constructs a `Worker`
- * singleton at module scope and jsdom has none.
+ * `StatusBar` is a cheap component to mount — its heaviest import is
+ * `llm/settings`, which reads localStorage. Components reaching
+ * `workers/disasmClient` were once unmountable here, because that module
+ * constructed a `Worker` at module scope and jsdom has none; since
+ * peek-a-bin-s22 it builds on first use, and `DisassemblyView.dom.test.tsx` is
+ * the counterpart to this file on the other side of that change.
  */
 
 const PE = parsePE(buildMinimalPE32());

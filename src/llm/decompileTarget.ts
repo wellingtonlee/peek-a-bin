@@ -2,9 +2,11 @@
  * Pure helpers behind `decompileForLLM`.
  *
  * Split out from `decompileForLLM.ts` because that module imports
- * `workers/disasmClient`, which constructs a real `Worker` at module scope and
- * therefore cannot be imported under vitest. Keep this file free of heavy
- * imports so the arithmetic below stays testable.
+ * `workers/disasmClient`, which used to construct a real `Worker` at module
+ * scope and so could not be imported under vitest at all. It builds on first
+ * use now (peek-a-bin-s22), so the split is about import weight rather than
+ * impossibility — keep this file free of heavy imports so the arithmetic below
+ * stays testable without dragging in the RPC surface.
  */
 import type { DisasmFunction } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";

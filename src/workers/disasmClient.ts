@@ -54,7 +54,8 @@ interface PendingRequest {
 }
 
 class DisasmWorkerClient {
-  private worker: Worker;
+  /** Built on first use by {@link ensureWorker}; null until then. */
+  private worker: Worker | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private disasmCache = new Map<string, Instruction[]>();
@@ -134,21 +135,43 @@ class DisasmWorkerClient {
    */
   private imageMachine: number | undefined;
 
-  constructor() {
-    this.worker = new Worker(new URL("./disasm.worker.ts", import.meta.url), { type: "module" });
-    this.worker.onmessage = (e) => {
+  /**
+   * Build the worker on first use.
+   *
+   * The module exports a singleton, so this used to be a constructor and a
+   * `new Worker(...)` ran on *import*. Two costs, and the second is the one
+   * that mattered. A session that opens no file paid for a thread and its
+   * Capstone WASM load regardless — and, because jsdom has no `Worker`,
+   * importing this module threw, so every component whose graph reaches it was
+   * unmountable under the component tests. `DisassemblyView` is that component,
+   * and it is most of the remaining render gap (see CLAUDE.md's "Not verified").
+   *
+   * Deferring costs nothing here: `App`'s very first effect calls {@link init},
+   * so in the real app construction moves from module evaluation to the first
+   * effect flush — one render pass later, before anything can be asked of the
+   * worker. No warm-up call is needed and none is offered; adding one would be
+   * production API existing only to restore an import-time side effect.
+   *
+   * This is `metricsClient.ts`'s shape, deliberately: two clients with one
+   * lifecycle rule between them. What differs is only the reason each is lazy —
+   * there, most sessions never cross the size threshold at all.
+   */
+  private ensureWorker(): Worker {
+    if (this.worker) return this.worker;
+    const worker = new Worker(new URL("./disasm.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (e) => {
       const { id, result, error } = e.data;
       const p = this.take(id);
       if (!p) return;
       if (error) p.reject(new Error(error));
       else p.resolve(result);
     };
-    this.worker.onerror = (e) => {
+    worker.onerror = (e) => {
       console.error("[disasm worker] load error:", e.message ?? e);
       // Reject all pending requests so callers don't hang
       this.rejectAll(`Worker error: ${e.message ?? "unknown"}`);
     };
-    this.worker.onmessageerror = () => {
+    worker.onmessageerror = () => {
       // A reply that failed structured clone (the large Instruction[] payloads
       // are the risk) never reaches onmessage, and the event carries no usable
       // data identifying which request it belonged to — so fail everything
@@ -156,6 +179,11 @@ class DisasmWorkerClient {
       console.error("[disasm worker] message deserialization failed");
       this.rejectAll("Worker reply could not be deserialized (structured clone failed)");
     };
+    // Assigned last, so a throw from `new Worker` or from wiring the handlers
+    // leaves the field null and the next request tries again rather than
+    // inheriting a half-built worker.
+    this.worker = worker;
+    return worker;
   }
 
   /** Remove a pending request and cancel its watchdog. */
@@ -193,11 +221,15 @@ class DisasmWorkerClient {
         // over; the caller's buffer is never transferred and never detaches.
         // See ./transfer.ts for the measurements behind this.
         const { args: payload, transfer } = prepareBinaryArgs(args);
-        this.worker.postMessage({ id, method, args: payload }, transfer);
+        this.ensureWorker().postMessage({ id, method, args: payload }, transfer);
       } catch (err) {
-        // e.g. DataCloneError on a non-transferable argument, or a TypeError
-        // from copying an already-detached view — fail now instead of leaving
-        // the entry and its watchdog around for the full timeout.
+        // e.g. DataCloneError on a non-transferable argument, a TypeError from
+        // copying an already-detached view, or — since construction is lazy —
+        // `new Worker` itself throwing, which is what an environment with no
+        // `Worker` at all does. Fail now instead of leaving the entry and its
+        // watchdog around for the full timeout. Note this is the whole reason a
+        // component test can mount a view that posts: the request rejects and
+        // the caller's error path runs, rather than the render throwing.
         this.take(id)?.reject(err);
       }
     });
@@ -222,6 +254,13 @@ class DisasmWorkerClient {
    * disassembly and xref caches key on addresses that mean nothing across
    * files, the decompile cache keys on a bare function address, and the jump
    * tables would otherwise be seeded into the *next* file's recursive descent.
+   *
+   * Posts nothing, and so **builds no worker** — as do
+   * {@link registerSourceBlob}, {@link invalidateCache} and
+   * {@link invalidateDecompileCache}. All four are client-side bookkeeping, and
+   * `App` calls the first two on every parse; making any of them construct
+   * would put the thread back at load time by another door and undo
+   * {@link ensureWorker}.
    */
   setImage(machine: number | undefined): void {
     this.imageMachine = machine;

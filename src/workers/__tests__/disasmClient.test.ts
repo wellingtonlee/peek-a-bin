@@ -17,11 +17,17 @@ import { createWorkerState, dispatch, type WorkerState } from "../dispatch";
 type PostedMessage = { id: number; method: string; args: any };
 
 /**
- * disasmClient.ts instantiates its worker singleton at module scope, so a fake
- * Worker has to be in place before the module is imported.
+ * The stand-in for `disasm.worker.ts`.
+ *
+ * The client builds its `Worker` on **first use**, not at import, so the stub
+ * only has to be in place before the first request — but it is installed before
+ * the import anyway, because that is one rule instead of two and it is what the
+ * lazy-construction tests below measure the absence of.
  */
 class FakeWorker {
   static last: FakeWorker | undefined;
+  /** How many the client has built this test. Reset by `loadClient`. */
+  static built = 0;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onerror: ((e: { message?: string }) => void) | null = null;
   onmessageerror: ((e: unknown) => void) | null = null;
@@ -32,6 +38,7 @@ class FakeWorker {
 
   constructor() {
     FakeWorker.last = this;
+    FakeWorker.built++;
   }
 
   /** Swallow the request — models a worker wedged in an infinite loop. */
@@ -63,7 +70,52 @@ class FakeWorker {
   }
 }
 
+/**
+ * The three logs that mean "nothing yet" before a worker exists.
+ *
+ * A test that records `worker.posted.length` as a baseline and *then* sends is
+ * asking a question with a true answer at that point, so it gets it. Anything
+ * else — replying, or reaching for a handler — is addressed to a worker that
+ * has not been built, which is a test bug and says so rather than no-op'ing.
+ */
+const EMPTY_LOGS = new Set(["posted", "transfers", "received"]);
+const NOTHING_YET: readonly never[] = [];
+
+/**
+ * A stable stand-in for a worker the client has not built yet.
+ *
+ * Construction is deferred to the first request, so at `loadClient()` time
+ * there is nothing to hand back — and nearly every test here destructures
+ * `worker` on that line and reaches for `.posted` or `.reply` later, once it
+ * has sent something. Resolving `FakeWorker.last` at the moment of each
+ * property access keeps all of those call sites honest without each having to
+ * remember to re-fetch.
+ */
+function workerHandle(): FakeWorker {
+  return new Proxy({} as FakeWorker, {
+    get(_target, prop) {
+      const w = FakeWorker.last;
+      if (!w) {
+        if (typeof prop === "string" && EMPTY_LOGS.has(prop)) return NOTHING_YET;
+        throw new Error(
+          `read '${String(prop)}' before the client built its worker — send a request first`,
+        );
+      }
+      const v = w[prop as keyof FakeWorker];
+      return typeof v === "function" ? v.bind(w) : v;
+    },
+    set(_target, prop, value) {
+      const w = FakeWorker.last;
+      if (!w) throw new Error(`wrote '${String(prop)}' before the client built its worker`);
+      (w as unknown as Record<string | symbol, unknown>)[prop] = value;
+      return true;
+    },
+  });
+}
+
 async function loadClient() {
+  FakeWorker.last = undefined;
+  FakeWorker.built = 0;
   vi.stubGlobal("Worker", FakeWorker);
   vi.resetModules();
   const mod = await import("../disasmClient");
@@ -74,11 +126,72 @@ async function loadClient() {
   // an artefact of module reloading, not of the production path, where there is
   // one graph.
   const timeouts = await import("../requestTimeout");
-  return { client: mod.disasmWorker, worker: FakeWorker.last!, mod, timeouts };
+  return { client: mod.disasmWorker, worker: workerHandle(), mod, timeouts };
 }
 
 /** The client singleton's type, which the module does not export by name. */
 type DisasmClient = Awaited<ReturnType<typeof loadClient>>["client"];
+
+describe("DisasmWorkerClient — the worker is built on first use", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("builds no worker just from being imported", async () => {
+    // The whole point. This module is imported by `DisassemblyView`, so while
+    // construction happened at module scope no component whose graph reaches it
+    // could be mounted under jsdom, which has no `Worker` at all.
+    await loadClient();
+    expect(FakeWorker.built).toBe(0);
+  });
+
+  it("builds exactly one worker however many requests are sent", async () => {
+    const { client } = await loadClient();
+    client.init();
+    client.resetStructRegistry();
+    client.init();
+    expect(FakeWorker.built).toBe(1);
+  });
+
+  it("builds none for the four methods that only touch client-side state", async () => {
+    // `App` calls `registerSourceBlob` and `setImage` on every parse. If either
+    // constructed, the thread would be back at load time by another door.
+    const { client } = await loadClient();
+    const buffer = new ArrayBuffer(8);
+    client.registerSourceBlob(buffer, new Blob([new Uint8Array(8)]));
+    client.setImage(0x8664);
+    client.invalidateCache();
+    client.invalidateDecompileCache();
+    expect(FakeWorker.built).toBe(0);
+  });
+
+  it("rejects the request rather than throwing when the environment has no Worker", async () => {
+    // What a component test sees. `send` builds inside its `try`, so a view that
+    // posts on mount gets a rejected promise and runs its own error path; a
+    // throw here would take the render down instead.
+    vi.stubGlobal("Worker", undefined);
+    vi.resetModules();
+    const { disasmWorker } = await import("../disasmClient");
+    await expect(disasmWorker.init()).rejects.toThrow();
+  });
+
+  it("tries again after a failed construction instead of caching a dead worker", async () => {
+    // The field is assigned last, so a throw leaves it null.
+    vi.stubGlobal("Worker", undefined);
+    vi.resetModules();
+    const { disasmWorker } = await import("../disasmClient");
+    await expect(disasmWorker.init()).rejects.toThrow();
+    FakeWorker.last = undefined;
+    FakeWorker.built = 0;
+    vi.stubGlobal("Worker", FakeWorker);
+    const pending = disasmWorker.init();
+    expect(FakeWorker.built).toBe(1);
+    const rebuilt = workerHandle();
+    rebuilt.reply(rebuilt.posted[0].id, undefined);
+    await expect(pending).resolves.toBeUndefined();
+  });
+});
 
 describe("DisasmWorkerClient — a wedged worker cannot hang callers forever", () => {
   // Fake timers are switched on only after the dynamic import resolves.
