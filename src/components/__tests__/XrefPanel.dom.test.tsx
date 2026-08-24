@@ -4,9 +4,6 @@ import "../../test/domSetup";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DisasmFunction, Xref } from "../../disasm/types";
-import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
-import { parsePE } from "../../pe/parser";
-import type { PEFile } from "../../pe/types";
 import { stubLayoutRect } from "../../test/domSetup";
 import { XrefPanel } from "../XrefPanel";
 
@@ -40,6 +37,12 @@ import { XrefPanel } from "../XrefPanel";
  * assertion depends on the window's size — and the row-count assertions are
  * written against the fixture's own totals, which the header count
  * independently states.
+ *
+ * WAS: this file built a whole `PEFile` (`buildMinimalPE64` + `parsePE`) to
+ * satisfy a required `pe` prop the component never destructured and never read.
+ * The prop is gone; there is no test for its absence because there cannot be
+ * one — the typechecker rejects a `pe={…}` at the mount site, which is the only
+ * way the prop could come back.
  */
 
 stubLayoutRect({ height: 600 });
@@ -79,15 +82,6 @@ const TYPED_XREFS = new Map<number, Xref[]>([
   [MAIN.address, [{ from: BASE + 0x28, type: "branch" }]],
 ]);
 
-/**
- * `XrefPanel` declares a required `pe: PEFile` prop and NEVER READS IT — it is
- * absent from the destructuring on line 32. Built here from the synthetic
- * fixture rather than removed from the component, because removing a prop is a
- * change at the mount site; see the report. No binary files: `buildMinimalPE64`
- * plus `parsePE`, per CLAUDE.md.
- */
-const PE: PEFile = parsePE(buildMinimalPE64({ imageBase: BASE - 0x1000 }));
-
 function renderPanel(over: Partial<Parameters<typeof XrefPanel>[0]> = {}) {
   const onNavigate = vi.fn();
   const onClose = vi.fn();
@@ -96,7 +90,6 @@ function renderPanel(over: Partial<Parameters<typeof XrefPanel>[0]> = {}) {
       typedXrefMap={TYPED_XREFS}
       funcMap={FUNC_MAP}
       sortedFuncs={SORTED_FUNCS}
-      pe={PE}
       onNavigate={onNavigate}
       onClose={onClose}
       {...over}
@@ -347,7 +340,6 @@ describe("XrefPanel", () => {
           typedXrefMap={TYPED_XREFS}
           funcMap={FUNC_MAP}
           sortedFuncs={SORTED_FUNCS}
-          pe={PE}
           onNavigate={() => {}}
           onClose={() => {}}
           scopeAddress={MAIN.address}
@@ -415,7 +407,6 @@ describe("XrefPanel", () => {
           typedXrefMap={TYPED_XREFS}
           funcMap={FUNC_MAP}
           sortedFuncs={SORTED_FUNCS}
-          pe={PE}
           onNavigate={() => {}}
           onClose={() => {}}
           currentFuncAddr={null}

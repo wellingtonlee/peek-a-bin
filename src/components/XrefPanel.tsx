@@ -2,7 +2,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DisasmFunction, Xref } from "../disasm/types";
 import { binarySearchFunc } from "../hooks/useDerivedState";
-import type { PEFile } from "../pe/types";
 
 type XrefType = "call" | "jmp" | "branch" | "data";
 type SortKey = "from" | "to" | "type";
@@ -20,7 +19,6 @@ interface XrefPanelProps {
   typedXrefMap: Map<number, Xref[]>;
   funcMap: Map<number, DisasmFunction>;
   sortedFuncs: DisasmFunction[];
-  pe: PEFile;
   onNavigate: (addr: number) => void;
   onClose: () => void;
   scopeAddress?: number | null;

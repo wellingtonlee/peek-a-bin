@@ -1607,7 +1607,6 @@ export function DisassemblyView() {
                 typedXrefMap={typedXrefMap}
                 funcMap={funcMap}
                 sortedFuncs={sortedFuncs}
-                pe={pe}
                 onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
                 onClose={() => {
                   setShowXrefPanel(false);
