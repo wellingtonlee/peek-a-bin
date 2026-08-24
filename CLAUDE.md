@@ -227,6 +227,18 @@ a new kind joins on the wrong side of silently. That is not hypothetical: the fi
 missed, and two `isFault: true` kinds rendered amber in the status bar while the same notice
 rendered red in App's banner — one notice, two colours, on screen at once (`peek-a-bin-n7q1`).
 
+**THE SAME HAND-WRITTEN-PREDICATE CLASS WAS FOUND TWICE MORE, IN `AnomaliesView.tsx`, AND ONE SITE
+IS STILL OPEN.** Its AI-findings palette was a ternary chain over `AIScanFinding["severity"]`
+(`=== "critical" || === "high" ? red : === "medium" ? amber : blue`), and both anomaly tables were
+keyed `Record<string, …>` so a fourth severity compiled, sorted last behind `info` and rendered in
+`info`'s blue — a new severity silently painted as the mildest one. Both are now
+`Record<Union, …>` (`SEVERITY_ORDER`, `SEVERITY_COLORS`, `FINDING_COLORS`), so a sixth member fails
+the build the way `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do. **The open site is
+`AddressBar.tsx`**, which answers a *different* question of the same union — the maximum severity
+across anomalies and findings — with its own `=== "critical" || === "high"` chain and a **third**
+palette (the `-500` shades). The two agree today and nothing declares that they must
+(`peek-a-bin-p0qw`).
+
 Rank reasoning, which is the part to preserve: the two **properties of the file** come first
 because each survives the engine being fixed (an ARM32 resource-only DLL has no disassembly on a
 healthy engine either); `"engine-unavailable"` next because its remedy is a page reload rather
@@ -331,6 +343,16 @@ so a wire value like `call-targets` cannot reach the screen and a fifth pass fai
 
 **Rendering**: virtual scrolling via `@tanstack/react-virtual`. `DisplayRow` union:
 `label | insn | separator | data`. `DisassemblyView` + `HexView` are lazy-loaded.
+
+**One `ErrorBoundary` wraps all nine mounted tab views, and nothing can clear it.** `App.tsx` puts
+the boundary *outside* `renderMainView()`, which keeps every visited tab in the tree class-hidden —
+so a throw in the Hex view replaces headers, sections, disassembly, imports, exports, strings,
+resources and anomalies as well, and because `hasError` is never reset and the boundary sits above
+the tab switch, changing tabs cannot recover it. The only exit is the fallback's
+`window.location.reload()`. `ErrorBoundary` itself is correct in isolation and is rendered
+(`panelUtilities.dom.test.tsx` pins the sticky behaviour deliberately, as behaviour rather than as
+endorsement); the repair, if taken, is at the mount site — per-tab boundaries or a `key` — and is
+not a change to those 45 lines (`peek-a-bin-p0qw`).
 
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
@@ -768,31 +790,64 @@ read "all of them compile" as "all of them are right".
 
 ### Not verified. Say so rather than implying otherwise:
 
-- **There IS a renderer, and it reaches seventeen components.** jsdom + `@testing-library/react`;
-  the `*.dom.test.tsx` suites cover `Modal`/`ModalBackdrop`/`useDismissOnOutsideClick`,
-  `StatusBar`, `DisassemblyView` (early-return branches *and* the populated panel, reaching
-  `DisassemblyRows`, `DisassemblyToolbar`, `InsnContextMenu`, `JumpArrows`, `InstructionDetail`),
-  `AddressBar`, `FileLoader`, `Sidebar`, `CFGView`, `HexView`'s toolbar and byte search, and all
-  six dialogs (`CommandPalette`, `GoToAddressModal`, `SettingsModal`, `BatchRenameModal`,
-  `AIReportPanel`, `KeyboardShortcuts`), plus **`App` itself** — mounted through the real browse
-  input, which is where the notice banner's three `isFault` reads and its "Still available:" prose
-  are checked against the tab bar they claim to agree with (`src/__tests__/App.dom.test.tsx`),
-  plus `SectionTable`, which that file's routing case mounts and asserts on.
-  **Still NOT rendered, and this list was MEASURED rather than recalled** — the previous one named
-  three surfaces where a per-component grep of every `*.dom.test.tsx` finds fifteen: the decompile
-  panel (`DecompileView`), the AI chat panel (`AIChatPanel`) and `MarkdownRenderer`; six of the
-  seven parser-derived tab views — `HeaderView` / `ImportsView` / `ExportsView` / `StringsView` /
-  `ResourcesView` / `AnomaliesView` — which is the surface `analysisNotice`'s
-  `"no-code-section"` kind exists to send a user to; `XrefPanel`, `BottomPanelContainer`,
-  `CallPanel`, `DataInspector`, `ResizeHandle`, `ErrorBoundary` and `Skeleton`; and the whole a11y
-  pass beyond `Modal`'s, the dialogs' attributes and the palette's listbox (`peek-a-bin-p0qw`).
-  **"Rendered" here means an assertion, not a mount, and the distinction became load-bearing the
-  moment `App` was rendered.** `App` imports the whole component tree, so a transitive-reachability
-  census over the import graph now reports **41 of 41 components reachable from a rendering suite**
-  and is worth nothing — the measured refusal of a drift guard that was about to be built on it.
-  Mounting a component as somebody's child while nothing asserts on its output is the vacuous kind
-  of coverage; `App`'s suite visits exactly two tabs and asserts on both.
-  `DisassemblyMinimap` mounts and never paints (jsdom has no 2D context).
+- **THE RENDER GAP IS CLOSED: every component under `src/components/` plus `App` itself is now
+  rendered by a suite that asserts on it.** Measured, not recalled — 31 `*.dom.test.tsx` suites, and
+  a per-component scan names 40 of the 41 files; the one it does not is `ModalBackdrop`, which
+  `Modal`'s suite renders by way of it. Four sessions ago this list opened "Nothing has rendered a
+  component". **What that does NOT mean is that the components are verified**, and the rest of this
+  section is the list of what a green suite here still says nothing about. Two words are worth
+  keeping straight: a component *mounting* as somebody's child is not coverage, and after `App` was
+  rendered a transitive-reachability census over the import graph reads **41 of 41** while asserting
+  nothing — the measured refusal of a drift guard built on it. "Rendered" here means an assertion
+  about that component's own output.
+- **The renderer has now found SEVEN real defects, and that is the argument for using it.** Two in
+  earlier sessions: `peek-a-bin-n7q1` (a fifth `kind === "analysis-failed"` site in `StatusBar.tsx`
+  rendering amber where App's banner rendered red — one notice, two colours, on screen at once) and
+  `peek-a-bin-a5sw` (the arrow keys **permanently wedged** on a separator row, so everything below
+  the first function tail was unreachable by keyboard). Five in the pass that closed the gap, all
+  under `peek-a-bin-p0qw`:
+  - **`HeaderView` printed a truncated `ImageBase` on essentially every 64-bit binary.**
+    `CopyableHex` spelled its value `(value >>> 0)`, so `0x140000000` rendered as
+    `0x0000000040000000` two rows under an `Entry Point` of `0x140001000` it had spelled correctly.
+  - **`DecompileView` opened one comment editor per line sharing the edited address.** `lineMap` is
+    many-to-one, so the `;` shortcut mounted N identical `<textarea>`s, each running `focusOnMount`.
+  - **`AnomaliesView` picked its AI-findings colour with a hand-written chain over the severity
+    string** — the `n7q1` shape again — and keyed both anomaly tables `Record<string, …>`, so a
+    fourth severity would have compiled, sorted last and rendered in `info`'s blue.
+  - **`ResourcesView` returned a keyless shorthand fragment as the element of a `.map`**, so every
+    render of a populated tab logged React's key warning and reconciled rows by index.
+  - **`App`'s tab bar gives the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
+    sits inside the button with no separator (left alone with `peek-a-bin-w50c`).
+  **None of the seven is visible to any static instrument here**: every one compiles, type-checks
+  and lints clean, and nothing under `corpus/` renders React.
+- **Writing a component test has four traps, all of them measured rather than reasoned.** They cost
+  four separate agents a round trip each. (1) **`waitFor` and `userEvent` both deadlock under
+  `vi.useFakeTimers()`** — `waitFor` polls on a timer of its own and `userEvent`'s inter-keystroke
+  awaits never resolve even with `advanceTimers` wired up; drive a debounced control with
+  `fireEvent.change` and advance the clock inside `act()`. (2) **Advance SHORT of a debounce first**:
+  "nothing has happened yet" is equally true of a 0 ms timer nobody ticked, so a single advance past
+  the boundary cannot tell a 250 ms debounce from no debounce — that control came back inert twice.
+  (3) **React caches its key warning PER OWNER COMPONENT**, so a dedicated `console.error` spy placed
+  after any other render sees a clean console with a keyless list in place; the guard has to be a
+  file-wide `beforeEach`/`afterEach`, so the *first* render that warns fails. (4) **`target:
+  "window"` cannot be discriminated behaviourally in jsdom** — `e.target` is then `window` and
+  jsdom's `Node.contains` throws a TypeError on a non-Node before `onDismiss` runs, so the popup
+  stays open for the wrong reason; assert on which global receives which listener instead.
+- **Every drag in this repo is verified as arithmetic, never as motion.** `ResizeHandle` (mouse
+  events, not pointer events) and `FloatingPanel`'s header drag and corner resize are asserted
+  through `mousedown`/`mousemove`/`mouseup` on `document`, checking the deltas the handlers compute
+  and the inline styles they write. jsdom has no layout, so **nothing has ever been observed to move
+  or resize.** What *is* covered end to end is `ResizeHandle`'s ref indirection:
+  `BottomPanelContainer`'s `handleResizeEnd` closes over `height` from its own render, so a mouseup
+  handler captured at mousedown would store the PRE-drag height — red under its own control from
+  both sides.
+- **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
+  and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint (no 2D context, no
+  `URL.createObjectURL`); `HeaderView`'s Authenticode block, rich header and debug info never render
+  (the fixture builders emit none) and both async arms of its checksum and entropy cells are
+  unreachable under `MAX_SYNC_FILE_METRIC_BYTES`; `ResourcesView`'s tree is **hand-constructed**, so
+  nothing there is evidence about the resource-directory walk; and every popup's *placement* is
+  unasserted, `getBoundingClientRect` being all-zero.
 - **Virtualization is a STAND-IN and a green suite must not be read as covering it.** `virtual-core`
   reads the scroll element's `offsetHeight` (not `getBoundingClientRect`), so in jsdom a
   virtualized list renders **zero** rows, not a short list. `domSetup.ts`'s `stubLayoutRect()` is
@@ -801,6 +856,14 @@ read "all of them compile" as "all of them are right".
   right, whether `scrollToIndex` works and whether anything is *visible* all stay unanswered.
   **A row in the document is not a row on screen.** The sidebar's function rows and the hex grid
   are out of reach; the entropy strip additionally gates on a width jsdom reports as 0.
+  **How blind, measured rather than argued**: under `stubLayoutRect` two real behaviour changes to
+  `ExportsView` — `estimateSize` 28 → 280 and `overscan` 20 → 0 — leave its whole suite green,
+  because every element reports one 600px rect and `scrollTop` is pinned at 0, so the computed range
+  covers the entire fixture whatever those numbers are. Those two controls are **left inert on
+  purpose** and recorded as the statement of the gap; making them discriminate would mean fabricating
+  a scroll position no browser produced. The stub itself is controlled in both directions — remove it
+  and 15 of `ExportsView`'s 18 row assertions fail, and `StringsView`'s twelve strings render **zero**
+  rows while its toolbar still counts all twelve — so the row assertions are not vacuous.
 - **jsdom is NOT a browser.** No layout, so nothing about geometry, overflow or visibility;
   `offsetParent` is a constant `null` and is supplied by a stand-in the focus trap depends on; no
   browser focus algorithm, no service worker, no screen reader. A green focus-trap test says the
@@ -1160,6 +1223,31 @@ mistake.
 - **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf` / `rewriteBodies`, one declaration each.** `rewriteBodies` was a verbatim copy in `structure.ts` and `cleanup.ts` plus two specialisations under other names — four hand-synced `IRStmt` switches all ending in `default:`, so a new body-carrying kind would be returned unrecursed in every one, silently. Both now end in an exhaustive `never`. `for`'s `init` and `update` are single statements, not lists, so neither reaches inside them; a caller needing that wants `foldStmt`'s shape. (`peek-a-bin-svwt`)
 
 - **`+`, `-` and `*` do not model wraparound, and the const-const fold site has no width evidence to key one on.** `knownWidth` returns null for an `IRConst` deliberately — `IRConst.size` is the CPU *mode*, 8 for every immediate in a 64-bit binary, not the operand's width. Wrapping them with `| 0` / `Math.imul` the way the bitwise arms do **introduces** a defect: those go through `fold64`, these do not, so a correct 64-bit `add rax, 1` over the boundary becomes a negative constant. The class does not occur in this corpus and no gate can see either direction; `is64` is the only sound evidence and `fold.ts` deliberately imports only `ir.ts`. `fold.test.ts` carries `does not wrap an arithmetic fold to int32`. (`peek-a-bin-ivj5`)
+
+- **`>>> 0` on a value that can exceed 2^32 is a TRUNCATION, not a respelling, and the Headers tab
+  is where that bit.** ToUint32 is the right way to print a value read as a signed int32 unsigned —
+  which is why `SectionTable` uses it on `characteristics` — but `HeaderView`'s `CopyableHex` is
+  handed 64-bit quantities: a PE32+ `ImageBase` is 0x140000000 for an MSVC x64 EXE and 0x180000000
+  for a DLL, and every TLS field is an image-based VA. Applied unconditionally it printed
+  `Image Base 0x0000000040000000` two rows under an `Entry Point` of `0x140001000` the same panel
+  spelled correctly — self-contradictory on essentially every 64-bit binary the tool opens, and
+  reachable with no gate in front of it. Reinterpret only what is actually **negative**. **No static
+  instrument can see this class**: `value` is `number` either way, `>>> 0` beside a `padStart(16)`
+  reads as deliberate, and the corpus never renders. The instrument is `HeaderView.dom.test.tsx`,
+  which asserts printed text against the fixture's own bytes rather than that a table appeared.
+  (`peek-a-bin-p0qw`)
+
+- **`lineMap` is MANY-TO-ONE, so anything keying a rendered element off an address alone renders one
+  per sharing line.** Several emitted C lines routinely carry one instruction address —
+  `DisassemblyView` builds an address → `line[]` map for exactly that reason, and `emit.ts`'s
+  `placeGotoLabels` says in as many words that "if an address somehow appears twice the earlier copy
+  is the one the jump was structured around". `DecompileView`'s comment editor decided `isEditing`
+  from `editingComment.address` alone and mounted N identical `<textarea>`s for one comment, each
+  running `focusOnMount`, so focus landed on the last. The rule: resolve the address to **one**
+  anchor line and take the **lowest** — `placeGotoLabels`' own tiebreak, and the line the auto-scroll
+  effect reaches with `Math.min`, so the editor opens where the panel just scrolled to.
+  `syncDisabled` must be re-tested at the anchor rather than inherited, since on the AI tab the map
+  numbers a different body. (`peek-a-bin-p0qw`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
