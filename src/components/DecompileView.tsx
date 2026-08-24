@@ -72,6 +72,13 @@ function tokenizeLine(line: string): Token[] {
       } else if (TYPES.has(text)) {
         tokens.push({ text, cls: "dc-type" });
       } else if (text.startsWith("sub_") || text.startsWith("loc_")) {
+        // Both are styled as links and both now DO something — `sub_` navigates
+        // the app to that address, `loc_` scrolls this panel to the label. They
+        // were styled identically before either of them worked, which made the
+        // `loc_` half a dead affordance; the alternative was to stop styling it,
+        // and following the label is the thing a reader actually wants. This
+        // function takes no line map and cannot ask whether a particular label
+        // exists, so resolvability is checked at the click instead.
         tokens.push({ text, cls: "dc-type underline cursor-pointer hover:opacity-80" });
       } else if (text === "__asm") {
         tokens.push({ text, cls: "dc-comment italic" });
@@ -208,20 +215,54 @@ export function DecompileView({
     void copyText(code);
   }, [code]);
 
+  /**
+   * Where each `loc_<HEX>` label sits, by line number.
+   *
+   * A `loc_` identifier is NOT an address to navigate to the way `sub_` is: it
+   * names a line **inside the function already on screen**, emitted by
+   * `placeGotoLabels` as the target of a `goto`. So the useful action is a
+   * scroll within this panel, and the target is found in the rendered text
+   * rather than through `lineMap` — the label line is right there, and reading
+   * it here means the affordance works on the AI and High Level tabs too, where
+   * the line map numbers a different body or does not exist at all.
+   *
+   * First occurrence wins, which costs nothing: a label is emitted once.
+   */
+  const labelLines = useMemo(() => {
+    const at = new Map<string, number>();
+    code.split("\n").forEach((line, i) => {
+      const m = line.match(/^\s*(loc_[0-9a-fA-F]+):/);
+      if (m && !at.has(m[1])) at.set(m[1], i);
+    });
+    return at;
+  }, [code]);
+
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       const target = e.target as HTMLElement;
       const text = target.textContent;
-      if (!text || !onNavigate) return;
+      if (!text) return;
+
+      // Click on loc_XXXX → scroll to that label, in this panel.
+      //
+      // THIS BRANCH IS WHY THE `onNavigate` GUARD MOVED. It used to sit at the
+      // top of the handler, so a panel mounted without `onNavigate` could not
+      // follow a label either — and following a label needs no caller at all.
+      if (labelLines.has(text)) {
+        const el = preRef.current?.querySelector(`[data-line="${labelLines.get(text)}"]`);
+        el?.scrollIntoView({ block: "center", behavior: "smooth" });
+        return;
+      }
 
       // Click on sub_XXXX → navigate to that address
+      if (!onNavigate) return;
       const subMatch = text.match(/^sub_([0-9a-fA-F]+)$/);
       if (subMatch) {
         const addr = parseInt(subMatch[1], 16);
         onNavigate(addr);
       }
     },
-    [onNavigate],
+    [onNavigate, labelLines],
   );
 
   // Auto-scroll to first highlighted line

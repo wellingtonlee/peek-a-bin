@@ -237,8 +237,10 @@ describe("DecompileView syntax highlighting", () => {
     setup({ code: "  sub_401000();\n  goto loc_4011A0;" });
     const clickable = "dc-type underline cursor-pointer hover:opacity-80";
     expect(tokensOf(0)).toContainEqual(["sub_401000", clickable]);
-    // Note for the defect below: `loc_` is styled `cursor-pointer` and
-    // `underline` exactly like `sub_`, but `handleClick` only matches `sub_`.
+    // The two are styled identically and BOTH now do something: `sub_`
+    // navigates the app to that address, `loc_` scrolls this panel to the
+    // label. They were styled the same before either half worked, which made
+    // the `loc_` one a dead affordance.
     expect(tokensOf(1)).toContainEqual(["loc_4011A0", clickable]);
   });
 
@@ -295,15 +297,75 @@ describe("DecompileView sub_ navigation", () => {
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
-  it("does not navigate from a loc_ token, though it is styled as clickable", async () => {
+  it("scrolls to the label instead of navigating, when a loc_ token is clicked", async () => {
     const onNavigate = vi.fn();
-    const { user } = setup({ code: "  goto loc_4011A0;", onNavigate });
-    await user.click(tokenSpan(0, "loc_4011A0"));
-    // CURRENT BEHAVIOUR, PINNED AS A DEFECT, not endorsed: the token carries
-    // `underline cursor-pointer hover:opacity-80`, so it offers a link
-    // affordance, and `handleClick`'s /^sub_…$/ never matches it. Clicking it
-    // does nothing but select the line. See the report.
-    expect(onNavigate).not.toHaveBeenCalled();
+    const scrollIntoView = vi.fn();
+    // jsdom implements no layout and `domSetup` stubs `scrollIntoView` as a
+    // no-op, so this asserts the panel asked the RIGHT ELEMENT to come into
+    // view — and nothing whatever about scrolling. Same bound as the
+    // highlight-effect test below.
+    //
+    // ON `HTMLElement.prototype`, NOT `Element.prototype`: that is where
+    // `domSetup` installs its no-op, so a spy on `Element` is SHADOWED by it
+    // and never fires. The first version of this test did exactly that and
+    // read as "the panel does not scroll".
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({
+        code: "  goto loc_4011A0;\n  ret;\nloc_4011A0:\n  return 1;",
+        onNavigate,
+      });
+      await user.click(tokenSpan(0, "loc_4011A0"));
+
+      // A `loc_` names a line INSIDE the function already on screen, not an
+      // address elsewhere, so following it must not move the app's cursor.
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      // The element it asked for is the LABEL's line, not the goto's.
+      const target = scrollIntoView.mock.instances[0] as HTMLElement;
+      expect(target.getAttribute("data-line")).toBe("2");
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("does nothing for a loc_ token with no label in the text", async () => {
+    // The control, and the honest bound on the affordance: the panel resolves
+    // the label out of the RENDERED TEXT, so a `goto` whose label is not on the
+    // page — a body the emitter truncated, or a hand-written fixture like this
+    // one — silently does nothing rather than scrolling somewhere arbitrary.
+    const onNavigate = vi.fn();
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: "  goto loc_4011A0;", onNavigate });
+      await user.click(tokenSpan(0, "loc_4011A0"));
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("follows a label even with no onNavigate, since following one needs no caller", async () => {
+    // Why the `onNavigate` guard moved down the handler rather than staying at
+    // the top: a panel mounted without it could not follow a label either, and
+    // a label is entirely internal to this component.
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: "  goto loc_4011A0;\nloc_4011A0:\n  return 1;" });
+      await user.click(tokenSpan(0, "loc_4011A0"));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      restore.mockRestore();
+    }
   });
 
   it("still selects the line when a sub_ token is clicked, so both handlers fire", async () => {
