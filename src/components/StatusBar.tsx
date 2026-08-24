@@ -266,7 +266,7 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
           // `title` carries the full sentence — the banner in App.tsx is where
           // it is stated at length.
           <span
-            className={notice.kind === "analysis-failed" ? "text-red-400" : "text-amber-400"}
+            className={notice.isFault ? "text-red-400" : "text-amber-400"}
             title={notice.detail}
           >
             {notice.label}

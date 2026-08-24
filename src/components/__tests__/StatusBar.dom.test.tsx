@@ -140,19 +140,19 @@ describe("StatusBar notice colour follows isFault", () => {
     );
   });
 
-  it.fails("is red for a dead engine (isFault: true) — CURRENTLY AMBER", () => {
+  it("is red for a dead engine (isFault: true)", () => {
     expect(
       colourOf({ analysisPhase: "building-xrefs", disasmFailed: "boom" }, "Engine unavailable"),
     ).toContain("text-red-400");
   });
 
-  it.fails("is red for a timed-out run (isFault: true) — CURRENTLY AMBER", () => {
+  it("is red for a timed-out run (isFault: true)", () => {
     expect(
       colourOf({ analysisPhase: "timed-out" as AnalysisPhase }, "Analysis timed out"),
     ).toContain("text-red-400");
   });
 
-  it.fails("agrees with App.tsx, which reads isFault — CURRENTLY DISAGREES", () => {
+  it("agrees with App.tsx, which reads isFault", () => {
     // Stated as the invariant rather than as three cases, so a seventh kind is
     // covered the day it is added.
     for (const overrides of [
