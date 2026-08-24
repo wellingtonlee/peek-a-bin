@@ -389,13 +389,23 @@ describe("XrefPanel", () => {
     });
 
     /**
-     * PINS CURRENT BEHAVIOUR, AND THE BEHAVIOUR IS ODD — see the report. When
-     * the cursor moves somewhere `currentFuncAddr` is null, the "Func" button
-     * disappears but `scopeMode` stays `"function"`, so the filter chain falls
-     * through and the WHOLE list comes back with NO scope button highlighted.
-     * Nothing false is on screen, so this is reported rather than changed.
+     * WAS A PIN, NOW A SPECIFICATION. Selecting "Func" and then moving the
+     * cursor somewhere `currentFuncAddr` is null used to make the "Func" button
+     * disappear while `scopeMode` stayed `"function"` — the filter chain fell
+     * through, the whole list came back, and NO scope button was highlighted.
+     * Nothing false was on screen and the list was complete, but the controls
+     * and the list described different things: an unfiltered list with nothing
+     * claiming it.
+     *
+     * The scope now falls back to "all" AND SAYS SO. That is the direction the
+     * house rule points — the forbidden shape is a narrower answer wearing a
+     * complete one's clothes, and this is the reverse — and "hold the empty
+     * Func scope and explain it" was refused because this scope FOLLOWS THE
+     * CURSOR rather than being a value the user entered: a cursor wandering
+     * through padding would blank and refill the panel repeatedly for a lapse
+     * the user never caused.
      */
-    it("silently un-scopes, and highlights nothing, when its scope address goes away", () => {
+    it("falls back to 'All' — highlighted — when its scope address goes away", () => {
       const { rerender } = renderPanel({
         currentFuncAddr: HELPER.address,
         currentFuncEnd: HELPER.address + HELPER.size,
@@ -413,9 +423,119 @@ describe("XrefPanel", () => {
           currentFuncEnd={null}
         />,
       );
+      // The list widened, and the button that describes THIS list is the one
+      // highlighted. Both halves matter: the count assertion alone passed
+      // before the fix.
       expect(rows()).toHaveLength(4);
       expect(screen.queryByRole("button", { name: "Func" })).toBeNull();
-      expect(screen.getByRole("button", { name: "All" }).className).not.toContain("bg-blue-600");
+      expect(screen.getByRole("button", { name: "All" }).className).toContain("bg-blue-600");
+    });
+
+    /**
+     * The fallback is DERIVED, not written back into state, and this is the
+     * behaviour that buys: the user picked "Func", so a lapse borrows the scope
+     * rather than discarding it. Collapsing `scopeMode` to "all" instead would
+     * mean a cursor crossing one gap between detected functions silently
+     * cancelled a scope the user chose — and PE32 detection is known to
+     * under-produce, so those gaps are ordinary.
+     */
+    it("resumes the chosen scope when the address comes back", () => {
+      const { rerender } = renderPanel({
+        currentFuncAddr: HELPER.address,
+        currentFuncEnd: HELPER.address + HELPER.size,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Func" }));
+      const lapsed = (
+        <XrefPanel
+          typedXrefMap={TYPED_XREFS}
+          funcMap={FUNC_MAP}
+          sortedFuncs={SORTED_FUNCS}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          currentFuncAddr={null}
+          currentFuncEnd={null}
+        />
+      );
+      rerender(lapsed);
+      expect(rows()).toHaveLength(4);
+      rerender(
+        <XrefPanel
+          typedXrefMap={TYPED_XREFS}
+          funcMap={FUNC_MAP}
+          sortedFuncs={SORTED_FUNCS}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          currentFuncAddr={HELPER.address}
+          currentFuncEnd={HELPER.address + HELPER.size}
+        />,
+      );
+      expect(fromColumn()).toEqual(["0x140001028"]);
+      expect(screen.getByRole("button", { name: "Func" }).className).toContain("bg-blue-600");
+    });
+
+    /**
+     * …and the user can make the widening permanent, which is the escape hatch
+     * that keeps "resumes" from being a trap: clicking "All" during a lapse
+     * writes the preference, so the scope does not spring back.
+     */
+    it("makes the widening stick if 'All' is clicked during the lapse", () => {
+      const { rerender } = renderPanel({
+        currentFuncAddr: HELPER.address,
+        currentFuncEnd: HELPER.address + HELPER.size,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Func" }));
+      rerender(
+        <XrefPanel
+          typedXrefMap={TYPED_XREFS}
+          funcMap={FUNC_MAP}
+          sortedFuncs={SORTED_FUNCS}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          currentFuncAddr={null}
+          currentFuncEnd={null}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "All" }));
+      rerender(
+        <XrefPanel
+          typedXrefMap={TYPED_XREFS}
+          funcMap={FUNC_MAP}
+          sortedFuncs={SORTED_FUNCS}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          currentFuncAddr={HELPER.address}
+          currentFuncEnd={HELPER.address + HELPER.size}
+        />,
+      );
+      expect(rows()).toHaveLength(4);
+      expect(screen.getByRole("button", { name: "All" }).className).toContain("bg-blue-600");
+    });
+
+    /**
+     * THE SAME LAPSE ON THE INSTRUCTION SCOPE, and it took a second control
+     * with it. `currentInsnAddr` going null used to leave the To/From toggle on
+     * screen beside an unfiltered list — the "shows the direction toggle only
+     * in the instruction scope" test above states why that is wrong, and the
+     * fall-through reached it by a route that test could not see, since it
+     * drives the scope buttons rather than the props.
+     */
+    it("takes the direction toggle with it when the instruction address goes away", () => {
+      const { rerender } = renderPanel({ currentInsnAddr: HELPER.address });
+      fireEvent.click(screen.getByRole("button", { name: "Insn" }));
+      expect(directionToggle()).toBeTruthy();
+      rerender(
+        <XrefPanel
+          typedXrefMap={TYPED_XREFS}
+          funcMap={FUNC_MAP}
+          sortedFuncs={SORTED_FUNCS}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          currentInsnAddr={null}
+        />,
+      );
+      expect(rows()).toHaveLength(4);
+      expect(directionToggle()).toBeNull();
+      expect(screen.getByRole("button", { name: "All" }).className).toContain("bg-blue-600");
     });
 
     it("combines a scope with a type filter rather than replacing it", () => {

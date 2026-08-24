@@ -102,15 +102,50 @@ export function XrefPanel({
     return result;
   }, [typedXrefMap, funcMap, sortedFuncs]);
 
+  /**
+   * Whether the caller has given this panel the address a scope needs. THE ONE
+   * DECLARATION of that rule: the filter chain below and the scope buttons both
+   * read it, so a scope can never be applied without a button claiming it, nor
+   * offered without an address to apply.
+   */
+  const scopeAvailable = (mode: ScopeMode): boolean => {
+    if (mode === "all") return true;
+    if (mode === "address") return scopeAddress != null;
+    if (mode === "function") return currentFuncAddr != null && currentFuncEnd != null;
+    return currentInsnAddr != null;
+  };
+
+  /**
+   * The scope actually on screen. `scopeMode` is the user's PREFERENCE and can
+   * outlive the address it needs — the cursor moves into a gap between detected
+   * functions and `currentFuncAddr` goes null while "Func" is still selected.
+   *
+   * Falling back to "all" is a decision, not a default; the alternative was to
+   * hold the empty "Func" scope and explain it. This panel's function and
+   * instruction scopes FOLLOW THE CURSOR rather than being values the user
+   * entered, so there is nothing to hold: a cursor wandering into padding would
+   * blank the panel and refill it on the way out, repeatedly, for a lapse the
+   * user never caused. What must not happen is what did happen — the chain
+   * falling through to the unfiltered list with no button highlighted, so the
+   * list and the controls describe different things. Widening and SAYING SO is
+   * the honest form of that; it is a narrower answer wearing a complete one's
+   * shape that the house rule forbids, and this is the reverse.
+   *
+   * Derived rather than pushed back into state on purpose: the preference
+   * survives the lapse, so re-entering a function resumes the scope the user
+   * chose, and clicking "All" during a lapse makes the widening permanent.
+   */
+  const effectiveScope: ScopeMode = scopeAvailable(scopeMode) ? scopeMode : "all";
+
   const filtered = useMemo(() => {
     let items = allXrefs.filter((x) => typeFilter.has(x.type));
 
     // Scope filtering
-    if (scopeMode === "address" && scopeAddress != null) {
+    if (effectiveScope === "address" && scopeAddress != null) {
       items = items.filter((x) => x.toAddr === scopeAddress);
-    } else if (scopeMode === "function" && currentFuncAddr != null && currentFuncEnd != null) {
+    } else if (effectiveScope === "function" && currentFuncAddr != null && currentFuncEnd != null) {
       items = items.filter((x) => x.fromAddr >= currentFuncAddr && x.fromAddr < currentFuncEnd);
-    } else if (scopeMode === "instruction" && currentInsnAddr != null) {
+    } else if (effectiveScope === "instruction" && currentInsnAddr != null) {
       if (direction === "to") {
         items = items.filter((x) => x.toAddr === currentInsnAddr);
       } else {
@@ -142,7 +177,7 @@ export function XrefPanel({
     filter,
     sortKey,
     sortAsc,
-    scopeMode,
+    effectiveScope,
     scopeAddress,
     currentFuncAddr,
     currentFuncEnd,
@@ -166,15 +201,15 @@ export function XrefPanel({
 
   const sortIndicator = (key: SortKey) => (sortKey === key ? (sortAsc ? " ▲" : " ▼") : "");
 
-  const scopeBtn = (mode: ScopeMode, label: string, show: boolean) => {
-    if (!show) return null;
+  const scopeBtn = (mode: ScopeMode, label: string) => {
+    if (!scopeAvailable(mode)) return null;
     return (
       <button
         type="button"
         key={mode}
         onClick={() => setScopeMode(mode)}
         className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
-          scopeMode === mode
+          effectiveScope === mode
             ? "bg-blue-600 text-white"
             : "bg-gray-800 text-gray-500 hover:text-gray-300"
         }`}
@@ -214,11 +249,11 @@ export function XrefPanel({
           ))}
         </div>
         <div className="flex items-center gap-1 ml-2">
-          {scopeBtn("all", "All", true)}
-          {scopeBtn("address", "Addr", scopeAddress != null)}
-          {scopeBtn("function", "Func", currentFuncAddr != null)}
-          {scopeBtn("instruction", "Insn", currentInsnAddr != null)}
-          {scopeMode === "instruction" && (
+          {scopeBtn("all", "All")}
+          {scopeBtn("address", "Addr")}
+          {scopeBtn("function", "Func")}
+          {scopeBtn("instruction", "Insn")}
+          {effectiveScope === "instruction" && (
             <button
               type="button"
               onClick={() => setDirection((d) => (d === "to" ? "from" : "to"))}
