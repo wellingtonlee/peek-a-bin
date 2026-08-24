@@ -115,6 +115,29 @@ export interface HeadInsn {
 }
 
 /**
+ * A prologue head, read one instruction at a time.
+ *
+ * `undefined` for an index past the end — whether because the head ran out of
+ * instructions, out of window, or into a byte the decoder refused; the three
+ * are the same answer to this rule and were the same answer when this was an
+ * array whose length simply stopped.
+ *
+ * A PULL rather than an array, and the reason is measured rather than
+ * stylistic. The caller decoded {@link MAX_SEH32_HEAD_INSNS} instructions at
+ * every candidate start, and {@link seh32PrologImmediates} bails at the first
+ * instruction that is not padding and not a pushed immediate — which is nearly
+ * all of them, since an ordinary MSVC entry begins `push ebp` and a Go one
+ * begins with a stack check. Instrumented over t32/w32 and two Windows/x86 `go`
+ * builds at `e9e6eaa`: **8.00 instructions decoded per head against 1.00-1.89
+ * consumed**, so 76-88% of the decoding was of instructions no rule ever looked
+ * at. Pulling makes those decodes not happen and leaves the ones that do happen
+ * identical, in the same order — so it cannot change an answer, which matters
+ * more here than the milliseconds: this feeds the fifth withdrawal admission in
+ * `functionDetect.ts` and therefore function boundaries (peek-a-bin-6dv3).
+ */
+export type HeadReader = (index: number) => HeadInsn | undefined;
+
+/**
  * `push 0x411050` → 0x411050; anything else → null.
  *
  * The immediate itself goes through `stackIdiom.ts`'s {@link loneImmediate},
@@ -145,28 +168,31 @@ function isHotPatchPad(insn: HeadInsn): boolean {
  * scope table resolves to readable data holding a well-formed record. So the
  * caller tries each and the table itself decides.
  */
-export function seh32PrologImmediates(head: readonly HeadInsn[]): number[] {
+export function seh32PrologImmediates(head: HeadReader): number[] {
   let i = 0;
+  let at = head(0);
   while (
-    i < head.length &&
-    (HEAD_PADDING.has(head[i].mnemonic.trim().toLowerCase()) || isHotPatchPad(head[i]))
+    at !== undefined &&
+    (HEAD_PADDING.has(at.mnemonic.trim().toLowerCase()) || isHotPatchPad(at))
   ) {
     i++;
+    at = head(i);
   }
 
   const imms: number[] = [];
-  while (i < head.length && imms.length <= MAX_SEH32_PROLOG_PUSHES) {
-    const imm = pushedImm(head[i]);
+  while (at !== undefined && imms.length <= MAX_SEH32_PROLOG_PUSHES) {
+    const imm = pushedImm(at);
     if (imm === null) break;
     imms.push(imm);
     i++;
+    at = head(i);
   }
   if (imms.length === 0 || imms.length > MAX_SEH32_PROLOG_PUSHES) return [];
 
   // The pushes have to be the arguments of a direct call, or they are not
   // arguments at all. This is what keeps the search off an ordinary
   // `push <string literal>` in the middle of a prologue-shaped head.
-  const call = head[i];
+  const call = head(i);
   if (call === undefined || call.mnemonic.trim().toLowerCase() !== "call") return [];
   if (!/^0x[0-9a-fA-F]+$/.test(call.opStr.trim())) return [];
   return imms;
@@ -220,7 +246,7 @@ export function readSeh32ScopeTable(
  * would be a narrowing with no evidence behind it.
  */
 export function seh32FuncletsOfPrologue(
-  head: readonly HeadInsn[],
+  head: HeadReader,
   reader: Seh32Reader,
   isCodeAddress: (addr: number) => boolean,
 ): number[] {

@@ -9,7 +9,13 @@ import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
 import { gridScan, type SweptInsn, sweepX86, type X86SweepCache } from "./linearSweep";
 import { resolveRipTarget } from "./ripRelative";
-import { MAX_SEH32_HEAD_INSNS, type Seh32Reader, seh32FuncletsOfPrologue } from "./seh32";
+import {
+  type HeadInsn,
+  type HeadReader,
+  MAX_SEH32_HEAD_INSNS,
+  type Seh32Reader,
+  seh32FuncletsOfPrologue,
+} from "./seh32";
 import { pushedImmediate, type StackInsn } from "./stackIdiom";
 import type { DisasmFunction, Instruction, Xref } from "./types";
 
@@ -179,6 +185,41 @@ export function disassemble(
  * `tail-calls` a jump-terminated function looks like it simply ends.
  */
 export type DetectPass = "call-targets" | "jump-tables" | "thunk-names" | "tail-calls";
+
+/**
+ * The phases of {@link detectFunctions}, in the order they run.
+ *
+ * An instrument's vocabulary and nothing else: no phase name reaches a caller's
+ * answer, and the tap that reports them is an observer that cannot change what
+ * any of them decides — the `StructuringTap` division exactly. Passing no tap
+ * costs one `undefined` check per phase and calls `performance.now()` zero
+ * times, which matters because the whole point is to measure the phases rather
+ * than the measuring.
+ *
+ * `sweep` is separated from `sweep-scan` deliberately, and it is the split that
+ * decides how this function's cost should be read. The former is the shared
+ * linear sweep of `./linearSweep.ts` — Capstone, paid once per section and then
+ * *free-ridden on* by `buildAllXrefs` and (through `gridScan`) by
+ * `hybridDisassemble`. The latter is detection's own pass over the resulting
+ * array: call and branch targets, the jump-table readers, the rolling window.
+ * A total that lumps them together makes detection look expensive for work its
+ * two successors are the beneficiaries of (peek-a-bin-6dv3).
+ */
+export type DetectPhase =
+  | "pdata-seeds"
+  | "handler-seeds"
+  | "entry-point"
+  | "exports"
+  | "prologue-scan"
+  | "padding-scan"
+  | "sweep"
+  | "sweep-scan"
+  | "pattern-admit"
+  | "seh32-relation"
+  | "interior-starts"
+  | "sizes"
+  | "thunk-names"
+  | "tail-calls";
 
 export interface DetectResult {
   functions: DisasmFunction[];
@@ -1462,35 +1503,58 @@ function precedingOperands(
 }
 
 /**
- * The first few instructions at `addr`, decoded from `addr` itself.
+ * The instructions at `addr`, decoded from `addr` itself, ON DEMAND.
  *
  * Same anchoring argument as {@link firstInstructionOperands}: the sweep's grid
  * is whatever the bytes in front of it produced, and this is asked about a
  * detected function start, so it decodes from the address rather than reading
  * the sweep's answer. Bounded by {@link MAX_SEH32_HEAD_INSNS} instructions and
  * by that many longest-x86-instructions of bytes.
+ *
+ * LAZY, and that is a measured decision rather than a stylistic one. It used to
+ * return an array, filled to the bound before the rule saw any of it — and
+ * `seh32PrologImmediates` stops at the first instruction that is neither
+ * padding nor a pushed immediate, which is nearly every function's second
+ * instruction. Instrumented over t32/w32 and two Windows/x86 `go` builds at
+ * `e9e6eaa`: **8.00 decoded per head against 1.00-1.89 consumed**, i.e. 76-88%
+ * of this pass's Capstone calls were of instructions nothing read, and this
+ * pass is 8.3-17.1% of PE32 detection.
+ *
+ * Each index is decoded at most once and answers identically to the array it
+ * replaces: the walk is the same walk, and an index the rule never asks for is
+ * simply not decoded. It cannot therefore move a boundary — which is the
+ * property that matters, since the answer feeds
+ * {@link interiorBranchedOverStarts}' fifth admission (peek-a-bin-6dv3).
  */
-function headInstructions(
+function headReader(
   addr: number,
   windowEnd: number,
   bytes: Uint8Array,
   baseAddress: number,
   scan: CapstoneScan,
-): { mnemonic: string; opStr: string }[] {
+): HeadReader {
   const lo = addr - baseAddress;
   const hi = Math.min(windowEnd - baseAddress, lo + MAX_SEH32_HEAD_INSNS * 16);
-  if (lo < 0 || hi > bytes.length || hi <= lo) return [];
-  const out: { mnemonic: string; opStr: string }[] = [];
+  const out: HeadInsn[] = [];
   let at = lo;
   let want = addr;
-  while (out.length < MAX_SEH32_HEAD_INSNS && at < hi) {
-    const insns = scan.decodeOne(bytes, at, hi, baseAddress + at);
-    if (insns.length === 0 || insns[0].address !== want) break;
-    out.push({ mnemonic: insns[0].mnemonic, opStr: insns[0].opStr });
-    at += insns[0].size;
-    want += insns[0].size;
-  }
-  return out;
+  let done = lo < 0 || hi > bytes.length || hi <= lo;
+  return (index: number): HeadInsn | undefined => {
+    // Indices are asked for in order and each is decoded once; a caller that
+    // skipped one would still get the right answer for the one it asked for,
+    // because the walk is driven by `out.length` rather than by `index`.
+    while (!done && out.length <= index && out.length < MAX_SEH32_HEAD_INSNS && at < hi) {
+      const insns = scan.decodeOne(bytes, at, hi, baseAddress + at);
+      if (insns.length === 0 || insns[0].address !== want) {
+        done = true;
+        break;
+      }
+      out.push({ mnemonic: insns[0].mnemonic, opStr: insns[0].opStr });
+      at += insns[0].size;
+      want += insns[0].size;
+    }
+    return out[index];
+  };
 }
 
 /**
@@ -1521,8 +1585,10 @@ function seh32FuncletRelation(
   const relation = new Map<number, Set<number>>();
   const isCodeAddress = (addr: number) => addr >= baseAddress && addr < endAddress;
   for (const start of sortedAddrs) {
-    const head = headInstructions(start, endAddress, bytes, baseAddress, scan);
-    if (head.length === 0) continue;
+    const head = headReader(start, endAddress, bytes, baseAddress, scan);
+    // `head(0) === undefined` is the old `head.length === 0`: the start does
+    // not decode at all, so there is no prologue to read.
+    if (head(0) === undefined) continue;
     for (const funclet of seh32FuncletsOfPrologue(head, reader, isCodeAddress)) {
       const parents = relation.get(funclet);
       if (parents === undefined) relation.set(funclet, new Set([start]));
@@ -1907,7 +1973,30 @@ export function detectFunctions(
    * this always did (peek-a-bin-x40u).
    */
   sweepCache?: X86SweepCache,
+  /**
+   * An instrument told how long each {@link DetectPhase} took, in milliseconds.
+   *
+   * Last, after `sweepCache`, because it is a different kind of parameter from
+   * every one before it: those are evidence this function reads, and this reads
+   * this function. It must never be able to change what any phase decides —
+   * `corpus/detectPhaseCost.ts` is the only caller, and the proof it observes
+   * without disturbing is that `npm run corpus` is byte-identical with it wired
+   * (peek-a-bin-6dv3).
+   */
+  phaseTap?: (phase: DetectPhase, ms: number) => void,
 ): DetectResult {
+  /**
+   * Close one phase and open the next. A no-op without a tap, down to not
+   * reading the clock.
+   */
+  let phaseMark = phaseTap ? performance.now() : 0;
+  const phase: (name: DetectPhase) => void = phaseTap
+    ? (name) => {
+        const now = performance.now();
+        phaseTap(name, now - phaseMark);
+        phaseMark = now;
+      }
+    : () => {};
   const addrSet = new Set<number>();
   const nameMap = new Map<number, string>();
   const pdataEndMap = new Map<number, number>();
@@ -1973,6 +2062,7 @@ export function detectFunctions(
       }
     }
   }
+  phase("pdata-seeds");
 
   // Exception handler seeds from UNWIND_INFO
   if (options?.handlerAddresses) {
@@ -1984,6 +2074,7 @@ export function detectFunctions(
       }
     }
   }
+  phase("handler-seeds");
 
   if (options?.entryPoint !== undefined) {
     const ep = options.entryPoint;
@@ -1993,6 +2084,7 @@ export function detectFunctions(
       nameMap.set(ep, "entry_point");
     }
   }
+  phase("entry-point");
 
   if (options?.exports) {
     for (const exp of options.exports) {
@@ -2003,6 +2095,7 @@ export function detectFunctions(
       }
     }
   }
+  phase("exports");
 
   // Prologue scanning
   for (let i = 0; i < len; i++) {
@@ -2150,6 +2243,7 @@ export function detectFunctions(
     }
     if (matched > 0) addPattern(baseAddress + i, matched);
   }
+  phase("prologue-scan");
 
   // Alignment padding heuristic
   for (let i = 0; i < len; i++) {
@@ -2175,6 +2269,7 @@ export function detectFunctions(
       i = padEnd - 1;
     }
   }
+  phase("padding-scan");
 
   // Call target collection
   /**
@@ -2317,6 +2412,9 @@ export function detectFunctions(
     const swept = sweepCache
       ? sweepCache.sweep(bytes, baseAddress, cs, "function detection")
       : sweepX86(bytes, baseAddress, cs, "function detection");
+    // Carries the handful of Set/Map allocations and the `makeImageReader` call
+    // in front of it, which are not worth a name of their own.
+    phase("sweep");
     for (const insn of swept) {
       if (insn.mnemonic === "call") {
         const m = insn.opStr.match(/^0x([0-9a-fA-F]+)$/);
@@ -2421,6 +2519,7 @@ export function detectFunctions(
       });
       if (recentInsns.length > MAX_RECENT) recentInsns.shift();
     }
+    phase("sweep-scan");
   }
 
   // Byte-pattern candidates are admitted last, because both things that can
@@ -2459,6 +2558,7 @@ export function detectFunctions(
     if (interior.has(addr)) continue;
     addrSet.add(addr);
   }
+  phase("pattern-admit");
 
   // A start the previous function branches over is that function's own code —
   // an MSVC `__finally` funclet, or a prologue pattern that matched mid-body —
@@ -2467,31 +2567,39 @@ export function detectFunctions(
   // arbitration is simply not made, as with the other decoder-fed passes.
   const allStarts = Array.from(addrSet).sort((a, b) => a - b);
   const reached = new Set<number>([...callTargets, ...branchTargets, ...jumpTableTargets]);
-  const interiorStarts = cs
-    ? interiorBranchedOverStarts(
-        allStarts,
-        strongStarts,
-        is64
-          ? new Map<number, Set<number>>()
-          : seh32FuncletRelation(
-              allStarts,
-              endAddress,
-              bytes,
-              baseAddress,
-              reader,
-              createScan(cs, "SEH scope table relation"),
-            ),
-        callSites,
-        forwardCondJumps,
-        forwardJumps,
-        reached,
-        pdataEndMap,
-        bytes,
-        baseAddress,
-        endAddress,
-        createScan(cs, "interior-start arbitration"),
-      )
-    : new Set<number>();
+  // The funclet relation is hoisted into a local rather than built in the
+  // argument list, so that {@link DetectPhase} can separate reading the SEH
+  // scope tables from arbitrating with them. Same expression, same arm, same
+  // evaluation order.
+  let interiorStarts = new Set<number>();
+  if (cs) {
+    const seh32Funclets = is64
+      ? new Map<number, Set<number>>()
+      : seh32FuncletRelation(
+          allStarts,
+          endAddress,
+          bytes,
+          baseAddress,
+          reader,
+          createScan(cs, "SEH scope table relation"),
+        );
+    phase("seh32-relation");
+    interiorStarts = interiorBranchedOverStarts(
+      allStarts,
+      strongStarts,
+      seh32Funclets,
+      callSites,
+      forwardCondJumps,
+      forwardJumps,
+      reached,
+      pdataEndMap,
+      bytes,
+      baseAddress,
+      endAddress,
+      createScan(cs, "interior-start arbitration"),
+    );
+    phase("interior-starts");
+  }
   const sortedAddrs =
     interiorStarts.size > 0 ? allStarts.filter((a) => !interiorStarts.has(a)) : allStarts;
   const functions: DisasmFunction[] = sortedAddrs.map((addr) => ({
@@ -2510,6 +2618,7 @@ export function detectFunctions(
       functions[i].size = endAddress - functions[i].address;
     }
   }
+  phase("sizes");
 
   // --- Thunk detection ---
   // These windows are 16 bytes and could not exhaust anything, but they still
@@ -2551,6 +2660,7 @@ export function detectFunctions(
         }
       }
     }
+    phase("thunk-names");
   }
 
   // --- Tail call detection ---
@@ -2595,6 +2705,7 @@ export function detectFunctions(
         }
       }
     }
+    phase("tail-calls");
   }
 
   return {

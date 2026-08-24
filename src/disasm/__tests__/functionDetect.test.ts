@@ -4,12 +4,14 @@ import { buildCFG } from "../cfg";
 import {
   buildAllXrefs,
   buildTypedXrefMap,
+  type DetectPhase,
   type DisasmContext,
   detectFunctions,
   disassemble,
   hybridDisassemble,
   mapInsn,
 } from "../functionDetect";
+import { MAX_SEH32_HEAD_INSNS } from "../seh32";
 import type { Instruction } from "../types";
 
 const BASE = 0x401000;
@@ -3004,5 +3006,207 @@ describe("buildAllXrefs", () => {
   it("ignores data sections when none are supplied", () => {
     const img = image(6, { 0: [0xff, 0x25, ...le32(0x1000)] });
     expect(buildAllXrefs(img, BASE, true, [], [], cs).dataXrefs).toEqual([]);
+  });
+});
+
+describe("detectFunctions — the phase tap", () => {
+  /**
+   * Every phase, in declaration order. Duplicated from `DetectPhase` on
+   * purpose: the union says which names exist and this says which ones the
+   * function actually reaches, and a phase that is declared and never reported
+   * is exactly the defect that makes `corpus/detectPhaseCost.ts` print a
+   * confident split with a third of the time in the wrong column.
+   */
+  const EXPECTED: DetectPhase[] = [
+    "pdata-seeds",
+    "handler-seeds",
+    "entry-point",
+    "exports",
+    "prologue-scan",
+    "padding-scan",
+    "sweep",
+    "sweep-scan",
+    "pattern-admit",
+    "seh32-relation",
+    "interior-starts",
+    "sizes",
+    "thunk-names",
+    "tail-calls",
+  ];
+
+  /**
+   * A PE32 image with a decoder and an IAT, which is the one configuration in
+   * which all fourteen phases run: `sweep`/`sweep-scan`, `seh32-relation`,
+   * `interior-starts` and `tail-calls` need a decoder, and `thunk-names`
+   * additionally needs a non-empty `iatMap`.
+   */
+  const everyPhase = (tap: (p: DetectPhase, ms: number) => void) => {
+    const img = image(0x40, {
+      0x00: [0x55, 0x8b, 0xec],
+      0x10: [...callTo(0x10, BASE + 0x20)],
+      0x20: [0x55, 0x8b, 0xec, 0xc3],
+    });
+    return detectFunctions(
+      img,
+      BASE,
+      false,
+      ctxOf({ cs32: fakeCs(), iatMap: new Map([[BASE + 0x100, { lib: "k.dll", func: "F" }]]) }),
+      {
+        entryPoint: BASE,
+        exports: [{ name: "e", address: BASE + 0x20 }],
+        handlerAddresses: [BASE],
+      },
+      undefined,
+      tap,
+    );
+  };
+
+  it("reports every phase exactly once, in declaration order", () => {
+    const seen: DetectPhase[] = [];
+    everyPhase((p) => seen.push(p));
+    expect(seen).toEqual(EXPECTED);
+  });
+
+  it("reports a duration for each phase and never a negative one", () => {
+    const seen: [DetectPhase, number][] = [];
+    everyPhase((p, ms) => seen.push([p, ms]));
+    for (const [, ms] of seen) expect(ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it("does not change the answer", () => {
+    const withTap = everyPhase(() => {});
+    const without = everyPhase.call(null, () => {});
+    // The same call twice is the weak half; the strong half is that a tapped
+    // run agrees with an untapped one, which is what a tap that mutated
+    // anything would break.
+    const untapped = (() => {
+      const img = image(0x40, {
+        0x00: [0x55, 0x8b, 0xec],
+        0x10: [...callTo(0x10, BASE + 0x20)],
+        0x20: [0x55, 0x8b, 0xec, 0xc3],
+      });
+      return detectFunctions(
+        img,
+        BASE,
+        false,
+        ctxOf({ cs32: fakeCs(), iatMap: new Map([[BASE + 0x100, { lib: "k.dll", func: "F" }]]) }),
+        {
+          entryPoint: BASE,
+          exports: [{ name: "e", address: BASE + 0x20 }],
+          handlerAddresses: [BASE],
+        },
+      );
+    })();
+    expect(withTap).toEqual(untapped);
+    expect(without).toEqual(untapped);
+  });
+
+  it("omits the decoder-fed phases when there is no decoder", () => {
+    const seen: DetectPhase[] = [];
+    detectFunctions(
+      image(0x20, { 0x00: [0x55, 0x8b, 0xec] }),
+      BASE,
+      false,
+      ctxOf(),
+      undefined,
+      undefined,
+      (p) => seen.push(p),
+    );
+    // Not an accident of this fixture: `sweep`, `sweep-scan`, `seh32-relation`,
+    // `interior-starts`, `thunk-names` and `tail-calls` each report from INSIDE
+    // their own `if (cs)`, so the set of phases reported is the set of passes
+    // that ran — the same gate `DetectResult.omitted` reports. A phase that
+    // closed unconditionally would report 0 ms here and say nothing.
+    expect(seen).toEqual([
+      "pdata-seeds",
+      "handler-seeds",
+      "entry-point",
+      "exports",
+      "prologue-scan",
+      "padding-scan",
+      "pattern-admit",
+      "sizes",
+    ]);
+  });
+
+  it("takes the empty-map arm of seh32-relation on x64", () => {
+    // Reported all the same, and reported as near-zero: on x64 `.pdata` has
+    // already settled every boundary the relation would arbitrate, so a
+    // non-trivial figure in that column on a PE32+ image means the arm moved.
+    const seen = new Map<DetectPhase, number>();
+    detectFunctions(
+      image(0x20, { 0x00: [0x55, 0x48, 0x89, 0xe5] }),
+      BASE,
+      true,
+      ctxOf({ cs64: fakeCs() }),
+      undefined,
+      undefined,
+      (p, ms) => seen.set(p, ms),
+    );
+    expect(seen.has("seh32-relation")).toBe(true);
+    expect(seen.has("interior-starts")).toBe(true);
+  });
+});
+
+describe("detectFunctions — the SEH32 prologue head is read lazily", () => {
+  /**
+   * `fakeCs` with a call counter, and the phase tap to bracket the window.
+   *
+   * The count that matters is the decodes charged to `seh32-relation`, and
+   * nothing else can isolate them: the pass shares its decoder with the sweep,
+   * the interior-start arbitration and the thunk and tail-call passes, so a
+   * total is dominated by work this has nothing to do with. That the tap makes
+   * this measurable at all is the second thing it buys (peek-a-bin-6dv3).
+   */
+  function countedRun(img: Uint8Array, options: Parameters<typeof detectFunctions>[4]) {
+    const inner = fakeCs();
+    let calls = 0;
+    const cs = {
+      disasm(bytes: Uint8Array, opts: { address: number; count?: number }) {
+        calls++;
+        return inner.disasm(bytes, opts);
+      },
+    };
+    const at = new Map<DetectPhase, number>();
+    const result = detectFunctions(img, BASE, false, ctxOf({ cs32: cs }), options, undefined, (p) =>
+      at.set(p, calls),
+    );
+    return {
+      result,
+      sehDecodes: (at.get("seh32-relation") ?? 0) - (at.get("pattern-admit") ?? 0),
+    };
+  }
+
+  it("decodes far fewer than the head bound per start", () => {
+    // Four starts, none of which begins with a pushed immediate, so the rule
+    // bails on each at its first instruction. Eagerly filling the head would
+    // cost MAX_SEH32_HEAD_INSNS decodes at every one of them.
+    const img = image(0x60, {
+      0x00: [0x55, 0x8b, 0xec, 0xc3],
+      0x10: [0x55, 0x8b, 0xec, 0xc3],
+      0x20: [0x55, 0x8b, 0xec, 0xc3],
+      0x30: [0x55, 0x8b, 0xec, 0xc3],
+    });
+    const { result, sehDecodes } = countedRun(img, { entryPoint: BASE });
+    const starts = result.functions.length;
+    expect(starts).toBeGreaterThanOrEqual(4);
+    // The bound an eager head would pay. `MAX_SEH32_HEAD_INSNS` is 8; asserting
+    // against the constant rather than a literal keeps this true if it moves.
+    expect(sehDecodes).toBeLessThan(starts * MAX_SEH32_HEAD_INSNS);
+    // And tightly: one decode per start is all this shape can need.
+    expect(sehDecodes).toBeLessThanOrEqual(starts * 2);
+  });
+
+  it("still reads far enough to see a prologue helper's arguments", () => {
+    // `push 0xc; push 0x411050; call` — the shape the relation exists for. The
+    // rule must get to the `call`, i.e. three instructions, so a reader that
+    // stopped at one would answer nothing here. That is the other direction of
+    // the same test: laziness must not become blindness.
+    const img = image(0x40, {
+      0x00: [0x6a, 0x0c, 0x68, 0x50, 0x10, 0x41, 0x00, ...callTo(0x07, BASE + 0x20)],
+      0x20: [0x55, 0x8b, 0xec, 0xc3],
+    });
+    const { sehDecodes } = countedRun(img, { entryPoint: BASE });
+    expect(sehDecodes).toBeGreaterThanOrEqual(3);
   });
 });

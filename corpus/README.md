@@ -1773,6 +1773,53 @@ buffers` to NO; serving a wrong mnemonic takes `differing` to 18046 and 16845; a
 about a grid shifted one byte takes the rate to 18.8% and 5.3%, which is what makes the 100% a
 measurement rather than a tautology.
 
+## `corpus/detectPhaseCost.ts` — separate, takes a path, and answers where detection's time goes
+
+`npm run corpus:detectcost -- <path-to-pe> [...]` breaks `detectFunctions` down phase by phase. It
+exists because detection became the whole load-time budget by standing still: `peek-a-bin-x40u` and
+`peek-a-bin-iqzu` cut the other two decode-bound RPCs roughly threefold each and left this one
+untouched, and nobody had ever asked what it was made of — so every proposal about it was an
+argument. Outside `npm run corpus` for `rpcUploadCost.ts`' and `jumpTableReach.ts`' reason, and it
+needs images of **very different sizes** to say anything, which is what the `go` recipe below is for.
+
+Three tables, and the second is the answer:
+
+- **The premise**, the three RPCs through the real `dispatch`, so the ratio this was filed on is
+  re-derived rather than quoted. `det-sweep` beside it is detection *without* the shared linear
+  sweep — the work that is genuinely detection's, as against the section decode both successors
+  free-ride on. At `e9e6eaa` detection is 60–79% of the three-RPC total and 1072–1738 ms per MiB of
+  `.text`, while `det-sweep` is 120–434.
+- **The split**, from a `DetectPhase` tap wired into `detectFunctions` itself. `unattributed` is the
+  integrity column: phases that do not sum to the whole call mean a boundary is in the wrong place,
+  and a split that quietly loses a third of the time would otherwise read as a clean answer. It runs
+  at 0.0–1.6% of the phase total. The **sweep is 73.6–89.0%** of every image measured, and the
+  largest phase that is genuinely detection's own is `tail-calls` at 4.6–8.6%.
+- **The fit**, the same figures as rates against three denominators — the section's size, the
+  instructions the sweep produced, the functions detected. A phase linear in one has a flat column
+  under it and a superlinear one has a column that climbs, which is the only way to answer "is this a
+  rate problem or a shape problem". Printed **per architecture**, because `seh32-relation` and
+  `interior-starts` are PE32-only and mixing a PE32 image with a PE32+ one reports a spread of
+  hundreds for a phase that is simply absent from half the population.
+
+At `e9e6eaa` the whole of detection is **3.90–4.15 µs per swept instruction on x86-64 and 4.41–4.59
+on PE32, spread 1.1x and 1.0x**, over a 37–38x instruction range and a 19x function range in each
+architecture. Nothing is superlinear, `interiorBranchedOverStarts` included.
+
+It replicates `dispatch`'s argument construction — nothing may hand a tap through the wire format —
+and prints **`same answer as dispatch`** for it, because a drifted replica reports a confident split
+of a call the worker never makes. The sweep is read twice, once from the tap and once as
+`cold - warm` (detection with an empty memo against detection with the memo already holding this
+section), and the two agree to 0.7–3.8%.
+
+Negative-controlled in three directions, and **one of the three is inert, which is the thing to know
+before trusting a column**: deleting a `phase()` call takes `unattributed` from 0.2% to 10.7% and
+fails `functionDetect.test.ts`' ordering assertion (it caught a real omission — `phase("pdata-seeds")`
+was never inserted, and its cost was being reported as `handler-seeds`); reporting `sweep` before the
+sweep runs leaves `unattributed` at -0.0% and makes `cold - warm` disagree by six orders of
+magnitude; but moving the `sweep`/`sweep-scan` boundary past the scan loop fools **both**, because no
+boundary is missing and `sweep-scan` is 4% of `sweep` against a ~10% run-to-run spread. That one
+boundary rests on reading the code.
+
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
 `npm run corpus:jumptables -- <path-to-pe>` censuses the indirect dispatches in **any** PE and
@@ -2182,6 +2229,7 @@ remaining gap and is not implemented.
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
 | `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries — for the whole-section payload and for the per-function one, side by side. Also censuses whether the two emit the same C for every function of the image. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch and a census, never a gate. Writes no artifacts. |
 | `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
+| `detectPhaseCost.ts` | **Separately invoked** (`npm run corpus:detectcost -- <path>`). Where `detectFunctions` spends its time, phase by phase, with the shared linear sweep separated from detection's own work — plus the rates that say whether any phase is superlinear. Drives the real `dispatch` for the premise and the real `detectFunctions` with a phase tap for the split, and checks the two agree. x86 only. A stopwatch, never a gate. Writes no artifacts. |
 | `hybridGridServe.ts` | **Separately invoked** (`npm run corpus:gridserve -- <path>`). Whether `hybridDisassemble` decodes at addresses the linear sweep already holds, plus a served-against-decoded differential and the timing. Drives the real `dispatch` with a wrapped Capstone handle. A census and a stopwatch; only the differential could become a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
@@ -2265,11 +2313,10 @@ program from the one production emits.
 
 - **`tsx` works here now, and the note saying it does not is stale.** This bullet used to read
   "`tsx` does not work on this machine (Node 18, `ERR_REQUIRE_ESM`)"; the machine is on Node 22 and
-  all four separately-invoked harnesses (`corpus:arm64`, `corpus:comments`,
-  `corpus:jumptables`, `corpus:uploadcost`,
-  `corpus:decompilecost`)
-  `corpus:jumptables`, `corpus:uploadcost`, `corpus:gridserve`)
-  are plain `tsx` scripts that run. The gated audits are vitest files for a different and still-good
+  every separately-invoked harness (`corpus:arm64`, `corpus:comments`, `corpus:jumptables`,
+  `corpus:uploadcost`, `corpus:decompilecost`, `corpus:gridserve`, `corpus:detectcost`) is a plain
+  `tsx` script that runs. (This list was duplicated and inconsistent for a while, two sessions each
+  appending their own harness to a different copy of it — hence "all four".) The gated audits are vitest files for a different and still-good
   reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
   against artifacts without a toolchain at all.
 - **Vitest's default reporter discards `console.log` from inside a test** but passes

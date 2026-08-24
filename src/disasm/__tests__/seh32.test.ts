@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  type HeadReader,
   MAX_SEH32_SCOPE_RECORDS,
   readSeh32ScopeTable,
   type Seh32Reader,
@@ -132,8 +133,20 @@ describe("readSeh32ScopeTable", () => {
 });
 
 describe("seh32PrologImmediates", () => {
-  const head = (...pairs: [string, string][]) =>
-    pairs.map(([mnemonic, opStr]) => ({ mnemonic, opStr }));
+  /**
+   * A {@link HeadReader} over a fixed list, remembering the highest index asked
+   * for — which is what the laziness test below reads.
+   */
+  const reading = (...pairs: [string, string][]) => {
+    const insns = pairs.map(([mnemonic, opStr]) => ({ mnemonic, opStr }));
+    let highest = -1;
+    const read: HeadReader = (i) => {
+      highest = Math.max(highest, i);
+      return insns[i];
+    };
+    return { read, pulled: () => highest + 1 };
+  };
+  const head = (...pairs: [string, string][]) => reading(...pairs).read;
 
   it("takes the immediates an MSVC SEH prologue pushes", () => {
     expect(
@@ -167,7 +180,21 @@ describe("seh32PrologImmediates", () => {
   it("refuses a register push, and a head with no push at all", () => {
     expect(seh32PrologImmediates(head(["push", "ebp"], ["call", "0x404170"]))).toEqual([]);
     expect(seh32PrologImmediates(head(["call", "0x404170"]))).toEqual([]);
-    expect(seh32PrologImmediates([])).toEqual([]);
+    expect(seh32PrologImmediates(head())).toEqual([]);
+  });
+
+  it("stops at the instruction that decides, and asks for no more", () => {
+    // The caller decodes each index on demand, so an index this rule does not
+    // ask for is a Capstone call that does not happen — 76-88% of them in this
+    // pass, measured. A rule that scanned the whole head instead would read
+    // eight here and still answer `[]` (peek-a-bin-6dv3).
+    const bails = reading(["push", "ebp"], ["call", "0x404170"], ["nop", ""]);
+    expect(seh32PrologImmediates(bails.read)).toEqual([]);
+    expect(bails.pulled()).toBe(1);
+
+    const oneImm = reading(["push", "0xc"], ["call", "0x404170"], ["nop", ""], ["nop", ""]);
+    expect(seh32PrologImmediates(oneImm.read)).toEqual([0xc]);
+    expect(oneImm.pulled()).toBe(2);
   });
 
   it("refuses more pushes than a prologue helper takes", () => {
@@ -192,11 +219,12 @@ describe("seh32FuncletsOfPrologue", () => {
       0xfffffffe, 0, 0xffffffcc, 0, 0xfffffffe, 0x00403bab, 0x00403bbf, 0x00000000, 0x00000000,
       0x00403270,
     ];
-    const head = [
+    const insns = [
       { mnemonic: "push", opStr: "0xc" },
       { mnemonic: "push", opStr: `0x${TABLE.toString(16)}` },
       { mnemonic: "call", opStr: "0x404170" },
     ];
+    const head: HeadReader = (i) => insns[i];
     // The frame size 0xc maps to nothing, so it contributes no records and needs
     // no knowledge of which argument carries the table.
     expect(seh32FuncletsOfPrologue(head, readerOf(TABLE, words), isCodeAddress)).toEqual([
@@ -205,10 +233,11 @@ describe("seh32FuncletsOfPrologue", () => {
   });
 
   it("names nothing when the prologue is not one", () => {
-    const head = [
+    const insns = [
       { mnemonic: "mov", opStr: "eax, dword ptr [ebp + 8]" },
       { mnemonic: "ret", opStr: "" },
     ];
+    const head: HeadReader = (i) => insns[i];
     expect(seh32FuncletsOfPrologue(head, readerOf(TABLE, T32_411110), isCodeAddress)).toEqual([]);
   });
 });
