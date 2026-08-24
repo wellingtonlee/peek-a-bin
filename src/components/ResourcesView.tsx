@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { useAppState } from "../hooks/usePEFile";
 import {
   ResourceTypeNames,
@@ -213,8 +213,15 @@ export function ResourcesView() {
                           typeof entry.name === "string" ? entry.name : `#${entry.name}`;
 
                         return (
-                          <>
-                            <tr key={leafKey} className="text-gray-300 hover:bg-gray-800/50">
+                          // KEYED FRAGMENT, not `<>`. The array element here is
+                          // the fragment, so a shorthand one — which cannot take
+                          // a key — left React reconciling these rows by index
+                          // and logging "Each child in a list should have a
+                          // unique key" on every render of a populated tab. The
+                          // keys were on the fragment's CHILDREN, where React
+                          // does not look for a list key.
+                          <Fragment key={leafKey}>
+                            <tr className="text-gray-300 hover:bg-gray-800/50">
                               <td className="py-0.5 pr-4">
                                 <button
                                   type="button"
@@ -251,7 +258,7 @@ export function ResourcesView() {
                               </td>
                             </tr>
                             {isExpanded && (
-                              <tr key={`${leafKey}-detail`}>
+                              <tr>
                                 <td colSpan={5}>
                                   <ExpandedLeaf
                                     typeId={typeId}
@@ -264,7 +271,7 @@ export function ResourcesView() {
                                 </td>
                               </tr>
                             )}
-                          </>
+                          </Fragment>
                         );
                       })}
                     </tbody>

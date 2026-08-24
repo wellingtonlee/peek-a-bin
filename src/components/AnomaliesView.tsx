@@ -1,42 +1,58 @@
 import type { Anomaly } from "../analysis/anomalies";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import type { AIScanFinding } from "../llm/types";
 
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 };
-const SEVERITY_COLORS: Record<string, { bg: string; text: string; badge: string }> = {
+/**
+ * A severity's place in the reading order, and the three class names that paint
+ * it.
+ *
+ * BOTH ARE `Record<Anomaly["severity"], …>` RATHER THAN `Record<string, …>`, and
+ * that is the whole instrument for a fourth severity. They used to be keyed by
+ * `string`, so adding one to {@link Anomaly} compiled, sorted last behind `info`
+ * and rendered in `info`'s blue — a new severity silently painted as the mildest
+ * one. Typed this way it fails the build here instead, the way
+ * `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do for their own unions.
+ *
+ * The `??` fallbacks at the two read sites are kept even so: an anomaly can
+ * reach `AppState` from outside the type system (the MCP wire, a restored
+ * snapshot), and the fallback is what keeps that a blue row rather than a
+ * property read on `undefined`.
+ */
+const SEVERITY_ORDER: Record<Anomaly["severity"], number> = { critical: 0, warning: 1, info: 2 };
+const SEVERITY_COLORS: Record<Anomaly["severity"], { bg: string; text: string; badge: string }> = {
   critical: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
   warning: { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" },
   info: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
 };
 
-const IRP_NAMES: Record<number, string> = {
-  0x00: "IRP_MJ_CREATE",
-  0x01: "IRP_MJ_CREATE_NAMED_PIPE",
-  0x02: "IRP_MJ_CLOSE",
-  0x03: "IRP_MJ_READ",
-  0x04: "IRP_MJ_WRITE",
-  0x05: "IRP_MJ_QUERY_INFORMATION",
-  0x06: "IRP_MJ_SET_INFORMATION",
-  0x07: "IRP_MJ_QUERY_EA",
-  0x08: "IRP_MJ_SET_EA",
-  0x09: "IRP_MJ_FLUSH_BUFFERS",
-  0x0a: "IRP_MJ_QUERY_VOLUME_INFORMATION",
-  0x0b: "IRP_MJ_SET_VOLUME_INFORMATION",
-  0x0c: "IRP_MJ_DIRECTORY_CONTROL",
-  0x0d: "IRP_MJ_FILE_SYSTEM_CONTROL",
-  0x0e: "IRP_MJ_DEVICE_CONTROL",
-  0x0f: "IRP_MJ_INTERNAL_DEVICE_CONTROL",
-  0x10: "IRP_MJ_SHUTDOWN",
-  0x11: "IRP_MJ_LOCK_CONTROL",
-  0x12: "IRP_MJ_CLEANUP",
-  0x13: "IRP_MJ_CREATE_MAILSLOT",
-  0x14: "IRP_MJ_QUERY_SECURITY",
-  0x15: "IRP_MJ_SET_SECURITY",
-  0x16: "IRP_MJ_POWER",
-  0x17: "IRP_MJ_SYSTEM_CONTROL",
-  0x18: "IRP_MJ_DEVICE_CHANGE",
-  0x19: "IRP_MJ_QUERY_QUOTA",
-  0x1a: "IRP_MJ_SET_QUOTA",
-  0x1b: "IRP_MJ_PNP",
+/**
+ * The AI findings' own palette — a SECOND, wider vocabulary, deliberately kept
+ * apart from {@link SEVERITY_COLORS} because the two enumerations differ:
+ * `AIScanFinding["severity"]` has five members and no `warning`.
+ *
+ * DECLARED AS A TABLE RATHER THAN THE NESTED TERNARY IT REPLACED. The old
+ * spelling was a hand-written predicate chain over the severity string
+ * (`=== "critical" || === "high" ? red : === "medium" ? amber : blue`), which is
+ * exactly the shape `peek-a-bin-n7q1` shipped: five render sites each spelling
+ * `kind === "analysis-failed"` by hand, the fifth missed, and one notice on
+ * screen in two colours at once. A `Record` over the union means a sixth
+ * severity fails the build.
+ *
+ * STILL NOT UNIFIED WITH `AddressBar.tsx`'s status dot, which asks a different
+ * question of the same union — the *maximum* severity across anomalies and
+ * findings together — and answers it with its own hand-written
+ * `severity === "critical" || severity === "high"` chain. The two agree today.
+ * Nothing makes them agree tomorrow.
+ */
+const FINDING_COLORS: Record<
+  AIScanFinding["severity"],
+  { bg: string; text: string; badge: string }
+> = {
+  critical: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
+  high: { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" },
+  medium: { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" },
+  low: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
+  info: { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" },
 };
 
 export function AnomaliesView() {
@@ -167,12 +183,7 @@ export function AnomaliesView() {
               </thead>
               <tbody>
                 {state.aiScanResults.map((finding, i) => {
-                  const sevColor =
-                    finding.severity === "critical" || finding.severity === "high"
-                      ? { bg: "bg-red-900/20", text: "text-red-300", badge: "bg-red-600" }
-                      : finding.severity === "medium"
-                        ? { bg: "bg-amber-900/20", text: "text-amber-300", badge: "bg-amber-600" }
-                        : { bg: "bg-blue-900/20", text: "text-blue-300", badge: "bg-blue-600" };
+                  const sevColor = FINDING_COLORS[finding.severity] ?? FINDING_COLORS.info;
                   return (
                     <tr key={i} className={`${sevColor.bg} border-b border-gray-800/50`}>
                       <td className="py-1.5 px-2">
@@ -251,9 +262,7 @@ export function AnomaliesView() {
                       <td className="py-1.5 px-2 text-gray-400 font-mono">
                         0x{handler.irpMajor.toString(16).toUpperCase().padStart(2, "0")}
                       </td>
-                      <td className="py-1.5 px-2 text-gray-300">
-                        {IRP_NAMES[handler.irpMajor] ?? handler.irpName}
-                      </td>
+                      <td className="py-1.5 px-2 text-gray-300">{handler.irpName}</td>
                       <td className="py-1.5 px-2">
                         {handler.handlerAddress > 0 ? (
                           <button
