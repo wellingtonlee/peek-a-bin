@@ -9,6 +9,7 @@ import type { DisasmFunction } from "../disasm/types";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
 import type { ContextMenuState } from "../hooks/useInsnContextMenu";
 import type { PEFile } from "../pe/types";
+import { copyText } from "../utils/clipboard";
 import { parseBranchTarget } from "./shared";
 
 export interface InsnContextMenuActions {
@@ -111,9 +112,7 @@ export function InsnContextMenu({
             <>
               {sep}
               {menuItem(`Copy selected (${count} rows)`, () => {
-                navigator.clipboard.writeText(
-                  formatRangeCopy(selectionRange, rows, pe, renames, comments),
-                );
+                void copyText(formatRangeCopy(selectionRange, rows, pe, renames, comments));
                 setCtxMenu(null);
               })}
             </>

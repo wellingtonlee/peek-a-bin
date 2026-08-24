@@ -19,6 +19,7 @@ import {
 import { parsePE } from "../../pe/parser";
 import type { PEFile } from "../../pe/types";
 import { stubLayoutRect } from "../../test/domSetup";
+import { COPY_FAILED_TITLE } from "../../utils/clipboard";
 import { disasmWorker } from "../../workers/disasmClient";
 import { DisassemblyView } from "../DisassemblyView";
 import { AppHarness } from "./appStateHarness";
@@ -649,6 +650,99 @@ describe("the context menu", () => {
     fireEvent.contextMenu(rowAt(container, A[5]), { clientX: 0, clientY: 0 });
     await user.click(screen.getByText("Copy address"));
     expect(writeText).toHaveBeenCalledWith(`0x${A[5].toString(16).toUpperCase()}`);
+  });
+
+  /**
+   * THE PLAIN-HTTP DEPLOYMENT (`peek-a-bin-p0tz`) at the context menu, which is
+   * four of the eighteen unguarded sites and the most-used ones.
+   *
+   * `navigator.clipboard` is `[SecureContext]`: over plain http off localhost
+   * the object is absent, so `navigator.clipboard.writeText(...)` threw a
+   * TypeError inside the menu item's handler — every copy item in the menu,
+   * dead, on the deployment this repo ships an nginx config for. The item now
+   * goes through `utils/clipboard.ts` and fails inert.
+   *
+   * The menu still closing is the second half and not decoration: the
+   * `setCtxMenu(null)` sits AFTER the copy in every one of these handlers, so a
+   * throw left the menu stuck open over the listing as well as losing the copy.
+   * That is also what makes this assertion discriminate at all — see the note
+   * in `DecompileView.dom.test.tsx` about a site where nothing follows the copy
+   * and `not.toThrow()` is inert.
+   *
+   * STAND-IN, NOT A BROWSER: the absence is manufactured by deleting the
+   * property, after `userEvent.setup()` has installed its own stub.
+   */
+  it("closes without throwing when there is no clipboard", async () => {
+    const user = userEvent.setup();
+    const { container } = await mountReady();
+    fireEvent.contextMenu(rowAt(container, A[5]), { clientX: 0, clientY: 0 });
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    await user.click(screen.getByText("Copy address"));
+    expect(screen.queryByText("Copy address")).toBeNull();
+  });
+
+  /**
+   * The one site in this panel that has a feedback affordance: double-clicking
+   * a row's address copies it and flashes the address green for a second.
+   *
+   * It used to flash off `writeText(hex).then(...)` with no rejection handler,
+   * so on the HTTP deployment it threw before the flash and on a denied
+   * permission it would have flashed nothing. `copiedAddr` now carries the
+   * OUTCOME (`utils/clipboard.ts`'s `CopyFlash`) rather than just an address,
+   * which is what lets the same affordance say "no" — and the type change is
+   * what forced both render sites, here and in `CFGView`, to be revisited.
+   *
+   * BOTH DIRECTIONS, because a flash that is always green and a flash that is
+   * always red are equally wrong and a one-directional test sees neither.
+   */
+  it("flashes the address green on a copy and red on a failed one", async () => {
+    userEvent.setup(); // installs the clipboard stub jsdom has not got
+    const { container } = await mountReady();
+    const addr = () => rowAt(container, A[5]).querySelector<HTMLElement>(".disasm-address");
+
+    fireEvent.doubleClick(addr() as HTMLElement);
+    await waitFor(() => expect(addr()?.className).toContain("text-green-400"));
+    expect(addr()?.className).not.toContain("text-red-400");
+    expect(addr()?.getAttribute("title")).toBeNull();
+
+    // Now take the clipboard away, as a non-secure context does.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    fireEvent.doubleClick(addr() as HTMLElement);
+    await waitFor(() => expect(addr()?.className).toContain("text-red-400"));
+    expect(addr()?.className).not.toContain("text-green-400");
+    expect(addr()?.getAttribute("title")).toBe(COPY_FAILED_TITLE);
+  });
+
+  /**
+   * The fourth and last affordance site, and the only one outside this panel's
+   * own files: `ColoredOperand` in `components/shared.tsx` flashes an operand's
+   * branch target when you double-click it.
+   *
+   * Reached through the real panel rather than by rendering `ColoredOperand`
+   * directly, because the `targets` it flashes come from `parseOperandTargets`
+   * over the row's own operand text — a fixture supplying them by hand would be
+   * asserting against itself.
+   */
+  it("flashes an operand's branch target green on a copy and red on a failed one", async () => {
+    userEvent.setup();
+    const { container } = await mountReady();
+    // The `jne` row, whose operand is its target's address.
+    const target = () =>
+      rowAt(container, A[2]).querySelector<HTMLElement>(
+        ".op-target, .text-green-400, .text-red-400",
+      );
+    const first = target();
+    expect(first).toBeTruthy();
+
+    fireEvent.doubleClick(first as HTMLElement);
+    await waitFor(() => expect(target()?.className).toContain("text-green-400"));
+    expect(target()?.className).not.toContain("text-red-400");
+
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    fireEvent.doubleClick(target() as HTMLElement);
+    await waitFor(() => expect(target()?.className).toContain("text-red-400"));
+    expect(target()?.className).not.toContain("text-green-400");
+    expect(target()?.getAttribute("title")).toBe(COPY_FAILED_TITLE);
   });
 });
 

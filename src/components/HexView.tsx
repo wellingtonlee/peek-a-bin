@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { useEntropyStrip } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { copyText } from "../utils/clipboard";
 import {
   dprMediaQuery,
   ENTROPY_STRIP_HEIGHT_PX,
@@ -498,7 +499,7 @@ export function HexView() {
     for (let i = selectionRange.start; i <= selectionRange.end; i++) {
       bytes.push(`0x${getByteValue(i).toString(16).toUpperCase().padStart(2, "0")}`);
     }
-    navigator.clipboard.writeText(`unsigned char data[] = { ${bytes.join(", ")} };`);
+    void copyText(`unsigned char data[] = { ${bytes.join(", ")} };`);
     setHexCtxMenu(null);
   }, [selectionRange, sectionBytes, getByteValue]);
 
@@ -508,14 +509,14 @@ export function HexView() {
     for (let i = selectionRange.start; i <= selectionRange.end; i++) {
       parts.push(getByteValue(i).toString(16).toLowerCase().padStart(2, "0"));
     }
-    navigator.clipboard.writeText(parts.join(" "));
+    void copyText(parts.join(" "));
     setHexCtxMenu(null);
   }, [selectionRange, sectionBytes, getByteValue]);
 
   const copySelectionAddress = useCallback(() => {
     if (!selectionRange) return;
     const addr = baseAddress + selectionRange.start;
-    navigator.clipboard.writeText(`0x${addr.toString(16).toUpperCase()}`);
+    void copyText(`0x${addr.toString(16).toUpperCase()}`);
     setHexCtxMenu(null);
   }, [selectionRange, baseAddress]);
 
@@ -533,7 +534,7 @@ export function HexView() {
         for (let i = selectionRange.start; i <= selectionRange.end; i++) {
           parts.push(getByteValue(i).toString(16).toUpperCase().padStart(2, "0"));
         }
-        navigator.clipboard.writeText(parts.join(" "));
+        void copyText(parts.join(" "));
       }
     };
     window.addEventListener("keydown", handler);

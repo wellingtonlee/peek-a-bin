@@ -6,6 +6,7 @@ import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { loadFontSize } from "../llm/settings";
 import type { PEFile } from "../pe/types";
+import { COPY_FAILED_TITLE, type CopyFlash } from "../utils/clipboard";
 import { focusOnMount } from "./focusOnMount";
 import { ColoredOperand, mnemonicClass } from "./shared";
 
@@ -39,7 +40,7 @@ export interface CFGViewProps {
   onContextMenu: (e: React.MouseEvent, insn: Instruction) => void;
   onRegClick: (regName: string) => void;
   highlightRegs: Set<string> | null;
-  copiedAddr: number | null;
+  copiedAddr: CopyFlash | null;
   editingComment: { address: number; value: string } | null;
   onEditComment: (state: { address: number; value: string } | null) => void;
   pan: { x: number; y: number };
@@ -676,7 +677,7 @@ function CFGBlock({
   onContextMenu: (e: React.MouseEvent, insn: Instruction) => void;
   onRegClick: (regName: string) => void;
   highlightRegs: Set<string> | null;
-  copiedAddr: number | null;
+  copiedAddr: CopyFlash | null;
   editingComment: { address: number; value: string } | null;
   onEditComment: (state: { address: number; value: string } | null) => void;
   searchMatches?: Set<number>;
@@ -779,8 +780,17 @@ function CFGBlock({
                 type="button"
                 tabIndex={-1}
                 className={`w-[5.5em] shrink-0 text-left text-[0.85em] cursor-pointer hover:text-blue-400 ${
-                  copiedAddr === insn.address ? "text-green-400" : "text-gray-500"
+                  copiedAddr?.address === insn.address
+                    ? copiedAddr.ok
+                      ? "text-green-400"
+                      : "text-red-400"
+                    : "text-gray-500"
                 }`}
+                title={
+                  copiedAddr?.address === insn.address && !copiedAddr.ok
+                    ? COPY_FAILED_TITLE
+                    : undefined
+                }
                 onClick={(e) => {
                   e.stopPropagation();
                   onAddressClick(insn.address);

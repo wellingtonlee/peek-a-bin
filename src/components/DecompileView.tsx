@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import { copyText } from "../utils/clipboard";
 import { focusOnMount } from "./focusOnMount";
 
 // ── Syntax Highlighting ──
@@ -204,7 +205,7 @@ export function DecompileView({
   }, [editingComment, syncDisabled, lineMap]);
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(code);
+    void copyText(code);
   }, [code]);
 
   const handleClick = useCallback(
@@ -560,7 +561,7 @@ export function DecompileView({
             type="button"
             onClick={() => {
               const hex = ctxMenu.address.toString(16).toUpperCase();
-              navigator.clipboard.writeText(hex);
+              void copyText(hex);
               setCtxMenu(null);
             }}
             className="w-full text-left px-3 py-1.5 hover:bg-gray-700/80 text-gray-200"

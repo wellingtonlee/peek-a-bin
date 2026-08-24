@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { classifyArm64Branch, isArm64JumpMnemonic } from "../disasm/arm64Operands";
+import { COPY_FAILED_TITLE, type CopyFlash, copyText } from "../utils/clipboard";
 
 // --- Register names set ---
 export const REG_NAMES = new Set([
@@ -160,7 +161,10 @@ export function ColoredOperand({
   tooltipData?: Map<number, string>;
 }) {
   const tokens = useMemo(() => tokenizeOperand(opStr), [opStr]);
-  const [copiedTarget, setCopiedTarget] = useState<number | null>(null);
+  // A `CopyFlash`, not a bare address: double-clicking an operand target used
+  // to flash green off an unchecked `navigator.clipboard.writeText`, which
+  // throws outright on a non-secure context. See `utils/clipboard.ts`.
+  const [copiedTarget, setCopiedTarget] = useState<CopyFlash | null>(null);
   const [hoveredAddr, setHoveredAddr] = useState<number | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const tooltipRef = useRef<HTMLButtonElement>(null);
@@ -201,25 +205,33 @@ export function ColoredOperand({
                 type="button"
                 tabIndex={-1}
                 key={i}
-                className={`inline ${copiedTarget === target.address ? "text-green-400" : "op-target"} underline cursor-pointer hover:opacity-80 relative`}
+                className={`inline ${
+                  copiedTarget?.address === target.address
+                    ? copiedTarget.ok
+                      ? "text-green-400"
+                      : "text-red-400"
+                    : "op-target"
+                } underline cursor-pointer hover:opacity-80 relative`}
                 ref={hoveredAddr === target.address ? tooltipRef : undefined}
                 onClick={(e) => {
                   e.stopPropagation();
                   onNavigate(target.address);
                 }}
-                onDoubleClick={(e) => {
+                onDoubleClick={async (e) => {
                   e.stopPropagation();
                   const hex = "0x" + target.address.toString(16).toUpperCase();
-                  navigator.clipboard.writeText(hex);
-                  setCopiedTarget(target.address);
+                  const ok = await copyText(hex);
+                  setCopiedTarget({ address: target.address, ok });
                   setTimeout(() => setCopiedTarget(null), 1000);
                 }}
                 onMouseEnter={tooltip ? () => showTooltip(target.address) : undefined}
                 onMouseLeave={tooltip ? hideTooltip : undefined}
                 title={
-                  !tooltip
-                    ? target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`
-                    : undefined
+                  copiedTarget?.address === target.address && !copiedTarget.ok
+                    ? COPY_FAILED_TITLE
+                    : !tooltip
+                      ? target.display || `Go to 0x${target.address.toString(16).toUpperCase()}`
+                      : undefined
                 }
               >
                 {t.text}

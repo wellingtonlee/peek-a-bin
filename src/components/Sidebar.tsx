@@ -10,6 +10,7 @@ import {
   useAppDispatch,
   useAppState,
 } from "../hooks/usePEFile";
+import { copyText } from "../utils/clipboard";
 import { generateMarkdownReport } from "../utils/exportSchema";
 import { focusOnMount } from "./focusOnMount";
 import { SkeletonRows } from "./Skeleton";
@@ -755,7 +756,7 @@ export function Sidebar() {
             type="button"
             className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
             onClick={() => {
-              navigator.clipboard.writeText("0x" + fnCtxMenu.fn.address.toString(16).toUpperCase());
+              void copyText("0x" + fnCtxMenu.fn.address.toString(16).toUpperCase());
               setFnCtxMenu(null);
             }}
           >

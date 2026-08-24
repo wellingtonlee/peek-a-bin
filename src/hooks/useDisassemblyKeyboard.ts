@@ -30,6 +30,7 @@ import type { BasicBlock } from "../disasm/cfg";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
+import { copyText } from "../utils/clipboard";
 import { type DisplayRow, rowAddress, seekAddressableRow } from "./useDisassemblyRows";
 import type { UseDisassemblySearchResult } from "./useDisassemblySearch";
 import type { ContextMenuState } from "./useInsnContextMenu";
@@ -200,9 +201,7 @@ export function useDisassemblyKeyboard({
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         if (selectionRange) {
           e.preventDefault();
-          navigator.clipboard.writeText(
-            formatRangeCopy(selectionRange, rows, pe, renames, comments),
-          );
+          void copyText(formatRangeCopy(selectionRange, rows, pe, renames, comments));
           return;
         }
       }

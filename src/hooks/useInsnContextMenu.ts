@@ -20,6 +20,7 @@ import { parseBranchTarget } from "../components/shared";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { rvaToFileOffset } from "../pe/parser";
 import type { PEFile } from "../pe/types";
+import { copyText } from "../utils/clipboard";
 import { type AppAction, getDisplayName } from "./usePEFile";
 
 export interface ContextMenuState {
@@ -65,13 +66,13 @@ export function useInsnContextMenu({
 }: UseInsnContextMenuArgs) {
   const ctxCopyAddr = useCallback(() => {
     if (!ctxMenu) return;
-    navigator.clipboard.writeText("0x" + ctxMenu.insn.address.toString(16).toUpperCase());
+    void copyText("0x" + ctxMenu.insn.address.toString(16).toUpperCase());
     setCtxMenu(null);
   }, [ctxMenu, setCtxMenu]);
 
   const ctxCopyInsn = useCallback(() => {
     if (!ctxMenu) return;
-    navigator.clipboard.writeText(`${ctxMenu.insn.mnemonic} ${ctxMenu.insn.opStr}`);
+    void copyText(`${ctxMenu.insn.mnemonic} ${ctxMenu.insn.opStr}`);
     setCtxMenu(null);
   }, [ctxMenu, setCtxMenu]);
 
@@ -80,7 +81,7 @@ export function useInsnContextMenu({
     const hex = Array.from(ctxMenu.insn.bytes)
       .map((b) => b.toString(16).padStart(2, "0"))
       .join(" ");
-    navigator.clipboard.writeText(hex);
+    void copyText(hex);
     setCtxMenu(null);
   }, [ctxMenu, setCtxMenu]);
 
@@ -124,7 +125,7 @@ export function useInsnContextMenu({
   const ctxCopyComment = useCallback(() => {
     if (!ctxMenu) return;
     const comment = comments[ctxMenu.insn.address] || ctxMenu.insn.comment;
-    if (comment) navigator.clipboard.writeText(comment);
+    if (comment) void copyText(comment);
     setCtxMenu(null);
   }, [ctxMenu, comments, setCtxMenu]);
 

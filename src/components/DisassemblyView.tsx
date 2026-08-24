@@ -21,6 +21,7 @@ import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile"
 import { useVulnScanner } from "../hooks/useVulnScanner";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
+import { type CopyFlash, copyText } from "../utils/clipboard";
 import { disasmWorker } from "../workers/disasmClient";
 import { AIChatPanel } from "./AIChatPanel";
 import { analysisNotice, VIEW_TAB_LABELS } from "./analysisNotice";
@@ -176,7 +177,7 @@ export function DisassemblyView() {
   const search = useDisassemblySearch(rows, currentIndex);
 
   // Local UI states
-  const [copiedAddr, setCopiedAddr] = useState<number | null>(null);
+  const [copiedAddr, setCopiedAddr] = useState<CopyFlash | null>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
   const [xrefScopeAddress, setXrefScopeAddress] = useState<number | null>(null);
   const [renamingLabel, setRenamingLabel] = useState<{ address: number; value: string } | null>(
@@ -710,17 +711,20 @@ export function DisassemblyView() {
     [dispatch, currentFunc, state.currentAddress, state.renames, viewMode, graphPan, graphZoom, pe],
   );
 
-  const handleDoubleClickAddr = useCallback((address: number) => {
+  // The flash carries the OUTCOME, not just the address: this used to be
+  // `.then(() => setCopiedAddr(address))` off an unchecked
+  // `navigator.clipboard.writeText`, which throws at the property access on a
+  // non-secure context. See `utils/clipboard.ts`.
+  const handleDoubleClickAddr = useCallback(async (address: number) => {
     const hex = "0x" + address.toString(16).toUpperCase();
-    navigator.clipboard.writeText(hex).then(() => {
-      setCopiedAddr(address);
-      setTimeout(() => setCopiedAddr(null), 1000);
-    });
+    const ok = await copyText(hex);
+    setCopiedAddr({ address, ok });
+    setTimeout(() => setCopiedAddr(null), 1000);
   }, []);
 
   const handleDoubleClickInsn = useCallback((insn: Instruction) => {
     const text = `${insn.mnemonic} ${insn.opStr}`;
-    navigator.clipboard.writeText(text);
+    void copyText(text);
   }, []);
 
   // Context menu actions

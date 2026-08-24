@@ -523,6 +523,51 @@ describe("DecompileView toolbar", () => {
     expect(writeText.mock.calls).toEqual([["int64_t f(void) {\n  return 0;\n}"]]);
   });
 
+  /**
+   * THE PLAIN-HTTP DEPLOYMENT (`peek-a-bin-p0tz`) at a site with NO feedback
+   * affordance, which is fourteen of the eighteen.
+   *
+   * `navigator.clipboard` is `[SecureContext]`, so on the nginx HTTP
+   * deployment the object is absent and `navigator.clipboard.writeText(code)`
+   * threw a TypeError on click. All this asserts is that it no longer does —
+   * and that is the whole of the fix at these sites.
+   *
+   * WHAT THE USER GETS TOLD HERE: nothing. Deliberately. The app has no toast
+   * or notification mechanism of any kind (grepped for at `09a160e`), and
+   * building one is a feature rather than this bug fix, so a Copy at a site
+   * with no existing affordance now fails silently instead of throwing. That
+   * is recorded as a known gap, not as a finished job.
+   *
+   * STAND-IN, NOT A BROWSER: the absence is manufactured here.
+   */
+  it("reports no error when there is no clipboard", () => {
+    setup({ code: "int64_t f(void) { return 0; }" });
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+
+    // THE INSTRUMENT, and it had to be this one: an `expect(...).not.toThrow()`
+    // around the click is INERT here — measured, with the unguarded call
+    // restored, 87/87 still green. React does not rethrow out of
+    // `dispatchEvent`; it reports the error, which jsdom surfaces as a window
+    // `error` event. And this handler changes no state afterwards, so a throw
+    // has no DOM consequence to assert on either. The report is the only trace
+    // a TypeError leaves at a site like this — which is fourteen of the
+    // eighteen.
+    const errors: unknown[] = [];
+    const onError = (e: ErrorEvent) => {
+      e.preventDefault();
+      errors.push(e.error ?? e.message);
+    };
+    window.addEventListener("error", onError);
+    try {
+      fireEvent.click(screen.getByTitle("Copy to clipboard"));
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+
+    expect(errors).toEqual([]);
+    expect(screen.getByTitle("Copy to clipboard")).toBeTruthy();
+  });
+
   it("closes on Close", async () => {
     const { user, onClose } = setup();
     await user.click(screen.getByTitle("Close (D)"));

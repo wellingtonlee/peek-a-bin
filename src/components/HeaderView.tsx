@@ -13,6 +13,7 @@ import {
   parseDebugDirectory,
   parseRichHeader,
 } from "../pe/metadata";
+import { COPY_FAILED_TITLE, copyText } from "../utils/clipboard";
 
 const COFF_CHARACTERISTICS: Record<number, string> = {
   0x0001: "RELOCS_STRIPPED",
@@ -64,8 +65,18 @@ function FlagChips({ flags }: { flags: string[] }) {
   );
 }
 
+/**
+ * A hex value that copies itself on click.
+ *
+ * `flash` is three-valued rather than the boolean it was: the copy used to be
+ * `navigator.clipboard.writeText(hex).then(() => setCopied(true))`, which on a
+ * non-secure context (plain `http:` off localhost) threw at the property
+ * access, and on a denied permission would have rejected with nothing catching
+ * it. Either way the tick was a claim about a copy that had not happened. See
+ * `utils/clipboard.ts`.
+ */
 function CopyableHex({ value, width = 8 }: { value: number; width?: number }) {
-  const [copied, setCopied] = useState(false);
+  const [flash, setFlash] = useState<"idle" | "ok" | "failed">("idle");
   // `>>> 0` is how a value read as a signed int32 is respelled unsigned — but it
   // is ToUint32, so it also truncates MODULO 2^32, and this component is handed
   // 64-bit quantities: a PE32+ `ImageBase` is 0x140000000 for an MSVC x64 EXE
@@ -78,11 +89,10 @@ function CopyableHex({ value, width = 8 }: { value: number; width?: number }) {
   const hex =
     "0x" + (value < 0 ? value >>> 0 : value).toString(16).toUpperCase().padStart(width, "0");
 
-  const handleClick = useCallback(() => {
-    navigator.clipboard.writeText(hex).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 800);
-    });
+  const handleClick = useCallback(async () => {
+    const ok = await copyText(hex);
+    setFlash(ok ? "ok" : "failed");
+    setTimeout(() => setFlash("idle"), 800);
   }, [hex]);
 
   return (
@@ -90,9 +100,9 @@ function CopyableHex({ value, width = 8 }: { value: number; width?: number }) {
       type="button"
       onClick={handleClick}
       className={`inline cursor-pointer hover:underline transition-colors ${
-        copied ? "text-green-400" : "text-blue-400"
+        flash === "ok" ? "text-green-400" : flash === "failed" ? "text-red-400" : "text-blue-400"
       }`}
-      title="Click to copy"
+      title={flash === "failed" ? COPY_FAILED_TITLE : "Click to copy"}
     >
       {hex}
     </button>
@@ -362,13 +372,12 @@ export function HeaderView() {
   const imphash = useMemo(() => (pe ? computeImphash(pe.imports) : null), [pe]);
   const overlay = useMemo(() => (pe ? detectOverlay(pe.buffer, pe) : null), [pe]);
 
-  const [copiedImphash, setCopiedImphash] = useState(false);
-  const copyImphash = useCallback(() => {
+  const [imphashFlash, setImphashFlash] = useState<"idle" | "ok" | "failed">("idle");
+  const copyImphash = useCallback(async () => {
     if (!imphash) return;
-    navigator.clipboard.writeText(imphash).then(() => {
-      setCopiedImphash(true);
-      setTimeout(() => setCopiedImphash(false), 800);
-    });
+    const ok = await copyText(imphash);
+    setImphashFlash(ok ? "ok" : "failed");
+    setTimeout(() => setImphashFlash("idle"), 800);
   }, [imphash]);
 
   if (!pe) return null;
@@ -528,8 +537,14 @@ export function HeaderView() {
                 <button
                   type="button"
                   onClick={copyImphash}
-                  className={`inline font-mono cursor-pointer hover:underline transition-colors ${copiedImphash ? "text-green-400" : "text-blue-400"}`}
-                  title="Click to copy"
+                  className={`inline font-mono cursor-pointer hover:underline transition-colors ${
+                    imphashFlash === "ok"
+                      ? "text-green-400"
+                      : imphashFlash === "failed"
+                        ? "text-red-400"
+                        : "text-blue-400"
+                  }`}
+                  title={imphashFlash === "failed" ? COPY_FAILED_TITLE : "Click to copy"}
                 >
                   {imphash}
                 </button>

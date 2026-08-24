@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../../test/domSetup";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Anomaly } from "../../analysis/anomalies";
@@ -10,6 +10,7 @@ import { buildMinimalPE32, buildMinimalPE64 } from "../../pe/__tests__/fixtures"
 import { IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGHLOW } from "../../pe/constants";
 import { parsePE } from "../../pe/parser";
 import type { PEFile } from "../../pe/types";
+import { COPY_FAILED_TITLE } from "../../utils/clipboard";
 import { HeaderView } from "../HeaderView";
 import { AppHarness, stateWithPE } from "./appStateHarness";
 
@@ -365,6 +366,47 @@ describe("HeaderView metadata block", () => {
     // this proves is that the handler runs and writes the SAME text the row
     // shows — not that a browser's clipboard would accept it.
     expect(await navigator.clipboard.readText()).toBe("0x00010000");
+    // ...and that the success flash is the one that appears. The value is
+    // unchanged either way, so the colour is the whole of the feedback.
+    await waitFor(() => expect(button.className).toContain("text-green-400"));
+    expect(button.className).not.toContain("text-red-400");
+    expect(button.getAttribute("title")).toBe("Click to copy");
+  });
+
+  /**
+   * THE PLAIN-HTTP DEPLOYMENT (`peek-a-bin-p0tz`), as far as jsdom can reach it.
+   *
+   * `navigator.clipboard` is a secure-context API, so over plain `http:` off
+   * localhost the whole object is absent — and this handler used to be
+   * `navigator.clipboard.writeText(hex).then(() => setCopied(true))`, which
+   * throws a TypeError at the property access before the `.then` is ever
+   * reached. Two separate claims here, and both are the point:
+   *
+   *  1. the click does not throw, and
+   *  2. it does not flash GREEN, which is what a naive `catch` would have left
+   *     — a tick over a copy that never happened is worse than a throw,
+   *     because the user believes it worked and moves on.
+   *
+   * STAND-IN, NOT A BROWSER: the absence is manufactured by deleting the
+   * property. Nothing here has served this app over http to a browser, so what
+   * is verified is the component's behaviour GIVEN the absence, not that a
+   * browser produces it.
+   */
+  it("flashes a failure, not a tick, when there is no clipboard", async () => {
+    const { user } = renderHeaders(parsePE(buildMinimalPE64()));
+    const button = within(rowValue("Size of Image")).getByRole("button");
+    // AFTER `renderHeaders`, which calls `userEvent.setup()` — that installs a
+    // clipboard stub of its own, so deleting first would simply be undone.
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+
+    await user.click(button);
+
+    await waitFor(() => expect(button.className).toContain("text-red-400"));
+    expect(button.className).not.toContain("text-green-400");
+    // The value the row is for is untouched: this changes what the user is
+    // told, never what the site copies.
+    expect(button.textContent).toBe("0x00010000");
+    expect(button.getAttribute("title")).toBe(COPY_FAILED_TITLE);
   });
 });
 

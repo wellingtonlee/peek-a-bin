@@ -11,6 +11,7 @@ import type { DisplayRow } from "../hooks/useDisassemblyRows";
 import type { AppAction } from "../hooks/usePEFile";
 import { getDisplayName } from "../hooks/usePEFile";
 import type { PEFile } from "../pe/types";
+import { COPY_FAILED_TITLE, type CopyFlash } from "../utils/clipboard";
 import { focusOnMount } from "./focusOnMount";
 import { ColoredOperand, mnemonicClass } from "./shared";
 
@@ -359,7 +360,7 @@ export function InsnRow({
   insnFilter: string;
   matchesFilter: (row: DisplayRow) => boolean;
   showBytes: boolean;
-  copiedAddr: number | null;
+  copiedAddr: CopyFlash | null;
   highlightRegs: Set<string> | null;
   lastClickedRow: number | null;
   editingComment: { address: number; value: string } | null;
@@ -525,8 +526,15 @@ export function InsnRow({
         type="button"
         tabIndex={-1}
         className={`disasm-address cursor-pointer hover:text-blue-400 text-left ${
-          copiedAddr === insn.address ? "text-green-400" : ""
+          copiedAddr?.address === insn.address
+            ? copiedAddr.ok
+              ? "text-green-400"
+              : "text-red-400"
+            : ""
         }`}
+        title={
+          copiedAddr?.address === insn.address && !copiedAddr.ok ? COPY_FAILED_TITLE : undefined
+        }
         onClick={() => onAddressClick(insn.address)}
         onDoubleClick={() => onDoubleClickAddr(insn.address)}
       >
