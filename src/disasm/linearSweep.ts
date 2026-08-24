@@ -297,8 +297,20 @@ function indexOfAddress(grid: SweptInsn[], address: number): number {
  * `RawInsn.bytes` reaches the view as `Instruction.bytes` (the hex column) and
  * therefore crosses `postMessage` in the reply. capstone-wasm builds it with
  * `HEAPU8.slice`, i.e. its own small buffer; a `subarray` of the section here
- * would look identical and would make the reply's structured clone serialise the
- * **whole `.text` once per instruction**. `.slice()`, always — pinned by a test.
+ * would look identical in every field and would make the reply's structured
+ * clone serialise the **whole `.text`**. `.slice()`, always — pinned by a test.
+ *
+ * ONCE PER MESSAGE, not once per instruction, and this sentence used to say the
+ * latter. `StructuredSerializeInternal` carries a memory map, so one
+ * `ArrayBuffer` referenced by N views is serialised once and the deserialised
+ * views share it — measured in `corpus/replyCloneCost.ts`, whose control 4 clones
+ * 500 views of an 8 MiB buffer and gets back exactly one 8 MiB buffer. The rule
+ * is unaffected: a whole-section tax on every reply, and on every
+ * ~100-instruction request back (`peek-a-bin-9gc9`), is a real cost, and that
+ * harness measures it at 112x the private baseline. Only the magnitude was
+ * overstated, by a factor of N. Note the *send* path is untouched by the dedup —
+ * `workers/transfer.ts` is about a single view onto the whole file, and one
+ * 16-byte view onto 8 MiB still drags all 8 MiB.
  */
 export function gridScan(grid: SweptInsn[], real: CapstoneScan): CapstoneScan {
   function serve(

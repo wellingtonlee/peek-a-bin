@@ -1820,6 +1820,137 @@ magnitude; but moving the `sweep`/`sweep-scan` boundary past the scan loop fools
 boundary is missing and `sweep-scan` is 4% of `sweep` against a ~10% run-to-run spread. That one
 boundary rests on reading the code.
 
+## `corpus/replyCloneCost.ts` — separate, takes a path, and re-derives a lost table
+
+`npm run corpus:replycost -- <path-to-pe> [...]` answers what the worker's **reply** costs and
+whether packing the instruction bytes would help. Outside `npm run corpus` for `rpcUploadCost.ts`'
+and `jumpTableReach.ts`' reason, and the image most worth pointing it at is the `go` build below.
+
+It exists because **the instrument that produced `peek-a-bin-rjt`'s four-row table was lost.** That
+bead records a measured decision not to change the reply path and ends "Bench: scratchpad
+bench-reply.mjs, methodology in its header"; two staleness audits then confirmed no such file exists
+anywhere outside `node_modules`, so the table had become a claim nobody could re-take. CLAUDE.md
+records the identical hazard for a different measurement — `peek-a-bin-02fa`, where "the instrument
+that produced 64→90 was lost with a scratch worktree and the claim was unrepeatable" — with the
+standing lesson **"when you build an oracle to verify a change, land the oracle"**. This is that
+oracle, landed. It does not reopen the decision; it gives the decision a base.
+
+The reply to `disassemble` / `hybridDisassemble` is an `Instruction[]`, posted by
+`disasm.worker.ts` as `self.postMessage({ id, result })` with **no transfer list**. Six rows over
+the same objects:
+
+| row | what it is |
+|---|---|
+| **A** | clone as-is — what ships today |
+| **B** | transfer every per-insn buffer |
+| **C** | pack the bytes into one buffer and transfer that |
+| **C+** | …and re-slice on unpack, which the return trip forces |
+| **D** | the same objects with no `bytes` field — the floor |
+| return trip | one function's slice sent back, private buffers against one shared packed buffer |
+
+**A − D is the entire budget any scheme here competes for**, and printing D is what stops row C
+being read as a large saving: most of a reply is object and string overhead, not bytes.
+
+### What it measured, and whether the recorded table survives
+
+**It does.** Measured idle at `488ddde`, synthetically at the bead's own 500k instructions
+(no image on this machine has that many — the largest obtainable is the ~2.4 MiB `go` build at
+155531):
+
+| row | recorded (bead) | re-derived | agreement |
+|---|---|---|---|
+| A clone as-is | 1640 ms | **1794 ms** | +9% |
+| B transfer each | 80568 ms | **80128 ms** | **−0.5%** |
+| C pack + transfer | 1085 ms | **1219 ms** | +12% |
+| D floor | 789 ms | **892 ms** | +13% |
+
+Row B agreeing to within half a percent on a figure of 80 seconds is the strongest evidence
+available that the lost bench measured what this one measures. The ordering A > C > D and B's
+catastrophe both reproduce, and the residual spread is the documented "wall clock on a loaded
+machine moves by tens of percent".
+
+**Row B is strongly superlinear, which the recorded table could not show from one point.** The
+per-buffer cost rises 5.7 → 164 µs over N = 5000 → 500000, i.e. an exponent of about **1.7**. That
+is a stronger statement than the single 80568 ms figure: the harm from a large transfer list *grows
+with the image* rather than being a fixed tax, so `prepareBinaryArgs` being top-level only is the
+difference between a linear reply and a superlinear one. Do not round the exponent to 2 — it is
+measured, and it is between the two.
+
+**Three things the recorded table did not have:**
+
+- **C+, and it is the row to read rather than C.** The bead's reason for refusing C is that an
+  unpacked `bytes` is a view onto one shared buffer, and those instructions go back to the worker a
+  function at a time — so the receiving side has to re-slice, which the bead says "gives back most
+  of the 555 ms". Measured, it gives back most of it: on the `go` image C saves 103.6 ms of a
+  463.5 ms reply and **C+ saves 92.7 ms**, and on the four corpus binaries C+ saves 4.9–8.6 ms of a
+  ~45 ms reply. That is a few percent of one event per load.
+- **The return trip, which `peek-a-bin-9gc9` has since made the shape of every request.** It is
+  reported per image with the packed buffer's size beside it, because **the tax is proportional to
+  `packed KiB` and not to `insns/func`** — see the dedup finding below. On these images the packed
+  buffer is under a megabyte and the tax is at the noise floor (2x on the `go` image, 7 ms per 100
+  opened functions; negative and therefore noise on the four corpus binaries). It is control 3 that
+  shows what it becomes when the packed buffer is tens of MB.
+- **A provenance census, and it has moved since the bead was filed.** The bead's premise is that
+  `bytes` is capstone-wasm's `HEAPU8.slice(ptr, ptr+24).subarray(0, size)`. That is now the
+  *minority* provenance: `peek-a-bin-iqzu`'s `gridScan` serves almost every instruction with an
+  exact-size `.slice()`, so the `go` image is **155531 of 155531 exact-size**, t64 and w64 are
+  entirely exact-size, and only 214 of t32's 18045 and 196 of w32's 16606 still come from Capstone.
+  Control 2 measures that this made **no difference to what the reply costs**.
+
+### The premise it re-derives rather than trusts
+
+`censusBacking` reports whether any two instructions share a backing buffer. Every row is
+meaningless if they do: `StructuredSerialize` of an `ArrayBufferView` serialises the whole
+underlying `ArrayBuffer`, not the view's window, so a `subarray` of the section would look identical
+to a reader and would put the whole `.text` into the message. `src/disasm/linearSweep.ts` forbids
+exactly that in `gridScan` and pins it with a test; `corpus/hybridGridServe.ts` reports it as its
+"own bytes buffers" column. Here it prints **NO view shares a buffer — the premise holds**, and if
+it ever did not, row A would already be catastrophic and packing would be a rescue rather than a
+micro-optimisation.
+
+### Negative controls, including one null result and one that had to be rebuilt twice
+
+`npm run corpus:replycost -- --control`. Four, and **two came back inert on the first attempt**:
+
+1. **Bytes dropped** → A must collapse onto D. **DISCRIMINATES** (the gap is 35–44% of A).
+2. **Backing widened to 24 B**, the difference between the two provenances → **NULL RESULT, reported
+   rather than tuned until it moves.** Its *sign* is not stable between runs (−17%, −10%, −5%, +17%
+   at `488ddde`), which is the tell that it is noise and not a small real effect: the two
+   provenances differ by ~20 B of backing per instruction, which against this reply's per-object
+   cost is below the floor.
+3. **A small payload aliasing a large section**, the defect `gridScan` may not commit →
+   **DISCRIMINATES**, at 112x the private baseline. This one was rebuilt twice. A first version used
+   a 669 KiB section and read *inert*; a second compared against the private clone and called
+   anything under 10x inert, which read 17x idle and **5x while the test suites were running** — a
+   verdict that depended on machine load. It is now judged on the claim actually being controlled —
+   the tax tracks the **section**, not N — by holding N fixed and growing the section (3.6 ms at
+   8 MiB, 25.9 ms at 32 MiB), with the pass condition being that the tax dwarfs the baseline, which
+   is a memcpy of tens of MB against a hundred small objects and is therefore load-proof.
+4. **500 views of one buffer** → checked as a *property* rather than a timing. **DEDUPLICATED.**
+
+### Control 4 qualifies a comment in the tree
+
+`src/disasm/linearSweep.ts` says a subarray of the section there "would make the reply's structured
+clone serialise the **WHOLE `.text` once per instruction**". Measured: **once per message, not once
+per instruction.** `StructuredSerializeInternal` carries a memory map, so an `ArrayBuffer`
+referenced by many views is serialised once and the deserialised views all share one buffer — 500
+views of an 8 MiB buffer clone to exactly 1 buffer of 8 MiB.
+
+**The rule is unaffected and `.slice()` is still right.** A whole-section tax on every reply, and on
+every ~100-instruction request back, is a real cost and control 3 measures it; and the *send* path's
+amplification is untouched by dedup, because there is only one view there anyway — a single 16-byte
+view onto an 8 MiB buffer still drags all 8 MiB. Only the magnitude in that comment overstates, by a
+factor of N.
+
+### Read the order of the rows, never the digits
+
+`structuredClone` is the algorithm `postMessage` runs, but here it serialises **and** deserialises in
+one process where a real worker splits the two across threads — so every figure over-states what the
+main thread blocks for, and a row this reports as negligible is negligible under either reading.
+Nothing here spawns a real `Worker`; that gap is the same one `corpus/decompileRpcCost.ts` records.
+Run it on an idle machine: the 500k row allocates several hundred MB and reads 6.99 µs/insn for A
+beside the test suites against 3.59 idle.
+
 ## `corpus/jumpTableReach.ts` — separate, and it takes a path
 
 `npm run corpus:jumptables -- <path-to-pe>` censuses the indirect dispatches in **any** PE and
@@ -2230,6 +2361,7 @@ remaining gap and is not implemented.
 | `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries — for the whole-section payload and for the per-function one, side by side. Also censuses whether the two emit the same C for every function of the image. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch and a census, never a gate. Writes no artifacts. |
 | `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
 | `detectPhaseCost.ts` | **Separately invoked** (`npm run corpus:detectcost -- <path>`). Where `detectFunctions` spends its time, phase by phase, with the shared linear sweep separated from detection's own work — plus the rates that say whether any phase is superlinear. Drives the real `dispatch` for the premise and the real `detectFunctions` with a phase tap for the split, and checks the two agree. x86 only. A stopwatch, never a gate. Writes no artifacts. |
+| `replyCloneCost.ts` | **Separately invoked** (`npm run corpus:replycost -- <path>`). What the worker's reply costs and whether packing the instruction bytes would help: clone as-is, transfer every buffer, pack and transfer, pack and re-slice, and the no-bytes floor, plus the return trip and a backing-buffer provenance census. Re-derives the four-row table `peek-a-bin-rjt` recorded and whose bench was lost. Drives the real `dispatch`; `structuredClone` stands in for `postMessage`. A stopwatch and a census, never a gate. Writes no artifacts. |
 | `hybridGridServe.ts` | **Separately invoked** (`npm run corpus:gridserve -- <path>`). Whether `hybridDisassemble` decodes at addresses the linear sweep already holds, plus a served-against-decoded differential and the timing. Drives the real `dispatch` with a wrapped Capstone handle. A census and a stopwatch; only the differential could become a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
 | `artifacts/<label>/jumpTables_<key>.json` | The recovered tables, as the cross-substitution input. |
@@ -2314,7 +2446,8 @@ program from the one production emits.
 - **`tsx` works here now, and the note saying it does not is stale.** This bullet used to read
   "`tsx` does not work on this machine (Node 18, `ERR_REQUIRE_ESM`)"; the machine is on Node 22 and
   every separately-invoked harness (`corpus:arm64`, `corpus:comments`, `corpus:jumptables`,
-  `corpus:uploadcost`, `corpus:decompilecost`, `corpus:gridserve`, `corpus:detectcost`) is a plain
+  `corpus:uploadcost`, `corpus:decompilecost`, `corpus:gridserve`, `corpus:detectcost`,
+  `corpus:replycost`) is a plain
   `tsx` script that runs. (This list was duplicated and inconsistent for a while, two sessions each
   appending their own harness to a different copy of it — hence "all four".) The gated audits are vitest files for a different and still-good
   reason — they need the config isolation below — and `compare.mjs` is plain node so it can be run
