@@ -66,7 +66,17 @@ function FlagChips({ flags }: { flags: string[] }) {
 
 function CopyableHex({ value, width = 8 }: { value: number; width?: number }) {
   const [copied, setCopied] = useState(false);
-  const hex = "0x" + (value >>> 0).toString(16).toUpperCase().padStart(width, "0");
+  // `>>> 0` is how a value read as a signed int32 is respelled unsigned — but it
+  // is ToUint32, so it also truncates MODULO 2^32, and this component is handed
+  // 64-bit quantities: a PE32+ `ImageBase` is 0x140000000 for an MSVC x64 EXE
+  // and 0x180000000 for a DLL, and every TLS field below is an image-based VA.
+  // Unconditionally, the panel printed `Image Base 0x0000000140000000` as
+  // `0x0000000040000000`, two rows under an Entry Point of 0x140001000 it had
+  // spelled correctly — self-contradictory on essentially every 64-bit binary.
+  // Reinterpret only what is actually negative, which is the one case `>>> 0`
+  // was there for.
+  const hex =
+    "0x" + (value < 0 ? value >>> 0 : value).toString(16).toUpperCase().padStart(width, "0");
 
   const handleClick = useCallback(() => {
     navigator.clipboard.writeText(hex).then(() => {
