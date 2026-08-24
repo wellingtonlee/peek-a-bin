@@ -370,6 +370,37 @@ outside every boundary, and `main.tsx` puts none above `<App/>` — so a throw i
 blank page. Wrapping each region trades loudness for partial function and is a judgement, not a
 tidy-up (`peek-a-bin-p0qw`).
 
+**The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `AddressBar`
+renders `role="tablist"` around exactly the nine tabs (not the toolbar, which also holds
+Open/Back/Forward/Undo/Redo and the address field), each `role="tab"` with `aria-selected`, `id`,
+`aria-controls` and a **roving tabindex that follows FOCUS, not selection** — cleared when focus
+leaves, so tabbing back in lands on the tab that is showing. **Activation is MANUAL**: arrows move
+focus, Enter/Space selects, and *nothing in the component handles either key*, because a real
+`<button>` already fires `onClick` for both and a second path would dispatch `SET_TAB` twice. That
+is a cost decision, not a style one — `App`'s `tabComponents` marks `DisassemblyView` and `HexView`
+lazy and `mountedTabs` never unmounts, so automatic activation would import *and permanently mount*
+both chunks for one sweep across the bar. `App.renderMainView` renders a **wrapper for every tab**
+and mounts the component inside only once visited, so `aria-controls` can never dangle while
+mounting behaviour is unchanged; omitting the attribute instead would have put App's mounting rule
+in AddressBar as a second declaration. Ids come from `components/tabIds.ts`, on `listboxIds.ts`'s
+model, because both ends of every reference are written in different files. `tabIndex={0}` on the
+**shown** panel only: most panes are static tables with no focusable content, so without a stop a
+keyboard user cannot reach the region they just switched to. The arrows are documented in
+`docs/keyboard.md` and **deliberately absent from the `?` panel** — every other entry there is a
+*global* binding, and bare arrows belong to the disassembly view everywhere outside the bar
+(`peek-a-bin-w50c`).
+
+**A severity's ORDER is declared once, in `components/severity.ts`; the PALETTE is not.**
+`ANOMALY_BADGE` and `FINDING_BADGE` fold two different unions onto one `BadgeLevel`, `BADGE_RANK`
+orders it, and `maxBadgeLevel` reduces both lists at once. `AnomaliesView` and `AddressBar` each
+keep their own `Record<BadgeLevel, …>` of class names, because a table row (`-900/20`, `-300`,
+`-600`) and an 8px dot (`-500`) legitimately differ — sharing the mapping is the point, sharing the
+colours is not. The unknown-value fallbacks stay **at the call sites and are deliberately
+different**: an unknown severity sorts *last* and paints *blue* in `AnomaliesView` but reads as the
+*mildest* in `maxBadgeLevel`, which is why the module exports raw lookups rather than one total
+function — folding them would have quietly changed a sort an existing test pins
+(`peek-a-bin-rl95`).
+
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
 
@@ -459,6 +490,16 @@ TypeScript AST and fails if `useDisassemblySearch` stops returning a `useMemo`, 
 `handleKeyDown` grows a read without a dependency entry or an entry without a read;
 `build/lintConfig.test.ts` parses `biome.json` and fails if it stops being strict JSON or if
 `useExhaustiveDependencies` drops below `error`.
+
+**`DOC_ONLY_KEYS` needs a liveness half, and the hole was found by a control coming back inert.**
+`keyboardShortcuts.test.ts` compares `SHORTCUT_GROUPS` against `docs/keyboard.md` as key-token
+sets, with `DOC_ONLY_KEYS` exempting keys the `?` panel deliberately omits. An exemption only ever
+*skips* a doc→panel check, so **a key could leave the documentation entirely while the entry
+excusing it stayed behind**, reading as if it were still documented — deleting the doc rows and
+keeping the exemptions left the suite green. It now asserts the other direction too: every
+`DOC_ONLY_KEYS` entry must name a key the doc still documents. Same family as
+`build/guardShape.test.ts` — an instrument judging the audit, because a guard whose population has
+emptied passes by no longer looking (`peek-a-bin-w50c`).
 
 **Two AST guards pin the threshold-and-worker pattern and fail in OPPOSITE directions** —
 `analysis/__tests__/anomalyOffThread.test.ts` and `hooks/__tests__/fileMetricsOffThread.test.ts`.
@@ -998,7 +1039,16 @@ read "all of them compile" as "all of them are right".
   unaffordanced sites and `CFGView`'s red/green branch have no test at all: reverting `HexView`'s
   copy to the unguarded call moves no row, which was reported as an inert control rather than
   papered over. Belongs in the `peek-a-bin-v2u` pass, over plain `http:` to a non-localhost host.
-- **The a11y work has never met a screen reader.** `XrefPanel` now carries `aria-label`s separating
+- **The a11y work has never met a screen reader.** The tablist's *mechanics* are checked in jsdom —
+  roles, `aria-selected`, the roving tabindex, arrow/Home/End focus movement, and `aria-controls`
+  resolved against the document in both directions — and `XrefPanel`'s two "To" buttons now carry
+  `aria-label`s that tell them apart, asserted through testing-library's name computation. **None of
+  that is evidence about a screen reader or a browser focus algorithm**, neither of which exists
+  here: nothing says a reader announces "Sections, tab 3 of 9", reads the panel on activation, or
+  honours `aria-labelledby`. Two further reasoned-not-observed points: a hidden panel is out of the
+  a11y tree only because `hidden` carries `display: none` in a browser, which it does not here; and
+  the extra tab stop on panes that *do* contain focusable content costs one Tab, which nobody has
+  judged. `peek-a-bin-v2u` is unchanged. `XrefPanel` now carries `aria-label`s separating
   its direction toggle from its "To" sort header — the two shared one accessible name — and states
   sort direction in words rather than as a bare "▲" glyph, asserted through testing-library's name
   computation, which is jsdom and not an assistive technology.
