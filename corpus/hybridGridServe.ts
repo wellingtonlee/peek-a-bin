@@ -42,8 +42,9 @@
  */
 
 import { readFileSync } from "node:fs";
-import { Capstone, Const, loadCapstone } from "capstone-wasm";
+import { Capstone, Const } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
+import { capstoneHandle, loadCapstoneModule } from "../src/disasm/capstoneReader";
 import { type SweptInsn, sweepX86 } from "../src/disasm/linearSweep";
 import type { Instruction } from "../src/disasm/types";
 import { parsePE } from "../src/pe/parser";
@@ -156,8 +157,8 @@ async function measure(path: string, reps: number): Promise<Row | null> {
 
   function fresh(sink?: { calls: Call[]; on: boolean }): WorkerState {
     const st = createWorkerState(Promise.resolve());
-    const cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
-    const cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
+    const cs32 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32));
+    const cs64 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64));
     st.cs32 = (sink ? recording(cs32, sink) : cs32) as never;
     st.cs64 = (sink ? recording(cs64, sink) : cs64) as never;
     st.arch = arch;
@@ -351,7 +352,7 @@ async function main(): Promise<void> {
     console.log("NOT be put in the corpus directory.");
     return;
   }
-  await loadCapstone();
+  await loadCapstoneModule();
   const rows: Row[] = [];
   for (const p of paths) {
     const row = await measure(p, 5);

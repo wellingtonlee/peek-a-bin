@@ -43,8 +43,9 @@
  */
 
 import { readFileSync } from "node:fs";
-import { Capstone, Const, loadCapstone } from "capstone-wasm";
+import { Capstone, Const } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
+import { capstoneHandle, loadCapstoneModule } from "../src/disasm/capstoneReader";
 import { parsePE } from "../src/pe/parser";
 import { dataSectionRanges, findCodeSection } from "../src/pe/sections";
 import { createWorkerState, dispatch } from "../src/workers/dispatch";
@@ -151,9 +152,9 @@ async function measure(path: string): Promise<Row | null> {
   }
 
   const state = createWorkerState(Promise.resolve());
-  state.cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
-  state.cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
-  state.csArm64 = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM);
+  state.cs32 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32));
+  state.cs64 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64));
+  state.csArm64 = capstoneHandle(new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM));
   state.arch = arch;
 
   const pdataRanges = pe.runtimeFunctions?.map((rf) => ({
@@ -411,7 +412,7 @@ async function main(): Promise<void> {
     scaleSweep();
     return;
   }
-  await loadCapstone();
+  await loadCapstoneModule();
   const rows: Row[] = [];
   for (const p of paths) {
     const row = await measure(p);

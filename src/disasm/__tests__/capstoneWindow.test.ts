@@ -281,17 +281,40 @@ describe("a decoder with the real engine's limits decodes the whole section", ()
 });
 
 describe("no unwindowed decode survives anywhere in src/", () => {
-  /** Every `.ts`/`.tsx` under `src/`, except this module and the tests. */
+  /**
+   * Every non-test `.ts`/`.tsx` under `src/`, excluding `.d.ts` — a declaration
+   * file emits no code, so it can neither decode nor bootstrap, and including
+   * one makes a call-shaped pattern match its declaration instead.
+   */
   function sources(dir: string, out: string[] = []): string[] {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, e.name);
       if (e.isDirectory()) {
         if (e.name !== "__tests__") sources(p, out);
-      } else if (/\.tsx?$/.test(e.name) && e.name !== "capstoneWindow.ts") {
+      } else if (/\.tsx?$/.test(e.name) && !e.name.endsWith(".d.ts")) {
         out.push(p);
       }
     }
     return out;
+  }
+
+  /**
+   * Files under `src/` other than `exempt` whose text matches `pattern`.
+   *
+   * The exemption is checked in **both** directions: the exempt file must
+   * itself match, or the guard has stopped describing anything — a renamed
+   * module, or a spelling the scan no longer recognises, would otherwise make
+   * every one of these read clean by matching nothing at all.
+   */
+  function offendersOf(pattern: RegExp, exempt: string): string[] {
+    const files = sources(path.join(process.cwd(), "src"));
+    expect(files.length).toBeGreaterThan(50);
+    const hits = files.filter((f) => pattern.test(fs.readFileSync(f, "utf8")));
+    const exemptPath = hits.find((f) => path.basename(f) === exempt);
+    expect(exemptPath, `${exempt} no longer matches ${pattern} — guard is vacuous`).toBeDefined();
+    return hits
+      .filter((f) => path.basename(f) !== exempt)
+      .map((f) => path.relative(process.cwd(), f));
   }
 
   it("routes every cs.disasm through createScan", () => {
@@ -299,11 +322,30 @@ describe("no unwindowed decode survives anywhere in src/", () => {
     // written the old way — `cs.disasm(chunk)` inside `try { } catch { offset++ }`
     // — reintroduces the whole defect, decodes correctly on every binary small
     // enough to test with, and fails silently on the first large one.
-    const offenders = sources(path.join(process.cwd(), "src"))
-      .filter((f) => /\.disasm\s*\(/.test(fs.readFileSync(f, "utf8")))
-      .map((f) => path.relative(process.cwd(), f));
+    expect(offendersOf(/\.disasm\s*\(/, "capstoneWindow.ts")).toEqual([]);
+  });
 
-    expect(offenders).toEqual([]);
+  it("routes every cs_disasm through capstoneReader", () => {
+    // The guard above is textual, and `src/disasm/capstoneReader.ts` decodes
+    // without ever writing `.disasm(` — it reaches the WASM export by name,
+    // `ccall("cs_disasm", …)`. So a second hand-written reader could appear
+    // anywhere in `src/` and trip nothing. It must not: the `cs_insn` ABI is
+    // hard-coded, a version bump changes it silently, and one copy of it is all
+    // the differential test in `capstoneReader.test.ts` can vouch for.
+    // Matched as a CALL, not as a word: the export is reachable only by naming
+    // it in a string for `ccall`/`cwrap`, or through emscripten's `_cs_disasm`
+    // alias. Three modules discuss `cs_disasm` in prose and must stay legal.
+    expect(offendersOf(/["']cs_disasm["']|\b_cs_disasm\b/, "capstoneReader.ts")).toEqual([]);
+  });
+
+  it("bootstraps capstone-wasm from exactly one place", () => {
+    // `loadCapstone` is a singleton: the second call returns immediately and
+    // populates nothing. So a bootstrap site calling it directly does not fail
+    // — it wins the race, leaves `capstoneReader`'s Module unpopulated, and
+    // silently drops the whole tool back onto the dependency's reader at ~3x
+    // the cost per instruction. Nothing else here could see that.
+    // `loadCapstoneModule(` does not match: `\s*\(` cannot follow the `M`.
+    expect(offendersOf(/\bloadCapstone\s*\(/, "capstoneReader.ts")).toEqual([]);
   });
 
   it("keeps the window under both of the decoder's measured ceilings", () => {

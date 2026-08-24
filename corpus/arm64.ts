@@ -105,7 +105,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { Capstone, Const, loadCapstone } from "capstone-wasm";
+import { Capstone, Const } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
 import {
   ARM64_INSN_SIZE,
@@ -120,6 +120,7 @@ import {
   findArm64AddressRefs,
   findArm64LiteralPools,
 } from "../src/disasm/arm64Operands";
+import { capstoneHandle, loadCapstoneModule } from "../src/disasm/capstoneReader";
 import type { CapstoneHandle } from "../src/disasm/capstoneWindow";
 import { arm64UnwindContext, stackFrameFor } from "../src/disasm/stackFrame";
 import type { DisasmFunction, Instruction } from "../src/disasm/types";
@@ -717,11 +718,12 @@ export function auditJumpTables(
  * evidence about anything, and every section here is far above it.
  */
 async function auditDecodeFloor(files: [string, string][]): Promise<Row[]> {
-  // `capstone-wasm`'s own `RawInsn.bytes` is a `number[]` where
-  // `CapstoneHandle` says `Uint8Array`; production reaches the same decoder
-  // through `Arm64Context.cs`, which is `any`. Casting here rather than
-  // widening the interface keeps that discrepancy where it already is.
-  const cs = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM) as unknown as CapstoneHandle;
+  // `capstoneHandle` is what production opens with too, so this audits the
+  // reader the app actually runs (`src/disasm/capstoneReader.ts`) and not
+  // capstone-wasm's own. It returns a `CapstoneHandle`, so the cast this line
+  // used to carry — for a `bytes: number[]` the package's declaration claimed
+  // and its runtime never produced — is gone.
+  const cs: CapstoneHandle = capstoneHandle(new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM));
   const armBelow: string[] = [];
   const x86Above: string[] = [];
   const tooSmall: string[] = [];
@@ -797,15 +799,15 @@ async function auditSweepCache(file: string): Promise<Row[]> {
 
   const run = async (share: boolean): Promise<{ answers: string; calls: number }> => {
     let calls = 0;
-    const real = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM);
+    const real = capstoneHandle(new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM));
     // Only `arch` and `disasm` are read by anything the sweep touches; wrapping
     // rather than subclassing keeps the count honest about what was asked of
     // Capstone rather than about how many times a wrapper was constructed.
     const counting = {
-      arch: (real as unknown as { arch: number }).arch,
-      disasm(...args: unknown[]): unknown {
+      arch: real.arch,
+      disasm(...args: Parameters<CapstoneHandle["disasm"]>): ReturnType<CapstoneHandle["disasm"]> {
         calls++;
-        return (real as unknown as { disasm: (...a: unknown[]) => unknown }).disasm(...args);
+        return real.disasm(...args);
       },
     };
     const state = createWorkerState(Promise.resolve());
@@ -1149,7 +1151,7 @@ async function auditImage(key: ArmBinKey, file: string): Promise<Row[]> {
 }
 
 async function main(): Promise<void> {
-  await loadCapstone();
+  await loadCapstoneModule();
   const arm = resolveArmCorpus();
   console.log(`corpus: ${arm.dir}  [${arm.source}]`);
   console.log(`ARM64 binaries: ${arm.present.map(([k]) => k).join(", ") || "none"}`);

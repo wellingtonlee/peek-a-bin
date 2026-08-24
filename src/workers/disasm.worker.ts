@@ -1,9 +1,6 @@
-import { loadCapstone as _loadCapstone, Capstone, Const } from "capstone-wasm";
+import { Capstone, Const } from "capstone-wasm";
 
-// Runtime accepts an options object with instantiateWasm hook, but the
-// published types omit the parameter under bundler module resolution.
-const loadCapstone = _loadCapstone as (args?: Record<string, any>) => Promise<void>;
-
+import { capstoneHandle, loadCapstoneModule } from "../disasm/capstoneReader";
 import { createWorkerState, dispatch, type WorkerRequest } from "./dispatch";
 
 // --- IndexedDB WASM module cache ---
@@ -74,7 +71,7 @@ async function loadCapstoneWithCache(): Promise<void> {
     });
     try {
       await Promise.race([
-        loadCapstone({
+        loadCapstoneModule({
           instantiateWasm(
             imports: WebAssembly.Imports,
             receiveInstance: (instance: WebAssembly.Instance) => void,
@@ -101,7 +98,7 @@ async function loadCapstoneWithCache(): Promise<void> {
   // so our locateFile callback would receive an empty scriptDir and produce a
   // wrong relative URL. Without hooks, Emscripten resolves the WASM URL
   // correctly via new URL("capstone.wasm", import.meta.url).
-  await loadCapstone();
+  await loadCapstoneModule();
 
   // Background: fetch + compile the WASM and cache for next visit.
   // Retrieve the URL Emscripten already fetched from the Performance API.
@@ -128,15 +125,20 @@ const initPromise = (async () => {
     await loadCapstoneWithCache();
   } catch {
     // IDB or instantiateWasm hook failed — fall back to default loading
-    await loadCapstone();
+    await loadCapstoneModule();
   }
-  state.cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
-  state.cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
+  // `capstoneHandle` picks the hand-marshalling reader in
+  // `../disasm/capstoneReader` when the bootstrap above retained the emscripten
+  // Module, and capstone-wasm's own otherwise. All three `loadCapstoneModule`
+  // paths feed the same singleton, so whichever one wins is the one that is
+  // retained; a path that loses simply leaves the dependency's reader in place.
+  state.cs32 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32));
+  state.cs64 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64));
   // ARM64 comes out of the same WASM module that is already loaded — a
   // `Capstone` is a `cs_open` handle, not an engine — so this adds no download,
   // no second `.wasm` asset to precache, and no measurable startup time. Opened
   // eagerly alongside the others so `configure` has nothing to wait for.
-  state.csArm64 = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM);
+  state.csArm64 = capstoneHandle(new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM));
 })();
 
 // `init` waits on this rather than on a placeholder.

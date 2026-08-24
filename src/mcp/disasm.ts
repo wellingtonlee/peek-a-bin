@@ -3,10 +3,11 @@
  * Used by the MCP server for direct disassembly.
  */
 
-import { Capstone, Const, loadCapstone } from "capstone-wasm";
+import { Capstone, Const } from "capstone-wasm";
 import { type ImageArch, unsupportedArchMessage } from "../disasm/arch";
 import { type Arm64Context, detectArm64Functions, disassembleArm64 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
+import { capstoneHandle, loadCapstoneModule } from "../disasm/capstoneReader";
 import type { DataWindow } from "../disasm/dataWindows";
 import {
   buildAllXrefs,
@@ -27,12 +28,18 @@ let initialized = false;
 
 export async function initCapstone(): Promise<void> {
   if (initialized) return;
-  await loadCapstone();
-  cs32 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32);
-  cs64 = new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64);
+  // `loadCapstoneModule` rather than `loadCapstone`: it retains the emscripten
+  // Module so `capstoneHandle` can hand out the hand-marshalling reader
+  // (`../disasm/capstoneReader`), which is ~3x cheaper per instruction. This
+  // path is what `npm run corpus` drives — `FileSession`, not the worker — so
+  // leaving it on the dependency's reader would mean the repo's main
+  // correctness harness verified a decoder the app does not use.
+  await loadCapstoneModule();
+  cs32 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_32));
+  cs64 = capstoneHandle(new Capstone(Const.CS_ARCH_X86, Const.CS_MODE_64));
   // One more handle on the same WASM module — `Capstone` is a `cs_open`, not a
   // second engine, so this costs no extra download and no measurable time.
-  csArm64 = new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM);
+  csArm64 = capstoneHandle(new Capstone(Const.CS_ARCH_ARM64, Const.CS_MODE_ARM));
   initialized = true;
 }
 
