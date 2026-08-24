@@ -220,7 +220,8 @@ phase must fail the build here instead (`peek-a-bin-bo3b`).
 **`analysisNotice()` (`components/analysisNotice.ts`) has six kinds, and they are RANKED**:
 `"unsupported-arch"` → `"no-code-section"` → `"engine-unavailable"` → `"analysis-timed-out"` →
 `"analysis-failed"` → `"partial-detection"`. Each carries **`isFault`**, and **all five render
-sites — four in `App.tsx` and one in `StatusBar.tsx` — read that** rather than testing the kind;
+sites — three in `App.tsx`, one in `DisassemblyView.tsx` and one in `StatusBar.tsx` — read
+that** rather than testing the kind;
 each had spelled `kind === "analysis-failed"` by hand to pick red over amber, which is a predicate
 a new kind joins on the wrong side of silently. That is not hypothetical: the fifth site was
 missed, and two `isFault: true` kinds rendered amber in the status bar while the same notice
@@ -767,15 +768,25 @@ read "all of them compile" as "all of them are right".
 
 ### Not verified. Say so rather than implying otherwise:
 
-- **There IS a renderer, and it reaches sixteen components.** jsdom + `@testing-library/react`;
+- **There IS a renderer, and it reaches seventeen components.** jsdom + `@testing-library/react`;
   the `*.dom.test.tsx` suites cover `Modal`/`ModalBackdrop`/`useDismissOnOutsideClick`,
   `StatusBar`, `DisassemblyView` (early-return branches *and* the populated panel, reaching
   `DisassemblyRows`, `DisassemblyToolbar`, `InsnContextMenu`, `JumpArrows`, `InstructionDetail`),
   `AddressBar`, `FileLoader`, `Sidebar`, `CFGView`, `HexView`'s toolbar and byte search, and all
   six dialogs (`CommandPalette`, `GoToAddressModal`, `SettingsModal`, `BatchRenameModal`,
-  `AIReportPanel`, `KeyboardShortcuts`). **Still NOT rendered**: the decompile panel, the AI chat
-  panel, `App` itself, and the whole a11y pass beyond `Modal`'s, the dialogs' attributes and the
-  palette's listbox. `DisassemblyMinimap` mounts and never paints (jsdom has no 2D context).
+  `AIReportPanel`, `KeyboardShortcuts`), plus **`App` itself** — mounted through the real browse
+  input, which is where the notice banner's three `isFault` reads and its "Still available:" prose
+  are checked against the tab bar they claim to agree with (`src/__tests__/App.dom.test.tsx`).
+  **Still NOT rendered, and this list was MEASURED rather than recalled** — the previous one named
+  three surfaces where a grep of every `*.dom.test.tsx` finds sixteen: the decompile panel
+  (`DecompileView`), the AI chat panel (`AIChatPanel`) and `MarkdownRenderer`; the seven
+  parser-derived tab views `HeaderView` / `SectionTable` / `ImportsView` / `ExportsView` /
+  `StringsView` / `ResourcesView` / `AnomaliesView`, which is the surface
+  `analysisNotice`'s `"no-code-section"` kind exists to send a user to; `XrefPanel`,
+  `BottomPanelContainer`, `CallPanel`, `DataInspector`, `ResizeHandle`, `ErrorBoundary` and
+  `Skeleton`; and the whole a11y pass beyond `Modal`'s, the dialogs' attributes and the palette's
+  listbox (`peek-a-bin-p0qw`). `DisassemblyMinimap` mounts and never paints (jsdom has no 2D
+  context).
 - **Virtualization is a STAND-IN and a green suite must not be read as covering it.** `virtual-core`
   reads the scroll element's `offsetHeight` (not `getBoundingClientRect`), so in jsdom a
   virtualized list renders **zero** rows, not a short list. `domSetup.ts`'s `stubLayoutRect()` is

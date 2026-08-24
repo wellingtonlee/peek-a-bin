@@ -100,26 +100,29 @@ describe("StatusBar renders the analysis notice", () => {
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
- * A DEFECT, FOUND BY RENDERING AND DELIBERATELY NOT FIXED HERE.
+ * A DEFECT FOUND BY RENDERING. FIXED IN 3fbfd64; THESE ARE ITS REGRESSION PINS.
  *
  * `AnalysisNotice.isFault` exists so that "is this red or amber" is decided in
  * one place. CLAUDE.md records why: the render sites "each spelled
  * `kind === "analysis-failed"` to pick red over amber, which is a hand-written
- * predicate a new kind joins on the wrong side of silently", and says the *four*
- * sites in `App.tsx` were converted to read `isFault`.
+ * predicate a new kind joins on the wrong side of silently", and four sites had
+ * been converted to read `isFault` — three in `App.tsx` and one in
+ * `DisassemblyView.tsx`, which CLAUDE.md attributed wholly to `App.tsx` until
+ * session 24 re-counted them.
  *
- * THERE IS A FIFTH SITE. `StatusBar.tsx` still spells the predicate by hand, and
- * two kinds have since joined on the wrong side of it: `"engine-unavailable"`
+ * THERE WAS A FIFTH SITE. `StatusBar.tsx` still spelled the predicate by hand,
+ * and two kinds had since joined on the wrong side of it: `"engine-unavailable"`
  * and `"analysis-timed-out"` are both `isFault: true` — the file argues at
  * length that the timeout's `isFault` being true is the point, and that reading
- * it as false is "the trap" — and both render AMBER in the status bar while the
- * same notice renders RED in App's banner. One notice, two colours, on screen
+ * it as false is "the trap" — so both rendered AMBER in the status bar while the
+ * same notice rendered RED in App's banner. One notice, two colours, on screen
  * at the same time.
  *
- * Filed as `peek-a-bin-n7q1`, and left alone on purpose: this task added a
- * renderer, it did not change behaviour. The three tests below assert the CORRECT colour and are marked
- * `.fails`, so they document the defect, and the day someone fixes StatusBar
- * they turn red and want flipping to `it`.
+ * Filed as `peek-a-bin-n7q1` and fixed one line later in 3fbfd64, so the cases
+ * below are plain `it`s asserting the CORRECT colour and they pass. They are
+ * kept because the predicate they pin is one a future kind can rejoin on the
+ * wrong side of; the last of them is stated as the INVARIANT over every kind
+ * rather than as three cases, so a seventh kind is covered the day it is added.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 describe("StatusBar notice colour follows isFault", () => {

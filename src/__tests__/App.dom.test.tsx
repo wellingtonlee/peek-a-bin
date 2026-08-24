@@ -1,0 +1,370 @@
+// @vitest-environment jsdom
+
+import "../test/domSetup";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../App";
+import { PARSER_DERIVED_TABS, VIEW_TAB_LABELS } from "../components/analysisNotice";
+import { VIEW_TABS } from "../hooks/usePEFile";
+import { buildMinimalPE64 } from "../pe/__tests__/fixtures";
+import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../pe/constants";
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE FIRST RENDER OF `App` ITSELF.
+ *
+ * CLAUDE.md's "Not verified" list has named `App` since the renderer landed.
+ * That matters for one specific reason rather than for completeness: **three of
+ * the five `AnalysisNotice.isFault` render sites are in `App.tsx`**, and the
+ * notice banner is the surface every one of `analysisNotice`'s six kinds is
+ * *for*. `StatusBar.dom.test.tsx` asserts the status bar "agrees with App.tsx,
+ * which reads isFault" — but until this file, that agreement was asserted
+ * against a reading of the source, not against a render. `peek-a-bin-n7q1` is
+ * exactly what a source-reading agreement is worth.
+ *
+ * WHAT THIS FILE IS ABOUT, then, is the notice's own promise: that a file the
+ * disassembler cannot touch still reaches the user with every parser-derived
+ * tab populated, and that the prose saying so cannot disagree with the buttons.
+ * CLAUDE.md states that invariant ("lists the populated tabs from
+ * `PARSER_DERIVED_TABS` rather than spelling them, so the prose cannot disagree
+ * with the buttons") and nothing had ever checked the two against each other on
+ * a screen.
+ *
+ * WHAT IT IS NOT. It does not drive a full analysis to `"ready"` — that wants
+ * every RPC in the pipeline answered and a real decoder, and the panel it would
+ * populate is already covered by `components/__tests__/DisassemblyPanel.dom.test.tsx`.
+ * It does not touch the AI features, the modals, or the recent-files list.
+ * jsdom is not a browser: no layout, no service worker, and — the trap that
+ * bites hardest here — **Tailwind is not in the test config, so the `hidden`
+ * class App puts on an inactive tab pane carries no `display: none`.** Every
+ * mounted pane is therefore queryable, so a query for text that a *different*
+ * tab renders will succeed. Tab assertions below go through the pane's own
+ * class, never through "can I find this text".
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/** What the client posted, in order, so a test can assert on the traffic. */
+interface PostedRequest {
+  id: number;
+  method: string;
+  args: unknown[];
+}
+const posted: PostedRequest[] = [];
+
+/**
+ * Whether `init` is answered with an error.
+ *
+ * A flag rather than two `Worker` stubs because the client's `Worker` is a
+ * module-level singleton built on first use: it survives between tests in this
+ * file, and swapping the constructor would not swap an already-built instance.
+ * `init()` is called from an effect on every mount, so the flag is read afresh
+ * each time and the singleton costs nothing.
+ */
+let initFails = false;
+
+/**
+ * Stands in for `disasm.worker.ts`.
+ *
+ * Replies on a microtask, not synchronously: a real reply arrives in a later
+ * task, and answering inside `postMessage` would let a state update land during
+ * the dispatch that caused it and hide an ordering defect.
+ *
+ * The error shape is the one the real worker posts — a plain string, because
+ * `disasm.worker.ts` flattens to `err?.message ?? String(err)` before it crosses
+ * `postMessage`. That is what makes the client-side `WorkerTimeoutError` check
+ * asymmetric, and a fake that posted an `Error` would be testing a shape the
+ * app never sees.
+ */
+class FakeDisasmWorker {
+  onmessage: ((e: { data: unknown }) => void) | null = null;
+  onerror: ((e: { message?: string }) => void) | null = null;
+  onmessageerror: ((e: unknown) => void) | null = null;
+
+  postMessage(msg: PostedRequest) {
+    posted.push(msg);
+    queueMicrotask(() => {
+      const reply = (data: Record<string, unknown>) => this.onmessage?.({ data });
+      if (msg.method === "init") {
+        if (initFails) reply({ id: msg.id, error: "capstone.wasm failed to load" });
+        else reply({ id: msg.id, result: undefined });
+        return;
+      }
+      if (msg.method === "extractStrings") {
+        reply({ id: msg.id, result: { strings: [], stringTypes: [] } });
+        return;
+      }
+      // Anything else is a request this file did not intend to provoke. It is
+      // answered with an error rather than a plausible empty result, so a
+      // pipeline stage reaching the worker unexpectedly shows up as a rejected
+      // request instead of passing quietly.
+      reply({ id: msg.id, error: `unstubbed RPC: ${msg.method}` });
+    });
+  }
+
+  terminate() {}
+}
+
+/**
+ * A PE with no executable section — an ordinary resource-only satellite DLL,
+ * which is the file `analysisNotice`'s `"no-code-section"` kind exists for.
+ * `findCodeSection` returns undefined for it, so App's detection effect takes
+ * its `"no-code"` early return.
+ */
+function resourceOnlyPE(): ArrayBuffer {
+  return buildMinimalPE64({
+    sections: [
+      {
+        name: ".rsrc",
+        virtualAddress: 0x1000,
+        virtualSize: 16,
+        data: new Uint8Array(16),
+        characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+      },
+    ],
+  });
+}
+
+/** Hand a buffer to App through the real browse input, as a user would. */
+async function openFile(buffer: ArrayBuffer, name = "sample.dll") {
+  const user = userEvent.setup();
+  const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+  if (!input) throw new Error("FileLoader rendered no file input");
+  await user.upload(input, new File([buffer], name, { type: "application/octet-stream" }));
+  return user;
+}
+
+/** The notice banner. It is the one `role="status"` App renders. */
+function notice(): HTMLElement | null {
+  return screen.queryByRole("status");
+}
+
+beforeEach(() => {
+  posted.length = 0;
+  initFails = false;
+  vi.stubGlobal("Worker", FakeDisasmWorker);
+  // `handleFile` calls `saveRecentFile`, which opens IndexedDB. jsdom 28 does
+  // not implement it and `fake-indexeddb` is not a dependency here, so the
+  // promise rejects and App's own `.catch` logs it. Silenced rather than
+  // stubbed: that a browser with no usable IndexedDB (a private window, site
+  // data blocked) still opens a file is a real property, and stubbing the
+  // store would stop this file from exercising it.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("App mounts", () => {
+  it("renders the file loader when nothing is open", () => {
+    render(<App />);
+    expect(screen.getByLabelText(/drop a pe file here/i)).toBeTruthy();
+    expect(notice()).toBeNull();
+  });
+
+  it("opens a parsed PE and shows the tab bar", async () => {
+    render(<App />);
+    await openFile(resourceOnlyPE());
+    // The tab bar is AddressBar's, derived from VIEW_TABS; its presence is how
+    // we know the loader unmounted and the main view took over.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Headers/ })).toBeTruthy();
+    });
+    expect(screen.queryByLabelText(/drop a pe file here/i)).toBeNull();
+  });
+});
+
+describe("the notice banner, rendered for the first time", () => {
+  it("is amber for a resource-only DLL, because nothing went wrong", async () => {
+    render(<App />);
+    await openFile(resourceOnlyPE());
+
+    const banner = await waitFor(() => {
+      const n = notice();
+      if (!n) throw new Error("no notice yet");
+      return n;
+    });
+
+    // `"no-code-section"` is `isFault: false`. The banner's own background and
+    // its label colour are two of App's three `isFault` reads; both must be
+    // amber, and neither may be red.
+    expect(banner.className).toContain("amber");
+    expect(banner.className).not.toContain("red");
+    expect(banner.textContent).toMatch(/no executable section/i);
+  });
+
+  it("is red for an engine that never loaded, which IS a fault", async () => {
+    initFails = true;
+    render(<App />);
+    await openFile(resourceOnlyPE());
+
+    // BOTH CONDITIONS IN ONE `waitFor`, and that is a fix rather than a style:
+    // asserted separately this test was FLAKY, failing about one run in three.
+    // `SET_DISASM_FAILED` feeds the notice straight from the reducer, while the
+    // phase that stops the placeholders is dispatched by the detection effect
+    // re-running on `state.disasmFailed` — so the banner can be on screen a
+    // render before the shimmer stops, and a `waitFor` that returns on the
+    // banner alone samples the intermediate state.
+    const banner = await waitFor(() => {
+      const n = notice();
+      if (!n) throw new Error("no notice yet");
+      if (document.querySelectorAll(".skeleton-shimmer").length > 0) {
+        throw new Error("still showing loading placeholders");
+      }
+      return n;
+    });
+
+    // `"engine-unavailable"` is `isFault: true`, and it OUTRANKS nothing here:
+    // the detection effect never reaches `findCodeSection` when the engine is
+    // dead, so this is the kind even for a file that also has no code section.
+    // That is the pairing peek-a-bin-b3jn is about — a dead engine used to say
+    // nothing at all while three surfaces spun "Loading engine...".
+    expect(banner.className).toContain("red");
+    expect(banner.className).not.toContain("amber");
+    expect(banner.textContent).toMatch(/capstone\.wasm failed to load/);
+
+    // AND THE LOADING PLACEHOLDERS MUST HAVE STOPPED. This is the other half of
+    // peek-a-bin-b3jn, and the half a notice test would miss: the notice is fed
+    // by `state.disasmFailed`, which the reducer sets on its own, so the banner
+    // renders whether or not the detection effect reaches a TERMINAL PHASE. What
+    // needs the phase is `ANALYSIS_IN_PROGRESS` — with the phase left where
+    // `handleFile` put it, the status bar's two slots and the sidebar's function
+    // list shimmer for the rest of the session under a banner that says the
+    // engine is dead.
+    //
+    // `.skeleton-shimmer` rather than StatusBar's `.animate-spin`, and the
+    // difference was MEASURED, not chosen: a spinner assertion here is VACUOUS.
+    // StatusBar renders `<Spinner/>` only in the `else` of `notice ? … :
+    // isAnalyzing ? …`, so whenever there is a notice to report — which is
+    // always, in this test — the spinner branch is unreachable and the
+    // assertion holds however broken the phase is. The negative control (drop
+    // the terminal-phase dispatch) came back INERT against `.animate-spin` and
+    // red against the shimmer, which is the whole reason the wait above is
+    // written the way it is.
+    expect(document.querySelectorAll(".skeleton-shimmer").length).toBe(0);
+  });
+
+  it("can be dismissed", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      if (!notice()) throw new Error("no notice yet");
+    });
+    await user.click(screen.getByRole("button", { name: /dismiss this notice/i }));
+    expect(notice()).toBeNull();
+  });
+});
+
+describe("the notice's prose cannot disagree with the buttons", () => {
+  /**
+   * THE INVARIANT, stated once rather than as eight cases.
+   *
+   * CLAUDE.md: `"no-code-section"` "lists the populated tabs from
+   * `PARSER_DERIVED_TABS` rather than spelling them, so the prose cannot
+   * disagree with the buttons". Both halves of that are on screen together for
+   * the first time here — the banner's "Still available:" sentence, and
+   * AddressBar's tab bar, which derives its labels from the same
+   * `VIEW_TAB_LABELS` record.
+   *
+   * Asserted as "every tab the prose names has a button" rather than by
+   * comparing two lists verbatim, because the prose is joined with commas and
+   * an "and" and a verbatim comparison would be a test of `joinProse`, which
+   * `analysisNotice.test.ts` already owns.
+   */
+  it("names only tabs that have a button", async () => {
+    render(<App />);
+    await openFile(resourceOnlyPE());
+
+    const banner = await waitFor(() => {
+      const n = notice();
+      if (!n) throw new Error("no notice yet");
+      return n;
+    });
+    const prose = banner.textContent ?? "";
+    expect(prose).toContain("Still available:");
+
+    for (const tab of PARSER_DERIVED_TABS) {
+      const label = VIEW_TAB_LABELS[tab];
+      expect(prose).toContain(label);
+      // Identified by TITLE, not by accessible name, and both reasons were
+      // found by this test failing rather than by reading the component:
+      //
+      //  * "Sections" IS AN AMBIGUOUS BUTTON NAME. The sidebar renders its own
+      //    collapsible "Sections (1)" header, so a name query for the tab
+      //    matches two buttons in a loaded app.
+      //  * A TAB BUTTON'S ACCESSIBLE NAME IS NOT ITS LABEL. The Anomalies tab
+      //    carries a count badge inside the button and the two run together
+      //    with no separator, so its name is the string "Anomalies3" — which a
+      //    screen reader reads as "Anomalies3, button", with nothing saying
+      //    what the 3 counts. Recorded here and left alone: it belongs with
+      //    `peek-a-bin-w50c` (the same bar has no tab semantics at all) and
+      //    with the browser pass, not with this file.
+      //
+      // The title also carries the 1-9 shortcut digit, so asserting on it
+      // checks the thing CLAUDE.md says is derived — that the bar and its
+      // `TAB_KEYS` map both come from `VIEW_TABS`, in that order.
+      const title = `${label} (${VIEW_TABS.indexOf(tab) + 1})`;
+      const buttons = screen
+        .getAllByRole("button")
+        .filter((b) => b.getAttribute("title") === title);
+      expect(buttons).toHaveLength(1);
+      expect(buttons[0].textContent?.startsWith(label)).toBe(true);
+    }
+  });
+
+  it("does not offer the one tab it has just withheld", async () => {
+    render(<App />);
+    await openFile(resourceOnlyPE());
+
+    const banner = await waitFor(() => {
+      const n = notice();
+      if (!n) throw new Error("no notice yet");
+      return n;
+    });
+    // The control for the case above: a rule that put every tab in the prose
+    // would satisfy it. `disassembly` is the only DECODER_DERIVED_TAB and is
+    // the one thing this file genuinely cannot show.
+    const still = (banner.textContent ?? "").split("Still available:")[1] ?? "";
+    expect(still).not.toContain(VIEW_TAB_LABELS.disassembly);
+  });
+});
+
+describe("the tab bar routes", () => {
+  /**
+   * Read the trap in this file's header before changing these. App keeps every
+   * visited tab MOUNTED and hides the inactive ones with Tailwind's `hidden`
+   * class — which carries no `display: none` here, because Tailwind is
+   * deliberately out of the test config. So "the Sections table is in the
+   * document" says nothing about which tab is showing, and these assertions go
+   * through the pane's own class instead.
+   */
+  function panes(): HTMLElement[] {
+    // Each mounted tab is wrapped in a div that is either `h-full` or `hidden`.
+    return Array.from(document.querySelectorAll<HTMLElement>("div.h-full, div.hidden")).filter(
+      (el) => el.className === "h-full" || el.className === "hidden",
+    );
+  }
+
+  it("mounts one visible pane at a time", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Headers/ })).toBeTruthy();
+    });
+
+    const visible = () => panes().filter((el) => el.className === "h-full").length;
+    expect(visible()).toBe(1);
+
+    // By title, not by name: see the invariant test above — the sidebar has a
+    // "Sections" button of its own, so the name is ambiguous once a PE is open.
+    await user.click(screen.getByTitle("Sections (3)"));
+    await waitFor(() => {
+      expect(visible()).toBe(1);
+    });
+    // Two panes mounted now, exactly one of them shown: the previous tab stays
+    // in the tree, which is the behaviour `mountedTabs` exists to produce.
+    expect(panes().length).toBeGreaterThan(1);
+  });
+});

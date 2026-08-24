@@ -521,10 +521,12 @@ describe("the keyboard", () => {
    * intra-function `jmp`, so everything below the first one is unreachable by
    * arrow key. PageUp/PageDown (40 rows) and clicking still work.
    *
-   * `it.fails` rather than a fix: this file is measurement, and the repair is a
-   * behaviour change that wants its own commit. The two assertions state what
-   * the view SHOULD do, so the day it is fixed this test fails as passing and
-   * must be un-`fails`ed.
+   * FIXED IN 0fbc1e5 (`seekAddressableRow`), one commit after this measurement
+   * found it — so this is a plain `it` and it passes. It was written as the
+   * repair's specification and is kept as its regression pin: the assertions
+   * state what the view must do, and nothing static can see a branch that
+   * declines to dispatch (`disasmHandlerDeps.test.ts` walks the dependency
+   * array, not the body's early returns).
    */
   it("steps over a separator row instead of stopping dead at it", async () => {
     const user = userEvent.setup();
