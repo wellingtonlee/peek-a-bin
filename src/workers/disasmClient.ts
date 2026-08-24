@@ -3,7 +3,9 @@ import type { IRPDispatchEntry } from "../analysis/driver";
 // nothing itself, so it adds no edge to Capstone either.
 import { archForMachine, type ImageArch } from "../disasm/arch";
 import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
-import type { FuncExtent } from "../disasm/funcInsns";
+// A value import, but `funcInsns.ts` is address arithmetic over plain data and
+// imports nothing but types, so it adds no edge to Capstone either.
+import { collectFuncInsns, type FuncExtent, funcXrefEntries } from "../disasm/funcInsns";
 // Type-only: erased at compile time, so this adds no runtime edge to
 // functionDetect (and none to Capstone through it).
 import type { DetectPass, ImageBounds } from "../disasm/functionDetect";
@@ -493,30 +495,54 @@ class DisasmWorkerClient {
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
     const cached = this.decompileCache.get(func.address);
     if (cached) return cached;
+    // THE PAYLOAD IS PER-FUNCTION, and that is 94-99% of what a decompile
+    // request used to cost (peek-a-bin-9gc9). The pipeline reads the instruction
+    // array only through `getFuncInsns` and the xref map only at the addresses
+    // of those instructions, so both are cut to this function's own window here
+    // — see `funcXrefEntries` for why that is exact rather than a heuristic.
+    // Measured on a 669 KiB-`.text` `go` image at 11408ac: 652 ms of instruction
+    // clone and 65 ms of xref clone per request, against 5.9 ms of decompiling.
+    //
     // Extents, not the whole records: the worker needs only where each function
-    // starts and ends to group `instructions` by owning function, which is what
-    // the per-callee clobber summary is built from. `funcEntries` above carries
+    // starts and ends to group the whole section by owning function, which is
+    // what the per-callee clobber summary is built from. `funcEntries` carries
     // the names and is rebuilt per call because it reflects renames; extents do
     // not change under a rename, which is why the summary can be cached against
     // the instruction token while `funcEntries` cannot.
     //
     // Sent only when the caller has them, so an older caller gets exactly the
     // pre-summary behaviour rather than a half-built one (peek-a-bin-s2ws).
-    const result: { code: string; lineMap: [number, number][] } = await this.send(
-      "decompileFunction",
-      this.decoded({
-        func,
-        instructions,
-        xrefEntries: Array.from(xrefMap.entries()),
-        stackFrame,
-        signature,
-        is64,
-        funcEntries: Array.from(funcMap.entries()),
-        runtimeFunctions,
-        funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
-        insnsToken: functions ? this.insnsToken(instructions) : undefined,
-      }),
-    );
+    const args = this.decoded({
+      func,
+      funcInsns: collectFuncInsns(func, instructions),
+      xrefEntries: funcXrefEntries(func, xrefMap),
+      stackFrame,
+      signature,
+      is64,
+      funcEntries: Array.from(funcMap.entries()),
+      runtimeFunctions,
+      funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
+      insnsToken: functions ? this.insnsToken(instructions) : undefined,
+    });
+    type Reply = { code: string; lineMap: [number, number][]; needInstructions?: boolean };
+    let result: Reply = await this.send("decompileFunction", args);
+    if (result?.needInstructions) {
+      // The worker has to build a clobber summary for this token and holds
+      // neither the summary nor the instructions to build it from, so it asked
+      // rather than answering without one. It is THE WORKER that decides this,
+      // not a model of it kept here: `CallSummaryCache` holds one entry and
+      // `configure` clears it, so any belief on this side would be a second copy
+      // of an eviction rule that lives over there. The cost is one extra round
+      // trip on the first request of a file — and none at all for a caller with
+      // no extents, or a PE32 image, where no summary is built.
+      //
+      // Bounded at one retry by construction: a request carrying `instructions`
+      // can always build, so the worker cannot ask twice. It needs no lock
+      // either — the retry is the same request again, so two clicks in flight at
+      // once are both answered whichever order the worker services them in, at
+      // worst sending the section twice.
+      result = await this.send("decompileFunction", { ...args, instructions });
+    }
     const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
     this.decompileCache.set(func.address, parsed);
     return parsed;

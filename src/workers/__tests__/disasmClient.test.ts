@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
 import { type SweptInsn, sweepX86 } from "../../disasm/linearSweep";
-import type { Instruction } from "../../disasm/types";
+import type { Instruction, Xref } from "../../disasm/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
 // serially-servicing worker would see the messages — which is the only way to
@@ -1040,14 +1040,14 @@ describe("DisasmWorkerClient — the decompile request carries the callee-clobbe
     insn(CALLEE + 3, "ret", "", 1),
   ];
 
-  function post(client: DisasmClient, insns: Instruction[], withFuncs: boolean) {
-    void client.decompileFunction(
+  function post(client: DisasmClient, insns: Instruction[], withFuncs: boolean, is64 = true) {
+    return client.decompileFunction(
       caller,
       insns,
       new Map(),
       null,
       null,
-      true,
+      is64,
       new Map([
         [caller.address, { name: caller.name, address: caller.address }],
         [callee.address, { name: callee.name, address: callee.address }],
@@ -1055,6 +1055,43 @@ describe("DisasmWorkerClient — the decompile request carries the callee-clobbe
       undefined,
       withFuncs ? [caller, callee] : undefined,
     );
+  }
+
+  /** A worker state with Capstone absent — nothing here decodes bytes. */
+  const freshState = () => createWorkerState(Promise.resolve());
+
+  /**
+   * Pump every message the client posts through the real `dispatch`, in order,
+   * replying to each — which is what a serially-servicing worker does, and the
+   * only way a request that provokes a *second* request can be exercised at all.
+   *
+   * The loop re-reads `worker.posted.length` on each pass, so a retry the client
+   * posts in reaction to a reply is picked up rather than assumed away.
+   */
+  async function drive<T>(
+    worker: {
+      posted: PostedMessage[];
+      received: PostedMessage[];
+      reply(id: number, r: unknown): void;
+    },
+    state: WorkerState,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    // From the messages THIS call posts, never from index 0: re-servicing an
+    // earlier request would re-run its side effects on `state` — a second pass
+    // over a decompile retry rebuilds the clobber summary, which silently turns
+    // a later cache-miss test into a cache hit.
+    const from = worker.posted.length;
+    const pending = call();
+    for (let i = from; i < worker.posted.length; i++) {
+      const msg = worker.received[i];
+      const result = await dispatch(msg.method as never, msg.args, state);
+      worker.reply(worker.posted[i].id, result);
+      // Let the client's continuation run: it may post the retry.
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    return pending;
   }
 
   it("sends every function's extents, which funcEntries cannot supply", async () => {
@@ -1077,16 +1114,15 @@ describe("DisasmWorkerClient — the decompile request carries the callee-clobbe
     // End to end across the hop: post through the client, then hand the
     // *received* args — everything having survived structured clone — to the
     // dispatch. Nothing here is a mock of the thing under test.
+    //
+    // Driven through the pump rather than one message, because the section's
+    // instructions no longer cross on every request: the first request of a file
+    // is answered with `needInstructions` and the client resends
+    // (peek-a-bin-9gc9). What this asserts is unchanged — a clobber reaches the
+    // emitted C — and the number of messages it takes is asserted next door.
     const { client, worker } = await loadClient();
 
-    post(client, instructions(), true);
-    const code = (
-      (await dispatch(
-        "decompileFunction",
-        worker.received[0].args,
-        createWorkerState(Promise.resolve()),
-      )) as { code: string }
-    ).code;
+    const code = (await drive(worker, freshState(), () => post(client, instructions(), true))).code;
 
     const store = code.split("\n").find((l) => l.includes("(rsi)"));
     expect(store).toMatch(/clobbered_r10_\d+/);
@@ -1732,5 +1768,316 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
     );
 
     expect(consulted).toBe(0);
+  });
+});
+
+/**
+ * peek-a-bin-9gc9 — the decompile request carries ONE function's instructions.
+ *
+ * The whole section's `Instruction[]` was 72-97% of a decompile request and the
+ * whole section's xref map another 7-14%, so the payload was 92-99% of what a
+ * click cost: 652 ms and 65 ms of clone against 5.9 ms of decompiling on a 669
+ * KiB-`.text` `go` image, measured at 11408ac by `corpus/decompileRpcCost.ts`.
+ * Neither array was read in full. `decompileFunction` passes the instructions to
+ * `buildCFG`, which narrows them with `getFuncInsns`, and passes the map to the
+ * same place, which reads it only at those instructions' addresses.
+ *
+ * The one consumer of the whole section is the callee-clobber summary, which is
+ * closed over the call graph and cached against the client's token — so it is
+ * read on the first request bearing one and never again. That is what the
+ * `needInstructions` reply is for, and the two things this block has to pin are
+ * that the ask happens when it must and that it does not happen when it need
+ * not: a request answered *without* a summary it should have had is well-formed
+ * C that the client's address-keyed decompile cache then serves for the rest of
+ * the session.
+ *
+ * Everything here goes through the real client and the real `dispatch`. Nothing
+ * is mocked but the `Worker` itself, and the args each test reads are the
+ * post-`structuredClone` ones a worker would receive.
+ */
+describe("DisasmWorkerClient — a decompile request carries one function's instructions", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const A = 0x140001000; // the function under test
+  const B = 0x140001100; // its callee, which zeroes r10
+  const C = 0x140001200; // a third function, so the section is bigger than either
+  // Size = the sum of its instructions' sizes, as a detected function's is. A
+  // padded size would make the slim window's boundary untestable: an off-by-one
+  // would still contain every instruction.
+  const fnA = { name: "sub_140001000", address: A, size: 13 };
+  const fnB = { name: "sub_140001100", address: B, size: 0x8 };
+  const fnC = { name: "sub_140001200", address: C, size: 0x8 };
+
+  const insn = (address: number, mnemonic: string, opStr: string, size: number): Instruction => ({
+    address,
+    mnemonic,
+    opStr,
+    size,
+    bytes: new Uint8Array(size),
+  });
+
+  /** Address-ascending, as `hybridDisassemble` returns it. */
+  const section = (): Instruction[] => [
+    insn(A, "mov", "r10, rcx", 3),
+    insn(A + 3, "call", `0x${B.toString(16)}`, 5),
+    insn(A + 8, "mov", "qword ptr [rsi], r10", 4),
+    insn(A + 12, "ret", "", 1),
+    insn(B, "xor", "r10d, r10d", 3),
+    insn(B + 3, "ret", "", 1),
+    insn(C, "xor", "eax, eax", 2),
+    insn(C + 2, "ret", "", 1),
+  ];
+
+  /** One branch xref in each function, so a whole-section map has three rows. */
+  const xrefs = (): Map<number, Xref[]> =>
+    new Map<number, Xref[]>([
+      [A + 8, [{ from: A, to: A + 8, type: "branch" } as unknown as Xref]],
+      [B + 3, [{ from: B, to: B + 3, type: "branch" } as unknown as Xref]],
+      [C + 2, [{ from: C, to: C + 2, type: "branch" } as unknown as Xref]],
+    ]);
+
+  const names = new Map([
+    [A, { name: fnA.name, address: A }],
+    [B, { name: fnB.name, address: B }],
+    [C, { name: fnC.name, address: C }],
+  ]);
+
+  const freshState = () => createWorkerState(Promise.resolve());
+
+  /** The section array for the current test; see {@link ask}. */
+  let shared: Instruction[] = [];
+  beforeEach(() => {
+    shared = section();
+  });
+
+  /**
+   * ONE array per test, deliberately. `insnsToken` is minted per array
+   * *identity*, and in the app every decompile request for a file names the
+   * array `hybridDisassemble` returned — so a helper that rebuilt it per call
+   * would mint a fresh token each time and never exercise a cache hit at all.
+   */
+  function ask(
+    client: DisasmClient,
+    func: { name: string; address: number; size: number },
+    opts: { extents?: boolean; is64?: boolean; insns?: Instruction[] } = {},
+  ) {
+    return client.decompileFunction(
+      func,
+      opts.insns ?? shared,
+      xrefs(),
+      null,
+      null,
+      opts.is64 ?? true,
+      names,
+      undefined,
+      opts.extents === false ? undefined : [fnA, fnB, fnC],
+    );
+  }
+
+  /** As above: service each posted message with the real dispatch, in order. */
+  async function drive<T>(
+    worker: {
+      posted: PostedMessage[];
+      received: PostedMessage[];
+      reply(id: number, r: unknown): void;
+    },
+    state: WorkerState,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    // From the messages THIS call posts, never from index 0: re-servicing an
+    // earlier request would re-run its side effects on `state` — a second pass
+    // over a decompile retry rebuilds the clobber summary, which silently turns
+    // a later cache-miss test into a cache hit.
+    const from = worker.posted.length;
+    const pending = call();
+    for (let i = from; i < worker.posted.length; i++) {
+      const result = await dispatch(
+        worker.received[i].method as never,
+        worker.received[i].args,
+        state,
+      );
+      worker.reply(worker.posted[i].id, result);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    return pending;
+  }
+
+  it("sends this function's instructions and not the section's", async () => {
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnA);
+
+    const args = worker.received[0].args;
+    expect(args.funcInsns.map((i: Instruction) => i.address)).toEqual([A, A + 3, A + 8, A + 12]);
+    // The four the section holds for B and C are not in the message at all.
+    expect(args.instructions).toBeUndefined();
+  });
+
+  it("sends this function's xref rows and not the section's", async () => {
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnA);
+
+    expect(worker.received[0].args.xrefEntries.map(([a]: [number]) => a)).toEqual([A + 8]);
+  });
+
+  it("gives the same emitted C as the whole-section payload did", async () => {
+    // The claim the whole change rests on, asked of the real dispatch: hand it
+    // the slim message and then the pre-change message, and compare. The corpus
+    // answers this at scale (0 of 3059 functions differ over five real images);
+    // this is the same question where a test can see it.
+    const { client, worker } = await loadClient();
+
+    const slim = await drive(worker, freshState(), () => ask(client, fnA));
+
+    const legacy = worker.received[0].args;
+    const whole = (await dispatch(
+      "decompileFunction",
+      { ...legacy, funcInsns: undefined, instructions: section() },
+      freshState(),
+    )) as { code: string };
+
+    expect(slim.code).toBe(whole.code);
+    // Non-vacuous: there is a body to compare.
+    expect(slim.code).toContain("(rsi)");
+  });
+
+  it("asks for the section exactly once, and the retry carries it", async () => {
+    const { client, worker } = await loadClient();
+
+    const result = await drive(worker, freshState(), () => ask(client, fnA));
+
+    expect(worker.received).toHaveLength(2);
+    expect(worker.received[0].args.instructions).toBeUndefined();
+    expect(worker.received[1].args.instructions).toHaveLength(8);
+    // The retry is not a bare resend of the array: it is the same request again,
+    // so the worker needs no memory of the first attempt.
+    expect(worker.received[1].args.func.address).toBe(A);
+    expect(worker.received[1].args.funcInsns).toHaveLength(4);
+    const store = result.code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toMatch(/clobbered_r10_\d+/);
+  });
+
+  it("does not ask again once the worker holds the summary", async () => {
+    // The point of the token: the second function of a file is a single message.
+    const { client, worker } = await loadClient();
+    const state = freshState();
+
+    await drive(worker, state, () => ask(client, fnA));
+    const afterFirst = worker.received.length;
+    await drive(worker, state, () => ask(client, fnC));
+
+    expect(afterFirst).toBe(2);
+    expect(worker.received.length - afterFirst).toBe(1);
+  });
+
+  it("never asks when the caller sent no extents", async () => {
+    // `llm/decompileForLLM.ts` is that caller. No extents means no summary, so
+    // the whole section is never wanted and the section never crosses at all.
+    const { client, worker } = await loadClient();
+
+    const result = await drive(worker, freshState(), () => ask(client, fnA, { extents: false }));
+
+    expect(worker.received).toHaveLength(1);
+    expect(worker.received[0].args.instructions).toBeUndefined();
+    expect(result.code).toContain("(rsi)");
+  });
+
+  it("never asks for a PE32 image", async () => {
+    // `calleeClobbersFor` returns nothing unless `is64`, so a summary a 32-bit
+    // lift cannot consult is pure cost — and the `is64` gate stays in
+    // `dispatch.ts` alone rather than being spelled here as well.
+    const { client, worker } = await loadClient();
+
+    await drive(worker, freshState(), () => ask(client, fnA, { is64: false }));
+
+    expect(worker.received).toHaveLength(1);
+    expect(worker.received[0].args.instructions).toBeUndefined();
+  });
+
+  it("asks again after a configure dropped the worker's summary", async () => {
+    // THE CASE A CLIENT-SIDE BELIEF GETS WRONG. `CallSummaryCache` holds one
+    // entry and `configure` clears it, so "has the worker got this token" is not
+    // a question this side can answer — which is why the worker asks rather than
+    // the client predicting. Without the ask, this request is answered without a
+    // summary and the difference is silent.
+    const { client, worker } = await loadClient();
+    const state = freshState();
+
+    await drive(worker, state, () => ask(client, fnA));
+    await dispatch("configure", { stringEntries: [], iatEntries: [], machine: 0x8664 }, state);
+    const before = worker.received.length;
+    const again = await drive(worker, state, () => ask(client, fnC));
+
+    expect(worker.received.length - before).toBe(2);
+    expect(worker.received[before].args.instructions).toBeUndefined();
+    expect(worker.received[before + 1].args.instructions).toHaveLength(8);
+    expect(again.code).toBeTruthy();
+  });
+
+  it("asks for a token it does not hold rather than serving the one it does", async () => {
+    // The cache is keyed on the token, and this is that key doing work: a second
+    // instruction array is a second disassembly, and answering it from the first
+    // one's summary would report clobbers of another image's call graph.
+    const { client, worker } = await loadClient();
+    const state = freshState();
+
+    await drive(worker, state, () => ask(client, fnA));
+    // A genuinely different array object, so a different token — the client
+    // mints per identity, and `section()` builds a fresh one each call.
+    const before = worker.received.length;
+    await drive(worker, state, () => ask(client, fnC, { insns: section() }));
+
+    expect(worker.received[before].args.insnsToken).not.toBe(worker.received[0].args.insnsToken);
+    expect(worker.received.length - before).toBe(2);
+  });
+
+  it("is order-insensitive when two first requests are in flight at once", async () => {
+    // Two clicks before either reply lands. Both slim messages miss, so both are
+    // asked to resend; the first retry builds the summary and the second finds
+    // it. Nothing here depends on which order the worker services them, which is
+    // what makes the ask safe without a lock — the retry is the same request
+    // again, so a resend that arrives after the summary already exists is
+    // answered from it.
+    const { client, worker } = await loadClient();
+    const state = freshState();
+
+    const a = ask(client, fnA);
+    const b = ask(client, fnC);
+    for (let i = 0; i < worker.posted.length; i++) {
+      const r = await dispatch(worker.received[i].method as never, worker.received[i].args, state);
+      worker.reply(worker.posted[i].id, r);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    // Two slim messages, then two retries: four in total, and both answered.
+    expect(worker.received).toHaveLength(4);
+    expect((await a).code).toContain("(rsi)");
+    expect((await b).code).toBeTruthy();
+    const store = (await a).code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toMatch(/clobbered_r10_\d+/);
+  });
+
+  it("would answer without a clobber if the ask were skipped", async () => {
+    // The negative control that makes the ask load-bearing rather than tidy.
+    // This is what a worker that shrugged and answered anyway would emit — the
+    // store reads the value the callee has provably zeroed, in C that compiles
+    // and that no gate in this repo can tell from the right answer.
+    const { client, worker } = await loadClient();
+
+    void ask(client, fnA);
+    const shrugged = (await dispatch(
+      "decompileFunction",
+      { ...worker.received[0].args, funcExtents: undefined, insnsToken: undefined },
+      freshState(),
+    )) as { code: string };
+
+    const store = shrugged.code.split("\n").find((l) => l.includes("(rsi)"));
+    expect(store).toMatch(/=\s*rcx\s*;/);
+    expect(store).not.toMatch(/clobbered_r10_\d+/);
   });
 });

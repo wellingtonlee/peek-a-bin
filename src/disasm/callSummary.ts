@@ -615,6 +615,23 @@ export class CallSummaryCache {
     return clobbers;
   }
 
+  /**
+   * The summaries for `token` if they are already built, and nothing otherwise.
+   *
+   * The counterpart of {@link forToken} for a caller that cannot build one: the
+   * decompile RPC no longer receives the whole section's `Instruction[]` on
+   * every request — it is 72-97% of one — so on a miss it has to ask the client
+   * to resend rather than quietly answering without a summary, which would be
+   * the pre-summary output served for the rest of the session out of the
+   * client's address-keyed decompile cache (peek-a-bin-9gc9).
+   *
+   * Named for `SectionMemo.peek`, and for the same reason: a lookup that cannot
+   * compute, so it can never evict or pay for what it did not find.
+   */
+  peek(token: number): CalleeClobbers | undefined {
+    return this.entry?.token === token ? this.entry.clobbers : undefined;
+  }
+
   /** Forget the held image, so one file's summaries do not outlive it. */
   clear(): void {
     this.entry = undefined;

@@ -124,11 +124,60 @@
  * BYTES and was measured and refused: the bytes are ~0.03% of the work they
  * feed, where these instructions are 84% of the work they feed, so the two
  * questions have opposite answers and must not be argued from each other.
+ *
+ * ## What `peek-a-bin-9gc9` then did, and why it was not residency
+ *
+ * The bead above proposed worker-side *residency* under the client's token. The
+ * premise — that the array has to live somewhere — is false, and reading the
+ * consumers is what shows it: `decompileFunction` hands the array to `buildCFG`
+ * and to nothing else, `buildCFG` narrows it with `getFuncInsns` on its first
+ * line, and the only reader of the *whole* section is the callee-clobber
+ * summary, which is cached against the token and so is read once per file. The
+ * same is true of the xref map, which `buildCFG` reads only at the addresses of
+ * those same instructions.
+ *
+ * So the client sends this function's slice of each (`collectFuncInsns`,
+ * `funcXrefEntries`) and the worker asks — `{ needInstructions: true }` — on the
+ * one request that needs more. Nothing is retained anywhere, which is the whole
+ * advantage over residency: `peek-a-bin-x40u` measured an `Instruction[]` at
+ * ~135 B/instruction, 24 MB for the `go` image, and the main thread already
+ * holds that array.
+ *
+ * Measured at `11408ac`, both sides pinned, and this harness now reports both
+ * payloads side by side plus the equivalence census:
+ *
+ * | image  | before  | after   | cheaper | payload share    | resends | differ |
+ * |--------|---------|---------|---------|------------------|---------|--------|
+ * | t32    | 56.6 ms |  3.4 ms |  16.6x  | 94.7% -> 11.3%   | 0       | 0/267  |
+ * | t64    | 54.8 ms |  3.0 ms |  18.1x  | 95.7% -> 23.1%   | 1       | 0/279  |
+ * | w32    | 53.0 ms |  2.3 ms |  22.9x  | 96.3% -> 16.0%   | 0       | 0/265  |
+ * | w64    | 49.0 ms |  2.4 ms |  20.5x  | 96.8% -> 35.2%   | 1       | 0/275  |
+ * | go x64 |  629 ms | 11.2 ms |  56.3x  | 99.0% -> 41.6%   | 1       | 0/1973 |
+ *
+ * One resend per x64 image and none for either PE32 image, because
+ * `calleeClobbersFor` returns nothing unless `is64` — so no summary is built and
+ * the section is never wanted. **0 of 3059 functions across the five emit
+ * different C**, which is the claim the change rests on; the property itself is
+ * pinned and negative-controlled in `src/disasm/__tests__/funcInsns.test.ts` and
+ * `src/workers/__tests__/disasmClient.test.ts`.
+ *
+ * **READ THE RESIDUE, because it moves this bead's own arithmetic.** With the
+ * two big arrays gone, the `go` image's remaining payload is `funcEntries` 2.18
+ * ms (19.5% of a request), `runtimeFunctions` 1.53 ms (13.7%) and `funcExtents`
+ * 0.645 ms (5.8%), against `funcInsns` at 0.012 ms and the xref rows at 0.004
+ * ms. `funcEntries` still cannot be cached — it carries renames.
+ * `runtimeFunctions` is the `.pdata` array, invariant under renames and a
+ * property of the image, and has never been examined. `funcExtents` was refused
+ * at 0.1-0.2% of a request and is now ~6% of a much smaller one, with the
+ * resend protocol it was said to need now built — but its ABSOLUTE cost is
+ * unchanged, which is what that refusal rested on, so re-measure rather than
+ * assume.
  */
 
 import { readFileSync } from "node:fs";
 import { Capstone, Const, loadCapstone } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
+import { collectFuncInsns, funcXrefEntries } from "../src/disasm/funcInsns";
 import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { DisasmFunction, Instruction, Xref } from "../src/disasm/types";
@@ -186,6 +235,16 @@ interface Row {
   whole: number;
   firstWork: number;
   medianWork: number;
+  /** The same, for the per-function payload the client sends since 9gc9. */
+  slimParts: { key: string; ms: number }[];
+  slimWhole: number;
+  /** Mean members of the two slimmed arrays, per request. */
+  meanOwnInsns: number;
+  meanOwnXrefs: number;
+  /** Functions whose emitted C differs between the two payloads, of `funcs`. */
+  differing: number;
+  /** Requests it took to decompile every function under the real protocol. */
+  messages: number;
 }
 
 async function measure(path: string): Promise<Row | null> {
@@ -260,6 +319,7 @@ async function measure(path: string): Promise<Row | null> {
   // The payload, built the way `useDecompileTabs.decompileLow` and
   // `disasmClient.decompileFunction` build it between them. `funcMap` carries
   // display names, which is why the client rebuilds it per call.
+  const xrefMap = new Map(xrefEntries);
   const func = functions[Math.floor(functions.length / 2)];
   const stackFrame = analyzeStackFrame(func, instructions, arch, pe.is64);
   const signature = inferSignature(func, instructions, arch, pe.is64);
@@ -288,6 +348,22 @@ async function measure(path: string): Promise<Row | null> {
   });
   const whole = cloneMs(payload, 5);
 
+  // THE PAYLOAD SINCE peek-a-bin-9gc9, built the way `disasmClient` builds it:
+  // this function's own instructions and its own xref rows. `instructions` is
+  // absent — it crosses only on the retry the worker asks for, once per file.
+  const slimPayload = {
+    ...payload,
+    instructions: undefined,
+    funcInsns: collectFuncInsns(func, instructions),
+    xrefEntries: funcXrefEntries(func, xrefMap),
+  };
+  const slimParts = (Object.keys(slimPayload) as (keyof typeof slimPayload)[]).map((key) => ({
+    key:
+      key === "funcInsns" ? "funcInsns (own)" : key === "xrefEntries" ? "xrefEntries (own)" : key,
+    ms: cloneMs(slimPayload[key], 25),
+  }));
+  const slimWhole = cloneMs(slimPayload, 25);
+
   // The work: the real RPC through the real dispatch. The FIRST request bearing
   // a token is the only one that reads `funcExtents` — `CallSummaryCache` serves
   // every later one — so it is reported apart from the median, because that
@@ -312,11 +388,73 @@ async function measure(path: string): Promise<Row | null> {
   }
   times.sort((a, b) => a - b);
 
+  // ── The claim the slim payload rests on, over EVERY function ──────────────
+  //
+  // Decompile the whole image twice: once from the whole-section payload, once
+  // from the per-function one under the real protocol, and compare the emitted C
+  // string by string. A fresh `WorkerState` each way, so the two runs see the
+  // same `StructRegistry` history in the same order — struct synthesis is
+  // cross-function, so sharing one would make the second run's input depend on
+  // the first's.
+  //
+  // This is a CENSUS of a property, not a gate, and it is here because a
+  // measurement of what a change saves is worth nothing beside a measurement of
+  // what it costs. `src/disasm/__tests__/funcInsns.test.ts` and
+  // `src/workers/__tests__/disasmClient.test.ts` are where the property is
+  // pinned and negative-controlled; this is where it is asked at scale.
+  const codeFor = async (slim: boolean): Promise<string[]> => {
+    const st = createWorkerState(Promise.resolve());
+    st.cs32 = state.cs32;
+    st.cs64 = state.cs64;
+    st.csArm64 = state.csArm64;
+    st.arch = arch;
+    const out: string[] = [];
+    let msgs = 0;
+    for (const f of functions) {
+      const base = { ...decompileArgs(f, 1) } as Record<string, unknown>;
+      if (slim) {
+        base.instructions = undefined;
+        base.funcInsns = collectFuncInsns(f, instructions);
+        base.xrefEntries = funcXrefEntries(f, xrefMap);
+      }
+      msgs++;
+      let r = (await dispatch("decompileFunction", base, st)) as {
+        code?: string;
+        needInstructions?: boolean;
+      };
+      if (r.needInstructions) {
+        // Exactly the client's retry: the same request again, with the section.
+        msgs++;
+        r = (await dispatch("decompileFunction", { ...base, instructions }, st)) as {
+          code?: string;
+        };
+      }
+      out.push(r.code ?? "");
+    }
+    if (slim) slimMessages = msgs;
+    return out;
+  };
+  let slimMessages = 0;
+  const wholeCode = await codeFor(false);
+  const slimCode = await codeFor(true);
+  let differing = 0;
+  for (let i = 0; i < wholeCode.length; i++) if (wholeCode[i] !== slimCode[i]) differing++;
+
+  const meanOwnInsns =
+    functions.reduce((a, f) => a + collectFuncInsns(f, instructions).length, 0) / functions.length;
+  const meanOwnXrefs =
+    functions.reduce((a, f) => a + funcXrefEntries(f, xrefMap).length, 0) / functions.length;
+
   console.log(
     `${path.split("/").pop()} — ${arch}, .text ${(bytes.length / 1024).toFixed(0)} KiB, ` +
       `${functions.length} functions, ${instructions.length} instructions`,
   );
   console.log(`  premise: ${checkNothingIsTransferred(payload)}`);
+  // The same premise for the payload that actually crosses now: `funcInsns`
+  // still carries a `bytes` view per element, so it is still nested and still
+  // cloned rather than transferred. If that ever changed the columns below
+  // would stop meaning what they say.
+  console.log(`  premise (per-function): ${checkNothingIsTransferred(slimPayload)}`);
   return {
     name: path.split("/").pop() ?? path,
     funcs: functions.length,
@@ -326,6 +464,12 @@ async function measure(path: string): Promise<Row | null> {
     whole,
     firstWork,
     medianWork: times[Math.floor(times.length / 2)],
+    slimParts,
+    slimWhole,
+    meanOwnInsns,
+    meanOwnXrefs,
+    differing,
+    messages: slimMessages,
   };
 }
 
@@ -357,6 +501,44 @@ function print(rows: Row[]): void {
         "  — pays the whole-image callee-clobber build, and is the ONLY",
     );
     console.log(`  ${"".padEnd(20)} ${"".padStart(8)}     request that reads funcExtents at all.`);
+    // ── The per-function payload, which is what actually crosses now ─────────
+    const slimPayloadMs = r.slimParts.reduce((a, p) => a + p.ms, 0);
+    const slimRequest = r.slimWhole + r.medianWork;
+    console.log("");
+    console.log(
+      `  the per-function payload (peek-a-bin-9gc9): ${r.meanOwnInsns.toFixed(1)} instructions ` +
+        `and ${r.meanOwnXrefs.toFixed(1)} xref rows per request, mean over all ${r.funcs} functions`,
+    );
+    console.log("  component            clone ms   % of a median request");
+    for (const p of [...r.slimParts].sort((a, b) => b.ms - a.ms).slice(0, 6)) {
+      console.log(
+        `  ${p.key.padEnd(20)} ${p.ms.toFixed(3).padStart(8)}   ${((p.ms * 100) / slimRequest).toFixed(3).padStart(8)}%`,
+      );
+    }
+    console.log(
+      `  ${"(sum of parts)".padEnd(20)} ${slimPayloadMs.toFixed(3).padStart(8)}   ${((slimPayloadMs * 100) / slimRequest).toFixed(3).padStart(8)}%`,
+    );
+    console.log(
+      `  ${"WHOLE PAYLOAD".padEnd(20)} ${r.slimWhole.toFixed(3).padStart(8)}   ${((r.slimWhole * 100) / slimRequest).toFixed(3).padStart(8)}%`,
+    );
+    console.log(
+      `  ${"decompile (median)".padEnd(20)} ${r.medianWork.toFixed(3).padStart(8)}   ${((r.medianWork * 100) / slimRequest).toFixed(3).padStart(8)}%`,
+    );
+    console.log(
+      `  a request is ${(request / slimRequest).toFixed(1)}x cheaper end to end ` +
+        `(${request.toFixed(1)} ms -> ${slimRequest.toFixed(1)} ms); payload share ` +
+        `${((r.whole * 100) / request).toFixed(1)}% -> ${((r.slimWhole * 100) / slimRequest).toFixed(1)}%`,
+    );
+    console.log(
+      `  opening all ${r.funcs} functions: ${((request * r.funcs) / 1000).toFixed(2)} s -> ` +
+        `${((slimRequest * r.funcs + r.whole) / 1000).toFixed(2)} s ` +
+        "(the second includes the ONE resend the worker asks for)",
+    );
+    console.log(
+      `  EQUIVALENCE: ${r.differing} of ${r.funcs} functions emit different C; ` +
+        `${r.messages} messages for ${r.funcs} requests ` +
+        `(${r.messages - r.funcs} resend${r.messages - r.funcs === 1 ? "" : "s"})`,
+    );
     // The two derived quantities the conclusion actually rests on. The first is
     // why the share above is a property of the tool rather than of the file:
     // `funcExtents` is linear in functions and `instructions` is linear in

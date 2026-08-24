@@ -26,7 +26,7 @@ import {
   disassembleArm64,
 } from "../disasm/arm64";
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
-import { CallSummaryCache } from "../disasm/callSummary";
+import { type CalleeClobbers, CallSummaryCache } from "../disasm/callSummary";
 import { unpackDataWindows } from "../disasm/dataWindows";
 import { decompileFunction } from "../disasm/decompile/pipeline";
 import { StructRegistry } from "../disasm/decompile/structs";
@@ -554,7 +554,27 @@ export async function dispatch(
       // Use per-call funcMap if provided (includes renames), else fall back to stored
       const fEntries: [number, { name: string; address: number }][] | undefined = args.funcEntries;
       const fMap = fEntries ? new Map(fEntries) : state.funcMap;
-      const insns = args.instructions as Instruction[];
+      // TWO INSTRUCTION ARGUMENTS, and which one each consumer reads is the
+      // whole of peek-a-bin-9gc9.
+      //
+      // `funcInsns` is this function's own slice and is all the pipeline needs:
+      // `decompileFunction` passes the array to `buildCFG` and to nothing else,
+      // and `buildCFG` immediately narrows it with `getFuncInsns`. The whole
+      // section's array was 72-97% of a decompile request — 652 ms of clone
+      // against 5.9 ms of decompiling on a 669 KiB-`.text` `go` image — so it
+      // now crosses only when something actually reads all of it.
+      //
+      // `instructions` is that whole array, and the ONE consumer of it is the
+      // callee-clobber summary below, which is closed over the call graph and so
+      // is a property of the image rather than of this function. It is cached
+      // against the client's token, so it is read on the first request bearing
+      // one and never again.
+      //
+      // A request carrying only `instructions` — an older client, or the retry
+      // path — behaves exactly as it always did, because `getFuncInsns` narrows
+      // whichever array it is given.
+      const whole = args.instructions as Instruction[] | undefined;
+      const insns = (args.funcInsns as Instruction[] | undefined) ?? whole ?? [];
       // What each callee writes, so a call clobbers that rather than the whole
       // ABI volatile set — see `clobberedByCall` in decompile/ssa.ts for why the
       // wide answer is worse. Two gates, and both mean "exactly the behaviour
@@ -566,15 +586,32 @@ export async function dispatch(
       //     a summary a PE32 lift cannot consult is pure cost.
       const extents = args.funcExtents as [number, number][] | undefined;
       const token = args.insnsToken as number | undefined;
-      const calleeClobbers =
-        extents && token !== undefined && args.is64
-          ? state.callSummaries.forToken(
-              token,
-              extents.map(([address, size]) => ({ address, size })),
-              insns,
-              state.iatMap,
-            )
-          : undefined;
+      let calleeClobbers: CalleeClobbers | undefined;
+      if (extents && token !== undefined && args.is64) {
+        // Held, or buildable from a whole array this request carried. Anything
+        // else and the client is asked to resend — never answered without the
+        // summary, which is the one failure mode that would be silent: the
+        // pre-summary C is well-formed, and the client's decompile cache is
+        // keyed on the function's address, so it would be served for the rest
+        // of the session (peek-a-bin-s2ws's own hazard).
+        //
+        // This is the reply, not a throw, and it is above the work: a resend
+        // costs one round trip on the first request of a file, where answering
+        // wrongly costs the session. `CallSummaryCache` holds exactly one entry
+        // and `configure` clears it, so the client cannot model when a miss
+        // happens and must be told.
+        calleeClobbers =
+          state.callSummaries.peek(token) ??
+          (whole
+            ? state.callSummaries.forToken(
+                token,
+                extents.map(([address, size]) => ({ address, size })),
+                whole,
+                state.iatMap,
+              )
+            : undefined);
+        if (!calleeClobbers) return { needInstructions: true };
+      }
       return decompileFunction(
         args.func as DisasmFunction,
         insns,

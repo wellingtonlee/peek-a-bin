@@ -1,4 +1,4 @@
-import type { DisasmFunction, Instruction } from "./types";
+import type { DisasmFunction, Instruction, Xref } from "./types";
 
 /**
  * All either function below reads of a function: where it starts and how long
@@ -142,4 +142,39 @@ export function getFuncInsns(
   const cached = funcInsnMap?.get(func.address);
   if (cached) return cached;
   return collectFuncInsns(func, instructions);
+}
+
+/**
+ * The xref rows a function's own decompilation can consult.
+ *
+ * The same predicate as {@link collectFuncInsns} over a different collection,
+ * and it lives beside it so "belongs to this function" has one declaration
+ * rather than two that can drift — the shape `sections.ts`, `ripRelative.ts`
+ * and `stackIdiom.ts` each exist to end.
+ *
+ * WHY THIS IS EXACT RATHER THAN AN APPROXIMATION. `decompileFunction` hands the
+ * map to `buildCFG` and to nothing else, and `buildCFG` reads it at exactly one
+ * place: `xrefMap.get(insn.address)` for each `insn` of `getFuncInsns(func, …)`
+ * — every one of which lies in `[func.address, func.address + func.size)` by
+ * that function's own filter. So a row outside the window cannot be consulted,
+ * and dropping it cannot change an answer. That is a property of `buildCFG`,
+ * not of any image, and `__tests__/funcInsns.test.ts` pins it by recording
+ * which keys the map is actually asked for.
+ *
+ * It is what lets the decompile RPC stop shipping the whole section's xref map
+ * on every request — 7-14% of one, against a mean of 7-9 rows per function on
+ * five real images (peek-a-bin-9gc9). Entries are returned in map order, which
+ * is the order `Array.from(map.entries())` produced before this existed, so a
+ * `new Map(rows)` on the far side iterates identically.
+ */
+export function funcXrefEntries(
+  func: FuncExtent,
+  xrefMap: Map<number, Xref[]>,
+): [number, Xref[]][] {
+  const endAddr = func.address + func.size;
+  const rows: [number, Xref[]][] = [];
+  for (const [addr, xrefs] of xrefMap) {
+    if (addr >= func.address && addr < endAddr) rows.push([addr, xrefs]);
+  }
+  return rows;
 }

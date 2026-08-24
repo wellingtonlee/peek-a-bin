@@ -1672,6 +1672,37 @@ residency, and it is a different question from `peek-a-bin-9a8`, which is about 
 other. It also re-derives the one premise it reads rather than measures — that `prepareBinaryArgs`
 finds nothing binary at the top level of these args, so the whole payload including one tiny buffer
 per instruction crosses by clone — and prints it per image.
+
+**`peek-a-bin-9gc9` then took that, and NOT as residency — so this harness now reports two payloads
+side by side plus an equivalence census.** The whole array was never *read* in full: the pipeline
+narrows it with `getFuncInsns` immediately, and the only reader of the whole section is the
+callee-clobber summary, which is cached against the client's token. So the client sends this
+function's slice of the instructions and of the xref map, and the section crosses only on the
+`{ needInstructions: true }` retry the worker asks for. Measured at `11408ac`:
+
+| image  | before  | after   | cheaper | payload share  | resends | differing |
+|--------|---------|---------|---------|----------------|---------|-----------|
+| t32    | 56.6 ms |  3.4 ms |  16.6×  | 94.7% → 11.3%  | 0       | 0 / 267   |
+| t64    | 54.8 ms |  3.0 ms |  18.1×  | 95.7% → 23.1%  | 1       | 0 / 279   |
+| w32    | 53.0 ms |  2.3 ms |  22.9×  | 96.3% → 16.0%  | 0       | 0 / 265   |
+| w64    | 49.0 ms |  2.4 ms |  20.5×  | 96.8% → 35.2%  | 1       | 0 / 275   |
+| go x64 |  629 ms | 11.2 ms |  56.3×  | 99.0% → 41.6%  | 1       | 0 / 1973  |
+
+`differing` is the census: every function decompiled twice, once from each payload, through the real
+`dispatch` under the real protocol, and the emitted C compared string by string. It is a **census
+and not a gate** — the property is pinned and negative-controlled in
+`src/disasm/__tests__/funcInsns.test.ts` and `src/workers/__tests__/disasmClient.test.ts`, and this
+is where it is asked at scale. One resend per x64 image and none for either PE32 one, because no
+summary is built unless `is64`.
+
+**Read the residue, because it moves `peek-a-bin-yavq`'s own arithmetic.** With the two big arrays
+gone, the `go` image's remaining payload is `funcEntries` 2.18 ms (19.5% of a request),
+`runtimeFunctions` 1.53 ms (13.7%) and `funcExtents` 0.645 ms (5.8%), against `funcInsns` at
+0.012 ms and the xref rows at 0.004 ms. `funcEntries` still cannot be cached. `runtimeFunctions` —
+the `.pdata` array, invariant under renames — has never been examined and is now the second-largest
+member. `funcExtents` was refused at 0.1–0.2% of a request and is now ~6% of a much smaller one,
+with the resend protocol it was said to need now built; its **absolute** cost is unchanged, which is
+what that refusal rested on, so re-measure rather than assume.
 ## `corpus/hybridGridServe.ts` — separate, takes a path, and answers one number
 
 `npm run corpus:gridserve -- <path-to-pe> [...]` answers whether `hybridDisassemble` decodes at
@@ -2118,7 +2149,7 @@ remaining gap and is not implemented.
 | `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, PC-relative literal pools, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
-| `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch, never a gate. Writes no artifacts. |
+| `decompileRpcCost.ts` | **Separately invoked** (`npm run corpus:decompilecost -- <path>`). What one decompile request costs, split by payload member, as a fraction of the decompiling it carries — for the whole-section payload and for the per-function one, side by side. Also censuses whether the two emit the same C for every function of the image. Drives the real `dispatch` and the real `prepareBinaryArgs`. x86 only — the decompiler refuses anything else. A stopwatch and a census, never a gate. Writes no artifacts. |
 | `rpcUploadCost.ts` | **Separately invoked** (`npm run corpus:uploadcost -- <path>`). What re-sending one code section to the worker costs, as a fraction of the decoding it feeds. Drives the real `dispatch` and the real `prepareBinaryArgs`. A stopwatch, never a gate. Writes no artifacts. |
 | `hybridGridServe.ts` | **Separately invoked** (`npm run corpus:gridserve -- <path>`). Whether `hybridDisassemble` decodes at addresses the linear sweep already holds, plus a served-against-decoded differential and the timing. Drives the real `dispatch` with a wrapped Capstone handle. A census and a stopwatch; only the differential could become a gate. Writes no artifacts. |
 | `compare.mjs` | Base-vs-change diff over two artifact directories. Plain node. `corpus:arm64` is not in its scope — it writes no artifacts and is compared by reading its own report. |
