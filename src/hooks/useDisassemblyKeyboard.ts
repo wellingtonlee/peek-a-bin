@@ -30,7 +30,7 @@ import type { BasicBlock } from "../disasm/cfg";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
-import { type DisplayRow, rowAddress } from "./useDisassemblyRows";
+import { type DisplayRow, rowAddress, seekAddressableRow } from "./useDisassemblyRows";
 import type { UseDisassemblySearchResult } from "./useDisassemblySearch";
 import type { ContextMenuState } from "./useInsnContextMenu";
 import { type AppAction, type AppState, getDisplayName } from "./usePEFile";
@@ -400,17 +400,22 @@ export function useDisassemblyKeyboard({
 
       const scrollAmount = e.key === "PageUp" || e.key === "PageDown" ? 40 : 1;
 
+      // `seekAddressableRow` rather than a bare index: a separator carries no
+      // address, and dispatching nothing left the cursor stuck on it forever,
+      // because the next press recomputed the same index (peek-a-bin-a5sw).
       if (e.key === "ArrowDown" || e.key === "PageDown") {
         e.preventDefault();
-        const newIdx = Math.min(currentIndex + scrollAmount, rows.length - 1);
-        const addr = rowAddress(rows[newIdx]);
+        const target = Math.min(currentIndex + scrollAmount, rows.length - 1);
+        const idx = seekAddressableRow(rows, currentIndex, target);
+        const addr = idx === null ? null : rowAddress(rows[idx]);
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
 
       if (e.key === "ArrowUp" || e.key === "PageUp") {
         e.preventDefault();
-        const newIdx = Math.max(currentIndex - scrollAmount, 0);
-        const addr = rowAddress(rows[newIdx]);
+        const target = Math.max(currentIndex - scrollAmount, 0);
+        const idx = seekAddressableRow(rows, currentIndex, target);
+        const addr = idx === null ? null : rowAddress(rows[idx]);
         if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
       }
     },

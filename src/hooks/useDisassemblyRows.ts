@@ -21,6 +21,45 @@ export function rowAddress(row: DisplayRow): number | null {
   return null;
 }
 
+/**
+ * The row a cursor move should land on, skipping rows that carry no address.
+ *
+ * A separator is the only {@link DisplayRow} `rowAddress` answers `null` for,
+ * and the cursor is identified by an *address* — so a move that lands on one has
+ * nothing to dispatch. Both arrow branches used to give up at that point, which
+ * left the cursor **permanently** stuck: nothing about the state changed, so the
+ * next press recomputed the same index and declined again. Separators sit after
+ * every `ret`/`retn`/`jmp`/`int3` not immediately followed by a label, so in a
+ * real listing that is most function tails (`peek-a-bin-a5sw`).
+ *
+ * `from` and `to` are row indices, `to` already clamped by the caller. The
+ * search runs **outward from `to` in the direction of travel first**, so a
+ * one-row move behaves as "the next addressable row"; only if that finds
+ * nothing does it fall back to scanning *back* toward `from`, which is what
+ * lets a 40-row PageDown near the end of the list still land on the last
+ * addressable row instead of doing nothing.
+ *
+ * Returns `null` when no addressable row lies that way, and the caller should
+ * then leave the cursor alone — a downward key must never move the cursor up.
+ */
+export function seekAddressableRow(
+  rows: readonly DisplayRow[],
+  from: number,
+  to: number,
+): number | null {
+  const dir = Math.sign(to - from);
+  if (dir === 0) return null;
+  for (let i = to; i >= 0 && i < rows.length; i += dir) {
+    if (rowAddress(rows[i]) !== null) return i;
+  }
+  // Nothing beyond `to`; take the nearest addressable row between it and where
+  // we started, so the move still goes somewhere in the direction asked for.
+  for (let i = to - dir; i !== from; i -= dir) {
+    if (rowAddress(rows[i]) !== null) return i;
+  }
+  return null;
+}
+
 export function binarySearchRows(rows: DisplayRow[], address: number): number {
   let lo = 0;
   let hi = rows.length - 1;

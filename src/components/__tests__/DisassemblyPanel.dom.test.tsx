@@ -526,7 +526,7 @@ describe("the keyboard", () => {
    * the view SHOULD do, so the day it is fixed this test fails as passing and
    * must be un-`fails`ed.
    */
-  it.fails("steps over a separator row instead of stopping dead at it", async () => {
+  it("steps over a separator row instead of stopping dead at it", async () => {
     const user = userEvent.setup();
     const r = await mountReady({ currentAddress: A[4] }); // the `jmp`
     pane().focus();
@@ -534,7 +534,7 @@ describe("the keyboard", () => {
     expect(r.state().currentAddress).toBe(A[5]);
   });
 
-  it.fails("steps back over a separator row as well", async () => {
+  it("steps back over a separator row as well", async () => {
     const user = userEvent.setup();
     const r = await mountReady({ currentAddress: A[5] }); // just past the separator
     pane().focus();
@@ -542,22 +542,26 @@ describe("the keyboard", () => {
     expect(r.state().currentAddress).toBe(A[4]);
   });
 
-  it("is stuck at a separator today, in both directions — the shape of the defect above", async () => {
-    // Not a claim that this is right. It pins the CURRENT behaviour, so that a
-    // change to it is visible here as well as in the two `it.fails` above, and
-    // so the two of those cannot both be satisfied by a handler that has simply
-    // stopped responding.
+  it("keeps moving across repeated presses, so the cursor cannot wedge", async () => {
+    // The companion to the two above, and the reason they cannot both be
+    // satisfied by a handler that has merely stopped responding: the ORIGINAL
+    // defect was that repeating the key changed nothing, because `currentIndex`
+    // never moved and the next press recomputed the same row. Five presses must
+    // therefore land five addressable rows away, not one and then nothing.
     const user = userEvent.setup();
     const down = await mountReady({ currentAddress: A[4] });
     pane().focus();
     for (let i = 0; i < 5; i++) await user.keyboard("{ArrowDown}");
-    expect(down.state().currentAddress).toBe(A[4]);
+    // Five presses is more than the stream has rows below A[4], so this lands on
+    // the LAST instruction — a fact about the fixture, not a restatement of the
+    // rule under test.
+    expect(down.state().currentAddress).toBe(A[A.length - 1]);
     down.unmount();
 
     const up = await mountReady({ currentAddress: A[5] });
     pane().focus();
     for (let i = 0; i < 5; i++) await user.keyboard("{ArrowUp}");
-    expect(up.state().currentAddress).toBe(A[5]);
+    expect(up.state().currentAddress).toBe(A[0]);
   });
 
   it("crosses a LABEL row, which carries its function's address", async () => {

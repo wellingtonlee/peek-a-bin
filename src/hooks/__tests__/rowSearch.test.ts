@@ -1,13 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 
-// useDisassemblyRows pulls in the worker client, which constructs a `Worker` at
-// module load. There is no Worker in the node test environment, and these tests
-// exercise the module's pure search helpers, so stub the singleton away.
+// useDisassemblyRows pulls in the worker client. That USED to make this mock
+// mandatory -- the client constructed a `Worker` at module load and the node
+// environment has none, so the import threw -- but it builds on first use since
+// peek-a-bin-z8h1. The mock is kept for import weight alone: these tests
+// exercise the module's pure helpers and have no reason to drag the RPC surface
+// in. Nothing here would break without it.
 vi.mock("../../workers/disasmClient", () => ({ disasmWorker: {} }));
 
 import type { DisasmFunction, Instruction } from "../../disasm/types";
 import { binarySearchFunc } from "../useDerivedState";
-import { binarySearchRows, type DisplayRow, rowAddress } from "../useDisassemblyRows";
+import {
+  binarySearchRows,
+  type DisplayRow,
+  rowAddress,
+  seekAddressableRow,
+} from "../useDisassemblyRows";
 
 function insn(address: number, blockIdx = 0): DisplayRow {
   return {
@@ -209,5 +217,51 @@ describe("binarySearchFunc", () => {
       const actual = binarySearchFunc(many, target);
       expect(actual?.address ?? null, `0x${target.toString(16)}`).toBe(expected?.address ?? null);
     }
+  });
+});
+
+describe("seekAddressableRow", () => {
+  const SEP: DisplayRow = { kind: "separator" };
+  /** insn, SEP, insn, SEP, SEP, insn — indices 0..5. */
+  const rows: DisplayRow[] = [insn(0x1000), SEP, insn(0x1004), SEP, SEP, insn(0x1008)];
+
+  it("steps over a single separator going down", () => {
+    expect(seekAddressableRow(rows, 0, 1)).toBe(2);
+  });
+
+  it("steps over a single separator going up", () => {
+    expect(seekAddressableRow(rows, 2, 1)).toBe(0);
+  });
+
+  it("steps over a RUN of separators, not just one", () => {
+    // The defect was a cursor that could not move at all; a fix that skipped
+    // exactly one row would still wedge on `int3` padding.
+    expect(seekAddressableRow(rows, 2, 3)).toBe(5);
+    expect(seekAddressableRow(rows, 5, 4)).toBe(2);
+  });
+
+  it("lands on the row asked for when it already carries an address", () => {
+    expect(seekAddressableRow(rows, 0, 2)).toBe(2);
+  });
+
+  /**
+   * The PageDown case. A 40-row jump clamps to the end of the list, which may
+   * be a separator with nothing addressable beyond it — so the search falls
+   * back TOWARD where it started rather than giving up, or a page key near the
+   * bottom would do nothing while addressable rows sat between.
+   */
+  it("falls back toward the start when nothing addressable lies beyond", () => {
+    const trailing: DisplayRow[] = [insn(0x1000), insn(0x1004), SEP, SEP];
+    expect(seekAddressableRow(trailing, 0, 3)).toBe(1);
+  });
+
+  it("never moves the cursor backwards on a downward request", () => {
+    // Only separators below: the answer must be null, NOT the row behind us.
+    const trailing: DisplayRow[] = [insn(0x1000), SEP, SEP];
+    expect(seekAddressableRow(trailing, 0, 2)).toBeNull();
+  });
+
+  it("answers null for a move of zero rows", () => {
+    expect(seekAddressableRow(rows, 2, 2)).toBeNull();
   });
 });
