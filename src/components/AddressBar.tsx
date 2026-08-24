@@ -13,6 +13,7 @@ import { serializeState, validateImport } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 import { VIEW_TAB_LABELS } from "./analysisNotice";
 import { focusOnMount } from "./focusOnMount";
+import { tabId, tabPanelId } from "./tabIds";
 
 /**
  * The tab bar, in `VIEW_TABS` order with the labels the rest of the app uses.
@@ -58,6 +59,78 @@ export function AddressBar() {
   const containerRef = useRef<HTMLDivElement>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const addressInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * THE ROVING TABINDEX, and it follows FOCUS rather than selection.
+   *
+   * The WAI-ARIA tabs pattern promises a screen reader user that a tablist is
+   * ONE tab stop and that the arrows move between the tabs inside it. That
+   * promise is what made this bar's missing semantics worth filing rather than
+   * patching (peek-a-bin-w50c): `role="tab"` and `aria-selected` without the
+   * keyboard half announce "tab 3 of 9" and then the arrows do nothing, which is
+   * worse than nine plain buttons that never claimed to be a tab set.
+   *
+   * Exactly one button carries `tabIndex={0}` at any moment. Which one is
+   * {@link rovingTab}: the tab the user has focused while inside the bar, and
+   * the SELECTED tab whenever they are not — so tabbing back into the bar lands
+   * on the tab that is showing, not wherever the arrows were left. `focusedTab`
+   * is cleared on focus leaving the tablist, which is what makes that true; the
+   * `relatedTarget` test is how "leaving" is told from moving between two tabs
+   * inside it (a `null` relatedTarget — focus lost to the document — counts as
+   * leaving).
+   *
+   * MANUAL ACTIVATION: the arrows move focus and nothing else. Activation is the
+   * button's own Enter/Space, which is why there is no key handling for either
+   * here — a real `<button>` already fires `onClick` for both, and adding a
+   * second path would dispatch `SET_TAB` twice. The choice is forced by what a
+   * panel costs: `App`'s `tabComponents` marks `DisassemblyView` and `HexView`
+   * `lazy`, so automatic activation would dynamically import and mount both just
+   * for arrowing past them, and `mountedTabs` never unmounts — one sweep across
+   * the bar would permanently mount all nine panes and push nine `#tab=` history
+   * updates. The APG allows either and says automatic activation is for panels
+   * that are cheap to show; these are not.
+   */
+  const [focusedTab, setFocusedTab] = useState<ViewTab | null>(null);
+  const rovingTab = focusedTab ?? state.activeTab;
+  const tabRefs = useRef(new Map<ViewTab, HTMLButtonElement | null>());
+
+  const focusTab = useCallback((tab: ViewTab) => {
+    setFocusedTab(tab);
+    tabRefs.current.get(tab)?.focus();
+  }, []);
+
+  const handleTablistKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const from = VIEW_TABS.indexOf(rovingTab);
+      let target: number;
+      switch (e.key) {
+        // The arrows WRAP — the APG's own wording: "if focus is on the last tab,
+        // moves focus to the first tab". Home/End are absolute and need no
+        // clamping, being in range by construction.
+        case "ArrowRight":
+          target = from + 1;
+          break;
+        case "ArrowLeft":
+          target = from - 1;
+          break;
+        case "Home":
+          target = 0;
+          break;
+        case "End":
+          target = VIEW_TABS.length - 1;
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+      focusTab(VIEW_TABS[(target + VIEW_TABS.length) % VIEW_TABS.length]);
+    },
+    [rovingTab, focusTab],
+  );
+
+  const handleTablistBlur = useCallback((e: React.FocusEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) setFocusedTab(null);
+  }, []);
 
   const sortedFuncs = useSortedFuncs();
 
@@ -446,69 +519,115 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      {TABS.map((tab, i) => {
-        const isAnomalies = tab.id === "anomalies";
-        const anomalyCount = isAnomalies ? state.anomalies.length + state.aiScanResults.length : 0;
-        // A scan that failed or only partly ran produces few or no findings, so
-        // the count alone reads as a clean result. Flag it separately.
-        const scanNote = !isAnomalies
-          ? null
-          : state.aiScan.phase === "failed"
-            ? "AI scan failed — findings are not a clean result"
-            : state.aiScan.phase === "complete" && state.aiScan.failed > 0
-              ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
+      {/* THE TABLIST, and it wraps only the nine tabs.
+          The toolbar around it holds Open, Back/Forward, Undo/Redo, the address
+          box and the AI buttons, none of which are tabs — `role="tablist"` on the
+          toolbar itself would tell a screen reader there are twenty-odd tabs and
+          make the arrows step through controls that switch nothing. The wrapper
+          repeats the toolbar's own flex classes so it lays out identically; jsdom
+          performs no layout, so that is read rather than measured. */}
+      <div
+        role="tablist"
+        aria-label="Views"
+        className="flex items-center gap-1"
+        onKeyDown={handleTablistKeyDown}
+        onBlur={handleTablistBlur}
+      >
+        {TABS.map((tab, i) => {
+          const isAnomalies = tab.id === "anomalies";
+          const anomalyCount = isAnomalies
+            ? state.anomalies.length + state.aiScanResults.length
+            : 0;
+          // A scan that failed or only partly ran produces few or no findings, so
+          // the count alone reads as a clean result. Flag it separately.
+          const scanNote = !isAnomalies
+            ? null
+            : state.aiScan.phase === "failed"
+              ? "AI scan failed — findings are not a clean result"
+              : state.aiScan.phase === "complete" && state.aiScan.failed > 0
+                ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
+                : null;
+          const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
+          const maxSeverity =
+            isAnomalies && anomalyCount > 0
+              ? state.anomalies.some((a) => a.severity === "critical") ||
+                state.aiScanResults.some((a) => a.severity === "critical" || a.severity === "high")
+                ? "critical"
+                : state.anomalies.some((a) => a.severity === "warning") ||
+                    state.aiScanResults.some((a) => a.severity === "medium")
+                  ? "warning"
+                  : "info"
               : null;
-        const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
-        const maxSeverity =
-          isAnomalies && anomalyCount > 0
-            ? state.anomalies.some((a) => a.severity === "critical") ||
-              state.aiScanResults.some((a) => a.severity === "critical" || a.severity === "high")
-              ? "critical"
-              : state.anomalies.some((a) => a.severity === "warning") ||
-                  state.aiScanResults.some((a) => a.severity === "medium")
-                ? "warning"
-                : "info"
-            : null;
-        const badgeColor =
-          maxSeverity === "critical"
-            ? "bg-red-500"
-            : maxSeverity === "warning"
-              ? "bg-amber-500"
-              : maxSeverity === "info"
-                ? "bg-blue-500"
-                : "";
-        return (
-          <button
-            type="button"
-            key={tab.id}
-            onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
-            className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
-              state.activeTab === tab.id
-                ? "bg-blue-600 text-white"
-                : "text-gray-400 hover:text-white hover:bg-gray-700"
-            }`}
-            title={scanNote ? `${tab.label} (${i + 1}) — ${scanNote}` : `${tab.label} (${i + 1})`}
-            aria-label={scanNote ? `${tab.label} — ${scanNote}` : undefined}
-          >
-            {tab.label}
-            {isAnomalies && anomalyCount > 0 && (
-              <span
-                className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
-              >
-                {anomalyCount}
-              </span>
-            )}
-            {scanNote && (
-              <span
-                aria-hidden="true"
-                className={`${scanNoteColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
-              >
-                !
-              </span>
-            )}
-          </button>
-        );
-      })}
+          const badgeColor =
+            maxSeverity === "critical"
+              ? "bg-red-500"
+              : maxSeverity === "warning"
+                ? "bg-amber-500"
+                : maxSeverity === "info"
+                  ? "bg-blue-500"
+                  : "";
+          /* THE ACCESSIBLE NAME, which is not the label.
+             The count sits in a `<span>` inside the button with no separator, so
+             the Anomalies tab announced itself as the single string "Anomalies3"
+             — a screen reader reads "Anomalies3, button" with nothing saying what
+             the 3 counts (peek-a-bin-w50c, session 24). The badge is a glyph now
+             (`aria-hidden`) and the count is spelled into the name instead. Left
+             `undefined` when there is nothing to add, so an ordinary tab keeps
+             its content as its name and every existing by-name query still
+             resolves. */
+          const countLabel =
+            anomalyCount > 0 ? `${anomalyCount} finding${anomalyCount === 1 ? "" : "s"}` : null;
+          const ariaLabel =
+            countLabel || scanNote
+              ? [tab.label, countLabel, scanNote].filter(Boolean).join(" — ")
+              : undefined;
+          const isActive = state.activeTab === tab.id;
+          return (
+            <button
+              type="button"
+              key={tab.id}
+              id={tabId(tab.id)}
+              role="tab"
+              aria-selected={isActive}
+              /* The panel is `App`'s, and `App` renders a wrapper for every tab
+                 whether or not its component has been mounted yet — precisely so
+                 this reference always resolves. See `renderMainView`. */
+              aria-controls={tabPanelId(tab.id)}
+              tabIndex={tab.id === rovingTab ? 0 : -1}
+              ref={(el) => {
+                tabRefs.current.set(tab.id, el);
+              }}
+              onFocus={() => setFocusedTab(tab.id)}
+              onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
+              className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
+                isActive
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-400 hover:text-white hover:bg-gray-700"
+              }`}
+              title={scanNote ? `${tab.label} (${i + 1}) — ${scanNote}` : `${tab.label} (${i + 1})`}
+              aria-label={ariaLabel}
+            >
+              {tab.label}
+              {isAnomalies && anomalyCount > 0 && (
+                <span
+                  aria-hidden="true"
+                  className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
+                >
+                  {anomalyCount}
+                </span>
+              )}
+              {scanNote && (
+                <span
+                  aria-hidden="true"
+                  className={`${scanNoteColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
+                >
+                  !
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
 
       <div className="flex-1" />
 

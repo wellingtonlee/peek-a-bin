@@ -9,6 +9,7 @@ import { type AppState, VIEW_TABS, type ViewTab } from "../../hooks/usePEFile";
 import type { AIScanFinding } from "../../llm/types";
 import { AddressBar } from "../AddressBar";
 import { VIEW_TAB_LABELS } from "../analysisNotice";
+import { tabId, tabPanelId } from "../tabIds";
 import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
 
 /**
@@ -72,11 +73,22 @@ function renderBar(over: Partial<AppState> = {}) {
   return { dispatch, user: userEvent.setup() };
 }
 
-/** The tab buttons, in DOM order, identified by carrying a `(N)` in the title. */
+/**
+ * The tab buttons, in DOM order, identified by carrying a `(N)` in the title.
+ *
+ * BY TITLE AND NOT BY ROLE, deliberately, even though they are `role="tab"` now:
+ * this helper is what the 1-9 headline test below reads the advertised digit out
+ * of, and a helper that selected on the role would be assuming the very thing
+ * `AddressBar tablist semantics` sets out to check. `document.querySelectorAll`
+ * rather than `getAllByRole("button")` for the same reason — the role is what
+ * changed, and the previous spelling silently returned an empty list the moment
+ * it did, which turns four assertions about the bar into assertions about
+ * nothing.
+ */
 function tabButtons(): HTMLButtonElement[] {
-  return screen
-    .getAllByRole("button")
-    .filter((b): b is HTMLButtonElement => /\(\d\)$/.test(b.getAttribute("title") ?? ""));
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((b) =>
+    /\(\d\)$/.test(b.getAttribute("title") ?? ""),
+  );
 }
 
 const addressInput = () => screen.getByPlaceholderText("Go to address (G)");
@@ -105,13 +117,15 @@ describe("AddressBar tab bar", () => {
   it("marks the active tab, and only it", () => {
     renderBar({ activeTab: "strings" });
     const active = tabButtons().filter((b) => b.className.includes("bg-blue-600"));
-    // Asserted through the component's own class because these buttons carry no
-    // `aria-selected` — they are not in a `role="tablist"`, so there is no ARIA
-    // state to read. That is a real a11y gap and NOT fixed here; this test
-    // records what the component does, and would keep passing if the gap were
-    // closed by adding the attribute (the class would remain).
+    // BOTH CHANNELS, and the pairing is the point. The class is what a sighted
+    // user sees; `aria-selected` is what a screen reader is told, and until
+    // peek-a-bin-w50c the class was the only one of the two that existed — so
+    // the selected tab was conveyed exclusively through the one channel
+    // assistive technology cannot read. Asserting them together is what fails
+    // if a later change moves one and not the other.
     expect(active).toHaveLength(1);
     expect(active[0].textContent).toBe(VIEW_TAB_LABELS.strings);
+    expect(active[0].getAttribute("aria-selected")).toBe("true");
   });
 
   it("badges the anomalies tab with the combined static and AI finding count", () => {
@@ -122,6 +136,216 @@ describe("AddressBar tab bar", () => {
     const anomalies = tabButtons()[VIEW_TABS.indexOf("anomalies")];
     // 1 static + 2 AI. The badge is the only place the two lists are summed.
     expect(anomalies.textContent).toBe(`${VIEW_TAB_LABELS.anomalies}3`);
+  });
+});
+
+describe("AddressBar tablist semantics", () => {
+  /**
+   * peek-a-bin-w50c. The bar was nine plain buttons: no `role`, no
+   * `aria-selected`, no `aria-controls`, and the current tab conveyed only by a
+   * CSS class. The bead deliberately did not patch half of it, because the
+   * WAI-ARIA pattern is a bargain — the roles promise ONE tab stop and arrow
+   * navigation, and roles without the keyboard half tell a user "tab 3 of 9" and
+   * then leave the arrows dead.
+   *
+   * WHAT THESE TESTS ARE AND ARE NOT. Every assertion below is about the DOM the
+   * component builds and about where the component puts focus. jsdom runs no
+   * screen reader and no browser focus algorithm, so none of this is evidence
+   * that a reader announces the bar correctly or that a browser agrees about the
+   * tab order — see `src/test/domSetup.ts`. peek-a-bin-v2u (the manual browser
+   * pass) is still the only thing that can settle that, and it stays open.
+   */
+  const tabs = () => screen.getAllByRole("tab") as HTMLButtonElement[];
+
+  it("is one tablist holding exactly the nine view tabs", () => {
+    renderBar();
+    const list = screen.getByRole("tablist");
+    // Named, because a tablist with no accessible name is announced as an
+    // anonymous group. And scoped: the toolbar around it holds Open,
+    // Back/Forward, Undo/Redo and the AI buttons, none of which switch a view,
+    // so a `role="tablist"` on the toolbar itself would claim twenty-odd tabs.
+    expect(list.getAttribute("aria-label")).toBe("Views");
+    expect(within(list).getAllByRole("tab")).toHaveLength(VIEW_TABS.length);
+    expect(tabs().map((b) => b.textContent)).toEqual(VIEW_TABS.map((t) => VIEW_TAB_LABELS[t]));
+    // The tab bar and the tablist are the same nine buttons, not two overlapping
+    // sets: `tabButtons()` finds them by their `(N)` title and this finds them
+    // by role, so a role added to the wrong control fails here.
+    expect(tabs()).toEqual(tabButtons());
+  });
+
+  it("says which tab is selected in ARIA, not only in CSS", () => {
+    renderBar({ activeTab: "hex" });
+    const selected = tabs().filter((b) => b.getAttribute("aria-selected") === "true");
+    expect(selected).toHaveLength(1);
+    expect(selected[0].textContent).toBe(VIEW_TAB_LABELS.hex);
+    // The other eight must say `false` rather than omitting the attribute: an
+    // absent `aria-selected` on a `role="tab"` reads as "not selected" to most
+    // readers but is not the same statement, and the APG spells it on every tab.
+    for (const tab of tabs()) {
+      expect(tab.getAttribute("aria-selected")).toBe(tab === selected[0] ? "true" : "false");
+    }
+  });
+
+  it("points each tab at its own panel, and labels nothing else", () => {
+    renderBar();
+    // CORRESPONDENCE ONLY. This suite renders the bar with no panels at all
+    // (`App` owns those), so `aria-controls` here names ids nothing has — which
+    // is a property of the harness, not of the app. That the reference RESOLVES
+    // is asserted in `src/__tests__/App.dom.test.tsx`, where both halves are on
+    // screen together. Both are needed: this one fails if the bar stops using
+    // the shared minter, that one fails if App does.
+    for (const [i, tab] of VIEW_TABS.entries()) {
+      expect(tabs()[i].id).toBe(tabId(tab));
+      expect(tabs()[i].getAttribute("aria-controls")).toBe(tabPanelId(tab));
+    }
+  });
+
+  it("is a single tab stop, on the selected tab", async () => {
+    renderBar({ activeTab: "exports" });
+    // THE ROVING TABINDEX, stated as the invariant rather than as nine
+    // attributes: exactly one 0, all the rest -1. A static tabindex — every tab
+    // 0, which is what nine plain buttons were — puts nine stops in the Tab
+    // order and is the thing the ARIA pattern exists to remove.
+    const zeros = tabs().filter((b) => b.tabIndex === 0);
+    expect(zeros).toHaveLength(1);
+    expect(zeros[0].textContent).toBe(VIEW_TAB_LABELS.exports);
+    expect(tabs().filter((b) => b.tabIndex === -1)).toHaveLength(VIEW_TABS.length - 1);
+  });
+
+  it("walks into the bar once, however many tabs there are", async () => {
+    const { user } = renderBar({ activeTab: "exports" });
+    const seen: HTMLElement[] = [];
+    // Enough presses to cross the whole toolbar; what is asserted is how many
+    // of the NINE were reached, not where Tab ends up.
+    for (let i = 0; i < 14; i++) {
+      await user.tab();
+      const el = document.activeElement as HTMLElement;
+      if (tabs().includes(el as HTMLButtonElement)) seen.push(el);
+    }
+    expect(seen.map((e) => e.textContent)).toEqual([VIEW_TAB_LABELS.exports]);
+  });
+
+  it("moves focus with the arrows, and moves the tab stop with it", async () => {
+    const { dispatch, user } = renderBar({ activeTab: "disassembly" });
+    await user.click(tabs()[0]);
+    dispatch.mockClear();
+
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement?.textContent).toBe(VIEW_TAB_LABELS[VIEW_TABS[1]]);
+    // The stop follows FOCUS, not selection — otherwise shift-tabbing out and
+    // back would land somewhere the user did not leave from.
+    const zeros = tabs().filter((b) => b.tabIndex === 0);
+    expect(zeros).toHaveLength(1);
+    expect(zeros[0]).toBe(document.activeElement);
+
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement?.textContent).toBe(VIEW_TAB_LABELS[VIEW_TABS[0]]);
+  });
+
+  it("wraps at both ends, which is what the APG specifies", async () => {
+    const { dispatch, user } = renderBar();
+    await user.click(tabs()[0]);
+    dispatch.mockClear();
+    // "If focus is on the first tab, Left Arrow moves focus to the last tab."
+    // A clamp here is not a milder version of the rule, it is a different rule,
+    // and it is invisible anywhere but at the two ends.
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement?.textContent).toBe(
+      VIEW_TAB_LABELS[VIEW_TABS[VIEW_TABS.length - 1]],
+    );
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement?.textContent).toBe(VIEW_TAB_LABELS[VIEW_TABS[0]]);
+  });
+
+  it("jumps to the ends on Home and End", async () => {
+    const { dispatch, user } = renderBar();
+    await user.click(tabs()[3]);
+    dispatch.mockClear();
+    await user.keyboard("{End}");
+    expect(document.activeElement?.textContent).toBe(
+      VIEW_TAB_LABELS[VIEW_TABS[VIEW_TABS.length - 1]],
+    );
+    await user.keyboard("{Home}");
+    expect(document.activeElement?.textContent).toBe(VIEW_TAB_LABELS[VIEW_TABS[0]]);
+  });
+
+  it("does NOT select the tab the arrows land on", async () => {
+    const { dispatch, user } = renderBar({ activeTab: "disassembly" });
+    await user.click(tabs()[0]);
+    dispatch.mockClear();
+    await user.keyboard("{ArrowRight}{ArrowRight}{End}{Home}");
+    // MANUAL ACTIVATION, and the reason is a cost rather than a preference:
+    // `App` marks `DisassemblyView` and `HexView` lazy and never unmounts a
+    // visited tab, so automatic activation would import and permanently mount
+    // both just for arrowing past them. Four moves, no dispatch.
+    expect(dispatch).not.toHaveBeenCalled();
+    // And selection has not moved either: still the tab it started on.
+    expect(tabs().filter((b) => b.getAttribute("aria-selected") === "true")[0].textContent).toBe(
+      VIEW_TAB_LABELS.disassembly,
+    );
+  });
+
+  it("selects the focused tab on Enter and on Space", async () => {
+    const { dispatch, user } = renderBar({ activeTab: "disassembly" });
+    await user.click(tabs()[0]);
+    dispatch.mockClear();
+    await user.keyboard("{ArrowRight}");
+    await user.keyboard("{Enter}");
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: VIEW_TABS[1] });
+    dispatch.mockClear();
+    // Both come from the element being a real `<button>`; nothing in the
+    // component handles either key. Asserted anyway, because "manual activation"
+    // is only half implemented if the arrows move focus nothing can act on.
+    await user.keyboard(" ");
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: VIEW_TABS[1] });
+  });
+
+  it("returns the tab stop to the selected tab once focus leaves", async () => {
+    const { dispatch, user } = renderBar({ activeTab: "exports" });
+    await user.click(tabs()[0]);
+    dispatch.mockClear();
+    await user.keyboard("{ArrowRight}");
+    expect(tabs().filter((b) => b.tabIndex === 0)[0]).toBe(document.activeElement);
+
+    await user.click(addressInput());
+    const zeros = tabs().filter((b) => b.tabIndex === 0);
+    // Otherwise tabbing back in lands wherever the arrows were last left, which
+    // is not where the user is.
+    expect(zeros).toHaveLength(1);
+    expect(zeros[0].textContent).toBe(VIEW_TAB_LABELS.exports);
+  });
+
+  it("leaves an arrow alone when the bar does not have focus", async () => {
+    const { dispatch, user } = renderBar();
+    await user.keyboard("{ArrowRight}{ArrowLeft}{Home}{End}");
+    // The handler is on the tablist, not on `window`: the disassembly view owns
+    // the unmodified arrows and a window-level listener here would steal them.
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(tabs().some((b) => b === document.activeElement)).toBe(false);
+  });
+
+  it("names the anomalies tab with its count instead of running the two together", () => {
+    renderBar({
+      anomalies: [{ severity: "warning", title: "a", detail: "d" }],
+      aiScanResults: [aiFinding("high", "b")],
+    });
+    const anomalies = tabs()[VIEW_TABS.indexOf("anomalies")];
+    // The badge is inside the button with no separator, so the accessible name
+    // used to be the single string "Anomalies2" — read as "Anomalies2, button",
+    // with nothing whatever saying what the 2 counts (peek-a-bin-w50c, note 1).
+    // The glyph is `aria-hidden` now and the count is spelled into the name.
+    expect(anomalies.textContent).toBe(`${VIEW_TAB_LABELS.anomalies}2`);
+    expect(anomalies.getAttribute("aria-label")).toBe("Anomalies — 2 findings");
+    expect(anomalies.getAttribute("aria-label")).not.toMatch(/Anomalies\d/);
+  });
+
+  it("leaves a tab with nothing to add unnamed, so its label is its name", () => {
+    renderBar();
+    const headers = tabs()[VIEW_TABS.indexOf("headers")];
+    // An `aria-label` that merely repeats the content is a second declaration of
+    // the label; omitting it keeps `VIEW_TAB_LABELS` the only one.
+    expect(headers.getAttribute("aria-label")).toBeNull();
+    expect(screen.getByRole("tab", { name: VIEW_TAB_LABELS.headers })).toBe(headers);
   });
 });
 

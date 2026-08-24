@@ -30,6 +30,17 @@ const DOC = readFileSync(DOC_PATH, "utf-8");
  */
 const DOC_ONLY_KEYS = new Map([
   ["?", 'rendered in the panel footer ("Press ? to toggle this panel"), not as a row'],
+  // The view tablist's own keys (peek-a-bin-w50c). WIDGET-SCOPED, not global:
+  // they are live only while focus is inside the tab bar, and the unmodified
+  // arrows belong to the disassembly view everywhere else. Every other row of
+  // the `?` panel is a binding that works from anywhere, so listing these there
+  // would state something false about four very common keys — and the same job
+  // already has a global spelling in the panel, `1`-`9`. Documented in
+  // docs/keyboard.md, where the row can carry the scope in its own description.
+  ["left", "view tablist arrow navigation: live only while the tab bar has focus"],
+  ["right", "view tablist arrow navigation: live only while the tab bar has focus"],
+  ["home", "view tablist Home: live only while the tab bar has focus"],
+  ["end", "view tablist End: live only while the tab bar has focus"],
 ]);
 
 /** Spelling differences that survive canonicalization, mapped onto one token. */
@@ -254,6 +265,31 @@ describe("SHORTCUT_GROUPS ⇄ docs/keyboard.md", () => {
       ).toBe(true);
     },
   );
+});
+
+describe("DOC_ONLY_KEYS", () => {
+  /**
+   * THE EXEMPTION LIST IS ITSELF DRIFT-PRONE, and this was found by a negative
+   * control coming back INERT. Deleting the two tab-bar rows from
+   * docs/keyboard.md left four exemptions with nothing to exempt and the suite
+   * stayed green — because an exemption only ever *skips* a doc→panel check, so
+   * a key can silently leave the documentation while the entry that excused it
+   * from the panel stays behind, reading as if it were still documented.
+   *
+   * So each entry must name a key the doc actually documents. Same family as
+   * `build/guardShape.test.ts`: an instrument that judges the audit rather than
+   * the thing audited, because a guard whose population has quietly emptied
+   * passes by no longer looking.
+   */
+  it.each([...DOC_ONLY_KEYS.entries()])('"%s" is still in docs/keyboard.md', (token, reason) => {
+    expect(
+      docByToken.has(token),
+      `DOC_ONLY_KEYS exempts "${token}" from the "?" panel because it is ` +
+        `${reason} — but docs/keyboard.md no longer documents it anywhere. Either the ` +
+        `shortcut is gone and the exemption should go with it, or a doc row was ` +
+        `deleted by accident.`,
+    ).toBe(true);
+  });
 });
 
 describe("tab-switch range", () => {

@@ -20,6 +20,7 @@ import { FileLoader } from "./components/FileLoader";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
 import { Sidebar } from "./components/Sidebar";
+import { tabId, tabPanelId } from "./components/tabIds";
 import { buildDataWindows } from "./disasm/dataWindows";
 import { buildIATLookup } from "./disasm/operands";
 import { MAX_SYNC_FILE_METRIC_BYTES } from "./hooks/asyncMetricState";
@@ -761,18 +762,50 @@ export default function App() {
 
   const renderMainView = () => {
     if (!state.peFile) return null;
-    return tabComponents.map(({ key, Component, isLazy }) =>
-      mountedTabs.current.has(key) ? (
-        <div key={key} className={state.activeTab === key ? "h-full" : "hidden"}>
-          {/* ONE BOUNDARY PER PANE, and the placement is the whole point.
-              A single boundary around this map — which is what was here — put
-              every tab behind one `hasError`: a throw in the Hex view replaced
-              headers, sections, disassembly, imports, exports, strings,
-              resources and anomalies with the same fallback, and since the
-              boundary sat ABOVE the tab switch, changing tabs could not recover
-              it either. Every visited tab stays mounted (`mountedTabs`), so the
-              blast radius was every tab the user had ever opened
-              (peek-a-bin-p0qw). */}
+    return tabComponents.map(({ key, Component, isLazy }) => (
+      /* THE WRAPPER IS RENDERED FOR EVERY TAB; THE COMPONENT INSIDE IT IS NOT.
+         This used to return `null` for an unvisited tab, wrapper and all. The
+         wrapper is now unconditional so that `AddressBar`'s
+         `aria-controls={tabPanelId(key)}` always resolves to a real element:
+         a reference naming an id nothing has is worse than no reference,
+         because assistive technology is entitled to look it up and find
+         nothing — the same judgement `activeDescendantId` makes in
+         `components/listboxIds.ts` when it answers `undefined` rather than "".
+         It is also what the WAI-ARIA tabs pattern does: its inactive panels are
+         present and hidden, not absent.
+
+         WHAT DID NOT CHANGE is the mounting rule this exists beside. A tab's
+         COMPONENT still mounts only once the tab has been visited, so an empty
+         wrapper carries no cost and `DisassemblyView`/`HexView` are still not
+         imported until asked for. The empty ones are only ever the hidden ones:
+         `mountedTabs` takes `state.activeTab` above, so the SELECTED tab's
+         panel always has its component in it (peek-a-bin-w50c). */
+      <div
+        key={key}
+        id={tabPanelId(key)}
+        role="tabpanel"
+        aria-labelledby={tabId(key)}
+        /* A panel with no focusable content needs a tab stop of its own or a
+           keyboard user cannot reach the region they just switched to — and
+           most of these are static tables (headers, sections, imports, exports,
+           resources). Which panes those are is a runtime question about their
+           rendered content, not something this list knows, so every shown panel
+           gets the stop and the ones with focusable content pay one extra Tab.
+           Only the shown panel: the others are `display: none` in a browser and
+           must not be in the tab order at all. */
+        tabIndex={state.activeTab === key ? 0 : -1}
+        className={state.activeTab === key ? "h-full" : "hidden"}
+      >
+        {mountedTabs.current.has(key) ? (
+          /* ONE BOUNDARY PER PANE, and the placement is the whole point.
+             A single boundary around this map — which is what was here — put
+             every tab behind one `hasError`: a throw in the Hex view replaced
+             headers, sections, disassembly, imports, exports, strings,
+             resources and anomalies with the same fallback, and since the
+             boundary sat ABOVE the tab switch, changing tabs could not recover
+             it either. Every visited tab stays mounted (`mountedTabs`), so the
+             blast radius was every tab the user had ever opened
+             (peek-a-bin-p0qw). */
           <ErrorBoundary label={VIEW_TAB_LABELS[key]}>
             {isLazy ? (
               <Suspense
@@ -788,9 +821,9 @@ export default function App() {
               <Component />
             )}
           </ErrorBoundary>
-        </div>
-      ) : null,
-    );
+        ) : null}
+      </div>
+    ));
   };
 
   return (

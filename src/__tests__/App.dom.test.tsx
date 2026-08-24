@@ -10,6 +10,7 @@ import {
   timeoutBudgetInWords,
   VIEW_TAB_LABELS,
 } from "../components/analysisNotice";
+import { tabId, tabPanelId } from "../components/tabIds";
 import { VIEW_TABS } from "../hooks/usePEFile";
 import { buildMinimalPE64 } from "../pe/__tests__/fixtures";
 import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../pe/constants";
@@ -242,7 +243,7 @@ describe("App mounts", () => {
     // The tab bar is AddressBar's, derived from VIEW_TABS; its presence is how
     // we know the loader unmounted and the main view took over.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^Headers/ })).toBeTruthy();
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
     });
     expect(screen.queryByLabelText(/drop a pe file here/i)).toBeNull();
   });
@@ -367,20 +368,19 @@ describe("the notice's prose cannot disagree with the buttons", () => {
       //    collapsible "Sections (1)" header, so a name query for the tab
       //    matches two buttons in a loaded app.
       //  * A TAB BUTTON'S ACCESSIBLE NAME IS NOT ITS LABEL. The Anomalies tab
-      //    carries a count badge inside the button and the two run together
-      //    with no separator, so its name is the string "Anomalies3" — which a
-      //    screen reader reads as "Anomalies3, button", with nothing saying
-      //    what the 3 counts. Recorded here and left alone: it belongs with
-      //    `peek-a-bin-w50c` (the same bar has no tab semantics at all) and
-      //    with the browser pass, not with this file.
+      //    carries a count badge inside the button and the two ran together
+      //    with no separator, so its name was the string "Anomalies3" — read as
+      //    "Anomalies3, button", with nothing saying what the 3 counted. Fixed
+      //    with the tablist work (peek-a-bin-w50c): the badge is `aria-hidden`
+      //    and the name is now "Anomalies — 3 findings". The title query stays,
+      //    because the FIRST reason above is unaffected and the title is also
+      //    what carries the digit.
       //
       // The title also carries the 1-9 shortcut digit, so asserting on it
       // checks the thing CLAUDE.md says is derived — that the bar and its
       // `TAB_KEYS` map both come from `VIEW_TABS`, in that order.
       const title = `${label} (${VIEW_TABS.indexOf(tab) + 1})`;
-      const buttons = screen
-        .getAllByRole("button")
-        .filter((b) => b.getAttribute("title") === title);
+      const buttons = screen.getAllByRole("tab").filter((b) => b.getAttribute("title") === title);
       expect(buttons).toHaveLength(1);
       expect(buttons[0].textContent?.startsWith(label)).toBe(true);
     }
@@ -413,7 +413,10 @@ describe("the tab bar routes", () => {
    * through the pane's own class instead.
    */
   function panes(): HTMLElement[] {
-    // Each mounted tab is wrapped in a div that is either `h-full` or `hidden`.
+    // Each tab is wrapped in a div that is either `h-full` or `hidden`. All nine
+    // wrappers are rendered from the first file onward — see the tablist suite
+    // below for why — so this counts WRAPPERS, and whether a tab's component is
+    // mounted is a question about the wrapper's CONTENT.
     return Array.from(document.querySelectorAll<HTMLElement>("div.h-full, div.hidden")).filter(
       (el) => el.className === "h-full" || el.className === "hidden",
     );
@@ -423,7 +426,7 @@ describe("the tab bar routes", () => {
     render(<App />);
     const user = await openFile(resourceOnlyPE());
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^Headers/ })).toBeTruthy();
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
     });
 
     const visible = () => panes().filter((el) => el.className === "h-full").length;
@@ -435,9 +438,17 @@ describe("the tab bar routes", () => {
     await waitFor(() => {
       expect(visible()).toBe(1);
     });
-    // Two panes mounted now, exactly one of them shown: the previous tab stays
-    // in the tree, which is the behaviour `mountedTabs` exists to produce.
-    expect(panes().length).toBeGreaterThan(1);
+    // The previous tab stays MOUNTED, which is the behaviour `mountedTabs`
+    // exists to produce — and since every wrapper is now rendered whether or not
+    // its component is, that has to be asserted on the wrapper's content rather
+    // than on a pane count. `disassembly` is the tab a file opens on, so it is
+    // the one that was left: hidden, and still holding what it rendered.
+    const first = document.getElementById(tabPanelId("disassembly"));
+    expect(first?.className).toBe("hidden");
+    expect(first?.textContent).not.toBe("");
+    // And a tab nobody has opened has a wrapper with nothing in it: the wrapper
+    // exists so `aria-controls` resolves, not because the component was mounted.
+    expect(document.getElementById(tabPanelId("strings"))?.textContent).toBe("");
 
     // And the pane that is shown has the section in it. Worth asserting rather
     // than leaving implicit: `App` mounts a tab's component when the tab is
@@ -542,6 +553,115 @@ describe("a stalled stage is reported as timed out, not as a failed analysis", (
     // notice interpolates those words into the sentence saying it did not fail.
     expect(banner.textContent).not.toMatch(/analysis failed/i);
     expect(banner.textContent).not.toMatch(/ANALYSIS FAILED/);
+  });
+});
+
+describe("the tab bar and the panes are one tablist", () => {
+  /**
+   * THE HALF `AddressBar.dom.test.tsx` CANNOT ASK. The tabs are minted in
+   * `AddressBar.tsx` and the panels in `App.tsx`, so every ARIA reference here
+   * has one end in each file — and the bar's own suite renders no panels at all,
+   * so all it can check is that the bar uses the shared minter. Whether the
+   * reference RESOLVES is only answerable where both halves are on screen, which
+   * is here. That split is the point: this file fails if `App` stops rendering a
+   * wrapper or renames an id, the bar's file fails if the bar does, and neither
+   * failure implies the other.
+   *
+   * Asserted in BOTH DIRECTIONS deliberately — tab → panel and panel → tab.
+   * A one-directional check passes an arrangement where every tab points at the
+   * same panel, which is the shape a copy-paste error takes.
+   *
+   * WHAT IT IS NOT EVIDENCE OF: jsdom has no screen reader, so nothing here says
+   * a reader announces "Sections, tab 3 of 9" or reads the panel when the tab is
+   * activated. peek-a-bin-v2u stays open.
+   */
+  it("gives every tab a panel, and every panel back its tab", async () => {
+    render(<App />);
+    await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
+    });
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs).toHaveLength(VIEW_TABS.length);
+    for (const [i, tab] of VIEW_TABS.entries()) {
+      const el = tabs[i];
+      expect(el.id).toBe(tabId(tab));
+      const controls = el.getAttribute("aria-controls");
+      expect(controls).toBe(tabPanelId(tab));
+      // RESOLVED AGAINST THE DOCUMENT, which is the whole reason this test is in
+      // App's file: an `aria-controls` naming an id nothing has is a dangling
+      // reference that produces no error and no visible change.
+      const panel = document.getElementById(controls as string);
+      expect(panel, `nothing in the document has id ${controls}`).toBeTruthy();
+      expect(panel?.getAttribute("role")).toBe("tabpanel");
+      expect(panel?.getAttribute("aria-labelledby")).toBe(el.id);
+    }
+  });
+
+  it("shows exactly one panel and gives only that one a tab stop", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    await user.click(screen.getByTitle("Sections (3)"));
+
+    const panels = VIEW_TABS.map((t) => document.getElementById(tabPanelId(t)) as HTMLElement);
+    const shown = panels.filter((el) => el.className === "h-full");
+    expect(shown).toHaveLength(1);
+    expect(shown[0].id).toBe(tabPanelId("sections"));
+    // Only the shown panel is in the tab order. The hidden ones are
+    // `display: none` in a browser and must not be reachable by Tab; -1 keeps
+    // them out of it while still allowing a programmatic focus.
+    expect(panels.filter((el) => el.tabIndex === 0)).toEqual(shown);
+    expect(panels.filter((el) => el.tabIndex === -1)).toHaveLength(VIEW_TABS.length - 1);
+  });
+
+  it("moves aria-selected with the pane that is showing", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+
+    const selected = () =>
+      screen.getAllByRole("tab").filter((t) => t.getAttribute("aria-selected") === "true");
+    const shown = () =>
+      VIEW_TABS.map((t) => document.getElementById(tabPanelId(t)) as HTMLElement).filter(
+        (el) => el.className === "h-full",
+      );
+
+    // THE PAIRING IS THE ASSERTION. The selected tab and the shown panel are
+    // decided by two different expressions in two different files, both off
+    // `state.activeTab`; one notice rendering in two colours at once
+    // (peek-a-bin-n7q1) is what a pair like that looks like when it drifts.
+    expect(selected()[0].getAttribute("aria-controls")).toBe(shown()[0].id);
+    await user.click(screen.getByTitle("Sections (3)"));
+    await waitFor(() => {
+      expect(selected()).toHaveLength(1);
+    });
+    expect(selected()[0].getAttribute("aria-controls")).toBe(tabPanelId("sections"));
+    expect(shown()[0].id).toBe(tabPanelId("sections"));
+  });
+
+  it("keeps the digit shortcuts working, in the same order the bar advertises", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    // The tablist's arrows are a SECOND way to move between tabs and had to be
+    // reconciled with the documented 1-9 keys rather than layered on top: the
+    // arrows move focus only, the digits select. Pressed at the window with
+    // nothing in the bar focused, so this is the global path.
+    await user.keyboard("5");
+    await waitFor(() => {
+      const selected = screen
+        .getAllByRole("tab")
+        .filter((t) => t.getAttribute("aria-selected") === "true");
+      expect(selected[0].getAttribute("title")).toBe(`${VIEW_TAB_LABELS[VIEW_TABS[4]]} (5)`);
+    });
   });
 });
 
