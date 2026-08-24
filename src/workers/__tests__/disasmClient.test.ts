@@ -67,7 +67,14 @@ async function loadClient() {
   vi.stubGlobal("Worker", FakeWorker);
   vi.resetModules();
   const mod = await import("../disasmClient");
-  return { client: mod.disasmWorker, worker: FakeWorker.last!, mod };
+  // The watchdog's own module, out of the *same* graph. `resetModules` gives
+  // the client a fresh copy of every dependency, so a `WorkerTimeoutError`
+  // imported statically at the top of this file is a different class object
+  // from the one the client throws and `toBeInstanceOf` is false against it —
+  // an artefact of module reloading, not of the production path, where there is
+  // one graph.
+  const timeouts = await import("../requestTimeout");
+  return { client: mod.disasmWorker, worker: FakeWorker.last!, mod, timeouts };
 }
 
 /** The client singleton's type, which the module does not export by name. */
@@ -105,6 +112,70 @@ describe("DisasmWorkerClient — a wedged worker cannot hang callers forever", (
     // The watchdog must have been cancelled: advancing past the deadline may
     // not produce a late rejection.
     await vi.advanceTimersByTimeAsync(10 * 60_000);
+  });
+
+  /**
+   * peek-a-bin-meai. The timeout has to be *distinguishable* from a failure.
+   *
+   * One budget covers every method — correctly, since the worker is serial — so
+   * a legitimate run on a very large image can trip it, and App's analysis chain
+   * reported that as `analysisPhase: "failed"`, the same terminal state a
+   * truncated file produces. `analysisRejection` decides between the two on the
+   * error's *type*, so the watchdog has to mint one. Note the existing
+   * `rejects.toThrow(/timed out/)` above passes either way: that instrument
+   * cannot see this, which is why the class is asserted directly.
+   */
+  it("rejects with its own error type, not a bare Error", async () => {
+    const { client, timeouts } = await loadClient();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending = client.init();
+    const assertion = expect(pending).rejects.toBeInstanceOf(timeouts.WorkerTimeoutError);
+    await vi.advanceTimersByTimeAsync(timeouts.REQUEST_TIMEOUT_MS);
+    await assertion;
+  });
+
+  it("names the stalled RPC and the budget it waited out", async () => {
+    const { client, timeouts } = await loadClient();
+    const { REQUEST_TIMEOUT_MS } = timeouts;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending = client.init().catch((e) => e);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+    const err = (await pending) as InstanceType<typeof timeouts.WorkerTimeoutError>;
+    expect(err.method).toBe("init");
+    expect(err.timeoutMs).toBe(REQUEST_TIMEOUT_MS);
+    // The message is unchanged from the bare Error it replaces, so nothing that
+    // reads the text — the log line, the engine-unavailable notice for an
+    // `init` that never answers — moves with this.
+    expect(err.message).toBe(`Worker request 'init' timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+  });
+
+  /**
+   * The discrimination, in the direction that matters. Every other rejection
+   * path must stay an ordinary Error, or `analysisRejection` routes a genuine
+   * failure to the timeout notice and the defect comes back pointing the other
+   * way. A change that minted the class in `rejectAll` would satisfy the two
+   * assertions above.
+   */
+  it.each([
+    ["a worker error", (w: FakeWorker) => w.onerror?.({ message: "load failed" })],
+    ["a reply that cannot be deserialized", (w: FakeWorker) => w.onmessageerror?.({})],
+  ])("does not claim %s timed out", async (_label, provoke) => {
+    const { client, worker, timeouts } = await loadClient();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const pending = client.init();
+    provoke(worker);
+    const err = await pending.catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(timeouts.WorkerTimeoutError);
+  });
+
+  it("does not claim a rejecting worker method timed out", async () => {
+    const { client, worker, timeouts } = await loadClient();
+    const pending = client.init();
+    worker.replyError(worker.posted[0].id, "Capstone is unavailable");
+    const err = await pending.catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(timeouts.WorkerTimeoutError);
   });
 
   it("rejects everything outstanding when a reply fails structured clone", async () => {

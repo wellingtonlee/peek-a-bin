@@ -55,12 +55,28 @@ it is a record rather than a `!== "ready" && !== "failed"` chain because that sh
 newly added phase to "still analysing", i.e. to a spinner that can never resolve — which is
 what `"no-code"` was before it existed (peek-a-bin-bo3b).
 
+A third terminal value, `"timed-out"`, covers the run the request watchdog stopped.
+`REQUEST_TIMEOUT_MS` (`workers/requestTimeout.ts`) is one 5-minute budget for every RPC —
+correctly, since the worker is serial, so a cheap call legitimately queues behind a multi-minute
+`hybridDisassemble` — and every rejection used to reach the user as `"failed"`, which is exactly
+what a truncated or corrupt file produces. The two call for opposite responses, so the watchdog
+mints a `WorkerTimeoutError`, `analysisRejection()` in `components/analysisNotice.ts` routes it to
+this phase with its message kept verbatim, and `analysisNotice()`'s `"analysis-timed-out"` kind
+says the file is fine and the tool gave up. It is a *fault* (`isFault: true`, like
+`"engine-unavailable"` — the field means "something went wrong", not "the file is to blame") and
+it is ranked below the dead engine, because `init()` is watchdogged by the same timer so an engine
+that never answers is itself a timeout and its remedy is a page reload. Unlike every other fault
+it withholds no *tab*: `buildAllXrefs` is the last stage of the chain, so a timeout there leaves a
+complete disassembly with only the xrefs missing (peek-a-bin-meai). It has never fired on any
+binary available here — `detectFunctions` reaches 300 s at roughly 225 MiB of code — so it is
+verified by fixtures and negative controls and has never been rendered.
+
 An engine that never loaded at all is a third state, and it is not a phase. `disasmWorker.init()`
 rejecting records `AppState.disasmFailed` (`SET_DISASM_FAILED`, which sets `error` too, for the
 `FileLoader` case where no file is open yet), and `RESET` carries it across a load exactly as it
 carries `disasmReady` — Capstone is initialised once per tab, so a dead engine is still dead for
 the next file. `analysisNotice()` reports it as `"engine-unavailable"`, ranked below the two
-no-fault properties of the file and above `"analysis-failed"`; the detection effect additionally
+no-fault properties of the file and above both `"analysis-timed-out"` and `"analysis-failed"`; the detection effect additionally
 moves the phase to `"failed"` so nothing reads as still analysing, and it does so for both orders
 (a file opened after the engine died, and an engine that dies with one already open). Before this
 the rejection dispatched a bare `SET_ERROR`, which renders only in `FileLoader` — unmounted

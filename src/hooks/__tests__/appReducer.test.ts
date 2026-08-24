@@ -503,6 +503,38 @@ describe("appReducer — analysis results", () => {
     expect(ANALYSIS_IN_PROGRESS[next.analysisPhase]).toBe(false);
   });
 
+  /**
+   * peek-a-bin-meai. Same class again, third cause: the request watchdog stopped
+   * a stage that was still working, which is not the same event as the analysis
+   * failing — and was reported as "failed", the state a truncated file reaches.
+   */
+  it("SET_ANALYSIS_PHASE reaches the timed-out state without going through failed", () => {
+    const next = appReducer(initialState, { type: "SET_ANALYSIS_PHASE", phase: "timed-out" });
+    expect(next.analysisPhase).toBe("timed-out");
+    expect(ANALYSIS_IN_PROGRESS[next.analysisPhase]).toBe(false);
+  });
+
+  /**
+   * The reason the timeout is a *phase* rather than a flag beside "failed".
+   *
+   * A phase is single-valued and RESET returns it to "idle", so the fact cannot
+   * outlive the run it describes; a parallel boolean would need clearing here
+   * *and* wherever a re-analysis starts, and a stale one reports the next file's
+   * genuine parse failure as a timeout. Contrast `disasmFailed` directly below,
+   * which is carried across a load on purpose — Capstone is initialised once per
+   * tab, so a dead engine really is still dead for the next file.
+   */
+  it("RESET forgets a timeout while still carrying the engine's own death", () => {
+    const timedOut = run([
+      { type: "SET_DISASM_FAILED", error: "engine gone" },
+      { type: "SET_ANALYSIS_PHASE", phase: "timed-out" },
+    ]);
+    expect(timedOut.analysisPhase).toBe("timed-out");
+    const next = appReducer(timedOut, { type: "RESET" });
+    expect(next.analysisPhase).toBe("idle");
+    expect(next.disasmFailed).toBe("engine gone");
+  });
+
   it("a no-code image keeps everything the parser recovered", () => {
     // The whole point of the state: headers, sections, imports, exports,
     // resources and strings are all read normally for a resource-only DLL, so a

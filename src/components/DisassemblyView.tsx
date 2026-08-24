@@ -999,7 +999,14 @@ export function DisassemblyView() {
   // is actually looking at fell through to "Address 0x… is not within any
   // section", which is true and explains nothing (peek-a-bin-bo3b). The failure
   // and partial-detection kinds are still deliberately excluded — neither is a
-  // reason to replace the panel.
+  // reason to replace the panel. So is the timeout: a stage cut off by the
+  // request watchdog may have left this panel *complete*, since `buildAllXrefs`
+  // is the last stage of App's chain, so replacing it would delete a real
+  // disassembly in order to explain its absence — and where the panel is instead
+  // empty, the view's own request has its own message two branches down. Unlike
+  // peek-a-bin-b3jn there is nothing to contradict either: the engine is alive,
+  // so neither the `!state.disasmReady` spinner below nor the tab bar's claims
+  // anything is still loading (peek-a-bin-meai).
   // "Engine unavailable" joins the two file properties for the same reason they
   // joined each other: this panel can never populate in that state either, and
   // the alternative was the `!state.disasmReady` spinner three branches down,

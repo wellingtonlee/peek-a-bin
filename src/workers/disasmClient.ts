@@ -18,6 +18,7 @@ import { jumpTableTargets } from "../disasm/seeds";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
+import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "./requestTimeout";
 import { prepareBinaryArgs } from "./transfer";
 
 /**
@@ -50,22 +51,6 @@ interface PendingRequest {
   method: string;
   timer: ReturnType<typeof setTimeout>;
 }
-
-/**
- * Watchdog for every worker request.
- *
- * One timeout for all methods rather than per-method budgets: the worker
- * services messages serially on a single thread, so a cheap call (`configure`,
- * `resetStructRegistry`) can sit queued behind a whole-image
- * `hybridDisassemble` for minutes. A short per-method timeout would reject
- * those queued requests even though nothing is wrong.
- *
- * 5 minutes is far above any legitimate run — whole-image disassembly and
- * decompilation of a large PE are seconds to low minutes of CPU — but bounded,
- * so a wedged worker (infinite loop, unresolved WASM load) surfaces as a real
- * error instead of leaving this and every later request pending forever.
- */
-const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 class DisasmWorkerClient {
   private worker: Worker;
@@ -175,9 +160,11 @@ class DisasmWorkerClient {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
-        this.take(id)?.reject(
-          new Error(`Worker request '${method}' timed out after ${REQUEST_TIMEOUT_MS / 1000}s`),
-        );
+        // Its own type, not a bare Error: a caller has to be able to tell "this
+        // took too long" from "this failed", because the analysis chain reports
+        // every rejection as one terminal phase and the two mean opposite
+        // things to a user. The message is unchanged — see ./requestTimeout.ts.
+        this.take(id)?.reject(new WorkerTimeoutError(method, REQUEST_TIMEOUT_MS));
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, method, timer });
       try {

@@ -15,7 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { detectAnomalies } from "../../analysis/anomalies";
 import {
   ANALYSIS_IN_PROGRESS,
@@ -34,14 +34,17 @@ import {
 import { computeImphash } from "../../pe/metadata";
 import { extractStrings, parsePE } from "../../pe/parser";
 import { findCodeSection } from "../../pe/sections";
+import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "../../workers/requestTimeout";
 import {
   type AnalysisNoticeKind,
   analysisNotice,
+  analysisRejection,
   DECODER_DERIVED_TABS,
   DETECT_PASS_LABELS,
   formatPassList,
   formatTabList,
   PARSER_DERIVED_TABS,
+  timeoutBudgetInWords,
   VIEW_TAB_LABELS,
 } from "../analysisNotice";
 
@@ -456,6 +459,231 @@ describe("analysisNotice — the decode engine itself never loaded", () => {
   });
 });
 
+/**
+ * peek-a-bin-meai. The watchdog stopped a stage that was still working.
+ *
+ * `REQUEST_TIMEOUT_MS` is one budget for every RPC — correctly, since the worker
+ * services messages serially, so a cheap call legitimately queues behind a
+ * multi-minute `hybridDisassemble` — and every rejection in App's analysis chain
+ * reached the user as `analysisPhase: "failed"`, which is exactly what a
+ * truncated or corrupt file produces. The two call for opposite responses, so
+ * the state has to be its own one.
+ *
+ * NOT REACHABLE ON ANY BINARY HERE, and the whole suite is therefore fixtures:
+ * measured at 755ea94, `detectFunctions` is the sole budget setter at ~1335 ms
+ * per MiB of code and reaches 300 s at roughly 225 MiB of code, and no such file
+ * exists on this machine. So the wrong message has never been seen, and neither
+ * has the right one — the render step joins peek-a-bin-v2u.
+ */
+describe("analysisNotice — the analysis was stopped by the request watchdog", () => {
+  /** What `analysisRejection` records for a watchdog rejection, verbatim. */
+  const TIMED_OUT = new WorkerTimeoutError("detectFunctions", REQUEST_TIMEOUT_MS).message;
+
+  it("says the run was stopped, and states the budget the watchdog used", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.kind).toBe("analysis-timed-out");
+    expect(notice?.label).toBe("Analysis timed out");
+    // Read off the constant, not spelled: raising the budget must not leave the
+    // banner quoting the old one.
+    expect(notice?.detail).toContain(`${timeoutBudgetInWords(REQUEST_TIMEOUT_MS)} limit`);
+    expect(notice?.detail).toContain("5-minute limit");
+  });
+
+  // The whole point of the kind. A parse failure means the file is bad and there
+  // is nothing to do; this means the file is fine and the tool gave up.
+  it("says nothing is wrong with the file, which the failure notice cannot", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.detail).toContain("Nothing is wrong with the file");
+    expect(notice?.detail).toContain("Opening the file again");
+  });
+
+  // A fault — the same reading that makes "engine-unavailable" one. The field is
+  // "something went wrong", not "the file is to blame": the user has no
+  // disassembly and did not ask to stop. Asserted in the exhaustive table below
+  // as well; here for the contrast with the two no-fault kinds.
+  it("is a fault, unlike the two properties of the file", () => {
+    const timedOut = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(timedOut?.isFault).toBe(true);
+    expect(analysisNotice({ machine: ARMNT, phase: "failed", error: null })?.isFault).toBe(false);
+    expect(analysisNotice({ machine: I386, phase: "no-code", error: null })?.isFault).toBe(false);
+  });
+
+  /**
+   * The one place a fault withholds no tab, and the reason is measurable rather
+   * than tidy.
+   *
+   * The three kinds that name DECODER_DERIVED_TABS can never populate the
+   * disassembly. A timeout can, and routinely does: `buildAllXrefs` is the last
+   * stage of App's chain, so a timeout there leaves a complete function list and
+   * a complete disassembly on screen with only the xrefs missing. "Still
+   * available: <everything else>" over a fully populated panel is false, and the
+   * banner gates that list on this array being non-empty — so leaving it empty
+   * is what keeps the false claim out. `partial-detection` is the precedent.
+   */
+  it("does not claim the disassembly is unavailable, because it may be complete", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.unavailableTabs).toEqual([]);
+    // The half that is true in every case: nothing the parser produced depends
+    // on a worker reply at all.
+    expect(notice?.availableTabs).toEqual(PARSER_DERIVED_TABS);
+    expect(notice?.detail).toContain(formatTabList(PARSER_DERIVED_TABS));
+  });
+
+  // The conflation this kind exists to undo, asserted on the text: the words
+  // "Analysis failed" may not appear in the notice that says it did not.
+  it("does not describe itself as a failure", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.detail).not.toMatch(/fail/i);
+    expect(notice?.label).not.toMatch(/fail/i);
+  });
+
+  // The watchdog's own message names the RPC that was in flight, which is the
+  // one thing a developer reading a bug report needs. Interpolated rather than
+  // translated through a Record over the whole WorkerMethod union.
+  it("carries the watchdog's message, so the stalled stage is nameable", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.detail).toContain("detectFunctions");
+  });
+
+  it("still explains itself when the message was lost", () => {
+    const notice = analysisNotice({ machine: I386, phase: "timed-out", error: null });
+    expect(notice?.kind).toBe("analysis-timed-out");
+    expect(notice?.detail).toContain("was stopped.");
+  });
+
+  it("carries the omitted passes alongside the prose, as every kind does", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "timed-out",
+      error: TIMED_OUT,
+      omitted: ["jump-tables"],
+    });
+    expect(notice?.omittedPasses).toEqual(["jump-tables"]);
+  });
+
+  // Below the machine type, for the reason "no-code-section" is: an image with
+  // no decoder has no disassembly however long it is given, so naming the
+  // watchdog would send the user off to retry for nothing.
+  it("ranks below an unsupported architecture", () => {
+    const notice = analysisNotice({ machine: ARMNT, phase: "timed-out", error: TIMED_OUT });
+    expect(notice?.kind).toBe("unsupported-arch");
+  });
+
+  // Below the engine, which is the cause: `init()` is watchdogged by the same
+  // timer, so an engine that never answers is *itself* a timeout — and its
+  // remedy is a page reload rather than a retry.
+  it("ranks below a dead engine, which is the cause and not the symptom", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "timed-out",
+      error: TIMED_OUT,
+      engineError: "Worker request 'init' timed out after 300s",
+    });
+    expect(notice?.kind).toBe("engine-unavailable");
+  });
+
+  // And the discrimination that matters: an ordinary failure is still an
+  // ordinary failure. A branch that fired on any error would pass every
+  // assertion above.
+  it("does not fire for an analysis that really did fail", () => {
+    const notice = analysisNotice({
+      machine: I386,
+      phase: "failed",
+      error: "Analysis failed: bad section header",
+    });
+    expect(notice?.kind).toBe("analysis-failed");
+    expect(notice?.detail).toContain("bad section header");
+  });
+
+  it("says nothing at all while the analysis is still running", () => {
+    expect(analysisNotice({ machine: I386, phase: "detecting-functions", error: null })).toBeNull();
+  });
+});
+
+/**
+ * Which terminal phase a rejected chain reaches — the decision App's `catch`
+ * used to make inline, where no test could reach it.
+ */
+describe("analysisRejection tells the watchdog apart from a failure", () => {
+  it("routes a watchdog rejection to its own terminal phase", () => {
+    const err = new WorkerTimeoutError("hybridDisassemble", REQUEST_TIMEOUT_MS);
+    expect(analysisRejection(err)).toEqual({ phase: "timed-out", error: err.message });
+  });
+
+  /**
+   * The message is recorded verbatim, and that is load-bearing rather than
+   * incidental: `analysisNotice` interpolates it, so the "Analysis failed: "
+   * prefix the other branch adds would put those two words in the middle of the
+   * notice that exists to say the analysis did not fail.
+   */
+  it("does not prefix the watchdog's message with a failure", () => {
+    const err = new WorkerTimeoutError("detectFunctions", REQUEST_TIMEOUT_MS);
+    const { phase, error } = analysisRejection(err);
+    const notice = analysisNotice({ machine: I386, phase, error });
+    expect(notice?.kind).toBe("analysis-timed-out");
+    expect(notice?.detail).not.toMatch(/fail/i);
+  });
+
+  // Everything that is not the watchdog keeps its exact previous behaviour,
+  // prefix included: a worker that threw, a structured-clone failure, a
+  // CapstoneUnavailableError flattened to text on its way across postMessage.
+  it.each([
+    ["an Error", new Error("bad section header"), "Analysis failed: bad section header"],
+    ["a string", "worker gone", "Analysis failed: worker gone"],
+  ])("leaves %s on the failed path, prefix and all", (_label, err, expected) => {
+    expect(analysisRejection(err)).toEqual({ phase: "failed", error: expected });
+  });
+
+  it("reaches the failure notice for anything that is not the watchdog", () => {
+    const { phase, error } = analysisRejection(new Error("bad section header"));
+    expect(analysisNotice({ machine: I386, phase, error })?.kind).toBe("analysis-failed");
+  });
+});
+
+describe("timeoutBudgetInWords states the budget rather than repeating it", () => {
+  it.each([
+    [5 * 60_000, "5-minute"],
+    [60_000, "1-minute"],
+    [10 * 60_000, "10-minute"],
+    // Not a whole number of minutes: seconds, rather than a rounded lie.
+    [90_000, "90-second"],
+    [1_000, "1-second"],
+  ])("%s ms reads as %s", (ms, words) => {
+    expect(timeoutBudgetInWords(ms)).toBe(words);
+  });
+
+  /**
+   * The claim is that the *prose* follows the constant, and asserting it against
+   * today's 5 minutes cannot see a hardcoded "5-minute" — that control is inert.
+   * So the watchdog module is replaced with a different budget and the notice
+   * re-imported on top of it: if the sentence were spelled out, this fails.
+   */
+  it("follows the constant rather than spelling today's value", async () => {
+    vi.resetModules();
+    vi.doMock("../../workers/requestTimeout", () => ({
+      REQUEST_TIMEOUT_MS: 90_000,
+      // The notice imports the class too, for `analysisRejection`. A plain
+      // subclass is enough: nothing in this test throws one.
+      WorkerTimeoutError: class extends Error {},
+    }));
+    try {
+      const { analysisNotice: withOtherBudget } = await import("../analysisNotice");
+      const notice = withOtherBudget({ machine: I386, phase: "timed-out", error: "stopped" });
+      expect(notice?.detail).toContain("90-second limit");
+      expect(notice?.detail).not.toContain("5-minute");
+    } finally {
+      vi.doUnmock("../../workers/requestTimeout");
+      vi.resetModules();
+    }
+  });
+
+  it("agrees with the watchdog's own arithmetic", () => {
+    const err = new WorkerTimeoutError("init", REQUEST_TIMEOUT_MS);
+    expect(err.message).toContain(`${REQUEST_TIMEOUT_MS / 1000}s`);
+    expect(timeoutBudgetInWords(REQUEST_TIMEOUT_MS)).toBe("5-minute");
+  });
+});
+
 describe("isFault separates what went wrong from what the file simply is", () => {
   // A table over every kind, so a sixth kind cannot be added without deciding
   // which side of the banner's red/amber split it belongs on. The four render
@@ -468,6 +696,7 @@ describe("isFault separates what went wrong from what the file simply is", () =>
     "unsupported-arch": false,
     "no-code-section": false,
     "engine-unavailable": true,
+    "analysis-timed-out": true,
     "analysis-failed": true,
     "partial-detection": false,
   };
@@ -476,6 +705,7 @@ describe("isFault separates what went wrong from what the file simply is", () =>
     "unsupported-arch": { machine: ARMNT, phase: "failed", error: null },
     "no-code-section": { machine: I386, phase: "no-code", error: null },
     "engine-unavailable": { machine: I386, phase: "failed", error: null, engineError: "dead" },
+    "analysis-timed-out": { machine: I386, phase: "timed-out", error: "timed out after 300s" },
     "analysis-failed": { machine: I386, phase: "failed", error: "boom" },
     "partial-detection": { machine: I386, phase: "ready", error: null, omitted: ["call-targets"] },
   };
@@ -495,7 +725,7 @@ describe("ANALYSIS_IN_PROGRESS covers every phase", () => {
     // record has not been widened to a partial/index-signature type — which is
     // how `phaseLabels` in StatusBar quietly stopped covering the union.
     const keys = Object.keys(ANALYSIS_IN_PROGRESS);
-    expect(keys.length).toBe(10);
+    expect(keys.length).toBe(11);
     for (const phase of keys) {
       expect(typeof ANALYSIS_IN_PROGRESS[phase as AnalysisPhase]).toBe("boolean");
     }
@@ -506,6 +736,7 @@ describe("ANALYSIS_IN_PROGRESS covers every phase", () => {
     expect(ANALYSIS_IN_PROGRESS.ready).toBe(false);
     expect(ANALYSIS_IN_PROGRESS.failed).toBe(false);
     expect(ANALYSIS_IN_PROGRESS["no-code"]).toBe(false);
+    expect(ANALYSIS_IN_PROGRESS["timed-out"]).toBe(false);
     for (const phase of [
       "parsing",
       "detecting-functions",
@@ -723,6 +954,26 @@ describe("every surface that reports a failure uses the shared decision", () => 
     expect(notice).toBeGreaterThan(-1);
     expect(spinner).toBeGreaterThan(-1);
     expect(notice).toBeLessThan(spinner);
+  });
+
+  /**
+   * peek-a-bin-meai, and the same shape as the two guards above.
+   *
+   * The notice is unreachable unless App's analysis chain actually dispatches
+   * the phase — and what it dispatched was a hardcoded `"failed"` with the
+   * watchdog's message wearing an "Analysis failed: " prefix, for every
+   * rejection alike. A `catch` body is unreachable by any test here, so what can
+   * be checked is that the decision is taken by the pure function above rather
+   * than inline; the absence assertion is the shape of the body it replaces, so
+   * a revert fails here rather than reading green.
+   */
+  it("App takes the terminal phase for a rejection from the shared decision", () => {
+    const source = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(source).toMatch(/analysisRejection\(err\)/);
+    // The inline body this replaces. `phase: "failed"` on its own is still
+    // there and still correct — the dead-engine early return dispatches it —
+    // so what is asserted absent is the prefix that only ever appeared here.
+    expect(source).not.toMatch(/error: `Analysis failed: \$\{/);
   });
 
   it("the status bar has no label for a phase it cannot render", () => {

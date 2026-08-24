@@ -10,7 +10,7 @@ import {
 } from "react";
 import { detectAnomalies } from "./analysis/anomalies";
 import { detectDriver } from "./analysis/driver";
-import { analysisNotice, formatTabList } from "./components/analysisNotice";
+import { analysisNotice, analysisRejection, formatTabList } from "./components/analysisNotice";
 import { FileLoader } from "./components/FileLoader";
 import { HeaderView } from "./components/HeaderView";
 import { SectionTable } from "./components/SectionTable";
@@ -432,14 +432,19 @@ export default function App() {
           });
       })
       // Without this, any worker failure in the chain above left analysisPhase
-      // pinned on its last value forever, with a spinner and no feedback.
+      // pinned on its last value forever, with a spinner and no feedback. Which
+      // terminal phase, and what message, is `analysisRejection`'s decision and
+      // not this callback's: the request watchdog stopping a stage that was
+      // still working is not the same event as the analysis failing, and
+      // reporting both as "failed" told a user whose large image merely needed
+      // longer the same thing as a user who dropped a truncated file
+      // (peek-a-bin-meai). Nothing here can be reached by a test, which is why
+      // the decision is a pure function elsewhere.
       .catch((err) => {
-        console.error("[peek-a-bin] analysis failed", err);
-        dispatch({ type: "SET_ANALYSIS_PHASE", phase: "failed" });
-        dispatch({
-          type: "SET_ERROR",
-          error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
+        console.error("[peek-a-bin] analysis stopped", err);
+        const { phase, error } = analysisRejection(err);
+        dispatch({ type: "SET_ANALYSIS_PHASE", phase });
+        dispatch({ type: "SET_ERROR", error });
       });
     // `disasmFailed` is listed because the early return above reads it: the
     // engine can reject *after* a file is open, and without it this effect never

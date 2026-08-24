@@ -26,6 +26,10 @@
 import { archForMachine, unsupportedArchMessage } from "../disasm/arch";
 import type { DetectPass } from "../disasm/functionDetect";
 import type { AnalysisPhase, ViewTab } from "../hooks/usePEFile";
+// A leaf that imports nothing, so this adds no edge to the worker singleton
+// `disasmClient.ts` constructs at module scope — see its docstring. The budget
+// is read rather than spelled, so the prose cannot disagree with the watchdog.
+import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "../workers/requestTimeout";
 
 /** Display names for the view tabs, for prose that has to name them. */
 export const VIEW_TAB_LABELS: Record<ViewTab, string> = {
@@ -80,7 +84,7 @@ export const DETECT_PASS_LABELS: Record<DetectPass, string> = {
 };
 
 /**
- * Which of the five situations this is.
+ * Which of the six situations this is.
  *
  * They are kept apart because the remedies differ: `"unsupported-arch"` is a
  * permanent property of the file and nothing is wrong; `"no-code-section"` is
@@ -88,15 +92,19 @@ export const DETECT_PASS_LABELS: Record<DetectPass, string> = {
  * one — the architecture is fine and there is simply no code;
  * `"engine-unavailable"` is a fault, and the only one that is not about this
  * file at all — the decoder itself never loaded, so no file this tab opens will
- * disassemble until the page is reloaded; `"analysis-failed"` is a genuine
- * fault whose message is worth reading; `"partial-detection"` is none of those
- * — the analysis finished and the disassembly is there, but the function list
- * is short, which is the one state that looks entirely healthy on screen.
+ * disassemble until the page is reloaded; `"analysis-timed-out"` is a fault too
+ * and is likewise not about the file, but it is *this* run rather than the tab —
+ * the watchdog stopped a stage that was still working, so the same file may
+ * finish on another machine or with a larger budget; `"analysis-failed"` is a
+ * genuine fault whose message is worth reading; `"partial-detection"` is none of
+ * those — the analysis finished and the disassembly is there, but the function
+ * list is short, which is the one state that looks entirely healthy on screen.
  */
 export type AnalysisNoticeKind =
   | "unsupported-arch"
   | "no-code-section"
   | "engine-unavailable"
+  | "analysis-timed-out"
   | "analysis-failed"
   | "partial-detection";
 
@@ -183,8 +191,23 @@ function omittedPassSentence(omitted: readonly DetectPass[]): string {
  * no decoder loaded died *of* that: `"analysis-failed"` would report the first
  * stage to throw, which is the symptom (peek-a-bin-b3jn).
  *
- * `omitted` ranks below all four, and for the same reason: it is a *consequence* of
- * either one, so an image with no decoder would otherwise be told about twice.
+ * `"analysis-timed-out"` ranks below `"engine-unavailable"` and above
+ * `"analysis-failed"`, and both halves are decided rather than appended. Below
+ * the engine because an `init` that never answers is itself timed out by the
+ * same watchdog, and its rejection lands in `engineError` — so a dead engine
+ * *is* the cause and "the analysis was cut off" would be its symptom, told to a
+ * user who needs to reload the page rather than wait. Below the two properties
+ * of the file for the reason the engine is: each survives any budget, so naming
+ * the watchdog would send the user off to retry an image that has no
+ * disassembly however long it is given. Above the failure because a run the
+ * watchdog stopped did not fail — the stage was still working — and
+ * `"analysis-failed"` would print the watchdog's own message as though it were
+ * a diagnosis of the file. It cannot in fact coincide with the failure, or with
+ * `"no-code"`: `phase` holds one value, and App dispatches this one *instead of*
+ * `"failed"` (peek-a-bin-meai).
+ *
+ * `omitted` ranks below all five, and for the same reason: it is a *consequence* of
+ * any of them, so an image with no decoder would otherwise be told about twice.
  * It stands alone only when the analysis is otherwise healthy — the case that
  * has no other signal at all, a dead Capstone under a supported architecture,
  * where detection keeps answering from `.pdata`/exports/entry/unwind and the
@@ -261,6 +284,48 @@ export function analysisNotice(input: {
       omittedPasses: omitted,
     };
   }
+  if (input.phase === "timed-out") {
+    const budget = timeoutBudgetInWords(REQUEST_TIMEOUT_MS);
+    // The watchdog's own message when the caller kept it, which names the RPC
+    // that was in flight. Interpolated rather than translated: the alternative
+    // is a `Record` of user-facing names over the whole `WorkerMethod` union,
+    // which is a lot of surface for one sentence, and the method name is the
+    // one thing here a developer reading a bug report needs. It must not arrive
+    // with `analysisRejection`'s `"Analysis failed: "` prefix on it — that
+    // prefix inside this notice is the very conflation the kind exists to undo.
+    const stopped = input.error
+      ? `The analysis did not finish within its ${budget} limit and was stopped: ${input.error}.`
+      : `The analysis did not finish within its ${budget} limit and was stopped.`;
+    return {
+      kind: "analysis-timed-out",
+      label: "Analysis timed out",
+      // A fault, on the same reading that makes `"engine-unavailable"` one:
+      // this field is "something went wrong", not "the file is to blame". The
+      // file is fine and the run is not — the user has no disassembly and did
+      // not ask to stop. The two no-fault kinds are the ones where the amber
+      // banner is telling the user what their file simply *is*.
+      isFault: true,
+      detail:
+        `${stopped} Nothing is wrong with the file — it parsed normally, and an image can be ` +
+        `large enough to need longer than the limit legitimately, which is set so a wedged ` +
+        `engine cannot leave the page waiting for ever. Whatever finished before the limit is ` +
+        `on screen and is correct as far as it goes, and ${formatTabList(PARSER_DERIVED_TABS)} ` +
+        `are complete either way. Opening the file again runs the analysis again.`,
+      availableTabs: PARSER_DERIVED_TABS,
+      // Empty, and this is the one place it differs from every other fault.
+      // The three withholding kinds can never populate the disassembly; a
+      // timeout can, and routinely does — `buildAllXrefs` is the last stage of
+      // the chain, so a timeout there leaves a complete function list and a
+      // complete disassembly on screen and only the xrefs missing. Naming
+      // DECODER_DERIVED_TABS here would print "Still available: <everything
+      // else>" over a fully populated panel, which is false in exactly that
+      // case; and the banner gates that list on this array being non-empty, so
+      // leaving it empty is what keeps the claim out. `partial-detection` is the
+      // precedent: a degraded analysis withholds no *tab*.
+      unavailableTabs: [],
+      omittedPasses: omitted,
+    };
+  }
   if (input.phase === "failed") {
     // The chain's own message when it has one. It is the only description of
     // what actually went wrong, and it had no render site at all before this.
@@ -294,6 +359,53 @@ export function analysisNotice(input: {
     };
   }
   return null;
+}
+
+/**
+ * Which terminal phase a rejected analysis chain reaches, and what to record as
+ * its message.
+ *
+ * A pure function because nothing in this repo renders a component, so the
+ * inline `catch` body in `App`'s analysis effect is unreachable by any test —
+ * the same reason the notice itself lives here rather than in JSX. Two rules,
+ * and each is a way to be wrong:
+ *
+ * - A {@link WorkerTimeoutError} is `"timed-out"`, not `"failed"`. The class is
+ *   what makes that decidable; matching the message for "timed out" would be a
+ *   hand-written predicate over another module's error text.
+ * - The timeout message is recorded *verbatim*, without the `"Analysis failed: "`
+ *   prefix the other branch adds. `analysisNotice` interpolates this string into
+ *   the timeout notice, so the prefix would put "Analysis failed" in the middle
+ *   of the very notice that exists to say the analysis did not fail.
+ *
+ * Everything that is not the watchdog keeps its previous behaviour exactly,
+ * including the prefix — a worker that threw, a structured-clone failure, a
+ * `CapstoneUnavailableError` flattened to text on its way across `postMessage`
+ * (peek-a-bin-meai).
+ */
+export function analysisRejection(err: unknown): { phase: AnalysisPhase; error: string } {
+  if (err instanceof WorkerTimeoutError) {
+    return { phase: "timed-out", error: err.message };
+  }
+  return {
+    phase: "failed",
+    error: `Analysis failed: ${err instanceof Error ? err.message : String(err)}`,
+  };
+}
+
+/**
+ * The watchdog budget in prose: "5 minutes", or seconds when it is not a whole
+ * number of them.
+ *
+ * Derived from `REQUEST_TIMEOUT_MS` rather than written out, so raising the
+ * budget cannot leave the banner claiming the old one — the same reason the
+ * notices list `PARSER_DERIVED_TABS` instead of naming the tabs.
+ */
+export function timeoutBudgetInWords(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds % 60 !== 0) return `${seconds}-second`;
+  const minutes = seconds / 60;
+  return minutes === 1 ? "1-minute" : `${minutes}-minute`;
 }
 
 /** "a, b and c" — the one list-to-prose rule, so two notices cannot punctuate differently. */

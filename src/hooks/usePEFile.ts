@@ -79,7 +79,24 @@ export type AnalysisPhase =
    * parser-derived tab is populated — see `analysisNotice`'s
    * `"no-code-section"` kind for what the user is told.
    */
-  | "no-code";
+  | "no-code"
+  /**
+   * Terminal, and not the same thing as `"failed"`: the analysis chain was cut
+   * off by the worker request watchdog.
+   *
+   * `REQUEST_TIMEOUT_MS` is one budget for every RPC — correctly, since the
+   * worker services messages serially — so a legitimate run on a very large
+   * image can trip it. Reported as `"failed"`, that is the same terminal state
+   * a truncated or corrupt file produces, and the two call for opposite
+   * responses: a parse failure means the file is bad and there is nothing to
+   * do, a timeout means the file is fine and the tool gave up. Its own value
+   * rather than a boolean beside `"failed"`, because a phase is single-valued
+   * and every load dispatches `"parsing"` over it — a parallel flag would need
+   * clearing at load *and* at re-analysis, and a stale one reports the next
+   * file's genuine parse failure as a timeout. See `analysisNotice`'s
+   * `"analysis-timed-out"` kind for what the user is told (peek-a-bin-meai).
+   */
+  | "timed-out";
 
 /**
  * Whether a phase means analysis is still in flight.
@@ -102,6 +119,7 @@ export const ANALYSIS_IN_PROGRESS: Record<AnalysisPhase, boolean> = {
   ready: false,
   failed: false,
   "no-code": false,
+  "timed-out": false,
 };
 
 export interface AppState {
