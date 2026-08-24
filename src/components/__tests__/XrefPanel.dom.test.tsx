@@ -111,14 +111,20 @@ function fromColumn(): string[] {
   return rowTexts().map((c) => c[1]);
 }
 /**
- * The instruction-scope direction toggle, found by its own class rather than by
- * its accessible name: it reads "To"/"From", and so does the sortable "To"
- * COLUMN HEADER, so a name query matches both. That collision is a real
- * readability wart in the component and is reported rather than worked around
- * in the source.
+ * The instruction-scope direction toggle, BY ITS ACCESSIBLE NAME. It used to be
+ * found by its class: its visible text reads "To"/"From" and so did the sortable
+ * "To" column header's, so a name query matched both and the workaround was the
+ * only way to tell them apart. The component now carries an `aria-label` on
+ * each, so the query that a user of the panel would make is the query this
+ * helper makes — which is the point of fixing it rather than working around it.
  */
 function directionToggle(): HTMLElement | null {
-  return document.querySelector("button.bg-gray-700");
+  return screen.queryByRole("button", { name: /^Reference direction:/ });
+}
+
+/** A sort header, by the name its `aria-label` gives it. */
+function sortHeader(what: "type" | "from address" | "to address"): HTMLElement {
+  return screen.getByRole("button", { name: new RegExp(`^Sort by ${what}`) });
 }
 
 describe("XrefPanel", () => {
@@ -190,10 +196,94 @@ describe("XrefPanel", () => {
     });
   });
 
+  /**
+   * WAS A REPORTED WART, NOW AN ASSERTION. The instruction-scope direction
+   * toggle reads "To"/"From" and the sortable "To" COLUMN HEADER read "To" —
+   * two buttons doing unrelated things under one accessible name, which is why
+   * `directionToggle()` above used to have to query by CSS class. A screen
+   * reader user got no way at all to tell them apart.
+   *
+   * NEITHER visible text could change: the toggle is a `text-[9px]` chip fifth
+   * in a row of chips inside a `flex-wrap` header, and each column header is a
+   * fixed-width cell (`w-12`/`w-32`) sitting over the row cell of the same
+   * width. So both carry `aria-label`s. This is jsdom, so what is asserted is
+   * the NAME COMPUTATION testing-library performs, not what any real assistive
+   * technology announces — CLAUDE.md's "the a11y work has never met a screen
+   * reader" still stands.
+   */
+  describe("accessible names", () => {
+    /** Every control in the header and the column strip — not the list rows. */
+    function controlNames(): string[] {
+      return Array.from(document.querySelectorAll("button"))
+        .filter((b) => !b.classList.contains("absolute"))
+        .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
+    }
+
+    /**
+     * WEAKER THAN IT LOOKS, AND MEASURED: it goes red only when BOTH labels are
+     * removed — the state the component was actually in. Removing either one
+     * alone leaves the two names distinct ("To" vs "Sort by to address"), so
+     * this row stays green while the collision is one edit away. The two
+     * targeted tests below are what guard each label; this one guards the
+     * property, and catches a THIRD control arriving with a name one of these
+     * already uses.
+     */
+    it("gives every control a name no other control shares", () => {
+      renderPanel({ currentInsnAddr: HELPER.address });
+      fireEvent.click(screen.getByRole("button", { name: "Insn" }));
+      const names = controlNames();
+      // The state that had the collision: the direction toggle only exists in
+      // the instruction scope, which is where the "To" header also lives.
+      expect(names.length).toBeGreaterThan(8);
+      expect(new Set(names).size).toBe(names.length);
+    });
+
+    it("names the direction toggle and the 'To' column differently", () => {
+      renderPanel({ currentInsnAddr: HELPER.address });
+      fireEvent.click(screen.getByRole("button", { name: "Insn" }));
+      // Both still SHOW "To"…
+      expect(directionToggle()?.textContent).toBe("To");
+      expect(sortHeader("to address").textContent).toBe("To");
+      // …and no button answers to the bare name any more, so neither query can
+      // reach the other's element.
+      expect(screen.queryAllByRole("button", { name: /^To$/ })).toHaveLength(0);
+      expect(directionToggle()).not.toBe(sortHeader("to address"));
+    });
+
+    it("states the sort direction in words, not only as an arrow", () => {
+      renderPanel();
+      // "From ▲" announces the glyph; the label says what it means. The name
+      // also has to change when the direction does, or it states the opposite
+      // of the arrow beside it.
+      expect(sortHeader("from address").getAttribute("aria-label")).toBe(
+        "Sort by from address, ascending",
+      );
+      expect(sortHeader("to address").getAttribute("aria-label")).toBe("Sort by to address");
+      fireEvent.click(sortHeader("from address"));
+      expect(sortHeader("from address").getAttribute("aria-label")).toBe(
+        "Sort by from address, descending",
+      );
+    });
+
+    it("re-labels the direction toggle when it is flipped", () => {
+      renderPanel({ currentInsnAddr: HELPER.address });
+      fireEvent.click(screen.getByRole("button", { name: "Insn" }));
+      const toggle = directionToggle();
+      if (!toggle) throw new Error("no direction toggle in the instruction scope");
+      expect(toggle.getAttribute("aria-label")).toBe("Reference direction: to this instruction");
+      fireEvent.click(toggle);
+      // The label states the CURRENT direction, as the visible text does — a
+      // label describing the ACTION would say the opposite of the word beside it.
+      expect(directionToggle()?.getAttribute("aria-label")).toBe(
+        "Reference direction: from this instruction",
+      );
+    });
+  });
+
   describe("sorting", () => {
     it("sorts by the 'to' address when that column header is clicked", () => {
       renderPanel();
-      fireEvent.click(screen.getByRole("button", { name: /^To/ }));
+      fireEvent.click(sortHeader("to address"));
       expect(rowTexts().map((c) => c[3])).toEqual([
         "0x140001000",
         "0x140001020",
@@ -204,7 +294,7 @@ describe("XrefPanel", () => {
 
     it("reverses on a second click of the same column, and marks the direction", () => {
       renderPanel();
-      const to = screen.getByRole("button", { name: /^To/ });
+      const to = sortHeader("to address");
       fireEvent.click(to);
       expect(to.textContent).toBe("To ▲");
       fireEvent.click(to);
@@ -219,10 +309,10 @@ describe("XrefPanel", () => {
 
     it("restarts ascending when the sort moves to a different column", () => {
       renderPanel();
-      const from = screen.getByRole("button", { name: /^From/ });
+      const from = sortHeader("from address");
       fireEvent.click(from); // already the sort key, so this flips to descending
       expect(from.textContent).toBe("From ▼");
-      const type = screen.getByRole("button", { name: /^Type/ });
+      const type = sortHeader("type");
       fireEvent.click(type);
       // A new column must not inherit the previous column's direction.
       expect(type.textContent).toBe("Type ▲");
@@ -233,9 +323,9 @@ describe("XrefPanel", () => {
 
     it("marks exactly one column at a time", () => {
       renderPanel();
-      expect(screen.getByRole("button", { name: /^From/ }).textContent).toBe("From ▲");
-      expect(screen.getByRole("button", { name: /^To/ }).textContent).toBe("To");
-      expect(screen.getByRole("button", { name: /^Type/ }).textContent).toBe("Type");
+      expect(sortHeader("from address").textContent).toBe("From ▲");
+      expect(sortHeader("to address").textContent).toBe("To");
+      expect(sortHeader("type").textContent).toBe("Type");
     });
   });
 

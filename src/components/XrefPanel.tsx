@@ -201,6 +201,19 @@ export function XrefPanel({
 
   const sortIndicator = (key: SortKey) => (sortKey === key ? (sortAsc ? " ▲" : " ▼") : "");
 
+  /**
+   * The accessible name of a sort header. The VISIBLE text cannot carry it: each
+   * header is a fixed-width cell (`w-12`/`w-32`) sitting over the row cell of the
+   * same width, so the word is a column label and lengthening it overflows the
+   * column. Two things this buys beyond the collision below — the name says the
+   * button SORTS rather than just naming a column, and the ▲/▼ that states the
+   * direction is a bare glyph in the announced name without it.
+   */
+  const sortLabel = (key: SortKey, what: string) =>
+    sortKey === key
+      ? `Sort by ${what}, ${sortAsc ? "ascending" : "descending"}`
+      : `Sort by ${what}`;
+
   const scopeBtn = (mode: ScopeMode, label: string) => {
     if (!scopeAvailable(mode)) return null;
     return (
@@ -254,8 +267,21 @@ export function XrefPanel({
           {scopeBtn("function", "Func")}
           {scopeBtn("instruction", "Insn")}
           {effectiveScope === "instruction" && (
+            /* Its visible text is "To"/"From", and so was the sortable "To"
+               COLUMN HEADER's — two buttons doing unrelated things under one
+               accessible name, which a screen reader gives no way to tell
+               apart. The text stays: this is a `text-[9px]` chip fifth in a
+               row of chips inside a wrapping header, and a longer word pushes
+               the filter input onto a second line. So the name is carried by
+               `aria-label`, and it states the CURRENT direction, because that
+               is what the visible label states. */
             <button
               type="button"
+              aria-label={
+                direction === "to"
+                  ? "Reference direction: to this instruction"
+                  : "Reference direction: from this instruction"
+              }
               onClick={() => setDirection((d) => (d === "to" ? "from" : "to"))}
               className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-700 text-gray-300 hover:bg-gray-600"
             >
@@ -280,6 +306,7 @@ export function XrefPanel({
       <div className="flex items-center px-3 py-0.5 border-b border-gray-800 text-gray-500 text-[10px] select-none shrink-0">
         <button
           type="button"
+          aria-label={sortLabel("type", "type")}
           className="w-12 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("type")}
         >
@@ -287,6 +314,7 @@ export function XrefPanel({
         </button>
         <button
           type="button"
+          aria-label={sortLabel("from", "from address")}
           className="w-32 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("from")}
         >
@@ -295,6 +323,7 @@ export function XrefPanel({
         <div className="w-36 shrink-0">Function</div>
         <button
           type="button"
+          aria-label={sortLabel("to", "to address")}
           className="w-32 shrink-0 text-left cursor-pointer hover:text-gray-300"
           onClick={() => toggleSort("to")}
         >
