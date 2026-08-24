@@ -44,6 +44,7 @@ import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import { extractStrings } from "../pe/parser";
 import type { SectionHeader } from "../pe/types";
+import { bytesOf } from "./blobSource";
 
 /**
  * Every method the worker answers.
@@ -508,8 +509,14 @@ export async function dispatch(
     }
 
     case "extractStrings": {
+      // `args.source` is the bytes, or a `Blob`/`File` handle to them that the
+      // main thread posted by reference to avoid copying the whole image. The
+      // read is the reason it is worth accepting one, and it happens here — see
+      // ./blobSource.ts. This is also the one parser-derived answer that comes
+      // back over this RPC, so it must stay reachable for every architecture,
+      // including one no decoder here supports (peek-a-bin-8ru3).
       const { strings, stringTypes } = extractStrings(
-        args.buffer,
+        await bytesOf(args.source),
         args.sections as SectionHeader[],
         args.imageBase,
         args.is64 as boolean | undefined,

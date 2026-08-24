@@ -18,6 +18,7 @@ import { jumpTableTargets } from "../disasm/seeds";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import type { SectionHeader } from "../pe/types";
+import { BlobSourceRegistry } from "./blobSource";
 import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "./requestTimeout";
 import { prepareBinaryArgs } from "./transfer";
 
@@ -93,6 +94,23 @@ class DisasmWorkerClient {
    * `DetectResult.jumpTableSpans`.
    */
   jumpTableSpans: [number, number][] = [];
+  /**
+   * `File` handles for buffers a caller has told us about, for `extractStrings`.
+   *
+   * That is the one method here whose argument is the *whole file* rather than a
+   * section, so the copy `prepareBinaryArgs` makes is the whole file too —
+   * ~0.4 ms per MiB on the main thread, which is where the copy is least
+   * affordable. A registered `Blob` is posted by reference instead and the
+   * worker reads it. The rule and its size check are `./blobSource.ts`'s, shared
+   * with `metricsClient.ts`; the registry is per-client so that being told is a
+   * fact about this client's wiring (peek-a-bin-736).
+   *
+   * Deliberately **not** cleared by {@link setImage}: it is a `WeakMap` on the
+   * buffer, so a registration dies with the file it describes and there is
+   * nothing to invalidate. A key that is still reachable is still correct.
+   */
+  private sourceBlobs = new BlobSourceRegistry("disasm worker");
+
   /**
    * The COFF machine type of the image every later decode belongs to, or
    * `undefined` when nothing has declared one.
@@ -212,6 +230,19 @@ class DisasmWorkerClient {
     this.decompileCache.clear();
     this.jumpTables = new Map();
     this.jumpTableSpans = [];
+  }
+
+  /**
+   * Record that `buffer` holds exactly the bytes of `blob`, so
+   * {@link extractStrings} can post the handle instead of a copy.
+   *
+   * Optional and fire-and-forget, exactly as on the metrics client: with no
+   * registration the buffer is copied as it always was, which is what the two
+   * load paths that have no `File` — a recent file out of IndexedDB, the bundled
+   * demo binary via `fetch` — keep doing.
+   */
+  registerSourceBlob(buffer: ArrayBuffer, blob: Blob): void {
+    this.sourceBlobs.register(buffer, blob);
   }
 
   /** How the declared image decodes; `"x86"` when nothing was declared. */
@@ -419,6 +450,18 @@ class DisasmWorkerClient {
     };
   }
 
+  /**
+   * Scan the image's data and code sections for strings, off the main thread.
+   *
+   * Takes the whole `ArrayBuffer` because that is what the scan indexes — every
+   * section is addressed by its absolute `pointerToRawData` — and it therefore
+   * used to be the one RPC whose argument copy was the whole file however small
+   * the region of interest. It still is, unless a source `Blob` has been
+   * registered for this buffer: then the handle goes over the wire instead and
+   * the worker reads the bytes itself (see {@link registerSourceBlob}). The
+   * answer is identical either way — `__tests__/dispatch.test.ts` asserts that
+   * over the same fixture — and callers pass the buffer regardless.
+   */
   async extractStrings(
     buffer: ArrayBuffer,
     sections: SectionHeader[],
@@ -426,7 +469,12 @@ class DisasmWorkerClient {
     is64?: boolean,
   ): Promise<{ strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }> {
     const result: { strings: [number, string][]; stringTypes: [number, "ascii" | "utf16le"][] } =
-      await this.send("extractStrings", { buffer, sections, imageBase, is64 });
+      await this.send("extractStrings", {
+        source: this.sourceBlobs.sourceFor(buffer),
+        sections,
+        imageBase,
+        is64,
+      });
     return {
       strings: new Map(result.strings),
       stringTypes: new Map(result.stringTypes),

@@ -319,9 +319,9 @@ describe("DisasmWorkerClient — byte arguments are sliced and transferred", () 
 
     void client.extractStrings(buffer, [], 0x140000000, true);
 
-    expect(worker.posted[0].args.buffer).not.toBe(buffer);
+    expect(worker.posted[0].args.source).not.toBe(buffer);
     expect(worker.transfers[0]).not.toContain(buffer);
-    expect(worker.received[0].args.buffer.byteLength).toBe(4096);
+    expect(worker.received[0].args.source.byteLength).toBe(4096);
     expect(buffer.byteLength).toBe(4096);
     expect(new Uint8Array(buffer, 1024, 1)[0]).toBe(0xcc);
   });
@@ -358,6 +358,156 @@ describe("DisasmWorkerClient — byte arguments are sliced and transferred", () 
     structuredClone({}, { transfer: [orphan.buffer] });
 
     await expect(client.detectFunctions(orphan, 0x1000, true)).rejects.toThrow(TypeError);
+  });
+});
+
+/**
+ * The source-blob registry, on the disasm client.
+ *
+ * `extractStrings` is the one method here whose argument is the whole image, so
+ * its copy is the whole image however little of it the scan reads — and that
+ * copy runs on the main thread. `App.tsx` registers the original `File` for the
+ * buffer it was read from and the handle goes over the wire instead.
+ *
+ * Two properties matter and neither is visible from a result: *what goes over
+ * the wire* (a Blob, and nothing in the transfer list), and *that the copy path
+ * is still the default* — two of the three load paths have no `File`, so a
+ * change that made the Blob path unconditional would break the demo binary and
+ * every recent file. The equivalence of the two arms is `dispatch.test.ts`'s
+ * (peek-a-bin-736).
+ */
+describe("DisasmWorkerClient — extractStrings source blob", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** A 4 KiB "file" with a 256-byte ".text" at offset 1024. */
+  function loadedFile() {
+    const buffer = new ArrayBuffer(4096);
+    new Uint8Array(buffer).fill(0xaa);
+    new Uint8Array(buffer, 1024, 256).fill(0xcc);
+    return buffer;
+  }
+
+  it("copies the buffer when no blob is registered", async () => {
+    // The common case: a recent file out of IndexedDB, or the bundled demo
+    // binary via fetch. Neither has a File, so this must stay the behaviour.
+    const { client, worker } = await loadClient();
+    const buffer = loadedFile();
+
+    void client.extractStrings(buffer, [], 0x400000, false);
+
+    expect(worker.posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+    expect(worker.posted[0].args.source).not.toBe(buffer);
+    expect(worker.transfers[0]).toHaveLength(1);
+  });
+
+  it("posts the blob by reference, transferring nothing, once registered", async () => {
+    const { client, worker } = await loadClient();
+    const buffer = loadedFile();
+    const blob = new Blob([buffer]);
+    client.registerSourceBlob(buffer, blob);
+
+    void client.extractStrings(buffer, [], 0x400000, false);
+
+    expect(worker.posted[0].args.source).toBe(blob);
+    // Nothing to transfer and nothing copied: that is the entire win.
+    expect(worker.transfers[0]).toHaveLength(0);
+    // The structured clone still delivers a Blob of the right size — which is
+    // what a plain postMessage of a File does, and it is O(1).
+    expect(worker.received[0].args.source).toBeInstanceOf(Blob);
+    expect(worker.received[0].args.source.size).toBe(4096);
+    // And the caller's file buffer is untouched, as it must be: the main thread
+    // keeps reading it through bufferRef, pe.buffer, HexView and entropy.
+    expect(buffer.byteLength).toBe(4096);
+    expect(new Uint8Array(buffer, 1024, 1)[0]).toBe(0xcc);
+  });
+
+  it("still sends the sections, image base and pointer width with a blob source", async () => {
+    // A Blob carries no PE metadata, so dropping these would leave the scan with
+    // nowhere to look — and it addresses every section by absolute
+    // pointerToRawData, which is why the whole image has to cross at all.
+    const { client, worker } = await loadClient();
+    const buffer = loadedFile();
+    client.registerSourceBlob(buffer, new Blob([buffer]));
+    const sections = [
+      {
+        name: ".rdata",
+        virtualAddress: 0x1000,
+        virtualSize: 256,
+        pointerToRawData: 1024,
+        sizeOfRawData: 256,
+        characteristics: 0x40000040,
+      },
+    ] as unknown as Parameters<DisasmClient["extractStrings"]>[1];
+
+    void client.extractStrings(buffer, sections, 0x140000000, true);
+
+    const sent = worker.posted[0].args;
+    expect(sent.sections).toBe(sections);
+    expect(sent.imageBase).toBe(0x140000000);
+    expect(sent.is64).toBe(true);
+  });
+
+  it("keys the registry per buffer, so another file still copies", async () => {
+    const { client, worker } = await loadClient();
+    const registered = loadedFile();
+    const other = loadedFile();
+    client.registerSourceBlob(registered, new Blob([registered]));
+
+    void client.extractStrings(other, [], 0x400000, false);
+
+    expect(worker.posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+  });
+
+  it("falls back to copying when the registered blob is the wrong size", async () => {
+    // A mis-paired handle — a stale closure, the previous load's File — would
+    // scan one image's bytes under another's section table. Cheap to catch,
+    // because Blob.size needs no read.
+    const { client, worker } = await loadClient();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const buffer = loadedFile();
+    client.registerSourceBlob(buffer, new Blob([new ArrayBuffer(512)]));
+
+    void client.extractStrings(buffer, [], 0x400000, false);
+
+    expect(worker.posted[0].args.source).toBeInstanceOf(ArrayBuffer);
+    expect(worker.transfers[0]).toHaveLength(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("survives a load, because setImage must not drop the registration", async () => {
+    // The registry is a WeakMap on the buffer, so a registration dies with the
+    // file it describes and there is nothing for setImage to invalidate. It is
+    // also the ordering App.tsx actually uses — setImage is called between the
+    // registration and the extractStrings call — so clearing it there would make
+    // the whole path dead on the only path that has a File.
+    const { client, worker } = await loadClient();
+    const buffer = loadedFile();
+    const blob = new Blob([buffer]);
+    client.registerSourceBlob(buffer, blob);
+    client.setImage(0x8664);
+
+    void client.extractStrings(buffer, [], 0x400000, false);
+
+    expect(worker.posted[0].args.source).toBe(blob);
+  });
+
+  it("does not send a machine type with extractStrings", async () => {
+    // The scan reads no instruction, so it is one of the methods that does not
+    // go through `decoded()`. A source handle must not change that: an
+    // architecture is not part of this question, and peek-a-bin-8ru3 turns on
+    // this method answering for an image no decoder here supports.
+    const { client, worker } = await loadClient();
+    const buffer = loadedFile();
+    client.setImage(0x1c4);
+    client.registerSourceBlob(buffer, new Blob([buffer]));
+
+    void client.extractStrings(buffer, [], 0x400000, false);
+
+    expect(worker.posted[0].args).not.toHaveProperty("machine");
   });
 });
 

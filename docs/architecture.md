@@ -441,6 +441,15 @@ The last table row is the counter-intuitive one: slicing wins even when the copy
 size, because a clone costs roughly two passes where a slice costs one memcpy plus O(1)
 ownership transfer. There is no size at which cloning is the better deal.
 
+**The one way out of the copy entirely is not to send bytes at all.** A `Blob` is
+structured-cloneable *by reference*, so where the caller has the original `File` it can post that
+instead and let the worker read it — see the metrics section below, which did it first, and
+`extractStrings`, which is the disasm worker's whole-file argument and now does the same
+(`peek-a-bin-736`). That is available only for a whole-file argument and only on the drop/browse
+path; a section window has no handle of its own, and two of the three load paths have no `File`.
+It also moves the read rather than removing it: the bytes are still read once, off the thread
+whose responsiveness the worker exists to protect.
+
 ### Worker-side split
 
 There are **two workers**. The disasm worker is three modules, split for testability:
@@ -450,6 +459,7 @@ There are **two workers**. The disasm worker is three modules, split for testabi
 | `src/workers/disasm.worker.ts` | The worker shell — `self.onmessage`, the Capstone WASM bootstrap, and the IndexedDB module cache |
 | `src/workers/dispatch.ts` | `dispatch(method, args, state)`, the RPC method switch, plus `WorkerMethod`, `WorkerRequest`, `WorkerState` and `createWorkerState()` |
 | `src/workers/transfer.ts` | `prepareBinaryArgs` — the args walk described above |
+| `src/workers/blobSource.ts` | `BlobSourceRegistry` and `bytesOf` — the other half of the same question, when a binary argument arrives as a `Blob`/`File` handle instead of the bytes. One declaration, shared by both clients and both dispatches |
 
 `disasm.worker.ts` cannot be imported outside a worker: it touches `self` and `indexedDB` and
 starts loading WASM at module-evaluation time. `dispatch.ts` touches none of those — the
@@ -509,6 +519,20 @@ Headers and Sections tabs still collapse into one request. What is *measured* is
 arms answer identically (`workers/__tests__/metricsDispatch.test.ts`, negative-controlled); the
 O(1) post is a spec property plus the earlier measurement of the copy it removes, since no test
 here spawns a real worker and no large real PE exists on this machine (`peek-a-bin-ex2`).
+
+**The disasm worker takes the same handle, for `extractStrings`** — the one RPC there whose binary
+argument is the whole image, because the scan addresses every section by its absolute
+`pointerToRawData`. `App.tsx` tells both workers, and the registry, its size check and the
+worker-side read live once in `src/workers/blobSource.ts` rather than twice, since two copies
+could disagree about the same handle. Measured at `e9e6eaa` over a 10.21 MiB Windows/amd64 PE
+built with `go` (`npm run corpus:uploadcost -- <path>`): the copy removed is **0.44-0.46 ms/MiB
+cold**, 0.39-0.52 over synthetic buffers from 0.5 to 200 MiB, so **~100-130 ms for a 253 MiB
+image** — which re-derives ex2's figure on a real image four times larger than anything it had.
+Read the copy's share of the work it feeds as a property of the *file* rather than of the tool:
+the scan reaches no decoder and its cost tracks how many strings it finds, so the copy is ~13% of
+the scan on that image against ~1% on a corpus binary. `extractStrings` is also the one
+parser-derived answer this RPC owes for an image whose architecture every decoder refuses, so the
+handle arm is deliberately no more gated than the buffer arm (`peek-a-bin-8ru3`, `peek-a-bin-736`).
 
 Inputs under the thresholds in `src/hooks/asyncMetricState.ts` — 256 KiB for the strip, 1 MiB
 for file metrics — stay synchronous and spawn no worker, so an ordinary binary never shows a

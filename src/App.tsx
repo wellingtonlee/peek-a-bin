@@ -659,6 +659,12 @@ export default function App() {
       // WeakMap keyed on this buffer, so nothing here has to be torn down — the
       // File becomes unreachable with the buffer it describes.
       if (file) metricsWorker.registerSourceBlob(buffer, file);
+      // And the disasm worker, for the same reason and with the same lifetime:
+      // `extractStrings` below is the one RPC whose argument is the whole image,
+      // so its copy is the whole image too. Told separately rather than through a
+      // shared registry, so that being told is a fact about each client's own
+      // wiring (peek-a-bin-736).
+      if (file) disasmWorker.registerSourceBlob(buffer, file);
       // The load handshake, and it must stay *above* the dispatch below.
       //
       // The architecture is a property of this file, and every later decode

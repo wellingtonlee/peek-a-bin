@@ -118,6 +118,14 @@ interface Row {
   hybrid: number;
   xrefs: number;
   copy: number;
+  /** Whole image, which is what `extractStrings` is charged for. */
+  fileMiB: number;
+  /** `extractStrings` through the real dispatch. */
+  strings: number;
+  /** `prepareBinaryArgs` over the whole-file argument that call takes. */
+  fileCopy: number;
+  /** `Blob.arrayBuffer()` over the same bytes: what the Blob route moves. */
+  blobRead: number;
 }
 
 async function measure(path: string): Promise<Row | null> {
@@ -186,6 +194,40 @@ async function measure(path: string): Promise<Row | null> {
     return performance.now() - t0;
   }, 25);
 
+  // The other RPC of a load whose argument is binary, and the only one whose
+  // argument is the WHOLE image: the scan addresses every section by its
+  // absolute `pointerToRawData`, so the buffer cannot be narrowed to the
+  // sections it reads without rebasing the scan. It reaches no decoder, which is
+  // why it is timed apart from the three above rather than added to them.
+  const stringArgs = {
+    source: buffer,
+    sections: pe.sections,
+    imageBase: pe.optionalHeader.imageBase,
+    is64: pe.is64,
+  };
+  let strings = 0;
+  for (let i = 0; i < 5; i++) {
+    const t0 = performance.now();
+    await dispatch("extractStrings", stringArgs, state);
+    strings = i === 0 ? performance.now() - t0 : Math.min(strings, performance.now() - t0);
+  }
+  const fileCopy = median(() => {
+    const t0 = performance.now();
+    prepareBinaryArgs(stringArgs);
+    return performance.now() - t0;
+  }, 25);
+  // What the Blob route moves onto the worker. Node's Blob copies at
+  // construction, so the construction is outside the timer and only the read is
+  // in it — and see printStrings on why this is not the browser's number.
+  const sourceBlob = new Blob([buffer]);
+  let blobRead = 0;
+  for (let i = 0; i < 9; i++) {
+    const t0 = performance.now();
+    await sourceBlob.arrayBuffer();
+    const dt = performance.now() - t0;
+    blobRead = i === 0 ? dt : Math.min(blobRead, dt);
+  }
+
   console.log(`${path.split("/").pop()} — ${arch}, .text ${(bytes.length / 1024).toFixed(0)} KiB`);
   console.log(`  region: ${checkOneRegion(buffer, text.pointerToRawData, text.sizeOfRawData)}`);
   return {
@@ -195,6 +237,10 @@ async function measure(path: string): Promise<Row | null> {
     hybrid,
     xrefs,
     copy,
+    fileMiB: buffer.byteLength / (1024 * 1024),
+    strings,
+    fileCopy,
+    blobRead,
   };
 }
 
@@ -230,6 +276,70 @@ function print(rows: Row[]): void {
   console.log("Both columns are linear in section size, so the last one is size-invariant:");
   console.log("extrapolate it, not the milliseconds. Wall clock on a loaded machine is not a");
   console.log("benchmark — read the order of magnitude, never the digits.");
+  printStrings(rows);
+}
+
+/**
+ * The same question for `extractStrings`, which is a different answer.
+ *
+ * It is the one RPC whose binary argument is the whole image rather than a
+ * section, so its copy is charged on the whole file — and it reaches no decoder,
+ * so the work that copy feeds is a linear scan and not a Capstone decode. Those
+ * two facts together make the fraction one to two orders of magnitude larger
+ * than the residency table above, which is why `peek-a-bin-736` came out the
+ * other way from `peek-a-bin-9a8`.
+ *
+ * READ IT AS A PROPERTY OF THE FILE, NOT OF THE TOOL — the opposite of the
+ * table above, and the reason this is printed separately rather than as another
+ * column. The scan's cost is dominated by the strings it finds, so its ms/MiB
+ * tracks string density: at `e9e6eaa` the `go` image reads ~2.8 ms/MiB against
+ * a corpus binary's 7-38, and the copy is ~13% of the scan there against ~1%
+ * here. A packed image with almost no plain text would push it higher still.
+ *
+ * THE `copy` COLUMN HERE READS LOW AND THE SYNTHETIC SWEEP BELOW IS THE ONE TO
+ * EXTRAPOLATE. By the time this runs, three decodes and a string scan have
+ * walked the whole buffer, so the copy is measured over hot pages: at `e9e6eaa`
+ * the `go` image reads ~0.13 ms/MiB here against **0.44-0.46 measured in a fresh
+ * process** and 0.39-0.52 in the sweep below. Take the cold figure, ~0.45 ms/MiB
+ * — which puts a 253 MiB image at roughly 100-130 ms, agreeing with the ~100 ms
+ * `peek-a-bin-ex2` measured for the same copy on the metrics path.
+ *
+ * `blob read` is what a `Blob` source moves ONTO the worker thread, and in a
+ * browser it is not this number: a `File` is backed by the file on disk, so the
+ * read is I/O (page cache, usually) rather than the memcpy Node measures here.
+ * What the number is good for is the shape of the trade — the bytes are still
+ * read once, just not on the thread that has to stay responsive. The column that
+ * matters is `copy`, because that one goes to zero.
+ */
+function printStrings(rows: Row[]): void {
+  console.log("");
+  console.log("extractStrings — the one RPC whose argument is the whole image");
+  console.log(
+    "image            file      scan  scan/MiB     copy   copy/MiB  % of scan   blob read",
+  );
+  for (const r of rows) {
+    console.log(
+      [
+        r.name.padEnd(14),
+        `${(r.fileMiB * 1024).toFixed(0).padStart(6)}K`,
+        `${r.strings.toFixed(1).padStart(8)}`,
+        `${(r.strings / r.fileMiB).toFixed(1).padStart(9)}`,
+        `${r.fileCopy.toFixed(3).padStart(8)}`,
+        `${(r.fileCopy / r.fileMiB).toFixed(3).padStart(10)}`,
+        `${((r.fileCopy * 100) / r.strings).toFixed(2).padStart(10)}%`,
+        `${r.blobRead.toFixed(3).padStart(11)}`,
+      ].join(" "),
+    );
+  }
+  console.log("");
+  console.log("`copy` is what a registered source Blob takes to zero: the handle is posted by");
+  console.log("reference and the worker reads the bytes itself (peek-a-bin-736). The bytes are");
+  console.log("still read once — off the thread that has to stay responsive, which is the whole");
+  console.log("claim. `% of scan` is a property of the FILE, not of the tool: the scan's cost");
+  console.log("tracks how many strings it finds, so a text-poor image raises it. Contrast the");
+  console.log("size-invariant last column of the table above. `copy` here is over HOT pages —");
+  console.log("three decodes and a scan have already walked the buffer — so it reads low; the");
+  console.log("synthetic sweep below is what to extrapolate (~0.45 ms/MiB cold).");
 }
 
 /**

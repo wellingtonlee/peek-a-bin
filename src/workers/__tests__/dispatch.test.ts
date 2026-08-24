@@ -315,7 +315,7 @@ describe("dispatch — extractStrings", () => {
     const result = await dispatch(
       "extractStrings",
       {
-        buffer,
+        source: buffer,
         sections: [
           {
             name: ".rdata",
@@ -345,7 +345,7 @@ describe("dispatch — extractStrings", () => {
     const result = (await dispatch(
       "extractStrings",
       {
-        buffer: new ArrayBuffer(0x100),
+        source: new ArrayBuffer(0x100),
         sections: [],
         imageBase: 0x400000,
       },
@@ -354,6 +354,131 @@ describe("dispatch — extractStrings", () => {
 
     expect(result.strings).toEqual([]);
     expect(result.stringTypes).toEqual([]);
+  });
+});
+
+/**
+ * The equivalence that the `Blob` source rests on.
+ *
+ * `App.tsx` hands `disasmClient` the original `File` when the drop/browse path
+ * produced one, and the client posts it by reference — so on that path *nothing*
+ * ever reads the image on the main thread and the only reader is this dispatch.
+ * If the two arms could disagree, the disagreement would be invisible: the file
+ * would still parse, still disassemble, still render, and only the Strings tab
+ * and every string xref built from it would be wrong, on large files, in a
+ * browser, with no test able to open the app.
+ *
+ * So the claim is asserted at full strength — the whole reply, both maps, not a
+ * spot check — and with a negative control, because a dispatch that quietly
+ * resolved the Blob to some other bytes would otherwise be indistinguishable
+ * from one that read it (peek-a-bin-736).
+ */
+describe("dispatch — extractStrings from a Blob", () => {
+  const MARKER = "ALPHA_MARKER_STRING";
+  const RDATA_RVA = 0x1000;
+  const IMAGE_BASE = 0x400000;
+
+  /** A `.rdata`-only image whose raw data is exactly `bytes`. */
+  const sectionsFor = (bytes: Uint8Array) => [
+    {
+      name: ".rdata",
+      virtualAddress: RDATA_RVA,
+      virtualSize: bytes.length,
+      pointerToRawData: 0,
+      sizeOfRawData: bytes.length,
+      characteristics: 0x40000040,
+    },
+  ];
+
+  /** `bytes` with `text` planted at `at`, NUL-terminated, in a 0x200 image. */
+  function imageWith(text: string, at = 0x100, length = 0x200): Uint8Array {
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i);
+    return bytes;
+  }
+
+  const run = (source: ArrayBuffer | Blob, bytes: Uint8Array) =>
+    dispatch(
+      "extractStrings",
+      {
+        source,
+        sections: sectionsFor(bytes),
+        imageBase: IMAGE_BASE,
+        is64: false,
+      },
+      state(),
+    ) as Promise<{ strings: [number, string][]; stringTypes: [number, string][] }>;
+
+  it("returns exactly what the ArrayBuffer arm returns, field for field", async () => {
+    const bytes = imageWith(MARKER);
+    const buffer = bytes.slice().buffer as ArrayBuffer;
+
+    const viaBuffer = await run(buffer, bytes);
+    const viaBlob = await run(new Blob([buffer]), bytes);
+
+    expect(viaBlob).toEqual(viaBuffer);
+    // Spelled out as well as compared, so a failure says which half moved — and
+    // so that a pair of empty replies could not satisfy the line above.
+    expect(viaBlob.strings.map(([, v]) => v)).toContain(MARKER);
+    expect(viaBlob.strings).toContainEqual([IMAGE_BASE + RDATA_RVA + 0x100, MARKER]);
+    expect(viaBlob.stringTypes).toContainEqual([IMAGE_BASE + RDATA_RVA + 0x100, "ascii"]);
+  });
+
+  it("accepts a File, which is the type the browser actually posts", async () => {
+    // `File extends Blob`; the resolution tests for Blob-ness, so this is the
+    // assertion that the subclass is not excluded by a narrower check.
+    const bytes = imageWith(MARKER);
+    const buffer = bytes.slice().buffer as ArrayBuffer;
+    const file = new File([buffer], "fixture.exe", { type: "application/octet-stream" });
+    expect(await run(file, bytes)).toEqual(await run(buffer, bytes));
+  });
+
+  it("reads the bytes out of the Blob rather than from anywhere else", async () => {
+    // Negative control. Every assertion above would still pass if the dispatch
+    // resolved a Blob to the wrong bytes in some consistent way, so the Blob
+    // here holds a *different* string of the same length and the answer must
+    // follow the Blob and not the buffer beside it.
+    const alpha = imageWith(MARKER);
+    const beta = imageWith("BETA_MARKER_STRING_");
+    expect(beta.length).toBe(alpha.length);
+
+    const viaBlob = await run(new Blob([beta]), alpha);
+    const values = viaBlob.strings.map(([, v]) => v);
+
+    expect(values).not.toContain(MARKER);
+    // Address as well as value: content alone is blind to a read that returns
+    // the right bytes in the wrong order, which would find the same string at a
+    // different offset. Checked — a `bytesOf` that swaps the Blob's halves
+    // satisfies `toContain` and fails this.
+    expect(viaBlob.strings).toContainEqual([IMAGE_BASE + RDATA_RVA + 0x100, "BETA_MARKER_STRING_"]);
+  });
+
+  it("agrees on a multi-part Blob split inside the string, at an odd length", async () => {
+    // A Blob is the concatenation of its parts and `Blob.arrayBuffer()` is the
+    // only place that concatenation happens. Splitting *inside* the marker is
+    // what makes a mis-ordered or short read produce two shorter strings rather
+    // than the same one; an odd total length rules out a whole-word read.
+    const bytes = imageWith(MARKER, 0x100, 0x201);
+    const whole = bytes.slice().buffer as ArrayBuffer;
+    const parts = new Blob([bytes.subarray(0, 0x108), bytes.subarray(0x108)]);
+
+    const viaParts = await run(parts, bytes);
+    expect(viaParts).toEqual(await run(whole, bytes));
+    expect(viaParts.strings.map(([, v]) => v)).toContain(MARKER);
+  });
+
+  it("rejects rather than answering from nothing when the Blob cannot be read", async () => {
+    // The File API's answer to a file that changed on disk is that the read
+    // fails, not that it returns the new bytes. `App.tsx` logs that and leaves
+    // the PE browsable without strings; what must never happen is a plausible
+    // string list computed from an empty or partial read.
+    const bytes = imageWith(MARKER);
+    const unreadable = {
+      size: bytes.length,
+      arrayBuffer: () => Promise.reject(new Error("NotReadableError")),
+    };
+    Object.setPrototypeOf(unreadable, Blob.prototype);
+    await expect(run(unreadable as unknown as Blob, bytes)).rejects.toThrow("NotReadableError");
   });
 });
 
@@ -941,7 +1066,7 @@ describe("dispatch — architecture routing", () => {
       const result = (await dispatch(
         "extractStrings",
         {
-          buffer: pe.buffer,
+          source: pe.buffer,
           sections: pe.sections,
           imageBase: pe.optionalHeader.imageBase,
           is64: false,
@@ -952,6 +1077,54 @@ describe("dispatch — architecture routing", () => {
       expect(result.strings.map(([, v]) => v)).toContain(marker);
       expect(result.stringTypes).not.toEqual([]);
       // And it reached no decoder to do it.
+      expect(s.cs32.seen).toEqual([]);
+      expect(s.csArm64.seen).toEqual([]);
+    });
+
+    /**
+     * peek-a-bin-736 on top of peek-a-bin-8ru3. `extractStrings` now accepts a
+     * `Blob` handle instead of the bytes, and this is the one method reached on
+     * an image whose architecture every decoder here refuses — so the two
+     * concerns meet at exactly one switch case. Source resolution happens
+     * *inside* the case and the arch gate is absent from it, and the assertion
+     * that has to keep holding is that the Blob arm is no more gated than the
+     * buffer arm: an image with no decoder still owes the Strings tab its
+     * contents however the bytes arrived.
+     */
+    it("extracts strings from a Blob handle on an image with no decoder", async () => {
+      const s = await armntState();
+      const marker = "peek-a-bin-armnt-blob-marker";
+      const data = new TextEncoder().encode(`${marker}\0`);
+      const image = buildMinimalPE32({
+        machine: ARMNT_MACHINE,
+        sections: [
+          {
+            name: ".rdata",
+            virtualAddress: 0x1000,
+            virtualSize: data.length,
+            data,
+            characteristics: 0x40000040,
+          },
+        ],
+      });
+      const pe = parsePE(image);
+      const args = {
+        sections: pe.sections,
+        imageBase: pe.optionalHeader.imageBase,
+        is64: false,
+      };
+
+      const viaBlob = (await dispatch(
+        "extractStrings",
+        { source: new Blob([pe.buffer]), ...args },
+        s,
+      )) as { strings: [number, string][]; stringTypes: [number, string][] };
+
+      expect(viaBlob.strings.map(([, v]) => v)).toContain(marker);
+      // Identical to the arm that was pinned before the handle existed, so the
+      // Blob path cannot be a narrower answer for this architecture.
+      expect(viaBlob).toEqual(await dispatch("extractStrings", { source: pe.buffer, ...args }, s));
+      // And still no decoder was reached to do it.
       expect(s.cs32.seen).toEqual([]);
       expect(s.csArm64.seen).toEqual([]);
     });
