@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { getApiRiskTag } from "../analysis/driver";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { parseOrdinalImport, resolveOrdinal } from "../pe/ordinalTables";
 import { clampPopup } from "../utils/clampPopup";
 
 interface XrefPopupState {
@@ -46,7 +47,26 @@ export function ImportsView() {
       .map((imp) => ({
         ...imp,
         functions: imp.functions
-          .map((fn, idx) => ({ name: fn, iatAddr: imp.iatAddresses[idx] ?? 0 }))
+          .map((fn, idx) => {
+            // An import that names no function carries only an ordinal, and for
+            // the DLLs pefile's `ordlookup` covers the ordinal IS a name — this
+            // is the same lookup `computeImphash` makes, through the same
+            // function, so the two cannot disagree about what ws2_32!115 is.
+            //
+            // Resolved HERE rather than at the point of render, so that the name
+            // a reader sees is also the name they can search for: a user typing
+            // "socket" is looking for the import, not for the string
+            // "Ordinal_23". `ordinal` is kept beside it because the resolved
+            // name is INFERRED FROM A TABLE and not read out of the file, and
+            // the row says so.
+            const ord = parseOrdinalImport(fn);
+            const resolved = ord === null ? undefined : resolveOrdinal(imp.libraryName, ord);
+            return {
+              name: resolved ?? fn,
+              ordinal: resolved ? ord : null,
+              iatAddr: imp.iatAddresses[idx] ?? 0,
+            };
+          })
           .filter((f) => f.name.toLowerCase().includes(filter.toLowerCase())),
       }))
       .filter(
@@ -146,6 +166,19 @@ export function ImportsView() {
                     return (
                       <li key={j} className="text-gray-300 flex items-center gap-2">
                         <span>{fn.name}</span>
+                        {/* The name came from a table, not from the file. Said
+                            on the row rather than left to the reader, because an
+                            ordinal import and a named one are different facts
+                            about the binary and a packer may have chosen the
+                            ordinal deliberately. */}
+                        {fn.ordinal !== null && (
+                          <span
+                            className="text-gray-500 text-[10px]"
+                            title={`Imported by ordinal ${fn.ordinal}; the name comes from pefile's ordlookup table, not from the file`}
+                          >
+                            #{fn.ordinal}
+                          </span>
+                        )}
                         {state.driverInfo?.isDriver &&
                           (() => {
                             const risk = getApiRiskTag(fn.name);

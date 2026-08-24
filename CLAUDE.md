@@ -95,7 +95,9 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
 
 - **`pe/`** — PE parser (headers, imports, exports, resources, authenticode). `ordinalTables.ts`
   is generated from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it
-  matches nothing. `sections.ts` owns `findCodeSection`/`isCodeSection`/`dataSectionRanges` (the
+  matches nothing. It also owns the **one declaration of the `Ordinal_<n>` spelling** —
+  `ORDINAL_IMPORT_PREFIX`, `formatOrdinalImport`, `parseOrdinalImport`, `resolveOrdinal` — because
+  that string is a *wire format* the parser writes and `computeImphash` reads back, not a label. `sections.ts` owns `findCodeSection`/`isCodeSection`/`dataSectionRanges` (the
   `.text`-or-executable predicate, previously written at seven sites). `buildSectionIndex()` +
   `rvaToFileOffsetIndexed()` in `parser.ts` are the batch form of `rvaToFileOffset`.
   `arm64Unwind.ts` decodes both ARM64 unwind encodings.
@@ -1233,6 +1235,22 @@ mistake.
 - **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf` / `rewriteBodies`, one declaration each.** `rewriteBodies` was a verbatim copy in `structure.ts` and `cleanup.ts` plus two specialisations under other names — four hand-synced `IRStmt` switches all ending in `default:`, so a new body-carrying kind would be returned unrecursed in every one, silently. Both now end in an exhaustive `never`. `for`'s `init` and `update` are single statements, not lists, so neither reaches inside them; a caller needing that wants `foldStmt`'s shape. (`peek-a-bin-svwt`)
 
 - **`+`, `-` and `*` do not model wraparound, and the const-const fold site has no width evidence to key one on.** `knownWidth` returns null for an `IRConst` deliberately — `IRConst.size` is the CPU *mode*, 8 for every immediate in a 64-bit binary, not the operand's width. Wrapping them with `| 0` / `Math.imul` the way the bitwise arms do **introduces** a defect: those go through `fold64`, these do not, so a correct 64-bit `add rax, 1` over the boundary becomes a negative constant. The class does not occur in this corpus and no gate can see either direction; `is64` is the only sound evidence and `fold.ts` deliberately imports only `ir.ts`. `fold.test.ts` carries `does not wrap an arithmetic fold to int32`. (`peek-a-bin-ivj5`)
+
+- **`Ordinal_<n>` is a WIRE FORMAT, not a label: `parsePE` writes it and `computeImphash` parses it
+  back out.** Nothing in the type system connects the two — they are in different files and neither
+  points at the other — so respelling the parser's output used to change every affected imphash
+  **silently**: an ordinal import falls through imphash's ordinal branch into its by-name branch and
+  hashes the literal display text. A hash has no runtime symptom, because it is only ever compared
+  with another tool's answer, so the failure mode is a corpus match that quietly stops matching.
+  `ORDINAL_IMPORT_PREFIX` and its two functions in `pe/ordinalTables.ts` are the one declaration
+  now, and `pe/__tests__/ordinalImports.test.ts` states the property directly — move the prefix and
+  the digests must not move. `parseOrdinalImport` returns **null**, never `NaN`, for a malformed
+  tail, since callers read null as "this is a name". **The view resolves through the SAME
+  `resolveOrdinal` imphash uses**, so the Imports tab can show `WSAStartup` for `ws2_32!115` without
+  a second table to drift: it resolves in the memo *above* the filter, so the name a reader sees is
+  the name they can search for, and marks the row `#115` because the name is inferred from a table
+  rather than read out of the file. An ordinal the tables do not cover keeps its honest
+  `Ordinal_<n>` spelling. (`peek-a-bin-p0qw`)
 
 - **`>>> 0` on a value that can exceed 2^32 is a TRUNCATION, not a respelling, and the Headers tab
   is where that bit.** ToUint32 is the right way to print a value read as a signed int32 unsigned —

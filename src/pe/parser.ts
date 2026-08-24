@@ -19,6 +19,7 @@ import {
   IMAGE_ORDINAL_FLAG32,
   IMAGE_ORDINAL_FLAG64,
 } from "./constants";
+import { formatOrdinalImport } from "./ordinalTables";
 import { parsePdata } from "./pdata";
 import { parseResourceDirectory } from "./resources";
 import { findCodeSection } from "./sections";
@@ -476,7 +477,7 @@ function parseImports(
         const ordinalFlag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
         if (thunkValue & ordinalFlag) {
           const ordinal = Number(thunkValue & 0xffffn);
-          functions.push(`Ordinal_${ordinal}`);
+          functions.push(formatOrdinalImport(ordinal));
         } else {
           // Import by name
           const nameTableRVA = Number(thunkValue);

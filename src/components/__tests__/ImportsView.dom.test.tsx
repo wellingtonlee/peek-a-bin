@@ -30,13 +30,16 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
  * rather than about a race; the pre-advance assertion in the same test is what
  * shows the debounce is real and not that the timer helper is doing nothing.
  *
- * ORDINAL-ONLY IMPORTS are exercised, and there is a fact about them worth
- * recording rather than asserting a wish: `parser.ts` names an ordinal import
- * `Ordinal_<n>` and does NOT consult `pe/ordinalTables.ts` — that table exists
- * for `computeImphash`, which is where pefile agreement matters. So the tab
- * shows `Ordinal_256`, not `WSAStartup`, and this suite pins that rather than
- * pretending otherwise. Changing it would be a `src/pe/` change and is out of
- * scope here.
+ * ORDINAL-ONLY IMPORTS are exercised in both directions, and the split is the
+ * point. `parser.ts` still writes `Ordinal_<n>` into `PEFile` — that spelling is
+ * a wire format `computeImphash` parses back out, so it must not move — but the
+ * VIEW now resolves it through `pe/ordinalTables.ts`, the same lookup and the
+ * same function imphash uses, so the two cannot disagree about what ws2_32!115
+ * is. A resolved row shows the name with a `#<ordinal>` marker saying the name
+ * came from a table rather than from the file; an ordinal the table does not
+ * cover keeps its honest `Ordinal_<n>` spelling, which is what KERNEL32's 256
+ * below pins. Both halves matter: resolving everything and resolving nothing are
+ * each one assertion away from passing a suite that only checked the other.
  *
  * THE XREF POPUP'S POSITION IS NOT TESTED and cannot be. `clampPopup` is fed
  * `getBoundingClientRect()`, which jsdom answers all-zero because it performs no
@@ -48,6 +51,15 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
 const KERNEL32: ImportLibraryDef = {
   libraryName: "KERNEL32.dll",
   functions: [{ name: "CreateFileW" }, { name: "ExitProcess" }, { ordinal: 256 }],
+};
+/**
+ * `ws2_32.dll` is one of the three DLLs pefile's `ordlookup` covers, so its
+ * ordinals ARE names. 115 is WSAStartup and 23 is socket — both read out of the
+ * table `metadata.test.ts` pins entry by entry against pefile.
+ */
+const WS2_32: ImportLibraryDef = {
+  libraryName: "WS2_32.dll",
+  functions: [{ ordinal: 115 }, { ordinal: 23 }, { ordinal: 60000 }],
 };
 const NTOSKRNL: ImportLibraryDef = {
   libraryName: "ntoskrnl.exe",
@@ -104,6 +116,46 @@ describe("ImportsView listing", () => {
       "IoCreateDevice",
       "PsCreateSystemThread",
     ]);
+  });
+
+  it("resolves an ordinal the table covers, and marks it as inferred", () => {
+    const { container } = renderImports(peWith([WS2_32]));
+    const shown = symbols(container);
+    expect(shown).toContain("WSAStartup");
+    expect(shown).toContain("socket");
+    // The marker is the provenance, and it is not decoration: an import by
+    // ordinal and an import by name are different facts about the binary — a
+    // packer may have chosen the ordinal precisely to keep the name out of the
+    // file — so the row says where the name came from.
+    expect(container.textContent).toContain("#115");
+    expect(container.textContent).toContain("#23");
+  });
+
+  it("leaves an ordinal the table does NOT cover spelled as an ordinal", () => {
+    // The control for the case above, in the same library: ws2_32 has no 60000,
+    // so a rule that invented a name for every ordinal would fail here, and one
+    // that resolved nothing would fail above. KERNEL32's 256 is the same claim
+    // for a library the table does not cover at all.
+    const { container } = renderImports(peWith([WS2_32]));
+    expect(symbols(container)).toContain("Ordinal_60000");
+    expect(container.textContent).not.toContain("#60000");
+  });
+
+  it("finds a resolved import by the name the reader can see", () => {
+    // Resolution happens in the memo, above the filter, precisely so that the
+    // name on screen is the name that can be searched for. Filtering on the raw
+    // `Ordinal_115` spelling a user never sees would be the defect.
+    vi.useFakeTimers();
+    try {
+      const { container } = renderImports(peWith([WS2_32]));
+      fireEvent.change(screen.getByPlaceholderText("Filter..."), {
+        target: { value: "wsastartup" },
+      });
+      act(() => void vi.advanceTimersByTime(250));
+      expect(symbols(container)).toEqual(["WSAStartup"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names an ordinal-only import the same way in a PE32 image", () => {

@@ -726,3 +726,56 @@ export const ORDINAL_TABLES: Record<string, Record<number, string>> = {
     500: "OACleanup",
   },
 };
+
+/**
+ * The spelling this parser gives an import that names no function.
+ *
+ * IT IS A WIRE FORMAT, NOT A LABEL, and that is the reason these three
+ * functions exist rather than a template literal at each site. `parsePE` writes
+ * `Ordinal_<n>` into `PEFile.imports[].functions`, and `computeImphash` **parses
+ * it back out** to decide whether an entry is an ordinal at all. So the string
+ * is load-bearing in a place nothing points at: respell it at the parser and
+ * every ordinal import silently falls through imphash's ordinal branch into its
+ * by-name branch, hashing the literal display text — a different imphash for
+ * every affected file, with no test naming the connection and no runtime
+ * symptom, since a hash is only ever compared with another tool's.
+ * {@link ORDINAL_IMPORT_PREFIX} is now the one declaration of it.
+ */
+export const ORDINAL_IMPORT_PREFIX = "Ordinal_";
+
+/** How `parsePE` spells an ordinal-only import. */
+export function formatOrdinalImport(ordinal: number): string {
+  return `${ORDINAL_IMPORT_PREFIX}${ordinal}`;
+}
+
+/**
+ * The ordinal behind {@link formatOrdinalImport}'s spelling, or null.
+ *
+ * Null for anything else, including a *named* import that happens to begin with
+ * the prefix and a malformed tail — callers treat null as "this is a name", so
+ * `Ordinal_` followed by non-digits must not read as ordinal NaN.
+ */
+export function parseOrdinalImport(func: string): number | null {
+  if (!func.startsWith(ORDINAL_IMPORT_PREFIX)) return null;
+  const tail = func.slice(ORDINAL_IMPORT_PREFIX.length);
+  if (!/^\d+$/.test(tail)) return null;
+  return Number.parseInt(tail, 10);
+}
+
+/**
+ * What that ordinal is called, per pefile's `ordlookup`, or undefined.
+ *
+ * KEYED BY THE LIBRARY NAME **WITH** ITS EXTENSION, lowercased, exactly as
+ * pefile keys `ordlookup` — `ws2_32.dll` and `wsock32.dll` disagree on ordinals
+ * 10, 11, 12 and 24, so a key that dropped the extension would merge two tables
+ * that are deliberately separate.
+ *
+ * Two callers with different purposes read this, and the distinction matters:
+ * `computeImphash` uses it because **pefile does**, so agreement is the whole
+ * requirement; the Imports view and the MCP resource use it to put a name in
+ * front of a reader, where being wrong is merely unhelpful. Both must resolve
+ * identically, which is why there is one function rather than two.
+ */
+export function resolveOrdinal(libraryName: string, ordinal: number): string | undefined {
+  return ORDINAL_TABLES[libraryName.toLowerCase()]?.[ordinal];
+}

@@ -1,4 +1,4 @@
-import { ORDINAL_TABLES } from "./ordinalTables";
+import { parseOrdinalImport, resolveOrdinal } from "./ordinalTables";
 import type { PEFile } from "./types";
 
 // --- Rich Header ---
@@ -343,20 +343,16 @@ export function computeImphash(imports: PEFile["imports"]): string {
     const libBase =
       dot > 0 && IMPHASH_STRIPPED_EXTENSIONS.has(lib.slice(dot + 1)) ? lib.slice(0, dot) : lib;
     for (const func of imp.functions) {
-      // Check if it's an ordinal (starts with "Ordinal_" or is numeric)
-      if (func.startsWith("Ordinal_")) {
-        const ord = parseInt(func.replace("Ordinal_", ""), 10);
-        // Keyed by the library name *with* its extension, exactly as pefile
-        // keys ordlookup — ws2_32 and wsock32 disagree on several ordinals.
-        const resolved = ORDINAL_TABLES[lib]?.[ord];
+      // Is this an ordinal-only import? The question is asked through
+      // `parseOrdinalImport` rather than by re-deriving the prefix here: the
+      // spelling is a wire format written by `parsePE`, and the two sites
+      // disagreeing is a silently different imphash (see ORDINAL_IMPORT_PREFIX).
+      const ord = parseOrdinalImport(func);
+      if (ord !== null) {
+        const resolved = resolveOrdinal(lib, ord);
         // pefile renders an unresolved ordinal as "ord<N>"
         // (ordlookup.formatOrdString), never as this parser's "Ordinal_N".
-        const funcName = resolved
-          ? resolved.toLowerCase()
-          : Number.isNaN(ord)
-            ? func.toLowerCase()
-            : `ord${ord}`;
-        parts.push(`${libBase}.${funcName}`);
+        parts.push(`${libBase}.${resolved ? resolved.toLowerCase() : `ord${ord}`}`);
       } else if (func) {
         // pefile skips imports it could not name at all.
         parts.push(`${libBase}.${func.toLowerCase()}`);
