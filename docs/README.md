@@ -39,6 +39,7 @@ repeating it.
 | Target-architecture support (x86/x64/ARM64, or refusing a machine type outright), the Capstone window, worker binary arguments | [architecture.md](architecture.md) — and [decompiler.md](decompiler.md) if what a pass *declines* to do changes, and [mcp-server.md](mcp-server.md) if a tool's answer for such a file changes |
 | Lint or format rule severity, or anything that changes whether a gate can fail | `biome.json` (strict JSON only) — then the **Commands** section of [../CLAUDE.md](../CLAUDE.md), which is where the expected `npm run lint` baseline and the known-red commands are recorded |
 | Decompiler IR, passes, or type system | [decompiler.md](decompiler.md) |
+| A component test, the jsdom setup, or the vitest config | the **Component tests** paragraph under Conventions in [../CLAUDE.md](../CLAUDE.md) — and its **Verification status** section if the render closes (or opens) a gap in the "Not verified" list, which a component test usually does |
 | Anything that moves what is *verified* — a new oracle, a real-binary measurement, or a gap you closed or opened | the **Verification status** section of [../CLAUDE.md](../CLAUDE.md). Keep measured and reasoned claims apart there; it is the section future agents trust |
 | How the corpus audits are run or configured — where the binaries are looked for, a new `PEEK_CORPUS_*` variable, a new audit | [../corpus/README.md](../corpus/README.md), and `.env.example` if a new setting can be recorded per machine |
 | Builds, Docker, CI, PWA, self-hosting | [deployment.md](deployment.md) |
