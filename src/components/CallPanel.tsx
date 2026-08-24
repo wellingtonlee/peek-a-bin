@@ -44,14 +44,34 @@ export function CallPanel({
   // biome-ignore lint/correctness/useExhaustiveDependencies: sortedFuncs is findContainingFunc's only capture; depending on the unmemoised arrow instead would recompute every render.
   const callers = useMemo(() => {
     const sources = xrefMap.get(func.address) || [];
-    const seen = new Set<number>();
-    const result: { fn: DisasmFunction; sourceAddr: number }[] = [];
+    const seen = new Set<string>();
+    const result: { key: string; fn: DisasmFunction | null; sourceAddr: number }[] = [];
     for (const src of sources) {
       const containing = findContainingFunc(src);
-      if (containing && !seen.has(containing.address)) {
-        seen.add(containing.address);
-        result.push({ fn: containing, sourceAddr: src });
-      }
+      // A source in no detected function is LISTED, not dropped. It used to be
+      // skipped outright, so it left neither a row nor a tally mark and
+      // "Called by (2)" understated a map holding four xrefs — a narrower
+      // answer in exactly the shape of a complete one, which is the thing this
+      // codebase will not ship. There is no need to invent a policy for it:
+      // the callee column beside this one already answers the same question,
+      // labelling a target with no function "unknown" and showing its address.
+      //
+      // The dedup key differs by side because the identity does: two calls from
+      // one function are one caller, but two unattributed sources are two
+      // distinct facts with nothing to merge them under.
+      //
+      // The `f`/`a` prefixes are DEFENSIVE, not a fix — checked, and the
+      // collision they exclude is not reachable today. A bare number would mix
+      // "the entry of the function containing this source" with "this source",
+      // and the two are drawn from one space; but `binarySearchFunc` answers
+      // with X for X's own entry address whenever X has a non-zero size, so a
+      // source cannot be both unattributed and equal to some entry. The prefix
+      // costs nothing and says which space each key is in, which is worth more
+      // than the argument reconstructing that.
+      const key = containing ? `f${containing.address}` : `a${src}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ key, fn: containing ?? null, sourceAddr: src });
     }
     return result;
   }, [func.address, xrefMap, sortedFuncs]);
@@ -100,13 +120,18 @@ export function CallPanel({
             callers.map((c) => (
               <button
                 type="button"
-                key={c.fn.address}
+                key={c.key}
                 onClick={() => onNavigate(c.sourceAddr)}
                 className="block w-full text-left px-1 py-0.5 rounded hover:bg-gray-800 truncate"
               >
-                <span className="text-blue-400">{getDisplayName(c.fn, renames)}</span>
+                <span className="text-blue-400">
+                  {c.fn ? getDisplayName(c.fn, renames) : "unknown"}
+                </span>
+                {/* An attributed row shows the function's ENTRY while navigating
+                    to the call site; an unattributed one has no entry to show,
+                    so it shows the call site it navigates to. */}
                 <span className="text-gray-600 ml-1">
-                  0x{c.fn.address.toString(16).toUpperCase()}
+                  0x{(c.fn ? c.fn.address : c.sourceAddr).toString(16).toUpperCase()}
                 </span>
               </button>
             ))

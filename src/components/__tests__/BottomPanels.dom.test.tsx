@@ -422,24 +422,88 @@ describe("CallPanel", () => {
 
   it("resolves each caller address to the function containing it, once per function", () => {
     renderCallPanel();
-    // Two distinct callers from three in-function xrefs: `helper` calls twice
-    // (0x…24 and 0x…28) and is listed once.
-    expect(screen.getByText("Called by (2)")).toBeTruthy();
-    const callers = callerRows();
-    expect(callers.map((b) => b.textContent)).toEqual(["helper0x140001020", "other0x140001040"]);
+    // `helper` calls twice (0x…24 and 0x…28) and is listed ONCE: two calls from
+    // one function are one caller. The third row is the unattributed source
+    // below.
+    expect(screen.getByText("Called by (3)")).toBeTruthy();
+    expect(callerRows().map((b) => b.textContent)).toEqual([
+      "helper0x140001020",
+      "other0x140001040",
+      "unknown0x140005000",
+    ]);
   });
 
   /**
-   * PINS CURRENT BEHAVIOUR. `0x140005000` is in no detected function, so
-   * `findContainingFunc` returns null and the entry is dropped — it is neither
-   * listed nor counted, and "Called by (2)" understates the four xrefs the map
-   * holds. Arguably it should be shown as a bare address; there is nothing false
-   * on screen, so this is reported rather than changed.
+   * WAS A PIN, NOW A SPECIFICATION. `0x140005000` is in no detected function, so
+   * `findContainingFunc` answers null; the entry used to be skipped outright,
+   * leaving neither a row nor a tally mark, so "Called by (2)" understated a map
+   * holding four xrefs. Nothing false was on screen — but the COUNT is the part
+   * a reader trusts, and a narrower answer in exactly the shape of a complete
+   * one is the failure mode `DetectResult.omitted` exists to prevent. It is
+   * reachable, not theoretical: PE32 has no `.pdata` to arbitrate boundaries and
+   * detection is known to both over- and under-produce.
+   *
+   * The repair needed no new policy. The CALLEE column beside this one already
+   * answers the same question for a target in no function — it labels it
+   * "unknown" and shows the address — so the caller side now says the same
+   * thing, and the two halves of one panel agree.
    */
-  it("silently drops a caller that lies outside every detected function", () => {
+  it("lists a caller outside every detected function, and counts it", () => {
     renderCallPanel();
-    expect(screen.queryByText(/140005000/)).toBeNull();
-    expect(screen.getByText("Called by (2)")).toBeTruthy();
+    expect(screen.getByText("Called by (3)")).toBeTruthy();
+    const unattributed = callerRows()[2];
+    expect(unattributed.textContent).toBe("unknown0x140005000");
+    // An attributed row shows its function's ENTRY address while navigating to
+    // the call site; this one has no entry to show, so the address on the row is
+    // the call site, and it is the address clicking it goes to.
+    expect(screen.getByText("0x140005000")).toBeTruthy();
+  });
+
+  it("navigates to the call site of an unattributed caller", () => {
+    const { onNavigate } = renderCallPanel();
+    fireEvent.click(callerRows()[2]);
+    expect(onNavigate).toHaveBeenCalledWith(0x140005000);
+  });
+
+  /**
+   * THE TWO SIDES DEDUP BY DIFFERENT KEYS, and that is the decision listing
+   * unattributed callers forced. An attributed source collapses into its
+   * FUNCTION, because two calls from one function are one caller. An
+   * unattributed source has no function to collapse into, so it dedups on its
+   * own address — two distinct sources are two distinct facts, and merging them
+   * would be the understating this change exists to stop, one level down.
+   *
+   * What is NOT asserted, because it is not reachable: the `f`/`a` prefixes on
+   * the key are defensive. A bare number would mix "the entry of the containing
+   * function" with "this source address", but `binarySearchFunc` answers with X
+   * for X's own entry whenever X has a non-zero size, so a source cannot be both
+   * unattributed and equal to some function's entry. The prefixes are kept for
+   * what they say, not for a defect they prevent.
+   */
+  it("dedups an attributed caller by function and an unattributed one by address", () => {
+    renderCallPanel({
+      func: OTHER,
+      xrefMap: new Map([
+        [
+          OTHER.address,
+          // Two calls from inside `helper`; one unattributed source listed
+          // twice; and a SECOND, different unattributed source. The second one
+          // is what makes this discriminating — with only one distinct
+          // unattributed address, a rule collapsing every function-less caller
+          // into a single row passes this test unchanged. Measured: that was
+          // negative control 4c, and it came back INERT until this address was
+          // added.
+          [HELPER.address + 4, HELPER.address + 8, 0x140003000, 0x140003000, 0x140004000],
+        ],
+      ]),
+      functions: [MAIN, HELPER],
+    });
+    expect(screen.getByText("Called by (3)")).toBeTruthy();
+    expect(callerRows().map((b) => b.textContent)).toEqual([
+      "helper0x140001020",
+      "unknown0x140003000",
+      "unknown0x140004000",
+    ]);
   });
 
   it("lists each distinct direct call target once, and labels an unknown one", () => {
