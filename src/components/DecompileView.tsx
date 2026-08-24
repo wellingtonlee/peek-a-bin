@@ -172,6 +172,37 @@ export function DecompileView({
     }));
   }, [code]);
 
+  /**
+   * The one line the comment editor mounts on, or null.
+   *
+   * `lineMap` is MANY-TO-ONE — several emitted C lines routinely carry one
+   * instruction address. Two other places already model it that way:
+   * `DisassemblyView` builds an addr → line[] map to feed `highlightLines`, and
+   * `emit.ts`'s `placeGotoLabels` says in as many words that "if an address
+   * somehow appears twice the earlier copy is the one the jump was structured
+   * around". Deciding `isEditing` from `editingComment.address` alone therefore
+   * mounted one `<textarea>` per sharing line — N identical edit boxes for one
+   * comment, each running `focusOnMount`, so focus landed on the last of them.
+   *
+   * The LOWEST such line wins: the same tiebreak `placeGotoLabels` takes, and the
+   * line the auto-scroll effect below brings into view with `Math.min`, so the
+   * editor opens on the line the panel just scrolled to.
+   *
+   * `syncDisabled` is repeated here rather than inherited from `lineAddr`,
+   * because that is what the pre-fix expression got right by accident: on the AI
+   * tab the line map numbers a different body, so an editor attributed to a line
+   * there would sit on the wrong line.
+   */
+  const editingLine = useMemo(() => {
+    const addr = editingComment?.address;
+    if (addr === undefined || syncDisabled || !lineMap) return null;
+    let best: number | null = null;
+    for (const [line, a] of lineMap) {
+      if (a === addr && (best === null || line < best)) best = line;
+    }
+    return best;
+  }, [editingComment, syncDisabled, lineMap]);
+
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(code);
   }, [code]);
@@ -439,7 +470,10 @@ export function DecompileView({
             const isHighlighted = highlightLines?.has(line.num);
             const lineAddr = !syncDisabled && lineMap ? lineMap.get(line.num) : undefined;
             const commentText = lineAddr !== undefined && comments ? comments[lineAddr] : undefined;
-            const isEditing = lineAddr !== undefined && editingComment?.address === lineAddr;
+            // The `!= null` is load-bearing beyond the truth test: it is what narrows
+            // `editingComment` for the editor's own JSX below, exactly as the
+            // `editingComment?.address` comparison it replaces used to.
+            const isEditing = editingLine === line.num && editingComment != null;
             return (
               <div key={line.num}>
                 <button
