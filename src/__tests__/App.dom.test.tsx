@@ -87,6 +87,26 @@ vi.mock("../components/StatusBar", async (importOriginal) => {
   };
 });
 
+/**
+ * Which DIALOG should throw when it renders, or null.
+ *
+ * Same flag-plus-passthrough shape as `boomTab` and `boomChrome`: the palette's
+ * own suite and the reopen assertion below both want the REAL component back,
+ * so the mock renders it whenever it is not asked to fail.
+ */
+let boomDialog: "palette" | null = null;
+
+vi.mock("../components/CommandPalette", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/CommandPalette")>();
+  return {
+    ...actual,
+    CommandPalette: (props: Parameters<typeof actual.CommandPalette>[0]) => {
+      if (boomDialog === "palette") throw new Error("command palette exploded");
+      return <actual.CommandPalette {...props} />;
+    },
+  };
+});
+
 vi.mock("../workers/requestTimeout", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workers/requestTimeout")>()),
   // 500 ms rather than something smaller: `timeoutBudgetInWords` rounds to
@@ -247,6 +267,7 @@ beforeEach(() => {
   stallDetect = false;
   boomTab = null;
   boomChrome = null;
+  boomDialog = null;
   vi.stubGlobal("Worker", FakeDisasmWorker);
   // `handleFile` calls `saveRecentFile`, which opens IndexedDB. jsdom 28 does
   // not implement it and `fake-indexeddb` is not a dependency here, so the
@@ -884,6 +905,94 @@ describe("a throw in the chrome does not blank the page", () => {
     await user.click(within(fallback).getByRole("button", { name: "Try again" }));
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Filter functions...")).toBeTruthy();
+    });
+    expect(screen.queryAllByRole("alert")).toEqual([]);
+  });
+});
+
+describe("a throw in a dialog is dismissible and does not kill it for the session", () => {
+  /**
+   * THE THREE ASSERTIONS, and only the first is the one a naive change passes.
+   *
+   * Wrapping each dialog in the plain `ErrorBoundary` satisfies the blast-radius
+   * half — the app behind an overlay is still on screen — while leaving the
+   * fallback floating in `App`'s root with no backdrop, no Escape and no Close,
+   * over a dialog that is still `open` in state; and because `hasError` never
+   * clears, the palette is then dead for the rest of the session and Ctrl+P
+   * silently does nothing. So the suite asserts all three: intact BEHIND,
+   * DISMISSIBLE, and CLEARED BY RE-OPENING (`peek-a-bin-pikv`).
+   */
+  async function openBrokenPalette() {
+    boomDialog = "palette";
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    await user.keyboard("{Control>}p{/Control}");
+    await screen.findByRole("alert");
+    return user;
+  }
+
+  it("leaves the app behind the overlay intact", async () => {
+    await openBrokenPalette();
+    expect(screen.getAllByRole("tab").length).toBe(VIEW_TABS.length);
+    expect(screen.getByPlaceholderText("Filter functions...")).toBeTruthy();
+  });
+
+  it("renders the fallback inside a real dialog, so it can be dismissed", async () => {
+    const user = await openBrokenPalette();
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("alert").textContent).toContain("command palette exploded");
+    // The backdrop is `ModalBackdrop`'s own button, and its presence is what
+    // says the fallback kept the modal scaffold rather than floating in App's
+    // root: no backdrop means no dim, no click-to-dismiss and no Escape.
+    expect(screen.getByRole("button", { name: "Close dialog" })).toBeTruthy();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(screen.queryAllByRole("alert")).toEqual([]);
+    expect(screen.getAllByRole("tab").length).toBe(VIEW_TABS.length);
+  });
+
+  it("clears the fault when the dialog is opened again", async () => {
+    const user = await openBrokenPalette();
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    // THE HALF THAT DISCRIMINATES THE WRONG VERSION. Re-opening is a named,
+    // explicit act, so it resets the boundary — the no-auto-reset rule is about
+    // retrying a deterministic fault on every parent render, which this is not.
+    // The fault is removed first so the outcome is observable; a fault still in
+    // place would simply throw straight back into the fallback.
+    boomDialog = null;
+    await user.keyboard("{Control>}p{/Control}");
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Search functions, imports, exports, strings..."),
+      ).toBeTruthy();
+    });
+    expect(screen.queryAllByRole("alert")).toEqual([]);
+  });
+
+  it("renders no dialog fallback at all when nothing throws", async () => {
+    // The liveness half: a boundary rendering its fallback unconditionally
+    // would pass every assertion above.
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    await user.keyboard("{Control>}p{/Control}");
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Search functions, imports, exports, strings..."),
+      ).toBeTruthy();
     });
     expect(screen.queryAllByRole("alert")).toEqual([]);
   });

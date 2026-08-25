@@ -515,9 +515,37 @@ re-taken.)
   fits the region it stands in for, or that the app underneath is *visibly* intact rather than merely
   present in the document. That is `peek-a-bin-v2u` work. Two further gaps: **no real render has ever
   produced one of these faults** — the throws are mocks, so the boundaries are verified as a mechanism
-  and not against any defect the app actually has — and the **six dialogs remain a blank page**, left
-  on a mechanism argument recorded in `ErrorBoundary`'s docstring, not on a judgement that they are
-  fine.
+  and not against any defect the app actually has.
+
+- **THE SIX DIALOGS ARE GUARDED NOW, by `DialogBoundary`, and the case rests on the WRONG VERSION
+  HAVING BEEN BUILT AND MEASURED FIRST** (`peek-a-bin-pikv`). The naive change — wrapping each dialog
+  in the existing `ErrorBoundary` — was implemented and run against the suite: the blast-radius
+  assertion (`leaves the app behind the overlay intact`) **passed**, and both of the assertions that
+  matter failed. That is this repo's standing lesson restated on a UI change: a row a wrong change can
+  drive to its best value is a target, not a gate. What the suite asserts is all three at once — the
+  app behind the overlay is intact, the fallback is **dismissible** (a real `role="dialog"`, a
+  `ModalBackdrop`, Escape, a Close button), and **re-opening clears it**. Driven through the real
+  `App`, the real Ctrl+P and the real `CommandPalette`, with the component's own suite
+  (`components/__tests__/DialogBoundary.dom.test.tsx`, 11 tests) reaching the two things App cannot
+  see: the `"nothing"` branch (a broken-and-closed boundary renders neither children nor fallback —
+  observable only through a render counter, since every dialog renders null when closed anyway) and
+  the derived-`open` shape `BatchRenameModal`/`AIReportPanel` use. **Four negative controls, all
+  discriminating, none inert**: (a) the boundary removed — the throw propagates uncaught and three
+  tests fail; (b) the reset removed — exactly one test fails, the re-open one, which is the wrong
+  version's signature; (c) the fallback rendered outside the `Modal` scaffold — the same two failures
+  as the wrong version, which is what it is; (d) the reset moved from `getDerivedStateFromProps` to
+  `componentDidUpdate` — only the ordering test fails, and only in the component suite, which is why
+  that suite exists. **One test was found INERT and rewritten rather than kept**: the first version of
+  the ordering assertion opened a still-broken dialog and asserted the fallback appeared, which is
+  true under both orderings; it now drains a `MutationObserver` across the reset commit and checks no
+  added node ever carried the alert, and control (d) reddens it.
+  **What is NOT verified.** jsdom is not a browser: nothing says the fallback's dim is visible, that
+  a browser's focus algorithm agrees with the trap it inherits, or that a screen reader announces the
+  `aria-labelledby` heading. No real dialog has ever thrown — every throw here is a mock. Five of the
+  six are wired identically to the palette and verified by typecheck and reading; only the palette is
+  driven end to end, and the `open` derivations for batch rename (`state.batchRename !== null`) and
+  the AI report (`state.aiReport !== null`) have never been produced by a real run, both needing an
+  LLM. `main.tsx` is unchanged and still has no boundary above `<App/>`.
 
 - **THERE IS A RENDERER NOW, and it reaches SIXTEEN components. Everything else in this list still stands, and the sentence this replaces — "nothing has rendered a component" — is retired.** jsdom, `@testing-library/react` and `@testing-library/user-event` are installed and five suites render React; see the **Component tests** entry under Conventions for the mechanism. What is actually rendered, and nothing beyond it: **`Modal`** (focus trap in both directions, Escape honoured and refused, focus restored to the trigger, `stopPropagation`, the backdrop, `aria-modal`/naming, the nested body scroll lock), **`ModalBackdrop`** by way of it, **`useDismissOnOutsideClick`** (attach, detach, `mousedown`-vs-`click` ordering, Escape, the stale-closure ref) **`StatusBar`** (the analysis notice's *render step*, which `analysisNotice.test.ts` could previously only reach by asserting the order of two regex matches in the source) and, since peek-a-bin-z8h1, **`DisassemblyView`'s four early-return branches** — the unsupported-architecture and engine-unavailable notices, and the order between the notice and the `!disasmReady` spinner, which is the other half of the pair `StatusBar`'s test closed. Since then two further passes: **`DisassemblyView`'s POPULATED panel** (`components/__tests__/DisassemblyPanel.dom.test.tsx`, 30 tests and 23 negative controls, reaching `DisassemblyRows`, `DisassemblyToolbar`, `InsnContextMenu`, `JumpArrows` and `InstructionDetail`; `DisassemblyMinimap` **mounts and never paints**, jsdom having no 2D context), and **the five views that were never blocked and simply never tested** — **`AddressBar`** (the tab bar checked against `VIEW_TABS`/`VIEW_TAB_LABELS`, and the 1-9 map checked against the bar *itself*: each button's advertised digit is read off it and pressed, so the two `.map`s are compared rather than a list repeated), **`FileLoader`** (that `state.error` renders at all, which is `peek-a-bin-b3jn`'s premise, and the `File` third argument `peek-a-bin-ex2`/`736` rest on), **`Sidebar`** (the skeleton, i.e. `peek-a-bin-bo3b` at its third site), **`CFGView`** (block set, edge set, edge types and dagre's coordinates — dagre never measures the DOM, so these are exactly a browser's) and **`HexView`**'s toolbar and byte search. Every assertion is negative-controlled by perturbing the component and confirming it fails, and two controls came back **inert** and had the test sharpened rather than kept — see the commit.
 - **THE RENDER GAP IS CLOSED, AND CLOSING IT COST FIVE DEFECTS' WORTH OF EVIDENCE THAT IT WAS WORTH CLOSING.** 31 `*.dom.test.tsx` suites; a per-component scan names **40 of the 41** files under `src/components/` plus `src/App.tsx`, the exception being `ModalBackdrop`, which `Modal`'s suite renders by way of it. The session added, in one parallel pass: `DecompileView` (86 tests, 66 controls), the seven parser-derived tab views — `HeaderView`, `SectionTable`, `ImportsView`, `ExportsView` (68 tests, 48 controls) and `StringsView`, `ResourcesView`, `AnomaliesView` (90 tests, 43 controls) — `AIChatPanel` and `MarkdownRenderer` (43 tests, 30 controls), and the bottom-panel family `BottomPanelContainer` with its unexported `FloatingPanel`, `XrefPanel`, `CallPanel`, `DataInspector`, `ResizeHandle`, `ErrorBoundary` and `Skeleton` (95 tests, 73 controls). **260 negative controls in total, of which 13 came back INERT**; every one is recorded where it lives rather than tuned away, and the four that could not be made to discriminate are the honest statement of a blind spot rather than a gap in the work.

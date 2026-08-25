@@ -401,14 +401,29 @@ decompile panel, which is `p0qw`'s own argument one level down. **`DecompileView
 no boundary on purpose**: they *are* the pane in the mode that shows them, so the pane's boundary is
 already the right radius.
 
-**What is STILL unguarded, and the reason is now a MECHANISM rather than a judgement**: the six
-dialogs, and `main.tsx` puts no boundary above `<App/>`. The dialogs pass the criterion easily
-(they are overlays), but this fallback is the wrong instrument — a dialog's subtree carries its own
-backdrop, focus trap and Escape handler, so a boundary that catches leaves the fallback floating in
-`App`'s root with the dialog still `open` in state, and since `hasError` never clears, one throw in
-the palette kills all six for the session. The right shape is a modal-placed fallback plus a reset
-keyed on the dialog's own `open` transition — a *named* trigger, which does not contradict the rule
-above — threaded through three different open-state plumbings. Not smuggled in beside this change
+**The six dialogs are guarded by a DIFFERENT class, `DialogBoundary.tsx`, and the split is the
+mechanism rather than the criterion.** They pass the criterion trivially — they are overlays — but
+could not use `ErrorBoundary`'s fallback for two reasons, and both are now measured rather than
+argued. (1) A dialog's subtree carries its own backdrop, focus trap, scroll lock and Escape, all of
+them `Modal`'s, so the ordinary card renders where that chrome would have been: floating in `App`'s
+root, undimmed, with no way out, over a dialog still `open` in state. The fallback here is itself a
+`Modal`, and Escape, the backdrop and its one **Close** button all call the caller's own `onClose`.
+(2) `hasError` never clearing would mean one throw in the palette makes **Ctrl+P silently do nothing
+for the rest of the session**; the reset is keyed on the dialog's own **closed → open transition**,
+which is a NAMED trigger and leaves the rule below untouched — it is a different class in a
+different file, and `"pane"`/`"chrome"` cannot reach it. Three things not to undo: the boundary is
+**outside** the dialog, not inside `Modal` around its children, because every one of these dialogs
+runs hooks and memos above its own `if (!open) return null`, so the common throw happens before
+`Modal` renders at all; a caught-and-then-closed boundary renders **nothing**, never the children,
+or that same pre-`open` code throws again with the boundary spent; and the reset is in
+`getDerivedStateFromProps`, not `componentDidUpdate`, so re-opening produces one commit instead of
+painting the fallback first. `dialogBoundaryRender` and `dialogBoundaryReset` are the rules, pure,
+in `modalScaffold.ts`. **The wrong version was built first and measured**: wrapping each dialog in
+the existing `ErrorBoundary` passes a naive blast-radius assertion and fails both halves that matter
+(`peek-a-bin-pikv`).
+
+**`main.tsx` still puts no boundary above `<App/>`**, deliberately: that is a whole-page fallback
+whose argument is crash reporting rather than partial function, and it is a separate question
 (`peek-a-bin-t23y`).
 
 **The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `AddressBar`

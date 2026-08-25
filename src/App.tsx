@@ -52,6 +52,7 @@ import { AIReportPanel } from "./components/AIReportPanel";
 import { AnomaliesView } from "./components/AnomaliesView";
 import { BatchRenameModal } from "./components/BatchRenameModal";
 import { CommandPalette } from "./components/CommandPalette";
+import { DialogBoundary } from "./components/DialogBoundary";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ExportsView } from "./components/ExportsView";
 import { GoToAddressModal } from "./components/GoToAddressModal";
@@ -732,6 +733,10 @@ export default function App() {
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeGoTo = useCallback(() => setGoToOpen(false), []);
+  // `BatchRenameModal` has no `open`/`onClose` pair — it reads `state.batchRename`
+  // and dispatches this itself. `DialogBoundary` needs the same dismissal from
+  // out here for the case where the dialog is not there to dispatch it.
+  const closeBatchRename = useCallback(() => dispatch({ type: "BATCH_RENAME_DISMISS" }), []);
   const fontStyle = useMemo(
     () => ({ "--mono-font-size": `${fontSize}px` }) as React.CSSProperties,
     [fontSize],
@@ -942,17 +947,56 @@ export default function App() {
             </ErrorBoundary>
           </div>
         )}
-        <CommandPalette open={paletteOpen} onClose={closePalette} />
-        <KeyboardShortcuts open={shortcutsOpen} onClose={closeShortcuts} />
-        <SettingsModal open={settingsOpen} onClose={closeSettings} />
-        <GoToAddressModal open={goToOpen} onClose={closeGoTo} />
-        <BatchRenameModal />
-        {state.aiReport && (
-          <AIReportPanel
-            onClose={aiReport.dismissReport}
-            onRegenerate={aiReport.regenerateReport}
-          />
-        )}
+        {/* DIALOG BOUNDARIES. Same criterion as the chrome ones above — an
+            overlay's loss leaves the whole app — but deliberately NOT the same
+            component: a dialog's backdrop, focus trap and Escape all belong to
+            its own subtree, so the ordinary fallback would float in this root
+            with no way out, and `ErrorBoundary`'s never-clear rule would leave
+            a dialog dead for the session. `DialogBoundary` places its fallback
+            inside a real `Modal` and resets on the dialog's own closed → open
+            transition, which is why each one is handed the caller's `open` and
+            `onClose` rather than only its children (peek-a-bin-pikv). */}
+        <DialogBoundary label="The command palette" open={paletteOpen} onClose={closePalette}>
+          <CommandPalette open={paletteOpen} onClose={closePalette} />
+        </DialogBoundary>
+        <DialogBoundary
+          label="The keyboard shortcuts"
+          open={shortcutsOpen}
+          onClose={closeShortcuts}
+        >
+          <KeyboardShortcuts open={shortcutsOpen} onClose={closeShortcuts} />
+        </DialogBoundary>
+        <DialogBoundary label="Settings" open={settingsOpen} onClose={closeSettings}>
+          <SettingsModal open={settingsOpen} onClose={closeSettings} />
+        </DialogBoundary>
+        <DialogBoundary label="Go to address" open={goToOpen} onClose={closeGoTo}>
+          <GoToAddressModal open={goToOpen} onClose={closeGoTo} />
+        </DialogBoundary>
+        {/* The last two have no `open` prop: their open-ness IS a field of
+            `AppState`, which they read for themselves, so it is re-derived here
+            rather than threaded through them. `onClose` is likewise the caller's
+            own dismissal — `BATCH_RENAME_DISMISS` is exactly what the dialog's
+            internal Cancel dispatches, and `dismissReport` is what App already
+            passes to the panel. */}
+        <DialogBoundary
+          label="Batch rename"
+          open={state.batchRename !== null}
+          onClose={closeBatchRename}
+        >
+          <BatchRenameModal />
+        </DialogBoundary>
+        <DialogBoundary
+          label="The AI report"
+          open={state.aiReport !== null}
+          onClose={aiReport.dismissReport}
+        >
+          {state.aiReport && (
+            <AIReportPanel
+              onClose={aiReport.dismissReport}
+              onRegenerate={aiReport.regenerateReport}
+            />
+          )}
+        </DialogBoundary>
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
   );

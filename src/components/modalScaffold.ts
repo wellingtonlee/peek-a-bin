@@ -247,3 +247,48 @@ export function accidentalDismissAllowed(risk: {
 }): boolean {
   return !risk.inFlight && !risk.unsavedWork;
 }
+
+/**
+ * What a dialog's error boundary should put on screen.
+ *
+ * `"children"` is the ordinary case. `"fallback"` is a caught render error with
+ * the dialog still open in the caller's state — the fallback must go inside a
+ * real {@link ./Modal}, or the user is left with a red box floating in `App`'s
+ * root with no backdrop, no Escape and no Close, over an app the focus trap has
+ * not released. `"nothing"` is the caught error with the dialog closed: the
+ * children are deliberately NOT re-rendered, because the throw may have come
+ * from a hook or a memo that runs above each dialog's own `if (!open) return
+ * null`, and re-running it would throw again with nobody left to catch it.
+ *
+ * The cost of `"nothing"` is that a broken dialog is unmounted while closed and
+ * loses its internal state. That is a state the session is already degraded in,
+ * and the alternative is a render loop.
+ */
+export type DialogBoundaryRender = "children" | "fallback" | "nothing";
+
+export function dialogBoundaryRender(open: boolean, caught: boolean): DialogBoundaryRender {
+  if (!caught) return "children";
+  return open ? "fallback" : "nothing";
+}
+
+/**
+ * Whether a caught error should be cleared, given the dialog's `open` prop now
+ * and on the previous render.
+ *
+ * THE TRIGGER IS THE CLOSED → OPEN TRANSITION AND NOTHING ELSE, which is what
+ * keeps this compatible with {@link ./ErrorBoundary}'s deliberate refusal to
+ * clear on a re-render. That rule's argument is specifically against retrying a
+ * deterministic fault on every parent render — the fallback would flicker in and
+ * out with no way to read it, and the retry would be nobody's decision. Opening
+ * a dialog the user closed is a named, explicit act by the user, exactly like
+ * the "Try again" button the pane and chrome fallbacks already offer; it just
+ * happens to be spelled Ctrl+P.
+ *
+ * It is a separate function from {@link dialogBoundaryRender} because the two
+ * answer different questions at different moments — this one runs before a
+ * render, from the props, and must be a no-op on every render that is not that
+ * transition, including the re-render that follows the catch itself.
+ */
+export function dialogBoundaryReset(wasOpen: boolean, open: boolean, caught: boolean): boolean {
+  return caught && open && !wasOpen;
+}

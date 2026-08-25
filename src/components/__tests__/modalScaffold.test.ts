@@ -13,6 +13,8 @@
 import { describe, expect, it } from "vitest";
 import {
   accidentalDismissAllowed,
+  dialogBoundaryRender,
+  dialogBoundaryReset,
   FOCUS_CONTAINER,
   FOCUSABLE_SELECTOR,
   lockBodyScroll,
@@ -249,5 +251,45 @@ describe("accidentalDismissAllowed", () => {
 
   it("needs both to be clear, not either", () => {
     expect(accidentalDismissAllowed({ inFlight: true, unsavedWork: true })).toBe(false);
+  });
+});
+
+describe("what a dialog's error boundary shows", () => {
+  it("shows the children when nothing was caught, open or not", () => {
+    expect(dialogBoundaryRender(true, false)).toBe("children");
+    expect(dialogBoundaryRender(false, false)).toBe("children");
+  });
+
+  it("shows the fallback only while the caller still calls the dialog open", () => {
+    expect(dialogBoundaryRender(true, true)).toBe("fallback");
+  });
+
+  it("shows nothing once a broken dialog is closed, rather than the children", () => {
+    // NOT "children". Each dialog runs hooks and memos above its own
+    // `if (!open) return null`, so re-rendering a broken one — even closed —
+    // can throw again, with the boundary already spent.
+    expect(dialogBoundaryRender(false, true)).toBe("nothing");
+  });
+});
+
+describe("when a dialog's error boundary resets", () => {
+  it("resets on the closed → open transition, which is a named user act", () => {
+    expect(dialogBoundaryReset(false, true, true)).toBe(true);
+  });
+
+  it("does not reset on the re-render that follows the catch", () => {
+    // `wasOpen` is already true at that moment. Getting this wrong would clear
+    // the error before the fallback was ever painted and loop on a
+    // deterministic fault — the very thing `ErrorBoundary`'s never-clear rule
+    // is about.
+    expect(dialogBoundaryReset(true, true, true)).toBe(false);
+  });
+
+  it("does not reset on closing", () => {
+    expect(dialogBoundaryReset(true, false, true)).toBe(false);
+  });
+
+  it("has nothing to do when nothing was caught", () => {
+    expect(dialogBoundaryReset(false, true, false)).toBe(false);
   });
 });
