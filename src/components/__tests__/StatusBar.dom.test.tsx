@@ -13,7 +13,7 @@ import {
 } from "../../hooks/usePEFile";
 import { buildMinimalPE32 } from "../../pe/__tests__/fixtures";
 import { parsePE } from "../../pe/parser";
-import { analysisNotice } from "../analysisNotice";
+import { type AnalysisNoticeKind, analysisNotice } from "../analysisNotice";
 import { StatusBar } from "../StatusBar";
 
 /**
@@ -35,6 +35,12 @@ import { StatusBar } from "../StatusBar";
  */
 
 const PE = parsePE(buildMinimalPE32());
+/**
+ * ARM Thumb-2 (0x01C4) -- a machine word `archForMachine` answers
+ * `"unsupported"` for. Reaching `"unsupported-arch"` needs no real ARM32
+ * binary, only a flipped machine word.
+ */
+const ARM_PE = parsePE(buildMinimalPE32({ machine: 0x01c4 }));
 
 function mount(overrides: Partial<AppState>) {
   function Host() {
@@ -157,28 +163,50 @@ describe("StatusBar notice colour follows isFault", () => {
     ).toContain("text-red-400");
   });
 
-  it("agrees with App.tsx, which reads isFault", () => {
-    // Stated as the invariant rather than as three cases, so a seventh kind is
-    // covered the day it is added.
-    for (const overrides of [
-      { analysisPhase: "failed" as AnalysisPhase, error: "x" },
-      { analysisPhase: "building-xrefs" as AnalysisPhase, disasmFailed: "boom" },
-      { analysisPhase: "timed-out" as AnalysisPhase },
-      { analysisPhase: "no-code" as AnalysisPhase },
-      { analysisPhase: "ready" as AnalysisPhase, omittedPasses: ["call-targets" as const] },
-    ]) {
+  /**
+   * One state per KIND, keyed by kind.
+   *
+   * It was an unkeyed array of five, and the comment above it claimed to state
+   * "the invariant rather than three cases, so a seventh kind is covered the day
+   * it is added" -- which a hand-written list cannot do, and did not: every
+   * entry used the x86 `PE`, so `"unsupported-arch"`, the HIGHEST-ranked of the
+   * six, had never been through this loop at all. A `Record<AnalysisNoticeKind,
+   * ...>` is what makes the claim true, on `analysisNotice.test.ts`'s own model
+   * and for the reason CLAUDE.md gives for `VIEW_TAB_LABELS` and
+   * `DETECT_PASS_LABELS`: a seventh kind now fails the BUILD here.
+   *
+   * `peFile` is per case rather than fixed, because the architecture is a
+   * property of the file and not of the phase -- the only way to reach
+   * `"unsupported-arch"` is to hand the bar an image whose machine word no
+   * decoder reads.
+   */
+  const REACHED: Record<AnalysisNoticeKind, Partial<AppState>> = {
+    "unsupported-arch": { peFile: ARM_PE, analysisPhase: "failed", error: "xrefs refused" },
+    "no-code-section": { analysisPhase: "no-code" },
+    "engine-unavailable": { analysisPhase: "building-xrefs", disasmFailed: "boom" },
+    "analysis-timed-out": { analysisPhase: "timed-out" },
+    "analysis-failed": { analysisPhase: "failed", error: "x" },
+    "partial-detection": { analysisPhase: "ready", omittedPasses: ["call-targets"] },
+  };
+
+  it.each(Object.keys(REACHED) as AnalysisNoticeKind[])(
+    "agrees with App.tsx, which reads isFault: %s",
+    (kind) => {
+      const overrides = REACHED[kind];
       const notice = analysisNotice({
-        machine: PE.coffHeader.machine,
-        phase: overrides.analysisPhase,
+        machine: (overrides.peFile ?? PE).coffHeader.machine,
+        phase: overrides.analysisPhase ?? "idle",
         error: overrides.error ?? null,
         omitted: overrides.omittedPasses ?? [],
         engineError: overrides.disasmFailed ?? null,
       });
-      if (!notice) continue;
-      const { unmount } = mount(overrides);
-      const cls = screen.getByText(notice.label).className;
-      expect(cls).toContain(notice.isFault ? "text-red-400" : "text-amber-400");
-      unmount();
-    }
-  });
+      // The state has to actually REACH the kind it is filed under, or the
+      // colour assertion below is about some other branch entirely -- the same
+      // both-halves rule `analysisNotice.test.ts`'s isFault table states.
+      expect(notice?.kind).toBe(kind);
+      mount(overrides);
+      const cls = screen.getByText(notice?.label ?? "").className;
+      expect(cls).toContain(notice?.isFault ? "text-red-400" : "text-amber-400");
+    },
+  );
 });

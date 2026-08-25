@@ -1025,11 +1025,28 @@ read "all of them compile" as "all of them are right".
   path is the only one that would. Same for `extractStrings`. The *browser* side of the trade is
   unmeasured: a `File` is backed by disk, so `Blob.arrayBuffer()` there is I/O, not the memcpy
   Node times.
-- **The architecture refusal has never been RENDERED**, though everything up to the render step is
-  covered: the displayed text is re-derived on the main thread from `pe.coffHeader.machine`, and
-  the parser-derived tabs are measured to stay populated and non-empty. No test has seen the
-  banner, the panel or the status bar. Reproducing it needs no real ARM32 binary — flip any PE's
-  machine word to 0x01C4.
+- **The architecture refusal IS now rendered — all three surfaces, on one screen — and what is
+  left unverified is narrower and different.** The old bullet said "no test has seen the banner,
+  the panel or the status bar"; by the time it was checked that was **a third stale**, since
+  `DisassemblyView.dom.test.tsx` had been rendering the replacement panel for an ARMNT image for
+  two sessions. `App.dom.test.tsx`'s "an image no decoder here reads" suite now drives a real
+  ARM32 fixture (`buildMinimalPE32({ machine: 0x01c4 })`, with genuine import and export
+  directories) through the real `App`, answered by the **real `dispatch`** rather than a stub — so
+  the empty `omitted`-bearing `detectFunctions` result and `buildAllXrefs`' throw are production
+  code. It asserts the banner is **amber while `analysisPhase` is `"failed"` and `state.error`
+  holds the refusal**, which is the property this kind alone discriminates; that the status bar
+  reads the same notice in the same colour *at the same time* (`peek-a-bin-n7q1`'s shape, for the
+  one kind `StatusBar.dom.test.tsx`'s agreement loop had never covered); that `"partial-detection"`
+  is outranked though all four passes are in the state; that `unavailableTabs` withholds exactly
+  the tab the panel withholds; and that all eight named tabs mount with content and none falls to
+  its error boundary. **Still not verified**: no human has seen it in a browser
+  (`peek-a-bin-v2u`), nothing has crossed a real `postMessage`, and jsdom shows no layout — so
+  every virtualized pane among those eight is asserted only through its heading, and a row in the
+  document is still not a row on screen. **Two controls came back INERT and neither was tuned
+  away**: spelling either the banner's or the status bar's predicate as `kind ===
+  "analysis-failed"` — the `n7q1` defect verbatim — leaves every row green, because for an
+  `isFault: false` kind the hand-written predicate and `isFault` *agree*. The discriminating
+  perturbation for this kind is a site reading the **phase**, and both go red under it.
 - **There is no ARM32, ARM64EC or ARM64X binary on this machine**, so every one of those paths is
   verified against synthetic fixtures and nothing else. The decode-rate floor is calibrated
   against real ARM64 and real x64 only and is **not** a claim about ARM64X, a good share of which

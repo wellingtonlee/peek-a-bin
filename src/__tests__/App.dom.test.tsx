@@ -12,8 +12,15 @@ import {
 } from "../components/analysisNotice";
 import { tabId, tabPanelId } from "../components/tabIds";
 import { VIEW_TABS } from "../hooks/usePEFile";
-import { buildMinimalPE64 } from "../pe/__tests__/fixtures";
+import { buildMinimalPE32, buildMinimalPE64 } from "../pe/__tests__/fixtures";
 import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../pe/constants";
+// The far end of the wire, imported so the architecture refusal a test sees is
+// the PRODUCTION one. `dispatch` is the RPC switch `disasm.worker.ts` wraps, and
+// it is extracted precisely so a test can be the worker; hand-stubbing
+// `detectFunctions`' `omitted` list and `buildAllXrefs`' throw would make this
+// suite assert against a second, private copy of the very rule under test.
+// `disasmClient.test.ts` established the pattern.
+import { createWorkerState, dispatch } from "../workers/dispatch";
 import { REQUEST_TIMEOUT_MS } from "../workers/requestTimeout";
 
 /**
@@ -176,6 +183,24 @@ let initFails = false;
 let stallDetect = false;
 
 /**
+ * Whether every RPC is answered by the REAL `dispatch` instead of the canned
+ * replies below.
+ *
+ * The architecture refusal is spread over three RPCs — `configure` records
+ * `state.arch` from the COFF machine word, `detectFunctions` answers empty with
+ * all four passes in `omitted`, and `buildAllXrefs` throws — and the notice's
+ * whole claim is about how those three land together. A stub of them would be a
+ * hand-written restatement of `dispatch.ts`'s own arms, so this runs the arms.
+ * `createWorkerState(Promise.resolve())` is enough: no path an unsupported image
+ * takes reaches Capstone, which is the property that makes the refusal cheap in
+ * the first place.
+ */
+let useRealDispatch = false;
+
+/** The worker-side session `dispatch` mutates, rebuilt per test. */
+let realState = createWorkerState(Promise.resolve());
+
+/**
  * Stands in for `disasm.worker.ts`.
  *
  * Replies on a microtask, not synchronously: a real reply arrives in a later
@@ -197,6 +222,16 @@ class FakeDisasmWorker {
     posted.push(msg);
     queueMicrotask(() => {
       const reply = (data: Record<string, unknown>) => this.onmessage?.({ data });
+      if (useRealDispatch) {
+        // The flattening is the worker's, not this fake's: `disasm.worker.ts`
+        // posts `err?.message ?? String(err)`, never the Error, which is what
+        // makes the client's `instanceof WorkerTimeoutError` check asymmetric.
+        dispatch(msg.method as never, msg.args, realState).then(
+          (result) => reply({ id: msg.id, result }),
+          (err: unknown) => reply({ id: msg.id, error: (err as Error)?.message ?? String(err) }),
+        );
+        return;
+      }
       if (msg.method === "init") {
         if (initFails) reply({ id: msg.id, error: "capstone.wasm failed to load" });
         else reply({ id: msg.id, result: undefined });
@@ -247,6 +282,44 @@ function resourceOnlyPE(): ArrayBuffer {
   });
 }
 
+/**
+ * `IMAGE_FILE_MACHINE_ARMNT` — ARM Thumb-2, Windows on ARM32. The machine word
+ * `archForMachine` answers `"unsupported"` for, and the one the whole refusal
+ * exists for. Flipping any PE's machine word is all it takes; no real ARM32
+ * binary exists on this machine and none is needed.
+ */
+const ARMNT = 0x01c4;
+
+/**
+ * A whole ARM32 image: an executable `.text` section the parser reads normally,
+ * plus genuine import and export directories.
+ *
+ * The directories are the point rather than decoration. `"unsupported-arch"`
+ * promises that every parser-derived tab is still *populated*, and a fixture
+ * with empty directories would satisfy "the tab has a button" while saying
+ * nothing whatever about whether the tab has anything in it — the vacuous half
+ * of the claim, and the half that matters, since the asymmetric refusal exists
+ * so a user of an ARM32 file gets every format-level fact.
+ */
+function arm32PE(): ArrayBuffer {
+  return buildMinimalPE32({
+    machine: ARMNT,
+    directories: {
+      imports: [
+        {
+          libraryName: "KERNEL32.dll",
+          functions: [{ name: "CreateFileW" }, { name: "CloseHandle" }],
+        },
+      ],
+      exports: {
+        dllName: "arm32sample.dll",
+        addresses: [0x1000],
+        names: [{ name: "ArmOnlyEntry", addressIndex: 0 }],
+      },
+    },
+  });
+}
+
 /** Hand a buffer to App through the real browse input, as a user would. */
 async function openFile(buffer: ArrayBuffer, name = "sample.dll") {
   const user = userEvent.setup();
@@ -265,6 +338,11 @@ beforeEach(() => {
   posted.length = 0;
   initFails = false;
   stallDetect = false;
+  useRealDispatch = false;
+  // Fresh per test: `state.arch` is session state set by `configure`, so a run
+  // that leaked an architecture into the next test would be the very defect
+  // `dispatch.ts`'s own docstring warns about.
+  realState = createWorkerState(Promise.resolve());
   boomTab = null;
   boomChrome = null;
   boomDialog = null;
@@ -453,6 +531,212 @@ describe("the notice's prose cannot disagree with the buttons", () => {
     // the one thing this file genuinely cannot show.
     const still = (banner.textContent ?? "").split("Still available:")[1] ?? "";
     expect(still).not.toContain(VIEW_TAB_LABELS.disassembly);
+  });
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE ARCHITECTURE REFUSAL, ON A SCREEN.
+ *
+ * `docs/verification.md` has said since the refusal landed that it "has never
+ * been RENDERED ... No test has seen the banner, the panel or the status bar."
+ * By this commit that was a THIRD true: `DisassemblyView.dom.test.tsx` had been
+ * rendering the replacement panel for an ARMNT image for two sessions. The
+ * banner and the status bar had not, and neither had the promise the whole
+ * asymmetry is for -- that an image no decoder here reads still arrives with
+ * every parser-derived tab populated.
+ *
+ * WHY THIS KIND IS THE INTERESTING ONE, and it is not "for completeness":
+ *
+ *  * It is the only kind that is `isFault: false` while `analysisPhase` is
+ *    `"failed"` and `state.error` is set. The chain really does die -- for an
+ *    ARM32 image `buildAllXrefs` throws -- so every one of the five render sites
+ *    has a *wrong* answer sitting right there in the same state object, and any
+ *    site spelling `kind === "analysis-failed"` or reading the phase paints it
+ *    red. `peek-a-bin-n7q1` is that defect with two other kinds; here the two
+ *    readings differ for the highest-ranked kind of all.
+ *  * `DetectResult.omitted` is populated with all four passes on this path, so
+ *    `"partial-detection"` is live and outranked. CLAUDE.md: an unsupported
+ *    architecture "already implies every decoder-fed pass", so the banner must
+ *    not go on to name them.
+ *
+ * The worker is the REAL `dispatch` here (see `useRealDispatch`), so the empty
+ * `omitted`-bearing detection result and the xref throw are production code and
+ * not this file's idea of them.
+ * ---------------------------------------------------------------------------
+ */
+describe("an image no decoder here reads", () => {
+  /** Open an ARM32 image and wait for the banner and the dead chain to settle. */
+  async function openArm32() {
+    useRealDispatch = true;
+    render(<App />);
+    const user = await openFile(arm32PE(), "sample-arm32.exe");
+    const banner = await waitFor(() => {
+      const n = notice();
+      if (!n) throw new Error("no notice yet");
+      // The chain has to have RUN, not merely started: `buildAllXrefs` is what
+      // throws, and until it has, `analysisPhase` is not yet "failed" and the
+      // colour assertion below would be sampling a state in which no site has a
+      // wrong answer available to give. Waiting on the status bar's own
+      // "(partial)" marker is the liveness half -- it is fed by
+      // `notice.omittedPasses`, so it is only there once `SET_OMITTED_PASSES`
+      // has landed with detection's four refused passes in it.
+      if (!screen.queryByText("(partial)")) throw new Error("detection has not answered yet");
+      return n;
+    });
+    return { banner, user };
+  }
+
+  it("is amber, though the analysis chain really did fail underneath it", async () => {
+    const { banner } = await openArm32();
+
+    // Two of App's three `isFault` reads: the banner's background and the
+    // label's colour. Both amber, neither red -- while `state.analysisPhase` is
+    // "failed" and `state.error` holds `buildAllXrefs`' refusal, which is the
+    // state a hand-written `kind === "analysis-failed"` would paint red.
+    expect(banner.className).toContain("amber");
+    expect(banner.className).not.toContain("red");
+    expect(banner.textContent).toContain("UNSUPPORTED ARCHITECTURE");
+    // The third read is the dismiss button, and it is inside the banner.
+    const dismiss = within(banner).getByRole("button", { name: /dismiss this notice/i });
+    expect(dismiss.className).toContain("amber");
+    expect(dismiss.className).not.toContain("red");
+
+    // The chain is genuinely dead -- asserted, not assumed. Without this the
+    // test above would pass just as well against a file whose analysis
+    // succeeded, and the point is that it did not.
+    expect(banner.textContent).not.toMatch(/analysis failed/i);
+    expect(screen.getByText("Unsupported architecture")).toBeTruthy();
+  });
+
+  it("says the machine type is the reason, and does not then list the passes", async () => {
+    const { banner } = await openArm32();
+    const prose = banner.textContent ?? "";
+
+    expect(prose).toContain("is not supported for this image's machine type");
+    // `"partial-detection"` is live on this path and deliberately outranked.
+    // Asserted as the absence of `omittedPassSentence`'s own words, and the
+    // "(partial)" wait above is what stops it being an assertion about an empty
+    // `omittedPasses` -- all four passes ARE in the state; the notice declines
+    // to repeat them.
+    expect(prose).not.toContain("Function detection ran without");
+    expect(prose).not.toContain("jump tables");
+    expect(prose).not.toContain("thunk names");
+  });
+
+  it("withholds the disassembly tab and offers every other one", async () => {
+    const { banner } = await openArm32();
+    const still = (banner.textContent ?? "").split("Still available:")[1] ?? "";
+    expect(still).not.toBe("");
+
+    for (const tab of PARSER_DERIVED_TABS) {
+      const label = VIEW_TAB_LABELS[tab];
+      expect(still).toContain(label);
+      // By title rather than by accessible name -- the sidebar renders its own
+      // "Sections" button, and the Anomalies tab carries a count badge. See the
+      // no-code suite above, where both traps were found by a failing test.
+      const title = `${label} (${VIEW_TABS.indexOf(tab) + 1})`;
+      const buttons = screen.getAllByRole("tab").filter((b) => b.getAttribute("title") === title);
+      expect(buttons).toHaveLength(1);
+    }
+    // The control for the loop: a rule that named every tab would satisfy it.
+    // `unavailableTabs` is DECODER_DERIVED_TABS here -- NOT empty, which is what
+    // separates this kind from `"analysis-timed-out"`, whose banner prints no
+    // "Still available:" sentence at all because a timeout can leave the panel
+    // complete.
+    expect(still).not.toContain(VIEW_TAB_LABELS.disassembly);
+  });
+
+  it("renders one notice in one colour across the banner and the status bar", async () => {
+    // THE peek-a-bin-n7q1 PROPERTY, for the one kind its regression pins in
+    // `StatusBar.dom.test.tsx` do not cover: that file's "agrees with App.tsx"
+    // loop enumerates five states and every one of them is x86, so
+    // `"unsupported-arch"` -- the highest-ranked kind of the six -- had never
+    // been through it. Here both surfaces are on the same screen at the same
+    // time, which is the form the original defect took: one notice, two colours.
+    const { banner } = await openArm32();
+    const status = screen.getByText("Unsupported architecture");
+
+    expect(status.className).toContain("text-amber-400");
+    expect(status.className).not.toContain("text-red-400");
+    // And they are the same notice, not two that happen to agree: the status
+    // bar carries the banner's full sentence as its title.
+    expect(banner.textContent).toContain(status.getAttribute("title") ?? " ");
+  });
+
+  it("keeps the parser-derived tabs populated, which is what the refusal is for", async () => {
+    // The asymmetry's whole justification: `detectFunctions` returns empty
+    // rather than throwing "because an ARM32 file still yields the headers,
+    // sections, imports, exports, resources and strings the PE parser gets
+    // right -- those are format-level facts and a user should get every one".
+    // Nothing had ever checked that a single one of them arrives.
+    //
+    // Asserted through each tab's own text, on the fixture's own bytes. NOT
+    // asserted: that any of it is VISIBLE. jsdom has no layout, this file does
+    // not opt into `stubLayoutRect()`, and `ExportsView` is virtualized -- so
+    // its rows are absent here whatever the code does, and only its header count
+    // is read below. A row in the document is not a row on screen, and an absent
+    // row here is not evidence of anything.
+    const { user } = await openArm32();
+
+    await user.click(screen.getByTitle("Imports (4)"));
+    await waitFor(() => {
+      expect(screen.getByText(/KERNEL32\.dll/)).toBeTruthy();
+    });
+    expect(screen.getByText(/1 libraries, 2 functions/)).toBeTruthy();
+
+    await user.click(screen.getByTitle("Exports (5)"));
+    await waitFor(() => {
+      // The count in the heading, not a row: see above.
+      expect(screen.getByText("Exports (1)")).toBeTruthy();
+    });
+
+    await user.click(screen.getByTitle("Sections (3)"));
+    await waitFor(() => {
+      expect(screen.getAllByText(".text").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("mounts every tab it names, with none of them falling to its error boundary", async () => {
+    // The prose promise, taken literally and asked of all eight: the notice
+    // tells the user those tabs are populated, so opening each must produce a
+    // pane with content in it and NOT `ErrorBoundary`'s fallback. Each tab pane
+    // has its own boundary (CLAUDE.md: "ONE ErrorBoundary PER TAB PANE"), so a
+    // tab that throws for an ARM32 image would swallow itself quietly here and
+    // leave the notice recommending a tab that shows "Try again".
+    //
+    // Deliberately weaker than the assertions above, and stated as such: this
+    // says "something rendered", which for a virtualized pane in jsdom may be
+    // nothing but a heading. The tabs whose CONTENT is checked are the three
+    // above.
+    const { user } = await openArm32();
+    for (const tab of PARSER_DERIVED_TABS) {
+      const label = VIEW_TAB_LABELS[tab];
+      await user.click(screen.getByTitle(`${label} (${VIEW_TABS.indexOf(tab) + 1})`));
+      await waitFor(() => {
+        const panel = document.getElementById(tabPanelId(tab));
+        if (!panel) throw new Error(`no panel for ${label}`);
+        if (panel.textContent === "") throw new Error(`${label} rendered nothing`);
+      });
+      const panel = document.getElementById(tabPanelId(tab));
+      expect(panel?.textContent).not.toContain("Try again");
+    }
+  });
+
+  it("replaces the disassembly panel rather than spinning at it", async () => {
+    // `DisassemblyView`'s arm is already covered in its own suite, in isolation.
+    // What is only checkable here is that App reaches it at all with this state
+    // -- the panel and the banner are fed by two separate `analysisNotice` calls
+    // with different arguments (the view passes no `omitted`), so "the pure
+    // function said unsupported" does not by itself mean the panel took the arm.
+    await openArm32();
+    const panel = document.getElementById(tabPanelId("disassembly"));
+    expect(panel?.textContent).toContain("No disassembly for this image");
+    // And nothing anywhere still claims the engine is loading. That pairing --
+    // a banner saying one thing while a spinner says another -- is
+    // peek-a-bin-b3jn.
+    expect(screen.queryByText(/Loading disassembly engine/)).toBeNull();
+    expect(document.querySelectorAll(".skeleton-shimmer").length).toBe(0);
   });
 });
 
