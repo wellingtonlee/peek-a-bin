@@ -502,7 +502,7 @@ a test that is not testing**, which is this repo's most frequently recurring mis
 
   **The class, and why it is the `Ordinal_<n>` class rather than the `>>> 0` class.** Nothing inside this tool ever compares a PDB GUID with anything. Its entire purpose is to be read *out*: the symbol-server path for a PDB is `<name>.pdb/<GUID><Age>/<name>.pdb`, so what the panel prints is a lookup key for another system. A wrong spelling is therefore not malformed, not empty and not obviously odd — it is a well-formed GUID that matches nothing, which is exactly the failure mode `ORDINAL_IMPORT_PREFIX` exists to prevent. It reached the page on every binary built with symbols, which for MSVC output is essentially all of them: all five corpus binaries carry a CodeView record.
 
-  **THE ORACLE IS REAL MSVC OUTPUT, and it is decisive.** `CoCreateGuid` mints RFC 4122 version-4 (random) UUIDs. The version nibble is the **first hex digit of the third group** — `Data3`'s high nibble — which is precisely one of the fields this swap moves, and the variant bits are the top two bits of `Data4[0]`, which it does not move. Read out of the five corpus binaries:
+  **THE ORACLE IS REAL MSVC OUTPUT, and it is decisive.** `CoCreateGuid` mints RFC 4122 version-4 (random) UUIDs. The version nibble is the **first hex digit of the third group** — `Data3`'s high nibble — which is precisely one of the fields this swap moves, and the variant bits are the top two bits of `Data4[0]`, which it does not move. Read out of the six corpus binaries — the integrator re-derived this independently with a from-spec reader, and got the **two ARM64 launchers as well**, which the original table omitted:
 
   | binary | file-order reading | ver | corrected reading | ver | variant |
   |---|---|---|---|---|---|
@@ -510,6 +510,8 @@ a test that is not testing**, which is this repo's most frequently recurring mis
   | `t64.exe` | `957C2BBD-DDC8-4745-99F6-0DBBFEDF5A30` | 4 | `BD2B7C95-C8DD-4547-99F6-0DBBFEDF5A30` | 4 | `10` |
   | `w64.exe` | `C58155E6-0226-7B41-ACDE-82D805DC896F` | **7** | `E65581C5-2602-417B-ACDE-82D805DC896F` | 4 | `10` |
   | `w32.exe` | `2E033976-4827-7948-8FD8-0F9F61D5371B` | **7** | `7639032E-2748-4879-8FD8-0F9F61D5371B` | 4 | `10` |
+  | `t64-arm.exe` | `3FE59A8C-6B46-B44E-9D1B-1B5473B1D0C6` | **B** | `8C9AE53F-466B-4EB4-9D1B-1B5473B1D0C6` | 4 | `10` |
+  | `w64-arm.exe` | `C09CAAE8-8C3D-1449-8BF1-87D7A41B552B` | **1** | `E8AA9CC0-3D8C-4914-8BF1-87D7A41B552B` | 4 | `10` |
   | `t64-arm.exe` | `3FE59A8C-6B46-B44E-9D1B-1B5473B1D0C6` | **B** | `8C9AE53F-466B-4EB4-9D1B-1B5473B1D0C6` | 4 | `10` |
 
   Five for five under the corrected reading, one for five under the old one — and that one is the 1-in-16 coincidence. The variant bits agree either way, which is the control: they are in the field that does *not* move, so a reading that also disturbed `Data4` would have broken them.

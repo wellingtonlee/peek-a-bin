@@ -940,8 +940,8 @@ read "all of them compile" as "all of them are right".
     GUID is the symbol-server key for the PDB, i.e. a value only ever read *out* of the tool, so a
     wrong spelling is well-formed and simply matches nothing — the `Ordinal_<n>` class, not the
     `>>> 0` class. The **oracle is real MSVC output**: `CoCreateGuid` mints version-4 UUIDs and the
-    version nibble sits in the third group, which reads 4 on all five corpus binaries under the
-    corrected reading against E / 4 / 7 / B before it. `pe/__tests__/metadata.test.ts` had **pinned
+    version nibble sits in the third group, which reads 4 on **all six** corpus binaries under the
+    corrected reading against E / 4 / 7 / B / 1 / 7 before it — one accidental match in six. `pe/__tests__/metadata.test.ts` had **pinned
     the defect as the rule**, under the comment "Bytes 01..10 in file order".
   - **`parseRichHeader` reported a use count with the top bit set as negative.** `^` is an int32
     operator, so a stored `0xFFFFFFFF` reached the Rich Header table as `-1`. Unfalsifiable on real
@@ -1472,7 +1472,7 @@ mistake.
   (`foo.pdb/<GUID><Age>/foo.pdb`), a value nothing inside the tool ever compares with anything, so
   a wrong spelling is well-formed and simply matches nothing. **The oracle is real MSVC output, not
   a fixture**: `CoCreateGuid` mints version-4 UUIDs and the version nibble is the first digit of the
-  THIRD group — precisely the group this swap moves — reading 4 on all five corpus binaries under
+  THIRD group — precisely the group this swap moves — reading 4 on all six corpus binaries under
   the corrected reading against E / 4 / 7 / B under the old one, with the RFC 4122 variant bits
   sitting in `Data4` and reading `10` either way. `pe/__tests__/metadata.test.ts` had **pinned the
   defect as the rule**, asserting `01020304-0506-0708-…` under the comment "Bytes 01..10 in file
