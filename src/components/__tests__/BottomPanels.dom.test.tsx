@@ -58,6 +58,7 @@ describe("BottomPanelContainer", () => {
   });
   afterEach(() => {
     localStorage.clear();
+    setViewport(JSDOM_W, JSDOM_H);
   });
 
   /**
@@ -344,6 +345,198 @@ describe("BottomPanelContainer", () => {
       fireEvent.mouseUp(document);
     });
   });
+
+  /**
+   * THE CLAMP (`peek-a-bin-goz4`). A floating panel could be dragged past any
+   * edge and become unreachable, the only escape being to close it from the tab
+   * strip — if the user worked out that was what had happened.
+   *
+   * The RULE itself is pinned as arithmetic in `floatingClamp.test.ts`, which is
+   * the primary instrument and needs neither a render nor a drag. What is
+   * asserted here is that each of the three sites that positions a panel — the
+   * header drag, the mint in `handlePopOut`, and the derivation that re-places a
+   * stored position against the current viewport — actually routes through it,
+   * and writes its answer into the inline styles React sets.
+   *
+   * jsdom performs no layout, so the numbers below are the numbers the handlers
+   * computed and nothing here has been observed to be on screen or off it. The
+   * viewport is jsdom's own 1024x768 unless a test moves it, which makes the
+   * four bounds 976 / -352 / 744 / 0 for the 400x300 panel `handlePopOut` mints.
+   */
+  describe("keeping a floating panel reachable", () => {
+    it("stops a drag at each edge instead of letting the panel out of reach", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      const header = floatingPanel().querySelector(".cursor-move") as HTMLElement;
+      // Grab at (400,240) on a window at (312,234): the offset is (88,6).
+      fireEvent.mouseDown(header, { clientX: 400, clientY: 240 });
+
+      // Far past the bottom-right. Unclamped this would be (4912, 4994).
+      fireEvent.mouseMove(document, { clientX: 5000, clientY: 5000 });
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["976px", "744px"]);
+
+      // Far past the top-left. Unclamped this would be (-5088, -5006). Note the
+      // asymmetry: 48px of the panel's RIGHT edge stays on screen horizontally,
+      // but the top is a hard zero, the header being flush with the panel's top.
+      fireEvent.mouseMove(document, { clientX: -5000, clientY: -5000 });
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["-352px", "0px"]);
+      fireEvent.mouseUp(document);
+    });
+
+    /**
+     * The clamp is applied to the drag's OUTPUT and never to the grab offset, so
+     * overshooting an edge does not accumulate: bring the pointer back and the
+     * panel is under the same point of the header it was grabbed by. Clamping
+     * the offset instead would leave it drifted by however far it overshot.
+     */
+    it("hands the panel back at the grab point after the pointer overshoots", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      const header = floatingPanel().querySelector(".cursor-move") as HTMLElement;
+      fireEvent.mouseDown(header, { clientX: 400, clientY: 240 });
+      fireEvent.mouseMove(document, { clientX: 5000, clientY: 5000 });
+      fireEvent.mouseMove(document, { clientX: 400, clientY: 240 });
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["312px", "234px"]);
+      fireEvent.mouseUp(document);
+    });
+
+    /**
+     * WHAT GETS STORED, which is the half the render-time derivation cannot do
+     * and the reason the drag has a clamp of its own. A drag writes the clamped
+     * position, because the user never chose the one the pointer ran off to; a
+     * position that merely does not FIT the current window is left alone (see
+     * the reopen and resize tests below). Without the clamp on the write the
+     * panel is placed correctly right up until the window grows, and then leaps
+     * out to a position nobody asked for — which this test is what discriminates.
+     */
+    it("stores the clamped position, not the one the pointer ran off to", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      const header = floatingPanel().querySelector(".cursor-move") as HTMLElement;
+      fireEvent.mouseDown(header, { clientX: 400, clientY: 240 });
+      fireEvent.mouseMove(document, { clientX: 5000, clientY: 5000 });
+      fireEvent.mouseUp(document);
+
+      // Room appears. The stored position is the edge it stopped at, so it stays
+      // there; had the raw (4912, 4994) been stored it would now be at
+      // (3952, 2976), the new viewport's own bounds.
+      setViewport(4000, 3000);
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["976px", "744px"]);
+    });
+
+    /**
+     * The reopen case, which the bead names as `poppedOut`'s one real edge. Not
+     * pruning `poppedOut` on close is deliberate and documented at that state's
+     * declaration; the exposure it owns is a stored x/y that has gone off-screen
+     * because the window shrank while the panel was closed.
+     */
+    it("re-places a panel reopened into a window that shrank while it was closed", () => {
+      const { rerender } = render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["312px", "234px"]);
+
+      rerender(<BottomPanelContainer panels={[panel("a", "Alpha", false)]} />);
+      setViewport(300, 200);
+      rerender(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      // 300 - 48 and 200 - 24. Unclamped it would come back at (312, 234), with
+      // its header entirely below a 200px-tall viewport.
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["252px", "176px"]);
+    });
+
+    /**
+     * The same derivation covers a window resized while the panel is OPEN, and
+     * it is derived rather than written back — so the user's position survives a
+     * lapse in the room to honour it. Same shape as `XrefPanel`'s
+     * `effectiveScope`: the derived value is what the screen reads, the stored
+     * one is the preference.
+     */
+    it("pulls a panel back inside when the window shrinks, and lets it return", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      setViewport(300, 200);
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["252px", "176px"]);
+      setViewport(JSDOM_W, JSDOM_H);
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["312px", "234px"]);
+    });
+
+    /**
+     * A CORNER RESIZE CARRIES NO POSITION, so it must carry the stored one
+     * through untouched — and it is the site where the derive-don't-store split
+     * is easiest to lose, because the derived object is right there and
+     * spreading it reads as harmless. `{ ...fs, w, h }` writes the CLAMPED
+     * position back, so making a panel bigger while the window happens to be
+     * narrow silently discards the position it would otherwise have returned to.
+     *
+     * The lapse has to be real for this to be a test: the panel is dragged to
+     * the right edge of a wide window, the window is narrowed under it so the
+     * rendered position and the stored one differ, the resize happens THERE, and
+     * the width is asserted mid-lapse so a control cannot pass by the resize
+     * simply not happening. Restoring the window is what reads the stored value
+     * back out — it is not otherwise observable from the rendered output.
+     */
+    it("leaves the stored position alone when the panel is resized during a lapse", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      const header = floatingPanel().querySelector(".cursor-move") as HTMLElement;
+      // Park it against the right edge of the full-width window: stored (976, 234).
+      fireEvent.mouseDown(header, { clientX: 400, clientY: 240 });
+      fireEvent.mouseMove(document, { clientX: 5000, clientY: 240 });
+      fireEvent.mouseUp(document);
+      expect(floatingPanel().style.left).toBe("976px");
+
+      // Narrow the window under it. 500 - 48; the stored 976 no longer fits.
+      setViewport(500, JSDOM_H);
+      expect(floatingPanel().style.left).toBe("452px");
+
+      // Resize from the corner, mid-lapse. 400 + 60 wide, height unchanged.
+      const corner = floatingPanel().querySelector(".cursor-nwse-resize") as HTMLElement;
+      fireEvent.mouseDown(corner, { clientX: 0, clientY: 0 });
+      fireEvent.mouseMove(document, { clientX: 60, clientY: 0 });
+      fireEvent.mouseUp(document);
+      // The resize really happened — otherwise the assertion below would pass
+      // against a callback that never fired.
+      expect(floatingPanel().style.width).toBe("460px");
+      // …and it moved nothing: the clamp still answers for the narrow window.
+      expect(floatingPanel().style.left).toBe("452px");
+
+      // The room comes back, and so does the position. `{ ...fs, w, h }` leaves
+      // it at 452px, having overwritten the preference with the picture of it.
+      setViewport(JSDOM_W, JSDOM_H);
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["976px", "234px"]);
+      expect(floatingPanel().style.width).toBe("460px");
+    });
+
+    /**
+     * A panel popped out on a window too short to centre it in comes up with its
+     * header at the top edge rather than above it.
+     *
+     * ITS CONTROL IS INERT AND THE INERTNESS IS PROVABLE, so it is reported
+     * rather than tuned away. Deleting the `clampFloatingPosition` call inside
+     * `handlePopOut` leaves this — and every other test — GREEN, because the
+     * centring formula can violate exactly one bound and it is the one bound
+     * that does not depend on the viewport. `vh/2 - h/2 < 0` whenever the window
+     * is shorter than the panel; every other inequality holds identically for
+     * all `vw`, `vh` (the algebra is at `handlePopOut`). A stored -50 and a
+     * stored 0 therefore RENDER THE SAME at every viewport, now and after any
+     * resize, so no assertion on the output can separate them — checked
+     * exhaustively over the viewport grid, not argued. What this test does
+     * constrain is the OUTPUT: with neither clamp the panel comes up at -50px,
+     * its header entirely off the top of the screen.
+     *
+     * The second half — growing the window and re-asserting — is the inert
+     * control itself, left in place as the statement of the gap.
+     */
+    it("mints a pop-out position through the same rule on a short window", () => {
+      setViewport(JSDOM_W, 200);
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      fireEvent.click(popOutButtons()[0]);
+      // Centred y would be 100 - 150 = -50; centred x is 512 - 200 = 312 and is
+      // inside the horizontal bounds, so it is untouched.
+      expect([floatingPanel().style.left, floatingPanel().style.top]).toEqual(["312px", "0px"]);
+      setViewport(JSDOM_W, JSDOM_H);
+      expect(floatingPanel().style.top).toBe("0px");
+    });
+  });
 });
 
 /** The docked strip: the only element carrying an inline height. */
@@ -351,6 +544,24 @@ function strip(): HTMLElement {
   const el = document.querySelector('[class*="panel-bg"][style*="height"]');
   if (!el) throw new Error("no docked panel strip in the document");
   return el as HTMLElement;
+}
+
+/** jsdom's own window, which every clamp assertion above is written against. */
+const JSDOM_W = 1024;
+const JSDOM_H = 768;
+
+/**
+ * Move the viewport the clamp is computed against.
+ *
+ * `innerWidth`/`innerHeight` are redefined rather than assigned because jsdom
+ * exposes them as accessors, and the `resize` event is dispatched explicitly
+ * because nothing here lays anything out — there is no real resize to observe,
+ * only the two numbers the container reads.
+ */
+function setViewport(w: number, h: number) {
+  Object.defineProperty(window, "innerWidth", { value: w, writable: true, configurable: true });
+  Object.defineProperty(window, "innerHeight", { value: h, writable: true, configurable: true });
+  fireEvent(window, new Event("resize"));
 }
 
 /** The portaled floating window, found by the class that positions it. */

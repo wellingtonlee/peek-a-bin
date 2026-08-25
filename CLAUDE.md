@@ -134,7 +134,13 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   `XrefPanel.tsx`'s `scopeAvailable()` is the one declaration of "has the caller given this panel
   the address this scope needs", read by the filter chain *and* by the scope buttons, with
   `effectiveScope` the thing everything on screen reads — `scopeMode` is the user's preference and
-  may outlive its address. All
+  may outlive its address. `floatingClamp.ts`'s
+  `clampFloatingPosition` is the one declaration of where a floating bottom panel may be —
+  read by the header drag, `handlePopOut`'s mint and the render-time derivation in
+  `BottomPanelContainer.tsx`, and deliberately taking **no height**, since a whole-panel-inside
+  rule pins a panel taller than the window. The clamped position is **derived, never written
+  back** — a callback spreading that derived object into `poppedOut` replaces the user's stored
+  position with the picture of it, which is how the corner resize lost one. All
   six dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
 - **`hooks/`** — state (`usePEFile`), derived state, rows, search. `useDisassemblyKeyboard.ts` and
@@ -928,7 +934,11 @@ read "all of them compile" as "all of them are right".
   events, not pointer events) and `FloatingPanel`'s header drag and corner resize are asserted
   through `mousedown`/`mousemove`/`mouseup` on `document`, checking the deltas the handlers compute
   and the inline styles they write. jsdom has no layout, so **nothing has ever been observed to move
-  or resize.** What *is* covered end to end is `ResizeHandle`'s ref indirection:
+  or resize.** The off-screen clamp is the same: the four bounds, the reopen-after-shrink case and
+  the resize case are pinned as numbers, and **nothing has seen a panel be reachable or not** — that
+  a 48px sliver or a 24px header band is enough to grab needs `peek-a-bin-v2u`. `handlePopOut`'s own
+  call to the clamp is **provably inert** (centring can violate only the viewport-independent top
+  bound), reported rather than removed. What *is* covered end to end is `ResizeHandle`'s ref indirection:
   `BottomPanelContainer`'s `handleResizeEnd` closes over `height` from its own render, so a mouseup
   handler captured at mousedown would store the PRE-drag height — red under its own control from
   both sides.

@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { clampFloatingPosition } from "./floatingClamp";
 import { ResizeHandle } from "./ResizeHandle";
 
 interface PanelDef {
@@ -68,6 +69,37 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
    */
   const [poppedOut, setPoppedOut] = useState<Map<string, FloatingState>>(new Map());
 
+  /**
+   * The viewport every floating position is clamped against, held as state so
+   * that a resize re-runs the derivation at the render site below. Seeded from
+   * `window` at mount, which is safe because nothing here renders on a server.
+   *
+   * The listener is unconditional rather than installed only while something is
+   * floating: the obvious guard (`poppedOut.size > 0`) would leave this stale
+   * exactly when a panel is CLOSED, which is the reopen case the clamp exists
+   * for, and a dependency on `poppedOut` itself would tear the listener down and
+   * rebuild it on every `mousemove` of a drag. The cost of always listening is
+   * one listener and a state write that returns the SAME OBJECT when neither
+   * dimension moved, so React bails out and a resize on the other axis of a
+   * scrollbar appearing re-renders nothing.
+   */
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }));
+
+  useEffect(() => {
+    const onResize = () => {
+      setViewport((prev) =>
+        prev.w === window.innerWidth && prev.h === window.innerHeight
+          ? prev
+          : { w: window.innerWidth, h: window.innerHeight },
+      );
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   // Set activeTab to first visible if current is gone.
   //
   // The first dependency is a joined id string on purpose: `visiblePanels` is
@@ -92,15 +124,48 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
     } catch {}
   }, [height]);
 
+  /**
+   * Mint a floating position: the window's centre, through the same clamp.
+   *
+   * **THIS CALL IS INERT AND THAT WAS MEASURED, NOT ASSUMED — it is recorded
+   * here rather than tuned away.** Centring can violate exactly one of the four
+   * bounds, and only the one the derivation below re-applies identically at
+   * every viewport, so no `window` size and no later resize can make the clamped
+   * and unclamped mints render differently:
+   *
+   * - Sideways it cannot go out of bounds at all. A centred panel of width `w`
+   *   spans `[(vw - w)/2, (vw + w)/2]`, so `vw/2 - w/2 <= vw - MIN_VISIBLE_EDGE`
+   *   reduces to `MIN_VISIBLE_EDGE <= vw/2 + w/2` and the lower bound likewise —
+   *   both hold for every non-negative viewport.
+   * - Downwards it cannot either: `vh/2 - h/2 <= vh - MIN_VISIBLE_HEADER`
+   *   reduces to `MIN_VISIBLE_HEADER <= vh/2 + h/2`.
+   * - Upwards it can, whenever `vh < h` — a 200px-tall window puts the centred
+   *   top edge at -50. But the TOP bound is a hard zero and therefore does not
+   *   depend on the viewport, so the derivation maps a stored -50 to 0 whatever
+   *   the window is doing, now or later.
+   *
+   * It is kept because the alternative is a second site computing a panel
+   * position without the rule, and the inertness is a property of the derivation
+   * below rather than of this call — the day that derivation changes, this is
+   * what stops a mint going out of bounds. Its cost is one function call.
+   *
+   * It reads `window` rather than the `viewport` state on purpose: a value being
+   * minted right now should use the live viewport, not a copy that a render may
+   * not yet have caught up with.
+   */
   const handlePopOut = useCallback((id: string) => {
     setPoppedOut((prev) => {
       const next = new Map(prev);
-      next.set(id, {
-        x: Math.round(window.innerWidth / 2 - 200),
-        y: Math.round(window.innerHeight / 2 - 150),
-        w: 400,
-        h: 300,
-      });
+      const w = 400;
+      const h = 300;
+      const at = clampFloatingPosition(
+        Math.round(window.innerWidth / 2 - w / 2),
+        Math.round(window.innerHeight / 2 - h / 2),
+        w,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      next.set(id, { ...at, w, h });
       return next;
     });
   }, []);
@@ -177,7 +242,38 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
 
       {/* Floating panels */}
       {floatingPanels.map((p) => {
-        const fs = poppedOut.get(p.id)!;
+        /**
+         * `stored` IS THE USER'S CHOICE AND `fs` IS THE PICTURE OF IT — the
+         * position is clamped HERE, on the way to the screen, and is deliberately
+         * not written back. That is what makes a panel reopened into (or caught
+         * by) a smaller window come in at the edge and then return to where the
+         * user actually left it once the room comes back. Same shape as
+         * `XrefPanel`'s `effectiveScope`: the derived value is what everything on
+         * screen reads, and the stored one is the preference outliving a lapse in
+         * the room to honour it.
+         *
+         * **SO NOTHING MAY WRITE `fs` BACK INTO `poppedOut`.** Spreading it into
+         * an update looks harmless and is how the split gets lost: during a lapse
+         * `fs.x` is the clamped position, so `{ ...fs, w, h }` in the corner
+         * resize below silently replaced the stored preference with the picture —
+         * make a panel bigger while the window happens to be narrow and the
+         * position it would have gone back to is gone. Both callbacks therefore
+         * start from `stored` and override only what the gesture is actually
+         * about, and the clamp reads `stored.w` for the same reason.
+         *
+         * A DRAG is the one thing clamped at the WRITE, and it is not an
+         * exception to the rule but the other half of it: the user never chose
+         * the position the pointer ran off to, so there is no preference there to
+         * preserve, and storing the raw value would have the panel leap out to it
+         * the next time the window grew. A corner RESIZE is a statement about
+         * size and about nothing else — it carries no position at all, so it must
+         * carry the stored one through untouched.
+         */
+        const stored = poppedOut.get(p.id)!;
+        const fs = {
+          ...stored,
+          ...clampFloatingPosition(stored.x, stored.y, stored.w, viewport.w, viewport.h),
+        };
         return createPortal(
           <FloatingPanel
             key={p.id}
@@ -186,16 +282,17 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
             onDock={() => handleDock(p.id)}
             onClose={p.onClose}
             onMove={(x, y) => {
+              const at = clampFloatingPosition(x, y, stored.w, viewport.w, viewport.h);
               setPoppedOut((prev) => {
                 const next = new Map(prev);
-                next.set(p.id, { ...fs, x, y });
+                next.set(p.id, { ...stored, ...at });
                 return next;
               });
             }}
             onResizeFloat={(w, h) => {
               setPoppedOut((prev) => {
                 const next = new Map(prev);
-                next.set(p.id, { ...fs, w, h });
+                next.set(p.id, { ...stored, w, h });
                 return next;
               });
             }}
@@ -227,7 +324,14 @@ function FloatingPanel({
   const headerRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
 
-  // Drag header
+  // Drag header.
+  //
+  // The grab offset is taken once, from the pointer and the position on screen,
+  // and every move is recomputed from the RAW pointer against it. The clamp
+  // lives in the caller's `onMove` and therefore applies to the output only —
+  // never to this offset, and never accumulated. That is what lets a pointer
+  // that ran past an edge and came back pick the panel up at exactly the grab
+  // point instead of having drifted by however far it overshot.
   useEffect(() => {
     const el = headerRef.current;
     if (!el) return;
