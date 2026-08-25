@@ -130,7 +130,7 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
 - **`disasm/decompile/`** — IR lifting → SSA → folding → structuring → cleanup → type inference →
   promotion → struct synthesis → emission.
 - **`components/`** — the disassembly view is split across `DisassemblyView.tsx` (orchestration),
-  `DisassemblyRows.tsx` (virtualized rows), `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`. All
+  `DisassemblyRows.tsx` (virtualized rows), `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`.
   `XrefPanel.tsx`'s `scopeAvailable()` is the one declaration of "has the caller given this panel
   the address this scope needs", read by the filter chain *and* by the scope buttons, with
   `effectiveScope` the thing everything on screen reads — `scopeMode` is the user's preference and
@@ -239,17 +239,18 @@ a new kind joins on the wrong side of silently. That is not hypothetical: the fi
 missed, and two `isFault: true` kinds rendered amber in the status bar while the same notice
 rendered red in App's banner — one notice, two colours, on screen at once (`peek-a-bin-n7q1`).
 
-**THE SAME HAND-WRITTEN-PREDICATE CLASS WAS FOUND TWICE MORE, IN `AnomaliesView.tsx`, AND ONE SITE
-IS STILL OPEN.** Its AI-findings palette was a ternary chain over `AIScanFinding["severity"]`
+**THE SAME HAND-WRITTEN-PREDICATE CLASS WAS FOUND TWICE MORE, IN `AnomaliesView.tsx`, AND BOTH ARE
+NOW CLOSED.** Its AI-findings palette was a ternary chain over `AIScanFinding["severity"]`
 (`=== "critical" || === "high" ? red : === "medium" ? amber : blue`), and both anomaly tables were
 keyed `Record<string, …>` so a fourth severity compiled, sorted last behind `info` and rendered in
-`info`'s blue — a new severity silently painted as the mildest one. Both are now
-`Record<Union, …>` (`SEVERITY_ORDER`, `SEVERITY_COLORS`, `FINDING_COLORS`), so a sixth member fails
-the build the way `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do. **The open site is
-`AddressBar.tsx`**, which answers a *different* question of the same union — the maximum severity
-across anomalies and findings — with its own `=== "critical" || === "high"` chain and a **third**
-palette (the `-500` shades). The two agree today and nothing declares that they must
-(`peek-a-bin-p0qw`).
+`info`'s blue — a new severity silently painted as the mildest one. Both are now keyed on the
+union, so a sixth member fails the build the way `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do
+(`peek-a-bin-p0qw`). The **third** site was `AddressBar.tsx`, which answers a *different* question
+of the same union — the maximum severity across anomalies and findings — with its own
+`=== "critical" || === "high"` chain and a third palette; it was closed at `1591289` by
+`components/severity.ts`, and the paragraph on that module below is the current statement of the
+rule. **Read that one for the identifiers**, which are `BADGE_RANK`, `ANOMALY_BADGE` and
+`FINDING_BADGE`.
 
 Rank reasoning, which is the part to preserve: the two **properties of the file** come first
 because each survives the engine being fixed (an ARM32 resource-only DLL has no disassembly on a
@@ -913,8 +914,9 @@ read "all of them compile" as "all of them are right".
     fourth severity would have compiled, sorted last and rendered in `info`'s blue.
   - **`ResourcesView` returned a keyless shorthand fragment as the element of a `.map`**, so every
     render of a populated tab logged React's key warning and reconciled rows by index.
-  - **`App`'s tab bar gives the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
-    sits inside the button with no separator (left alone with `peek-a-bin-w50c`).
+  - **`App`'s tab bar gave the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
+    sat inside the button with no separator. Fixed at `6f99fdf` with `peek-a-bin-w50c`: the badge
+    is `aria-hidden` and the count is spelled into an `aria-label` instead.
   **None of the seven is visible to any static instrument here**: every one compiles, type-checks
   and lints clean, and nothing under `corpus/` renders React.
 - **Writing a component test has four traps, all of them measured rather than reasoned.** They cost
@@ -969,12 +971,6 @@ read "all of them compile" as "all of them are right".
   `offsetParent` is a constant `null` and is supplied by a stand-in the focus trap depends on; no
   browser focus algorithm, no service worker, no screen reader. A green focus-trap test says the
   component's own logic moves focus where it says; it does not say a browser agrees.
-- **The renderer has already paid for itself twice, which is the argument for using it.**
-  `peek-a-bin-n7q1`: a fifth `kind === "analysis-failed"` site in `StatusBar.tsx` rendered amber
-  where App's banner rendered red — one notice, two colours, on screen at once; no static
-  instrument could see it, because both spellings compile and type-check. `peek-a-bin-a5sw`: the
-  arrow keys **permanently wedged** on a separator row, so in a real listing everything below the
-  first function tail was unreachable by keyboard — nobody had ever driven the app.
 - **The browser's callee-clobber summary is wired and guarded end to end, but no human has seen a
   `clobbered_` name on screen.** The client→worker hop, the two-message `needInstructions` retry
   and the `.pdata` single-row slice are all asserted through the real `disasmClient` answered by
@@ -1045,9 +1041,13 @@ read "all of them compile" as "all of them are right".
     instruction names the data*. Everything left is data nothing names — alignment padding inside
     a `.pdata` extent, pools reached other than by an `ldr`-literal — and no instrument here can
     say which a residual word is.
-  - **Nothing has rendered an ARM64 view.** No human and no test has seen an A64 disassembly on
-    screen: `source` dimming, the `db`/`dd` rendering, jump arrows, the CFG and the minimap are
-    verified by typecheck and reading. It bites harder here because the remaining report row is a
+  - **The ARM64 *signature refusal* has been rendered; nothing else about an ARM64 view has.**
+    `DisassemblyPanel.dom.test.tsx` mounts the real panel under an ARM64 machine word and asserts
+    that no calling convention reaches the screen — `peek-a-bin-56q`'s render step, landed at
+    `b70fb72`. But that fixture's instruction stream is scripted **x86** bytes with only the
+    machine word flipped, so no human and no test has seen an A64 disassembly on screen: `source`
+    dimming, the `db`/`dd` rendering, jump arrows, the CFG and the minimap are verified by
+    typecheck and reading. It bites harder here because the remaining report row is a
     *view* defect, and because the jump-table fix's last step — `buildDataItems` rendering the
     withheld words as `db`/`dd` — **has never been executed**. What is measured is that the words
     leave the stream.
