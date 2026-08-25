@@ -913,7 +913,7 @@ read "all of them compile" as "all of them are right".
   rendered a transitive-reachability census over the import graph reads **41 of 41** while asserting
   nothing — the measured refusal of a drift guard built on it. "Rendered" here means an assertion
   about that component's own output.
-- **The renderer has now found SEVEN real defects, and that is the argument for using it.** Two in
+- **The renderer has now found NINE real defects, and that is the argument for using it.** Two in
   earlier sessions: `peek-a-bin-n7q1` (a fifth `kind === "analysis-failed"` site in `StatusBar.tsx`
   rendering amber where App's banner rendered red — one notice, two colours, on screen at once) and
   `peek-a-bin-a5sw` (the arrow keys **permanently wedged** on a separator row, so everything below
@@ -932,7 +932,22 @@ read "all of them compile" as "all of them are right".
   - **`App`'s tab bar gave the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
     sat inside the button with no separator. Fixed at `6f99fdf` with `peek-a-bin-w50c`: the badge
     is `aria-hidden` and the count is spelled into an `aria-label` instead.
-  **None of the seven is visible to any static instrument here**: every one compiles, type-checks
+  Two more from *closing* two of the named holes above — found not by a render failing but by
+  having to state, for the first time, what the block being rendered was supposed to print:
+  - **`parseDebugDirectory` printed the CodeView PDB GUID in file byte order.** `CV_INFO_PDB70`'s
+    `Signature` is a `GUID` struct, so `Data1`/`Data2`/`Data3` are little-endian integers and only
+    `Data4` is a byte string; hex-joining all sixteen bytes byte-swaps the first three groups. The
+    GUID is the symbol-server key for the PDB, i.e. a value only ever read *out* of the tool, so a
+    wrong spelling is well-formed and simply matches nothing — the `Ordinal_<n>` class, not the
+    `>>> 0` class. The **oracle is real MSVC output**: `CoCreateGuid` mints version-4 UUIDs and the
+    version nibble sits in the third group, which reads 4 on all five corpus binaries under the
+    corrected reading against E / 4 / 7 / B before it. `pe/__tests__/metadata.test.ts` had **pinned
+    the defect as the rule**, under the comment "Bytes 01..10 in file order".
+  - **`parseRichHeader` reported a use count with the top bit set as negative.** `^` is an int32
+    operator, so a stored `0xFFFFFFFF` reached the Rich Header table as `-1`. Unfalsifiable on real
+    output — all 36 Rich entries across the four x86 corpus binaries are under 150 (maxima 121, 118, 118, 115) — so the
+    population is packed and corrupted headers, where a negative count reads as a parse failure.
+  **None of the nine is visible to any static instrument here**: every one compiles, type-checks
   and lints clean, and nothing under `corpus/` renders React.
 - **Writing a component test has four traps, all of them measured rather than reasoned.** They cost
   four separate agents a round trip each. (1) **`waitFor` and `userEvent` both deadlock under
@@ -961,11 +976,27 @@ read "all of them compile" as "all of them are right".
   both sides.
 - **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
   and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint (no 2D context, no
-  `URL.createObjectURL`); `HeaderView`'s Authenticode block, rich header and debug info never render
-  (the fixture builders emit none) and both async arms of its checksum and entropy cells are
-  unreachable under `MAX_SYNC_FILE_METRIC_BYTES`; `ResourcesView`'s tree is **hand-constructed**, so
+  `URL.createObjectURL`); `ResourcesView`'s tree is **hand-constructed**, so
   nothing there is evidence about the resource-directory walk; and every popup's *placement* is
   unasserted, `getBoundingClientRect` being all-zero.
+- **`HeaderView`'s four named holes are CLOSED, and closing them found a defect.** The fixture
+  builders now emit an **`IMAGE_DEBUG_DIRECTORY` with an RSDS CodeView record**, a **`Rich`
+  header** (which moves `e_lfanew` past 0x80, so the whole layout is re-derived) and a
+  **`WIN_CERTIFICATE`** carrying a hand-built PKCS#7 blob past the last section — all three
+  **opt-in**, so no existing caller's bytes change. The **async arms of the Checksum Validation
+  row** are reached by a fixture genuinely over `MAX_SYNC_FILE_METRIC_BYTES` rather than by
+  mocking the threshold, with the sub-threshold case as the control that the size is what routes
+  it; the failure arm is additionally reached through the **real** `MetricsWorkerClient`, since
+  jsdom has no `Worker` and `send` rejects inside its own `try`. **What is still not reached**: the
+  PKCS#7 blob carries no digest and no signature value, because nothing in this tool verifies
+  either — the assertions are about the DER walk's output reaching the page; nothing has watched a
+  real `postMessage`; the **other** consumer of that same `useFileMetrics` state, `SectionTable`'s
+  entropy column, still renders neither async arm; and `useEntropyStrip`'s (a different threshold,
+  `MAX_SYNC_ENTROPY_BLOCK_BYTES`, in `HexView`) are untouched by any of this. Two controls came
+  back **INERT and are recorded rather than tuned away**: misaligning the certificate by one byte
+  (`parseSecurityDirectory` reads the directory's offset verbatim and is indifferent to the 8-byte
+  alignment a real image has) and zeroing a debug entry's `SizeOfData` (`parseDebugDirectory`
+  never reads it — see the unbounded PDB-path scan noted below) (`peek-a-bin-p0qw`).
 - **Virtualization is a STAND-IN and a green suite must not be read as covering it.** `virtual-core`
   reads the scroll element's `offsetHeight` (not `getBoundingClientRect`), so in jsdom a
   virtualized list renders **zero** rows, not a short list. `domSetup.ts`'s `stubLayoutRect()` is
@@ -1431,6 +1462,32 @@ mistake.
   the name they can search for, and marks the row `#115` because the name is inferred from a table
   rather than read out of the file. An ordinal the tables do not cover keeps its honest
   `Ordinal_<n>` spelling. (`peek-a-bin-p0qw`)
+
+- **A CodeView PDB GUID is a `GUID` STRUCT, not sixteen bytes: the first three fields are
+  little-endian integers and only `Data4` reads straight through.** `CV_INFO_PDB70.Signature` is
+  `{ DWORD Data1; WORD Data2; WORD Data3; BYTE Data4[8] }` in native order, and the canonical text
+  form prints the first three as integers — so hex-joining all sixteen bytes in file order
+  byte-swaps the first three groups. `parseDebugDirectory` did exactly that. Same class as
+  `Ordinal_<n>` above and **not** the `>>> 0` class: the GUID is the symbol-server key for the PDB
+  (`foo.pdb/<GUID><Age>/foo.pdb`), a value nothing inside the tool ever compares with anything, so
+  a wrong spelling is well-formed and simply matches nothing. **The oracle is real MSVC output, not
+  a fixture**: `CoCreateGuid` mints version-4 UUIDs and the version nibble is the first digit of the
+  THIRD group — precisely the group this swap moves — reading 4 on all five corpus binaries under
+  the corrected reading against E / 4 / 7 / B under the old one, with the RFC 4122 variant bits
+  sitting in `Data4` and reading `10` either way. `pe/__tests__/metadata.test.ts` had **pinned the
+  defect as the rule**, asserting `01020304-0506-0708-…` under the comment "Bytes 01..10 in file
+  order, formatted as a GUID string" — a restatement of the implementation rather than of the
+  format. **Nothing static could see it and no corpus gate can**: both spellings are `string`, and
+  a comment reaches neither the emitted C nor the IR. The instrument is `HeaderView.dom.test.tsx`,
+  which derives the expected text from the fixture's own bytes with an independent swap and pins
+  the literal beside it. A neighbouring one-character fix in the same file: `parseRichHeader`'s
+  `useCount` was `getUint32(…) ^ xorKey`, and `^` is an int32 operator, so a stored `0xFFFFFFFF`
+  reached the Rich Header table as `-1`; `toolId`/`buildId` are masked back to 16 bits and were
+  never affected. **Two things left alone, deliberately**: `parseDebugDirectory` never reads
+  `SizeOfData`, so the PDB path scan runs to the next NUL *anywhere in the file* — a control
+  zeroing that field is **inert** and the bound to choose is a judgement, not an obvious fix; and
+  the Data Directories table heads the Certificate Table's first column "RVA" when the format says
+  it is a **file offset**, which is what `dumpbin` prints too. (`peek-a-bin-p0qw`)
 
 - **`>>> 0` on a value that can exceed 2^32 is a TRUNCATION, not a respelling, and the Headers tab
   is where that bit.** ToUint32 is the right way to print a value read as a signed int32 unsigned —

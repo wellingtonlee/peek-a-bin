@@ -49,7 +49,14 @@ export function parseRichHeader(buffer: ArrayBuffer): RichEntry[] | null {
   const entries: RichEntry[] = [];
   for (let i = dansOffset + 16; i + 8 <= richOffset; i += 8) {
     const compId = view.getUint32(i, true) ^ xorKey;
-    const useCount = view.getUint32(i + 4, true) ^ xorKey;
+    // `^` is an int32 operator, so the XOR of two uint32s comes back SIGNED. The
+    // two halves of `compId` are masked back to 16 bits and are unaffected, but
+    // `useCount` is the whole word: without the `>>> 0` a stored 0xFFFFFFFF is
+    // rendered as `-1` in the Rich Header table. Real MSVC counts are small — all
+    // 36 entries across the four x86 corpus binaries are under 150 — so this is a
+    // packed or corrupted header's row, and a negative count there reads as a
+    // parse failure rather than as the value the file holds.
+    const useCount = (view.getUint32(i + 4, true) ^ xorKey) >>> 0;
     entries.push({
       toolId: (compId >> 16) & 0xffff,
       buildId: compId & 0xffff,
@@ -123,13 +130,31 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
       const sig = view.getUint32(pointerToRawData, true);
       if (sig === 0x53445352) {
         // "RSDS"
-        // GUID: 16 bytes at offset 4
-        const guidBytes = new Uint8Array(buffer, pointerToRawData + 4, 16);
-        const hex = Array.from(guidBytes)
+        // CV_INFO_PDB70's `Signature` field is a `GUID`, i.e. the struct
+        //   { DWORD Data1; WORD Data2; WORD Data3; BYTE Data4[8]; }
+        // laid out in NATIVE byte order — so the first three fields are stored
+        // little-endian on disk while the canonical text form prints each of them
+        // as an integer. Only `Data4` is a byte string and reads straight through.
+        //
+        // Reading all sixteen bytes in file order therefore mis-spells the first
+        // three groups, and this GUID is exactly the kind of value that class of
+        // defect hides in: nothing here ever compares it with anything, it is only
+        // ever read *out* of the tool — the symbol-server path for a PDB is
+        // `<name>.pdb/<GUID><Age>/<name>.pdb` — so a wrong spelling looks entirely
+        // well-formed and simply matches nothing. Same shape as `Ordinal_<n>`.
+        //
+        // MEASURED, not reasoned: `CoCreateGuid` mints version-4 UUIDs, and all
+        // four real MSVC binaries in the corpus carry a version nibble of 4 under
+        // this reading against E / 4 / 7 / B under the file-order one. The variant
+        // bits sit in Data4 and are `10` in all four either way.
+        const d1 = view.getUint32(pointerToRawData + 4, true);
+        const d2 = view.getUint16(pointerToRawData + 8, true);
+        const d3 = view.getUint16(pointerToRawData + 10, true);
+        const tail = Array.from(new Uint8Array(buffer, pointerToRawData + 12, 8))
           .map((b) => b.toString(16).padStart(2, "0"))
           .join("");
         info.guid =
-          `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`.toUpperCase();
+          `${d1.toString(16).padStart(8, "0")}-${d2.toString(16).padStart(4, "0")}-${d3.toString(16).padStart(4, "0")}-${tail.slice(0, 4)}-${tail.slice(4)}`.toUpperCase();
         info.age = view.getUint32(pointerToRawData + 20, true);
         // PDB path: null-terminated string after age
         const pathStart = pointerToRawData + 24;

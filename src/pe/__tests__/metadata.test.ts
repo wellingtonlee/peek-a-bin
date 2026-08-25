@@ -367,6 +367,18 @@ describe("parseRichHeader", () => {
     expect(parseRichHeader(richBuffer(entries))).toEqual(entries);
   });
 
+  it("reads a use count with the top bit set as unsigned", () => {
+    // `^` is an int32 operator, so the XOR of two uint32s comes back SIGNED and
+    // a stored 0xFFFFFFFF was reported as -1. `toolId`/`buildId` are masked back
+    // to 16 bits and were never affected, which is why only the count is here.
+    //
+    // Unfalsifiable on real output and deliberately kept anyway: all 36 Rich
+    // entries across the four x86 corpus binaries have counts under 150, so the
+    // population this row protects is packed and corrupted headers.
+    const entries = [{ toolId: 0x0102, buildId: 0x521e, useCount: 0xffffffff }];
+    expect(parseRichHeader(richBuffer(entries))).toEqual(entries);
+  });
+
   it("returns null when the DanS marker is missing", () => {
     const buf = richBuffer([{ toolId: 1, buildId: 2, useCount: 3 }]);
     new DataView(buf).setUint32(0x80, 0xdeadbeef, true); // clobber DanS
@@ -468,8 +480,49 @@ describe("parseDebugDirectory", () => {
     expect(info[0].typeName).toBe("CodeView");
     expect(info[0].age).toBe(7);
     expect(info[0].pdbPath).toBe(path);
-    // Bytes 01..10 in file order, formatted as a GUID string.
-    expect(info[0].guid).toBe("01020304-0506-0708-090A-0B0C0D0E0F10");
+    // THE ASSERTION THIS REPLACES READ `01020304-0506-0708-…` — the sixteen
+    // bytes in file order — under the comment "Bytes 01..10 in file order,
+    // formatted as a GUID string", i.e. it restated the implementation rather
+    // than the format. `CV_INFO_PDB70.Signature` is a `GUID`,
+    // `{ DWORD Data1; WORD Data2; WORD Data3; BYTE Data4[8] }`, laid out in
+    // native byte order, and the canonical text form prints the first three as
+    // integers — so those three groups are byte-swapped and only `Data4` reads
+    // straight through.
+    //
+    // The oracle is real MSVC output, not this fixture: `CoCreateGuid` mints
+    // version-4 UUIDs, and all four x86 corpus binaries carry a version nibble
+    // of 4 under this reading against E / 4 / 7 / B under the file-order one.
+    expect(info[0].guid).toBe("04030201-0605-0807-090A-0B0C0D0E0F10");
+  });
+
+  it("swaps only the first three GUID fields, and leaves Data4 alone", () => {
+    // Each of the four fields is distinguishable, so a swap applied to the wrong
+    // one — or to all sixteen bytes — cannot pass. Data4 is a byte string in the
+    // struct as well as on disk, so it must NOT move.
+    const rva = 0x2000;
+    const data = new Uint8Array(0x200);
+    new DataView(data.buffer).setUint32(12, 2, true); // type = CodeView
+    const buf = buildMinimalPE32({
+      sections: [dataSection(".rdata", rva, data)],
+      dataDirectories: new Map([[6, { virtualAddress: rva, size: 28 }]]),
+    });
+    const sec = parsePE(buf).sections.find((s) => s.virtualAddress === rva);
+    if (!sec) throw new Error("fixture section missing");
+    const cvOffset = sec.pointerToRawData + 0x80;
+    const fv = new DataView(buf);
+    fv.setUint32(sec.pointerToRawData + 24, cvOffset, true);
+    fv.setUint32(cvOffset, 0x53445352, true); // "RSDS"
+    // Data1 = AA BB CC DD, Data2 = 11 22, Data3 = 33 44, Data4 = 55 66 … CC.
+    const guid = [
+      0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+      0xcc,
+    ];
+    guid.forEach((b, i) => fv.setUint8(cvOffset + 4 + i, b));
+    fv.setUint32(cvOffset + 20, 1, true);
+
+    expect(parseDebugDirectory(buf, parsePE(buf))[0].guid).toBe(
+      "DDCCBBAA-2211-4433-5566-778899AABBCC",
+    );
   });
 
   it("does not throw when the CodeView record points past the end of the file", () => {

@@ -5,9 +5,11 @@
 
 import {
   IMAGE_DIRECTORY_ENTRY_BASERELOC,
+  IMAGE_DIRECTORY_ENTRY_DEBUG,
   IMAGE_DIRECTORY_ENTRY_EXPORT,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
+  IMAGE_DIRECTORY_ENTRY_SECURITY,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DOS_SIGNATURE,
   IMAGE_FILE_MACHINE_AMD64,
@@ -98,6 +100,34 @@ export interface RelocBlockDef {
 }
 
 /**
+ * One `IMAGE_DEBUG_DIRECTORY` entry, and optionally the payload it points at.
+ *
+ * `PointerToRawData` is a **file offset**, not an RVA — the one field in this
+ * whole builder that cannot be filled in while laying the directory section out,
+ * because the section's own file offset is not decided until the outer builder
+ * runs. It is emitted as a fixup instead; see {@link SectionFileFixup}.
+ */
+export interface DebugEntryDef {
+  /** `IMAGE_DEBUG_TYPE_*`. 2 is CodeView, which is the only one with a payload. */
+  type: number;
+  timeDateStamp?: number;
+  majorVersion?: number;
+  minorVersion?: number;
+  /**
+   * An RSDS (CV_INFO_PDB70) payload: `"RSDS"`, the 16 GUID bytes verbatim, the
+   * age, then a NUL-terminated PDB path.
+   *
+   * `guid` is written **in file order**, so a test can state the bytes the file
+   * holds and the formatted string separately — which is the only way to see a
+   * byte-order defect in the formatter, since the two are otherwise derived from
+   * one another.
+   */
+  codeView?: { guid: Uint8Array; age: number; pdbPath: string };
+  /** An opaque payload, for a type with no modelled shape. Ignored if `codeView` is set. */
+  rawData?: Uint8Array;
+}
+
+/**
  * Real data directories to synthesize. Everything requested here is laid out
  * into one extra section and the matching data directory entries are filled in.
  */
@@ -107,6 +137,45 @@ export interface DirectorySpec {
   tls?: TLSDef;
   loadConfig?: LoadConfigDef;
   relocations?: RelocBlockDef[];
+  debug?: DebugEntryDef[];
+}
+
+/**
+ * A `Rich` header — MSVC's undocumented build-provenance block, XOR-obfuscated
+ * and sitting between the DOS stub and the PE signature.
+ *
+ * Requesting one **moves `e_lfanew`**: `parseRichHeader` only looks from 0x80
+ * onwards, so the block cannot fit inside the 64-byte DOS header the builders
+ * otherwise emit. Everything downstream is computed from `e_lfanew`, so nothing
+ * else in the layout has to know.
+ */
+export interface RichHeaderDef {
+  entries: { toolId: number; buildId: number; useCount: number }[];
+  /** The key stored after the `Rich` marker; every dword before it is XORed with it. */
+  xorKey?: number;
+}
+
+/**
+ * An attribute certificate (`WIN_CERTIFICATE`) appended past the last section.
+ *
+ * The security data directory's first field is a **file offset**, not an RVA —
+ * the one directory in the PE format that is not an RVA — so this is emitted
+ * after the section bodies rather than inside one, and the directory entry is
+ * filled in by the outer builder.
+ */
+export interface CertificateDef {
+  /** `WIN_CERT_REVISION_2_0` by default. */
+  revision?: number;
+  /** `WIN_CERT_TYPE_PKCS_SIGNED_DATA` (2) by default. */
+  certificateType?: number;
+  /** Emitted verbatim as `bCertificate`, instead of the synthesized PKCS#7 blob. */
+  raw?: Uint8Array;
+  /** CommonName of the first certificate's subject / issuer. */
+  subjectCN?: string;
+  issuerCN?: string;
+  /** DER `UTCTime` bodies, i.e. `YYMMDDHHMMSSZ`. */
+  notBefore?: string;
+  notAfter?: string;
 }
 
 export interface PEFixtureOptions {
@@ -124,6 +193,25 @@ export interface PEFixtureOptions {
   directoryRVA?: number;
   /** Name of the synthesized directory section (default '.rdata'). */
   directorySectionName?: string;
+  /** Emit a `Rich` header, which also moves `e_lfanew`. */
+  richHeader?: RichHeaderDef;
+  /** Append a `WIN_CERTIFICATE` past the last section and point directory 4 at it. */
+  certificate?: CertificateDef;
+}
+
+/**
+ * "Write `sectionFileOffset + addend` as a uint32 at `sectionFileOffset + at`."
+ *
+ * The escape hatch for the fields that hold a **file offset**: nothing inside
+ * {@link buildDirectorySection} knows where its own section will land, so those
+ * are recorded and applied once the outer builder has assigned raw-data
+ * pointers. Both ends are section-relative, so the fixup is independent of the
+ * layout it will be resolved against.
+ */
+interface SectionFileFixup {
+  sectionIndex: number;
+  at: number;
+  addend: number;
 }
 
 const NUM_DATA_DIRS = 16;
@@ -158,11 +246,16 @@ function defaultTextSection(_fileOffset: number): SectionDef {
 function buildDirectorySection(
   spec: DirectorySpec,
   cfg: { is64: boolean; imageBase: number; rva: number },
-): { data: Uint8Array; dirs: Map<number, { virtualAddress: number; size: number }> } {
+): {
+  data: Uint8Array;
+  dirs: Map<number, { virtualAddress: number; size: number }>;
+  fixups: { at: number; addend: number }[];
+} {
   const { is64, imageBase, rva: baseRVA } = cfg;
   const backing = new Uint8Array(DIRECTORY_BLOB_SIZE);
   const dv = new DataView(backing.buffer);
   const dirs = new Map<number, { virtualAddress: number; size: number }>();
+  const fixups: { at: number; addend: number }[] = [];
   const ptrSize = is64 ? 8 : 4;
 
   let pos = 0;
@@ -329,7 +422,213 @@ function buildDirectorySection(
     });
   }
 
-  return { data: backing.subarray(0, Math.max(Math.ceil(pos / 4) * 4, 4)), dirs };
+  // --- Debug directory ---
+  if (spec.debug) {
+    const ENTRY = 28;
+    const table = alloc(spec.debug.length * ENTRY);
+    spec.debug.forEach((d, i) => {
+      // Payloads are allocated first so the entry can name them; `alloc` is a
+      // bump pointer, so an entry laid out after its own payload is fine.
+      let payload: Uint8Array | null = null;
+      if (d.codeView) {
+        const cv = d.codeView;
+        if (cv.guid.length !== 16) throw new Error("fixture CodeView GUID must be 16 bytes");
+        payload = new Uint8Array(24 + cv.pdbPath.length + 1);
+        const pv = new DataView(payload.buffer);
+        pv.setUint32(0, 0x53445352, true); // "RSDS"
+        payload.set(cv.guid, 4);
+        pv.setUint32(20, cv.age, true);
+        for (let j = 0; j < cv.pdbPath.length; j++) {
+          payload[24 + j] = cv.pdbPath.charCodeAt(j);
+        }
+      } else if (d.rawData) {
+        payload = d.rawData;
+      }
+
+      let payloadOff = 0;
+      if (payload) {
+        payloadOff = alloc(payload.length, 4);
+        backing.set(payload, payloadOff);
+      }
+
+      const e = table + i * ENTRY;
+      dv.setUint32(e + 4, d.timeDateStamp ?? 0, true);
+      dv.setUint16(e + 8, d.majorVersion ?? 0, true);
+      dv.setUint16(e + 10, d.minorVersion ?? 0, true);
+      dv.setUint32(e + 12, d.type, true);
+      dv.setUint32(e + 16, payload ? payload.length : 0, true); // SizeOfData
+      if (payload) {
+        dv.setUint32(e + 20, rvaOf(payloadOff), true); // AddressOfRawData (an RVA)
+        // PointerToRawData is a FILE offset; see SectionFileFixup.
+        fixups.push({ at: e + 24, addend: payloadOff });
+      }
+    });
+    dirs.set(IMAGE_DIRECTORY_ENTRY_DEBUG, {
+      virtualAddress: rvaOf(table),
+      size: spec.debug.length * ENTRY,
+    });
+  }
+
+  return { data: backing.subarray(0, Math.max(Math.ceil(pos / 4) * 4, 4)), dirs, fixups };
+}
+
+// --- Rich header ---
+
+/**
+ * The DOS header plus, optionally, a `Rich` block, and the `e_lfanew` that
+ * follows it.
+ *
+ * The block is laid out exactly as `link.exe` writes it and exactly as
+ * `parseRichHeader` reads it back: `DanS` and three zero dwords at 0x80, one
+ * `(toolId<<16 | buildId, useCount)` pair per entry, then the literal `Rich`
+ * marker and the key **unobfuscated**. Everything before the marker is XORed
+ * with the key, which is what makes the marker findable by a plain byte scan
+ * while nothing before it is.
+ *
+ * 0x80 is not decorative — `parseRichHeader` starts scanning there and refuses
+ * to walk back below it, because the fixed 64-byte DOS header and the standard
+ * DOS stub occupy everything under it in a real image.
+ */
+function buildDosStub(rich: RichHeaderDef | undefined): { bytes: Uint8Array; peOffset: number } {
+  const DOS_HEADER_SIZE = 64;
+  if (!rich) return { bytes: new Uint8Array(DOS_HEADER_SIZE), peOffset: DOS_HEADER_SIZE };
+
+  const RICH_START = 0x80;
+  const key = rich.xorKey ?? 0x5a4d3c2b;
+  // DanS + 3 pad dwords + 2 dwords per entry + "Rich" + key.
+  const blockDwords = 4 + rich.entries.length * 2 + 2;
+  const end = RICH_START + blockDwords * 4;
+  // Real linkers align the PE header that follows; 16 is what link.exe uses.
+  const peOffset = Math.ceil(end / 16) * 16;
+
+  const bytes = new Uint8Array(peOffset);
+  const dv = new DataView(bytes.buffer);
+  const put = (off: number, value: number) => dv.setUint32(off, value >>> 0, true);
+
+  put(RICH_START, 0x536e6144 ^ key); // "DanS"
+  put(RICH_START + 4, key); // 0 ^ key
+  put(RICH_START + 8, key);
+  put(RICH_START + 12, key);
+  rich.entries.forEach((e, i) => {
+    const at = RICH_START + 16 + i * 8;
+    put(at, (((e.toolId & 0xffff) << 16) | (e.buildId & 0xffff)) ^ key);
+    put(at + 4, e.useCount ^ key);
+  });
+  const markerAt = RICH_START + 16 + rich.entries.length * 8;
+  bytes.set([0x52, 0x69, 0x63, 0x68], markerAt); // "Rich", in the clear
+  put(markerAt + 4, key);
+
+  return { bytes, peOffset };
+}
+
+// --- Authenticode ---
+
+/** One DER element: a tag byte, a definite length, and the content. */
+function der(tag: number, content: Uint8Array): Uint8Array {
+  let header: number[];
+  if (content.length < 0x80) header = [tag, content.length];
+  else if (content.length < 0x100) header = [tag, 0x81, content.length];
+  else header = [tag, 0x82, (content.length >> 8) & 0xff, content.length & 0xff];
+  const out = new Uint8Array(header.length + content.length);
+  out.set(header, 0);
+  out.set(content, header.length);
+  return out;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+function ascii(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+/** `Name ::= SEQUENCE OF SET OF SEQUENCE { AttributeType, AttributeValue }` with one CN. */
+function derName(cn: string): Uint8Array {
+  const OID_CN = new Uint8Array([0x55, 0x04, 0x03]); // 2.5.4.3
+  const attr = der(0x30, concat(der(0x06, OID_CN), der(0x13, ascii(cn))));
+  return der(0x30, der(0x31, attr));
+}
+
+/**
+ * A PKCS#7 SignedData blob with exactly the structure `authenticode.ts` walks:
+ * ContentInfo → [0] → SignedData → [0] certificates → the first Certificate →
+ * TBSCertificate → issuer / validity / subject.
+ *
+ * It is *shaped* like a signature and is not one — there is no digest and no
+ * signature value, because nothing in this tool verifies either. What it does
+ * carry is every field the panel prints, so the printed text can be asserted
+ * against the bytes rather than against another copy of the same walk.
+ */
+function buildPKCS7(def: CertificateDef): Uint8Array {
+  const subject = def.subjectCN ?? "Contoso Software";
+  const issuer = def.issuerCN ?? "Contoso Root CA";
+  const notBefore = def.notBefore ?? "230115090000Z";
+  const notAfter = def.notAfter ?? "260115085959Z";
+
+  // 1.2.840.113549.1.1.11 (sha256WithRSAEncryption), used only as a placeholder
+  // where the walk requires a SEQUENCE it does not read.
+  const sigAlg = der(
+    0x30,
+    der(0x06, new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b])),
+  );
+  const version = der(0xa0, der(0x02, new Uint8Array([0x02]))); // [0] EXPLICIT v3
+  const serial = der(0x02, new Uint8Array([0x10, 0x2a]));
+  const validity = der(0x30, concat(der(0x17, ascii(notBefore)), der(0x17, ascii(notAfter))));
+  const spki = der(0x30, concat(sigAlg, der(0x03, new Uint8Array([0x00, 0x01]))));
+
+  const tbs = der(
+    0x30,
+    concat(version, serial, sigAlg, derName(issuer), validity, derName(subject), spki),
+  );
+  const certificate = der(0x30, concat(tbs, sigAlg, der(0x03, new Uint8Array([0x00, 0x01]))));
+
+  const signedData = der(
+    0x30,
+    concat(
+      der(0x02, new Uint8Array([0x01])), // version
+      der(0x31, new Uint8Array(0)), // digestAlgorithms, empty
+      der(0x30, der(0x06, new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01]))),
+      der(0xa0, certificate), // [0] IMPLICIT certificates
+    ),
+  );
+
+  // ContentInfo: SEQUENCE { OID 1.2.840.113549.1.7.2 signedData, [0] content }
+  return der(
+    0x30,
+    concat(
+      der(0x06, new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02])),
+      der(0xa0, signedData),
+    ),
+  );
+}
+
+/**
+ * A `WIN_CERTIFICATE`: `dwLength`, `wRevision`, `wCertificateType`, then the
+ * blob. `dwLength` counts the 8-byte header **and is not padded**, while the
+ * entry itself is padded to an 8-byte boundary — a divergence real images have
+ * and a reader can trip on, so the fixture reproduces it.
+ */
+function buildCertificateBlob(def: CertificateDef): Uint8Array {
+  const body = def.raw ?? buildPKCS7(def);
+  const dwLength = 8 + body.length;
+  const padded = Math.ceil(dwLength / 8) * 8;
+  const out = new Uint8Array(padded);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, dwLength, true);
+  dv.setUint16(4, def.revision ?? 0x0200, true);
+  dv.setUint16(6, def.certificateType ?? 0x0002, true);
+  out.set(body, 8);
+  return out;
 }
 
 /**
@@ -341,13 +640,19 @@ function resolveLayout(
   opts: PEFixtureOptions,
   is64: boolean,
   imageBase: number,
-): { sections: SectionDef[]; dirs: Map<number, { virtualAddress: number; size: number }> } {
+): {
+  sections: SectionDef[];
+  dirs: Map<number, { virtualAddress: number; size: number }>;
+  fixups: SectionFileFixup[];
+} {
   const sections = [...(opts.sections ?? [defaultTextSection(0)])];
   const dirs = new Map(opts.dataDirectories ?? []);
+  const fixups: SectionFileFixup[] = [];
 
   if (opts.directories) {
     const rva = opts.directoryRVA ?? 0x2000;
     const built = buildDirectorySection(opts.directories, { is64, imageBase, rva });
+    const sectionIndex = sections.length;
     sections.push({
       name: opts.directorySectionName ?? ".rdata",
       virtualAddress: rva,
@@ -358,9 +663,10 @@ function resolveLayout(
     for (const [idx, dir] of built.dirs) {
       if (!dirs.has(idx)) dirs.set(idx, dir);
     }
+    for (const f of built.fixups) fixups.push({ ...f, sectionIndex });
   }
 
-  return { sections, dirs };
+  return { sections, dirs, fixups };
 }
 
 /**
@@ -376,18 +682,21 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   // PE32 optional header: 96 bytes fixed + numDataDirs * 8
   const optionalHeaderSize = 96 + numDataDirs * DATA_DIR_ENTRY_SIZE;
 
-  // Layout offsets
-  const dosHeaderSize = 64;
+  // Layout offsets. A Rich header pushes `e_lfanew` out past 0x80, since that is
+  // where `parseRichHeader` starts looking; with none, the 64-byte DOS header is
+  // the whole of what precedes the PE signature. Everything below is derived
+  // from `peOffset`, so nothing else has to know which of the two it got.
+  const dosStub = buildDosStub(opts.richHeader);
   const peSignatureSize = 4;
   const coffHeaderSize = 20;
 
-  const peOffset = dosHeaderSize; // e_lfanew
+  const peOffset = dosStub.peOffset; // e_lfanew
   const coffOffset = peOffset + peSignatureSize;
   const optionalHeaderOffset = coffOffset + coffHeaderSize;
   const sectionHeadersOffset = optionalHeaderOffset + optionalHeaderSize;
 
   // Sections
-  const { sections, dirs } = resolveLayout(opts, false, imageBase);
+  const { sections, dirs, fixups } = resolveLayout(opts, false, imageBase);
   const numSections = sections.length;
   const sectionHeadersSize = numSections * 40;
 
@@ -404,12 +713,23 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
     currentFileOffset += Math.ceil(sec.data.length / fileAlignment) * fileAlignment;
   }
 
-  const totalSize = currentFileOffset;
+  // The attribute certificate sits past the last section, because the security
+  // data directory's first field is a FILE OFFSET rather than an RVA — the one
+  // directory in the format that is not an RVA. 8-byte aligned, as the spec
+  // requires of every entry in the table.
+  const cert = opts.certificate ? buildCertificateBlob(opts.certificate) : null;
+  const certOffset = cert ? Math.ceil(currentFileOffset / 8) * 8 : 0;
+  if (cert && !dirs.has(IMAGE_DIRECTORY_ENTRY_SECURITY)) {
+    dirs.set(IMAGE_DIRECTORY_ENTRY_SECURITY, { virtualAddress: certOffset, size: cert.length });
+  }
+
+  const totalSize = cert ? certOffset + cert.length : currentFileOffset;
   const buffer = new ArrayBuffer(totalSize);
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
 
-  // --- DOS Header ---
+  // --- DOS Header (and the Rich block behind it, when there is one) ---
+  bytes.set(dosStub.bytes, 0);
   view.setUint16(0, IMAGE_DOS_SIGNATURE, true); // e_magic = "MZ"
   view.setUint32(0x3c, peOffset, true); // e_lfanew
 
@@ -470,6 +790,15 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
     bytes.set(sections[i].data, sectionFileOffsets[i]);
   }
 
+  // File-offset fields, which could not be filled in until raw-data pointers
+  // were assigned. See SectionFileFixup.
+  for (const f of fixups) {
+    const base = sectionFileOffsets[f.sectionIndex];
+    view.setUint32(base + f.at, base + f.addend, true);
+  }
+
+  if (cert) bytes.set(cert, certOffset);
+
   return buffer;
 }
 
@@ -486,16 +815,17 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
   // PE64 optional header: 112 bytes fixed + numDataDirs * 8
   const optionalHeaderSize = 112 + numDataDirs * DATA_DIR_ENTRY_SIZE;
 
-  const dosHeaderSize = 64;
+  // See buildMinimalPE32 for why `e_lfanew` is not a constant.
+  const dosStub = buildDosStub(opts.richHeader);
   const peSignatureSize = 4;
   const coffHeaderSize = 20;
 
-  const peOffset = dosHeaderSize;
+  const peOffset = dosStub.peOffset;
   const coffOffset = peOffset + peSignatureSize;
   const optionalHeaderOffset = coffOffset + coffHeaderSize;
   const sectionHeadersOffset = optionalHeaderOffset + optionalHeaderSize;
 
-  const { sections, dirs } = resolveLayout(opts, true, imageBase);
+  const { sections, dirs, fixups } = resolveLayout(opts, true, imageBase);
   const numSections = sections.length;
   const sectionHeadersSize = numSections * 40;
 
@@ -510,12 +840,23 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
     currentFileOffset += Math.ceil(sec.data.length / fileAlignment) * fileAlignment;
   }
 
-  const totalSize = currentFileOffset;
+  // The attribute certificate sits past the last section, because the security
+  // data directory's first field is a FILE OFFSET rather than an RVA — the one
+  // directory in the format that is not an RVA. 8-byte aligned, as the spec
+  // requires of every entry in the table.
+  const cert = opts.certificate ? buildCertificateBlob(opts.certificate) : null;
+  const certOffset = cert ? Math.ceil(currentFileOffset / 8) * 8 : 0;
+  if (cert && !dirs.has(IMAGE_DIRECTORY_ENTRY_SECURITY)) {
+    dirs.set(IMAGE_DIRECTORY_ENTRY_SECURITY, { virtualAddress: certOffset, size: cert.length });
+  }
+
+  const totalSize = cert ? certOffset + cert.length : currentFileOffset;
   const buffer = new ArrayBuffer(totalSize);
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
 
-  // --- DOS Header ---
+  // --- DOS Header (and the Rich block behind it, when there is one) ---
+  bytes.set(dosStub.bytes, 0);
   view.setUint16(0, IMAGE_DOS_SIGNATURE, true);
   view.setUint32(0x3c, peOffset, true);
 
@@ -575,6 +916,15 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
   for (let i = 0; i < numSections; i++) {
     bytes.set(sections[i].data, sectionFileOffsets[i]);
   }
+
+  // File-offset fields, which could not be filled in until raw-data pointers
+  // were assigned. See SectionFileFixup.
+  for (const f of fixups) {
+    const base = sectionFileOffsets[f.sectionIndex];
+    view.setUint32(base + f.at, base + f.addend, true);
+  }
+
+  if (cert) bytes.set(cert, certOffset);
 
   return buffer;
 }
