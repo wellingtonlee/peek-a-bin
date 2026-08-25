@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../../test/domSetup";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { DataInspector } from "../DataInspector";
@@ -240,6 +240,89 @@ describe("ErrorBoundary", () => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toContain("Something went wrong");
     expect(alert.textContent).not.toContain("view went wrong");
+  });
+
+  /**
+   * THE `"chrome"` VARIANT (`peek-a-bin-t23y`).
+   *
+   * The pane fallback is a centred card in a full-height flex container, which
+   * is right for a tab pane and wrong everywhere the boundary went next: it
+   * overflows a 224px sidebar column and dwarfs a 20px status strip, so the
+   * boundary would push the rest of the app around to report a fault in
+   * something the user was not looking at. The variant is the mount site saying
+   * how much room it has, exactly as `label` is the mount site saying what it
+   * is guarding.
+   *
+   * The blast-radius assertions live where the boundaries are mounted —
+   * `src/__tests__/App.dom.test.tsx` for the sidebar and the status bar,
+   * `DisassemblyPanel.dom.test.tsx` for the chat and bottom panels. What is
+   * checked here is only what the variant itself changes.
+   */
+  it("states the region and the fault in one line, in the chrome variant", () => {
+    render(
+      <ErrorBoundary label="Sidebar" variant="chrome">
+        <Boom message="unique-marker-c17" />
+      </ErrorBoundary>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Sidebar failed");
+    expect(alert.textContent).toContain("unique-marker-c17");
+    // Not the pane sentence: the two fallbacks are different renders, not one
+    // render with different classes, so this is what says which ran.
+    expect(alert.textContent).not.toContain("went wrong");
+  });
+
+  it("offers Try again but NOT Reload in the chrome variant", () => {
+    // A DECISION, not an omission, and it is the variant's whole argument
+    // restated as a control. A chrome boundary is only ever placed where the
+    // app is still worth using without the region, so a reload — which discards
+    // the parsed image and the worker's disassembly — is exactly the wrong
+    // trade to put one click away from a user whose session is otherwise
+    // intact. The pane fallback keeps it as the last resort; here it is not a
+    // resort at all, and the browser's own reload still exists.
+    render(
+      <ErrorBoundary label="Sidebar" variant="chrome">
+        <Boom />
+      </ErrorBoundary>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(alert).queryByRole("button", { name: "Reload" })).toBeNull();
+    // The control for the line above: the pane variant does offer it, so this
+    // is a difference between the two rather than a button nobody renders.
+    cleanup();
+    render(
+      <ErrorBoundary label="Sidebar">
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(within(screen.getByRole("alert")).getByRole("button", { name: "Reload" })).toBeTruthy();
+  });
+
+  it("recovers the region in place from the chrome fallback", () => {
+    function Flaky({ fail }: { fail: boolean }) {
+      if (fail) throw new Error("flaky");
+      return <div>chrome healthy</div>;
+    }
+    const { rerender } = render(
+      <ErrorBoundary label="Chat" variant="chrome">
+        <Flaky fail={true} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole("alert").textContent).toContain("Chat failed");
+    rerender(
+      <ErrorBoundary label="Chat" variant="chrome">
+        <Flaky fail={false} />
+      </ErrorBoundary>,
+    );
+    // Still the fallback: `hasError` is deliberately NOT cleared on a re-render
+    // — an automatic reset would retry a deterministic fault on every parent
+    // render and flicker the fallback with no way to read it. Recovery is the
+    // click, in both variants.
+    expect(screen.getByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(screen.getByText("chrome healthy")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("marks the fallback as an alert, so a replaced region is announced", () => {

@@ -364,11 +364,45 @@ deterministic fault on every parent render and flicker the fallback in and out w
 it, so recovery is explicit. Blast radius is asserted in `src/__tests__/App.dom.test.tsx` by
 `vi.mock`ing one tab's component to throw on a flag; nothing static can see any of this, since
 `typecheck` accepts a boundary with neither `getDerivedStateFromError` nor `componentDidCatch` and
-`componentDidCatch` has no signature to inspect. **What is STILL unguarded, and it is filed rather
-than blanketed**: `Sidebar`, `AddressBar`, `StatusBar`, the six dialogs and the panel container sit
-outside every boundary, and `main.tsx` puts none above `<App/>` — so a throw in any of them is a
-blank page. Wrapping each region trades loudness for partial function and is a judgement, not a
-tidy-up (`peek-a-bin-p0qw`).
+`componentDidCatch` has no signature to inspect (`peek-a-bin-p0qw`).
+
+**…and FOUR CHROME REGIONS now have one too, on a criterion that is stated once, in
+`ErrorBoundary`'s own docstring: guard a region exactly when the app is still worth using without
+it.** The `variant` prop (`"pane" | "chrome"`) is the mount site saying how much room it has, the
+way `label` says what it is guarding — the pane's centred card overflows a 224px sidebar column and
+dwarfs a 20px status strip, so `"chrome"` is one line sized to its own text, and it deliberately
+offers **no Reload**: a chrome boundary is only ever placed where the session is otherwise intact,
+so discarding the parsed image and the worker's disassembly is the wrong trade to put one click
+away. Guarded: **`Sidebar`** and **`StatusBar`** (in `App`), **`AIChatPanel`** and
+**`BottomPanelContainer`** (in `DisassemblyView`). **Loudness is not a second criterion competing
+with the first** — `componentDidCatch` logs the stack either way and the fallback additionally
+*names* the region, which a blank page does not.
+
+**`AddressBar` is deliberately LEFT LOUD, and the argument is a measurement rather than a
+preference**: it owns the global `window` keydown handler carrying the 1-9 `TAB_KEYS` map, so a
+boundary would remove **both** routes to another tab, not just the buttons, leaving an app pinned
+to whichever tab was showing. No partial function is bought, so the boundary would only convert an
+unmistakable blank page into a half-working app that gets worked around instead of reported. The
+suggested middle in `peek-a-bin-t23y` grouped `StatusBar` with it; **measured, that is wrong** —
+the status bar's only navigation affordance is a jump to the containing function, duplicated by the
+sidebar and by the listing.
+
+**Two measured corrections to that bead's premise, worth keeping**: `AIChatPanel` and
+`BottomPanelContainer` mount inside `DisassemblyView` and were therefore never a blank page — they
+sat inside the *pane's* boundary, and what a throw cost was the listing, toolbar, graph and
+decompile panel, which is `p0qw`'s own argument one level down. **`DecompileView` and `CFGView` get
+no boundary on purpose**: they *are* the pane in the mode that shows them, so the pane's boundary is
+already the right radius.
+
+**What is STILL unguarded, and the reason is now a MECHANISM rather than a judgement**: the six
+dialogs, and `main.tsx` puts no boundary above `<App/>`. The dialogs pass the criterion easily
+(they are overlays), but this fallback is the wrong instrument — a dialog's subtree carries its own
+backdrop, focus trap and Escape handler, so a boundary that catches leaves the fallback floating in
+`App`'s root with the dialog still `open` in state, and since `hasError` never clears, one throw in
+the palette kills all six for the session. The right shape is a modal-placed fallback plus a reset
+keyed on the dialog's own `open` transition — a *named* trigger, which does not contradict the rule
+above — threaded through three different open-state plumbings. Not smuggled in beside this change
+(`peek-a-bin-t23y`).
 
 **The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `AddressBar`
 renders `role="tablist"` around exactly the nine tabs (not the toolbar, which also holds

@@ -916,11 +916,30 @@ export default function App() {
             )}
             <GraphOverviewContext.Provider value={graphOverviewState}>
               <div className="flex flex-1 overflow-hidden">
-                <Sidebar />
+                {/* CHROME BOUNDARIES, and the criterion is in `ErrorBoundary`'s
+                    own docstring: guard a region exactly when the app is still
+                    worth using without it. The sidebar is a function list and a
+                    bookmark list — every address it offers is still reachable
+                    from the address field, the listing and the status bar — so
+                    a throw in it must not cost the disassembly the user was
+                    reading, which until now it did, by blanking the page
+                    (peek-a-bin-t23y). */}
+                <ErrorBoundary label="Sidebar" variant="chrome">
+                  <Sidebar />
+                </ErrorBoundary>
                 <main className="flex-1 overflow-auto">{renderMainView()}</main>
               </div>
             </GraphOverviewContext.Provider>
-            <StatusBar mcpStatus={mcpStatus} />
+            {/* The status bar is a derived readout and nothing depends on it.
+                NOTE this departs from `peek-a-bin-t23y`'s suggested middle,
+                which grouped it with `AddressBar` as a region whose loss means
+                the user cannot navigate: its only navigation affordance is a
+                jump to the containing function, duplicated by the sidebar and
+                by the listing. `AddressBar` itself is deliberately NOT wrapped
+                — see the docstring for the measurement behind that. */}
+            <ErrorBoundary label="Status bar" variant="chrome">
+              <StatusBar mcpStatus={mcpStatus} />
+            </ErrorBoundary>
           </div>
         )}
         <CommandPalette open={paletteOpen} onClose={closePalette} />

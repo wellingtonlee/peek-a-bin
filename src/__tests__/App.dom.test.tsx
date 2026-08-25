@@ -56,6 +56,37 @@ vi.mock("../components/SectionTable", async (importOriginal) => {
   };
 });
 
+/**
+ * Which CHROME region should throw when it renders, or null.
+ *
+ * Same flag-plus-passthrough shape as `boomTab` above and for the same reason:
+ * every other test in this file asserts on these two components' real output,
+ * so the mock renders the genuine component whenever it is not asked to fail.
+ */
+let boomChrome: "sidebar" | "statusbar" | null = null;
+
+vi.mock("../components/Sidebar", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/Sidebar")>();
+  return {
+    ...actual,
+    Sidebar: () => {
+      if (boomChrome === "sidebar") throw new Error("sidebar exploded");
+      return <actual.Sidebar />;
+    },
+  };
+});
+
+vi.mock("../components/StatusBar", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/StatusBar")>();
+  return {
+    ...actual,
+    StatusBar: (props: Parameters<typeof actual.StatusBar>[0]) => {
+      if (boomChrome === "statusbar") throw new Error("status bar exploded");
+      return <actual.StatusBar {...props} />;
+    },
+  };
+});
+
 vi.mock("../workers/requestTimeout", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workers/requestTimeout")>()),
   // 500 ms rather than something smaller: `timeoutBudgetInWords` rounds to
@@ -215,6 +246,7 @@ beforeEach(() => {
   initFails = false;
   stallDetect = false;
   boomTab = null;
+  boomChrome = null;
   vi.stubGlobal("Worker", FakeDisasmWorker);
   // `handleFile` calls `saveRecentFile`, which opens IndexedDB. jsdom 28 does
   // not implement it and `fake-indexeddb` is not a dependency here, so the
@@ -752,5 +784,107 @@ describe("a throw in one tab does not take out the others", () => {
       (el) => el.className === "h-full",
     );
     expect(shown?.textContent).toContain(".rsrc");
+  });
+});
+
+describe("a throw in the chrome does not blank the page", () => {
+  /**
+   * THE DEFECT THIS PINS: until `peek-a-bin-t23y` the tree held exactly ONE
+   * `ErrorBoundary` usage outside the component's own file — the per-pane one
+   * above — and `main.tsx` puts none above `<App/>`. So a render throw in the
+   * sidebar or the status bar unmounted the whole application and left a BLANK
+   * PAGE, with `console.error` the only trace, to report a fault in a function
+   * list or in a 20px readout.
+   *
+   * The assertion is the BLAST RADIUS, never that a fallback appeared: each
+   * test below names something in a NEIGHBOURING region that must still be on
+   * screen. Only a render can see any of this — `typecheck` accepts a boundary
+   * with neither `getDerivedStateFromError` nor `componentDidCatch`.
+   *
+   * `AddressBar` is deliberately NOT guarded and there is no test here asserting
+   * that it is not; the argument, which is a measurement about the global
+   * `TAB_KEYS` handler it owns, is in `ErrorBoundary`'s docstring, which is
+   * where anyone about to wrap it will be reading.
+   */
+  async function openWithBrokenChrome(which: "sidebar" | "statusbar") {
+    boomChrome = which;
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByTitle("Sections (3)")).toBeTruthy();
+    });
+    return user;
+  }
+
+  /** The chrome fallback for one region, found by the sentence it renders. */
+  function chromeAlert(label: string): HTMLElement {
+    const hit = screen
+      .getAllByRole("alert")
+      .find((el) => el.textContent?.includes(`${label} failed`));
+    if (!hit) throw new Error(`no chrome fallback naming ${label}`);
+    return hit;
+  }
+
+  it("keeps the tab bar and the pane when the sidebar throws", async () => {
+    const user = await openWithBrokenChrome("sidebar");
+
+    // Names the region and carries the real message, so a bug report can say
+    // which of the chrome regions went — which a blank page cannot.
+    expect(chromeAlert("Sidebar").textContent).toContain("sidebar exploded");
+
+    // The neighbours: AddressBar's tablist still has all nine tabs, and one of
+    // them still SWITCHES and renders its pane's real content. Asserting the
+    // tab bar alone would not say the app is usable — the tab bar rendering is
+    // what a boundary around AddressBar would have taken, not what a boundary
+    // around the sidebar could.
+    expect(screen.getAllByRole("tab").length).toBe(VIEW_TABS.length);
+    await user.click(screen.getByTitle("Headers (2)"));
+    const shown = await waitFor(() => {
+      const el = Array.from(document.querySelectorAll<HTMLElement>("div.h-full")).find(
+        (d) => d.className === "h-full",
+      );
+      if (!el) throw new Error("no visible pane");
+      return el;
+    });
+    expect(shown.textContent).toMatch(/machine/i);
+  });
+
+  it("keeps the sidebar and the tab bar when the status bar throws", async () => {
+    await openWithBrokenChrome("statusbar");
+
+    expect(chromeAlert("Status bar").textContent).toContain("status bar exploded");
+    expect(screen.getAllByRole("tab").length).toBe(VIEW_TABS.length);
+    // The real sidebar, not a stand-in: its own filter field.
+    expect(screen.getByPlaceholderText("Filter functions...")).toBeTruthy();
+  });
+
+  it("renders no fallback at all when nothing throws", async () => {
+    // The liveness half. Every assertion above is about a red row; a boundary
+    // that rendered its fallback unconditionally would pass all of them, and
+    // this is what says the population is also asked over well-formed input.
+    render(<App />);
+    await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter functions...")).toBeTruthy();
+    });
+    expect(screen.queryAllByRole("alert")).toEqual([]);
+  });
+
+  it("re-renders the region alone when Try again is clicked", async () => {
+    const user = await openWithBrokenChrome("sidebar");
+    const fallback = chromeAlert("Sidebar");
+
+    // The chrome fallback deliberately offers NO Reload: it is only ever placed
+    // where the app is still usable without the region, so discarding the
+    // parsed image and the worker's disassembly is the wrong trade to put one
+    // click away. Asserted because it is a decision, not an omission.
+    expect(within(fallback).queryByRole("button", { name: "Reload" })).toBeNull();
+
+    boomChrome = null;
+    await user.click(within(fallback).getByRole("button", { name: "Try again" }));
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Filter functions...")).toBeTruthy();
+    });
+    expect(screen.queryAllByRole("alert")).toEqual([]);
   });
 });

@@ -33,6 +33,7 @@ import { DecompileView } from "./DecompileView";
 import { DisassemblyMinimap } from "./DisassemblyMinimap";
 import { DataRow, InsnRow, LabelRow, SeparatorRow } from "./DisassemblyRows";
 import { DisassemblyToolbar } from "./DisassemblyToolbar";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { InsnContextMenu } from "./InsnContextMenu";
 import { InstructionDetail } from "./InstructionDetail";
 import { JumpArrows } from "./JumpArrows";
@@ -1543,84 +1544,99 @@ export function DisassemblyView() {
               }}
             />
             <div className="shrink-0" style={{ width: chatWidth }}>
-              <AIChatPanel
-                chat={aiChat}
-                onClose={() => setShowChat(false)}
-                onRename={(address, name) => dispatch({ type: "RENAME_FUNCTION", address, name })}
-              />
+              {/* ONE LEVEL DOWN FROM THE TAB PANE, which is the whole of what
+                  this buys. `App` already wraps this view in a boundary, so a
+                  throw here was never the blank page `peek-a-bin-t23y` names —
+                  it took the DISASSEMBLY PANE, listing, graph, decompile panel
+                  and all, to report a fault in an optional side panel. That is
+                  `peek-a-bin-p0qw`'s blast-radius argument at this scale. */}
+              <ErrorBoundary label="Chat" variant="chrome">
+                <AIChatPanel
+                  chat={aiChat}
+                  onClose={() => setShowChat(false)}
+                  onRename={(address, name) => dispatch({ type: "RENAME_FUNCTION", address, name })}
+                />
+              </ErrorBoundary>
             </div>
           </>
         )}
       </div>
       {/* end flex wrapper for content + minimap */}
 
-      {/* Tabbed bottom panels */}
-      <BottomPanelContainer
-        panels={[
-          {
-            id: "calls",
-            label: "Calls",
-            visible: showCallPanel && !!currentFunc,
-            onClose: () => setShowCallPanel(false),
-            content: currentFunc ? (
-              <CallPanel
-                func={currentFunc}
-                xrefMap={xrefMap}
-                instructions={instructions}
-                functions={state.functions}
-                renames={state.renames}
-                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-                onClose={() => setShowCallPanel(false)}
-              />
-            ) : null,
-          },
-          {
-            id: "detail",
-            label: "Detail",
-            visible: showDetail && isExecutable,
-            onClose: () => setShowDetail(false),
-            content: curInsnForDetail ? (
-              <InstructionDetail
-                insn={curInsnForDetail}
-                typedXrefMap={typedXrefMap}
-                funcMap={funcMap}
-                iatMap={iatMap}
-                renames={state.renames}
-                sortedFuncs={sortedFuncs}
-                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-                onClose={() => setShowDetail(false)}
-                stackFrame={stackFrame}
-                signature={currentFuncSig}
-              />
-            ) : null,
-          },
-          {
-            id: "xrefs",
-            label: "Xrefs",
-            visible: showXrefPanel,
-            onClose: () => {
-              setShowXrefPanel(false);
-              setXrefScopeAddress(null);
+      {/* Tabbed bottom panels. Same argument as the chat panel above: the Calls,
+          Detail and Xrefs panels are consulted beside the listing, never
+          instead of it, so a throw in one of them must not take the listing.
+          Note the boundary catches a throw from RENDERING a panel, not from
+          BUILDING the array below — that runs in this component and is outside
+          it, which is honest: a fault there is a fault in the view itself. */}
+      <ErrorBoundary label="Panels" variant="chrome">
+        <BottomPanelContainer
+          panels={[
+            {
+              id: "calls",
+              label: "Calls",
+              visible: showCallPanel && !!currentFunc,
+              onClose: () => setShowCallPanel(false),
+              content: currentFunc ? (
+                <CallPanel
+                  func={currentFunc}
+                  xrefMap={xrefMap}
+                  instructions={instructions}
+                  functions={state.functions}
+                  renames={state.renames}
+                  onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                  onClose={() => setShowCallPanel(false)}
+                />
+              ) : null,
             },
-            content: (
-              <XrefPanel
-                typedXrefMap={typedXrefMap}
-                funcMap={funcMap}
-                sortedFuncs={sortedFuncs}
-                onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
-                onClose={() => {
-                  setShowXrefPanel(false);
-                  setXrefScopeAddress(null);
-                }}
-                scopeAddress={xrefScopeAddress}
-                currentFuncAddr={currentFunc?.address ?? null}
-                currentFuncEnd={currentFunc ? currentFunc.address + currentFunc.size : null}
-                currentInsnAddr={state.currentAddress}
-              />
-            ),
-          },
-        ]}
-      />
+            {
+              id: "detail",
+              label: "Detail",
+              visible: showDetail && isExecutable,
+              onClose: () => setShowDetail(false),
+              content: curInsnForDetail ? (
+                <InstructionDetail
+                  insn={curInsnForDetail}
+                  typedXrefMap={typedXrefMap}
+                  funcMap={funcMap}
+                  iatMap={iatMap}
+                  renames={state.renames}
+                  sortedFuncs={sortedFuncs}
+                  onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                  onClose={() => setShowDetail(false)}
+                  stackFrame={stackFrame}
+                  signature={currentFuncSig}
+                />
+              ) : null,
+            },
+            {
+              id: "xrefs",
+              label: "Xrefs",
+              visible: showXrefPanel,
+              onClose: () => {
+                setShowXrefPanel(false);
+                setXrefScopeAddress(null);
+              },
+              content: (
+                <XrefPanel
+                  typedXrefMap={typedXrefMap}
+                  funcMap={funcMap}
+                  sortedFuncs={sortedFuncs}
+                  onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                  onClose={() => {
+                    setShowXrefPanel(false);
+                    setXrefScopeAddress(null);
+                  }}
+                  scopeAddress={xrefScopeAddress}
+                  currentFuncAddr={currentFunc?.address ?? null}
+                  currentFuncEnd={currentFunc ? currentFunc.address + currentFunc.size : null}
+                  currentInsnAddr={state.currentAddress}
+                />
+              ),
+            },
+          ]}
+        />
+      </ErrorBoundary>
     </div>
   );
 }

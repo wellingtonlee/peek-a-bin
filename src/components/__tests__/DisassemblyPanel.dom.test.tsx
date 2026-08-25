@@ -66,6 +66,37 @@ import { AppHarness } from "./appStateHarness";
  * out of scope here; they are their own components with their own dependencies.
  */
 
+/**
+ * Which side panel should throw when it renders, or null.
+ *
+ * Flag-plus-passthrough, the shape `App.dom.test.tsx` uses: the mocks render the
+ * genuine components whenever they are not asked to fail, so the detail-panel
+ * suite below still asserts on `InstructionDetail`'s real output.
+ */
+let boomPanel: "detail" | "chat" | null = null;
+
+vi.mock("../InstructionDetail", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../InstructionDetail")>();
+  return {
+    ...actual,
+    InstructionDetail: (props: Parameters<typeof actual.InstructionDetail>[0]) => {
+      if (boomPanel === "detail") throw new Error("detail panel exploded");
+      return <actual.InstructionDetail {...props} />;
+    },
+  };
+});
+
+vi.mock("../AIChatPanel", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../AIChatPanel")>();
+  return {
+    ...actual,
+    AIChatPanel: (props: Parameters<typeof actual.AIChatPanel>[0]) => {
+      if (boomPanel === "chat") throw new Error("chat panel exploded");
+      return <actual.AIChatPanel {...props} />;
+    },
+  };
+});
+
 stubLayoutRect({ height: 600 });
 
 /**
@@ -302,11 +333,16 @@ const pane = () => screen.getByRole("application");
 beforeEach(() => {
   ScriptedWorker.posted = [];
   ScriptedWorker.built = 0;
+  boomPanel = null;
   vi.stubGlobal("Worker", ScriptedWorker);
+  // `ErrorBoundary.componentDidCatch` logs the stack, which is the point of it;
+  // silenced so the deliberate throws below do not bury the run.
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   // The client is a module singleton and its disassembly cache is keyed on
   // (arch, base address, is64) — identical across these tests — so without this
   // the second mount is served from the first and posts nothing.
@@ -905,5 +941,85 @@ describe("renders per cursor move, against the real DisassemblyView", () => {
     const before = { ...counts };
     await user.keyboard("{F9}");
     expect(counts.HexView - before.HexView).toBe(0);
+  });
+});
+
+describe("a throw in a side panel does not take the listing", () => {
+  /**
+   * `peek-a-bin-p0qw`'s BLAST-RADIUS ARGUMENT ONE LEVEL DOWN (`peek-a-bin-t23y`).
+   *
+   * The bead lists the AI chat panel and the bottom panel container beside
+   * `Sidebar` and the dialogs as regions whose throw is a blank page. MEASURED,
+   * THAT IS NOT TRUE OF THESE TWO and the correction is worth keeping: both
+   * mount inside `DisassemblyView`, which `App` already wraps in a per-tab
+   * boundary — so a throw here replaced the DISASSEMBLY PANE and the other
+   * eight tabs carried on. The page was never blank.
+   *
+   * What it did cost was everything the pane holds: the virtualized listing,
+   * the toolbar, the jump arrows, the minimap, the graph and the decompile
+   * panel — all replaced to report a fault in a panel the user opened beside
+   * them and can close. That is exactly the trade `peek-a-bin-p0qw` refused one
+   * level up, so these two get their own boundaries and the assertion is the
+   * same one: the neighbour is still on screen.
+   *
+   * `DecompileView` and `CFGView` deliberately get NO boundary of their own.
+   * They are not consulted beside the listing, they ARE the pane in the mode
+   * that shows them, so the pane's boundary is already the right blast radius.
+   */
+  it("keeps the listing when the Detail panel throws", async () => {
+    const user = userEvent.setup();
+    const { container } = await mountReady({ currentAddress: A[1] });
+    const before = insnRows(container).length;
+    expect(before).toBe(INSNS.length);
+
+    boomPanel = "detail";
+    pane().focus();
+    await user.keyboard("i");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Panels failed");
+    expect(alert.textContent).toContain("detail panel exploded");
+
+    // THE POINT: every instruction row is still rendered, and so is the
+    // toolbar. Under the pane-level boundary alone all of this was replaced.
+    expect(insnRows(container)).toHaveLength(before);
+    expect(toolbar(container)).toBeTruthy();
+  });
+
+  it("keeps the listing when the chat panel throws", async () => {
+    const user = userEvent.setup();
+    const { container } = await mountReady();
+    const before = insnRows(container).length;
+
+    boomPanel = "chat";
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"));
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Chat failed");
+    expect(insnRows(container)).toHaveLength(before);
+
+    // And the region recovers on its own, without touching the listing: the
+    // chat column is the only thing that re-renders.
+    boomPanel = null;
+    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(insnRows(container)).toHaveLength(before);
+  });
+
+  it("renders no fallback while both panels are healthy", async () => {
+    // The liveness half: both assertions above are about a red row, and a
+    // boundary rendering its fallback unconditionally would satisfy them.
+    const user = userEvent.setup();
+    const { container } = await mountReady({ currentAddress: A[1] });
+    pane().focus();
+    await user.keyboard("i");
+    await screen.findByText(/Instruction Detail/i);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("peek-a-bin:open-chat"));
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(insnRows(container)).toHaveLength(INSNS.length);
   });
 });
