@@ -3,6 +3,7 @@ import { useFileMetrics } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
   DataDirectoryNames as DATA_DIR_NAMES,
+  IMAGE_DIRECTORY_ENTRY_SECURITY,
   MachineTypes as MACHINE_TYPES,
   RelocTypeNames as RELOC_TYPE_NAMES,
   SubsystemNames as SUBSYSTEM_NAMES,
@@ -497,6 +498,40 @@ export function HeaderView() {
                 <td className="py-1 pr-6 text-gray-300">{DATA_DIR_NAMES[i] ?? `Directory ${i}`}</td>
                 <td className="py-1 pr-6">
                   <CopyableHex value={dd.virtualAddress} />
+                  {/*
+                    The Certificate Table is the ONE directory whose address
+                    field is not an RVA — the attribute certificates sit outside
+                    every section, so the field is a raw file offset, and
+                    `pe/authenticode.ts`'s `parseSecurityDirectory` uses it as
+                    one. Only this table disagreed, and only on this row.
+
+                    The correction goes on the ROW rather than in the heading
+                    because the exception is a property of the row: heading the
+                    column "RVA / offset" would make all sixteen rows ambiguous
+                    in order to disambiguate one, and would leave a reader
+                    coming from `dumpbin` — which prints the same value under
+                    the same "RVA" heading — with less information, not more.
+                    The spelling is the panel's own existing idiom for "what
+                    this number actually is": a muted parenthetical beside the
+                    number, exactly as in `0x014C (x86)`, `0x010B (PE32)` and
+                    `(RVA: 0x…)` above. So no footnote mechanism is invented
+                    for one row, and nothing is hidden behind a hover.
+
+                    Shown UNCONDITIONALLY, including where the directory is
+                    empty (0/0, i.e. every unsigned binary). The statement is
+                    about the FIELD, not about the value: suppressing it when
+                    zero would make it read as a property of this file, and
+                    would mean the table still says "RVA" over that row on most
+                    of the binaries anyone opens. (peek-a-bin-xnne)
+                  */}
+                  {i === IMAGE_DIRECTORY_ENTRY_SECURITY && (
+                    <span
+                      className="text-gray-500 ml-2"
+                      title="The attribute certificates lie outside every section, so this directory's address field is a raw file offset rather than an RVA."
+                    >
+                      (file offset)
+                    </span>
+                  )}
                 </td>
                 <td className="py-1">
                   <CopyableHex value={dd.size} />

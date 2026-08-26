@@ -377,6 +377,65 @@ describe("HeaderView data directories", () => {
     expect(rows[15].textContent).toContain("Directory 15");
     expect(container.textContent).toContain("CLR Runtime Header");
   });
+
+  /**
+   * THE ONE ROW THE COLUMN HEADING IS WRONG ABOUT.
+   *
+   * Directory 4's address field is a raw FILE OFFSET, not an RVA — the
+   * attribute certificates sit outside every section — and
+   * `parseSecurityDirectory` reads it as one. The heading said "RVA" over all
+   * sixteen rows, so that row was correctly read and incorrectly labelled
+   * (peek-a-bin-xnne).
+   *
+   * The correction is a muted parenthetical on the row, in the panel's own
+   * idiom. These three assertions are what make it a marker rather than
+   * decoration: it is ON the certificate row, ABSENT from an ordinary one, and
+   * appears EXACTLY ONCE in the table — a marker on every row is no marker.
+   */
+  it("marks the certificate row's address as a file offset, and only that row", () => {
+    const pe = parsePE(buildMinimalPE64());
+    const { container } = renderHeaders(pe);
+    const table = screen.getByText("Data Directories").nextElementSibling as HTMLElement;
+    const rows = Array.from(table.querySelectorAll("tbody tr"));
+
+    // The heading is unchanged and still says "RVA". Weakening it to
+    // "RVA / offset" would make fifteen correct rows ambiguous to disambiguate
+    // one, and `dumpbin` prints this value under "RVA" too.
+    const heads = Array.from(table.querySelectorAll("thead th")).map((h) => h.textContent);
+    expect(heads).toEqual(["#", "Name", "RVA", "Size"]);
+
+    expect(rows[4].textContent).toContain("Certificate Table");
+    expect(rows[4].textContent).toContain("(file offset)");
+
+    // UNCONDITIONAL: this fixture is unsigned, so directory 4 is 0/0. The
+    // statement is about the field, not about the value — suppressing it when
+    // empty would make it read as a property of this file, and would leave the
+    // table saying "RVA" over that row on nearly every binary anyone opens.
+    expect(pe.dataDirectories[4].virtualAddress).toBe(0);
+    expect(rows[4].textContent).toContain("0x00000000");
+    expect(container.textContent).toContain("(file offset)");
+  });
+
+  // The two halves of "and only that row", kept in SEPARATE tests on purpose:
+  // in one `it` the first failure hides the second, so a control that puts the
+  // marker everywhere would only ever be seen to redden whichever came first.
+  // Split, each is independently demonstrated.
+  it("counts exactly one file-offset marker in the sixteen rows", () => {
+    renderHeaders(parsePE(buildMinimalPE64()));
+    const table = screen.getByText("Data Directories").nextElementSibling as HTMLElement;
+    const marked = Array.from(table.querySelectorAll("tbody tr")).filter((r) =>
+      (r.textContent ?? "").includes("(file offset)"),
+    );
+    expect(marked).toHaveLength(1);
+  });
+
+  it("leaves an ordinary directory row unmarked", () => {
+    renderHeaders(parsePE(buildMinimalPE64()));
+    const table = screen.getByText("Data Directories").nextElementSibling as HTMLElement;
+    const imports = Array.from(table.querySelectorAll("tbody tr"))[1];
+    expect(imports.textContent).toContain("Import Table");
+    expect(imports.textContent).not.toContain("(file offset)");
+  });
 });
 
 describe("HeaderView metadata block", () => {
@@ -861,13 +920,22 @@ describe("HeaderView digital signature", () => {
         (s) => offset >= s.virtualAddress && offset < s.virtualAddress + s.virtualSize,
       ),
     ).toBe(false);
-    // And the row that shows it: the Certificate Table's "RVA" column holds that
-    // same file offset, which is what the format says and what dumpbin prints.
+    // And the row that shows it: the Certificate Table's column holds that same
+    // file offset, which is what the format says and what dumpbin prints under
+    // an "RVA" heading. The row says so beside the number — this is the POPULATED
+    // half of the marker's population; the empty-directory half is in the data
+    // directories block above (peek-a-bin-xnne).
     renderHeaders(pe);
     const dirTable = screen.getByText("Data Directories").nextElementSibling as HTMLElement;
-    const certRow = Array.from(dirTable.querySelectorAll("tbody tr"))[4];
+    const certRow = Array.from(dirTable.querySelectorAll("tbody tr"))[4] as HTMLElement;
     expect(certRow.textContent).toContain("Certificate Table");
     expect(certRow.textContent).toContain(
+      `0x${offset.toString(16).toUpperCase().padStart(8, "0")}`,
+    );
+    expect(certRow.textContent).toContain("(file offset)");
+    // The marker is a sibling of the hex, not inside it: the value stays
+    // copyable as the bare number a reader pastes into a hex editor.
+    expect(within(certRow).getAllByRole("button")[0].textContent).toBe(
       `0x${offset.toString(16).toUpperCase().padStart(8, "0")}`,
     );
   });
