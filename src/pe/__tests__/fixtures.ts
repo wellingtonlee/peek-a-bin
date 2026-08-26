@@ -9,6 +9,7 @@ import {
   IMAGE_DIRECTORY_ENTRY_EXPORT,
   IMAGE_DIRECTORY_ENTRY_IMPORT,
   IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
   IMAGE_DIRECTORY_ENTRY_SECURITY,
   IMAGE_DIRECTORY_ENTRY_TLS,
   IMAGE_DOS_SIGNATURE,
@@ -128,6 +129,43 @@ export interface DebugEntryDef {
 }
 
 /**
+ * ONE LEAF of the resource tree: an `IMAGE_RESOURCE_DATA_ENTRY` and the bytes
+ * it names.
+ *
+ * `data` is emitted into the section and the entry records its **RVA** — not an
+ * offset from the resource base, which is what every other offset in the
+ * directory is. That mixture of bases is the whole difficulty of this structure,
+ * so the builder writes each field in the base the format actually uses rather
+ * than in one convenient base.
+ */
+export interface ResourceLangDef {
+  /** Third-level id: a LANGID (0x0409 = en-US, 0x0407 = de-DE). */
+  lang: number;
+  /** Emitted verbatim; a test can assert the recovered bytes against it. */
+  data: Uint8Array;
+  /** `CodePage`. Defaults to 0. 65001 (UTF-8) and 932 (Shift-JIS) are real. */
+  codePage?: number;
+}
+
+/** Second level of the tree: one resource, in one or more languages. */
+export interface ResourceNameDef {
+  /**
+   * A number is an **ID** entry; a string is a **NAME** entry, emitted as a
+   * length-prefixed UTF-16LE string elsewhere in the block with the high bit set
+   * in the entry's `Name` field.
+   */
+  id: number | string;
+  langs: ResourceLangDef[];
+}
+
+/** First level of the tree: one resource type. */
+export interface ResourceTypeDef {
+  /** An `RT_*` ordinal, or a user-defined type NAME (`"MOFDATA"`, `"PNG"`). */
+  id: number | string;
+  names: ResourceNameDef[];
+}
+
+/**
  * Real data directories to synthesize. Everything requested here is laid out
  * into one extra section and the matching data directory entries are filled in.
  */
@@ -138,6 +176,11 @@ export interface DirectorySpec {
   loadConfig?: LoadConfigDef;
   relocations?: RelocBlockDef[];
   debug?: DebugEntryDef[];
+  /**
+   * A three-level `IMAGE_RESOURCE_DIRECTORY` tree, laid out last in the section
+   * so the directory entry's `Size` covers exactly the resource block.
+   */
+  resources?: ResourceTypeDef[];
 }
 
 /**
@@ -466,6 +509,141 @@ function buildDirectorySection(
     dirs.set(IMAGE_DIRECTORY_ENTRY_DEBUG, {
       virtualAddress: rvaOf(table),
       size: spec.debug.length * ENTRY,
+    });
+  }
+
+  // --- Resources ---
+  // LAST, deliberately: the resource data directory's `Size` is computed as
+  // `pos - rootAt`, which is the whole resource block only while nothing else is
+  // allocated after it.
+  if (spec.resources) {
+    /**
+     * SIXTEEN BYTES OF 0xCC IN FRONT OF THE ROOT, AND THEY ARE THE POINT.
+     *
+     * A real `.rsrc` puts the root directory at offset 0, so the SECTION base
+     * and the RESOURCE base coincide and a walk that confused the two would
+     * still be right on every real file — the discrimination a fixture is for
+     * would be structurally impossible. Pushing the root off the section start
+     * separates them. Read as a directory this filler claims 0xCCCC named and
+     * 0xCCCC id entries pointing at 0xCCCCCCCC, so a reader anchored on the
+     * section produces garbage rather than a smaller version of the truth.
+     */
+    const decoyAt = alloc(16, 4);
+    backing.fill(0xcc, decoyAt, decoyAt + 16);
+
+    /**
+     * Named entries first, sorted by name; then ID entries ascending.
+     *
+     * The walk does not depend on this — it decides per entry from the `Name`
+     * field's high bit — but it is what `rc.exe` emits and what
+     * `NumberOfNamedEntries` describes, so a fixture that emitted them
+     * interleaved would not be a file any other reader could agree about.
+     */
+    const order = <T extends { id: number | string }>(items: T[]): T[] => {
+      const named = items
+        .filter((i) => typeof i.id === "string")
+        .sort((a, b) => (String(a.id).toUpperCase() < String(b.id).toUpperCase() ? -1 : 1));
+      const ids = items
+        .filter((i) => typeof i.id === "number")
+        .sort((a, b) => Number(a.id) - Number(b.id));
+      return [...named, ...ids];
+    };
+
+    const dirBytes = (n: number) => 16 + n * 8;
+
+    // Pass 1 — every directory node, parents before children.
+    const sortedTypes = order(spec.resources);
+    const rootAt = alloc(dirBytes(sortedTypes.length), 4);
+    const typePlan = sortedTypes.map((t) => {
+      const names = order(t.names);
+      return { def: t, names, at: alloc(dirBytes(names.length), 4) };
+    });
+    const namePlan = typePlan.map((tp) =>
+      tp.names.map((n) => ({ def: n, at: alloc(dirBytes(n.langs.length), 4) })),
+    );
+
+    // Pass 2 — the 16-byte data entries, then the bytes they name.
+    //
+    // ENTRIES BEFORE BLOBS, which is both what `rc.exe` emits and what makes a
+    // TRUNCATED image expressible: cut the file between the two and the whole
+    // tree still reads while every leaf's bytes are off the end, which is the
+    // shape a carved or part-downloaded sample has.
+    const leafPlan = namePlan.map((names) =>
+      names.map((np) => np.def.langs.map(() => alloc(16, 4))),
+    );
+    namePlan.forEach((names, ti) =>
+      names.forEach((np, ni) =>
+        np.def.langs.forEach((l, li) => {
+          const blobAt = alloc(Math.max(l.data.length, 1), 4);
+          backing.set(l.data, blobAt);
+          const entryAt = leafPlan[ti][ni][li];
+          // OffsetToData here is an **RVA**, unlike every other offset in the
+          // block, which is relative to the resource base below.
+          dv.setUint32(entryAt, rvaOf(blobAt), true);
+          dv.setUint32(entryAt + 4, l.data.length, true);
+          dv.setUint32(entryAt + 8, l.codePage ?? 0, true);
+          dv.setUint32(entryAt + 12, 0, true); // Reserved
+        }),
+      ),
+    );
+
+    /** Everything but a data entry's RVA is an offset from the ROOT directory. */
+    const resOff = (at: number): number => at - rootAt;
+
+    /** `IMAGE_RESOURCE_DIR_STRING_U`: a uint16 length **in characters**, then UTF-16LE. */
+    const putResourceName = (s: string): number => {
+      const at = alloc(2 + s.length * 2, 2);
+      dv.setUint16(at, s.length, true);
+      for (let i = 0; i < s.length; i++) dv.setUint16(at + 2 + i * 2, s.charCodeAt(i), true);
+      return at;
+    };
+
+    const writeDir = (
+      at: number,
+      children: { id: number | string; target: number; isDir: boolean }[],
+    ): void => {
+      dv.setUint32(at, 0, true); // Characteristics
+      dv.setUint32(at + 4, 0, true); // TimeDateStamp
+      dv.setUint16(at + 8, 4, true); // MajorVersion, as rc.exe writes it
+      dv.setUint16(at + 10, 0, true); // MinorVersion
+      dv.setUint16(at + 12, children.filter((c) => typeof c.id === "string").length, true);
+      dv.setUint16(at + 14, children.filter((c) => typeof c.id === "number").length, true);
+      children.forEach((c, i) => {
+        const p = at + 16 + i * 8;
+        const name =
+          typeof c.id === "string" ? (0x80000000 | resOff(putResourceName(c.id))) >>> 0 : c.id;
+        dv.setUint32(p, name, true);
+        const target = resOff(c.target);
+        dv.setUint32(p + 4, c.isDir ? (0x80000000 | target) >>> 0 : target, true);
+      });
+    };
+
+    writeDir(
+      rootAt,
+      typePlan.map((tp) => ({ id: tp.def.id, target: tp.at, isDir: true })),
+    );
+    typePlan.forEach((tp, ti) =>
+      writeDir(
+        tp.at,
+        namePlan[ti].map((np) => ({ id: np.def.id, target: np.at, isDir: true })),
+      ),
+    );
+    namePlan.forEach((names, ti) =>
+      names.forEach((np, ni) =>
+        writeDir(
+          np.at,
+          np.def.langs.map((l, li) => ({
+            id: l.lang,
+            target: leafPlan[ti][ni][li],
+            isDir: false,
+          })),
+        ),
+      ),
+    );
+
+    dirs.set(IMAGE_DIRECTORY_ENTRY_RESOURCE, {
+      virtualAddress: rvaOf(rootAt),
+      size: pos - rootAt,
     });
   }
 

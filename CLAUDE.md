@@ -976,9 +976,28 @@ read "all of them compile" as "all of them are right".
   both sides.
 - **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
   and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint (no 2D context, no
-  `URL.createObjectURL`); `ResourcesView`'s tree is **hand-constructed**, so
-  nothing there is evidence about the resource-directory walk; and every popup's *placement* is
-  unasserted, `getBoundingClientRect` being all-zero.
+  `URL.createObjectURL`) — the preview's *reconstruction* has unit coverage, but no test and no
+  human has seen an icon; and every popup's *placement* is unasserted, `getBoundingClientRect`
+  being all-zero.
+- **THE RESOURCE-DIRECTORY HOLE IS CLOSED, AND CLOSING IT FOUND A DEFECT.** `DirectorySpec` gained
+  an **opt-in** `resources` tree (`ResourceTypeDef` → `ResourceNameDef` → `ResourceLangDef`) that
+  emits a real three-level `IMAGE_RESOURCE_DIRECTORY`: high-bit subdirectory flags, named entries
+  as length-prefixed **UTF-16** strings beside ID entries, named entries sorted ahead of ID ones
+  as `rc.exe` writes them, two languages under one id, per-leaf code pages, and data entries whose
+  `OffsetToData` is an **RVA** while every offset around it is resource-base-relative. All 20
+  existing builds are byte-identical. **The sixteen bytes of 0xCC in front of the root are the
+  load-bearing part**: a real `.rsrc` puts the root at offset 0, so resource base and section base
+  coincide and a walk that confused them is *structurally* undetectable — measured, not argued.
+  Reading the section base instead of the resource base reddens **17** rows across the two suites
+  with the pad in place, and with it removed reddens **one** — the row asserting the pad exists. The defect: **`ExpandedLeaf`'s manifest arm and `downloadResource`
+  threw `RangeError` on a TRUNCATED image.** `rvaToFileOffset` answers against the section table
+  and never sees the buffer, so where the headers describe more than the file holds it returns an
+  offset past the end; `Math.min(size, byteLength - fileOff)` goes negative and `new Uint8Array`
+  throws — taking the pane into its `ErrorBoundary` on a click, while the tree itself walks fine
+  (`parseResourceDirectory` bounds every read on the buffer) so every row is on screen.
+  `resourceBytes` is the one declaration of the guard; the `RT_GROUP_ICON` arm deliberately keeps
+  `buffer.slice`, which **clamps** rather than throwing. Nothing static could see it and nothing
+  under `corpus/` renders.
 - **`HeaderView`'s four named holes are CLOSED, and closing them found a defect.** The fixture
   builders now emit an **`IMAGE_DEBUG_DIRECTORY` with an RSDS CodeView record**, a **`Rich`
   header** (which moves `e_lfanew` past 0x80, so the whole layout is re-derived) and a

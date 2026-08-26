@@ -7,8 +7,17 @@
  */
 
 import { describe, expect, it } from "vitest";
+import {
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
+  RT_ICON,
+  RT_MANIFEST,
+  RT_RCDATA,
+  RT_STRING,
+} from "../constants";
+import { parsePE, rvaToFileOffset } from "../parser";
 import { parseResourceDirectory, parseVersionInfo, reconstructIcon } from "../resources";
-import type { SectionHeader } from "../types";
+import type { ResourceNode, SectionHeader } from "../types";
+import { buildMinimalPE32, buildMinimalPE64, type PEFixtureOptions } from "./fixtures";
 
 const TIMEOUT = 5000;
 const RSRC_RVA = 0x1000;
@@ -509,5 +518,278 @@ describe("reconstructIcon", () => {
         reconstructIcon(buffer, data.buffer, entries, rsrcSections(0x4000)),
       ).not.toThrow();
     }
+  });
+});
+
+// ── The walk, driven out of a real PE ───────────────────────────────────────
+
+/**
+ * EVERYTHING ABOVE READS A HAND-PLACED BUFFER; THIS READS A FILE.
+ *
+ * `RsrcBuilder` writes directories at literal offsets into a bare `ArrayBuffer`
+ * whose section maps RVA 0x1000 to file offset 0 — so the resource base, the
+ * section base and the file base are all the same number and a walk that
+ * confused any two of them is indistinguishable from a correct one. These cases
+ * go through `parsePE`: a real section table, a real data directory, a real
+ * `rvaToFileOffset`, and a `.rsrc` whose root is deliberately NOT at the start
+ * of its section (`buildDirectorySection` puts sixteen bytes of 0xCC in front of
+ * it — see the fixture) so the two bases differ by a number a test can name.
+ *
+ * The leaf's `OffsetToData` is the other half: it is an **RVA** while every
+ * other offset in the block is relative to the resource base, and the only way
+ * to see that being read against the wrong base is to assert the recovered
+ * BYTES rather than the offset.
+ */
+describe("parseResourceDirectory over a built PE", () => {
+  const MANIFEST = new TextEncoder().encode('<?xml version="1.0"?><assembly/>');
+  const ICON_EN = new Uint8Array([0x28, 0x00, 0x00, 0x00, 0xde, 0xad]);
+  const ICON_DE = new Uint8Array([0x28, 0x00, 0x00, 0x00, 0xbe, 0xef, 0x11]);
+  const MOF = new Uint8Array([0x42]);
+  const STR = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+
+  const LANG_EN = 0x0409;
+  const LANG_DE = 0x0407;
+
+  /** Two ID-typed groups, one NAME-typed group, a NAME-identified resource, two languages. */
+  const spec = {
+    directorySectionName: ".rsrc",
+    directoryRVA: 0x3000,
+    directories: {
+      resources: [
+        {
+          id: RT_ICON,
+          names: [
+            {
+              id: 1,
+              langs: [
+                { lang: LANG_EN, data: ICON_EN },
+                { lang: LANG_DE, data: ICON_DE, codePage: 932 },
+              ],
+            },
+          ],
+        },
+        {
+          id: RT_MANIFEST,
+          names: [{ id: 1, langs: [{ lang: LANG_EN, data: MANIFEST, codePage: 65001 }] }],
+        },
+        {
+          id: RT_STRING,
+          names: [{ id: "STRINGSé", langs: [{ lang: 0, data: STR }] }],
+        },
+        { id: "MOFDATA", names: [{ id: 101, langs: [{ lang: LANG_EN, data: MOF }] }] },
+      ],
+    },
+  } satisfies PEFixtureOptions;
+
+  const built = () =>
+    [buildMinimalPE32(spec), buildMinimalPE64(spec)].map((b) => ({ buf: b, pe: parsePE(b) }));
+
+  it("puts the resource root somewhere other than the start of its section", () => {
+    /**
+     * THE LIVENESS HALF OF EVERY BASE ASSERTION BELOW. If the builder ever
+     * stopped padding, resource base and section base would coincide again and
+     * a walk anchored on the wrong one would pass every row in this file
+     * without anybody noticing. Asserted about the FILE, not about the walk.
+     */
+    for (const { pe } of built()) {
+      const dir = pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+      const rsrc = pe.sections.find((s) => s.name === ".rsrc");
+      expect(rsrc).toBeDefined();
+      expect(dir.virtualAddress).toBeGreaterThan(rsrc!.virtualAddress);
+      expect(dir.size).toBeGreaterThan(0);
+    }
+  });
+
+  it("recovers the three-level tree, on PE32 and PE32+ alike", () => {
+    for (const { pe } of built()) {
+      const tree = pe.resources;
+      expect(tree).toBeDefined();
+      // Named entries sort ahead of ID entries in a directory, which is the
+      // order the file holds them in and therefore the order the walk returns.
+      expect(tree!.root.map((n) => n.id)).toEqual(["MOFDATA", RT_ICON, RT_STRING, RT_MANIFEST]);
+
+      const icon = tree!.root.find((n) => n.id === RT_ICON)!;
+      expect(icon.children!.map((c) => c.id)).toEqual([1]);
+      expect(icon.children![0].children!.map((c) => c.id)).toEqual([LANG_EN, LANG_DE]);
+      // Only leaves carry a data entry; the two directory levels above carry none.
+      expect(icon.dataEntry).toBeUndefined();
+      expect(icon.children![0].dataEntry).toBeUndefined();
+      expect(icon.children![0].children![0].dataEntry).toBeDefined();
+    }
+  });
+
+  it("keeps a NAME entry a string and an ID entry a number, at both levels", () => {
+    for (const { pe } of built()) {
+      const entries = pe.resources!.entries;
+      // A named TYPE and a named RESOURCE are different levels of the same
+      // mechanism — the high bit of the entry's `Name` field — and a reader
+      // that handled one and not the other would still pass a one-level test.
+      expect(entries.find((e) => e.type === "MOFDATA")!.name).toBe(101);
+      expect(entries.find((e) => e.type === RT_STRING)!.name).toBe("STRINGSé");
+      expect(entries.filter((e) => typeof e.type === "number").length).toBe(4);
+    }
+  });
+
+  it("reads a name length in CHARACTERS and the characters as UTF-16", () => {
+    // `STRINGSé` is eight characters and sixteen bytes, and the last one is
+    // outside ASCII: a length read as bytes truncates it to four, and a body
+    // read as bytes turns it into mojibake. Both are visible in one assertion.
+    for (const { pe } of built()) {
+      const name = pe.resources!.entries.find((e) => e.type === RT_STRING)!.name;
+      expect(name).toBe("STRINGSé");
+      expect(String(name)).toHaveLength(8);
+    }
+  });
+
+  it("distinguishes two languages of one resource", () => {
+    for (const { pe } of built()) {
+      const icons = pe.resources!.entries.filter((e) => e.type === RT_ICON);
+      expect(icons.map((e) => e.lang)).toEqual([LANG_EN, LANG_DE]);
+      expect(icons.map((e) => e.size)).toEqual([ICON_EN.length, ICON_DE.length]);
+      // Two languages of one name are two distinct data entries at two RVAs.
+      expect(icons[0].rva).not.toBe(icons[1].rva);
+    }
+  });
+
+  it("carries each leaf's code page through, including ones that are not 1252", () => {
+    // 0, 932 (Shift-JIS) and 65001 (UTF-8) all occur in real images; a reader
+    // that hardcoded a default, or read the Reserved dword one field along,
+    // would answer the same number for all three.
+    for (const { pe } of built()) {
+      const pages = new Map<string, number>();
+      const walk = (nodes: ResourceNode[], path: (number | string)[]) => {
+        for (const n of nodes ?? []) {
+          if (n.dataEntry) pages.set([...path, n.id].join("/"), n.dataEntry.codePage);
+          walk(n.children ?? [], [...path, n.id]);
+        }
+      };
+      walk(pe.resources!.root, []);
+      expect(Object.fromEntries(pages)).toEqual({
+        [`${RT_ICON}/1/${LANG_EN}`]: 0,
+        [`${RT_ICON}/1/${LANG_DE}`]: 932,
+        [`${RT_MANIFEST}/1/${LANG_EN}`]: 65001,
+        [`${RT_STRING}/STRINGSé/0`]: 0,
+        [`MOFDATA/101/${LANG_EN}`]: 0,
+      });
+    }
+  });
+
+  it("names bytes the file really holds, resolving the leaf RVA as an RVA", () => {
+    /**
+     * THE ASSERTION THIS WHOLE FIXTURE EXISTS FOR. `OffsetToData` is an RVA;
+     * every other offset in the block is relative to the resource base. Read it
+     * against the resource base — the obvious mistake, since it is what the
+     * three enclosing structures use — and it still resolves to somewhere
+     * inside the section, so the only thing that catches it is the CONTENT.
+     */
+    for (const { buf, pe } of built()) {
+      const want = new Map<number | string, Uint8Array>([
+        [RT_MANIFEST, MANIFEST],
+        [RT_STRING, STR],
+        ["MOFDATA", MOF],
+      ]);
+      for (const [type, bytes] of want) {
+        const entry = pe.resources!.entries.find((e) => e.type === type)!;
+        expect(entry.size).toBe(bytes.length);
+        const off = rvaToFileOffset(entry.rva, pe.sections);
+        expect(off).toBeGreaterThan(0);
+        expect(Array.from(new Uint8Array(buf, off, entry.size))).toEqual(Array.from(bytes));
+      }
+      // The two localisations differ in content, not just in RVA.
+      const [en, de] = pe.resources!.entries.filter((e) => e.type === RT_ICON);
+      const at = (e: { rva: number; size: number }) =>
+        Array.from(new Uint8Array(buf, rvaToFileOffset(e.rva, pe.sections), e.size));
+      expect(at(en)).toEqual(Array.from(ICON_EN));
+      expect(at(de)).toEqual(Array.from(ICON_DE));
+    }
+  });
+
+  it("flattens every leaf exactly once and nothing else", () => {
+    for (const { pe } of built()) {
+      expect(pe.resources!.entries).toHaveLength(5);
+      expect(pe.resources!.truncated).toBeUndefined();
+    }
+  });
+
+  it("finds no resources at all when the fixture is not asked for any", () => {
+    /**
+     * THE CONTROL IN THE OTHER DIRECTION. Every row above would be equally
+     * green against a builder that emitted nothing, if the rows were written as
+     * "no wrong entry appears" instead of "these entries appear". This states
+     * that the directory is opt-in and absent by default, so `pe.resources`
+     * being populated above is the fixture's doing.
+     */
+    expect(parsePE(buildMinimalPE32({})).resources).toBeUndefined();
+    expect(parsePE(buildMinimalPE64({ directories: { imports: [] } })).resources).toBeUndefined();
+  });
+
+  it("answers an empty tree for a resource directory with no entries", () => {
+    // A root directory declaring zero named and zero id entries. The data
+    // directory is present and non-empty, so `parsePE` really does walk — this
+    // is not the "no directory" path above.
+    const buf = buildMinimalPE64({
+      directorySectionName: ".rsrc",
+      directoryRVA: 0x3000,
+      directories: { resources: [] },
+    });
+    const pe = parsePE(buf);
+    expect(pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE].size).toBeGreaterThan(0);
+    expect(pe.resources).toEqual({ root: [], entries: [] });
+  });
+
+  it("returns a childless node for a resource with no languages", () => {
+    // The middle level exists and the third is empty — a directory that
+    // declares zero entries is not the same thing as a leaf, and conflating
+    // them would invent a data entry out of whatever follows.
+    const pe = parsePE(
+      buildMinimalPE64({
+        directorySectionName: ".rsrc",
+        directoryRVA: 0x3000,
+        directories: { resources: [{ id: RT_RCDATA, names: [{ id: 5, langs: [] }] }] },
+      }),
+    );
+    expect(pe.resources!.root[0].children![0]).toEqual({ id: 5, children: [] });
+    expect(pe.resources!.entries).toEqual([]);
+  });
+
+  it("still reads the tree when the leaf bytes are past the end of a truncated file", () => {
+    /**
+     * The shape a carved or part-downloaded sample has: the section table
+     * describes the whole image, the file stops early. The directory tree and
+     * the data entries are inside what survives, so the walk answers in full —
+     * and every RVA it reports resolves, through the section table, to a file
+     * offset that is not in the buffer. `rvaToFileOffset` never sees the buffer
+     * and cannot say so; that is a fact about its CALLERS, and
+     * `ResourcesView.dom.test.tsx` holds the row where one of them got it wrong.
+     */
+    const buf = buildMinimalPE64({
+      directorySectionName: ".rsrc",
+      directoryRVA: 0x3000,
+      directories: {
+        resources: [
+          {
+            id: RT_MANIFEST,
+            names: [
+              {
+                id: 1,
+                langs: [
+                  { lang: LANG_EN, data: MANIFEST },
+                  { lang: LANG_DE, data: MANIFEST },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const full = parsePE(buf);
+    const lastOff = Math.max(
+      ...full.resources!.entries.map((e) => rvaToFileOffset(e.rva, full.sections)),
+    );
+    const cut = buf.slice(0, lastOff - 4);
+    const pe = parsePE(cut);
+    expect(pe.resources!.entries).toHaveLength(2);
+    const off = rvaToFileOffset(pe.resources!.entries[1].rva, pe.sections);
+    expect(off).toBeGreaterThan(cut.byteLength);
   });
 });

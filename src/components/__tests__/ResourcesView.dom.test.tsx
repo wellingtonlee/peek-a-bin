@@ -4,13 +4,18 @@ import "../../test/domSetup";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
-import { buildMinimalPE32, buildMinimalPE64 } from "../../pe/__tests__/fixtures";
+import {
+  buildMinimalPE32,
+  buildMinimalPE64,
+  type ResourceTypeDef,
+} from "../../pe/__tests__/fixtures";
 import {
   IMAGE_SCN_CNT_CODE,
   IMAGE_SCN_CNT_INITIALIZED_DATA,
   IMAGE_SCN_MEM_EXECUTE,
   IMAGE_SCN_MEM_READ,
   ResourceTypeNames,
+  RT_ICON,
   RT_MANIFEST,
   RT_VERSION,
 } from "../../pe/constants";
@@ -30,22 +35,23 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
  * the buttons. Nothing had ever checked that the tab the prose sends a user to
  * renders anything at all.
  *
- * HOW THE FIXTURE IS BUILT, because it is half hand-made and the split matters.
- * `buildMinimalPE32`/`buildMinimalPE64` have NO resource-directory support —
- * `DirectorySpec` covers imports, exports, TLS, load config and relocations and
- * stops there — and extending the builder was declined in favour of the pattern
- * the suite already uses for `pe.strings` in `appStateHarness.ts`: parse a real
- * PE, then fill in the one map the parser leaves for a later stage. So:
+ * HOW THE FIXTURES ARE BUILT — THERE ARE NOW TWO KINDS, AND THE SPLIT MATTERS.
  *
- *  - **REAL**: the file, its section table, `pe.buffer`, and every byte a leaf
- *    preview decodes. `.rsrc` is a genuine section with genuine
- *    `pointerToRawData`, so `ExpandedLeaf`'s `rvaToFileOffset` walk is the
- *    production one over production data, and an RVA that resolves nowhere
- *    really resolves nowhere.
- *  - **HAND-CONSTRUCTED**: `pe.resources`, the `ResourceTree`. Its `entries` are
- *    written out rather than produced by `parseResources`. So nothing here is
- *    evidence about the resource-directory WALK — that has its own suite — and
- *    everything here is evidence about what the view does with a tree.
+ *  - **HAND-CONSTRUCTED TREES** (everything down to "leaf previews"). The file,
+ *    its section table, `pe.buffer` and every byte a leaf preview decodes are
+ *    REAL — `.rsrc` is a genuine section with a genuine `pointerToRawData`, so
+ *    `ExpandedLeaf`'s `rvaToFileOffset` walk is the production one over
+ *    production data — but `pe.resources` is written out by hand rather than
+ *    produced by `parseResourceDirectory`. Nothing in those cases is evidence
+ *    about the WALK, and they are kept because they reach shapes a real
+ *    directory cannot: a numeric type the name table does not know, an RVA in
+ *    no section, a leaf whose `size` is zero.
+ *  - **PARSED TREES** (the last describe). `DirectorySpec.resources` builds a
+ *    real three-level `IMAGE_RESOURCE_DIRECTORY` — high-bit subdirectory flags,
+ *    length-prefixed UTF-16 name entries, data entries whose `OffsetToData` is
+ *    an RVA while everything around it is resource-base-relative — and
+ *    `parsePE` walks it. Those cases connect the walk to the view for the first
+ *    time, and one of them found a defect: see the truncated-file row.
  *
  * NOT VIRTUALIZED. Plain `<table>`s over plain `.map`s, so every row is really
  * in the document and row sets and row order are assertable. No
@@ -494,5 +500,205 @@ describe("ResourcesView — leaf previews", () => {
     const { user } = renderResources(pe);
     await user.click(screen.getByRole("button", { name: "▶#1" }));
     expect(screen.queryByText("No version strings found")).toBeNull();
+  });
+});
+
+/**
+ * THE WALK AND THE VIEW, CONNECTED — the first cases in this file whose
+ * `ResourceTree` came out of `parseResourceDirectory` rather than out of a
+ * literal.
+ *
+ * Everything above hands the component a hand-written tree, which is the right
+ * shape for asking what the VIEW does with one and says nothing whatever about
+ * the walk. These build a real three-level `IMAGE_RESOURCE_DIRECTORY` in the
+ * fixture (`DirectorySpec.resources`), parse it with the production parser and
+ * render what comes out — so a defect anywhere between the entry's high bit and
+ * the table cell shows up here and in no other suite.
+ *
+ * The hand-built cases STAY. They reach shapes the builder cannot emit — a
+ * numeric type the name table does not know, an RVA in no section, a leaf whose
+ * `size` is zero — and a fixture-only file would lose all of them.
+ */
+function peWithParsedResources(resources: ResourceTypeDef[], is64 = true): PEFile {
+  const build = is64 ? buildMinimalPE64 : buildMinimalPE32;
+  return parsePE(
+    build({
+      directorySectionName: ".rsrc",
+      directoryRVA: RSRC_RVA,
+      directories: { resources },
+    }),
+  );
+}
+
+describe("ResourcesView — over a parsed resource directory", () => {
+  const MANIFEST = '<?xml version="1.0"?><assembly manifestVersion="1.0"/>';
+  const parsedSpec: ResourceTypeDef[] = [
+    {
+      id: RT_ICON,
+      names: [
+        {
+          id: 1,
+          langs: [
+            { lang: 0x0409, data: new Uint8Array(40).fill(0xa1) },
+            { lang: 0x0407, data: new Uint8Array(24).fill(0xb2) },
+          ],
+        },
+        { id: "MAINICON", langs: [{ lang: 0x0409, data: new Uint8Array(8) }] },
+      ],
+    },
+    {
+      id: RT_MANIFEST,
+      names: [
+        {
+          id: 1,
+          langs: [{ lang: 0x0409, data: new TextEncoder().encode(MANIFEST), codePage: 65001 }],
+        },
+      ],
+    },
+    { id: "MOFDATA", names: [{ id: 101, langs: [{ lang: 0, data: new Uint8Array([0x42]) }] }] },
+  ];
+
+  it("heads each group with the parsed type, resolved or verbatim", () => {
+    renderResources(peWithParsedResources(parsedSpec));
+    // Named types sort ahead of ID types in the file, so MOFDATA leads.
+    expect(screen.getByRole("button", { name: /^▼MOFDATA\(1\)$/ })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: new RegExp(`^▼${ResourceTypeNames[RT_ICON]}\\(3\\)$`) }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", {
+        name: new RegExp(`^▼${ResourceTypeNames[RT_MANIFEST]}\\(1\\)$`),
+      }),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+      "Resources (3 types, 5 entries)",
+    );
+  });
+
+  it("keeps a parsed NAME entry a name and a parsed ID entry an ordinal", () => {
+    // The `#` prefix is the view's whole signal, and the value behind it now
+    // comes from the entry's high bit rather than from a literal in this file.
+    renderResources(peWithParsedResources(parsedSpec));
+    expect(rowsUnder(ResourceTypeNames[RT_ICON]).map((r) => r.cells[0].textContent)).toEqual([
+      "▶MAINICON",
+      "▶#1",
+      "▶#1",
+    ]);
+    expect(rowsUnder("MOFDATA").map((r) => r.cells[0].textContent)).toEqual(["▶#101"]);
+  });
+
+  it("shows both languages of one parsed resource, with their own sizes", () => {
+    renderResources(peWithParsedResources(parsedSpec));
+    const rows = rowsUnder(ResourceTypeNames[RT_ICON]).filter(
+      (r) => r.cells[0].textContent === "▶#1",
+    );
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["1033", "1031"]);
+    expect(rows.map((r) => r.cells[2].textContent)).toEqual(["40 B", "24 B"]);
+    // Two languages, two data entries, two RVAs.
+    expect(rows[0].cells[3].textContent).not.toBe(rows[1].cells[3].textContent);
+  });
+
+  it("previews a manifest whose bytes the WALK located, end to end", async () => {
+    /**
+     * The one row in this repo where the entry's RVA was read out of a real
+     * `IMAGE_RESOURCE_DATA_ENTRY` — against the image base, while every offset
+     * around it is against the resource base — and then resolved back to a file
+     * offset by the production `rvaToFileOffset`. Assert the TEXT: read the RVA
+     * against the wrong base and it still lands inside `.rsrc`, so an offset
+     * assertion would pass and only the content can tell.
+     */
+    const { user } = renderResources(peWithParsedResources(parsedSpec));
+    const row = rowsUnder(ResourceTypeNames[RT_MANIFEST])[0];
+    await user.click(within(row).getByRole("button", { name: "▶#1" }));
+    expect(screen.getByText(MANIFEST).tagName).toBe("PRE");
+  });
+
+  it("renders a parsed directory on PE32 as well as PE32+", () => {
+    for (const is64 of [false, true]) {
+      const { unmount } = render(
+        <AppHarness state={stateWithPE(peWithParsedResources(parsedSpec, is64))} dispatch={vi.fn()}>
+          <ResourcesView />
+        </AppHarness>,
+      );
+      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+        "Resources (3 types, 5 entries)",
+      );
+      unmount();
+    }
+  });
+
+  it("says there are none for a parsed directory that declares no entries", () => {
+    // Not the same path as "no resource directory": the data directory is
+    // present and non-empty and the walk really runs, and answers nothing.
+    renderResources(peWithParsedResources([]));
+    expect(screen.getByText("No resources found in this PE file.")).toBeTruthy();
+  });
+
+  it("expands a leaf whose bytes are past the end of a TRUNCATED file", async () => {
+    /**
+     * THE DEFECT THIS SUITE FOUND, and it needed both halves of this session's
+     * work to be reachable: a real walk to produce the rows, and a real file to
+     * truncate.
+     *
+     * `rvaToFileOffset` resolves against the SECTION TABLE and never sees the
+     * buffer, so where the headers describe more than the file holds — a carved
+     * sample, a part-finished download — it answers an offset past the end.
+     * `ExpandedLeaf`'s manifest arm computed `Math.min(size, buffer.byteLength -
+     * fileOff)`, which is then NEGATIVE, and `new Uint8Array` threw
+     * `RangeError: Invalid typed array length: -16`. The walk itself is fine —
+     * `parseResourceDirectory` bounds every read on the buffer — so every row
+     * renders and only the CLICK is fatal, which is why nothing static and
+     * nothing in `npm run corpus` could see it. `downloadResource` had the same
+     * arithmetic; it is not clicked here (no `URL.createObjectURL` in jsdom) and
+     * shares `resourceBytes` instead.
+     *
+     * The file is cut four bytes short of the LAST leaf's own bytes, so the
+     * first leaf is still readable and the second is not — a row that would
+     * pass against a fix that simply refused every truncated file.
+     */
+    const two: ResourceTypeDef[] = [
+      {
+        id: RT_MANIFEST,
+        names: [
+          {
+            id: 1,
+            langs: [
+              // Nine bytes, so the four-byte allocation alignment leaves a gap
+              // the cut can land in: the first leaf ends before the file does
+              // and the second one starts after it.
+              { lang: 0x0409, data: new TextEncoder().encode("<first />") },
+              { lang: 0x0407, data: new TextEncoder().encode("<second/>") },
+            ],
+          },
+        ],
+      },
+    ];
+    const buf = buildMinimalPE64({
+      directorySectionName: ".rsrc",
+      directoryRVA: RSRC_RVA,
+      directories: { resources: two },
+    });
+    const full = parsePE(buf);
+    const offsets = full.resources!.entries.map((e) => rvaToFileOffset(e.rva, full.sections));
+    const cut = offsets[0] + full.resources!.entries[0].size;
+    const pe = parsePE(buf.slice(0, cut));
+
+    // The fixture, before the component: both rows survive the cut, the first
+    // leaf's bytes are all present, and the second leaf's are all missing.
+    expect(pe.resources!.entries).toHaveLength(2);
+    expect(offsets[0] + pe.resources!.entries[0].size).toBeLessThanOrEqual(pe.buffer.byteLength);
+    expect(offsets[1]).toBeGreaterThan(pe.buffer.byteLength);
+    expect(rvaToFileOffset(pe.resources!.entries[1].rva, pe.sections)).toBe(offsets[1]);
+
+    const { user } = renderResources(pe);
+    const rows = () => rowsUnder(ResourceTypeNames[RT_MANIFEST]);
+    await user.click(within(rows()[0]).getByRole("button", { name: "▶#1" }));
+    // The readable one still decodes.
+    expect(screen.getByText("<first />").tagName).toBe("PRE");
+    // The unreadable one renders an empty detail row instead of throwing.
+    await user.click(within(rows()[2]).getByRole("button", { name: "▶#1" }));
+    const after = rows();
+    expect(after).toHaveLength(4);
+    expect(after[3].textContent).toBe("");
   });
 });

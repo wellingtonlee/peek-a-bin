@@ -11,6 +11,35 @@ import { rvaToFileOffset } from "../pe/parser";
 import { parseVersionInfo, reconstructIcon } from "../pe/resources";
 import type { ResourceTree } from "../pe/types";
 
+/**
+ * The bytes a resource leaf names, or null when the file does not contain them.
+ *
+ * THE GUARD IS `fileOff >= buffer.byteLength`, AND IT IS NOT PARANOIA.
+ * `rvaToFileOffset` resolves an RVA against the SECTION TABLE and never sees the
+ * buffer, so on a TRUNCATED image — a carved sample, a part-finished download,
+ * anything whose section headers describe more than the file holds — it answers
+ * a file offset that is past the end and cannot say so. `buffer.byteLength -
+ * fileOff` is then NEGATIVE, `Math.min(size, …)` keeps the negative, and
+ * `new Uint8Array(buffer, fileOff, -16)` throws `RangeError: Invalid typed array
+ * length` — which takes the whole Resources pane into its ErrorBoundary fallback
+ * on a click.
+ *
+ * The tree walks fine in that case: `parseResourceDirectory` bounds every read
+ * on the buffer, so every row renders and only EXPANDING one is fatal. That is
+ * why nothing static could see it and why the row that pins it drives the real
+ * component over a real truncated fixture.
+ */
+function resourceBytes(
+  buffer: ArrayBuffer,
+  rva: number,
+  size: number,
+  sections: import("../pe/types").SectionHeader[],
+): Uint8Array | null {
+  const fileOff = rvaToFileOffset(rva, sections);
+  if (fileOff < 0 || fileOff >= buffer.byteLength) return null;
+  return new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff));
+}
+
 function getTypeName(id: number | string): string {
   if (typeof id === "string") return id;
   return ResourceTypeNames[id] ?? `Type ${id}`;
@@ -54,7 +83,10 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
   }
 
   if (numType === RT_GROUP_ICON) {
-    // Reconstruct icon from group + individual RT_ICON entries
+    // Reconstruct icon from group + individual RT_ICON entries.
+    // `slice` CLAMPS rather than throwing, so a past-the-end offset yields an
+    // empty buffer and `reconstructIcon` answers null — the asymmetry with
+    // `resourceBytes` above is deliberate, not an unguarded site.
     const fileOff = rvaToFileOffset(rva, sections);
     if (fileOff < 0) return null;
     const groupData = buffer.slice(fileOff, fileOff + size);
@@ -85,9 +117,8 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
   }
 
   if (numType === RT_MANIFEST) {
-    const fileOff = rvaToFileOffset(rva, sections);
-    if (fileOff < 0) return null;
-    const bytes = new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff));
+    const bytes = resourceBytes(buffer, rva, size, sections);
+    if (!bytes) return null;
     const text = new TextDecoder("utf-8").decode(bytes);
     return (
       <pre className="ml-8 my-1 p-2 bg-gray-800 border border-gray-700 rounded text-[10px] text-gray-300 overflow-auto max-h-60 whitespace-pre-wrap">
@@ -106,9 +137,8 @@ function downloadResource(
   sections: import("../pe/types").SectionHeader[],
   name: string,
 ) {
-  const fileOff = rvaToFileOffset(rva, sections);
-  if (fileOff < 0) return;
-  const bytes = new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff));
+  const bytes = resourceBytes(buffer, rva, size, sections);
+  if (!bytes) return;
   const blob = new Blob([bytes]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
