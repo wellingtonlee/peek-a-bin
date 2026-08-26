@@ -15,7 +15,12 @@ import {
   RT_STRING,
 } from "../constants";
 import { parsePE, rvaToFileOffset } from "../parser";
-import { parseResourceDirectory, parseVersionInfo, reconstructIcon } from "../resources";
+import {
+  MAX_TOTAL_ENTRIES,
+  parseResourceDirectory,
+  parseVersionInfo,
+  reconstructIcon,
+} from "../resources";
 import type { ResourceNode, SectionHeader } from "../types";
 import { buildMinimalPE32, buildMinimalPE64, type PEFixtureOptions } from "./fixtures";
 
@@ -156,6 +161,113 @@ describe("parseResourceDirectory", () => {
     b.dir(0, 1, 0).entry(0, 0, 0x80000000 | 0x3f0, 0x20, false);
     const tree = parseRsrc(b.buf);
     expect(tree.root[0].id).toBe("");
+  });
+
+  it("keeps a NAME-identified LANGUAGE level a name instead of calling it zero", () => {
+    /**
+     * THE THIRD LEVEL IS IDENTIFIED BY THE SAME HIGH BIT AS THE TWO ABOVE IT,
+     * and the flatten step used to answer `typeof … === "number" ? … : 0`, so a
+     * named language became `lang: 0`. Nothing said so, and 0 is a REAL LANGID
+     * (neutral) — the narrower answer wearing a complete one's shape, which is
+     * the shape this codebase refuses everywhere else.
+     *
+     * `rc.exe` never writes one, so a file with a named language is the output
+     * of a hand-rolled or non-Microsoft resource compiler, and precisely the
+     * sort of thing a hostile sample reaches for because tools mishandle it.
+     */
+    const b = new RsrcBuilder();
+    b.nameString(0x400, "MYLANG");
+    b.dir(0, 0, 1).entry(0, 0, RT_RCDATA, 0x100, true);
+    b.dir(0x100, 0, 1).entry(0x100, 0, 1, 0x200, true);
+    b.dir(0x200, 1, 0).entry(0x200, 0, 0x80000000 | 0x400, 0x300, false);
+    b.data(0x300, 0x5000, 0x40);
+
+    const tree = parseRsrc(b.buf);
+    expect(tree.root[0].children?.[0].children?.[0].id).toBe("MYLANG");
+    expect(tree.entries).toEqual([
+      { type: RT_RCDATA, name: 1, lang: "MYLANG", rva: 0x5000, size: 0x40 },
+    ]);
+  });
+
+  it("keeps two NAMED languages of one resource apart", () => {
+    // The harm the row above describes, stated as the thing a reader sees: two
+    // localisations that both answered `lang: 0` were two rows separable only by
+    // RVA, in a column that claimed they were the same language.
+    const b = new RsrcBuilder();
+    b.nameString(0x400, "ALPHA");
+    b.nameString(0x420, "BETA");
+    b.dir(0, 0, 1).entry(0, 0, RT_RCDATA, 0x100, true);
+    b.dir(0x100, 0, 1).entry(0x100, 0, 1, 0x200, true);
+    b.dir(0x200, 2, 0)
+      .entry(0x200, 0, 0x80000000 | 0x400, 0x300, false)
+      .entry(0x200, 1, 0x80000000 | 0x420, 0x310, false);
+    b.data(0x300, 0x5000, 1);
+    b.data(0x310, 0x6000, 2);
+
+    expect(parseRsrc(b.buf).entries.map((e) => e.lang)).toEqual(["ALPHA", "BETA"]);
+  });
+
+  it("still answers 0 for a leaf that has no language level at all", () => {
+    /**
+     * THE OTHER DIRECTION, and the reason the fix is `?? 0` rather than a
+     * sentinel. A leaf sitting SHALLOWER than the third level has no id to
+     * carry, which is a different fact from "the id was a string"; both levels
+     * above already spell that fallback `?? 0` and this one now agrees with
+     * them.
+     */
+    const b = new RsrcBuilder();
+    b.dir(0, 0, 1).entry(0, 0, RT_RCDATA, 0x100, true);
+    b.dir(0x100, 0, 1).entry(0x100, 0, 7, 0x300, false); // leaf at level 2
+    b.data(0x300, 0x5000, 4);
+
+    expect(parseRsrc(b.buf).entries).toEqual([
+      { type: RT_RCDATA, name: 7, lang: 0, rva: 0x5000, size: 4 },
+    ]);
+  });
+
+  describe("the entry budget's boundary", () => {
+    /**
+     * `truncated` USED TO BE READ OFF `remaining > 0`, which is false both when
+     * the walk stopped early and when it spent its last allowed entry and
+     * finished. A directory holding EXACTLY the budget therefore claimed to be
+     * short over a complete answer — the wrong direction for a flag whose only
+     * job is to warn a reader that what they are looking at is incomplete.
+     *
+     * Both sides are asserted, because a fix that simply stopped setting the
+     * flag would pass the first row alone.
+     */
+    const rootWithEntries = (n: number): ArrayBuffer => {
+      const size = 16 + n * 8 + 64;
+      const buf = new ArrayBuffer(size);
+      const dv = new DataView(buf);
+      // One directory cannot declare more than 0xFFFF of either kind, so the
+      // budget's worth needs both counts. Every entry's `Name` is left without
+      // the high bit, so the walk reads them all as IDs whatever the split says
+      // — it sums the two counts and decides each entry's kind for itself.
+      const ids = Math.min(n, 0xffff);
+      dv.setUint16(12, n - ids, true);
+      dv.setUint16(14, ids, true);
+      for (let i = 0; i < n; i++) {
+        const at = 16 + i * 8;
+        dv.setUint32(at, i, true);
+        // A leaf whose data entry starts at the end of the buffer: the budget is
+        // spent, nothing is flattened, and the case stays cheap.
+        dv.setUint32(at + 4, size, true);
+      }
+      return buf;
+    };
+
+    it("does not claim truncation for exactly the budget's worth of entries", () => {
+      const tree = parseRsrc(rootWithEntries(MAX_TOTAL_ENTRIES));
+      expect(tree.root).toHaveLength(MAX_TOTAL_ENTRIES);
+      expect(tree.truncated).toBeUndefined();
+    });
+
+    it("claims truncation one entry past the budget", () => {
+      const tree = parseRsrc(rootWithEntries(MAX_TOTAL_ENTRIES + 1));
+      expect(tree.root).toHaveLength(MAX_TOTAL_ENTRIES);
+      expect(tree.truncated).toBe(true);
+    });
   });
 
   describe("hostile trees", () => {
@@ -701,6 +813,58 @@ describe("parseResourceDirectory over a built PE", () => {
         Array.from(new Uint8Array(buf, rvaToFileOffset(e.rva, pe.sections), e.size));
       expect(at(en)).toEqual(Array.from(ICON_EN));
       expect(at(de)).toEqual(Array.from(ICON_DE));
+    }
+  });
+
+  it("carries a NAME-identified LANGUAGE level out of a real file", () => {
+    /**
+     * THE FIXTURE HALF, AND IT HAD TO COME FIRST. `ResourceLangDef.lang` was
+     * `number`, so no builder in this repo could emit the bytes and there was
+     * nothing for a walk test to fail against. It is `number | string` now and
+     * the third level goes through the same named-entry path as the two above
+     * it: a length-prefixed UTF-16 string elsewhere in the block, with the high
+     * bit set in the entry's `Name`.
+     *
+     * THE LOAD-BEARING ROW IS THE THIRD LANGUAGE. A neutral LANGID of 0 sits
+     * beside the two names deliberately: the defect answered `0` for ALL THREE,
+     * so a case with only named languages would still be red under the fix while
+     * a reader could not tell the two kinds apart. Sizes differ per leaf, so the
+     * rows are provably three distinct resources and not one row read thrice.
+     */
+    const named = {
+      directorySectionName: ".rsrc",
+      directoryRVA: 0x3000,
+      directories: {
+        resources: [
+          {
+            id: RT_RCDATA,
+            names: [
+              {
+                id: 1,
+                langs: [
+                  { lang: "ALPHA", data: new Uint8Array([0xa1]) },
+                  { lang: "BÊTA", data: new Uint8Array([0xb2, 0xb2]) },
+                  { lang: 0, data: new Uint8Array([0xc3, 0xc3, 0xc3]) },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    } satisfies PEFixtureOptions;
+
+    for (const build of [buildMinimalPE32, buildMinimalPE64]) {
+      const buf = build(named);
+      const pe = parsePE(buf);
+      const leaf = pe.resources!.root[0].children![0];
+      expect(leaf.children!.map((c) => c.id)).toEqual(["ALPHA", "BÊTA", 0]);
+      expect(pe.resources!.entries.map((e) => e.lang)).toEqual(["ALPHA", "BÊTA", 0]);
+      expect(pe.resources!.entries.map((e) => e.size)).toEqual([1, 2, 3]);
+      // A named language is still a leaf like any other: its data entry's RVA
+      // resolves and names the bytes the fixture put there.
+      const alpha = pe.resources!.entries[0];
+      const off = rvaToFileOffset(alpha.rva, pe.sections);
+      expect(Array.from(new Uint8Array(buf, off, alpha.size))).toEqual([0xa1]);
     }
   });
 

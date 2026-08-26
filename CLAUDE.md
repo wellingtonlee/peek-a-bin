@@ -1002,6 +1002,27 @@ read "all of them compile" as "all of them are right".
   `resourceBytes` is the one declaration of the guard; the `RT_GROUP_ICON` arm deliberately keeps
   `buffer.slice`, which **clamps** rather than throwing. Nothing static could see it and nothing
   under `corpus/` renders.
+- **A NAME-IDENTIFIED LANGUAGE LEVEL IS CARRIED, NOT FLATTENED TO ZERO, and `ResourceTree.lang` is
+  `number | string` like the two levels above it.** All three levels of the directory are
+  identified by the same high bit, but the flatten step read `typeof currentPath[2] === "number" ?
+  … : 0` — so a named language became `lang: 0`, and 0 is a **real LANGID** (neutral): the narrower
+  answer wearing a complete one's shape, with two named localisations of one resource rendering as
+  two rows both claiming language 0 and separable only by RVA. `rc.exe` never writes one, so the
+  population is a hand-rolled or non-Microsoft resource compiler's output — and a hostile sample
+  reaching for exactly the shape tools mishandle. No file on this machine has one; the evidence is
+  the fixture (`ResourceLangDef.lang` widened to `number | string`), which had to land first or
+  there was nothing to fail against. **`ordinalLabel` in `ResourcesView` is the one declaration of
+  the `#` marker** the Name column always used, now read by the Language column too, because a
+  language *named* `"1033"` and LANGID 1033 are otherwise one string on the page. **`keyPart` is a
+  DIFFERENT question and deliberately not the same function** — it decides which rows are the same
+  row, so it tags the kind (`i3` vs `s3`); at the **type** level, where `String(entry.type)` merged
+  a named type and the ordinal spelling the same digits into one heading with one collapse state,
+  that is a real fix, and at the **leaf** level it is belt only, since `leafKey` still ends in the
+  row index — which must stay, two identical entries in one crafted directory being two rows whose
+  key would otherwise collide. **That control is measured INERT and reported.** Beside it,
+  `truncated` was read off `remaining > 0`, so a directory holding **exactly** `MAX_TOTAL_ENTRIES`
+  claimed to be short over a complete answer; the flag is set at the `break` now, and both sides of
+  the boundary are pinned (`peek-a-bin-6qx9`).
 - **`HeaderView`'s four named holes are CLOSED, and closing them found a defect.** The fixture
   builders now emit an **`IMAGE_DEBUG_DIRECTORY` with an RSDS CodeView record**, a **`Rich`
   header** (which moves `e_lfanew` past 0x80, so the whole layout is re-derived) and a

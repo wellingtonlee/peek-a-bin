@@ -293,7 +293,7 @@ describe("ResourcesView — the type → name → language tree", () => {
     renderResources(withResources(peWithResourceBytes(new Uint8Array(0x900)), entries));
     const rows = rowsUnder("Icon");
     expect(rows).toHaveLength(3);
-    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["1033", "1033", "1031"]);
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["#1033", "#1033", "#1031"]);
     expect(rows.map((r) => r.cells[3].textContent)).toEqual(["0x3000", "0x3200", "0x3400"]);
   });
 
@@ -304,7 +304,7 @@ describe("ResourcesView — the type → name → language tree", () => {
     renderResources(withResources(peWithResourceBytes(new Uint8Array(0x900)), entries));
     const rows = rowsUnder("Icon").filter((r) => r.cells[0].textContent === "▶#2");
     expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["1033", "1031"]);
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["#1033", "#1031"]);
   });
 
   it("gives two languages of one resource independent expand state", async () => {
@@ -592,7 +592,7 @@ describe("ResourcesView — over a parsed resource directory", () => {
     const rows = rowsUnder(ResourceTypeNames[RT_ICON]).filter(
       (r) => r.cells[0].textContent === "▶#1",
     );
-    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["1033", "1031"]);
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["#1033", "#1031"]);
     expect(rows.map((r) => r.cells[2].textContent)).toEqual(["40 B", "24 B"]);
     // Two languages, two data entries, two RVAs.
     expect(rows[0].cells[3].textContent).not.toBe(rows[1].cells[3].textContent);
@@ -625,6 +625,113 @@ describe("ResourcesView — over a parsed resource directory", () => {
       );
       unmount();
     }
+  });
+
+  it("renders a NAME-identified language as its name, and an ordinal one marked", async () => {
+    /**
+     * THE VIEW HALF OF THE FLATTEN FIX. `parseResourceDirectory` used to answer
+     * `lang: 0` for a name-identified third level, so two named localisations of
+     * one resource were two rows both claiming language 0 and separable only by
+     * RVA. `lang` is `number | string` now and the column prints what the file
+     * says.
+     *
+     * THE `#` IS THE OTHER HALF AND IT IS NOT DECORATION. The two rows here are
+     * the language NAMED "1033" and the LANGID 1033, which are different
+     * languages of one resource; printed bare they are one string on the page,
+     * and the column would be back to claiming two distinct rows are the same
+     * language by a different route. It is the same ordinal marker the Name
+     * column has always used, from the same declaration (`ordinalLabel`).
+     */
+    renderResources(
+      peWithParsedResources([
+        {
+          id: RT_ICON,
+          names: [
+            {
+              id: 1,
+              langs: [
+                { lang: "1033", data: new Uint8Array([0xa1]) },
+                { lang: 0x0409, data: new Uint8Array([0xb2, 0xb2]) },
+                { lang: 0, data: new Uint8Array([0xc3, 0xc3, 0xc3]) },
+              ],
+            },
+          ],
+        },
+      ]),
+    );
+    const rows = rowsUnder(ResourceTypeNames[RT_ICON]);
+    // Named entries sort ahead of ID entries inside a directory, here at the
+    // THIRD level — which is itself evidence the fixture emitted a named one.
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(["1033", "#1033", "#0"]);
+    expect(rows.map((r) => r.cells[2].textContent)).toEqual(["1 B", "2 B", "3 B"]);
+  });
+
+  it("gives a named and an ordinal language of one resource independent expand state", async () => {
+    /**
+     * `leafKey` is the `expanded` set's identity, and its language term is now
+     * `keyPart(entry.lang)` — tagged, so the name "1033" and the LANGID 1033 are
+     * two members rather than one.
+     *
+     * REPORTED HONESTLY: A CONTROL ON THAT TAG IS INERT. The key still ends in
+     * the row index, which is what makes it injective and has to stay (two
+     * identical entries in one crafted directory are walked as two rows, and a
+     * key without the index would collide and take React's duplicate-key warning
+     * with it). So this row passes with `String(entry.lang)` in place of
+     * `keyPart` too. It is here for the PROPERTY, which the flatten fix is what
+     * actually restored: before it both rows carried `lang: 0` and the tag would
+     * have had nothing to tell apart either.
+     */
+    const { user } = renderResources(
+      peWithParsedResources([
+        {
+          id: RT_ICON,
+          names: [
+            {
+              id: 1,
+              langs: [
+                { lang: "1033", data: new Uint8Array([0xa1]) },
+                { lang: 0x0409, data: new Uint8Array([0xb2, 0xb2]) },
+              ],
+            },
+          ],
+        },
+      ]),
+    );
+    expect(rowsUnder(ResourceTypeNames[RT_ICON])).toHaveLength(2);
+    await user.click(rowsUnder(ResourceTypeNames[RT_ICON])[0].querySelector("button")!);
+    const after = rowsUnder(ResourceTypeNames[RT_ICON]);
+    expect(after).toHaveLength(3);
+    // Which of the two opened is the assertion: the leaf rows are the five-cell
+    // ones, and the language cell says which language each marker belongs to.
+    expect(
+      after
+        .filter((r) => r.cells.length === 5)
+        .map((r) => `${r.cells[0].textContent}|${r.cells[1].textContent}`),
+    ).toEqual(["▼#1|1033", "▶#1|#1033"]);
+  });
+
+  it("keeps a NAMED type and the ORDINAL that spells the same digits as two groups", () => {
+    /**
+     * THE SAME CLASS ONE LEVEL UP, AND THE CONTROL THAT IS NOT INERT. The type
+     * level has been `number | string` all along, but the grouping key was
+     * `String(entry.type)`, so the type NAMED "3" and RT_ICON (3) hashed to one
+     * bucket: one heading, one collapse state, one type counted, and the heading
+     * took its label from whichever entry came first. `keyPart` tags the kind,
+     * and there is no row index at this level to paper over it.
+     */
+    renderResources(
+      peWithParsedResources([
+        { id: "3", names: [{ id: 1, langs: [{ lang: 0x0409, data: new Uint8Array([1]) }] }] },
+        { id: RT_ICON, names: [{ id: 2, langs: [{ lang: 0x0409, data: new Uint8Array([2]) }] }] },
+      ]),
+    );
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+      "Resources (2 types, 2 entries)",
+    );
+    expect(screen.getByRole("button", { name: /^▼3\(1\)$/ })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: new RegExp(`^▼${ResourceTypeNames[RT_ICON]}\\(1\\)$`) }),
+    ).toBeTruthy();
   });
 
   it("says there are none for a parsed directory that declares no entries", () => {

@@ -45,6 +45,44 @@ function getTypeName(id: number | string): string {
   return ResourceTypeNames[id] ?? `Type ${id}`;
 }
 
+/**
+ * How an ORDINAL-OR-NAME level is written on the page. One declaration, read by
+ * the Name column and the Language column.
+ *
+ * All three levels of the directory are identified the same way — the high bit
+ * of the entry's `Name` field — so all three can be an ordinal or a string, and
+ * the `#` is the whole signal telling a reader which. Without it a resource
+ * whose name is literally `"101"` and resource `#101` are one string on the
+ * page; likewise a language NAMED `"1033"` beside LANGID 1033.
+ *
+ * The type level does not use this: it goes through `getTypeName`, which is a
+ * lookup rather than a spelling, and prints `Type 4001` for an ordinal it cannot
+ * name — already unambiguous.
+ */
+function ordinalLabel(id: number | string): string {
+  return typeof id === "string" ? id : `#${id}`;
+}
+
+/**
+ * How an ordinal-or-name level is written into a REACT KEY / a Set member.
+ *
+ * A DIFFERENT QUESTION FROM {@link ordinalLabel}, and the reason the two are not
+ * one function: this one decides which rows are the SAME row, so it must keep
+ * the two kinds apart even where they read alike. `String(id)` does not — it
+ * sends the ordinal 3 and the name `"3"` to one key, which for the TYPE level
+ * merges two genuinely distinct groups into one heading with one collapse state.
+ *
+ * ON `leafKey` the tag is belt rather than braces: the trailing row index is
+ * what makes a leaf key injective, and it has to stay — two identical entries in
+ * one crafted directory are walked as two rows, and a key without the index
+ * would collide and take React's duplicate-key warning with it. So a control on
+ * the tag at the LEAF level is inert by construction; at the TYPE level, where
+ * there is no index, it is not.
+ */
+function keyPart(id: number | string): string {
+  return typeof id === "string" ? `s${id}` : `i${id}`;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -175,7 +213,7 @@ export function ResourcesView() {
   const totalEntries = pe?.resources?.entries.length ?? 0;
   const typeCount = useMemo(() => {
     if (!pe?.resources) return 0;
-    const types = new Set(pe.resources.entries.map((e) => String(e.type)));
+    const types = new Set(pe.resources.entries.map((e) => keyPart(e.type)));
     return types.size;
   }, [pe?.resources]);
 
@@ -183,7 +221,7 @@ export function ResourcesView() {
   const grouped = useMemo(() => {
     const map = new Map<string, ResourceTree["entries"]>();
     for (const entry of pe?.resources?.entries ?? []) {
-      const key = String(entry.type);
+      const key = keyPart(entry.type);
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(entry);
     }
@@ -237,10 +275,10 @@ export function ResourcesView() {
                     </thead>
                     <tbody>
                       {entries.map((entry, idx) => {
-                        const leafKey = `${typeKey}-${entry.name}-${entry.lang}-${idx}`;
+                        const leafKey = `${typeKey}-${keyPart(entry.name)}-${keyPart(entry.lang)}-${idx}`;
                         const isExpanded = expanded.has(leafKey);
-                        const nameDisplay =
-                          typeof entry.name === "string" ? entry.name : `#${entry.name}`;
+                        const nameDisplay = ordinalLabel(entry.name);
+                        const langDisplay = ordinalLabel(entry.lang);
 
                         return (
                           // KEYED FRAGMENT, not `<>`. The array element here is
@@ -264,7 +302,7 @@ export function ResourcesView() {
                                   {nameDisplay}
                                 </button>
                               </td>
-                              <td className="py-0.5 pr-4 text-gray-500">{entry.lang}</td>
+                              <td className="py-0.5 pr-4 text-gray-500">{langDisplay}</td>
                               <td className="py-0.5 pr-4 font-mono">{formatSize(entry.size)}</td>
                               <td className="py-0.5 pr-4 font-mono text-blue-400">
                                 0x{entry.rva.toString(16).toUpperCase()}
@@ -278,7 +316,7 @@ export function ResourcesView() {
                                       entry.rva,
                                       entry.size,
                                       pe.sections,
-                                      `resource_${typeName}_${nameDisplay}_${entry.lang}.bin`,
+                                      `resource_${typeName}_${nameDisplay}_${langDisplay}.bin`,
                                     )
                                   }
                                   className="text-gray-500 hover:text-blue-400 text-[10px]"

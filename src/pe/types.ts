@@ -270,7 +270,19 @@ export interface ResourceTree {
   entries: {
     type: number | string;
     name: number | string;
-    lang: number;
+    /**
+     * A LANGID, or a NAME — the third level of the directory is identified by
+     * the same high bit as the two above it, so `number | string` is the honest
+     * type and the three levels now agree.
+     *
+     * VANISHINGLY RARE AND DELIBERATELY SUPPORTED. `rc.exe` writes a LANGID, so
+     * a named language level is the output of a hand-rolled or non-Microsoft
+     * resource compiler — which is exactly why a hostile sample reaches for it,
+     * and exactly why a tool whose readers open hostile files should not quietly
+     * relabel it. No binary on the machine this was written on has one; the
+     * evidence is `src/pe/__tests__/fixtures.ts` emitting the bytes.
+     */
+    lang: number | string;
     rva: number;
     size: number;
   }[];

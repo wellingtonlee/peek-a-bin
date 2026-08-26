@@ -13,10 +13,29 @@ const MAX_DEPTH = 4;
  * in under a minute — in the browser that is a dead tab. Real images use a few
  * thousand entries at most.
  */
-const MAX_TOTAL_ENTRIES = 65536;
+export const MAX_TOTAL_ENTRIES = 65536;
 
 /** Resource name strings are short in practice; anything longer is junk. */
 const MAX_RESOURCE_STRING = 4096;
+
+/**
+ * The walk's entry allowance, and WHETHER IT WAS ACTUALLY HIT.
+ *
+ * `stopped` is not derivable from `remaining`. It used to be read as
+ * `remaining > 0`, which is false in two different situations: the walk broke
+ * out early (a truncation) and the walk consumed its very last allowed entry and
+ * finished (not a truncation). A directory holding EXACTLY {@link
+ * MAX_TOTAL_ENTRIES} entries therefore reported `truncated: true` over a
+ * complete answer — the wrong direction for a flag whose whole job is to tell a
+ * reader the tree they are looking at is short.
+ *
+ * The flag is set at the `break`, so it means exactly "an entry the file
+ * declares was not walked".
+ */
+interface Budget {
+  remaining: number;
+  stopped: boolean;
+}
 
 /**
  * Read a UTF-16LE length-prefixed string from the resource section.
@@ -47,7 +66,7 @@ function walkDirectory(
   visited: Set<number>,
   entries: ResourceTree["entries"],
   parentPath: (number | string)[],
-  budget: { remaining: number },
+  budget: Budget,
 ): ResourceNode[] {
   if (depth >= MAX_DEPTH) return [];
   if (visited.has(dirOffset)) return [];
@@ -65,7 +84,10 @@ function walkDirectory(
   const entriesStart = absOffset + 16;
 
   for (let i = 0; i < totalEntries; i++) {
-    if (budget.remaining <= 0) break;
+    if (budget.remaining <= 0) {
+      budget.stopped = true;
+      break;
+    }
     budget.remaining--;
 
     const entryOffset = entriesStart + i * 8;
@@ -113,7 +135,17 @@ function walkDirectory(
         entries.push({
           type: currentPath[0] ?? 0,
           name: currentPath[1] ?? 0,
-          lang: typeof currentPath[2] === "number" ? currentPath[2] : 0,
+          // A NAME AT THE LANGUAGE LEVEL IS CARRIED, NOT FLATTENED TO ZERO.
+          // This used to read `typeof … === "number" ? … : 0`, so a third-level
+          // entry identified by a name string became `lang: 0` — and 0 is a real
+          // LANGID (neutral), so the narrower answer wore a complete one's shape
+          // and two named languages of one resource rendered as two rows both
+          // claiming language 0, separable only by RVA.
+          //
+          // `?? 0` is the same spelling the two levels above use, and for the
+          // same reason: the fallback is for a leaf that sits SHALLOWER than
+          // this level, which is the only case with no id to carry.
+          lang: currentPath[2] ?? 0,
           rva: dataRva,
           size,
         });
@@ -140,10 +172,10 @@ export function parseResourceDirectory(
   const view = new DataView(buffer);
   const entries: ResourceTree["entries"] = [];
   const visited = new Set<number>();
-  const budget = { remaining: MAX_TOTAL_ENTRIES };
+  const budget: Budget = { remaining: MAX_TOTAL_ENTRIES, stopped: false };
 
   const root = walkDirectory(view, fileOffset, 0, 0, visited, entries, [], budget);
-  return budget.remaining > 0 ? { root, entries } : { root, entries, truncated: true };
+  return budget.stopped ? { root, entries, truncated: true } : { root, entries };
 }
 
 /**

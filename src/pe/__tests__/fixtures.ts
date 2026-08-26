@@ -139,8 +139,17 @@ export interface DebugEntryDef {
  * than in one convenient base.
  */
 export interface ResourceLangDef {
-  /** Third-level id: a LANGID (0x0409 = en-US, 0x0407 = de-DE). */
-  lang: number;
+  /**
+   * Third-level id: a LANGID (0x0409 = en-US, 0x0407 = de-DE), or — as the
+   * format allows at every level — a NAME, emitted with the high bit set
+   * exactly as a named type or a named resource is.
+   *
+   * `rc.exe` never writes one, so it takes a fixture to produce the bytes at
+   * all; that is the whole reason this half exists. Emitted in the order the
+   * caller lists them, unlike the two levels above, which are sorted named-first
+   * as `rc.exe` orders them — see the note on `order` below.
+   */
+  lang: number | string;
   /** Emitted verbatim; a test can assert the recovered bytes against it. */
   data: Uint8Array;
   /** `CodePage`. Defaults to 0. 65001 (UTF-8) and 932 (Shift-JIS) are real. */
@@ -538,6 +547,16 @@ function buildDirectorySection(
      * field's high bit — but it is what `rc.exe` emits and what
      * `NumberOfNamedEntries` describes, so a fixture that emitted them
      * interleaved would not be a file any other reader could agree about.
+     */
+    /*
+     * LANGUAGE ENTRIES ARE NOT PUT THROUGH THIS, AND THAT IS DELIBERATE.
+     * `order` is applied to the type and name levels only; a leaf's languages
+     * are emitted in the order the caller listed them, so a test can state the
+     * order the FILE holds and assert the walk returns it. Existing callers rely
+     * on that (one lists en-US before de-DE, which is not ascending), so sorting
+     * here would change bytes those tests were written against. `writeDir`
+     * counts named and ID children per directory whatever the order, so the
+     * header stays truthful either way.
      */
     const order = <T extends { id: number | string }>(items: T[]): T[] => {
       const named = items
