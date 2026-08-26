@@ -646,10 +646,14 @@ binaries are in `~/.local/share/peek-a-bin-corpus`, found with nothing set.
 
 Each of these has an oracle outside the code under test.
 
-- **The PE parser holds**, differentially against an **independently written from-spec reader** —
-  sections, imports, exports, imphash, resources, checksum and `.pdata` agree on every file,
-  including every ARM64 `.pdata` entry on begin/end/unwind/handler. pefile is **not** installed
-  here; the reference is hand-written.
+- **The PE parser was checked differentially against an independently written from-spec reader** —
+  sections, imports, exports, imphash, resources, checksum and `.pdata` agreeing on every file —
+  but **ONLY THE `.pdata` HALF IS STILL RE-ESTABLISHED BY A RUN**, and that only on ARM64, by
+  `npm run corpus:arm64`. Measured 2026-08-26: of the six files under `corpus/` that call
+  `parsePE`, five are cost censuses and only `corpus/arm64.ts` compares the parser with anything.
+  The other six subjects have **no standing differential**, so read that sentence as a record of a
+  past measurement rather than as something a green run re-checks — the `peek-a-bin-02fa` failure
+  mode, *land the oracle*. pefile is **not** installed here; the reference was hand-written.
 - **Function boundaries** are cross-checked against `.pdata` on x64 (which is authoritative), and
   on ARM64 against the sweep's alignment invariants. PE32 has no `.pdata` and still over-produces.
 - **gcc / the emitted C compiles.** `gcc -std=gnu89 -fsyntax-only` over every emitted function:
