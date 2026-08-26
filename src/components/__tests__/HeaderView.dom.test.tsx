@@ -87,7 +87,7 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
  */
 
 /**
- * Set the four optional/COFF header fields `buildMinimalPE*` leaves at zero.
+ * Set the COFF/optional header fields `buildMinimalPE*` leaves at zero or fixed.
  *
  * The offsets are derived from `e_lfanew` rather than written down: the COFF
  * header starts four bytes past it and the optional header twenty past that.
@@ -95,10 +95,18 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
  * SAME optional-header offsets in PE32 and PE32+ — the two layouts diverge at
  * `ImageBase` and re-converge at `SizeOfImage` — which is what makes one helper
  * correct for both, and is asserted by using it on both below.
+ *
+ * `machine` is the COFF header's first field, so it needs no such argument. It
+ * is a *rewrite* rather than a fill: the builders set it, and overwriting it is
+ * how an image whose architecture this engine has no decoder for is produced
+ * here at all — see `machineArch.test.ts`, which does the same thing to check
+ * `archForMachine`. Nothing in `parsePE` routes on it below PE32+ `.pdata`, so
+ * a PE32 fixture parses identically whatever is written here.
  */
 function patchHeader(
   buf: ArrayBuffer,
   fields: {
+    machine?: number;
     timeDateStamp?: number;
     coffCharacteristics?: number;
     checksum?: number;
@@ -109,6 +117,7 @@ function patchHeader(
   const dv = new DataView(buf);
   const coff = dv.getUint32(0x3c, true) + 4;
   const opt = coff + 20;
+  if (fields.machine !== undefined) dv.setUint16(coff, fields.machine, true);
   if (fields.timeDateStamp !== undefined) dv.setUint32(coff + 4, fields.timeDateStamp, true);
   if (fields.coffCharacteristics !== undefined)
     dv.setUint16(coff + 18, fields.coffCharacteristics, true);
@@ -288,6 +297,54 @@ describe("HeaderView flag and constant tables", () => {
   it("dates a zero timestamp at the epoch rather than leaving the cell blank", () => {
     renderHeaders(parsePE(buildMinimalPE64()));
     expect(rowValue("Timestamp").textContent).toBe("0x00000000 (Thu, 01 Jan 1970 00:00:00 GMT)");
+  });
+});
+
+/**
+ * THE MACHINE ROW, and the one word this table used to be misleading about.
+ *
+ * `MachineTypes` carried `IMAGE_FILE_MACHINE_ARM` (0x01C0) — the obsolete,
+ * pre-Thumb-2 value that essentially never appears in a linked image — and not
+ * ARMNT (0x01C4), which is the word every 32-bit ARM Windows binary actually
+ * carries. So the Headers tab of exactly the image `unsupportedArchMessage`
+ * exists for printed `0x01C4 (Unknown)` two rows from an `ARM` entry naming a
+ * machine the reader will never meet (peek-a-bin-0cct).
+ *
+ * These assertions are the pair that makes the fix a *fix* rather than a
+ * widening: the named arm must print the name, and the fallback arm must still
+ * say `(Unknown)`, or the row would be printing a name for everything and the
+ * first assertion would say nothing.
+ */
+describe("HeaderView machine names", () => {
+  it("names ARMNT, the machine word a real 32-bit ARM image carries", () => {
+    const { unmount } = renderHeaders(
+      parsePE(patchHeader(buildMinimalPE32(), { machine: 0x01c4 })),
+    );
+    expect(rowValue("Machine").textContent).toBe("0x01C4 (ARM Thumb-2)");
+    unmount();
+
+    // Its obsolete sibling keeps its own name and its own spelling — the two are
+    // different machines and the table must not fold them together.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { machine: 0x01c0 })));
+    expect(rowValue("Machine").textContent).toBe("0x01C0 (ARM)");
+  });
+
+  it("still admits a machine word the table does not name", () => {
+    // 0x5064 = IMAGE_FILE_MACHINE_RISCV64, deliberately NOT in `MachineTypes`:
+    // `(Unknown)` beside a correct hex word is an honest statement about the
+    // table, and the table's rule is to name what would otherwise be misleading
+    // rather than to be complete. This is the liveness half of the assertion
+    // above — a table that named everything would pass that one vacuously.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { machine: 0x5064 })));
+    expect(rowValue("Machine").textContent).toBe("0x5064 (Unknown)");
+  });
+
+  it("prints the machine word at four hex digits, not eight", () => {
+    // `width={4}` on the `CopyableHex`. 0x01C4 has a leading zero, so a default
+    // width would read `0x000001C4` and a missing `padStart` `0x1C4`.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { machine: 0x01c4 })));
+    const hex = within(rowValue("Machine")).getByRole("button").textContent;
+    expect(hex).toBe("0x01C4");
   });
 });
 

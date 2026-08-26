@@ -6,14 +6,56 @@
 // Machine Types
 export const IMAGE_FILE_MACHINE_I386 = 0x14c;
 export const IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+/** The original, pre-Thumb-2 32-bit ARM. See {@link MachineTypes}. */
 export const IMAGE_FILE_MACHINE_ARM = 0x1c0;
+/** What every 32-bit ARM Windows image actually carries. See {@link MachineTypes}. */
+export const IMAGE_FILE_MACHINE_ARMNT = 0x1c4;
 export const IMAGE_FILE_MACHINE_ARM64 = 0xaa64;
 export const IMAGE_FILE_MACHINE_IA64 = 0x200;
 
+/**
+ * Machine word → the name the Headers tab prints beside the hex.
+ *
+ * **A NAMING TABLE, NOT A SUPPORT CLAIM, and it has exactly one reader** —
+ * `components/HeaderView.tsx`'s COFF Header block, which falls back to
+ * `"Unknown"`. Nothing routes on membership here: the decision surface is
+ * `disasm/arch.ts`'s `archForMachine` / `isKnownMachine`, which read the raw
+ * number. So an entry can never widen or narrow what the engine will decode,
+ * and adding one is a statement about a *format-level fact* — the same class of
+ * thing `unsupportedArchMessage` promises the tool keeps answering for an image
+ * it will not disassemble ("The file's headers, sections, imports, exports,
+ * resources and strings are still read normally").
+ *
+ * That is why naming ARMNT here does **not** contradict `unsupportedArchMessage`
+ * declining to name the architecture. Those answer different questions: the
+ * refusal must not name what the *decoder* did not recognise, because naming it
+ * would claim a recognition that did not happen; this table says what a machine
+ * *word* means, which the parser does know.
+ *
+ * **WHERE THE LINE IS, since the obvious rule does not exist.** The tempting
+ * consistency argument — "carry exactly the words `archForMachine` enumerates as
+ * unsupported" — has nothing to attach to: `archForMachine` decides by
+ * *exclusion*. It names three supported values and returns `"unsupported"` for
+ * every other number, so the set of unsupported machine words is the complement
+ * of a three-element set over all 2^16 and cannot be listed. The ARM32/IA-64/
+ * RISC-V/MIPS sentence in that module is prose, not a set.
+ *
+ * The rule this table follows instead: an entry is added where the table would
+ * otherwise be **misleading**, not merely silent. `"(Unknown)"` beside a correct
+ * hex word is an honest statement about this table, so silence is a fine answer
+ * for RISC-V, MIPS and the rest of the PE machine list — and the full
+ * `IMAGE_FILE_MACHINE_*` table would buy names for machines this tool will never
+ * be asked to open. ARMNT is different on both counts: 0x01C4 is the word every
+ * linked 32-bit ARM Windows image carries, and the table *already* named its
+ * obsolete sibling 0x01C0, so a reader saw `ARM` for the value that essentially
+ * never occurs and `(Unknown)` for the one that does — which invites the
+ * conclusion that 0x01C4 is not an ARM machine at all. (peek-a-bin-0cct)
+ */
 export const MachineTypes: Record<number, string> = {
   [IMAGE_FILE_MACHINE_I386]: "x86",
   [IMAGE_FILE_MACHINE_AMD64]: "x64",
   [IMAGE_FILE_MACHINE_ARM]: "ARM",
+  [IMAGE_FILE_MACHINE_ARMNT]: "ARM Thumb-2",
   [IMAGE_FILE_MACHINE_ARM64]: "ARM64",
   [IMAGE_FILE_MACHINE_IA64]: "IA64",
 };
