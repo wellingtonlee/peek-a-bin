@@ -1143,7 +1143,12 @@ export function checksumSubject(ref: RefImage, pe: PEFile, ab: ArrayBuffer): Row
 // ── 6. imphash ──────────────────────────────────────────────────────────────
 
 export function imphashSubject(ref: RefImage, pe: PEFile): Row[] {
-  const prod = computeImphash(pe.imports);
+  // Takes the FILE, not the list: `computeImphash` refuses (returns null) when
+  // the import walk was cut short, and asking that of the list is impossible by
+  // construction (peek-a-bin-tmo9). On this corpus no walk is ever truncated,
+  // so `prod` is a string on every row here — a null would show up as a
+  // disagreement rather than being quietly compared as `"null"`.
+  const prod = computeImphash(pe);
   const rows: string[] = [];
   let bad = 0;
   // An ordinal import from a DLL pefile resolves through `ordlookup` is
