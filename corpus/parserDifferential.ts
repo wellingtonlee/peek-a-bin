@@ -1238,7 +1238,11 @@ export function resourceSubject(ref: RefImage, pe: PEFile): Row[] {
     ),
     liveness("resource entries", n),
     report(
-      "resources: walk truncated by the entry budget",
+      // The flag no longer means only "the entry budget ran out": as of
+      // peek-a-bin-dhcx it also covers a directory or subdirectory header past
+      // the buffer and an unresolvable .rsrc RVA, all three being declared
+      // entries the walk abandoned. The label follows the flag.
+      "resources: walk left incomplete",
       pe.resources?.truncated ? 1 : 0,
       "1 image",
     ),
