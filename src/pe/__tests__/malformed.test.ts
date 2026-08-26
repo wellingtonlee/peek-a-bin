@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { parseSecurityDirectory } from "../authenticode";
 import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../constants";
+import { MAX_PDB_PATH_BYTES, PDB_PATH_TRUNCATION_MARKER, parseDebugDirectory } from "../metadata";
 import { parsePE } from "../parser";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
@@ -532,6 +533,182 @@ describe("malformed PE handling", () => {
       expect(Date.now() - started).toBeLessThan(TIMEOUT);
       // Signature is present but unparseable — it must report that, not hang.
       expect(result?.signed).toBe(true);
+    });
+  });
+
+  /**
+   * The CodeView PDB path scan (`peek-a-bin-nygv`).
+   *
+   * `parseDebugDirectory` used to scan for the path's terminating NUL from
+   * `pointerToRawData + 24` forward through the **whole buffer**, then decode
+   * everything it passed — during a render, on the main thread, on files this
+   * tool opens at a couple of hundred MiB. The instrument here is the decoded
+   * length and the returned value, never a timing: three agents share this
+   * machine and a wall-clock assertion would be flaky where a length is exact.
+   *
+   * The well-formed row is the safety case for the whole change: it must stay
+   * byte-identical to the pre-fix output.
+   */
+  describe("debug directory PDB path scan", () => {
+    const WELL_FORMED_PATH = "C:\\build\\obj\\sample.pdb";
+
+    /** Build a PE32 carrying one RSDS CodeView record with a known path. */
+    function withCodeView(pdbPath = WELL_FORMED_PATH): ArrayBuffer {
+      return buildMinimalPE32({
+        directories: {
+          debug: [{ type: 2, codeView: { guid: new Uint8Array(16).fill(0xab), age: 9, pdbPath } }],
+        },
+      });
+    }
+
+    /** File offset of debug entry `i`'s 28-byte `IMAGE_DEBUG_DIRECTORY`. */
+    function debugEntryOffset(buf: ArrayBuffer, i = 0): number {
+      const pe = parsePE(buf);
+      const rva = pe.dataDirectories[6].virtualAddress;
+      const sec = pe.sections.find(
+        (s) => rva >= s.virtualAddress && rva < s.virtualAddress + s.virtualSize,
+      );
+      if (!sec) throw new Error("fixture debug directory is not inside a section");
+      return sec.pointerToRawData + (rva - sec.virtualAddress) + i * 28;
+    }
+
+    /** File offset of the RSDS payload entry `i` names (`PointerToRawData`). */
+    function payloadOffset(buf: ArrayBuffer, i = 0): number {
+      return new DataView(buf).getUint32(debugEntryOffset(buf, i) + 24, true);
+    }
+
+    function setSizeOfData(buf: ArrayBuffer, size: number, i = 0): void {
+      new DataView(buf).setUint32(debugEntryOffset(buf, i) + 16, size, true);
+    }
+
+    /**
+     * Grow the file by `extra` bytes and fill everything from `from` to the new
+     * end with a non-zero byte, so the buffer holds **no NUL** after that point.
+     *
+     * The tail is what makes the measurement sharp: the old scan's decoded
+     * length was `fileLength - pathStart`, so a small fixture would have hidden
+     * the defect behind a small number. Section headers and the debug table
+     * both sit *below* the payload in this layout, so nothing the parser reads
+     * is disturbed — asserted by the callers, which all parse successfully.
+     */
+    function noNulAfter(buf: ArrayBuffer, from: number, extra: number): ArrayBuffer {
+      const grown = new ArrayBuffer(buf.byteLength + extra);
+      new Uint8Array(grown).set(new Uint8Array(buf));
+      new Uint8Array(grown, from).fill(0x41); // 'A'
+      return grown;
+    }
+
+    it("reads a well-formed path exactly, and does not mark it", { timeout: TIMEOUT }, () => {
+      // THE SAFETY CASE. Every bound below is only admissible because this row
+      // is unchanged by them.
+      const buf = withCodeView();
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info).toHaveLength(1);
+      expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
+      expect(info[0].pdbPathTruncated).toBeUndefined();
+      expect(info[0].age).toBe(9);
+    });
+
+    it("bounds the scan when the record has no NUL after it at all", {
+      timeout: TIMEOUT,
+    }, () => {
+      // The original defect. `SizeOfData` is cleared too, so the ONLY thing
+      // standing between this scan and the end of the file is the cap.
+      const base = withCodeView();
+      const start = payloadOffset(base) + 24;
+      setSizeOfData(base, 0);
+      const buf = noNulAfter(base, start, 1 << 20);
+
+      // The instrument, MEASURED against the pre-fix code rather than reasoned:
+      // a megabyte of NUL-free bytes follows the record, and the old scan
+      // decoded 1,049,036 characters of it against this one's 4,109. The
+      // fixture is a megabyte only so the suite stays fast; the shape is
+      // `fileLength - pathStart`, so on the ~253 MiB image this tool is
+      // expected to open the old number is ~265,000,000 — inside a render.
+      expect(buf.byteLength - start).toBeGreaterThan(64 * MAX_PDB_PATH_BYTES);
+
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPathTruncated).toBe(true);
+      expect(info[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
+      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
+    });
+
+    it("does not truncate a valid path when SizeOfData is zero", { timeout: TIMEOUT }, () => {
+      // A declaration too small to hold even the fixed part plus a terminator
+      // is not a credible statement about this record, so it is IGNORED rather
+      // than honoured — honouring it would turn a robustness fix into a
+      // correctness defect on a file whose path is perfectly well-formed.
+      // HONEST NOTE ABOUT THIS ROW AS AN INSTRUMENT. Zeroing `SizeOfData` is
+      // the control that exposed the defect (`peek-a-bin-nygv`), and it was
+      // inert because nothing read the field. It is **still inert in that
+      // direction** — this row is green before the fix and green after it, by
+      // two different routes. It is not useless: it is the guard against the
+      // opposite error, and goes red the moment the credibility test is
+      // dropped and the field is honoured unconditionally. The row that proves
+      // the field is read at all is the understating one below.
+      const buf = withCodeView();
+      setSizeOfData(buf, 0);
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
+      expect(info[0].pdbPathTruncated).toBeUndefined();
+    });
+
+    it("cuts the path short — visibly — when SizeOfData understates it", {
+      timeout: TIMEOUT,
+    }, () => {
+      // The smaller bound wins, so an understated size DOES shorten the answer.
+      // That is only admissible because the answer says so: the value carries
+      // the marker and cannot be mistaken for a path.
+      const buf = withCodeView();
+      setSizeOfData(buf, 24 + 7); // room for "C:\\buil" and no terminator
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPathTruncated).toBe(true);
+      expect(info[0].pdbPath).toBe(`C:\\buil${PDB_PATH_TRUNCATION_MARKER}`);
+      // A narrower answer must not wear a complete one's shape.
+      expect(info[0].pdbPath).not.toBe(WELL_FORMED_PATH);
+      expect(WELL_FORMED_PATH.startsWith(info[0].pdbPath ?? "")).toBe(false);
+    });
+
+    it("still reads the whole path when SizeOfData overstates it wildly", {
+      timeout: TIMEOUT,
+    }, () => {
+      const buf = withCodeView();
+      setSizeOfData(buf, 0xffffffff);
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
+      expect(info[0].pdbPathTruncated).toBeUndefined();
+    });
+
+    it("falls back to the cap when SizeOfData overstates and there is no NUL", {
+      timeout: TIMEOUT,
+    }, () => {
+      // An absurd size is what a hostile file writes to defeat a size-only
+      // bound; the cap is the backstop that makes the size field safe to trust.
+      const base = withCodeView();
+      const start = payloadOffset(base) + 24;
+      setSizeOfData(base, 0xffffffff);
+      const buf = noNulAfter(base, start, 1 << 20);
+
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPathTruncated).toBe(true);
+      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
+    });
+
+    it("is bounded by the end of the file when that comes first", {
+      timeout: TIMEOUT,
+    }, () => {
+      // Neither the declared size nor the cap may be read past the buffer.
+      const base = withCodeView();
+      const start = payloadOffset(base) + 24;
+      setSizeOfData(base, 0xffffffff);
+      const buf = noNulAfter(base, start, 16); // far short of the cap
+
+      const info = parseDebugDirectory(buf, parsePE(buf));
+      expect(info[0].pdbPathTruncated).toBe(true);
+      expect(info[0].pdbPath?.length).toBeLessThan(
+        MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length,
+      );
+      expect(info[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
     });
   });
 });

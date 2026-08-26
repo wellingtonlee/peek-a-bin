@@ -71,10 +71,42 @@ export function parseRichHeader(buffer: ArrayBuffer): RichEntry[] | null {
 export interface DebugInfo {
   type: number;
   typeName: string;
+  /**
+   * The CodeView PDB path, **or an admission that it could not be read whole**.
+   *
+   * When {@link pdbPathTruncated} is set this string is a *prefix* of what the
+   * file holds followed by {@link PDB_PATH_TRUNCATION_MARKER}, and is therefore
+   * not a path. See {@link parseDebugDirectory}'s scan-bound docstring for why
+   * the admission is spelled into the value rather than only into this type.
+   */
   pdbPath?: string;
+  /** Set only when the path scan hit its bound before finding a NUL. */
+  pdbPathTruncated?: boolean;
   guid?: string;
   age?: number;
 }
+
+/**
+ * The admission appended to {@link DebugInfo.pdbPath} when the scan was cut
+ * short. It contains characters no Windows path may hold (`<`, `>`), so a value
+ * carrying it cannot be mistaken for — or used as — a path.
+ */
+export const PDB_PATH_TRUNCATION_MARKER = "… <truncated>";
+
+/**
+ * The absolute ceiling on a PDB path scan, in bytes, used when the record's own
+ * `SizeOfData` is absent or not credible.
+ *
+ * 4096 is deliberately far above any path MSVC emits (`link.exe` writes an ANSI
+ * build-machine path, historically capped at `MAX_PATH` = 260) and far below
+ * anything whose decode costs a render. It is a backstop, not the primary
+ * bound: on a well-formed file `SizeOfData` always wins, because a conforming
+ * `CV_INFO_PDB70` record declares exactly `24 + strlen(path) + 1` bytes.
+ */
+export const MAX_PDB_PATH_BYTES = 4096;
+
+/** `CV_INFO_PDB70`'s fixed part: "RSDS" + 16 GUID bytes + a 4-byte age. */
+const CV_INFO_PDB70_HEADER_BYTES = 24;
 
 const DEBUG_TYPE_NAMES: Record<number, string> = {
   0: "Unknown",
@@ -119,6 +151,7 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
     const off = fileOffset + i * entrySize;
     if (off + entrySize > buffer.byteLength) break;
     const type = view.getUint32(off + 12, true);
+    const sizeOfData = view.getUint32(off + 16, true);
     const pointerToRawData = view.getUint32(off + 24, true);
     const info: DebugInfo = {
       type,
@@ -156,12 +189,73 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
         info.guid =
           `${d1.toString(16).padStart(8, "0")}-${d2.toString(16).padStart(4, "0")}-${d3.toString(16).padStart(4, "0")}-${tail.slice(0, 4)}-${tail.slice(4)}`.toUpperCase();
         info.age = view.getUint32(pointerToRawData + 20, true);
-        // PDB path: null-terminated string after age
-        const pathStart = pointerToRawData + 24;
-        let pathEnd = pathStart;
+        // PDB path: a NUL-terminated string after the age.
+        //
+        // THE SCAN IS BOUNDED THREE WAYS AND THE SMALLEST WINS. It used to be
+        // bounded only by the end of the buffer, so a record with no NUL after
+        // it — a truncated or hostile file — scanned the *whole image* and then
+        // decoded everything it passed. `parseDebugDirectory` is called from
+        // `HeaderView`'s `useMemo`, i.e. during a render on the main thread, and
+        // this tool opens files of a couple of hundred MiB, so the bad case was
+        // a multi-hundred-MiB `TextDecoder` inside a render. It could never read
+        // outside the `ArrayBuffer`, so this is a denial of service and a
+        // wrong-value question, not memory safety (`peek-a-bin-nygv`).
+        //
+        // WHY NOT `SizeOfData` ALONE. It is as attacker-controlled as the bytes
+        // it describes, and it is the *only* bound that can be too small: an
+        // understated value truncates a path that is perfectly well-formed on
+        // disk. A robustness fix that silently shortens a real path has traded
+        // a hang for a wrong answer, which is the worse of the two here — the
+        // path is read *out* of the tool (a symbol server wants
+        // `<name>.pdb/<GUID><Age>/<name>.pdb`), so a short one matches nothing
+        // and looks entirely well-formed doing it. Same shape as the
+        // `Ordinal_<n>` and imphash trap.
+        //
+        // WHY NOT A CAP ALONE. A cap generous enough never to truncate a real
+        // path still lets a hostile record spend the whole cap, and it throws
+        // away the one statement the file makes about its own record.
+        //
+        // SO: BOTH, SMALLEST WINS, AND A CUT-SHORT SCAN SAYS SO. A declaration
+        // too small to hold even the fixed part plus a terminator is not a
+        // credible statement about this record and is ignored rather than
+        // honoured — dropping to the cap, which is what the cap is for. (Note
+        // the fixed part is read *above* without consulting `SizeOfData` at
+        // all: a record declaring less than it visibly contains has already
+        // been read past, so honouring a zero here would be inconsistent as
+        // well as useless.)
+        //
+        // THE ADMISSION IS SPELLED INTO THE VALUE, not only into the type, and
+        // that is the load-bearing half. This codebase's doctrine is that a
+        // narrower answer must not wear a complete one's shape —
+        // `DetectResult.omitted` names the passes that did not run,
+        // `analysisNotice` states a diagnosis, `emit.ts` prints
+        // `__unrecovered_N` rather than something plausible. A truncated path
+        // rendered as a path is exactly that failure. `pdbPathTruncated` is the
+        // machine-readable half, but a consumer that has never heard of it
+        // still cannot be fooled, because the string itself carries
+        // `PDB_PATH_TRUNCATION_MARKER`. That matters concretely: the one render
+        // site prints `d.pdbPath` verbatim and knows nothing about the flag.
+        // The app has no toast mechanism and one must not be invented for a bug
+        // fix (see the `copyText` refusal), so the value *is* the channel.
+        const pathStart = pointerToRawData + CV_INFO_PDB70_HEADER_BYTES;
+        // `SizeOfData` must claim room for the fixed part and at least one byte
+        // of NUL-terminated path, or it is telling us nothing about the path.
+        const declaredEnd =
+          sizeOfData > CV_INFO_PDB70_HEADER_BYTES
+            ? pointerToRawData + sizeOfData
+            : Number.POSITIVE_INFINITY;
+        const scanEnd = Math.min(declaredEnd, pathStart + MAX_PDB_PATH_BYTES, buffer.byteLength);
         const bytes = new Uint8Array(buffer);
-        while (pathEnd < bytes.length && bytes[pathEnd] !== 0) pathEnd++;
-        info.pdbPath = new TextDecoder().decode(bytes.slice(pathStart, pathEnd));
+        let pathEnd = pathStart;
+        while (pathEnd < scanEnd && bytes[pathEnd] !== 0) pathEnd++;
+        const text = new TextDecoder().decode(bytes.slice(pathStart, pathEnd));
+        if (pathEnd < scanEnd) {
+          // A NUL was found inside the bound: the path is whole.
+          info.pdbPath = text;
+        } else {
+          info.pdbPath = text + PDB_PATH_TRUNCATION_MARKER;
+          info.pdbPathTruncated = true;
+        }
       }
     }
 

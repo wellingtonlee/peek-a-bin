@@ -1514,6 +1514,27 @@ mistake.
   `syncDisabled` must be re-tested at the anchor rather than inherited, since on the AI tab the map
   numbers a different body. (`peek-a-bin-p0qw`)
 
+- **A NUL-terminated string read out of a PE must be bounded, and `SizeOfData` alone is not the
+  bound.** `parseDebugDirectory` (`pe/metadata.ts`) scanned for the CodeView PDB path's NUL from
+  `pointerToRawData + 24` forward through the **whole buffer** and decoded everything it passed —
+  inside `HeaderView`'s `useMemo`, i.e. during a render on the main thread, on images this tool
+  opens at a couple of hundred MiB. Measured on a 1 MiB NUL-free fixture: 1,049,036 characters
+  returned against 4,109 after. The scan is now `min(declared size, MAX_PDB_PATH_BYTES = 4096, end
+  of buffer)`, and **all three are needed**: `SizeOfData` is as attacker-controlled as the bytes it
+  describes and is the only bound that can be too *small*, so honouring it alone silently shortens
+  a valid path — the `Ordinal_<n>`/imphash trap again, since the path is read *out* of the tool for
+  a symbol server and a short one matches nothing while looking well-formed; a cap alone still lets
+  a hostile record spend the whole cap. A declared size at or under the 24-byte fixed part is
+  **not credible** and drops to the cap rather than being honoured. **When the scan is cut short
+  the VALUE says so, not just the type**: `pdbPath` carries `PDB_PATH_TRUNCATION_MARKER`
+  (`… <truncated>`) beside the `pdbPathTruncated` flag, because a narrower answer must not wear a
+  complete one's shape and the one render site prints `pdbPath` verbatim with no knowledge of the
+  flag — there is no toast mechanism and one must not be invented for a bug fix. **The control that
+  exposed this was inert** (zeroing `SizeOfData` moved no row, because nothing read the field), and
+  the zero row **remains** inert as a before/after control; the row that proves the field is read
+  is the understating one. Cases and six discriminating controls in
+  `pe/__tests__/malformed.test.ts`; corpus byte-identical over four binaries. (`peek-a-bin-nygv`)
+
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
 - **`RegState.defs` is keyed by literal operand text deliberately; ask `wroteAnyAlias` rather than canonicalising the map.** The map stores the last-written *expression*, which carries the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as eight. But arity is width-blind, and `collectArgs64` probing the literal 64-bit name missed every sub-width setup and broke out of the loop — the write then had no reader and DCE deleted it, giving `ExitProcess()` with the exit code gone, in well-typed C. `wroteAnyAlias` answers the width-blind question over the width-exact map and returns a **boolean**, so the recorded expression can never be substituted at the call site (`peek-a-bin-urs` cannot return through it). The suite had pinned the defect as the rule under a KNOWN BUG comment. And: when you build an oracle to verify a change, land the oracle — the instrument for this one was lost with a scratch worktree (`peek-a-bin-02fa`). (`peek-a-bin-qb2x`)
