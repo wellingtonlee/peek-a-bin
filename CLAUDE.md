@@ -1665,8 +1665,44 @@ mistake.
   reach a digest, so a truncated name also marks the entry, which makes the hash refuse; truncation
   is decided exactly ("stopped at the bound *and* no NUL sits at it") so a name of exactly 1024
   bytes plus its terminator is not marked. Nine discriminating controls, none inert; corpus
-  byte-identical over four binaries. **`ResourceTree.truncated` is still only half built — no view
-  renders it.** (`peek-a-bin-tmo9`)
+  byte-identical over four binaries. (`peek-a-bin-tmo9`)
+
+- **…and the resource tree's half of that admission is now built, plus the three places the flag
+  was not being set. `Budget.incomplete`'s OLD NAME COST ALL THREE.** `parseResourceDirectory`
+  (`pe/resources.ts`) had set `ResourceTree.truncated` since long before this and **no view rendered
+  it**, so a tree cut short by `MAX_TOTAL_ENTRIES` read on screen exactly like a complete one. The
+  admission goes **on the count line and not on a row** — the opposite half of the choice
+  `ImportsView` makes — because the budget is *global to the walk*: one `Budget` is threaded by
+  reference through every `walkDirectory` frame, so when it runs out the walk breaks out of whatever
+  directory it reached and every ancestor is equally short, leaving no row that is "the incomplete
+  one". `ImportEntry.truncated` is per-library precisely because each descriptor has its own thunk
+  walk. **The `entries.length === 0` arm is the worse half and is separate**: it took the same exit
+  as a PE with no resource directory and printed "No resources found in this PE file.", a positive
+  claim about the *file* rather than a narrow answer — `HeaderView`'s `""`-versus-`null` imphash
+  distinction in view form. It is reachable with no leaf at all, the allowance being spent on
+  *directory* entries. **And the flag's field was called `stopped`, which reads as a fact about the
+  budget, so three other abandonment points never touched it**: a directory whose declared entry
+  array runs past the buffer, a declared subdirectory whose own header is past the buffer, and a
+  resource directory whose RVA resolves nowhere (that last returned a bare empty tree — byte-for-byte
+  the answer a PE with no resources gets, and a **pre-existing test had pinned that as the rule**).
+  It is `incomplete` now and means exactly "an entry the file declares was not walked", whatever
+  stopped the walk. `depth >= MAX_DEPTH` and a repeat visit deliberately still do **not** set it and
+  say so at their sites — both are judgements about a malformed *shape* rather than an unread entry.
+  **The two resource STRING clips now carry `nygv`'s marker too**
+  (`RESOURCE_STRING_TRUNCATION_MARKER`): a resource name clipped at
+  `MAX_RESOURCE_STRING`, and a version-info key or value the walk stopped collecting. Both are
+  rendered verbatim (`ordinalLabel`, `ExpandedLeaf`'s table) and **neither feeds a digest**, which is
+  the stated asymmetry with `readCString` — there a marker had to additionally mark the entry so it
+  could never reach `computeImphash`; here the marker alone is the whole fix. Both are decided
+  **exactly**, never on "we reached the bound": `readResourceString` compares what it collected
+  against the count the string's own uint16 header declares (covering the cap *and* the buffer
+  ending mid-string with one test) and `readWString` records the drop at the drop site, so a string
+  of exactly the cap's length is not marked. **Two pre-existing tests had pinned both silences as
+  the rule** (`length <= 4096`, and `toMatch(/^A+$/)` — the `tmo9` forwarder row's exact shape).
+  Eleven discriminating controls, none inert; `npm run corpus:parserdiff` reports all six real
+  binaries unflagged, which is the case rather than a formality. The full census of which parser
+  admissions reach a screen is `peek-a-bin-ul9m`, summarised in `docs/verification.md`.
+  (`peek-a-bin-dhcx`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 

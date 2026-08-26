@@ -19,6 +19,7 @@ import {
   MAX_TOTAL_ENTRIES,
   parseResourceDirectory,
   parseVersionInfo,
+  RESOURCE_STRING_TRUNCATION_MARKER,
   reconstructIcon,
 } from "../resources";
 import type { ResourceNode, SectionHeader } from "../types";
@@ -136,14 +137,75 @@ describe("parseResourceDirectory", () => {
     expect(tree.entries[0].type).toBe("MYDATA");
   });
 
-  it("returns an empty tree when the directory RVA is unmapped", () => {
+  it("admits the tree is short when the directory RVA is unmapped", () => {
+    /**
+     * THIS ROW USED TO PIN THE SILENT NARROWING AS THE RULE. It asserted
+     * `toEqual({ root: [], entries: [] })` — a bare empty tree, byte-for-byte
+     * the answer a PE with NO resource directory gets — for a file that declares
+     * a resource directory at an address no section holds. `ResourcesView` reads
+     * that shape and prints "No resources found in this PE file.", a positive
+     * claim about the file that this input does not support.
+     *
+     * `parsePE` only calls the walk when the data directory's RVA and size are
+     * both non-zero, so reaching here means the file really does claim
+     * resources. The claim being unresolvable is a fact about the parse, and
+     * `truncated` is the one channel that carries it.
+     */
     const buf = new ArrayBuffer(0x100);
     const tree = parseResourceDirectory(
       buf,
       { virtualAddress: 0x99999999, size: 0x100 },
       rsrcSections(0x100),
     );
-    expect(tree).toEqual({ root: [], entries: [] });
+    expect(tree).toEqual({ root: [], entries: [], truncated: true });
+  });
+
+  describe("the walk admits every way it can be cut short, not only the budget", () => {
+    /**
+     * `Budget.stopped` — now `Budget.incomplete` — READ AS A FACT ABOUT THE
+     * BUDGET, AND THAT NAME COST THREE SITES. `ResourceTree.truncated` means "an
+     * entry the file declares was not walked", but only the allowance running
+     * out ever set it, so three other abandonment points produced a short tree
+     * wearing a complete one's shape — the class this flag exists to prevent,
+     * reached by routes it was not being set on.
+     *
+     * None of the three can occur in a well-formed image: each needs the file to
+     * declare something the buffer does not hold. `npm run corpus:parserdiff`
+     * is the control on that — all six real binaries must stay unflagged.
+     */
+    it("when a directory's entry array runs past the end of the buffer", () => {
+      // The header claims four entries and the buffer holds one and a half.
+      const b = new RsrcBuilder(0x20);
+      b.dir(0, 0, 4).entry(0, 0, 7, 0x18, false);
+      const tree = parseRsrc(b.buf);
+      expect(tree.truncated).toBe(true);
+    });
+
+    it("when a declared subdirectory's own header is past the end", () => {
+      // The root is readable and names a child the buffer does not reach, so
+      // every entry under that child is declared and unread.
+      const b = new RsrcBuilder(0x30);
+      b.dir(0, 0, 1).entry(0, 0, 3, 0x28, true);
+      const tree = parseRsrc(b.buf);
+      expect(tree.root).toEqual([{ id: 3, children: [] }]);
+      expect(tree.truncated).toBe(true);
+    });
+
+    it("but not for a tree the walk reads whole", () => {
+      /**
+       * THE LIVENESS HALF. Every row above is equally green against a walk that
+       * set the flag unconditionally — which would be the worse defect, since a
+       * warning on every file is a warning on none.
+       */
+      const b = new RsrcBuilder();
+      b.dir(0, 0, 1).entry(0, 0, RT_RCDATA, 0x100, true);
+      b.dir(0x100, 0, 1).entry(0x100, 0, 1, 0x200, true);
+      b.dir(0x200, 0, 1).entry(0x200, 0, 0x409, 0x300, false);
+      b.data(0x300, 0x5000, 4);
+      const tree = parseRsrc(b.buf);
+      expect(tree.entries).toHaveLength(1);
+      expect(tree.truncated).toBeUndefined();
+    });
   });
 
   it("ignores a leaf whose data entry runs past the end of the buffer", () => {
@@ -351,7 +413,16 @@ describe("parseResourceDirectory", () => {
       expect(tree.truncated).toBe(true);
     });
 
-    it("caps an absurdly long resource name string", { timeout: TIMEOUT }, () => {
+    it("caps an absurdly long resource name string AND says it did", { timeout: TIMEOUT }, () => {
+      /**
+       * THIS ROW USED TO PIN THE SILENT CLIP AS THE RULE. It asserted only
+       * `length <= 4096` — true of a clipped name and of the file's own name
+       * alike — so 4096 characters of somebody else's `.rsrc` reached the
+       * Resources tab reading exactly like a name the file states. That is
+       * `peek-a-bin-nygv`'s defect, and the repair is nygv's: the admission is
+       * spelled into the VALUE, because the value is a string and
+       * `ordinalLabel` prints it verbatim.
+       */
       const size = 0x40000;
       const buf = new ArrayBuffer(size);
       const dv = new DataView(buf);
@@ -367,8 +438,53 @@ describe("parseResourceDirectory", () => {
         { virtualAddress: RSRC_RVA, size },
         rsrcSections(size),
       );
-      expect(typeof tree.root[0].id).toBe("string");
-      expect((tree.root[0].id as string).length).toBeLessThanOrEqual(4096);
+      const id = tree.root[0].id as string;
+      expect(typeof id).toBe("string");
+      expect(id.endsWith(RESOURCE_STRING_TRUNCATION_MARKER)).toBe(true);
+      // The clip itself is unchanged: the recovered PREFIX is still capped.
+      // 0x41 FILL BYTES MAKE 0x4141 UTF-16 UNITS, not the letter "A" — the
+      // old length-only assertion never had to notice which.
+      expect(id.slice(0, -RESOURCE_STRING_TRUNCATION_MARKER.length)).toBe("\u4141".repeat(4096));
+    });
+
+    it("marks a name the BUFFER cut short, not only one the cap did", () => {
+      // The other cause, and the reason one test covers both: the comparison is
+      // against the character count the string's own header declares, so the
+      // buffer ending mid-string falls short of it exactly as the cap does.
+      const size = 0x1010;
+      const buf = new ArrayBuffer(size);
+      const dv = new DataView(buf);
+      new Uint8Array(buf).fill(0x42);
+      dv.setUint16(12, 0, true);
+      dv.setUint16(14, 1, true);
+      dv.setUint32(16, (0x80000000 | 0x1000) >>> 0, true);
+      dv.setUint32(20, 0x2000, true);
+      dv.setUint16(0x1000, 100, true); // claims 100 chars; 7 fit before the end
+
+      const tree = parseResourceDirectory(
+        buf,
+        { virtualAddress: RSRC_RVA, size },
+        rsrcSections(size),
+      );
+      expect(tree.root[0].id).toBe(`${"\u4242".repeat(7)}${RESOURCE_STRING_TRUNCATION_MARKER}`);
+    });
+
+    it("does not mark a name it read whole", () => {
+      /**
+       * THE LIVENESS HALF, and the boundary: a name whose declared length the
+       * reader satisfies exactly is complete, so the marker must not appear.
+       * Deciding truncation on "we reached the bound" instead would mark this —
+       * `peek-a-bin-6qx9`'s off-by-one in the other reader.
+       */
+      const b = new RsrcBuilder();
+      b.nameString(0x400, "SHORT");
+      b.dir(0, 1, 0).entry(0, 0, (0x80000000 | 0x400) >>> 0, 0x100, true);
+      b.dir(0x100, 0, 1).entry(0x100, 0, 1, 0x200, true);
+      b.dir(0x200, 0, 1).entry(0x200, 0, 0x409, 0x300, false);
+      b.data(0x300, 0x5000, 4);
+      const tree = parseRsrc(b.buf);
+      expect(tree.root[0].id).toBe("SHORT");
+      expect(tree.entries[0].type).toBe("SHORT");
     });
   });
 });
@@ -532,8 +648,80 @@ describe("parseVersionInfo", () => {
 
     const info = parseVersionInfo(buf, RSRC_RVA, size, rsrcSections(buf.byteLength));
     expect(info.Key).toBeDefined();
-    expect(info.Key.length).toBe(4096);
-    expect(info.Key).toMatch(/^A+$/);
+    /**
+     * THIS ROW USED TO PIN THE SILENT CLIP AS THE RULE, in the tmo9 forwarder
+     * row's exact shape: `toMatch(/^A+$/)` over a value the reader had stopped
+     * collecting — a clipped version string asserted to read identically to a
+     * complete one, in a table `ExpandedLeaf` prints verbatim. The clip is still
+     * the clip; what changed is that it says so.
+     */
+    expect(info.Key.endsWith(RESOURCE_STRING_TRUNCATION_MARKER)).toBe(true);
+    expect(info.Key.slice(0, -RESOURCE_STRING_TRUNCATION_MARKER.length)).toBe("A".repeat(4096));
+  });
+
+  it("does not mark a version string it read whole", () => {
+    // THE LIVENESS HALF. Every real version resource is on this side of the
+    // boundary, so a marker leaking onto one would be visible on every binary
+    // with a Version Info leaf — which is most of them.
+    const size = 0x400;
+    const buf = new ArrayBuffer(size);
+    const dv = new DataView(buf);
+    const putKey = (at: number, key: string) => {
+      for (let i = 0; i < key.length; i++) dv.setUint16(at + i * 2, key.charCodeAt(i), true);
+      dv.setUint16(at + key.length * 2, 0, true);
+      return pad4(at + (key.length + 1) * 2);
+    };
+    dv.setUint16(0, size, true);
+    dv.setUint16(2, 0, true); // no VS_FIXEDFILEINFO
+    let at = putKey(6, "VS_VERSION_INFO");
+    dv.setUint16(at, 0x200, true);
+    at = putKey(at + 6, "StringFileInfo");
+    dv.setUint16(at, 0x180, true);
+    at = putKey(at + 6, "040904B0");
+    dv.setUint16(at, 0x100, true);
+    dv.setUint16(at + 2, 1, true);
+    const valueAt = putKey(at + 6, "CompanyName");
+    putKey(valueAt, "Contoso Ltd");
+
+    const info = parseVersionInfo(buf, RSRC_RVA, size, rsrcSections(buf.byteLength));
+    expect(info.CompanyName).toBe("Contoso Ltd");
+    expect(JSON.stringify(info)).not.toContain(RESOURCE_STRING_TRUNCATION_MARKER);
+  });
+
+  it("does not mark a value of EXACTLY the cap's length that terminated", () => {
+    /**
+     * THE BOUNDARY, and the row that makes the "decide on reaching the bound"
+     * control discriminate for this reader too. A properly terminated value of
+     * exactly {@link MAX_RESOURCE_STRING} characters is a COMPLETE read, so
+     * inferring truncation from `chars.length` after the fact marks it — which
+     * is `peek-a-bin-6qx9`'s off-by-one, one reader over. `dropped` is recorded
+     * at the drop site precisely so the two cannot be confused.
+     */
+    const CAP = 4096;
+    const size = 0x2400;
+    const buf = new ArrayBuffer(size);
+    const dv = new DataView(buf);
+    const putKey = (at: number, key: string) => {
+      for (let i = 0; i < key.length; i++) dv.setUint16(at + i * 2, key.charCodeAt(i), true);
+      dv.setUint16(at + key.length * 2, 0, true);
+      return pad4(at + (key.length + 1) * 2);
+    };
+    dv.setUint16(0, size, true);
+    dv.setUint16(2, 0, true);
+    let at = putKey(6, "VS_VERSION_INFO");
+    dv.setUint16(at, size - at, true);
+    at = putKey(at + 6, "StringFileInfo");
+    dv.setUint16(at, size - at, true);
+    at = putKey(at + 6, "040904B0");
+    dv.setUint16(at, size - at, true);
+    dv.setUint16(at + 2, 1, true);
+    const valueAt = putKey(at + 6, "Exact");
+    for (let i = 0; i < CAP; i++) dv.setUint16(valueAt + i * 2, 0x0043, true); // 'C'
+    dv.setUint16(valueAt + CAP * 2, 0, true); // and it TERMINATES
+
+    const info = parseVersionInfo(buf, RSRC_RVA, size, rsrcSections(buf.byteLength));
+    expect(info.Exact).toBe("C".repeat(CAP));
+    expect(info.Exact).not.toContain(RESOURCE_STRING_TRUNCATION_MARKER);
   });
 });
 

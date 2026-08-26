@@ -8,7 +8,7 @@ import {
   RT_VERSION,
 } from "../pe/constants";
 import { rvaToFileOffset } from "../pe/parser";
-import { parseVersionInfo, reconstructIcon } from "../pe/resources";
+import { MAX_TOTAL_ENTRIES, parseVersionInfo, reconstructIcon } from "../pe/resources";
 import type { ResourceTree } from "../pe/types";
 
 /**
@@ -229,6 +229,25 @@ export function ResourcesView() {
   }, [pe?.resources]);
 
   if (!pe?.resources || pe.resources.entries.length === 0) {
+    // A CUT-SHORT WALK THAT REACHED NO LEAF IS NOT AN EMPTY DIRECTORY, and this
+    // is the worse half of the two admissions here — the count line below at
+    // least states something arithmetically true about what was recovered,
+    // whereas "No resources found" is a positive claim about the FILE that a
+    // budget exhaustion makes false. It is `HeaderView`'s imphash distinction
+    // in view form: `""` means "imports nothing" and `null` means "the table is
+    // not whole", and collapsing the two prints "No imports" over a table that
+    // was merely cut short.
+    //
+    // Reachable without a leaf: the allowance is spent walking DIRECTORY
+    // entries, so a root declaring more subdirectories than `MAX_TOTAL_ENTRIES`
+    // exhausts it before `walkDirectory` ever descends to a data entry.
+    if (pe?.resources?.truncated) {
+      return (
+        <div className="p-4 text-xs text-yellow-400">
+          {`The resource directory could not be read whole: the walk stopped before reaching any resource — at its ${MAX_TOTAL_ENTRIES}-entry budget, or where the directory runs past the end of the file. This file is not necessarily without resources.`}
+        </div>
+      );
+    }
     return <div className="p-4 text-xs text-gray-500">No resources found in this PE file.</div>;
   }
 
@@ -240,6 +259,36 @@ export function ResourcesView() {
         <h2 className="text-sm font-semibold text-gray-200">
           Resources ({typeCount} types, {totalEntries} entries)
         </h2>
+        {/* THE ADMISSION, ON THE COUNT AND NOT ON A ROW. `parseResourceDirectory`
+            has set `ResourceTree.truncated` since long before this and nothing
+            rendered it, so a tree cut short by `MAX_TOTAL_ENTRIES` read on
+            screen exactly like a complete one — the narrower answer wearing a
+            complete one's shape.
+
+            WHY ONE LINE RATHER THAN A PER-ROW MARKER, which is where the
+            Imports tab puts half of its own admission: the budget is GLOBAL to
+            the walk — and it is not even the only thing that can cut one short,
+            which is why the sentence names entries rather than the budget alone
+            (`Budget.incomplete` in `pe/resources.ts` names the other three).
+            One `Budget` is threaded by reference through every
+            `walkDirectory` frame, so when it runs out the walk breaks out of
+            whatever directory it had reached and every ancestor above it is
+            equally short. There is no row that is "the incomplete one" to mark,
+            and claiming there were would state a fact the flag does not carry.
+            `ImportEntry.truncated` is per-library precisely because each
+            descriptor has its own thunk walk.
+
+            The COUNTS beside it are the sentence a reader actually reads about
+            a list's extent — `peek-a-bin-tmo9`'s finding — so this sits next to
+            them rather than anywhere else on the page. See `peek-a-bin-dhcx`. */}
+        {resources.truncated && (
+          <span
+            className="text-yellow-400 text-[11px]"
+            title={`The resource directory could not be read whole: the walk stopped before every entry the file declares was visited — at its ${MAX_TOTAL_ENTRIES}-entry budget, or where the directory runs past the end of the file. The counts above describe what was recovered, not what the file declares.`}
+          >
+            Incomplete &mdash; the walk did not cover every entry
+          </span>
+        )}
       </div>
 
       <div className="space-y-1">

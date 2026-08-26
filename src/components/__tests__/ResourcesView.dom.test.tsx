@@ -10,6 +10,7 @@ import {
   type ResourceTypeDef,
 } from "../../pe/__tests__/fixtures";
 import {
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
   IMAGE_SCN_CNT_CODE,
   IMAGE_SCN_CNT_INITIALIZED_DATA,
   IMAGE_SCN_MEM_EXECUTE,
@@ -20,6 +21,7 @@ import {
   RT_VERSION,
 } from "../../pe/constants";
 import { parsePE, rvaToFileOffset } from "../../pe/parser";
+import { MAX_TOTAL_ENTRIES } from "../../pe/resources";
 import type { PEFile, ResourceTree } from "../../pe/types";
 import { ResourcesView } from "../ResourcesView";
 import { AppHarness, stateWithPE } from "./appStateHarness";
@@ -807,5 +809,193 @@ describe("ResourcesView — over a parsed resource directory", () => {
     const after = rows();
     expect(after).toHaveLength(4);
     expect(after[3].textContent).toBe("");
+  });
+});
+
+/**
+ * A WALK CUT SHORT BY ITS BUDGET, AND THE LAST HOP TO THE SCREEN.
+ *
+ * `parseResourceDirectory` has set `ResourceTree.truncated` since long before
+ * this and NOTHING RENDERED IT, so a tree stopped at `MAX_TOTAL_ENTRIES` read on
+ * screen exactly like a complete one — same table, same counts, nothing saying
+ * the walk stopped. That is the house defect class stated in `CLAUDE.md` as *a
+ * narrower answer must not wear a complete one's shape*, and the flag was
+ * already the hard half: it exists, it is correct, and `peek-a-bin-6qx9` fixed
+ * the off-by-one that reported it falsely at exactly the budget.
+ *
+ * TWO ARMS, BECAUSE THE VIEW HAS TWO EXITS AND THEY MISLEAD DIFFERENTLY.
+ *  - **The count line.** The heading is a sentence about the list's extent —
+ *    `peek-a-bin-tmo9`'s finding for the Imports tab — so a short list makes it
+ *    describe a smaller file, entirely plausibly.
+ *  - **The empty arm, which is the worse one.** "No resources found in this PE
+ *    file." is a positive claim about the FILE, and a budget exhaustion makes it
+ *    false rather than merely narrow. It is reachable with no leaf at all,
+ *    because the allowance is spent on DIRECTORY entries: a root declaring more
+ *    subdirectories than the budget never descends to a data entry.
+ *
+ * EVERY ROW HERE IS OVER A REAL PARSED DIRECTORY, never a hand-set flag, so the
+ * walk and the view are connected. `peWithBudgetedRoot` writes the root's entry
+ * counts itself — the fixture builder emits well-formed trees and cannot
+ * over-declare — on `resources.test.ts`'s `rootWithEntries` model.
+ */
+describe("ResourcesView — a walk cut short by its budget", () => {
+  const BUDGET_RVA = 0x4000;
+
+  /**
+   * A `.rsrc` whose ROOT declares `total` entries, the first `leaves` of which
+   * are real data entries and the rest of which point past the end of the image.
+   *
+   * The past-the-end target is what keeps the case cheap: `walkDirectory` still
+   * SPENDS a budget entry on each one (the decrement is above the bounds test),
+   * so the allowance runs out, while nothing is flattened and nothing renders.
+   * `0x7ffffff0` has its high bit clear, so each is read as a LEAF rather than
+   * as a subdirectory, and no `visited` entry collapses them.
+   */
+  function peWithBudgetedRoot(total: number, leaves: number): PEFile {
+    const entriesAt = 16;
+    const leavesAt = entriesAt + total * 8;
+    const blobAt = leavesAt + leaves * 16;
+    const body = new Uint8Array(blobAt + Math.max(leaves, 1) * 4);
+    const dv = new DataView(body.buffer);
+
+    // One directory cannot declare more than 0xFFFF of either kind, so the
+    // budget's worth needs both counts. No entry sets the high bit in `Name`,
+    // so the walk reads them all as IDs whatever the split claims.
+    const ids = Math.min(total, 0xffff);
+    dv.setUint16(12, total - ids, true);
+    dv.setUint16(14, ids, true);
+    for (let i = 0; i < total; i++) {
+      const at = entriesAt + i * 8;
+      dv.setUint32(at, i, true);
+      dv.setUint32(at + 4, i < leaves ? leavesAt + i * 16 : 0x7ffffff0, true);
+    }
+    for (let i = 0; i < leaves; i++) {
+      const at = leavesAt + i * 16;
+      dv.setUint32(at, BUDGET_RVA + blobAt + i * 4, true); // OffsetToData is an RVA
+      dv.setUint32(at + 4, 4, true); // Size
+      dv.setUint32(at + 8, 0, true); // CodePage
+    }
+
+    return parsePE(
+      buildMinimalPE64({
+        sections: [
+          {
+            name: ".text",
+            virtualAddress: 0x1000,
+            virtualSize: 4,
+            data: new Uint8Array([0xc3, 0xcc, 0xcc, 0xcc]),
+            characteristics: IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+          },
+          {
+            name: ".rsrc",
+            virtualAddress: BUDGET_RVA,
+            virtualSize: body.length,
+            data: body,
+            characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+          },
+        ],
+        dataDirectories: new Map([
+          [IMAGE_DIRECTORY_ENTRY_RESOURCE, { virtualAddress: BUDGET_RVA, size: body.length }],
+        ]),
+      }),
+    );
+  }
+
+  /** The admission beside the count line, or null. */
+  const budgetNotice = () =>
+    screen.queryByText(/^Incomplete — the walk did not cover every entry$/);
+
+  it("builds a directory the walk really does cut short, with leaves surviving", () => {
+    // THE FIXTURE, ASSERTED BEFORE THE COMPONENT. Every row below is vacuous if
+    // the walk is not actually truncated or if the leaves do not survive it, and
+    // both are properties of bytes this file writes by hand.
+    const pe = peWithBudgetedRoot(MAX_TOTAL_ENTRIES + 4, 3);
+    expect(pe.resources!.truncated).toBe(true);
+    expect(pe.resources!.entries).toHaveLength(3);
+    expect(pe.resources!.root).toHaveLength(MAX_TOTAL_ENTRIES);
+  });
+
+  it("says the tree is incomplete beside the counts", () => {
+    renderResources(peWithBudgetedRoot(MAX_TOTAL_ENTRIES + 4, 3));
+    // The counts are still printed and still describe what was RECOVERED — the
+    // admission qualifies them rather than replacing them, because 3 entries is
+    // the true extent of the table on screen.
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+      "Resources (3 types, 3 entries)",
+    );
+    expect(budgetNotice()).toBeTruthy();
+  });
+
+  it("names the budget in the admission rather than spelling a number", () => {
+    // `MAX_TOTAL_ENTRIES` is exported, so the sentence a reader gets moves with
+    // the constant. Read from the module, never from a literal here.
+    renderResources(peWithBudgetedRoot(MAX_TOTAL_ENTRIES + 4, 3));
+    expect(budgetNotice()!.getAttribute("title")).toContain(String(MAX_TOTAL_ENTRIES));
+  });
+
+  it("still renders every row it recovered", () => {
+    // THE ADMISSION MUST NOT WITHHOLD THE ANSWER. What survived the budget is
+    // as true as it ever was; refusing to show it would trade one wrong shape
+    // for another, which is `XrefPanel`'s "fall back VISIBLY" rule.
+    const { container } = renderResources(peWithBudgetedRoot(MAX_TOTAL_ENTRIES + 4, 3));
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(3);
+  });
+
+  it("does not claim incompleteness for a directory the walk read whole", () => {
+    // THE LIVENESS HALF. Every row above is equally green against a view that
+    // printed the admission unconditionally.
+    renderResources(
+      peWithParsedResources([
+        {
+          id: RT_MANIFEST,
+          names: [{ id: 1, langs: [{ lang: 0x0409, data: new Uint8Array([1, 2, 3, 4]) }] }],
+        },
+      ]),
+    );
+    expect(budgetNotice()).toBeNull();
+    expect(screen.queryByText(/could not be read whole/)).toBeNull();
+  });
+
+  it("does not claim incompleteness for a directory that is exactly the budget's worth", () => {
+    // THE BOUNDARY, from the view's side. `peek-a-bin-6qx9` fixed a parser
+    // off-by-one that reported truncation over a COMPLETE answer at exactly
+    // this size; a reader would have been told a whole tree was short.
+    const pe = peWithBudgetedRoot(MAX_TOTAL_ENTRIES, 3);
+    expect(pe.resources!.truncated).toBeUndefined();
+    renderResources(pe);
+    expect(budgetNotice()).toBeNull();
+  });
+
+  describe("and where it reached no leaf at all", () => {
+    it("does not say the file has no resources", () => {
+      /**
+       * THE WORSE HALF. `entries.length === 0` took the same exit as a PE with
+       * no resource directory, so a walk that ran out of allowance before
+       * descending to a single data entry printed "No resources found in this PE
+       * file." — a positive claim about the file, not a narrow one.
+       *
+       * `HeaderView`'s imphash distinction in view form: `""` means "imports
+       * nothing" and `null` means "the table is not whole", and collapsing them
+       * prints "No imports" over a table that was merely cut short.
+       */
+      const pe = peWithBudgetedRoot(MAX_TOTAL_ENTRIES + 1, 0);
+      expect(pe.resources!.truncated).toBe(true);
+      expect(pe.resources!.entries).toHaveLength(0);
+
+      renderResources(pe);
+      expect(screen.queryByText("No resources found in this PE file.")).toBeNull();
+      const notice = screen.getByText(/could not be read whole/);
+      expect(notice.textContent).toContain(String(MAX_TOTAL_ENTRIES));
+      expect(notice.textContent).toMatch(/not necessarily without resources/);
+    });
+
+    it("still says the file has none when the walk read an empty directory whole", () => {
+      // THE LIVENESS HALF OF THE SAME ARM, and the reason the calm sentence
+      // stays: a directory with nothing in it and no directory at all really
+      // are one fact to a reader. Only a CUT-SHORT walk is a different one.
+      renderResources(peWithParsedResources([]));
+      expect(screen.getByText("No resources found in this PE file.")).toBeTruthy();
+      expect(screen.queryByText(/could not be read whole/)).toBeNull();
+    });
   });
 });

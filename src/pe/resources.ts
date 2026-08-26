@@ -19,9 +19,41 @@ export const MAX_TOTAL_ENTRIES = 65536;
 const MAX_RESOURCE_STRING = 4096;
 
 /**
- * The walk's entry allowance, and WHETHER IT WAS ACTUALLY HIT.
+ * Appended to a resource string this reader could not read whole.
  *
- * `stopped` is not derivable from `remaining`. It used to be read as
+ * `peek-a-bin-nygv`'s rule — the admission is spelled into the VALUE, because
+ * the value is a string and every render site prints it verbatim: a resource id
+ * goes through `ordinalLabel`, a version-info key and value straight into
+ * `ExpandedLeaf`'s table. It holds characters no resource name and no version
+ * string legitimately contains, so it cannot be mistaken for the file's own text.
+ *
+ * THE ASYMMETRY WITH `readCString` IS DELIBERATE AND IS THE STATED DECISION.
+ * `parser.ts`'s import/export name reader appends `NAME_TRUNCATION_MARKER` **and**
+ * marks the entry not-whole, so a marked name can never reach `computeImphash` —
+ * there, a marker would otherwise change a digest. Nothing here feeds a digest,
+ * a hash or any cross-tool comparison, so the marker alone is the whole fix and
+ * no refusal accompanies it.
+ *
+ * Both truncations are decided EXACTLY, never by "we reached the bound":
+ * `readResourceString` compares what it collected against the character count the
+ * string's own uint16 header declares (which covers the cap and the buffer ending
+ * mid-string with one test), and `readWString` records whether it actually dropped
+ * a character. A string of exactly {@link MAX_RESOURCE_STRING} characters is
+ * therefore not marked — `peek-a-bin-6qx9`'s off-by-one, in the other reader.
+ *
+ * A THIRD COPY OF THIS LITERAL now exists (`PDB_PATH_TRUNCATION_MARKER` in
+ * `metadata.ts`, `NAME_TRUNCATION_MARKER` in `parser.ts`), following the
+ * one-constant-per-reader pattern those two established. Folding the three into
+ * one declaration is the right end state and is filed rather than done here,
+ * because it touches two files this change does not own.
+ */
+export const RESOURCE_STRING_TRUNCATION_MARKER = "… <truncated>";
+
+/**
+ * The walk's entry allowance, and WHETHER THE WALK COVERED WHAT THE FILE
+ * DECLARES.
+ *
+ * `incomplete` is not derivable from `remaining`. It used to be read as
  * `remaining > 0`, which is false in two different situations: the walk broke
  * out early (a truncation) and the walk consumed its very last allowed entry and
  * finished (not a truncation). A directory holding EXACTLY {@link
@@ -29,12 +61,26 @@ const MAX_RESOURCE_STRING = 4096;
  * complete answer — the wrong direction for a flag whose whole job is to tell a
  * reader the tree they are looking at is short.
  *
- * The flag is set at the `break`, so it means exactly "an entry the file
- * declares was not walked".
+ * IT WAS NAMED `stopped` AND THAT NAME COST THREE SITES. It reads as a fact
+ * about the BUDGET, so three other places where the walk abandons entries the
+ * file declares — an entry array running past the end of the buffer, a
+ * subdirectory header past the end, a resource directory whose RVA resolves
+ * nowhere — each broke out or returned early without touching it, and the tree
+ * they produced was a short one wearing a complete one's shape. That is the
+ * defect `ResourceTree.truncated` exists to prevent, reached by routes the flag
+ * was not being set on. The field means exactly **"an entry the file declares
+ * was not walked"**, whatever stopped the walk, which is the fact a reader needs
+ * and the only one the flag can carry.
+ *
+ * TWO EARLY RETURNS IN {@link walkDirectory} DELIBERATELY DO NOT SET IT, and
+ * they are marked at their sites: `depth >= MAX_DEPTH` and a repeat visit. Both
+ * are judgements about a MALFORMED shape rather than about an unread entry, and
+ * either could be argued the other way — they are left as filed rows rather than
+ * swept in with the three that are unambiguous.
  */
 interface Budget {
   remaining: number;
-  stopped: boolean;
+  incomplete: boolean;
 }
 
 /**
@@ -43,7 +89,8 @@ interface Budget {
  */
 function readResourceString(view: DataView, offset: number): string {
   if (offset + 2 > view.byteLength) return "";
-  const len = Math.min(view.getUint16(offset, true), MAX_RESOURCE_STRING);
+  const declared = view.getUint16(offset, true);
+  const len = Math.min(declared, MAX_RESOURCE_STRING);
   const chars: number[] = [];
   for (let i = 0; i < len; i++) {
     const pos = offset + 2 + i * 2;
@@ -52,7 +99,12 @@ function readResourceString(view: DataView, offset: number): string {
   }
   // Spreading a 65535-element array into fromCharCode is at or over the
   // argument limit of some engines; the clamp above keeps this well under it.
-  return String.fromCharCode(...chars);
+  const text = String.fromCharCode(...chars);
+  // ONE EXACT TEST FOR BOTH CAUSES. `declared` is the character count the
+  // string's own header states, so falling short of it is the clip
+  // ({@link MAX_RESOURCE_STRING}) *or* the buffer ending inside the string, and
+  // reaching it exactly is a complete read either way.
+  return chars.length < declared ? text + RESOURCE_STRING_TRUNCATION_MARKER : text;
 }
 
 /**
@@ -68,12 +120,26 @@ function walkDirectory(
   parentPath: (number | string)[],
   budget: Budget,
 ): ResourceNode[] {
+  // NEITHER OF THESE TWO SETS `incomplete`, and that is a decision. Both are
+  // properties of a MALFORMED tree rather than of an unread entry: a PE resource
+  // directory is three levels by construction, so `MAX_DEPTH` is only reached by
+  // a file that nests further than the format allows, and a repeat visit is a
+  // cycle. The second has a real cost — a subdirectory legitimately shared by
+  // two referrers is emptied for the second one — but calling that "the walk was
+  // cut short" is arguable in a way the three sites below are not, so it is
+  // filed rather than swept in here.
   if (depth >= MAX_DEPTH) return [];
   if (visited.has(dirOffset)) return [];
   visited.add(dirOffset);
 
   const absOffset = sectionBase + dirOffset;
-  if (absOffset + 16 > view.byteLength) return [];
+  // The PARENT declared this subdirectory and the buffer does not hold its
+  // header, so every entry under it is one the file declares and the walk did
+  // not read.
+  if (absOffset + 16 > view.byteLength) {
+    budget.incomplete = true;
+    return [];
+  }
 
   // IMAGE_RESOURCE_DIRECTORY: 16 bytes
   const numberOfNamedEntries = view.getUint16(absOffset + 12, true);
@@ -85,13 +151,19 @@ function walkDirectory(
 
   for (let i = 0; i < totalEntries; i++) {
     if (budget.remaining <= 0) {
-      budget.stopped = true;
+      budget.incomplete = true;
       break;
     }
     budget.remaining--;
 
     const entryOffset = entriesStart + i * 8;
-    if (entryOffset + 8 > view.byteLength) break;
+    // The two uint16 counts read above are the FILE's claim about this
+    // directory; the buffer ending inside the array leaves entries `i` onward
+    // unwalked exactly as the budget running out does.
+    if (entryOffset + 8 > view.byteLength) {
+      budget.incomplete = true;
+      break;
+    }
 
     const nameOrId = view.getUint32(entryOffset, true);
     const offsetToData = view.getUint32(entryOffset + 4, true);
@@ -166,16 +238,23 @@ export function parseResourceDirectory(
   resourceDir: { virtualAddress: number; size: number },
   sections: SectionHeader[],
 ): ResourceTree {
+  // A RESOURCE DIRECTORY THE SECTION TABLE CANNOT PLACE IS NOT AN ABSENT ONE.
+  // `parsePE` only calls this when the data directory has a non-zero RVA and a
+  // non-zero size, so reaching here means the file declares resources and names
+  // an address no section holds. Answering a bare empty tree made that
+  // indistinguishable from a PE with no resource directory at all, which is the
+  // sentence `ResourcesView` prints — a positive claim about the file rather
+  // than a narrow one.
   const fileOffset = rvaToFileOffset(resourceDir.virtualAddress, sections);
-  if (fileOffset < 0) return { root: [], entries: [] };
+  if (fileOffset < 0) return { root: [], entries: [], truncated: true };
 
   const view = new DataView(buffer);
   const entries: ResourceTree["entries"] = [];
   const visited = new Set<number>();
-  const budget: Budget = { remaining: MAX_TOTAL_ENTRIES, stopped: false };
+  const budget: Budget = { remaining: MAX_TOTAL_ENTRIES, incomplete: false };
 
   const root = walkDirectory(view, fileOffset, 0, 0, visited, entries, [], budget);
-  return budget.stopped ? { root, entries, truncated: true } : { root, entries };
+  return budget.incomplete ? { root, entries, truncated: true } : { root, entries };
 }
 
 /**
@@ -197,6 +276,7 @@ export function parseVersionInfo(
   // Helper: read UTF-16LE null-terminated string
   function readWString(pos: number): { str: string; end: number } {
     const chars: number[] = [];
+    let dropped = false;
     let p = pos;
     while (p + 2 <= end) {
       const ch = view.getUint16(p, true);
@@ -206,9 +286,18 @@ export function parseVersionInfo(
       // collecting: an unterminated string spanning a large version resource
       // would otherwise spread hundreds of thousands of arguments into
       // fromCharCode and blow the call stack.
+      //
+      // `dropped` is the admission, and it is recorded HERE rather than inferred
+      // from `chars.length` afterwards: a value of exactly
+      // {@link MAX_RESOURCE_STRING} characters that terminated properly is a
+      // complete read, and the two are indistinguishable by length alone.
       if (chars.length < MAX_RESOURCE_STRING) chars.push(ch);
+      else dropped = true;
     }
-    return { str: String.fromCharCode(...chars), end: p };
+    const str = String.fromCharCode(...chars);
+    // `end` is deliberately unchanged by the marker: it is a FILE POSITION the
+    // caller's walk continues from, and the marker is text for a reader.
+    return { str: dropped ? str + RESOURCE_STRING_TRUNCATION_MARKER : str, end: p };
   }
 
   // DWORD align
