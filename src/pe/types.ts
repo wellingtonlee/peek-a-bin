@@ -326,6 +326,19 @@ export interface PEFile {
    */
   importsTruncated?: boolean;
   exports: ExportEntry[];
+  /**
+   * Set when `exports` is **not the whole export table**: a name-pointer,
+   * ordinal or address-table walk stopped at a bound rather than at its
+   * declared count, or an export name ran past `readCString`'s limit. Only a
+   * crafted (or absurdly large) export table reaches it — `MAX_EXPORT_ENTRIES`
+   * is the format's own `uint16` ordinal ceiling, so a well-formed file cannot.
+   *
+   * Read it before treating `exports` as a complete description of the file.
+   * There is no export-side digest to withhold (contrast `importsTruncated` and
+   * `computeImphash`), so the flag and the Exports tab's heading count are the
+   * whole admission. See `parseExports`.
+   */
+  exportsTruncated?: boolean;
   tlsDirectory?: TLSDirectory;
   loadConfig?: LoadConfigDirectory;
   relocations?: RelocationBlock[];

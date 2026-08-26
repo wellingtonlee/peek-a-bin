@@ -286,8 +286,18 @@ function sectionForRva(rva: number, index: SectionIndex): SectionHeader | null {
  * inflate beyond the image. `min(virtualSize, sizeOfRawData)` because
  * `offsetInSection` refuses both, so a byte past either is a byte the rest of
  * this parser will not resolve.
+ *
+ * **Exported because it is the ONE DECLARATION of that bound**, and five walks
+ * outside `parseImports` now want it — the two export tables, the relocation
+ * blocks, the debug directory (`metadata.ts`) and `.pdata` (`pdata.ts`). Every
+ * one of those was bounded by the end of the FILE, which is exactly the shape
+ * `peek-a-bin-nygv` and `peek-a-bin-tmo9` both turned out to be. See the
+ * attacker-controlled-bound census in `docs/gotchas.md`.
+ *
+ * Returns -1 for an unmapped RVA; a caller wanting "no opinion" must spell that
+ * as `Number.POSITIVE_INFINITY` itself rather than passing -1 into a `Math.min`.
  */
-function sectionRawLimitForRva(rva: number, index: SectionIndex): number {
+export function sectionRawLimitForRva(rva: number, index: SectionIndex): number {
   const section = sectionForRva(rva, index);
   if (section === null) return -1;
   return section.pointerToRawData + Math.min(section.virtualSize, section.sizeOfRawData);
@@ -608,9 +618,14 @@ function parseImports(
       break;
     }
 
-    // Read library name
+    // Read library name. An RVA the section table does not map drops the whole
+    // library — the descriptor is real, the file declared it, and we cannot name
+    // it — so the table is NOT whole and must say so. Without this a crafted (or
+    // simply damaged) file renders a shorter Imports tab that reads as complete
+    // and hands `computeImphash` a confident digest over a list missing a DLL.
     const nameOffset = rvaToFileOffsetIndexed(nameRVA, sectionIndex);
     if (nameOffset < 0 || nameOffset >= view.byteLength) {
+      tableTruncated = true;
       descriptorOffset += descriptorSize;
       continue;
     }
@@ -630,6 +645,11 @@ function parseImports(
     // below is entered with a negative offset and getBigUint64 throws, failing
     // the whole file load. Every other rvaToFileOffset call site checks this.
     let thunkOffset = thunkRVA ? rvaToFileOffsetIndexed(thunkRVA, sectionIndex) : -1;
+    // A descriptor that names a thunk array we cannot resolve is not a library
+    // that imports nothing: `KERNEL32.dll (0)` is a statement about the file,
+    // and the two are indistinguishable without this. `!thunkRVA` really does
+    // mean "no thunk array declared" and is left unmarked.
+    if (thunkRVA && thunkOffset < 0) entryTruncated = true;
     if (thunkRVA && thunkOffset >= 0) {
       let funcIndex = 0;
       const thunkSectionLimit = sectionRawLimitForRva(thunkRVA, sectionIndex);
@@ -654,15 +674,38 @@ function parseImports(
         if (thunkValue === 0n) break;
         functionBudget--;
 
-        // Compute IAT VA for this function
-        const iatVA = imageBase + firstThunk + funcIndex * thunkSize;
-        iatAddresses.push(iatVA);
+        // WHAT THIS SLOT IMPORTS, or null when the file does not let us say.
+        //
+        // **`functions` AND `iatAddresses` ARE PARALLEL ARRAYS PAIRED BY INDEX
+        // BY FOUR CONSUMERS** — `disasm/operands.ts`'s `buildIATLookup`
+        // (`iatAddresses[i]` -> `functions[i]`, which is what labels a call site
+        // in the disassembly), `ImportsView`, `useVulnScanner` and
+        // `mcp/resources.ts`. The IAT address used to be pushed
+        // unconditionally while the name was pushed only if its hint/name
+        // record resolved, so ONE unresolvable name RVA shifted every later
+        // name up one slot and **mislabelled every remaining call site in that
+        // library, on real instructions, with another import's name**. That is
+        // a wrong value, not a missing one, and no flag repairs it.
+        //
+        // So a slot contributes to BOTH arrays or to NEITHER, which is what
+        // keeps the pairing an invariant rather than a convention. `funcIndex`
+        // still counts every thunk, so the IAT VAs that do get pushed stay the
+        // addresses the loader will use. Inventing a placeholder name to keep
+        // the arrays the same length was the other option and is the
+        // `Ordinal_<n>` trap: it would put a fabricated symbol into a list that
+        // feeds `computeImphash` and `matchesApi`.
+        //
+        // The structural fix is one array of `{ name, iatAddress }` pairs, so
+        // the desync is unrepresentable. Not taken here: it changes a `PEFile`
+        // shape read by four modules in three directories, and the invariant
+        // this loop now keeps is testable directly.
+        let funcName: string | null = null;
 
         // Check if import by ordinal
         const ordinalFlag = is64 ? IMAGE_ORDINAL_FLAG64 : BigInt(IMAGE_ORDINAL_FLAG32);
         if (thunkValue & ordinalFlag) {
           const ordinal = Number(thunkValue & 0xffffn);
-          functions.push(formatOrdinalImport(ordinal));
+          funcName = formatOrdinalImport(ordinal);
         } else {
           // Import by name
           const nameTableRVA = Number(thunkValue);
@@ -670,10 +713,17 @@ function parseImports(
 
           if (nameTableOffset >= 0 && nameTableOffset + 2 < view.byteLength) {
             // Skip hint (2 bytes)
-            const funcName = readCString(view, nameTableOffset + 2);
+            funcName = readCString(view, nameTableOffset + 2);
             if (isNameTruncated(funcName)) entryTruncated = true;
-            functions.push(funcName);
+          } else {
+            // A declared import we cannot name: the entry is not whole.
+            entryTruncated = true;
           }
+        }
+
+        if (funcName !== null) {
+          functions.push(funcName);
+          iatAddresses.push(imageBase + firstThunk + funcIndex * thunkSize);
         }
 
         thunkOffset += thunkSize;
@@ -694,22 +744,74 @@ function parseImports(
 }
 
 /**
- * Parse Export Table
+ * The most export names, and the most address-table slots, that will be read.
+ *
+ * **NOT AN INVENTED NUMBER — it is the format's own ceiling.** The export
+ * ordinal table is an array of `uint16` holding the unbiased index into the
+ * address table, so a PE cannot bind more than 65536 slots to names at all, and
+ * the loader's ordinal space is a `uint16` too. That is the same reasoning, and
+ * the same value, `MAX_IMPORT_FUNCTIONS` already records above ("A DLL cannot
+ * export more than 65535 symbols"), and it means a well-formed file cannot be
+ * cut short by it.
+ *
+ * Real tables sit three orders of magnitude below: `ntdll.dll` exports ~2400.
+ * **That figure is documentation, not measurement — no binary in this corpus
+ * exports anything at all** (all six are EXEs, and `corpus:parserdiff`'s two
+ * export gates are VACUOUS), so nothing here can demonstrate the cap is above
+ * a real table. The format argument is the whole of the evidence.
+ */
+export const MAX_EXPORT_ENTRIES = 65536;
+
+/**
+ * Parse Export Table.
+ *
+ * **THREE ATTACKER-CONTROLLED COUNTS, AND UNTIL NOW THE ONLY BOUND ON ANY OF
+ * THEM WAS THE END OF THE FILE** — the `peek-a-bin-tmo9` shape, in the reader
+ * the census went looking at first because `NumberOfNames` and
+ * `NumberOfFunctions` are a classic multiplying pair.
+ *
+ * They do not in fact multiply: the two walks are sequential, and the alias
+ * loop (`for (const name of names)`) is bounded by the *total* number of names
+ * because `namesByIndex` partitions them. What was there instead is a plain
+ * hundredfold amplification, and it was measured rather than reasoned: at
+ * `d8d8a6d`, a **1,049,088-byte** fixture declaring `0xFFFFFFFF` for both
+ * counts and a name-pointer table of slots all aimed at one unterminated run
+ * yielded **524,093 export entries carrying 104,696,157 characters of name**,
+ * inside `parsePE`, on the main thread, before anything renders.
+ *
+ * Every walk is now bounded four ways, smallest winning, exactly as
+ * `parseImports` is:
+ *
+ *  - **the containing section's raw extent** (`sectionRawLimitForRva`), which
+ *    is the bound that improves the ANSWER and not merely the cost: a name
+ *    pointer table that runs off the end of `.rdata` was reading the next
+ *    section's bytes — or the overlay's — as name RVAs;
+ *  - **the declared count**, as before;
+ *  - **`MAX_EXPORT_ENTRIES`**, the count cap, which is what actually stops the
+ *    hostile case since a section's declared size is attacker-controlled too;
+ *  - **the buffer**.
+ *
+ * A list cannot carry a truncation marker (an invented entry would be a lie
+ * inside a list that feeds the Exports tab, function detection and the MCP
+ * tools), so the admission is the flag `PEFile.exportsTruncated` and the
+ * Exports tab's own heading count — the same two forms `parseImports` uses.
+ * There is no export-side `computeImphash` to refuse, which is why this needs
+ * no third form.
  */
 function parseExports(
   view: DataView,
   exportDir: DataDirectory,
   sectionIndex: SectionIndex,
-): ExportEntry[] {
+): { exports: ExportEntry[]; truncated: boolean } {
   if (!exportDir.virtualAddress || !exportDir.size) {
-    return [];
+    return { exports: [], truncated: false };
   }
 
   const exports: ExportEntry[] = [];
   const exportTableOffset = rvaToFileOffsetIndexed(exportDir.virtualAddress, sectionIndex);
 
   if (exportTableOffset < 0 || exportTableOffset + 40 > view.byteLength) {
-    return exports;
+    return { exports, truncated: false };
   }
 
   // Read Export Directory Table
@@ -728,22 +830,41 @@ function parseExports(
   // nothing to report. The name tables are optional — a DLL may export purely
   // by ordinal — so an unmapped name table only costs the names.
   if (addressTableOffset < 0) {
-    return exports;
+    return { exports, truncated: false };
   }
+
+  /** Whether any walk below stopped at a bound instead of at its declared count. */
+  let tableTruncated = false;
+
+  /**
+   * How far a table starting at `offset` may be read: its own section's raw
+   * extent where the section table places it, and the buffer otherwise. One
+   * helper because the three tables ask the identical question and a fourth
+   * hand-written copy is how these bounds drift apart.
+   */
+  const limitFor = (rva: number, offset: number): number => {
+    const sectionLimit = sectionRawLimitForRva(rva, sectionIndex);
+    return Math.max(
+      0,
+      Math.min(view.byteLength, sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY) -
+        offset,
+    );
+  };
 
   // Address-table index -> the names bound to it. Multiple names may resolve to
   // the same slot (aliases), and dumpbin lists each, so keep them all.
   const namesByIndex = new Map<number, string[]>();
 
   if (namePointerOffset >= 0 && ordinalTableOffset >= 0) {
-    // numberOfNames comes straight off the file as a uint32. A hostile 0xFFFFFFFF
-    // would otherwise spin ~4.3 billion times here, freezing the main thread — the
-    // name/ordinal tables cannot exceed the buffer, so clamp to what could fit.
+    // numberOfNames comes straight off the file as a uint32, so it bounds
+    // nothing on its own. Four bounds, smallest winning — see the docstring.
     const maxNames = Math.min(
       numberOfNames,
-      Math.max(0, Math.floor((view.byteLength - namePointerOffset) / 4)),
-      Math.max(0, Math.floor((view.byteLength - ordinalTableOffset) / 2)),
+      MAX_EXPORT_ENTRIES,
+      Math.floor(limitFor(namePointerRVA, namePointerOffset) / 4),
+      Math.floor(limitFor(ordinalTableRVA, ordinalTableOffset) / 2),
     );
+    if (maxNames < numberOfNames) tableTruncated = true;
 
     // Walk name pointer table
     for (let i = 0; i < maxNames; i++) {
@@ -765,6 +886,9 @@ function parseExports(
       if (nameOffset < 0 || nameOffset >= view.byteLength) continue;
 
       const name = readCString(view, nameOffset);
+      // A name `readCString` could not read whole does not name this export, so
+      // the table is not whole either — the same reading `parseImports` takes.
+      if (isNameTruncated(name)) tableTruncated = true;
 
       const existing = namesByIndex.get(addressIndex);
       if (existing) existing.push(name);
@@ -777,12 +901,14 @@ function parseExports(
   const forwarderStart = exportDir.virtualAddress;
   const forwarderEnd = exportDir.virtualAddress + exportDir.size;
 
-  // Same clamp as the name walk: numberOfFunctions is attacker-controlled and
-  // the address table is 4 bytes per entry.
+  // Same four bounds as the name walk: numberOfFunctions is attacker-controlled
+  // and the address table is 4 bytes per entry.
   const maxFunctions = Math.min(
     numberOfFunctions,
-    Math.max(0, Math.floor((view.byteLength - addressTableOffset) / 4)),
+    MAX_EXPORT_ENTRIES,
+    Math.floor(limitFor(addressTableRVA, addressTableOffset) / 4),
   );
+  if (maxFunctions < numberOfFunctions) tableTruncated = true;
 
   // Walk the address table, which is the only table that covers ordinal-only
   // exports. Index i is ordinal `ordinalBase + i` per the PE spec.
@@ -804,6 +930,7 @@ function parseExports(
       const forwarderOffset = rvaToFileOffsetIndexed(address, sectionIndex);
       if (forwarderOffset >= 0 && forwarderOffset < view.byteLength) {
         forwarder = readCString(view, forwarderOffset) || undefined;
+        if (forwarder && isNameTruncated(forwarder)) tableTruncated = true;
       }
     }
 
@@ -822,7 +949,55 @@ function parseExports(
     }
   }
 
-  return exports;
+  return { exports, truncated: tableTruncated };
+}
+
+/** The per-section scan ceiling, unchanged: 1 MiB of any one section's bytes. */
+const SECTION_SCAN_LIMIT = 1024 * 1024;
+
+/**
+ * The most bytes `extractStrings` will scan **across a whole image**.
+ *
+ * The per-section 1 MiB ceiling bounded each scan and nothing bounded their
+ * PRODUCT with the section count — which is a `uint16` read off the file and
+ * clamped only by `buffer / 40`. Every section named `.rdata` is scanned, and
+ * `pointerToRawData` may be 0 for all of them, so N sections each scan the same
+ * megabyte: measured at `d8d8a6d`, a 221,184-byte fixture with 400 such
+ * sections produced **166,784 strings in 752 ms**, and the shape is linear in
+ * the section count, so a 1 MiB file declaring its buffer-full ~26,000 sections
+ * asks for ~26 GiB of scanning and a Map to match. `peek-a-bin-tmo9`'s lesson
+ * exactly: per-iteration safety says nothing about the total.
+ *
+ * 64 MiB is above any real image's data sections (the whole corpus is under
+ * 200 KiB; a 253 MiB image's `.rdata`/`.data` are a few MiB) and it is the
+ * budget for the *scan*, not for the file — a large binary loses nothing.
+ *
+ * This is a **worker-side** walk (`extractStrings` is the disasm RPC whose
+ * argument is the whole image), so the cost is a dead worker and an unbounded
+ * Map crossing `postMessage`, not a frozen render. Second tier, therefore, but
+ * the largest amplification in the census.
+ */
+export const MAX_STRING_SCAN_BYTES = 64 * 1024 * 1024;
+
+/** Bytes left in one `extractStrings` call's whole-image scan budget. */
+interface ScanBudget {
+  remaining: number;
+}
+
+/**
+ * How far into `section` a scan may read, given what is left of the budget.
+ * Decrements the budget by what it hands out, so the three passes below share
+ * one total rather than each getting their own.
+ */
+function scanEndFor(view: DataView, section: SectionHeader, budget: ScanBudget): number {
+  const start = section.pointerToRawData;
+  const end = Math.min(
+    start + Math.min(section.sizeOfRawData, SECTION_SCAN_LIMIT),
+    view.byteLength,
+  );
+  const allowed = Math.max(0, Math.min(end - start, budget.remaining));
+  budget.remaining -= allowed;
+  return start + allowed;
 }
 
 /**
@@ -832,13 +1007,13 @@ function extractASCIIStrings(
   view: DataView,
   section: SectionHeader,
   imageBase: number,
+  budget: ScanBudget,
   minLength = 4,
 ): Map<number, string> {
   const strings = new Map<number, string>();
 
   const start = section.pointerToRawData;
-  const scanLimit = 1024 * 1024;
-  const end = Math.min(start + Math.min(section.sizeOfRawData, scanLimit), view.byteLength);
+  const end = scanEndFor(view, section, budget);
 
   const buf = new Uint8Array(view.buffer, view.byteOffset);
   let i = start;
@@ -891,13 +1066,13 @@ function extractUTF16Strings(
   view: DataView,
   section: SectionHeader,
   imageBase: number,
+  budget: ScanBudget,
   minLength = 4,
 ): Map<number, string> {
   const strings = new Map<number, string>();
 
   const start = section.pointerToRawData;
-  const scanLimit = 1024 * 1024;
-  const end = Math.min(start + Math.min(section.sizeOfRawData, scanLimit), view.byteLength);
+  const end = scanEndFor(view, section, budget);
 
   const utf16Decoder = new TextDecoder("utf-16le");
   const buf = new Uint8Array(view.buffer, view.byteOffset);
@@ -1090,7 +1265,29 @@ function parseLoadConfig(
 }
 
 /**
- * Parse Base Relocations
+ * Parse Base Relocations.
+ *
+ * **THE BLOCK WALK HONOURED THE DIRECTORY'S DECLARED SIZE AND THE ENTRY WALK
+ * INSIDE IT DID NOT.** `entryCount` came from the block's own `SizeOfBlock`,
+ * whose only backstop was the end of the FILE, so a directory declaring **8
+ * bytes** — one block header — whose `SizeOfBlock` read `0xFFFFFFFF` produced
+ * **524,284 relocation entries** out of a 1,049,088-byte fixture (measured at
+ * `d8d8a6d`; the pre-existing test asserted only `< buf.byteLength`, which that
+ * number satisfies). That is `peek-a-bin-tmo9`'s shape once more: the declared
+ * size bounded the outer walk and was then ignored by the inner one.
+ *
+ * `blockLimit` is now the smallest of the block's own claim, the directory's,
+ * the containing section's raw extent and the buffer. `Math.floor` on the entry
+ * count is the other half — `(sizeOfBlock - 8) / 2` for an odd `SizeOfBlock`
+ * gave a fractional count, so `i < entryCount` read half an entry's worth of
+ * loop.
+ *
+ * **What is deliberately NOT capped is the entry TOTAL.** A relocation table is
+ * legitimately O(image): one block per 4 KiB page, up to 2044 entries in each,
+ * so a 253 MiB image really does carry millions. There is no count above which
+ * a table is provably bogus, and the section extent *is* the file's own
+ * statement about how far the array goes — so that, and not an invented number,
+ * is the bound. See `docs/gotchas.md`.
  */
 function parseBaseRelocations(
   view: DataView,
@@ -1104,21 +1301,27 @@ function parseBaseRelocations(
 
   const blocks: RelocationBlock[] = [];
   let pos = baseOffset;
-  const endPos = baseOffset + relocDir.size;
+  const sectionLimit = sectionRawLimitForRva(relocDir.virtualAddress, sectionIndex);
+  const dirLimit = Math.min(
+    view.byteLength,
+    baseOffset + Math.max(0, relocDir.size),
+    sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY,
+  );
 
-  while (pos + 8 <= view.byteLength && pos < endPos) {
+  while (pos + 8 <= dirLimit) {
     const virtualAddress = view.getUint32(pos, true);
     const sizeOfBlock = view.getUint32(pos + 4, true);
 
     if (virtualAddress === 0 || sizeOfBlock < 8) break;
 
-    const entryCount = (sizeOfBlock - 8) / 2;
+    // The block may not claim more than the directory, the section or the file
+    // leaves it, whatever its header says.
+    const blockLimit = Math.min(dirLimit, pos + sizeOfBlock);
+    const entryCount = Math.max(0, Math.floor((blockLimit - pos - 8) / 2));
     const entries: RelocationEntry[] = [];
 
     for (let i = 0; i < entryCount; i++) {
-      const entryPos = pos + 8 + i * 2;
-      if (entryPos + 2 > view.byteLength) break;
-      const value = view.getUint16(entryPos, true);
+      const value = view.getUint16(pos + 8 + i * 2, true);
       const type = (value >> 12) & 0xf;
       const entryOffset = value & 0xfff;
       entries.push({ type, offset: entryOffset });
@@ -1207,7 +1410,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   );
 
   // 8. Parse Exports
-  const exports = parseExports(
+  const { exports, truncated: exportsTruncated } = parseExports(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_EXPORT] || { virtualAddress: 0, size: 0 },
     sectionIndex,
@@ -1281,6 +1484,9 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     // `PEFile` built anywhere else cannot claim completeness by accident.
     ...(importsTruncated ? { importsTruncated: true } : {}),
     exports,
+    // Same rule as `importsTruncated`: omitted rather than false, so a `PEFile`
+    // built anywhere else cannot claim completeness by accident.
+    ...(exportsTruncated ? { exportsTruncated: true } : {}),
     tlsDirectory,
     loadConfig,
     relocations,
@@ -1305,10 +1511,15 @@ export function extractStrings(
   const strings = new Map<number, string>();
   const stringTypes = new Map<number, "ascii" | "utf16le">();
   const dataSectionNames = new Set([".rdata", ".data", ".rodata"]);
+  // ONE budget for the whole call, shared by all four passes below — see
+  // MAX_STRING_SCAN_BYTES. A per-pass budget would multiply by four, and a
+  // per-section one is what was already there and is what the section count
+  // multiplies out.
+  const budget: ScanBudget = { remaining: MAX_STRING_SCAN_BYTES };
 
   for (const sec of sections) {
     if (dataSectionNames.has(sec.name)) {
-      const asciiStrings = extractASCIIStrings(view, sec, imageBase, 4);
+      const asciiStrings = extractASCIIStrings(view, sec, imageBase, budget, 4);
       asciiStrings.forEach((v, k) => {
         strings.set(k, v);
         stringTypes.set(k, "ascii");
@@ -1318,7 +1529,7 @@ export function extractStrings(
 
   const textSection = findCodeSection(sections);
   if (textSection) {
-    const textAscii = extractASCIIStrings(view, textSection, imageBase, 8);
+    const textAscii = extractASCIIStrings(view, textSection, imageBase, budget, 8);
     textAscii.forEach((v, k) => {
       if (!strings.has(k)) {
         strings.set(k, v);
@@ -1329,7 +1540,7 @@ export function extractStrings(
 
   for (const sec of sections) {
     if (dataSectionNames.has(sec.name)) {
-      const utf16Strings = extractUTF16Strings(view, sec, imageBase, 4);
+      const utf16Strings = extractUTF16Strings(view, sec, imageBase, budget, 4);
       utf16Strings.forEach((v, k) => {
         if (!strings.has(k)) {
           strings.set(k, v);
@@ -1341,12 +1552,18 @@ export function extractStrings(
 
   // Pointer indirection pass: scan .rdata/.data for pointers to known string VAs
   const ptrSize = is64 ? 8 : 4;
+  // `Math.max(...)` over the section table: `numberOfSections` is a `uint16`, so
+  // the spread is at most 65535 arguments. Checked rather than assumed —
+  // measured at `d8d8a6d`, V8 accepts 65535 and throws `RangeError: Maximum
+  // call stack size exceeded` at 125000, so this is safe *only* because of the
+  // `uint16`. Anything that ever lets the section count past 65535 must replace
+  // this with a reduce.
   const imageEnd = imageBase + Math.max(...sections.map((s) => s.virtualAddress + s.virtualSize));
 
   for (const sec of sections) {
     if (!dataSectionNames.has(sec.name)) continue;
     const start = sec.pointerToRawData;
-    const end = Math.min(start + Math.min(sec.sizeOfRawData, 1024 * 1024), view.byteLength);
+    const end = scanEndFor(view, sec, budget);
 
     for (let off = start; off + ptrSize <= end; off += ptrSize) {
       let ptr: number;

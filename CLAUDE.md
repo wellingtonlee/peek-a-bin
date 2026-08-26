@@ -1703,6 +1703,41 @@ mistake.
   binaries unflagged, which is the case rather than a formality. The full census of which parser
   admissions reach a screen is `peek-a-bin-ul9m`, summarised in `docs/verification.md`.
   (`peek-a-bin-dhcx`)
+  byte-identical over four binaries. **`ResourceTree.truncated` is still only half built — no view
+  renders it.** (`peek-a-bin-tmo9`)
+- **THE ATTACKER-CONTROLLED-BOUND CLASS WAS SWEPT DELIBERATELY, AND SEVEN MORE SITES WERE OPEN —
+  including one that produced a WRONG NAME on real instructions.** `nygv` and `tmo9` were both
+  found incidentally, so nobody had ever asked every reader in `src/pe/` the five questions the
+  class turns on: what bounds it; whether the *work* is bounded or only the reads; whether two
+  file-supplied counts **multiply**; whether anything allocates a size the file chose; and whether
+  it runs on the main thread. Ranked, with the figure that was measured at `d8d8a6d` against an
+  identical fixture: **ARM64 `.pdata` unwind codes** (a real product — 1020 bytes per record x a
+  `buffer / 8` entry count, all naming one record: 37.7 s on a 266 KB file, growing linearly, so
+  hours at 253 MiB, in `parsePE`); **the debug directory's entry count** (`nygv`'s own defect with
+  a new multiplier — 153,877,941 characters of PDB path from a 1 MiB file, *inside a render*);
+  **the export tables** (524,093 entries / 104,696,157 characters of name); **`parseImports`'
+  parallel `functions`/`iatAddresses`** (desynchronised by one unresolvable name RVA, so
+  `buildIATLookup` labelled every later call site in that library with **another import's name** —
+  a wrong value no flag repairs); two more `tmo9` bypasses in `parseImports` (a vanished library
+  and a `KERNEL32.dll (0)`, each yielding a confident imphash); **relocation blocks** (an
+  eight-byte directory producing 524,284 entries, where the pre-existing test asserted only
+  `< buf.byteLength`, which that satisfies); **`extractStrings`** (sections x 1 MiB: 13.3M strings
+  in 87.7 s, the largest amplification and the only one off the main thread); and
+  **`readDERChildren`** (41.6 MB of heap from a 1 MiB file, an OOM no `try/catch` can catch).
+  `sectionRawLimitForRva` is now exported as the **one declaration** of the section bound, because
+  five walks wanted it and every one had the end of the file instead. `MAX_EXPORT_ENTRIES` is the
+  *format's* `uint16` ordinal ceiling rather than an invented number, which matters because no
+  binary here exports anything and `corpus:parserdiff`'s export gates are **vacuous**; the ARM64
+  unwind budget is calibrated against the real tables (1220 code bytes in total on `t64-arm`, 28
+  in the largest record). **Fifteen controls, one INERT and recorded rather than repaired** — the
+  export section bound's fixture was too small to distinguish a section from the buffer, so removal
+  left the row green. Deliberately **not** bounded: the relocation entry *total* (legitimately
+  O(image), and the section extent is the file's own statement). Deliberately **refused and handed
+  back**: the two `catch {}` blocks in `parsePE` that render "Unsigned" and "No resources found"
+  for a file that has both — the render site is the whole of the fix and those files are owned
+  elsewhere, the standing precedent being `ResourceTree.truncated`, set since before `tmo9` and
+  **still rendered by no view**. `corpus:parserdiff` byte-identical (98/118, 20 vacuous), `corpus`
+  byte-identical over four binaries, `corpus:arm64` 51/51.
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 

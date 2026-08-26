@@ -160,7 +160,7 @@ interface UnwindCode {
 }
 
 /** Read one code at `i`, or null when the byte is not one this table knows. */
-function readUnwindCode(bytes: readonly number[], i: number): UnwindCode | null {
+function readUnwindCode(bytes: ArrayLike<number>, i: number): UnwindCode | null {
   const b = bytes[i];
   const next = (k: number): number => bytes[i + k] ?? 0;
   // Truncated: a multi-byte code whose operand bytes are not present cannot be
@@ -214,7 +214,7 @@ export interface Arm64UnwindCodeWalk {
  * *after* the frame pointer was established, i.e. below it; so the delta is the
  * total minus that, minus `add_fp`'s own displacement.
  */
-export function decodeUnwindCodes(bytes: readonly number[]): Arm64UnwindCodeWalk {
+export function decodeUnwindCodes(bytes: ArrayLike<number>): Arm64UnwindCodeWalk {
   let i = 0;
   let totalAlloc = 0;
   let allocBelowFp: number | null = null;
@@ -262,7 +262,7 @@ export function decodeUnwindCodes(bytes: readonly number[]): Arm64UnwindCodeWalk
  * the delta is that field verbatim, so the guard there is structural rather
  * than a measured saving.
  */
-export function frameFromUnwindCodes(bytes: readonly number[]): Arm64UnwindFrame | null {
+export function frameFromUnwindCodes(bytes: ArrayLike<number>): Arm64UnwindFrame | null {
   const walk = decodeUnwindCodes(bytes);
   if (walk.unknownByte !== null) return null;
   return {

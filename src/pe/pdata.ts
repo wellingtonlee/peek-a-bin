@@ -1,6 +1,11 @@
 import { decodePackedArm64Unwind, frameFromUnwindCodes } from "./arm64Unwind";
 import { IMAGE_FILE_MACHINE_ARM64 } from "./constants";
-import { buildSectionIndex, rvaToFileOffsetIndexed, type SectionIndex } from "./parser";
+import {
+  buildSectionIndex,
+  rvaToFileOffsetIndexed,
+  type SectionIndex,
+  sectionRawLimitForRva,
+} from "./parser";
 import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
 
 /** UNWIND_INFO flag: the record carries an exception handler. */
@@ -18,6 +23,81 @@ const UNW_FLAG_CHAININFO = 0x4;
 
 const X64_ENTRY_SIZE = 12;
 const ARM64_ENTRY_SIZE = 8;
+
+/**
+ * The most `RUNTIME_FUNCTION` entries that will be read out of one exception
+ * directory.
+ *
+ * `count` was `Math.floor(size / entrySize)` over a `uint32` from the file,
+ * with the end of the BUFFER as its only backstop — so a crafted `size` of
+ * `0xFFFFFFFF` takes the whole file: `buffer / 12` on x64, `buffer / 8` on
+ * ARM64.
+ *
+ * 2^20 is an order of magnitude above the largest real table this codebase
+ * knows of (`parsePdata`'s own docstring records ntoskrnl-sized images at ~100k
+ * entries; the corpus tops out at 419). At 12 bytes an entry that is a 12 MiB
+ * `.pdata`, larger than any observed. It is a backstop rather than the primary
+ * bound: the containing section's raw extent, applied beside it, is the bound
+ * the file itself provides and cannot inflate beyond the image.
+ */
+export const MAX_PDATA_ENTRIES = 1 << 20;
+
+/**
+ * The most `.xdata` unwind-code bytes that will be decoded across one whole
+ * ARM64 exception table.
+ *
+ * **THIS IS THE PRODUCT, AND IT IS THE WORST FINDING IN THE CENSUS BY WALL
+ * CLOCK.** An `.xdata` record's extension word gives `codeWords` eight bits, so
+ * one record may legitimately carry 255 * 4 = 1020 code bytes, which
+ * `parseArm64XdataRecord` copies into a fresh `number[]` and then walks. Nothing
+ * stopped every entry in the table from naming the SAME record, so the cost is
+ * `entries x 1020` — and entries was `buffer / 8`. Measured at `d8d8a6d` with
+ * `size = 0xFFFFFFFF` and every entry aimed at one 1020-byte record:
+ *
+ * | file      | entries | unwind bytes walked | wall clock |
+ * |-----------|---------|---------------------|------------|
+ * | 69,632    |   8,064 |           8,225,280 |    8.3 s   |
+ * | 266,240   |  32,640 |          33,292,800 |   37.7 s   |
+ *
+ * — linear in file size with a ~1020x constant, in `parsePE`, on the main
+ * thread. A 1 MiB file is ~150 s; the 253 MiB images this tool opens are hours.
+ * A 1 MiB fixture did not complete inside a two-minute harness timeout.
+ *
+ * A per-record cap cannot fix that (`peek-a-bin-tmo9`'s lesson: capping each of
+ * two file-supplied counts still multiplies out), so this is ONE budget for the
+ * whole table.
+ *
+ * **4 MiB IS CALIBRATED AGAINST THE REAL TABLES, not picked round.** Measured at
+ * `d8d8a6d` over both ARM64 corpus binaries: `t64-arm` has 419 `.pdata` entries,
+ * 156 of them naming an `.xdata` record, **1220 code bytes in total** and **28
+ * bytes in the largest single record**; `w64-arm` 381 / 144 / **1100** / **28**.
+ * So the format's 1020-byte per-record ceiling is ~36x anything a linker
+ * actually emits, and 4 MiB is ~3400x either whole-table total. It still covers
+ * an ntoskrnl-scale table — `parsePdata`'s docstring puts those at ~100k entries,
+ * i.e. ~2.8 MB at the observed 28 bytes each — so a legitimate large ARM64 image
+ * cannot be cut by it.
+ *
+ * **What the budget canNOT fix, and it is worth knowing:** `readUnwindCode`
+ * allocates two closures and a result object per BYTE, so the walk costs ~1.1 µs
+ * a byte (8.2 MB in 8.9 s, measured after this fix's `Uint8Array` change, which
+ * itself took 25 s → 18 s off the 16 MiB case). At 4 MiB the hostile ceiling is
+ * therefore still ~4 s on the main thread — and a legitimate 100k-entry ARM64
+ * image already pays ~3 s of it today. That is a pre-existing property of the
+ * decoder, not of the bound, and rewriting it does not belong in a bounds change.
+ *
+ * The narrowing is honest without a new channel: a record whose codes are not
+ * decoded yields **no `arm64Frame`**, which is already exactly what
+ * `frameFromUnwindCodes` returns for a record it cannot read, and what every
+ * consumer of `RuntimeFunction.arm64Frame` already handles. The function's
+ * *extent* — the part `functionDetect` treats as authoritative — is read out of
+ * the header word and is unaffected.
+ */
+export const MAX_ARM64_UNWIND_CODE_BYTES = 4 * 1024 * 1024;
+
+/** Unwind-code bytes left in one table's budget. See MAX_ARM64_UNWIND_CODE_BYTES. */
+interface UnwindBudget {
+  remaining: number;
+}
 
 /**
  * Parse .pdata (Exception Directory).
@@ -125,9 +205,32 @@ export function parsePdata(
   if (offset < 0) return [];
 
   const view = new DataView(buffer);
+  // How far the table may be read: its own section's raw extent where the
+  // section table places it, and the buffer otherwise. The `size` the directory
+  // declares is honoured by the two readers below; this is the bound it cannot
+  // inflate past. See MAX_PDATA_ENTRIES.
+  const sectionLimit = sectionRawLimitForRva(exceptionDir.virtualAddress, sectionIndex);
+  const limit = Math.min(
+    view.byteLength,
+    sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY,
+  );
   return machine === IMAGE_FILE_MACHINE_ARM64
-    ? parseArm64Pdata(view, offset, exceptionDir.size, sectionIndex)
-    : parseX64Pdata(view, offset, exceptionDir.size, sectionIndex);
+    ? parseArm64Pdata(view, offset, exceptionDir.size, limit, sectionIndex)
+    : parseX64Pdata(view, offset, exceptionDir.size, limit, sectionIndex);
+}
+
+/**
+ * How many fixed-size entries a table at `offset` may hold: its declared size,
+ * what the section and buffer leave, and {@link MAX_PDATA_ENTRIES}. One helper
+ * because both readers ask the identical question and a second hand-written
+ * copy is how these bounds drift apart.
+ */
+function entryCountFor(offset: number, size: number, limit: number, entrySize: number): number {
+  return Math.min(
+    Math.floor(Math.max(0, size) / entrySize),
+    Math.floor(Math.max(0, limit - offset) / entrySize),
+    MAX_PDATA_ENTRIES,
+  );
 }
 
 /**
@@ -138,14 +241,14 @@ function parseX64Pdata(
   view: DataView,
   offset: number,
   size: number,
+  limit: number,
   sectionIndex: SectionIndex,
 ): RuntimeFunction[] {
-  const count = Math.floor(size / X64_ENTRY_SIZE);
+  const count = entryCountFor(offset, size, limit, X64_ENTRY_SIZE);
   const results: RuntimeFunction[] = [];
 
   for (let i = 0; i < count; i++) {
     const entryOffset = offset + i * X64_ENTRY_SIZE;
-    if (entryOffset + X64_ENTRY_SIZE > view.byteLength) break;
 
     const beginAddress = view.getUint32(entryOffset, true);
     const endAddress = view.getUint32(entryOffset + 4, true);
@@ -220,21 +323,24 @@ function parseArm64Pdata(
   view: DataView,
   offset: number,
   size: number,
+  limit: number,
   sectionIndex: SectionIndex,
 ): RuntimeFunction[] {
-  const count = Math.floor(size / ARM64_ENTRY_SIZE);
+  const count = entryCountFor(offset, size, limit, ARM64_ENTRY_SIZE);
   const results: RuntimeFunction[] = [];
+  // ONE budget for the whole table, not one per record — see
+  // MAX_ARM64_UNWIND_CODE_BYTES for why a per-record cap cannot bound this.
+  const unwindBudget: UnwindBudget = { remaining: MAX_ARM64_UNWIND_CODE_BYTES };
 
   for (let i = 0; i < count; i++) {
     const entryOffset = offset + i * ARM64_ENTRY_SIZE;
-    if (entryOffset + ARM64_ENTRY_SIZE > view.byteLength) break;
 
     const beginAddress = view.getUint32(entryOffset, true);
     const unwindData = view.getUint32(entryOffset + 4, true);
     const flag = unwindData & 0x3;
 
     if (flag === 0) {
-      const rf = parseArm64XdataRecord(view, beginAddress, unwindData, sectionIndex);
+      const rf = parseArm64XdataRecord(view, beginAddress, unwindData, sectionIndex, unwindBudget);
       if (rf) results.push(rf);
       continue;
     }
@@ -281,6 +387,7 @@ function parseArm64XdataRecord(
   beginAddress: number,
   xdataRVA: number,
   sectionIndex: SectionIndex,
+  unwindBudget: UnwindBudget,
 ): RuntimeFunction | null {
   const recordOffset = rvaToFileOffsetIndexed(xdataRVA, sectionIndex);
   if (recordOffset < 0 || recordOffset + 4 > view.byteLength) return null;
@@ -317,9 +424,17 @@ function parseArm64XdataRecord(
   // after them and the cursor arithmetic is shared; a record whose codes run
   // past the buffer yields no frame rather than a truncated one.
   const codesEnd = cursor + codeWords * 4;
-  if (codesEnd <= view.byteLength) {
-    const codes: number[] = [];
-    for (let i = cursor; i < codesEnd; i++) codes.push(view.getUint8(i));
+  // The budget gates the DECODE, never the extent: `endAddress` above is read
+  // out of the header word and is what `functionDetect` treats as
+  // authoritative. A record the budget refuses yields no `arm64Frame`, which is
+  // already what an undecodable record yields.
+  if (codesEnd <= view.byteLength && codesEnd - cursor <= unwindBudget.remaining) {
+    unwindBudget.remaining -= codesEnd - cursor;
+    // A `Uint8Array` window, not a `number[]` built byte by byte: the walk only
+    // ever indexes and reads `.length`, so the two are interchangeable to it
+    // (hence `ArrayLike<number>`), and the copy was ~1020 pushes plus an array
+    // per record with a hostile table naming one record from every entry.
+    const codes = new Uint8Array(view.buffer, view.byteOffset + cursor, codesEnd - cursor);
     const frame = frameFromUnwindCodes(codes);
     if (frame) rf.arm64Frame = frame;
   }

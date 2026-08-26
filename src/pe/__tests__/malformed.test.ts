@@ -16,17 +16,21 @@ import {
 } from "../constants";
 import {
   computeImphash,
+  MAX_DEBUG_DIRECTORY_ENTRIES,
   MAX_PDB_PATH_BYTES,
   PDB_PATH_TRUNCATION_MARKER,
   parseDebugDirectory,
 } from "../metadata";
 import {
+  extractStrings,
   isNameTruncated,
+  MAX_EXPORT_ENTRIES,
   MAX_IMPORT_DESCRIPTORS,
   MAX_IMPORT_FUNCTIONS,
   NAME_TRUNCATION_MARKER,
   parsePE,
 } from "../parser";
+import { MAX_ARM64_UNWIND_CODE_BYTES, MAX_PDATA_ENTRIES, parsePdata } from "../pdata";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
 const TIMEOUT = 5000;
@@ -1060,6 +1064,619 @@ describe("malformed PE handling", () => {
       expect(pe.imports[0].truncated).toBeUndefined();
       expect(pe.importsTruncated).toBeUndefined();
       expect(computeImphash(pe)).toMatch(/^[0-9a-f]{32}$/);
+    });
+  });
+
+  /**
+   * THE ATTACKER-CONTROLLED-BOUND SWEEP (2026-08-26).
+   *
+   * `peek-a-bin-nygv` and `peek-a-bin-tmo9` were each found incidentally. This
+   * block is what a deliberate census of every reader in `src/pe/` turned up.
+   * Two rules from those two, restated because every row here obeys them:
+   *
+   *  - **the instrument is the returned value or count, never a timing** —
+   *    several agents share this machine;
+   *  - **a bound is only admissible if a well-formed file is unchanged by it**,
+   *    so each group carries the safety row as well as the hostile one.
+   *
+   * Every "before" figure is stated with the commit it was measured at
+   * (`d8d8a6d`) by running the identical fixture against the pre-fix parser.
+   */
+  describe("bounds census (2026-08-26)", () => {
+    const RVA = 0x1000;
+
+    function rdata(data: Uint8Array, rva = RVA, name = ".rdata"): SectionDef {
+      return {
+        name,
+        virtualAddress: rva,
+        virtualSize: data.length,
+        data,
+        characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
+      };
+    }
+
+    describe("debug directory entry count", () => {
+      /**
+       * A file whose debug directory declares `size` and whose every 28-byte
+       * slot is a CodeView entry naming one unterminated `RSDS` record. The
+       * record lives in a SECOND section so the entry grid cannot overwrite the
+       * path bytes with its own NULs.
+       */
+      function codeViewGrid(gridBytes: number, size: number): ArrayBuffer {
+        const buf = buildMinimalPE32({
+          sections: [
+            rdata(new Uint8Array(gridBytes).fill(0x41)),
+            rdata(new Uint8Array(0x4000).fill(0x41), 0x200000, ".junk"),
+          ],
+          dataDirectories: new Map([[6, { virtualAddress: RVA, size }]]),
+        });
+        const pe = parsePE(buf);
+        const grid = pe.sections.find((s) => s.name === ".rdata")!.pointerToRawData;
+        const rec = pe.sections.find((s) => s.name === ".junk")!.pointerToRawData;
+        const dv = new DataView(buf);
+        for (let off = grid; off + 28 <= grid + gridBytes; off += 28) {
+          dv.setUint32(off + 12, 2, true); // type = CodeView
+          dv.setUint32(off + 16, 0xffffffff, true); // SizeOfData — not credible
+          dv.setUint32(off + 24, rec, true); // pointerToRawData -> the record
+        }
+        dv.setUint32(rec, 0x53445352, true); // "RSDS"
+        return buf;
+      }
+
+      it("caps the entry walk, so the PDB scan cannot multiply by it", { timeout: TIMEOUT }, () => {
+        // `nygv` bounded the per-record path scan and left the entry count
+        // bounded only by the buffer, so the PRODUCT was still open: every entry
+        // may name the same record and spend the whole of MAX_PDB_PATH_BYTES.
+        //
+        // BEFORE (d8d8a6d, identical fixture): 38,034 entries carrying
+        // 153,877,941 characters of PDB path out of a 1,065,472-byte file — a
+        // 144x amplification, inside `HeaderView`'s `useMemo`, i.e. during a
+        // render on the main thread. AFTER: 256 entries, ~1.05M characters.
+        const buf = codeViewGrid(1024 * 1024, 0xffffffff);
+        const pe = parsePE(buf);
+        const dbg = parseDebugDirectory(buf, pe);
+
+        // Exactly AT the cap, which is the liveness half: a row asserting only
+        // "<= 256" would pass against a walk that had stopped looking.
+        expect(dbg.length).toBe(MAX_DEBUG_DIRECTORY_ENTRIES);
+        const chars = dbg.reduce((n, d) => n + (d.pdbPath?.length ?? 0), 0);
+        expect(chars).toBeLessThanOrEqual(
+          MAX_DEBUG_DIRECTORY_ENTRIES * (MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length),
+        );
+        // Discriminating: the pre-fix figure is two orders of magnitude above
+        // this, so the assertion is not satisfied by the defect.
+        expect(chars).toBeLessThan(2_000_000);
+        // Each cut-short path still SAYS so — the per-record admission survives
+        // the new per-directory bound.
+        expect(dbg[0].pdbPathTruncated).toBe(true);
+        expect(dbg[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
+      });
+
+      it("bounds the walk by the containing section, not by the file", { timeout: TIMEOUT }, () => {
+        // The grid is 0x100 bytes of `.rdata` (9 whole entries) and the declared
+        // size claims the world. Before, the walk ran on into `.junk` and read
+        // another section's bytes as debug entries; the section's raw extent is a
+        // limit the FILE declares, so it is the bound that improves the answer
+        // rather than merely the cost.
+        const buf = codeViewGrid(0x100, 0xffffffff);
+        const pe = parsePE(buf);
+        expect(parseDebugDirectory(buf, pe).length).toBe(Math.floor(0x100 / 28));
+      });
+
+      it("reads a well-formed debug directory exactly", { timeout: TIMEOUT }, () => {
+        // THE SAFETY CASE. The four x86 corpus binaries declare ONE entry and
+        // the two ARM64 ones THREE, so nothing real is anywhere near the cap.
+        const buf = buildMinimalPE32({
+          directories: {
+            debug: [
+              {
+                type: 2,
+                codeView: {
+                  guid: new Uint8Array(16).fill(0xab),
+                  age: 1,
+                  pdbPath: "C:\\src\\app.pdb",
+                },
+              },
+            ],
+          },
+        });
+        const pe = parsePE(buf);
+        const dbg = parseDebugDirectory(buf, pe);
+        expect(dbg).toHaveLength(1);
+        expect(dbg[0].pdbPath).toBe("C:\\src\\app.pdb");
+        expect(dbg[0].pdbPathTruncated).toBeUndefined();
+      });
+    });
+
+    describe("export table", () => {
+      /**
+       * An export directory declaring `count` for both name and function counts,
+       * whose whole name-pointer table aims at one unterminated run of 'A'.
+       */
+      function exportFlood(sectionBytes: number, count: number): ArrayBuffer {
+        const data = new Uint8Array(sectionBytes).fill(0x41); // no NUL anywhere
+        const dv = new DataView(data.buffer);
+        dv.setUint32(16, 1, true); // ordinal base
+        dv.setUint32(20, count, true); // numberOfFunctions
+        dv.setUint32(24, count, true); // numberOfNames
+        dv.setUint32(28, RVA + 0x100, true); // addressTableRVA
+        dv.setUint32(32, RVA + 0x200, true); // namePointerRVA — runs to section end
+        dv.setUint32(36, RVA + 0x180, true); // ordinalTableRVA
+        for (let i = 0x200; i + 4 <= sectionBytes; i += 4) dv.setUint32(i, RVA + 0x80, true);
+        return buildMinimalPE32({
+          sections: [rdata(data)],
+          dataDirectories: new Map([[0, { virtualAddress: RVA, size: 40 }]]),
+        });
+      }
+
+      it("caps both walks and says the table was cut short", { timeout: TIMEOUT }, () => {
+        // BEFORE (d8d8a6d, identical fixture): 524,093 export entries carrying
+        // 104,696,157 characters of name out of a 1,049,088-byte file — a 100x
+        // amplification, in `parsePE`, on the main thread, before anything
+        // renders. The only bound on any of the three counts was the buffer.
+        const buf = exportFlood(1024 * 1024, 0xffffffff);
+        const pe = parsePE(buf);
+
+        // MAX_EXPORT_ENTRIES bounds the named walk and the address-table walk
+        // separately, and an aliased name emits one entry per name, so the
+        // ceiling is the sum.
+        expect(pe.exports.length).toBeLessThanOrEqual(2 * MAX_EXPORT_ENTRIES);
+        // Liveness: the cap was actually reached, so this is not a green row
+        // over an empty population.
+        expect(pe.exports.length).toBeGreaterThan(MAX_EXPORT_ENTRIES);
+        // Discriminating: the pre-fix figure is 524,093.
+        expect(pe.exports.length).toBeLessThan(200_000);
+        // THE ADMISSION. A list cannot carry a marker, so it is the flag plus
+        // the Exports tab's count.
+        expect(pe.exportsTruncated).toBe(true);
+      });
+
+      it("bounds each table by its own section, not by the file", { timeout: TIMEOUT }, () => {
+        // The name-pointer table ends exactly at the end of `.rdata` — 8 slots —
+        // while the directory declares 200 names. A SECOND section holds 128
+        // more slots, each a perfectly resolvable name RVA, so without the
+        // section bound the walk reads another section's bytes as this table's
+        // and binds names the export directory never listed.
+        //
+        // NOTE: THE FIRST VERSION OF THIS ROW WAS AN INERT CONTROL and is
+        // recorded rather than quietly repaired. It used a 0x220-byte section in
+        // a ~0x1000-byte file and asserted that no name bound; with the section
+        // bound removed, the extra slots were file PADDING, which reads as RVA 0
+        // and is unmapped, so the row stayed green over the defect. A bound
+        // whose control cannot be made red is a bound with no test.
+        const data = new Uint8Array(0x220);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(16, 1, true); // ordinal base
+        dv.setUint32(20, 8, true); // numberOfFunctions
+        dv.setUint32(24, 200, true); // numberOfNames — claims 25x the table
+        dv.setUint32(28, RVA + 0x100, true); // addressTable: 8 slots
+        dv.setUint32(32, RVA + 0x200, true); // namePointer: exactly 8 slots left
+        dv.setUint32(36, RVA + 0x180, true); // ordinalTable
+        data.set(new TextEncoder().encode("NAME\0"), 0x80);
+        for (let i = 0; i < 8; i++) {
+          dv.setUint32(0x100 + i * 4, 0x1500 + i, true); // an address per slot
+          dv.setUint16(0x180 + i * 2, i, true); // name i -> address slot i
+          dv.setUint32(0x200 + i * 4, RVA + 0x80, true); // -> "NAME"
+        }
+        // 128 more resolvable name pointers, in a DIFFERENT section.
+        const junk = new Uint8Array(0x200);
+        const jv = new DataView(junk.buffer);
+        for (let i = 0; i + 4 <= 0x200; i += 4) jv.setUint32(i, RVA + 0x80, true);
+
+        const buf = buildMinimalPE32({
+          sections: [rdata(data), rdata(junk, 0x200000, ".junk")],
+          dataDirectories: new Map([[0, { virtualAddress: RVA, size: 40 }]]),
+        });
+        const pe = parsePE(buf);
+        // Exactly the 8 names the section holds, one per address slot.
+        expect(pe.exports).toHaveLength(8);
+        expect(pe.exports.every((e) => e.name === "NAME")).toBe(true);
+        // And the declared count was not met, so the table is not whole.
+        expect(pe.exportsTruncated).toBe(true);
+      });
+
+      it("reads a well-formed export table exactly, and marks nothing", {
+        timeout: TIMEOUT,
+      }, () => {
+        // THE SAFETY CASE, and the only evidence there is that the cap is above
+        // a real table: no binary in this corpus exports anything, so
+        // `corpus:parserdiff`'s two export gates are VACUOUS. MAX_EXPORT_ENTRIES
+        // is the format's own `uint16` ordinal ceiling, which is the argument.
+        const buf = buildMinimalPE32({
+          directories: {
+            exports: {
+              dllName: "sample.dll",
+              ordinalBase: 1,
+              addresses: [0x1500, 0x1600],
+              names: [
+                { name: "Alpha", addressIndex: 0 },
+                { name: "Beta", addressIndex: 1 },
+              ],
+            },
+          },
+        });
+        const pe = parsePE(buf);
+        expect(pe.exports.map((e) => [e.name, e.ordinal])).toEqual([
+          ["Alpha", 1],
+          ["Beta", 2],
+        ]);
+        expect(pe.exportsTruncated).toBeUndefined();
+      });
+    });
+
+    describe("base relocation blocks", () => {
+      it("honours the declared directory size inside the block too", { timeout: TIMEOUT }, () => {
+        // THE DEFECT: the BLOCK walk honoured `relocDir.size` and the ENTRY walk
+        // inside it did not, so a directory declaring EIGHT BYTES — one block
+        // header — whose `SizeOfBlock` read 0xFFFFFFFF took the rest of the
+        // file. BEFORE (d8d8a6d, identical fixture): 524,284 entries out of a
+        // 1,049,088-byte file. The pre-existing row asserted only
+        // `< buf.byteLength`, which 524,284 satisfies.
+        const data = new Uint8Array(1024 * 1024).fill(0x41);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, 0x1000, true); // VirtualAddress
+        dv.setUint32(4, 0xffffffff, true); // SizeOfBlock — claims the world
+
+        const buf = buildMinimalPE32({
+          sections: [rdata(data, RVA, ".reloc")],
+          dataDirectories: new Map([[5, { virtualAddress: RVA, size: 8 }]]),
+        });
+        const pe = parsePE(buf);
+        // The directory declared room for a header and nothing else, so there is
+        // no entry the file claims exists.
+        expect(pe.relocations?.[0].entries).toHaveLength(0);
+      });
+
+      it("does not read a fractional entry from an odd SizeOfBlock", { timeout: TIMEOUT }, () => {
+        // `(sizeOfBlock - 8) / 2` was not floored, so `i < entryCount` ran one
+        // iteration into the half-entry a 4-byte-odd block leaves.
+        const data = new Uint8Array(0x200);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, 0x1000, true);
+        dv.setUint32(4, 11, true); // 8 header + 1 entry + 1 spare byte
+        dv.setUint16(8, 0x3001, true);
+        const buf = buildMinimalPE32({
+          sections: [rdata(data, RVA, ".reloc")],
+          dataDirectories: new Map([[5, { virtualAddress: RVA, size: 11 }]]),
+        });
+        const pe = parsePE(buf);
+        expect(pe.relocations?.[0].entries).toEqual([{ type: 3, offset: 1 }]);
+      });
+
+      it("reads a well-formed relocation table exactly", { timeout: TIMEOUT }, () => {
+        // THE SAFETY CASE. Gated for real against `corpus:parserdiff`, which
+        // compares every block and entry of all six binaries (1172 entries on
+        // t32) against an independently written from-spec reader.
+        const buf = buildMinimalPE32({
+          directories: {
+            relocations: [
+              {
+                virtualAddress: 0x1000,
+                entries: [
+                  { type: 3, offset: 0x10 },
+                  { type: 3, offset: 0x20 },
+                ],
+              },
+              { virtualAddress: 0x2000, entries: [{ type: 3, offset: 0x8 }] },
+            ],
+          },
+        });
+        const pe = parsePE(buf);
+        expect(pe.relocations?.map((b) => [b.virtualAddress, b.entries.length])).toEqual([
+          [0x1000, 2],
+          [0x2000, 1],
+        ]);
+      });
+    });
+
+    describe("authenticode DER child lists", () => {
+      /** A security directory covering the whole file, full of 2-byte elements. */
+      function derFlood(bytes: number): ArrayBuffer {
+        const buf = new ArrayBuffer(bytes);
+        const b = new Uint8Array(buf);
+        const dv = new DataView(buf);
+        const at = 512;
+        dv.setUint32(at, bytes - at, true); // dwLength
+        dv.setUint16(at + 4, 0x200, true); // wRevision
+        dv.setUint16(at + 6, 0x0002, true); // PKCS_SIGNED_DATA
+        const c = at + 8;
+        b[c] = 0x30; // SEQUENCE
+        b[c + 1] = 0x84; // long form, 4 length bytes
+        dv.setUint32(c + 2, bytes - c - 6, false); // big-endian
+        for (let i = c + 6; i + 2 <= bytes; i += 2) {
+          b[i] = 0x05; // NULL
+          b[i + 1] = 0x00;
+        }
+        return buf;
+      }
+
+      it("does not size a child array from the file", { timeout: TIMEOUT }, () => {
+        // A DER header is at least two bytes, so a container of nothing but
+        // two-byte elements yields contentLen/2 children — and contentLen is
+        // bounded only by dwLength, which is bounded only by the buffer.
+        // BEFORE (d8d8a6d, identical fixture): 41.6 MB of heap allocated in one
+        // call on a 1,048,576-byte file, in `parsePE`, on the main thread. AFTER:
+        // 0.4 MB. `parseSecurityDirectory`'s try/catch cannot catch an OOM.
+        const dirs = Array.from({ length: 5 }, () => ({ virtualAddress: 0, size: 0 }));
+        dirs[4] = { virtualAddress: 512, size: 1024 * 1024 - 512 };
+        const before = process.memoryUsage().heapUsed;
+        const info = parseSecurityDirectory(derFlood(1024 * 1024), dirs);
+        const delta = process.memoryUsage().heapUsed - before;
+
+        // The walk still reports the certificate it found; what it must not do
+        // is allocate a child per element of the file.
+        expect(info?.signed).toBe(true);
+        // Discriminating: the pre-fix figure is ~41.6 MB. 8 MB leaves ample room
+        // for GC noise on a shared machine while excluding the defect by 5x.
+        expect(delta).toBeLessThan(8_000_000);
+      });
+
+      it("still reads a well-formed certificate's subject and issuer", { timeout: TIMEOUT }, () => {
+        // THE SAFETY CASE — and the weakest evidence in this census: NO BINARY ON
+        // THIS MACHINE IS SIGNED, so `corpus:parserdiff` has nothing to say here
+        // and MAX_DER_CHILDREN rests on the format and on documentation. Every
+        // level X.509 and PKCS#7 use has single digits of children.
+        const buf = buildMinimalPE32({
+          certificate: { subjectCN: "Example Corp", issuerCN: "Example CA" },
+        });
+        const pe = parsePE(buf);
+        expect(pe.certificate?.subject).toBe("Example Corp");
+        expect(pe.certificate?.issuer).toBe("Example CA");
+      });
+    });
+
+    describe("ARM64 .pdata unwind codes", () => {
+      /**
+       * An ARM64 exception table of `entries` slots all naming ONE `.xdata`
+       * record carrying the format's maximum 255 code words (1020 bytes) of
+       * `nop`. `size` is what the directory declares.
+       */
+      function unwindFlood(tableBytes: number, size: number) {
+        // `.pdata` holds the entry grid; `.xdata` holds the ONE record they all
+        // name, in its own section so the grid cannot overwrite its code bytes.
+        const XDATA_BYTES = 0x800;
+        const pdataAt = 0x1000;
+        const xdataAt = pdataAt + tableBytes;
+        const sect = (name: string, rva: number, at: number, len: number) => ({
+          name,
+          virtualSize: len,
+          virtualAddress: rva,
+          sizeOfRawData: len,
+          pointerToRawData: at,
+          pointerToRelocations: 0,
+          pointerToLinenumbers: 0,
+          numberOfRelocations: 0,
+          numberOfLinenumbers: 0,
+          characteristics: 0x40000040,
+        });
+        const sections = [
+          sect(".pdata", 0x1000, pdataAt, tableBytes),
+          sect(".xdata", 0x10000000, xdataAt, XDATA_BYTES),
+        ];
+        const buf = new ArrayBuffer(xdataAt + XDATA_BYTES);
+        const dv = new DataView(buf);
+        const XR = 0x10000000; // the record's RVA
+        for (let o = pdataAt; o + 8 <= xdataAt; o += 8) {
+          dv.setUint32(o, 0x2000, true); // beginAddress
+          dv.setUint32(o + 4, XR, true); // UnwindData -> .xdata RVA, flag 0
+        }
+        dv.setUint32(xdataAt, 1, true); // len 1 word, version 0, epilogCount 0, codeWords 0
+        dv.setUint32(xdataAt + 4, 0x00ff0000, true); // extension: codeWords = 0xFF
+        // 255 code words of `nop` (0xe3), which never terminate the walk.
+        for (let i = xdataAt + 8; i < xdataAt + 8 + 1020; i++) dv.setUint8(i, 0xe3);
+        return parsePdata(buf, { virtualAddress: 0x1000, size }, sections, 0xaa64);
+      }
+
+      it("bounds the unwind-code walk across the WHOLE table", { timeout: 60_000 }, () => {
+        // THE WORST FINDING IN THE CENSUS BY WALL CLOCK, and a product: one
+        // record may legitimately carry 1020 code bytes, nothing stopped every
+        // entry from naming the SAME record, and `count` was `buffer / 8`.
+        // BEFORE (d8d8a6d, identical fixtures): a 69,632-byte file walked
+        // 8,225,280 unwind bytes in 8.3 s and a 266,240-byte one 33,292,800 in
+        // 37.7 s — linear in file size, so 253 MiB is hours, in `parsePE`, on
+        // the main thread. A 1 MiB fixture did not finish inside 120 s.
+        //
+        // AFTER, and the SHAPE is the claim: the budget is a whole-table total,
+        // so the work stops growing with the file. Both sizes now walk the same
+        // 4,194,240 bytes in ~4.3 s.
+        const small = unwindFlood(64 * 1024, 0xffffffff);
+        const large = unwindFlood(256 * 1024, 0xffffffff);
+        const framed = (rs: typeof small) => rs.filter((r) => r.arm64Frame).length;
+
+        // A record the budget refuses yields NO `arm64Frame` — which is already
+        // exactly what an undecodable record yields, so no new channel is needed.
+        // 1020 bytes a record, so the budget buys 4112 of them.
+        expect(framed(small)).toBe(Math.floor(MAX_ARM64_UNWIND_CODE_BYTES / 1020));
+        // The load-bearing assertion: FLAT in file size where it was linear.
+        expect(framed(large)).toBe(framed(small));
+        // The extent is read from the header word and is NOT gated by the
+        // budget: `functionDetect` treats it as authoritative.
+        expect(large.every((r) => r.endAddress > r.beginAddress)).toBe(true);
+      });
+
+      it("caps the entry count, which the declared size did not", { timeout: 60_000 }, () => {
+        // `count` was `Math.floor(size / 8)` over a uint32 from the file with the
+        // buffer as its only backstop.
+        const rs = unwindFlood(16 * 1024 * 1024, 0xffffffff);
+        expect(rs.length).toBeLessThanOrEqual(MAX_PDATA_ENTRIES);
+        // Liveness: the cap was reached, so this is not a vacuous zero.
+        expect(rs.length).toBe(MAX_PDATA_ENTRIES);
+      });
+
+      it("reads a small well-formed ARM64 table whole", { timeout: TIMEOUT }, () => {
+        // THE SAFETY CASE, calibrated against the real corpus: `t64-arm` has 419
+        // entries, 156 `.xdata` records, 1220 code bytes IN TOTAL and 28 bytes in
+        // its largest record; `w64-arm` 381 / 144 / 1100 / 28. So 4 MiB is ~3400x
+        // either whole-table total and the format's own 1020-byte per-record
+        // ceiling is 36x anything a linker emits. Gated for real by
+        // `npm run corpus:arm64`.
+        const rs = unwindFlood(8 * 4, 8 * 4);
+        expect(rs).toHaveLength(4);
+        expect(rs.every((r) => r.arm64Frame)).toBe(true);
+      });
+    });
+
+    describe("string extraction scan budget", () => {
+      /** `n` sections all called `.rdata` and all scanning from file offset 0. */
+      function overlappingSections(n: number) {
+        const buf = buildMinimalPE32({
+          sections: Array.from({ length: n }, (_, i) =>
+            rdata(new Uint8Array(0x40).fill(0x41), 0x1000 + i * 0x2000),
+          ),
+        });
+        const pe = parsePE(buf);
+        for (const s of pe.sections) {
+          s.pointerToRawData = 0;
+          s.sizeOfRawData = 0xffffffff;
+        }
+        return { buf, pe };
+      }
+
+      it("bounds the whole image, not each section", { timeout: 60_000 }, () => {
+        // The per-section 1 MiB ceiling bounded each scan and nothing bounded
+        // its PRODUCT with the section count — a uint16 clamped only by
+        // buffer/40, and every section named `.rdata` is scanned.
+        // BEFORE (d8d8a6d, identical fixtures): 1600 sections over an 883,712-byte
+        // file produced 3,308,739 strings in 14.3 s, and 6400 sections over
+        // 3,533,312 bytes produced 13,268,566 in 87.7 s — linear in the section
+        // count. AFTER: 83,559 in 0.39 s and 95,030 in 0.43 s.
+        //
+        // This is the WORKER side (`extractStrings` is the disasm RPC whose
+        // argument is the whole image), so the cost is a dead worker and an
+        // unbounded Map crossing `postMessage`, not a frozen render.
+        const a = overlappingSections(1600);
+        const b = overlappingSections(6400);
+        const sa = extractStrings(a.buf, a.pe.sections, 0x400000, false).strings.size;
+        const sb = extractStrings(b.buf, b.pe.sections, 0x400000, false).strings.size;
+
+        // Discriminating: the pre-fix figures are 3.3M and 13.3M.
+        expect(sa).toBeLessThan(1_000_000);
+        expect(sb).toBeLessThan(1_000_000);
+        // The SHAPE is the claim: quadrupling the section count over a file four
+        // times the size no longer quadruples the work. Before, sb/sa was 4.0.
+        expect(sb).toBeLessThan(sa * 2);
+      });
+
+      it("still finds every string in a well-formed image", { timeout: TIMEOUT }, () => {
+        // THE SAFETY CASE. 64 MiB is above any real image's data sections — the
+        // whole corpus is under 200 KiB and a 253 MiB image's `.rdata`/`.data`
+        // are a few MiB — so a large binary loses nothing.
+        const data = new Uint8Array(0x100);
+        data.set(new TextEncoder().encode("HelloWorld\0SecondString\0"), 0);
+        const buf = buildMinimalPE32({ sections: [rdata(data)] });
+        const pe = parsePE(buf);
+        const { strings } = extractStrings(buf, pe.sections, 0x400000, false);
+        expect([...strings.values()]).toContain("HelloWorld");
+        expect([...strings.values()]).toContain("SecondString");
+      });
+    });
+
+    /**
+     * `parseImports` builds `functions` and `iatAddresses` as PARALLEL arrays
+     * paired by index by four consumers — `disasm/operands.ts`'s
+     * `buildIATLookup` (which is what labels a call site in the disassembly),
+     * `ImportsView`, `useVulnScanner` and `mcp/resources.ts`.
+     *
+     * These three rows are the same family as the bounds above but a different
+     * failure: `peek-a-bin-tmo9` built the truncation machinery and three paths
+     * bypassed it, and the first of them was a WRONG VALUE rather than an
+     * omission.
+     */
+    describe("import table paths that dropped data unmarked", () => {
+      function rd(data: Uint8Array): SectionDef {
+        return rdata(data);
+      }
+
+      it("keeps functions and iatAddresses in lockstep", { timeout: TIMEOUT }, () => {
+        // THE DEFECT: `iatAddresses.push` was unconditional and
+        // `functions.push` happened only if the hint/name record resolved, so
+        // ONE unresolvable name RVA shifted every later name up a slot and
+        // mislabelled every remaining call site in that library with another
+        // import's name — on real instructions, in the disassembly.
+        //
+        // Three thunks: a resolvable name, an UNMAPPED name RVA, another
+        // resolvable name. Before, this produced 3 IAT addresses and 2 names,
+        // so `buildIATLookup` bound slot 1's address to slot 2's name.
+        const data = new Uint8Array(0x1000);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, RVA + 0x100, true); // OriginalFirstThunk
+        dv.setUint32(12, RVA + 0x400, true); // Name
+        dv.setUint32(16, RVA + 0x100, true); // FirstThunk
+        data.set(new TextEncoder().encode("KERNEL32.dll\0"), 0x400);
+        dv.setUint32(0x100, RVA + 0x500, true); // -> "Sleep"
+        // 0x7ffffff0, not 0x99999999: the high bit is IMAGE_ORDINAL_FLAG32, so
+        // a "large" RVA is an ordinal import and never reaches the name path.
+        dv.setUint32(0x104, 0x7ffffff0, true); // -> unmapped hint/name record
+        dv.setUint32(0x108, RVA + 0x520, true); // -> "ExitProcess"
+        dv.setUint32(0x10c, 0, true); // null thunk
+        data.set(new TextEncoder().encode("\0\0Sleep\0"), 0x500);
+        data.set(new TextEncoder().encode("\0\0ExitProcess\0"), 0x520);
+
+        const buf = buildMinimalPE32({
+          sections: [rd(data)],
+          dataDirectories: new Map([[1, { virtualAddress: RVA, size: 40 }]]),
+        });
+        const pe = parsePE(buf);
+        const imp = pe.imports[0];
+
+        // THE INVARIANT. Not "both are 2" — that a slot contributes to both
+        // arrays or to neither is the property four consumers depend on.
+        expect(imp.functions).toHaveLength(imp.iatAddresses.length);
+        expect(imp.functions).toEqual(["Sleep", "ExitProcess"]);
+        // And each surviving name still carries the address the loader will use:
+        // thunk 2 is at FirstThunk + 2 * 4, NOT at + 1 * 4.
+        const base = pe.optionalHeader.imageBase + RVA + 0x100;
+        expect(imp.iatAddresses).toEqual([base, base + 8]);
+        // A declared import we could not name means the entry is not whole, so
+        // the imphash must be withheld rather than computed over a short list.
+        expect(imp.truncated).toBe(true);
+        expect(pe.importsTruncated).toBe(true);
+        expect(computeImphash(pe)).toBeNull();
+      });
+
+      it("marks the table when a descriptor's own name RVA is unmapped", {
+        timeout: TIMEOUT,
+      }, () => {
+        // A whole imported library vanished with no flag: a smaller Imports tab
+        // that reads as complete, and a confident imphash over a list missing a
+        // DLL.
+        const data = new Uint8Array(0x1000);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, RVA + 0x100, true);
+        dv.setUint32(12, 0x99999999, true); // Name — unmapped
+        dv.setUint32(16, RVA + 0x100, true);
+        dv.setUint32(0x100, 0, true);
+
+        const buf = buildMinimalPE32({
+          sections: [rd(data)],
+          dataDirectories: new Map([[1, { virtualAddress: RVA, size: 40 }]]),
+        });
+        const pe = parsePE(buf);
+        expect(pe.imports).toHaveLength(0);
+        expect(pe.importsTruncated).toBe(true);
+        expect(computeImphash(pe)).toBeNull();
+      });
+
+      it("marks an entry whose thunk array is unmapped", { timeout: TIMEOUT }, () => {
+        // `KERNEL32.dll (0)` was indistinguishable from a library that genuinely
+        // imports nothing — which is a statement about the file.
+        const data = new Uint8Array(0x1000);
+        const dv = new DataView(data.buffer);
+        dv.setUint32(0, 0x99999999, true); // OriginalFirstThunk — unmapped
+        dv.setUint32(12, RVA + 0x400, true);
+        dv.setUint32(16, 0x99999999, true); // FirstThunk — unmapped
+        data.set(new TextEncoder().encode("KERNEL32.dll\0"), 0x400);
+
+        const buf = buildMinimalPE32({
+          sections: [rd(data)],
+          dataDirectories: new Map([[1, { virtualAddress: RVA, size: 40 }]]),
+        });
+        const pe = parsePE(buf);
+        expect(pe.imports[0].libraryName).toBe("KERNEL32.dll");
+        expect(pe.imports[0].functions).toHaveLength(0);
+        expect(pe.imports[0].truncated).toBe(true);
+        expect(pe.importsTruncated).toBe(true);
+      });
     });
   });
 });

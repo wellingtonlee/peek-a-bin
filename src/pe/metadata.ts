@@ -1,4 +1,5 @@
 import { parseOrdinalImport, resolveOrdinal } from "./ordinalTables";
+import { buildSectionIndex, sectionRawLimitForRva } from "./parser";
 import type { PEFile } from "./types";
 
 // --- Rich Header ---
@@ -108,6 +109,43 @@ export const MAX_PDB_PATH_BYTES = 4096;
 /** `CV_INFO_PDB70`'s fixed part: "RSDS" + 16 GUID bytes + a 4-byte age. */
 const CV_INFO_PDB70_HEADER_BYTES = 24;
 
+/**
+ * The most `IMAGE_DEBUG_DIRECTORY` entries that will be read.
+ *
+ * **`peek-a-bin-nygv` BOUNDED THE PDB PATH SCAN AND LEFT THE ENTRY COUNT
+ * UNBOUNDED, SO THE PRODUCT WAS STILL OPEN** — and the product is what matters,
+ * because every entry may name the same CodeView record and so spend the full
+ * {@link MAX_PDB_PATH_BYTES} on its own. Measured at `d8d8a6d`: a
+ * **1,065,472-byte** fixture whose debug directory declares `0xFFFFFFFF` and
+ * whose every 28-byte slot is a CodeView entry pointing at one unterminated
+ * record returned **38,034 entries carrying 153,877,941 characters of PDB
+ * path** — a 144x amplification, inside `HeaderView`'s `useMemo`, i.e. during a
+ * render on the main thread. That is `nygv`'s own defect with a different
+ * multiplier, and `nygv`'s test could not see it because it built one entry.
+ *
+ * 256 is three orders of magnitude above anything real: the four x86 corpus
+ * binaries declare **one** entry each and the two ARM64 ones **three**
+ * (`debugDirSize` 28 and 84 respectively, measured at `d8d8a6d`), and
+ * `DEBUG_TYPE_NAMES` knows 17 types in total, so a linker has nothing like 256
+ * distinct records to emit. With the per-record cap that bounds the whole walk
+ * at 256 x 4096 = 1 MiB of decoding, which a render can afford.
+ *
+ * The bound that improves the ANSWER rather than the cost is the containing
+ * section's raw extent, applied beside this: a debug directory running off the
+ * end of `.rdata` was reading the next section's bytes as entries.
+ *
+ * **THE READER-FACING ADMISSION IS ONLY PARTIAL AND THAT IS A KNOWN HOLE.**
+ * A record whose *path* was cut short says so, in the value, via
+ * {@link PDB_PATH_TRUNCATION_MARKER}. A directory whose *entry list* was cut
+ * short says nothing, because the return type is a bare `DebugInfo[]` and its
+ * one consumer (`HeaderView`) would have to change to carry a flag — the same
+ * position `ResourceTree.truncated` sat in before anything rendered it. Since
+ * only a crafted file can reach 256 where every real one declares 1 or 3, the
+ * row count *is* legible; but a `debugTruncated` flag beside the table is the
+ * honest completion and is deliberately left undone rather than pretended.
+ */
+export const MAX_DEBUG_DIRECTORY_ENTRIES = 256;
+
 const DEBUG_TYPE_NAMES: Record<number, string> = {
   0: "Unknown",
   1: "COFF",
@@ -145,11 +183,22 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
   const view = new DataView(buffer);
   const results: DebugInfo[] = [];
   const entrySize = 28;
-  const numEntries = Math.floor(debugDir.size / entrySize);
+  // FOUR BOUNDS, SMALLEST WINNING — see MAX_DEBUG_DIRECTORY_ENTRIES. The
+  // declared size was the only one of these that was here, and it is a `uint32`
+  // straight off the file, so it bounded nothing.
+  const sectionLimit = sectionRawLimitForRva(debugRVA, buildSectionIndex(pe.sections));
+  const walkLimit = Math.min(
+    buffer.byteLength,
+    fileOffset + Math.max(0, debugDir.size),
+    sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY,
+  );
+  const numEntries = Math.min(
+    MAX_DEBUG_DIRECTORY_ENTRIES,
+    Math.max(0, Math.floor((walkLimit - fileOffset) / entrySize)),
+  );
 
   for (let i = 0; i < numEntries; i++) {
     const off = fileOffset + i * entrySize;
-    if (off + entrySize > buffer.byteLength) break;
     const type = view.getUint32(off + 12, true);
     const sizeOfData = view.getUint32(off + 16, true);
     const pointerToRawData = view.getUint32(off + 24, true);

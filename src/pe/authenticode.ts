@@ -80,11 +80,44 @@ function readDERElement(data: Uint8Array, offset: number): DERElement | null {
   };
 }
 
+/**
+ * The most children one DER container's child list will hold.
+ *
+ * **THE ARRAY WAS SIZED FROM THE FILE.** A DER header is at least two bytes, so
+ * a container whose content is nothing but two-byte elements yields
+ * `contentLen / 2` children — and `contentLen` is bounded only by
+ * `WIN_CERTIFICATE.dwLength`, which is bounded only by the buffer. Measured at
+ * `d8d8a6d`: a 1,048,576-byte file whose security directory covers the whole of
+ * it, holding one long-form `SEQUENCE` full of two-byte NULLs, allocated
+ * **41.6 MB of heap in one call** — a 40x amplification, in `parsePE`, on the
+ * main thread. On a 253 MiB image that is ~10 GB, and `parseSecurityDirectory`'s
+ * `try/catch` cannot catch an OOM.
+ *
+ * DER's own structure saves the *nesting* from multiplying — children partition
+ * their parent's content range, so `extractCN`'s three levels sum to the top
+ * container's length rather than cubing it — but nothing bounded any single
+ * level.
+ *
+ * 4096 is far above every level X.509 and PKCS#7 actually use: a `SignedData`
+ * has ~6 children, its certificates `SET` holds a chain of a handful, an RDN
+ * `SEQUENCE` a few attributes. **Not measured against a real signature — no
+ * binary on this machine is signed** (all six corpus images report no
+ * certificate at all, so `corpus:parserdiff` has nothing to say here), so this
+ * cap rests on the format and on documentation, and the evidence for it is
+ * weaker than for the others in this census.
+ *
+ * A cut-short list is not marked. Every caller reads a *fixed field* out of the
+ * list by index (`children[1]`, `tbsChildren[idx + 2]`) and falls back to `base`
+ * — i.e. `subject: null`, `issuer: null` — when the list is too short, which is
+ * the honest narrowing already: `null` means "not read", not "absent".
+ */
+const MAX_DER_CHILDREN = 4096;
+
 function readDERChildren(data: Uint8Array, start: number, length: number): DERElement[] {
   const children: DERElement[] = [];
   let pos = start;
   const end = start + length;
-  while (pos < end) {
+  while (pos < end && children.length < MAX_DER_CHILDREN) {
     const el = readDERElement(data, pos);
     // <= 0 rather than === 0: a non-advancing element would loop forever.
     if (!el || el.totalLen <= 0) break;

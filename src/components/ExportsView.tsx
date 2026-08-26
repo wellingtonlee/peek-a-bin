@@ -73,6 +73,20 @@ export function ExportsView() {
     <div className="p-4 text-xs h-full flex flex-col">
       <div className="flex items-center gap-4 mb-3">
         <h2 className="text-sm font-semibold text-gray-200">Exports ({pe.exports.length})</h2>
+        {/* THE ADMISSION, ON THE COUNT — the same shape `ImportsView` carries
+            for `importsTruncated`. A list cannot hold a truncation marker the
+            way a string can, so the count is where it goes, because the count
+            is the sentence a reader actually reads: without this the heading
+            above describes a smaller file entirely plausibly, which is the
+            narrower answer wearing a complete one's shape. See `parseExports`. */}
+        {pe.exportsTruncated && (
+          <span
+            className="text-yellow-400 text-[11px]"
+            title="The export table could not be read whole: a walk stopped at its bound rather than at its declared count, or a name ran past its limit."
+          >
+            Incomplete &mdash; the table was cut short
+          </span>
+        )}
         <input
           type="text"
           value={filterInput}
