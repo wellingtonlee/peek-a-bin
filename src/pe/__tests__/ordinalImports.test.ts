@@ -83,29 +83,35 @@ describe("the imphash does not depend on how the spelling is spelled", () => {
    * the writer used a template literal and the reader used `startsWith`.
    */
   it("resolves through the same table computeImphash uses", () => {
-    const viaSpelling = computeImphash([
-      {
-        libraryName: "WS2_32.dll",
-        functions: [formatOrdinalImport(115), formatOrdinalImport(23)],
-        iatAddresses: [],
-      },
-    ]);
+    const viaSpelling = computeImphash({
+      imports: [
+        {
+          libraryName: "WS2_32.dll",
+          functions: [formatOrdinalImport(115), formatOrdinalImport(23)],
+          iatAddresses: [],
+        },
+      ],
+    });
     // pefile canonicalizes a resolved ordinal to its *name*, so an image
     // importing by ordinal and one importing the same functions by name have
     // the same imphash. That is a property of pefile, not a coincidence here.
-    const viaNames = computeImphash([
-      { libraryName: "WS2_32.dll", functions: ["WSAStartup", "socket"], iatAddresses: [] },
-    ]);
+    const viaNames = computeImphash({
+      imports: [
+        { libraryName: "WS2_32.dll", functions: ["WSAStartup", "socket"], iatAddresses: [] },
+      ],
+    });
     expect(viaSpelling).toBe(viaNames);
   });
 
   it("still renders an uncovered ordinal as pefile's ord<N>", () => {
-    const uncovered = computeImphash([
-      { libraryName: "SOMELIB.dll", functions: [formatOrdinalImport(42)], iatAddresses: [] },
-    ]);
-    const asName = computeImphash([
-      { libraryName: "SOMELIB.dll", functions: ["ord42"], iatAddresses: [] },
-    ]);
+    const uncovered = computeImphash({
+      imports: [
+        { libraryName: "SOMELIB.dll", functions: [formatOrdinalImport(42)], iatAddresses: [] },
+      ],
+    });
+    const asName = computeImphash({
+      imports: [{ libraryName: "SOMELIB.dll", functions: ["ord42"], iatAddresses: [] }],
+    });
     expect(uncovered).toBe(asName);
   });
 });

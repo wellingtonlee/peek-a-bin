@@ -149,6 +149,17 @@ export interface ImportEntry {
   libraryName: string;
   functions: string[];
   iatAddresses: number[];
+  /**
+   * Set when this entry does not fully describe what the file holds: the thunk
+   * walk stopped at a bound rather than at a null thunk, or a name in it could
+   * not be read whole. One flag, one meaning — **not whole** — because that is
+   * the granularity every consumer needs and the finer distinction between the
+   * two causes is not one any of them acts on.
+   *
+   * `PEFile.importsTruncated` is the whole-table answer and is set whenever any
+   * entry carries this.
+   */
+  truncated?: boolean;
 }
 
 export interface ExportEntry {
@@ -303,6 +314,17 @@ export interface PEFile {
   dataDirectories: DataDirectory[];
   sections: SectionHeader[];
   imports: ImportEntry[];
+  /**
+   * Set when `imports` is **not the whole import table**: the descriptor walk
+   * stopped at a bound rather than at the null descriptor, or some entry is
+   * `truncated`. Only a crafted (or absurdly large) import table reaches it.
+   *
+   * Read it before treating `imports` as a complete description of the file.
+   * `computeImphash` refuses outright on it: a digest over a short list is
+   * well-formed and wrong, and it is only ever compared with another tool's
+   * answer, so it fails by matching nothing. See `parseImports`.
+   */
+  importsTruncated?: boolean;
   exports: ExportEntry[];
   tlsDirectory?: TLSDirectory;
   loadConfig?: LoadConfigDirectory;

@@ -43,13 +43,60 @@ import { normalizeOptionalHeader } from "./types";
 const textDecoder = new TextDecoder();
 
 /**
- * Read null-terminated ASCII string from buffer
+ * The admission appended to a name `readCString` could not read whole.
+ *
+ * It is the shape `peek-a-bin-nygv` settled on for the PDB path
+ * (`PDB_PATH_TRUNCATION_MARKER`), for the same reason: a narrower answer must
+ * not wear a complete one's shape, and the *value* is the only channel that
+ * reaches a reader — the render sites print these strings verbatim and the app
+ * has no toast mechanism.
+ *
+ * `…` and `<`/`>` are bytes no name this parser reads can contain: a PE import,
+ * export or library name is an ASCII C string emitted by a linker, so the
+ * marker cannot be confused with one, and it cannot survive a round trip
+ * through anything that resolves a name (no API matches it, no ordinal table
+ * holds it, no symbol is called it).
+ */
+export const NAME_TRUNCATION_MARKER = "… <truncated>";
+
+/** Whether `readCString` had to cut this string short. One declaration. */
+export function isNameTruncated(name: string): boolean {
+  return name.endsWith(NAME_TRUNCATION_MARKER);
+}
+
+/**
+ * Read a NUL-terminated ASCII string, bounded by `maxLength` and by the buffer.
+ *
+ * **A CUT-SHORT READ SAYS SO**, by appending {@link NAME_TRUNCATION_MARKER}.
+ * The 1024-byte cap has been here since long before the marker and it is the
+ * right bound — no linker emits a name near it — but it used to truncate
+ * SILENTLY, so a crafted `.rdata` holding 1024 non-NUL bytes where a name
+ * should be produced a 1024-character library or function name that read as the
+ * file's own (`peek-a-bin-tmo9`, measured: exactly 1024 characters, tail
+ * `"AAAAAAAA"`, nothing marking it).
+ *
+ * THE MARKER IS NOT ENOUGH ON ITS OWN, and that asymmetry is the finding.
+ * A PDB path is read *out* of the tool by a human; these names are also read by
+ * `computeImphash`, `matchesApi`, `resolveOrdinal` and the IAT map. A marker
+ * there changes a hash rather than merely labelling a string, which is the
+ * `Ordinal_<n>` trap again. So `parseImports` additionally treats a truncated
+ * name as evidence that the entry is **not whole** (`ImportEntry.truncated`),
+ * which propagates to `PEFile.importsTruncated`, which makes `computeImphash`
+ * refuse outright — so a marked name can never reach a digest.
+ *
+ * Truncation is decided exactly: the read stopped at the bound *and* there is
+ * no NUL sitting at it. A name of exactly `maxLength` bytes plus its terminator
+ * is whole and is not marked.
  */
 function readCString(view: DataView, offset: number, maxLength = 1024): string {
   let end = offset;
   const limit = Math.min(offset + maxLength, view.byteLength);
   while (end < limit && view.getUint8(end) !== 0) end++;
-  return textDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + offset, end - offset));
+  const text = textDecoder.decode(
+    new Uint8Array(view.buffer, view.byteOffset + offset, end - offset),
+  );
+  const terminated = end < view.byteLength && view.getUint8(end) === 0;
+  return terminated ? text : text + NAME_TRUNCATION_MARKER;
 }
 
 /**
@@ -64,18 +111,35 @@ function readCString(view: DataView, offset: number, maxLength = 1024): string {
  * `buildSectionIndex()` and call `rvaToFileOffsetIndexed()` instead.
  */
 export function rvaToFileOffset(rva: number, sections: readonly SectionHeader[]): number {
-  for (const section of sections) {
-    const sectionStart = section.virtualAddress;
-    const sectionEnd = section.virtualAddress + section.virtualSize;
+  return offsetInSection(scanSectionForRva(rva, sections), rva);
+}
 
-    if (rva >= sectionStart && rva < sectionEnd) {
-      const offset = rva - section.virtualAddress;
-      if (offset >= section.sizeOfRawData) return -1;
-      return section.pointerToRawData + offset;
+/**
+ * The first section in table order whose *virtual* range contains `rva`, or
+ * null. The containment half of `rvaToFileOffset`'s semantics, factored out so
+ * that "which section holds this RVA" has one declaration — `sectionForRva`
+ * (the searchable form) and `sectionRawLimitForRva` (how far a walk may go
+ * without leaving it) both answer from it rather than restating the rule.
+ */
+function scanSectionForRva(rva: number, sections: readonly SectionHeader[]): SectionHeader | null {
+  for (const section of sections) {
+    if (rva >= section.virtualAddress && rva < section.virtualAddress + section.virtualSize) {
+      return section;
     }
   }
+  return null;
+}
 
-  return -1;
+/**
+ * `rva`'s file offset inside a section already known to contain it virtually,
+ * or -1 when it lands past that section's raw data. Deliberately does NOT fall
+ * through to a later section: see `rvaToFileOffset`'s docstring.
+ */
+function offsetInSection(section: SectionHeader | null, rva: number): number {
+  if (section === null) return -1;
+  const offset = rva - section.virtualAddress;
+  if (offset >= section.sizeOfRawData) return -1;
+  return section.pointerToRawData + offset;
 }
 
 /** The searchable form of a section table: sections by ascending RVA. */
@@ -183,13 +247,21 @@ export function buildSectionIndex(sections: readonly SectionHeader[]): SectionIn
  * `rvaToFileOffset(rva, index.sections)` would.
  */
 export function rvaToFileOffsetIndexed(rva: number, index: SectionIndex): number {
+  return offsetInSection(sectionForRva(rva, index), rva);
+}
+
+/**
+ * The section `rvaToFileOffsetIndexed` resolves `rva` into, or null. Exactly
+ * what `scanSectionForRva(rva, index.sections)` answers, in O(log sections).
+ */
+function sectionForRva(rva: number, index: SectionIndex): SectionHeader | null {
   const sorted = index.sorted;
-  if (sorted === null) return rvaToFileOffset(rva, index.sections);
+  if (sorted === null) return scanSectionForRva(rva, index.sections);
 
   // Upper bound: how many section starts are <= rva. The sections being sorted
   // and disjoint, the one before that boundary is the only possible container.
   // A NaN rva compares false against everything, so it collapses to 0 and
-  // leaves as -1 instead of looping.
+  // leaves as null instead of looping.
   const starts = sorted.starts;
   let lo = 0;
   let hi = starts.length;
@@ -198,13 +270,27 @@ export function rvaToFileOffsetIndexed(rva: number, index: SectionIndex): number
     if (starts[mid] <= rva) lo = mid + 1;
     else hi = mid;
   }
-  if (lo === 0) return -1;
+  if (lo === 0) return null;
 
   const section = sorted.sections[lo - 1];
-  const offset = rva - section.virtualAddress;
-  if (offset >= section.virtualSize) return -1;
-  if (offset >= section.sizeOfRawData) return -1;
-  return section.pointerToRawData + offset;
+  return rva - section.virtualAddress < section.virtualSize ? section : null;
+}
+
+/**
+ * File offset one past the last byte of raw data in the section holding `rva`,
+ * or -1 when `rva` is in no section.
+ *
+ * This is the bound for a walk that starts at a resolved RVA and steps forward:
+ * an array the file places inside a section does not continue past it, so the
+ * section end is a limit **the file itself declares** and one no attacker can
+ * inflate beyond the image. `min(virtualSize, sizeOfRawData)` because
+ * `offsetInSection` refuses both, so a byte past either is a byte the rest of
+ * this parser will not resolve.
+ */
+function sectionRawLimitForRva(rva: number, index: SectionIndex): number {
+  const section = sectionForRva(rva, index);
+  if (section === null) return -1;
+  return section.pointerToRawData + Math.min(section.virtualSize, section.sizeOfRawData);
 }
 
 /**
@@ -399,7 +485,79 @@ function parseSectionHeaders(view: DataView, offset: number, count: number): Sec
 }
 
 /**
- * Parse Import Table
+ * The most import descriptors — i.e. imported libraries — that will be read.
+ *
+ * A descriptor is not free: it resolves an RVA and decodes a name of up to
+ * `readCString`'s 1024 bytes. Real images import from a handful of libraries
+ * (2-3 across every binary in the corpus; a heavily linked application reaches
+ * the low hundreds), so 4096 is more than an order of magnitude above anything
+ * a linker emits and still bounds the walk at a few megabytes of decoding.
+ */
+export const MAX_IMPORT_DESCRIPTORS = 4096;
+
+/**
+ * The most imported functions that will be read **across the whole table**.
+ *
+ * Deliberately one global budget rather than a per-library cap, because the
+ * cost that matters is the PRODUCT: a crafted file supplies both the descriptor
+ * count and the thunk count, and capping each separately still multiplies out.
+ * Measured at 5baec33 on a 1 MiB fixture (52,416 descriptors all naming one
+ * unterminated thunk array), the old walk did not merely hang — node died with
+ * `FATAL ERROR: Ineffective mark-compacts near heap limit`, i.e. 4 GB of import
+ * entries out of a one-megabyte file. In a browser that is the tab.
+ *
+ * 65536 is the same budget `parseResourceDirectory` gives its own tree walk,
+ * and is far above any real total (94 functions is the corpus maximum; a large
+ * C++ application reaches a few thousand). A DLL cannot export more than 65535
+ * symbols, so this is also above what any single library could legitimately
+ * contribute.
+ */
+export const MAX_IMPORT_FUNCTIONS = 65536;
+
+/**
+ * Parse Import Table.
+ *
+ * TWO ATTACKER-CONTROLLED WALKS, EACH BOUNDED FOUR WAYS, SMALLEST WINNING, AND
+ * A CUT-SHORT ONE SAYS SO (`peek-a-bin-tmo9`, the list-shaped sibling of
+ * `peek-a-bin-nygv`'s PDB path).
+ *
+ * The descriptor walk stops at the null descriptor and the thunk walk stops at
+ * the null thunk, but a file need not supply either. Before this, the thunk
+ * walk's only other bound was the end of the FILE, so an unterminated array
+ * pushed one import entry per pointer-width slot all the way to EOF — inside
+ * `parsePE`, on the main thread, before anything renders.
+ *
+ * The bounds:
+ *
+ *  - **the containing section's raw extent** (`sectionRawLimitForRva`). An
+ *    import array the file places inside a section does not continue past it,
+ *    so this is evidence the file itself provides and cannot inflate beyond the
+ *    image. It is also the bound that improves the ANSWER rather than merely
+ *    the cost: without it a missing terminator at the end of `.rdata` reads the
+ *    next section's bytes — or the overlay's — as thunks.
+ *  - **the directory's declared size**, for descriptors, as before.
+ *  - **a count cap**, which is the bound that actually stops the hostile case,
+ *    since a section's declared size is attacker-controlled too.
+ *  - **the buffer**.
+ *
+ * WHY THE ADMISSION IS NOT A MARKER. `nygv` spelled its truncation into the
+ * value because the value was a string and the render site printed it verbatim.
+ * Here the value is a LIST, and there is no honest place to put a marker in
+ * one: an invented `<truncated>` entry would be a lie inside a list that feeds
+ * `computeImphash`, the Imports tab, the IAT map and the MCP tools — the
+ * `Ordinal_<n>` trap with a new spelling. So the admission takes the two forms
+ * a list can carry it in:
+ *
+ *  - `ImportEntry.truncated` / `PEFile.importsTruncated`, the machine-readable
+ *    half, on the model of `ResourceTree.truncated`; and
+ *  - a REFUSAL from `computeImphash`, which is the strongest form of "a
+ *    narrower answer must not wear a complete one's shape". An imphash over a
+ *    short list is a well-formed digest of something the file does not contain,
+ *    and it is only ever compared with another tool's answer, so it fails by
+ *    matching nothing while looking entirely correct.
+ *
+ * The reader-facing half is the Imports tab's own counts, which say the list is
+ * incomplete rather than quietly describing a smaller file.
  */
 function parseImports(
   view: DataView,
@@ -407,31 +565,40 @@ function parseImports(
   sectionIndex: SectionIndex,
   is64: boolean,
   imageBase: number,
-): ImportEntry[] {
+): { imports: ImportEntry[]; truncated: boolean } {
   if (!importDir.virtualAddress || !importDir.size) {
-    return [];
+    return { imports: [], truncated: false };
   }
 
   const imports: ImportEntry[] = [];
   const importTableOffset = rvaToFileOffsetIndexed(importDir.virtualAddress, sectionIndex);
 
   if (importTableOffset < 0 || importTableOffset >= view.byteLength) {
-    return imports;
+    return { imports, truncated: false };
   }
 
   let descriptorOffset = importTableOffset;
   const descriptorSize = 20;
+  /** Whether any walk below stopped at a bound instead of at its terminator. */
+  let tableTruncated = false;
+  /** Functions left in the whole-table budget. See MAX_IMPORT_FUNCTIONS. */
+  let functionBudget = MAX_IMPORT_FUNCTIONS;
 
-  // The walk stops at the null descriptor, but a file that simply omits one
-  // would otherwise run the rest of the buffer as descriptors. The directory
-  // declares its own extent, so never read past it either.
+  const descriptorSectionLimit = sectionRawLimitForRva(importDir.virtualAddress, sectionIndex);
   const descriptorLimit = Math.min(
     view.byteLength,
     importTableOffset + Math.max(0, importDir.size),
+    descriptorSectionLimit >= 0 ? descriptorSectionLimit : Number.POSITIVE_INFINITY,
+    importTableOffset + MAX_IMPORT_DESCRIPTORS * descriptorSize,
   );
 
-  // Walk import descriptors until null entry
-  while (descriptorOffset + descriptorSize <= descriptorLimit) {
+  // Walk import descriptors until the null entry — or until a bound, which is
+  // the case that has to say so.
+  for (;;) {
+    if (descriptorOffset + descriptorSize > descriptorLimit) {
+      tableTruncated = true;
+      break;
+    }
     const originalFirstThunk = view.getUint32(descriptorOffset, true);
     const nameRVA = view.getUint32(descriptorOffset + 12, true);
     const firstThunk = view.getUint32(descriptorOffset + 16, true);
@@ -451,6 +618,10 @@ function parseImports(
     const libraryName = readCString(view, nameOffset);
     const functions: string[] = [];
     const iatAddresses: number[] = [];
+    // A name that could not be read whole does not describe this library, so
+    // the entry is not whole either — see `readCString`'s docstring for why the
+    // marker alone is not the answer where the value reaches a digest.
+    let entryTruncated = isNameTruncated(libraryName);
 
     // Read import names from INT (Import Name Table)
     const thunkRVA = originalFirstThunk || firstThunk;
@@ -461,13 +632,27 @@ function parseImports(
     let thunkOffset = thunkRVA ? rvaToFileOffsetIndexed(thunkRVA, sectionIndex) : -1;
     if (thunkRVA && thunkOffset >= 0) {
       let funcIndex = 0;
+      const thunkSectionLimit = sectionRawLimitForRva(thunkRVA, sectionIndex);
+      const thunkLimit = Math.min(
+        view.byteLength,
+        thunkSectionLimit >= 0 ? thunkSectionLimit : Number.POSITIVE_INFINITY,
+      );
 
-      while (thunkOffset + thunkSize <= view.byteLength) {
+      for (;;) {
+        if (thunkOffset + thunkSize > thunkLimit) {
+          entryTruncated = true;
+          break;
+        }
+        if (functionBudget <= 0) {
+          entryTruncated = true;
+          break;
+        }
         const thunkValue = is64
           ? view.getBigUint64(thunkOffset, true)
           : BigInt(view.getUint32(thunkOffset, true));
 
         if (thunkValue === 0n) break;
+        functionBudget--;
 
         // Compute IAT VA for this function
         const iatVA = imageBase + firstThunk + funcIndex * thunkSize;
@@ -486,6 +671,7 @@ function parseImports(
           if (nameTableOffset >= 0 && nameTableOffset + 2 < view.byteLength) {
             // Skip hint (2 bytes)
             const funcName = readCString(view, nameTableOffset + 2);
+            if (isNameTruncated(funcName)) entryTruncated = true;
             functions.push(funcName);
           }
         }
@@ -495,11 +681,16 @@ function parseImports(
       }
     }
 
-    imports.push({ libraryName, functions, iatAddresses });
+    imports.push(
+      entryTruncated
+        ? { libraryName, functions, iatAddresses, truncated: true }
+        : { libraryName, functions, iatAddresses },
+    );
+    if (entryTruncated) tableTruncated = true;
     descriptorOffset += descriptorSize;
   }
 
-  return imports;
+  return { imports, truncated: tableTruncated };
 }
 
 /**
@@ -1007,7 +1198,7 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
       ? Number(optionalHeader.imageBase)
       : optionalHeader.imageBase;
 
-  const imports = parseImports(
+  const { imports, truncated: importsTruncated } = parseImports(
     view,
     dataDirectories[IMAGE_DIRECTORY_ENTRY_IMPORT] || { virtualAddress: 0, size: 0 },
     sectionIndex,
@@ -1086,6 +1277,9 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
     dataDirectories,
     sections,
     imports,
+    // Omitted rather than set false when the table is whole, so that a
+    // `PEFile` built anywhere else cannot claim completeness by accident.
+    ...(importsTruncated ? { importsTruncated: true } : {}),
     exports,
     tlsDirectory,
     loadConfig,

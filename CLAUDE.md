@@ -1604,6 +1604,36 @@ mistake.
   is the understating one. Cases and six discriminating controls in
   `pe/__tests__/malformed.test.ts`; corpus byte-identical over four binaries. (`peek-a-bin-nygv`)
 
+- **…and where the truncated thing is a LIST, the admission goes on the COUNT and the digest
+  REFUSES.** `parseImports` (`pe/parser.ts`) had two attacker-controlled walks: the thunk walk was
+  bounded **only by the end of the file**, so an unterminated array pushed one entry per
+  pointer-width slot to EOF inside `parsePE`, on the main thread; the descriptor walk was bounded
+  by the directory's declared size, a uint32 the file supplies. Measured at `5baec33` on a 1 MiB
+  fixture: 262,080 functions in one library (now `MAX_IMPORT_FUNCTIONS` = 65,536) and 52,416
+  libraries (now `MAX_IMPORT_DESCRIPTORS` = 4,096). **The cost that matters is the PRODUCT** — every
+  descriptor may name the same array — so the function budget is **global, not per-library**: with
+  both, the pre-fix parser did not hang, node died with `Ineffective mark-compacts near heap limit`,
+  ~4 GB out of a one-megabyte file. Bounds are `min(containing section, declared size, count cap,
+  buffer)`; the **section** bound (`sectionRawLimitForRva`) is the one that improves the *answer* —
+  without it a missing terminator at the end of `.rdata` reads the next section as thunks (192 →
+  4,288 measured) — and section selection is now **one declaration** (`scanSectionForRva` /
+  `sectionForRva` / `offsetInSection`) that `rvaToFileOffset` and `rvaToFileOffsetIndexed` both
+  answer from. **A list cannot carry `nygv`'s marker**: an invented `<truncated>` entry would be a
+  lie inside a list feeding `computeImphash`, the Imports tab, the IAT map and MCP. So the admission
+  is `ImportEntry.truncated` / `PEFile.importsTruncated` (on `ResourceTree.truncated`'s model), the
+  Imports tab's own **counts**, and **`computeImphash` returning `null`** — a digest over a short
+  list is well-formed, wrong, and only ever compared with another tool's answer, so it fails by
+  matching nothing. Its parameter is the **`PEFile`, not `PEFile["imports"]`**, deliberately:
+  whether the list is whole is a fact about the parse, so taking the file makes forgetting to ask a
+  compile error. `""` still means "imports nothing" and `HeaderView` prints a different sentence for
+  each. `readCString`'s 1024-byte cap now appends `NAME_TRUNCATION_MARKER` (measured: 1024 silent
+  characters before), **but the marker alone would be wrong here** — unlike a PDB path these names
+  reach a digest, so a truncated name also marks the entry, which makes the hash refuse; truncation
+  is decided exactly ("stopped at the bound *and* no NUL sits at it") so a name of exactly 1024
+  bytes plus its terminator is not marked. Nine discriminating controls, none inert; corpus
+  byte-identical over four binaries. **`ResourceTree.truncated` is still only half built — no view
+  renders it.** (`peek-a-bin-tmo9`)
+
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
 - **`RegState.defs` is keyed by literal operand text deliberately; ask `wroteAnyAlias` rather than canonicalising the map.** The map stores the last-written *expression*, which carries the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as eight. But arity is width-blind, and `collectArgs64` probing the literal 64-bit name missed every sub-width setup and broke out of the loop — the write then had no reader and DCE deleted it, giving `ExitProcess()` with the exit code gone, in well-typed C. `wroteAnyAlias` answers the width-blind question over the width-exact map and returns a **boolean**, so the recorded expression can never be substituted at the call site (`peek-a-bin-urs` cannot return through it). The suite had pinned the defect as the rule under a KNOWN BUG comment. And: when you build an oracle to verify a change, land the oracle — the instrument for this one was lost with a scratch worktree (`peek-a-bin-02fa`). (`peek-a-bin-qb2x`)

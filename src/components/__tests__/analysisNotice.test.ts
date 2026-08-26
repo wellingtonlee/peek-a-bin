@@ -1114,8 +1114,8 @@ describe("an image with no decoder keeps every parser-derived view", () => {
     // The Headers tab shows it, and it is derived from the import table rather
     // than from any instruction — an ARM32 sample must still be identifiable by
     // the hash every corpus indexes on.
-    expect(computeImphash(armnt.imports)).toBeTruthy();
-    expect(computeImphash(armnt.imports)).toBe(computeImphash(i386.imports));
+    expect(computeImphash(armnt)).toBeTruthy();
+    expect(computeImphash(armnt)).toBe(computeImphash(i386));
   });
 
   it("extracts strings — the one parser-derived tab fed by the refusing module", () => {

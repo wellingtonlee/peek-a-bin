@@ -386,3 +386,44 @@ describe("ImportsView with nothing to show", () => {
     expect(container.innerHTML).toBe("");
   });
 });
+
+/**
+ * A LIST CANNOT CARRY A TRUNCATION MARKER, SO THE COUNT DOES.
+ *
+ * `peek-a-bin-nygv` spelled its admission into the value because the value was
+ * a string; here it is a list, and an invented `<truncated>` entry would be a
+ * lie inside something that feeds `computeImphash` and the IAT map. So the
+ * admission goes where a reader actually reads the list's extent — the heading
+ * and the per-library count — and these are the rows that say it reached a
+ * reader rather than only a type. Nothing else here renders `truncated`;
+ * `ResourceTree.truncated` has carried the same flag since before this and no
+ * view has ever shown it.
+ */
+describe("ImportsView on a table that could not be read whole", () => {
+  /** The same `peWith` fixture, with the parser's own flags set by hand. */
+  function truncatedPE(opts: { table: boolean; entry: boolean }): PEFile {
+    const pe = peWith([KERNEL32, NTOSKRNL]);
+    if (opts.table) pe.importsTruncated = true;
+    if (opts.entry) pe.imports[0].truncated = true;
+    return pe;
+  }
+
+  it("says the table was cut short, beside the heading", () => {
+    renderImports(truncatedPE({ table: true, entry: false }));
+    expect(screen.getByText(/Incomplete .* the table was cut short/)).toBeTruthy();
+  });
+
+  it("says nothing of the sort about a whole table", () => {
+    // The control that keeps the row above from being a permanent banner.
+    renderImports(peWith([KERNEL32, NTOSKRNL]));
+    expect(screen.queryByText(/Incomplete/)).toBeNull();
+    expect(screen.queryByText("incomplete")).toBeNull();
+  });
+
+  it("marks the one library whose imports are short, and not the other", () => {
+    const { container } = renderImports(truncatedPE({ table: true, entry: true }));
+    const labels = libraries(container);
+    expect(labels[0]).toContain("incomplete");
+    expect(labels[1]).not.toContain("incomplete");
+  });
+});

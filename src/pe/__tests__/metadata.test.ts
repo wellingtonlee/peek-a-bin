@@ -115,17 +115,21 @@ describe("computeImphash", () => {
   const digestOf = (canonical: string) => nodeMD5(ascii(canonical));
 
   it("returns an empty string when there is nothing to hash", () => {
-    expect(computeImphash([])).toBe("");
-    expect(computeImphash([{ libraryName: "KERNEL32.dll", functions: [], iatAddresses: [] }])).toBe(
-      "",
-    );
+    expect(computeImphash({ imports: [] })).toBe("");
+    expect(
+      computeImphash({
+        imports: [{ libraryName: "KERNEL32.dll", functions: [], iatAddresses: [] }],
+      }),
+    ).toBe("");
   });
 
   it("lowercases, strips the .dll extension and joins with commas", () => {
-    const hash = computeImphash([
-      { libraryName: "KERNEL32.dll", functions: ["Sleep", "CreateFileW"], iatAddresses: [] },
-      { libraryName: "USER32.DLL", functions: ["MessageBoxA"], iatAddresses: [] },
-    ]);
+    const hash = computeImphash({
+      imports: [
+        { libraryName: "KERNEL32.dll", functions: ["Sleep", "CreateFileW"], iatAddresses: [] },
+        { libraryName: "USER32.DLL", functions: ["MessageBoxA"], iatAddresses: [] },
+      ],
+    });
     expect(hash).toBe(digestOf("kernel32.sleep,kernel32.createfilew,user32.messageboxa"));
   });
 
@@ -133,25 +137,29 @@ describe("computeImphash", () => {
     // pefile strips the extension when it is one of dll/ocx/sys, which matters
     // for drivers — this tool's main subject.
     expect(
-      computeImphash([
-        { libraryName: "NTOSKRNL.exe", functions: ["ExAllocatePool"], iatAddresses: [] },
-      ]),
+      computeImphash({
+        imports: [{ libraryName: "NTOSKRNL.exe", functions: ["ExAllocatePool"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("ntoskrnl.exe.exallocatepool"));
 
     expect(
-      computeImphash([
-        { libraryName: "HAL.dll", functions: ["KeStallExecutionProcessor"], iatAddresses: [] },
-      ]),
+      computeImphash({
+        imports: [
+          { libraryName: "HAL.dll", functions: ["KeStallExecutionProcessor"], iatAddresses: [] },
+        ],
+      }),
     ).toBe(digestOf("hal.kestallexecutionprocessor"));
 
     expect(
-      computeImphash([
-        { libraryName: "WDFLDR.SYS", functions: ["WdfVersionBind"], iatAddresses: [] },
-      ]),
+      computeImphash({
+        imports: [{ libraryName: "WDFLDR.SYS", functions: ["WdfVersionBind"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("wdfldr.wdfversionbind"));
 
     expect(
-      computeImphash([{ libraryName: "COMCTL32.ocx", functions: ["Foo"], iatAddresses: [] }]),
+      computeImphash({
+        imports: [{ libraryName: "COMCTL32.ocx", functions: ["Foo"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("comctl32.foo"));
   });
 
@@ -159,19 +167,25 @@ describe("computeImphash", () => {
     // pefile's ordlookup.formatOrdString yields b"ord" + str(n); the parser's
     // own "Ordinal_N" spelling must not leak into the hash input.
     expect(
-      computeImphash([{ libraryName: "SOMELIB.dll", functions: ["Ordinal_42"], iatAddresses: [] }]),
+      computeImphash({
+        imports: [{ libraryName: "SOMELIB.dll", functions: ["Ordinal_42"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("somelib.ord42"));
   });
 
   it("resolves known ordinals to their real names", () => {
     expect(
-      computeImphash([
-        { libraryName: "WS2_32.dll", functions: ["Ordinal_115", "Ordinal_23"], iatAddresses: [] },
-      ]),
+      computeImphash({
+        imports: [
+          { libraryName: "WS2_32.dll", functions: ["Ordinal_115", "Ordinal_23"], iatAddresses: [] },
+        ],
+      }),
     ).toBe(digestOf("ws2_32.wsastartup,ws2_32.socket"));
 
     expect(
-      computeImphash([{ libraryName: "oleaut32.dll", functions: ["Ordinal_2"], iatAddresses: [] }]),
+      computeImphash({
+        imports: [{ libraryName: "oleaut32.dll", functions: ["Ordinal_2"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("oleaut32.sysallocstring"));
   });
 
@@ -210,9 +224,11 @@ describe("computeImphash", () => {
     ];
     for (const [ordinal, funcName] of expected) {
       expect(
-        computeImphash([
-          { libraryName: "ws2_32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
-        ]),
+        computeImphash({
+          imports: [
+            { libraryName: "ws2_32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
+          ],
+        }),
         `ws2_32 ordinal ${ordinal}`,
       ).toBe(digestOf(`ws2_32.${funcName}`));
     }
@@ -235,9 +251,9 @@ describe("computeImphash", () => {
     for (const [library, ordinal, funcName] of cases) {
       const libBase = library.replace(/\.dll$/, "");
       expect(
-        computeImphash([
-          { libraryName: library, functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
-        ]),
+        computeImphash({
+          imports: [{ libraryName: library, functions: [`Ordinal_${ordinal}`], iatAddresses: [] }],
+        }),
         `${library} ordinal ${ordinal}`,
       ).toBe(digestOf(`${libBase}.${funcName}`));
     }
@@ -254,15 +270,19 @@ describe("computeImphash", () => {
     ];
     for (const [ordinal, ws2Name, wsockName] of conflicts) {
       expect(
-        computeImphash([
-          { libraryName: "ws2_32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
-        ]),
+        computeImphash({
+          imports: [
+            { libraryName: "ws2_32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
+          ],
+        }),
         `ws2_32 ordinal ${ordinal}`,
       ).toBe(digestOf(`ws2_32.${ws2Name}`));
       expect(
-        computeImphash([
-          { libraryName: "wsock32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
-        ]),
+        computeImphash({
+          imports: [
+            { libraryName: "wsock32.dll", functions: [`Ordinal_${ordinal}`], iatAddresses: [] },
+          ],
+        }),
         `wsock32 ordinal ${ordinal}`,
       ).toBe(digestOf(`wsock32.${wsockName}`));
     }
@@ -293,27 +313,33 @@ describe("computeImphash", () => {
   it("falls back to ord<N> for an ordinal missing from the lookup table", () => {
     // ws2_32 is a known DLL but this ordinal is outside the bundled subset.
     expect(
-      computeImphash([
-        { libraryName: "ws2_32.dll", functions: ["Ordinal_9999"], iatAddresses: [] },
-      ]),
+      computeImphash({
+        imports: [{ libraryName: "ws2_32.dll", functions: ["Ordinal_9999"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("ws2_32.ord9999"));
   });
 
   it("skips imports with no usable name", () => {
     expect(
-      computeImphash([{ libraryName: "KERNEL32.dll", functions: ["", "Sleep"], iatAddresses: [] }]),
+      computeImphash({
+        imports: [{ libraryName: "KERNEL32.dll", functions: ["", "Sleep"], iatAddresses: [] }],
+      }),
     ).toBe(digestOf("kernel32.sleep"));
   });
 
   it("preserves import order across libraries", () => {
-    const a = computeImphash([
-      { libraryName: "a.dll", functions: ["one"], iatAddresses: [] },
-      { libraryName: "b.dll", functions: ["two"], iatAddresses: [] },
-    ]);
-    const b = computeImphash([
-      { libraryName: "b.dll", functions: ["two"], iatAddresses: [] },
-      { libraryName: "a.dll", functions: ["one"], iatAddresses: [] },
-    ]);
+    const a = computeImphash({
+      imports: [
+        { libraryName: "a.dll", functions: ["one"], iatAddresses: [] },
+        { libraryName: "b.dll", functions: ["two"], iatAddresses: [] },
+      ],
+    });
+    const b = computeImphash({
+      imports: [
+        { libraryName: "b.dll", functions: ["two"], iatAddresses: [] },
+        { libraryName: "a.dll", functions: ["one"], iatAddresses: [] },
+      ],
+    });
     expect(a).toBe(digestOf("a.one,b.two"));
     expect(b).toBe(digestOf("b.two,a.one"));
     expect(a).not.toBe(b);
@@ -326,7 +352,7 @@ describe("computeImphash", () => {
       },
     });
     const pe = parsePE(buf);
-    expect(computeImphash(pe.imports)).toBe(digestOf("kernel32.sleep,kernel32.ord42"));
+    expect(computeImphash(pe)).toBe(digestOf("kernel32.sleep,kernel32.ord42"));
   });
 });
 

@@ -460,6 +460,34 @@ describe("HeaderView metadata block", () => {
     expect(rowValue("Imphash").textContent).toBe("No imports");
   });
 
+  it("withholds the imphash for a truncated import table, and does not call it absent", () => {
+    // THE REFUSAL, ON SCREEN. `computeImphash` returns null rather than a
+    // digest when the import table could not be read whole, because a hash over
+    // a short list is well-formed, wrong, and only ever compared with another
+    // tool's answer — so it fails by matching nothing (`peek-a-bin-tmo9`).
+    //
+    // `null` and `""` are both falsy and the row must NOT collapse them: an
+    // image that imports nothing and an image whose import table was cut short
+    // are different facts, and printing "No imports" for the second is exactly
+    // the narrower answer wearing a complete one's shape. That is the whole
+    // reason this row exists — the two branches are one `?:` apart in the
+    // source and nothing static can tell them apart.
+    const pe = parsePE(
+      buildMinimalPE64({
+        directories: {
+          imports: [{ libraryName: "KERNEL32.dll", functions: [{ name: "ExitProcess" }] }],
+        },
+      }),
+    );
+    pe.importsTruncated = true;
+    renderHeaders(pe);
+    const text = rowValue("Imphash").textContent ?? "";
+    expect(text).toContain("Unavailable");
+    expect(text).toContain("incomplete");
+    expect(text).not.toBe("No imports");
+    expect(text).not.toMatch(/[0-9a-f]{32}/);
+  });
+
   it("distinguishes an unset checksum from a wrong one", () => {
     // The fixtures never write CheckSum, which is the common real case for a
     // freshly linked non-signed image and must NOT read as "Invalid".

@@ -370,7 +370,12 @@ export function HeaderView() {
   // over every byte in the file. See hooks/useFileMetrics.ts.
   const fileMetrics = useFileMetrics(pe);
   const checksum = fileMetrics.value?.checksum ?? null;
-  const imphash = useMemo(() => (pe ? computeImphash(pe.imports) : null), [pe]);
+  // `null` from `computeImphash` is a REFUSAL, not an absence: the import
+  // table is not whole, so a digest over it would be well-formed and wrong.
+  // `""` still means the image imports nothing. The row below tells them apart
+  // — printing "No imports" for a truncated table would be the narrower answer
+  // wearing a complete one's shape, which is the defect this guards.
+  const imphash = useMemo(() => (pe ? computeImphash(pe) : null), [pe]);
   const overlay = useMemo(() => (pe ? detectOverlay(pe.buffer, pe) : null), [pe]);
 
   const [imphashFlash, setImphashFlash] = useState<"idle" | "ok" | "failed">("idle");
@@ -583,6 +588,10 @@ export function HeaderView() {
                 >
                   {imphash}
                 </button>
+              ) : imphash === null ? (
+                <span className="text-yellow-400">
+                  Unavailable &mdash; the import table is incomplete
+                </span>
               ) : (
                 <span className="text-gray-500">No imports</span>
               )}

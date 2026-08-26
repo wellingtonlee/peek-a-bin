@@ -454,9 +454,36 @@ export function md5(input: Uint8Array): string {
  */
 const IMPHASH_STRIPPED_EXTENSIONS = new Set(["dll", "ocx", "sys"]);
 
-export function computeImphash(imports: PEFile["imports"]): string {
+/**
+ * pefile's imphash over an image's import table, or **null when the table is
+ * not whole**.
+ *
+ * THE REFUSAL IS THE POINT, and it is why this takes the file rather than the
+ * list. A digest over a truncated import list is not a degraded answer, it is a
+ * well-formed answer to a different question: the value is a hex string
+ * indistinguishable from a correct one, it is never validated against anything
+ * inside this tool, and its only use is being compared with another tool's
+ * answer — so it fails by MATCHING NOTHING while looking entirely correct. That
+ * is the `Ordinal_<n>` trap (see `pe/ordinalTables.ts`) in a third place, and
+ * the codebase's standing rule that a narrower answer must not wear a complete
+ * one's shape leaves no room for emitting one anyway.
+ *
+ * There is no marker to spell into the value, because the value is a hash: any
+ * string this returns is either pefile's answer or a lie. Silence, labelled by
+ * the type, is the only honest narrowing — which is also why the parameter is
+ * the `PEFile` and not `PEFile["imports"]`. Whether the LIST is whole is a fact
+ * about the parse, not about any element, so a caller holding only the array
+ * cannot establish it; taking the file makes forgetting to ask a compile error
+ * rather than a silently wrong hash.
+ *
+ * `""` (falsy but not null) still means what it always meant: the image imports
+ * nothing pefile would hash. The two are different facts and the one render
+ * site tells them apart.
+ */
+export function computeImphash(pe: Pick<PEFile, "imports" | "importsTruncated">): string | null {
+  if (pe.importsTruncated) return null;
   const parts: string[] = [];
-  for (const imp of imports) {
+  for (const imp of pe.imports) {
     const lib = imp.libraryName.toLowerCase();
     const dot = lib.lastIndexOf(".");
     const libBase =

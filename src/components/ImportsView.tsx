@@ -102,6 +102,22 @@ export function ImportsView() {
         <h2 className="text-sm font-semibold text-gray-200">
           Imports ({pe.imports.length} libraries, {totalFunctions} functions)
         </h2>
+        {/* THE ADMISSION, ON THE COUNT. A list cannot carry a truncation
+            marker the way a string can — an invented `<truncated>` entry
+            would be a lie inside a list that feeds `computeImphash`, the IAT
+            map and the MCP tools — so the count is where it goes, because the
+            count is the sentence a reader actually reads. Without this the
+            heading above describes a smaller file entirely plausibly, which is
+            the narrower answer wearing a complete one's shape. See
+            `parseImports` (`peek-a-bin-tmo9`). */}
+        {pe.importsTruncated && (
+          <span
+            className="text-yellow-400 text-[11px]"
+            title="The import table could not be read whole: a walk stopped at its bound rather than at a terminator, or a name ran past its limit. The imphash is withheld for the same reason."
+          >
+            Incomplete &mdash; the table was cut short
+          </span>
+        )}
         <input
           type="text"
           value={filterInput}
@@ -158,6 +174,14 @@ export function ImportsView() {
                 <span className="text-gray-500 font-normal text-[10px]">
                   ({imp.functions.length})
                 </span>
+                {imp.truncated && (
+                  <span
+                    className="text-yellow-400 font-normal text-[10px]"
+                    title="This library's imports could not be read whole; the list is short or a name ran past its limit"
+                  >
+                    incomplete
+                  </span>
+                )}
               </button>
               {!isCollapsed && (
                 <ul className="ml-6 space-y-0.5">
