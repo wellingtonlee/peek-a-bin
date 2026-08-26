@@ -33,6 +33,7 @@
     "corpus:decompilecost": "tsx corpus/decompileRpcCost.ts",
     "corpus:detectcost": "tsx corpus/detectPhaseCost.ts",
     "corpus:gridserve": "tsx corpus/hybridGridServe.ts",
+    "corpus:parserdiff": "tsx corpus/parserDifferential.ts",
     "corpus:replycost": "tsx corpus/replyCloneCost.ts",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:setup": "tsx src/mcp/index.ts setup"

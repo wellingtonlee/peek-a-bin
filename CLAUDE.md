@@ -40,6 +40,7 @@ proves:
 npm run corpus                        # the four x86 binaries: every detection/decompiler gate
 npm run corpus:arm64                  # A64 sweep, .pdata, xrefs, jump tables, sweep-cache differential
 npm run corpus:comments               # ARM64 comment audit + x86 comment digest
+npm run corpus:parserdiff             # PE parser vs an independent from-spec reader, all six binaries
 npm run corpus:compare -- <base> <change>   # diff two runs guard-by-guard; takes PATHS (corpus/artifacts/<label>)
 npm run corpus:jumptables    -- <pe>  # indirect-dispatch census: was each reader even reached
 npm run corpus:gridserve     -- <pe>  # hybridDisassemble grid coincidence + served-vs-decoded diff
@@ -646,14 +647,38 @@ binaries are in `~/.local/share/peek-a-bin-corpus`, found with nothing set.
 
 Each of these has an oracle outside the code under test.
 
-- **The PE parser was checked differentially against an independently written from-spec reader** —
-  sections, imports, exports, imphash, resources, checksum and `.pdata` agreeing on every file —
-  but **ONLY THE `.pdata` HALF IS STILL RE-ESTABLISHED BY A RUN**, and that only on ARM64, by
-  `npm run corpus:arm64`. Measured 2026-08-26: of the six files under `corpus/` that call
-  `parsePE`, five are cost censuses and only `corpus/arm64.ts` compares the parser with anything.
-  The other six subjects have **no standing differential**, so read that sentence as a record of a
-  past measurement rather than as something a green run re-checks — the `peek-a-bin-02fa` failure
-  mode, *land the oracle*. pefile is **not** installed here; the reference was hand-written.
+- **The PE parser holds, differentially against an independently written from-spec reader —
+  and THE ORACLE IS NOW IN THE TREE**, as `corpus/parserDifferential.ts`
+  (`npm run corpus:parserdiff`). Until 2026-08-26 that sentence was a record of a past measurement
+  whose instrument had been lost with a scratch directory: five of the six `corpus/` files calling
+  `parsePE` were cost censuses, and only `corpus/arm64.ts` compared the parser with anything (the
+  ARM64 `.pdata` rows). Six of the seven named subjects had **no standing differential at all** —
+  the `peek-a-bin-02fa` failure mode, *land the oracle*, for the third time. A run now
+  re-establishes, over **all six** binaries: headers and data directories, sections, imports
+  (names, order and IAT slot VAs), the checksum, imphash end to end, resources (leaves *and*
+  tree shape), x64 `.pdata`, and relocations — **98 gates green, 0 red**, each with a liveness
+  half beside it. pefile is not installed here, so imphash is a second reading of the ALGORITHM,
+  hashed with `node:crypto`, not a comparison against pefile's output.
+  - **Independence is the whole value and nothing in the language holds it.** The reference region
+    uses nothing from `src/`; `build/parserIndependence.test.ts` splits the file on two banner
+    comments and fails if a name imported from `src/` appears in it, with a liveness half. Without
+    that guard, adding `rvaToFileOffset` to the reference turns the harness into a differential
+    test between one implementation and itself and **every row stays green**.
+  - **20 of the 118 gates are VACUOUS and print as such**, excluded from the green count. All six
+    binaries are EXEs — **0 exports, 0 forwarders, 0 ordinal imports**, and no DLL exists on this
+    machine — so the export reader and the `Ordinal_<n>` wire-format check have never run on a
+    real image. They are controlled in `build/parserIndependence.test.ts` over a hand-built image
+    instead. Pass a DLL as an argument and those rows stop being vacuous.
+  - **Ten controls red, one INERT and recorded.** Accepting `UNWIND_INFO` version 0 — undoing
+    `peek-a-bin-eu8` — moves no row, because on t64 and w64 every record resolves and every one
+    carries version 1. Two report rows now print that population, so the blind spot is visible
+    rather than inferred. The x64 `.pdata` half of the parser is asked **here and nowhere else**;
+    ARM64 stays with `npm run corpus:arm64`, which judges it against the sweep.
+  - **What a green run still does not establish**: TLS, load config, debug directory, rich header,
+    Authenticode and string extraction are not compared; nothing malformed is (both readers see
+    well-formed MSVC output, so every clamp and lenient continue in the parser is unreached);
+    and the RVA→offset *rule* is necessarily the same in both readers, so only the parser's
+    `SectionIndex` fast path is independently checked.
 - **Function boundaries** are cross-checked against `.pdata` on x64 (which is authoritative), and
   on ARM64 against the sweep's alignment invariants. PE32 has no `.pdata` and still over-produces.
 - **gcc / the emitted C compiles.** `gcc -std=gnu89 -fsyntax-only` over every emitted function:

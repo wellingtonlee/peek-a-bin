@@ -1305,6 +1305,140 @@ of maximum cardinality over the same extents, by exhaustive search. `peek-a-bin-
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
+## `corpus/parserDifferential.ts` — separate, and the only oracle over the PE parser
+
+`npm run corpus:parserdiff`. Over **all six** binaries — the x86 four *and* the ARM64 pair —
+plus any extra paths given as arguments. Missing binaries skip cleanly and exit 0; exit 1 on any
+red gate. The last line reads
+`98 of 118 gates green, 20 VACUOUS (empty population — no evidence), 38 rows reported. OK`.
+
+### Why it exists
+
+CLAUDE.md's Verification section opened its list of audits-with-an-oracle with this:
+
+> The PE parser holds, differentially against an independently written from-spec reader —
+> sections, imports, exports, imphash, resources, checksum and `.pdata` agree on every file.
+
+Measured 2026-08-25: **that instrument was not in the tree.** Six files under `corpus/` called
+`parsePE`; five were cost censuses that parsed only to have something to time, and the sixth
+(`corpus/arm64.ts`) compared the parser with the sweep on the ARM64 `.pdata` rows alone. Six of
+the seven named subjects had no standing differential of any kind. Whatever produced those
+agreements was a one-off lost with a scratch directory — the same failure this whole directory
+exists to prevent (`peek-a-bin-dfae`, `peek-a-bin-02fa`: *when you build an oracle to verify a
+change, land the oracle*). This is its third and most consequential instance, because the parser
+is what every other measurement here is downstream of.
+
+### What it is, and exactly how independent it is
+
+One file, in two regions. Above the `THE SUBJECTS` banner is a reference reader that uses
+**nothing from `src/`** — it reads a `DataView` against the PE/COFF specification, plus
+`node:crypto` for MD5. Below it is the comparison, which necessarily uses the parser.
+
+TypeScript hoists every import to the top of a file, so that split cannot be expressed by import
+placement and nothing in the language or the linter holds it. `build/parserIndependence.test.ts`
+does: it splits the file on those two banner comments and fails if any name imported from `src/`
+appears in the reference region, in either direction, with a liveness half asserting the list of
+forbidden names is not empty. Without it, someone adding `rvaToFileOffset` to the reference "just
+for the section walk" turns the harness into a differential test between one implementation and
+itself — the trap CLAUDE.md names in as many words — and **every row stays green while doing it**.
+
+Three places the independence is genuinely weaker, stated rather than glossed:
+
+- **The RVA→file-offset rule is the same rule in both readers**, because the spec permits one. So
+  this cannot catch an error in the *rule*. What it does catch independently is the parser's
+  `SectionIndex` — a sorted binary search with a scan fallback, chosen for speed — disagreeing
+  with a plain table-order scan.
+- **imphash is a second reading of the ALGORITHM, not of pefile's output.** pefile is not
+  installed here and cannot be consulted. If pefile's rules were misread, both readers are wrong
+  together. The reference also declines pefile's `ordlookup` table rather than inventing one: an
+  ordinal import from `ws2_32.dll` / `wsock32.dll` / `oleaut32.dll` makes the row **non-comparable
+  and vacuous**, never falsely green.
+- **`.pdata` on ARM64 is not asked here** — `npm run corpus:arm64` already gates every ARM64
+  record against the sweep, `.xdata` codes included, which is the stronger oracle. The **x64**
+  records on t64 and w64 are asked here and nowhere else.
+
+### The subjects
+
+| Subject | Gate | Population on this corpus |
+|---|---|---|
+| **Headers** — 20 COFF and optional-header fields | field disagreements | 20 per image |
+| **Data directories** — VA and size | entry disagreements | 16 per image |
+| **Sections** — name and nine fields | field disagreements | 5–6 per image, 50–60 fields |
+| **Imports** — DLL names, ordered function names, IAT slot VAs | two gates | 2–3 DLLs, 85–94 functions |
+| **Imports, ordinal spelling** — `Ordinal_<n>` | spelling disagreements | **0 — VACUOUS** |
+| **Exports** — name, ordinal bias, RVA, `byOrdinal`, forwarders | entry disagreements | **0 — VACUOUS** |
+| **Checksum** — reference vs parser, and reference vs the linker's stored value | two gates | 1 per image; the linker half is vacuous on the ARM64 pair, which store 0 |
+| **imphash** — end to end, parser import list included | digest disagreement | 85–94 `dll.func` parts |
+| **Resources** — the flattened leaves *and* the top-level tree shape | two gates | 10 entries, 4 type nodes |
+| **`.pdata`** (x64 only) — begin/end/unwind, handler flags, handler RVA | record disagreements | 240 and 235 records |
+| **Relocations** — blocks, entry types and offsets | block and entry disagreements | 166–1172 entries |
+
+Every subject that must have a population on a real MSVC image carries an explicit
+**liveness gate** beside it, which goes red if the denominator ever reaches 0 — a
+population-based audit fails by silently matching nothing, and a gate that reaches 0 by no longer
+looking is this repo's recurring failure mode.
+
+**A failure means the parser and the specification disagree about the bytes of a real image.**
+Which of the two is wrong is not decided by the row; the row prints both readings and the offset
+they came from.
+
+### VACUOUS is not green, and 20 rows are vacuous
+
+All six binaries are EXEs: **0 exports, 0 forwarders and 0 ordinal imports between them**, and
+`find / -xdev -iname '*.dll'` finds nothing on this machine. Those rows print `GATE  VAC` rather
+than `GATE  ok ` and are excluded from the green count, because "a green row over an empty
+population says nothing" is this directory's standing rule and the export reader would otherwise
+look verified when it has never run. They are exercised in `build/parserIndependence.test.ts`
+instead, over an image built byte by byte in that file with a named export, an alias sharing one
+address-table slot, an ordinal-only slot, a forwarder, an ordinal import and an `ordlookup`
+ordinal — each asked in both directions. Pass a real DLL as an argument
+(`npm run corpus:parserdiff -- /path/to/x.dll`) and those rows stop being vacuous.
+
+### Negative controls
+
+Every gate with a live population was controlled by perturbing the **production** parser,
+confirming the row goes red, and restoring. All at `5baec33`:
+
+| Perturbation | Result |
+|---|---|
+| `virtualSize` read at `+12` instead of `+8` | 40 RED — sections red on all six, plus every RVA-resolved subject and three liveness gates |
+| PE32+ `imageBase` truncated to 32 bits | 8 RED on the four PE32+ images only — the `>>> 0` defect class of `peek-a-bin-p0qw`, at the parser rather than the view |
+| import name read without skipping the 2-byte hint | 12 RED — imports and imphash on all six |
+| IAT slot stride fixed at 4 bytes | 4 RED — the four 64-bit images only |
+| the image's own CheckSum field not excluded from the sum | 4 RED — see the inert note below |
+| `.dll` no longer stripped for imphash | 6 RED — imphash only, imports untouched |
+| resource leaf size read from the `codePage` field | 6 RED |
+| resource `type` and `name` levels swapped | 6 RED |
+| `.pdata` handler RVA not 4-byte aligned past the unwind codes | 2 RED, 16 and 14 records |
+| relocation type shifted by 11 instead of 12 | 6 RED, 164–1165 entries |
+
+**One control came back INERT and is recorded rather than tuned away.** Accepting
+`UNWIND_INFO` version 0 alongside 1 and 2 — undoing `peek-a-bin-eu8`'s guard — moves **no row**:
+`npm run corpus:parserdiff` still exits 0. The reason is a population, not a blind spot in the
+audit, and the report now says so directly, in two rows added for it: on t64 and w64 **every**
+record's `unwindInfoAddress` resolves and **every** one carries version 1, so that guard is not
+exercised by this corpus at all. Read those two rows before quoting the `.pdata` gate.
+
+**A second, partial inertness worth knowing**: the CheckSum-exclusion control is red on the four
+x86 binaries and inert on the two ARM64 ones — their stored checksum is 0, so excluding the field
+and not excluding it sum the same bytes. The ARM64 pair also makes the "reference disagrees with
+the value the linker stored" gate vacuous for the same reason: there is no linker value to
+disagree with. On the x86 four that row is the strongest evidence in the harness, being the one
+oracle **outside both readers**.
+
+### What a green run does not establish
+
+- Nothing about TLS, the load config, the debug directory, the rich header, Authenticode or
+  string extraction. None is compared and none is claimed.
+- Nothing about exports, forwarders or ordinal imports **on a real image** — see VACUOUS above.
+- Nothing about malformed input. Both readers are pointed at well-formed MSVC output; the
+  parser's clamps and lenient continues (`descriptorLimit`, `maxNames`, `MAX_TOTAL_ENTRIES`, a
+  descriptor with an unresolvable name) are never reached, so the differential says nothing about
+  whether they are right. `src/pe/__tests__/malformed.test.ts` is the instrument there.
+- Nothing about a name containing a byte ≥ 0x80 or an interior NUL. The two readers decode
+  differently there on purpose (`String.fromCharCode` over bytes here, `TextDecoder` in the
+  parser), so such rows are **excluded and counted**; the count is 0 on all six.
+
 ## `corpus/comments.ts` — separate, like every ARM64 audit here
 
 `npm run corpus` drives **t32, t64, w64, w32** and nothing else, and not one of the audits above
