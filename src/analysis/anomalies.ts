@@ -1,4 +1,5 @@
 import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
+import { dataDirectoryClamp } from "../pe/dataDirectories";
 import { type ChecksumResult, detectOverlay, validateChecksum } from "../pe/metadata";
 import type { PEFile } from "../pe/types";
 import { computeSectionEntropies } from "../utils/entropy";
@@ -138,6 +139,39 @@ export function detectAnomalies(pe: PEFile, metrics?: AnomalyMetrics): Anomaly[]
       title: "TLS callbacks detected",
       detail: `${pe.tlsDirectory.callbacks.length} TLS callback(s) found. These execute before the entry point and can be used for anti-debug or pre-entry execution.`,
     });
+  }
+
+  // Warning: the file declares more data directories than the parser would read.
+  //
+  // `numberOfRvaAndSizes` is attacker-controlled, so `parseDataDirectories`
+  // clamps to `Math.min(count, 16, fits)` — and every real linker writes exactly
+  // 16, so a declared count above that is not a rounding error, it is a
+  // deliberate claim the format cannot honour. This pass is where "the file
+  // claims something implausible" lives, and it is the surface an analyst reads
+  // rather than the one they have to notice: the Headers panel marks the same
+  // fact on the row itself (`HeaderView`'s Number of RVA and Sizes), from the
+  // same `dataDirectoryClamp`, because the two answer different questions.
+  //
+  // Warning rather than critical: the file is malformed and the malformation is
+  // deliberate, but nothing here says code will run — `critical` in this pass is
+  // reserved for WX sections and an entry point in writable memory. And warning
+  // rather than info: unlike ASLR/DEP, which are ordinary build settings, no
+  // toolchain produces this by accident. (peek-a-bin-dd94)
+  const dirClamp = dataDirectoryClamp(pe);
+  if (dirClamp) {
+    anomalies.push(
+      dirClamp.reason === "short-header"
+        ? {
+            severity: "warning",
+            title: "Data directory table is cut short",
+            detail: `The optional header declares ${dirClamp.declared} data ${dirClamp.declared === 1 ? "directory" : "directories"} but the file ends after ${dirClamp.present}. The header is truncated, so any directory past ${dirClamp.present} is not in the file at all.`,
+          }
+        : {
+            severity: "warning",
+            title: "Data directory count exceeds the format maximum",
+            detail: `The optional header declares ${dirClamp.declared} data directories. The PE format defines 16, and linkers write exactly 16, so ${dirClamp.present} were read and the rest ignored. A count this size is a common crafted-PE tell.`,
+          },
+    );
   }
 
   // Warning: Checksum mismatch

@@ -1129,3 +1129,177 @@ describe("HeaderView checksum validation, off the main thread", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * THE DECLARED COUNT AND THE TABLE UNDER IT (peek-a-bin-dd94).
+ *
+ * `parseDataDirectories` clamps to `Math.min(count, 16, fits)` because
+ * `numberOfRvaAndSizes` is attacker-controlled; the panel printed the RAW count
+ * and then rendered the clamped table beneath it. Neither number is false alone
+ * — the same shape as the Certificate Table row's mislabelled offset — and this
+ * is the adversarial-input direction of it: the parser noticed a crafted-PE tell
+ * deliberately and the one surface a human reads swallowed it.
+ *
+ * Every number below is read off the fixture rather than written down, and the
+ * two halves of the mismatch are separate `it`s on purpose: in one `it` the
+ * first failure hides the second, and "the parenthetical is wrong" and "the
+ * table is a different length than it claims" are different regressions.
+ */
+describe("HeaderView on a PE declaring more data directories than it has", () => {
+  /** The bead's measured case: a PE32+ optional header claiming 40. */
+  const pe40 = () => parsePE(buildMinimalPE64({ numberOfRvaAndSizes: 40 }));
+
+  it("prints the declared count AND admits the clamp beside it", () => {
+    const pe = pe40();
+    expect(pe.optionalHeader.numberOfRvaAndSizes).toBe(40);
+    expect(pe.dataDirectories.length).toBe(16);
+    renderHeaders(pe);
+    // No space in `textContent`: the gap is an `ml-2` margin, as with the entry
+    // point row above.
+    expect(rowValue("Number of RVA and Sizes").textContent).toBe("40(clamped to 16)");
+  });
+
+  it("renders exactly the rows the parser read, which is what the count contradicts", () => {
+    const pe = pe40();
+    renderHeaders(pe);
+    const table = screen.getByText("Data Directories").nextElementSibling;
+    if (!(table instanceof HTMLElement)) throw new Error("no data directory table");
+    // Sixteen, under a declared 40. This is the half of the pair that was never
+    // wrong and never the point.
+    expect(table.querySelectorAll("tbody tr").length).toBe(pe.dataDirectories.length);
+  });
+
+  it("says WHY in the title, naming the format's maximum rather than the parser", () => {
+    renderHeaders(pe40());
+    const note = rowValue("Number of RVA and Sizes").querySelector("span[title]");
+    expect(note?.getAttribute("title")).toContain("PE format defines sixteen");
+  });
+
+  it("says the header is truncated when THAT is what bound the count", () => {
+    // The other arm of `dataDirectoryClamp`, and the reason it has two: a
+    // plausible 16 that the file has no room for is a different finding, and
+    // reporting the spec cap there would name a constraint that did not bind.
+    const full = buildMinimalPE32();
+    const opt = new DataView(full).getUint32(0x3c, true) + 4 + 20;
+    const buf = full.slice(0, opt + 96 + 3 * 8);
+    new DataView(buf).setUint32(opt + 92, 16, true);
+    const pe = parsePE(buf);
+    expect(pe.dataDirectories.length).toBe(3);
+    renderHeaders(pe);
+
+    expect(rowValue("Number of RVA and Sizes").textContent).toBe("16(clamped to 3)");
+    const note = rowValue("Number of RVA and Sizes").querySelector("span[title]");
+    expect(note?.getAttribute("title")).toContain("do not fit in the file");
+  });
+
+  it("shows NOTHING beside a plausible count — the control for all of the above", () => {
+    // Without this, every assertion above is equally true of a panel that prints
+    // "(clamped to N)" on every binary anyone opens. An ordinary fixture
+    // declares 16 and holds 16.
+    const pe = parsePE(buildMinimalPE64());
+    expect(pe.optionalHeader.numberOfRvaAndSizes).toBe(pe.dataDirectories.length);
+    renderHeaders(pe);
+    expect(rowValue("Number of RVA and Sizes").textContent).toBe("16");
+  });
+});
+
+/**
+ * TWO LABELS THAT CLAIMED MORE THAN THE VALUE SUPPORTED.
+ *
+ * Both are the class the `ImageBase` defect above belongs to: a derived spelling
+ * that is right for the values anyone has looked at and states something false
+ * for the rest, where nothing static can see it because both spellings are the
+ * same type.
+ */
+describe("HeaderView derives its labels from the values, not from beside them", () => {
+  it("takes the Magic label from the magic", () => {
+    // `is64` IS `magic === 0x020B`, so the old `pe.is64 ? "PE32+" : "PE32"`
+    // printed `(PE32)` for every other value — including 0x0107, a ROM image,
+    // which is neither. UNREACHABLE THROUGH `parsePE`, which throws on any third
+    // magic, so the state is built by hand here: this pins the row's rule, and
+    // is a guard against the parser widening rather than a repair of anything on
+    // screen today.
+    const pe = parsePE(buildMinimalPE32());
+    pe.optionalHeader.magic = 0x0107;
+    renderHeaders(pe);
+    expect(rowValue("Magic").textContent).toBe("0x0107 (ROM)");
+  });
+
+  it("admits an unmapped magic the way the Machine and Subsystem rows do", () => {
+    const pe = parsePE(buildMinimalPE32());
+    pe.optionalHeader.magic = 0x0999;
+    renderHeaders(pe);
+    expect(rowValue("Magic").textContent).toBe("0x0999 (Unknown)");
+  });
+
+  it("still spells the two magics that reach it today", () => {
+    // The control: the change must not move the label on any real file.
+    renderHeaders(parsePE(buildMinimalPE32()));
+    expect(rowValue("Magic").textContent).toBe("0x010B (PE32)");
+  });
+
+  it("names the deprecated COFF bits instead of dropping them", () => {
+    // 0x8092 = BYTES_REVERSED_HI(0x8000) | BYTES_REVERSED_LO(0x0080) |
+    // AGGRESSIVE_WS_TRIM(0x0010) | EXECUTABLE_IMAGE(0x0002). All three of the
+    // deprecated bits were absent from the table, so a file setting them
+    // rendered the same single chip as 0x0002 alone.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { coffCharacteristics: 0x8092 })));
+    expect(chips("Characteristics")).toEqual([
+      "EXECUTABLE_IMAGE",
+      "AGGRESSIVE_WS_TRIM",
+      "BYTES_REVERSED_LO",
+      "BYTES_REVERSED_HI",
+    ]);
+  });
+
+  it("admits a bit the format does not name", () => {
+    // 0x0042 = EXECUTABLE_IMAGE(0x0002) | 0x0040, which is RESERVED and has no
+    // name to add to the table — so this admission cannot be closed by
+    // completing it. Before this the row rendered exactly as 0x0002 would.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { coffCharacteristics: 0x0042 })));
+    expect(chips("Characteristics")).toEqual(["EXECUTABLE_IMAGE"]);
+  });
+
+  it("spells the unnamed bits, not merely that there were some", () => {
+    // Split from the chip assertion above: a reader compares this against
+    // `dumpbin`, so which bit is unaccounted for is the content of the finding.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE32(), { coffCharacteristics: 0x0042 })));
+    expect(rowValue("Characteristics").textContent).toContain("(unknown bits: 0x0040)");
+  });
+
+  it("admits an unnamed DLL characteristic too — the second call site", () => {
+    // 0x0104 = NX_COMPAT(0x0100) | 0x0004, reserved. Both flag rows share
+    // `decodeFlags`, and a change that reached only one of them would leave the
+    // other silently dropping bits.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE64(), { dllCharacteristics: 0x0104 })));
+    expect(chips("DLL Characteristics")).toEqual(["NX_COMPAT"]);
+    expect(rowValue("DLL Characteristics").textContent).toContain("(unknown bits: 0x0004)");
+  });
+
+  it("admits nothing on a word whose every set bit is named", () => {
+    // The control for the admission, in the direction that matters: a normal
+    // binary must not grow an "(unknown bits)" note. The fixture's own
+    // characteristics are EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE.
+    renderHeaders(parsePE(buildMinimalPE64()));
+    expect(rowValue("Characteristics").textContent).not.toContain("unknown bits");
+    expect(rowValue("DLL Characteristics").textContent).not.toContain("unknown bits");
+  });
+
+  it("still says `none` for a zero word, rather than admitting nothing twice", () => {
+    // `FlagChips` returns early on an empty flag list; that early return had to
+    // learn about the leftover mask, and getting it wrong the other way would
+    // print `none` beside an unnamed set bit.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE64(), { coffCharacteristics: 0 })));
+    expect(rowValue("Characteristics").textContent).toContain("none");
+    expect(rowValue("Characteristics").textContent).not.toContain("unknown bits");
+  });
+
+  it("does NOT say `none` when the only set bits are unnamed", () => {
+    // The pair to the case above, and the one an early return gets wrong: 0x0040
+    // alone names no chip, so a `flags.length === 0` test on its own reports a
+    // file that set a reserved bit as having set nothing.
+    renderHeaders(parsePE(patchHeader(buildMinimalPE64(), { coffCharacteristics: 0x0040 })));
+    expect(rowValue("Characteristics").textContent).not.toContain("none");
+    expect(rowValue("Characteristics").textContent).toContain("(unknown bits: 0x0040)");
+  });
+});

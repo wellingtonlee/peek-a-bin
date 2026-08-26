@@ -1571,6 +1571,40 @@ mistake.
   which asserts printed text against the fixture's own bytes rather than that a table appeared.
   (`peek-a-bin-p0qw`)
 
+- **A number the parser CLAMPED and the raw number it clamped are two true facts that mislead as a
+  pair, and the clamp is DERIVED rather than published.** `numberOfRvaAndSizes` is
+  attacker-controlled, so `parseDataDirectories` reads `Math.min(count, 16, fits)` entries while
+  `optionalHeader.numberOfRvaAndSizes` keeps the raw value — and `HeaderView` printed
+  `Number of RVA and Sizes: 40` directly above a table of SIXTEEN rows. Same class as the
+  Certificate Table's mislabelled offset, in the **adversarial-input** direction: a declared 40 is a
+  crafted-PE tell the parser noticed on purpose, and the one surface a human reads was the one place
+  it disappeared. **`dataDirectoryClamp` (`pe/dataDirectories.ts`) is the one declaration**, read by
+  the panel's row *and* by `analysis/anomalies.ts`, which is where "this file claims something
+  implausible" belongs and is the surface an analyst opens rather than one they must notice.
+  **The `importsTruncated` precedent was considered and deliberately not followed**: that flag
+  exists because a walk cut short at a bound is *shaped exactly like* a complete short list, so
+  nothing downstream can recover it — whereas `dataDirectories.length < numberOfRvaAndSizes` **is**
+  the clamp exactly, over two fields already on `PEFile`. A parser field there would be a second
+  declaration that can disagree with the array it describes. The clamp carries a `reason`, because
+  "the count exceeds the format maximum" and "the file ends mid-table" are different findings and
+  only the second says bytes are missing. Nothing static sees any of it — both numbers are `number`
+  and the corpus never renders. (`peek-a-bin-dd94`)
+
+- **A derived LABEL must come from the value it labels, and a flag row must admit the bits its table
+  does not name.** Two more of the same class in `HeaderView`, both found by reading rather than by
+  a failing test. `Magic` spelled its parenthetical `pe.is64 ? "PE32+" : "PE32"`, and `is64` **is**
+  `magic === 0x020B` — so every third value, e.g. 0x0107 (ROM), would have printed `(PE32)`, where
+  the Machine and Subsystem rows beside it both admit an unmapped value with `(Unknown)`. It is
+  **unreachable through `parsePE` today** (which throws on any other magic), so that half is a guard
+  against a widening there, not a repair — stated rather than implied. `COFF_CHARACTERISTICS` was
+  separately missing all three deprecated bits (0x0010, 0x0080, 0x8000), and neither flag row said
+  anything about a set bit it could not name, so `0x0042` rendered exactly as `0x0002` would.
+  `decodeFlags` now returns the leftover mask and `FlagChips` prints `(unknown bits: 0x…)` — the
+  admission cannot be closed by completing the table instead, since 0x0040 is reserved by the format
+  and has no name to give it. The admission is deliberately **not** a chip: a chip means "the format
+  names this bit", which is the opposite of what it says, and the suite's `chips()` helper reads
+  `span.rounded`. (`peek-a-bin-dd94`)
+
 - **`lineMap` is MANY-TO-ONE, so anything keying a rendered element off an address alone renders one
   per sharing line.** Several emitted C lines routinely carry one instruction address —
   `DisassemblyView` builds an address → `line[]` map for exactly that reason, and `emit.ts`'s

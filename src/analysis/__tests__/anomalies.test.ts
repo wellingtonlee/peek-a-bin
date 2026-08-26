@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
+import { buildMinimalPE32, buildMinimalPE64 } from "../../pe/__tests__/fixtures";
 import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../../pe/constants";
 import { validateChecksum } from "../../pe/metadata";
 import { parsePE } from "../../pe/parser";
@@ -135,5 +135,75 @@ describe("detectAnomalies — attacker-controlled section table", () => {
 
     expect(() => detectAnomalies(pe)).not.toThrow();
     expect(() => detectAnomalies(pe, { checksum: null, sectionEntropies: null })).not.toThrow();
+  });
+});
+
+/**
+ * THE DECLARED DATA DIRECTORY COUNT (peek-a-bin-dd94).
+ *
+ * `numberOfRvaAndSizes` is attacker-controlled and `parseDataDirectories` clamps
+ * what it reads; before this the raw count reached the Headers panel and the
+ * clamp reached nothing at all, so the one deliberate crafted-PE tell the parser
+ * had already noticed was visible on no surface. This pass is the surface an
+ * analyst reads on purpose.
+ *
+ * Both arms of `dataDirectoryClamp` are reached here — a count above the format
+ * maximum, and a file that ends mid-table — and the liveness half is the last
+ * case: an ordinary fixture must raise neither.
+ */
+describe("detectAnomalies — the data directory count the file declares", () => {
+  /** The bead's own measured case: a PE32+ whose optional header claims 40. */
+  const declaring40 = () => parsePE(buildMinimalPE64({ numberOfRvaAndSizes: 40 }));
+
+  it("raises a warning when the file declares more than the format defines", () => {
+    const found = detectAnomalies(declaring40()).find(
+      (a) => a.title === "Data directory count exceeds the format maximum",
+    );
+    expect(found?.severity).toBe("warning");
+  });
+
+  it("names both numbers, so the detail says what was dropped", () => {
+    // Split from the assertion above deliberately: two expectations in one `it`
+    // hide each other, and the severity and the prose fail for different
+    // reasons.
+    const found = detectAnomalies(declaring40()).find(
+      (a) => a.title === "Data directory count exceeds the format maximum",
+    );
+    // 40 declared against the 16 `parsePE` read — asserted against the fixture's
+    // own bytes rather than against a hardcoded sentence.
+    const pe = declaring40();
+    expect(pe.optionalHeader.numberOfRvaAndSizes).toBe(40);
+    expect(pe.dataDirectories.length).toBe(16);
+    expect(found?.detail).toContain("40");
+    expect(found?.detail).toContain("16");
+  });
+
+  it("reports a file that ends mid-table as cut short instead", () => {
+    // The other arm: a plausible count of 16 that the file has no room for. The
+    // reason matters because "the count is out of range" and "the header is
+    // truncated" are different findings, and only the second says bytes are
+    // missing.
+    const full = buildMinimalPE32();
+    const dv0 = new DataView(full);
+    const opt = dv0.getUint32(0x3c, true) + 4 + 20;
+    const buf = full.slice(0, opt + 96 + 3 * 8); // room for three entries
+    new DataView(buf).setUint32(opt + 92, 16, true);
+    const pe = parsePE(buf);
+    expect(pe.dataDirectories.length).toBe(3);
+
+    const found = detectAnomalies(pe).find((a) => a.title === "Data directory table is cut short");
+    expect(found?.severity).toBe("warning");
+  });
+
+  it("raises NEITHER on a file whose table is whole", () => {
+    // The liveness half. A rule that fires on every file is not a finding, and
+    // this is also the control for the panel's parenthetical: an ordinary
+    // fixture declares 16 and holds 16.
+    const pe = parsePE(buildMinimalPE64());
+    expect(pe.optionalHeader.numberOfRvaAndSizes).toBe(pe.dataDirectories.length);
+
+    const found = titles(pe);
+    expect(found).not.toContain("Data directory count exceeds the format maximum");
+    expect(found).not.toContain("Data directory table is cut short");
   });
 });

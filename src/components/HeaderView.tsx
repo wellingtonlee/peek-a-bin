@@ -8,6 +8,7 @@ import {
   RelocTypeNames as RELOC_TYPE_NAMES,
   SubsystemNames as SUBSYSTEM_NAMES,
 } from "../pe/constants";
+import { dataDirectoryClamp } from "../pe/dataDirectories";
 import {
   computeImphash,
   detectOverlay,
@@ -16,12 +17,26 @@ import {
 } from "../pe/metadata";
 import { COPY_FAILED_TITLE, copyText } from "../utils/clipboard";
 
+/**
+ * Every COFF characteristic the PE format names.
+ *
+ * The four deprecated bits — 0x0010 AGGRESSIVE_WS_TRIM, 0x0080 BYTES_REVERSED_LO
+ * and 0x8000 BYTES_REVERSED_HI, which Windows no longer honours — were missing,
+ * so a file setting one rendered no chip for it and said nothing about the
+ * omission. Deprecated is not unnamed: a reader asking what this word claims is
+ * asking about the file, and "the OS ignores this bit" is a different answer
+ * from silence. 0x0040 is genuinely reserved and has no name in the format, so
+ * no table can ever be complete here — which is what {@link decodeFlags}'
+ * leftover mask is for.
+ */
 const COFF_CHARACTERISTICS: Record<number, string> = {
   0x0001: "RELOCS_STRIPPED",
   0x0002: "EXECUTABLE_IMAGE",
   0x0004: "LINE_NUMS_STRIPPED",
   0x0008: "LOCAL_SYMS_STRIPPED",
+  0x0010: "AGGRESSIVE_WS_TRIM",
   0x0020: "LARGE_ADDRESS_AWARE",
+  0x0080: "BYTES_REVERSED_LO",
   0x0100: "32BIT_MACHINE",
   0x0200: "DEBUG_STRIPPED",
   0x0400: "REMOVABLE_RUN_FROM_SWAP",
@@ -29,6 +44,14 @@ const COFF_CHARACTERISTICS: Record<number, string> = {
   0x1000: "SYSTEM",
   0x2000: "DLL",
   0x4000: "UP_SYSTEM_ONLY",
+  0x8000: "BYTES_REVERSED_HI",
+};
+
+/** The three optional-header magics the PE format defines. */
+const OPTIONAL_HEADER_MAGIC: Record<number, string> = {
+  0x010b: "PE32",
+  0x0107: "ROM",
+  0x020b: "PE32+",
 };
 
 const DLL_CHARACTERISTICS: Record<number, string> = {
@@ -45,23 +68,58 @@ const DLL_CHARACTERISTICS: Record<number, string> = {
   0x8000: "TERMINAL_SERVER_AWARE",
 };
 
-function decodeFlags(value: number, table: Record<number, string>): string[] {
+/**
+ * The named bits set in `value`, and — the second return — the bits that are set
+ * and that the table does not name.
+ *
+ * The leftover mask is the whole point of the shape change. Both flag rows used
+ * to drop an unnamed bit on the floor: `0x0040` in a COFF characteristics word
+ * rendered exactly the same chips as `0x0000` beside it would, so the panel
+ * silently claimed the file set nothing it did not recognise. The two rows that
+ * decode a *scalar* — Machine and Subsystem — have always admitted an unmapped
+ * value with `(Unknown)`, and this is the same admission for a bit field. It
+ * cannot be closed by completing the table instead: 0x0040 is reserved by the
+ * format and has no name to give it.
+ */
+function decodeFlags(
+  value: number,
+  table: Record<number, string>,
+): { flags: string[]; unknown: number } {
   const flags: string[] = [];
+  let unknown = value;
   for (const [bit, name] of Object.entries(table)) {
     if (value & Number(bit)) flags.push(name);
+    unknown &= ~Number(bit);
   }
-  return flags;
+  // `>>> 0` because `&= ~bit` works on int32 and the top bit would otherwise
+  // print as a negative number. Every flag word here is 16 bits, so nothing is
+  // truncated by it — contrast `CopyableHex`, where the same spelling on a
+  // 64-bit ImageBase was a defect.
+  return { flags, unknown: unknown >>> 0 };
 }
 
-function FlagChips({ flags }: { flags: string[] }) {
-  if (flags.length === 0) return <span className="text-gray-500">none</span>;
+function FlagChips({ flags, unknown }: { flags: string[]; unknown: number }) {
+  if (flags.length === 0 && unknown === 0) return <span className="text-gray-500">none</span>;
   return (
-    <span className="flex flex-wrap gap-1">
+    <span className="flex flex-wrap gap-1 items-center">
       {flags.map((f) => (
         <span key={f} className="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 text-[10px]">
           {f}
         </span>
       ))}
+      {unknown !== 0 && (
+        // Deliberately NOT a chip: a chip is this panel's spelling for "the
+        // format names this bit and the file set it", and the whole statement
+        // here is that it does not. `chips()` in the suite reads
+        // `span.rounded`, so an admission wearing a chip's clothes would also
+        // start showing up in every flag-list assertion.
+        <span
+          className="text-gray-400 text-[10px]"
+          title="Bits the PE format does not name are set in this word. Reserved bits are normally zero."
+        >
+          (unknown bits: 0x{unknown.toString(16).toUpperCase().padStart(4, "0")})
+        </span>
+      )}
     </span>
   );
 }
@@ -391,6 +449,7 @@ export function HeaderView() {
   const { coffHeader: coff, optionalHeader: opt } = pe;
   const coffFlags = decodeFlags(coff.characteristics, COFF_CHARACTERISTICS);
   const dllFlags = decodeFlags(opt.dllCharacteristics, DLL_CHARACTERISTICS);
+  const dirClamp = dataDirectoryClamp(pe);
   const entryVA = opt.imageBase + opt.addressOfEntryPoint;
 
   const navigateToEntry = () => {
@@ -423,7 +482,7 @@ export function HeaderView() {
             <Row label="Characteristics">
               <CopyableHex value={coff.characteristics} width={4} />
               <div className="mt-1">
-                <FlagChips flags={coffFlags} />
+                <FlagChips flags={coffFlags.flags} unknown={coffFlags.unknown} />
               </div>
             </Row>
           </tbody>
@@ -435,9 +494,26 @@ export function HeaderView() {
         <h2 className="text-sm font-semibold text-gray-200 mb-2">Optional Header</h2>
         <table>
           <tbody>
+            {/*
+              The label comes from the MAGIC, not from `pe.is64`. `is64` is
+              `magic === 0x020B`, so the old ternary printed `(PE32)` for every
+              value that is not PE32+ — including 0x0107, a ROM image, which is
+              neither. That is a derived label claiming more than the value
+              supports, the class the Machine and Subsystem rows above and below
+              already refuse by admitting `(Unknown)`.
+
+              UNREACHABLE THROUGH `parsePE` TODAY, and stated rather than
+              implied: the parser throws on any magic but 0x010B and 0x020B, so
+              nothing that reaches this panel can carry a third value. This is a
+              guard against a widening there, not a repair of something on
+              screen — which is why the row is spelled the way the two rows that
+              can be wrong are spelled, rather than given a special case.
+            */}
             <Row label="Magic">
               <CopyableHex value={opt.magic} width={4} />{" "}
-              <span className="text-gray-400">({pe.is64 ? "PE32+" : "PE32"})</span>
+              <span className="text-gray-400">
+                ({OPTIONAL_HEADER_MAGIC[opt.magic] ?? "Unknown"})
+              </span>
             </Row>
             <Row label="Entry Point">
               <button
@@ -476,10 +552,45 @@ export function HeaderView() {
             <Row label="DLL Characteristics">
               <CopyableHex value={opt.dllCharacteristics} width={4} />
               <div className="mt-1">
-                <FlagChips flags={dllFlags} />
+                <FlagChips flags={dllFlags.flags} unknown={dllFlags.unknown} />
               </div>
             </Row>
-            <Row label="Number of RVA and Sizes">{opt.numberOfRvaAndSizes}</Row>
+            {/*
+              THE DECLARED COUNT AND THE TABLE BELOW IT ARE THE SAME PAIR AS THE
+              Certificate Table row above: neither number is false alone. The raw
+              count is what the file says, and `parseDataDirectories` clamps what
+              it reads to `Math.min(count, 16, fits)` because the field is
+              attacker-controlled — so a PE32+ declaring 40 printed
+              `Number of RVA and Sizes: 40` directly above a table of SIXTEEN
+              rows, with nothing on screen saying so. This is the
+              adversarial-input direction of it: a count of 40 is a crafted-PE
+              tell the parser noticed deliberately, and the panel was the one
+              surface a human reads and the one place it disappeared.
+
+              Spelled in the panel's own muted-parenthetical idiom — `0x014C
+              (x86)`, `0x010B (PE32)`, `(file offset)` — rather than as a banner,
+              because the reader who needs it is the one already looking at this
+              number. `analysis/anomalies.ts` raises the same fact for the reader
+              who is not: the Anomalies tab is where "this file claims something
+              implausible" belongs, and the two surfaces answer different
+              questions. Both derive the fact from `dataDirectoryClamp`, which is
+              the one declaration of it. (peek-a-bin-dd94)
+            */}
+            <Row label="Number of RVA and Sizes">
+              {opt.numberOfRvaAndSizes}
+              {dirClamp && (
+                <span
+                  className="text-gray-400 ml-2"
+                  title={
+                    dirClamp.reason === "short-header"
+                      ? `The declared ${dirClamp.declared} entries do not fit in the file, so the table below holds the ${dirClamp.present} that do.`
+                      : `The PE format defines sixteen data directories. This file declares ${dirClamp.declared}, so the table below holds the ${dirClamp.present} the format allows.`
+                  }
+                >
+                  (clamped to {dirClamp.present})
+                </span>
+              )}
+            </Row>
           </tbody>
         </table>
       </section>
