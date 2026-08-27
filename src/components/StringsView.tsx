@@ -100,6 +100,25 @@ export function StringsView() {
           {filtered.length.toLocaleString()}
           {filterInput ? ` / ${allStrings.length.toLocaleString()}` : ""} strings
         </span>
+        {/* THE ADMISSION GOES ON THE COUNT, because the count is what it
+            qualifies — the same placement as the Resources pane's, and for the
+            same reason: the scan's bounds are properties of the WALK, not of any
+            one string, so there is no row to mark. A list also cannot carry
+            `TRUNCATION_MARKER` the way a value can; an invented entry would be a
+            falsehood inside a Map that feeds the xref maps and the disassembly's
+            inline comments.
+
+            This is the one narrowing in the parser that ORDINARY input reaches:
+            `SECTION_SCAN_LIMIT` is 1 MiB per section, and any large real binary
+            has more than that in `.rdata` (peek-a-bin-2py5). */}
+        {pe.stringScan && (
+          <span
+            className="text-yellow-400 text-[10px]"
+            title={`The string scan stopped short in ${pe.stringScan.clippedSections.join(", ")}: ${pe.stringScan.unscannedBytes.toLocaleString()} bytes the file holds were never examined. The count beside this describes what was found, not what the file contains.`}
+          >
+            Incomplete &mdash; {pe.stringScan.unscannedBytes.toLocaleString()} bytes unscanned
+          </span>
+        )}
         <div className="flex-1" />
         {!stringXrefs ? (
           <span className="text-[10px] text-gray-500 flex items-center gap-1">

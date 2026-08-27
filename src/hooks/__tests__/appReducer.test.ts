@@ -472,6 +472,32 @@ describe("appReducer — analysis results", () => {
     expect(next.peFile).not.toBe(loaded.peFile);
   });
 
+  it("SET_STRINGS carries what the scan did not read, and omits it otherwise", () => {
+    // `stringScan` is the only channel for the fact that the string list is a
+    // LOWER BOUND — the scan happens in the worker and this action is what
+    // crosses back with it. Spread rather than assigned, so an ordinary file
+    // leaves the field ABSENT rather than writing `undefined` over it: presence
+    // is the admission (peek-a-bin-2py5).
+    const loaded = appReducer(initialState, { type: "SET_PE_FILE", peFile: peFile() });
+    const clipped = appReducer(loaded, {
+      type: "SET_STRINGS",
+      strings: new Map([[0x1000, "hello"]]),
+      stringTypes: new Map(),
+      stringScan: { clippedSections: [".rdata"], unscannedBytes: 4096 },
+    });
+    expect(clipped.peFile?.stringScan).toEqual({
+      clippedSections: [".rdata"],
+      unscannedBytes: 4096,
+    });
+
+    const whole = appReducer(loaded, {
+      type: "SET_STRINGS",
+      strings: new Map([[0x1000, "hello"]]),
+      stringTypes: new Map(),
+    });
+    expect("stringScan" in (whole.peFile as object)).toBe(false);
+  });
+
   it("SET_XREFS keeps the existing dataXrefs when the action omits them", () => {
     const first = appReducer(initialState, {
       type: "SET_XREFS",

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { unsupportedArchMessage } from "../../disasm/arch";
 import { type SweptInsn, sweepX86 } from "../../disasm/linearSweep";
 import type { Instruction, Xref } from "../../disasm/types";
-import type { RuntimeFunction } from "../../pe/types";
+import type { RuntimeFunction, SectionHeader } from "../../pe/types";
 // The far end of the wire. Importing it here is what lets a test post a request
 // through the client and then answer it with the real dispatch, in the order a
 // serially-servicing worker would see the messages — which is the only way to
@@ -2639,4 +2639,61 @@ describe("DisasmWorkerClient — a decompile request carries one .pdata row", ()
     }
     return pending;
   }
+});
+
+/**
+ * peek-a-bin-2py5 — what the string scan did NOT read crosses the hop.
+ *
+ * `dispatch.test.ts` pins the worker's half: `extractStrings` reports the bytes
+ * no pass looked at. What only this path can show is that the client carries it
+ * to its caller, because the client is where the reply is unpacked — the strings
+ * and their types are rebuilt into Maps there, and a third field is exactly the
+ * kind of thing an unpacker drops silently. If it does, `App.tsx` stores the
+ * strings and the Strings tab prints their count as a fact about the file.
+ *
+ * Driven with the real client answered by the real dispatch. `SECTION_SCAN_LIMIT`
+ * is 1 MiB per section, so the fixture is a section just over that — the
+ * narrowing an ordinary large binary meets, not a crafted one.
+ */
+describe("DisasmWorkerClient — extractStrings carries the scan's coverage back", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const section = (bytes: number) => [
+    {
+      name: ".rdata",
+      virtualAddress: 0x1000,
+      virtualSize: bytes,
+      pointerToRawData: 0,
+      sizeOfRawData: bytes,
+      characteristics: 0x40000040,
+    } as unknown as SectionHeader,
+  ];
+
+  async function extract(bytes: number) {
+    const { client, worker } = await loadClient();
+    const buffer = new ArrayBuffer(bytes);
+    const pending = client.extractStrings(buffer, section(bytes), 0x400000, false);
+    const msg = worker.received[0];
+    worker.reply(
+      worker.posted[0].id,
+      await dispatch("extractStrings", msg.args, createWorkerState(Promise.resolve())),
+    );
+    return pending;
+  }
+
+  it("hands the caller the sections a bound cut short", async () => {
+    const over = 0x1000;
+    const result = await extract(1024 * 1024 + over);
+    expect(result.stringScan?.clippedSections).toEqual([".rdata"]);
+    expect(result.stringScan?.unscannedBytes).toBe(over);
+  });
+
+  it("hands the caller nothing when the scan read everything", async () => {
+    // The control, and the half that matters on ordinary files: a client that
+    // synthesised a coverage object would put a warning on every binary.
+    const result = await extract(0x400);
+    expect("stringScan" in result).toBe(false);
+  });
 });

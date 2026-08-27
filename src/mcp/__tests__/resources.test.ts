@@ -301,9 +301,12 @@ describe("pe://{fileId}/strings", () => {
     } as never);
     const strings = await body(captureResources(session).get("pe-strings")!, "strings");
 
-    expect(strings).toEqual([
-      { address: "0x140002000", value: "Hello", type: "ascii", xrefCount: 0, xrefs: [] },
-    ]);
+    // The list is under a key, and `incomplete` is absent for a scan that
+    // covered everything — `toEqual` on the whole document, so a stray key fails
+    // here.
+    expect(strings).toEqual({
+      strings: [{ address: "0x140002000", value: "Hello", type: "ascii", xrefCount: 0, xrefs: [] }],
+    });
   });
 
   it("carries an explicit utf16le type through", async () => {
@@ -314,9 +317,35 @@ describe("pe://{fileId}/strings", () => {
     } as never);
     const strings = await body(captureResources(session).get("pe-strings")!, "strings");
 
-    expect(strings).toEqual([
-      { address: "0x140002000", value: "Wide", type: "utf16le", xrefCount: 0, xrefs: [] },
-    ]);
+    expect(strings).toEqual({
+      strings: [
+        { address: "0x140002000", value: "Wide", type: "utf16le", xrefCount: 0, xrefs: [] },
+      ],
+    });
+  });
+
+  it("says when the scan did not examine every byte the file holds", async () => {
+    // THE ONE ADMISSION ORDINARY INPUT REACHES: `SECTION_SCAN_LIMIT` is 1 MiB
+    // per section, so any large real binary is scanned short — every other row
+    // in this family needs a crafted file (peek-a-bin-2py5).
+    const pe = samplePE();
+    const { session } = stubSession({
+      pe: { ...pe, stringScan: { clippedSections: [".rdata"], unscannedBytes: 4096 } },
+      stringMap: new Map([[0x140002000, "Hello"]]),
+      stringTypes: new Map(),
+    } as never);
+    const doc = (await body(
+      captureResources(session).get("pe-strings")!,
+      "strings",
+    )) as unknown as {
+      incomplete?: string;
+      strings: unknown[];
+    };
+
+    expect(doc.incomplete).toContain(".rdata");
+    expect(doc.incomplete).toContain("LOWER BOUND");
+    // The list is still there.
+    expect(doc.strings).toHaveLength(1);
   });
 
   it("reports which code addresses reference each string (peek-a-bin-0d0)", async () => {
@@ -332,11 +361,11 @@ describe("pe://{fileId}/strings", () => {
       stringTypes: new Map(),
       stringXrefs: new Map([[0x140002000, [0x140001010, 0x140001040]]]),
     } as never);
-    const strings = (await body(captureResources(session).get("pe-strings")!, "strings")) as {
-      value: string;
-      xrefCount: number;
-      xrefs: string[];
-    }[];
+    const strings = (
+      (await body(captureResources(session).get("pe-strings")!, "strings")) as {
+        strings: { value: string; xrefCount: number; xrefs: string[] }[];
+      }
+    ).strings;
 
     expect(strings[0]).toMatchObject({
       value: "Used",

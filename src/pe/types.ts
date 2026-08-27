@@ -304,6 +304,52 @@ export interface ResourceTree {
   truncated?: boolean;
 }
 
+/**
+ * What `extractStrings` did NOT look at.
+ *
+ * THE ONE NARROWING IN THIS PARSER THAT ORDINARY INPUT REACHES. Every other
+ * admission here — a cut-short import table, a resource walk that ran out of
+ * budget, a name past `readCString`'s cap — needs a crafted or absurd file. This
+ * one needs only a section with more than `SECTION_SCAN_LIMIT` (1 MiB) of raw
+ * data in it. So the Strings tab, the MCP resource and the exported report were
+ * all stating a clipped list's length as a fact about the file, without the file
+ * having to be hostile (`peek-a-bin-2py5`).
+ *
+ * HOW MUCH OF THAT IS MEASURED, since it is the reason this row was raised above
+ * the others: the 1 MiB bound is in the code. That a real image reaches it is
+ * INFERRED — `MAX_STRING_SCAN_BYTES`' own docstring puts a 253 MiB image's
+ * `.rdata`/`.data` at "a few MiB", and that figure is quoted rather than
+ * re-measured. **No binary on this machine has a data section anywhere near it**:
+ * the largest raw section across the six corpus images is 112,640 bytes
+ * (`t64-arm.exe`, measured at `12ff998`), so all six report nothing and the
+ * population here is a fixture.
+ *
+ * It is a property of the SCAN, not of any one string: a list cannot carry
+ * `TRUNCATION_MARKER` the way a value can, because an invented entry would be a
+ * falsehood inside a Map that feeds the xref maps and the disassembly's inline
+ * comments (`peek-a-bin-tmo9`'s argument for `importsTruncated`). So it is a
+ * flag, the counts that go beside it, and one sentence out of
+ * `parseAdmissions`.
+ */
+export interface StringScanCoverage {
+  /**
+   * The sections a bound cut short, in the order they were scanned. Never empty
+   * — the whole object is absent when the scan was complete.
+   *
+   * Names rather than indices, because this is prose material; a crafted image
+   * with two `.rdata` sections may name one twice, which is honest.
+   */
+  clippedSections: string[];
+  /**
+   * Bytes the FILE HOLDS, inside those sections, that no pass looked at.
+   *
+   * Excludes bytes a section header declares and the buffer does not contain: a
+   * truncated image is a different fact, and reporting it here would flag every
+   * carved sample as an unscanned one.
+   */
+  unscannedBytes: number;
+}
+
 export interface PEFile {
   buffer: ArrayBuffer;
   is64: boolean;
@@ -346,5 +392,15 @@ export interface PEFile {
   resources?: ResourceTree;
   strings: Map<number, string>; // VA → string from .rdata
   stringTypes: Map<number, "ascii" | "utf16le">;
+  /**
+   * Set only when the string scan was cut short — see {@link StringScanCoverage}.
+   *
+   * `parsePE` never sets it, because `parsePE` does not scan for strings: it
+   * leaves `strings` empty and the `extractStrings` RPC fills both. Absent
+   * therefore means EITHER "the scan has not run" OR "it covered everything",
+   * and the distinction is not this field's to make — `analysisPhase` is what
+   * says whether the scan has happened.
+   */
+  stringScan?: StringScanCoverage;
   certificate?: import("./authenticode").CertificateInfo;
 }

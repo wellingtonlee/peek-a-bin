@@ -38,6 +38,7 @@ import type {
   RelocationBlock,
   RelocationEntry,
   SectionHeader,
+  StringScanCoverage,
   TLSDirectory,
 } from "./types";
 import { normalizeOptionalHeader } from "./types";
@@ -959,25 +960,69 @@ const SECTION_SCAN_LIMIT = 1024 * 1024;
  */
 export const MAX_STRING_SCAN_BYTES = 64 * 1024 * 1024;
 
-/** Bytes left in one `extractStrings` call's whole-image scan budget. */
+/**
+ * Bytes left in one `extractStrings` call's whole-image scan budget, and HOW FAR
+ * INTO EACH SECTION ANY PASS ACTUALLY GOT.
+ *
+ * The second half is the admission's raw material, and it has to be collected
+ * here because {@link scanEndFor} is the one place both bounds apply. `reach` is
+ * keyed on the `SectionHeader` OBJECT rather than on its name: a crafted image
+ * may declare several sections called `.rdata`, and two of them are two
+ * populations of bytes.
+ */
 interface ScanBudget {
   remaining: number;
+  /**
+   * Per section handed to a pass: the furthest offset any pass reached, and the
+   * furthest it could have reached. `available` excludes bytes the FILE DOES NOT
+   * HOLD — a section table describing more than the buffer contains is a
+   * truncated image, a different fact from a scan that was cut short, and
+   * folding the two would report every carved sample as an unscanned one.
+   */
+  reach: Map<SectionHeader, { scanned: number; available: number }>;
 }
 
 /**
  * How far into `section` a scan may read, given what is left of the budget.
- * Decrements the budget by what it hands out, so the three passes below share
- * one total rather than each getting their own.
+ * Decrements the budget by what it hands out, so the four passes below share one
+ * total rather than each getting their own — and records the reach, since a pass
+ * cut short here is the only place that fact exists.
  */
 function scanEndFor(view: DataView, section: SectionHeader, budget: ScanBudget): number {
   const start = section.pointerToRawData;
-  const end = Math.min(
-    start + Math.min(section.sizeOfRawData, SECTION_SCAN_LIMIT),
-    view.byteLength,
-  );
+  const available = Math.max(0, Math.min(start + section.sizeOfRawData, view.byteLength) - start);
+  const end = start + Math.min(available, SECTION_SCAN_LIMIT);
   const allowed = Math.max(0, Math.min(end - start, budget.remaining));
   budget.remaining -= allowed;
+
+  // The MAXIMUM across passes, not the last or the sum: three passes read the
+  // same section, and what a reader needs is the bytes NO pass ever looked at.
+  // Summing would treble-count and taking the last would report a pass that
+  // found the budget already spent as though the section were never read.
+  const seen = budget.reach.get(section);
+  if (seen === undefined) budget.reach.set(section, { scanned: allowed, available });
+  else seen.scanned = Math.max(seen.scanned, allowed);
+
   return start + allowed;
+}
+
+/**
+ * What the string scan did NOT look at, or `undefined` when it covered every
+ * byte it was given.
+ *
+ * Undefined-rather-than-empty is `PEFile.importsTruncated`'s rule: a value built
+ * anywhere else cannot claim completeness by accident, and the presence of the
+ * object *is* the admission.
+ */
+function stringScanCoverage(budget: ScanBudget): StringScanCoverage | undefined {
+  const clipped: string[] = [];
+  let unscannedBytes = 0;
+  for (const [section, seen] of budget.reach) {
+    if (seen.scanned >= seen.available) continue;
+    clipped.push(section.name);
+    unscannedBytes += seen.available - seen.scanned;
+  }
+  return clipped.length > 0 ? { clippedSections: clipped, unscannedBytes } : undefined;
 }
 
 /**
@@ -1506,7 +1551,16 @@ export function extractStrings(
   sections: SectionHeader[],
   imageBase: number,
   is64?: boolean,
-): { strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> } {
+): {
+  strings: Map<number, string>;
+  stringTypes: Map<number, "ascii" | "utf16le">;
+  /**
+   * Set only when a bound cut a scan short — see {@link StringScanCoverage}.
+   * Every caller that stores the strings must store this beside them, or the
+   * count it goes on to print is a length stated as a fact about the file.
+   */
+  stringScan?: StringScanCoverage;
+} {
   const view = new DataView(buffer);
   const strings = new Map<number, string>();
   const stringTypes = new Map<number, "ascii" | "utf16le">();
@@ -1515,7 +1569,7 @@ export function extractStrings(
   // MAX_STRING_SCAN_BYTES. A per-pass budget would multiply by four, and a
   // per-section one is what was already there and is what the section count
   // multiplies out.
-  const budget: ScanBudget = { remaining: MAX_STRING_SCAN_BYTES };
+  const budget: ScanBudget = { remaining: MAX_STRING_SCAN_BYTES, reach: new Map() };
 
   for (const sec of sections) {
     if (dataSectionNames.has(sec.name)) {
@@ -1585,5 +1639,6 @@ export function extractStrings(
     }
   }
 
-  return { strings, stringTypes };
+  const stringScan = stringScanCoverage(budget);
+  return stringScan ? { strings, stringTypes, stringScan } : { strings, stringTypes };
 }

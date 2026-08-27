@@ -145,6 +145,24 @@ describe("generateMarkdownReport — what the parse did not read whole", () => {
     expect(md).not.toContain("incomplete");
   });
 
+  it("marks the Strings section when the scan did not read every byte", () => {
+    // The narrowing a real binary meets, on a file the user keeps: an exported
+    // report stated the string count as a fact about the image
+    // (peek-a-bin-2py5).
+    const pe = parsePE(buildMinimalPE32());
+    const md = reportFor({
+      ...pe,
+      strings: new Map([[0x402000, "kernel32.dll"]]),
+      stringScan: { clippedSections: [".rdata"], unscannedBytes: 65_536 },
+    } as PEFile);
+
+    expect(md).toContain("**This parse was not complete.**");
+    expect(md).toContain("## Strings (incomplete — see Summary)");
+    expect(md).toContain("65,536");
+    // The count is qualified, never withheld.
+    expect(md).toContain("| Strings | 1 |");
+  });
+
   it("clips a long string with the parser's marker, not a bare ellipsis", () => {
     const pe = parsePE(buildMinimalPE32());
     const long = "A".repeat(200);

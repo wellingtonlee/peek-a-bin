@@ -680,3 +680,46 @@ describe("StringsView — what this environment can and cannot see", () => {
     }
   });
 });
+
+/**
+ * THE ONE PARSER NARROWING ORDINARY INPUT REACHES, on the surface that states
+ * the count.
+ *
+ * `SECTION_SCAN_LIMIT` is 1 MiB per section and `MAX_STRING_SCAN_BYTES` 64 MiB
+ * per call, so any real binary with more than a megabyte of `.rdata` is scanned
+ * short — and this header printed the resulting list's length with nothing beside
+ * it. Every other admission in this parser needs a crafted file
+ * (`peek-a-bin-2py5`).
+ *
+ * The state is set directly rather than by scanning a >1 MiB fixture: what is
+ * under test here is the header, and `pe/__tests__/malformed.test.ts` is where
+ * the bound itself is driven for real.
+ */
+describe("StringsView — a scan that did not read everything", () => {
+  it("qualifies the count, and names the bytes it never looked at", () => {
+    const pe = peWithStrings({ rdata: [ascii("kernel32.dll")] });
+    renderStrings({
+      ...pe,
+      stringScan: { clippedSections: [".rdata"], unscannedBytes: 65_536 },
+    });
+
+    // The count is still printed — an admission that withheld the answer would
+    // be the mistake `analysisNotice`'s timeout kind exists to avoid.
+    expect(screen.getByText("1 strings")).toBeTruthy();
+    const notice = screen.getByText(/Incomplete/);
+    expect(notice.textContent).toContain("65,536 bytes unscanned");
+    // The sections are in the tooltip rather than the strip, which has a fixed
+    // height and a filter box beside it.
+    expect(notice.getAttribute("title")).toContain(".rdata");
+  });
+
+  it("says nothing for a scan that covered everything", () => {
+    // THE CONTROL: `stringScan` is absent for every ordinary file, and a rule
+    // that marked them all would put a warning on every binary the tool opens.
+    const pe = peWithStrings({ rdata: [ascii("kernel32.dll")] });
+    expect(pe.stringScan).toBeUndefined();
+    renderStrings(pe);
+    expect(screen.getByText("1 strings")).toBeTruthy();
+    expect(screen.queryByText(/Incomplete/)).toBeNull();
+  });
+});

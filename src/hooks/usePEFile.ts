@@ -4,7 +4,7 @@ import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
 import type { DetectPass } from "../disasm/functionDetect";
 import type { DisasmFunction } from "../disasm/types";
 import type { AIScanFinding, BatchRenameResult } from "../llm/types";
-import type { PEFile } from "../pe/types";
+import type { PEFile, StringScanCoverage } from "../pe/types";
 
 export type ViewTab =
   | "disassembly"
@@ -292,6 +292,13 @@ export type AppAction =
       type: "SET_STRINGS";
       strings: Map<number, string>;
       stringTypes: Map<number, "ascii" | "utf16le">;
+      /**
+       * What the scan did not look at, when a bound cut it short. Optional
+       * because it is absent for every ordinary file, and it must be carried
+       * here rather than derived later: the scan happens in the worker and this
+       * action is the only thing that crosses back with it (`peek-a-bin-2py5`).
+       */
+      stringScan?: StringScanCoverage;
     }
   | {
       type: "SET_XREFS";
@@ -606,7 +613,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       if (!state.peFile) return state;
       return {
         ...state,
-        peFile: { ...state.peFile, strings: action.strings, stringTypes: action.stringTypes },
+        peFile: {
+          ...state.peFile,
+          strings: action.strings,
+          stringTypes: action.stringTypes,
+          // Spread rather than assigned, so a complete scan leaves the field
+          // ABSENT rather than writing `undefined` over it — the presence of the
+          // object is the admission, `PEFile.importsTruncated`'s rule.
+          ...(action.stringScan ? { stringScan: action.stringScan } : {}),
+        },
       };
     }
     case "SET_XREFS":

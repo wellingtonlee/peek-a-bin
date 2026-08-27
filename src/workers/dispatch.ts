@@ -515,7 +515,7 @@ export async function dispatch(
       // ./blobSource.ts. This is also the one parser-derived answer that comes
       // back over this RPC, so it must stay reachable for every architecture,
       // including one no decoder here supports (peek-a-bin-8ru3).
-      const { strings, stringTypes } = extractStrings(
+      const { strings, stringTypes, stringScan } = extractStrings(
         await bytesOf(args.source),
         args.sections as SectionHeader[],
         args.imageBase,
@@ -524,6 +524,12 @@ export async function dispatch(
       return {
         strings: Array.from(strings.entries()),
         stringTypes: Array.from(stringTypes.entries()),
+        // WHAT THE SCAN DID NOT LOOK AT, and it has to cross the wire because
+        // this is where the scan happens. Omitted when the scan was complete, so
+        // a reply cannot claim a narrowing that did not occur — and a caller
+        // that drops it goes on to print the string count as a fact about the
+        // file (peek-a-bin-2py5).
+        ...(stringScan ? { stringScan } : {}),
       };
     }
 

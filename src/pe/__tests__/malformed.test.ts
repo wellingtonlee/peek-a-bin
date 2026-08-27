@@ -1573,9 +1573,81 @@ describe("malformed PE handling", () => {
         data.set(new TextEncoder().encode("HelloWorld\0SecondString\0"), 0);
         const buf = buildMinimalPE32({ sections: [rdata(data)] });
         const pe = parsePE(buf);
-        const { strings } = extractStrings(buf, pe.sections, 0x400000, false);
+        const { strings, stringScan } = extractStrings(buf, pe.sections, 0x400000, false);
         expect([...strings.values()]).toContain("HelloWorld");
         expect([...strings.values()]).toContain("SecondString");
+        // …AND SAYS NOTHING. The control for the three rows below: `stringScan`
+        // absent is what an ordinary file must produce, or the Strings tab
+        // carries a warning on every binary the tool opens (peek-a-bin-2py5).
+        expect(stringScan).toBeUndefined();
+      });
+
+      /**
+       * WHAT THE SCAN DID NOT LOOK AT, WHICH NOTHING RECORDED AT ALL.
+       *
+       * The two bounds above are right and the list they produce was presented as
+       * complete on three surfaces — the Strings tab's count, `pe://{id}/strings`
+       * and the exported report's summary row. Unlike every other narrowing in
+       * this parser, the per-section one is reached by ORDINARY input: any real
+       * binary with more than `SECTION_SCAN_LIMIT` (1 MiB) in a data section is
+       * scanned short (peek-a-bin-2py5).
+       */
+      describe("and what it says about the bytes it did not read", () => {
+        it("names the section and counts the bytes when the per-section cap bites", () => {
+          // 1 MiB + 64 KiB of `.rdata`: the section the tool cannot finish, at
+          // the smallest size that reaches the bound.
+          const over = 64 * 1024;
+          const data = new Uint8Array(1024 * 1024 + over);
+          const buf = buildMinimalPE32({ sections: [rdata(data)] });
+          const pe = parsePE(buf);
+          const { stringScan } = extractStrings(buf, pe.sections, 0x400000, false);
+
+          expect(stringScan?.clippedSections).toEqual([".rdata"]);
+          // Derived from the fixture, not restated: the raw size a section header
+          // gets is the data's length rounded up to the file alignment, so the
+          // shortfall is computed from `sizeOfRawData` rather than from `over`.
+          expect(stringScan?.unscannedBytes).toBe(pe.sections[0].sizeOfRawData - 1024 * 1024);
+          expect(stringScan?.unscannedBytes).toBeGreaterThanOrEqual(over);
+        });
+
+        it("says so when the whole-image budget runs out instead", () => {
+          // The other bound, reachable cheaply for the reason the row above this
+          // describe explains: 400 sections all scanning from offset 0 ask for
+          // 400x the file, so the 64 MiB budget is spent partway through and
+          // every later section goes unread.
+          const { buf, pe } = overlappingSections(400);
+          const { stringScan } = extractStrings(buf, pe.sections, 0x400000, false);
+
+          expect(stringScan).toBeDefined();
+          expect(stringScan!.clippedSections.length).toBeGreaterThan(1);
+          expect(stringScan!.unscannedBytes).toBeGreaterThan(0);
+          // A SECTION SOME PASS READ WHOLE IS NOT REPORTED, which is what makes
+          // the recorded reach the MAXIMUM across passes rather than the last
+          // one's. Three passes read each data section; by the time the third
+          // reaches an early section the budget is spent, so "the last pass got
+          // nothing" would report a section the first pass read completely.
+          // Measured here at 97 of 400 (this assertion fails at ~400 under that
+          // reading).
+          expect(stringScan!.clippedSections.length).toBeLessThan(pe.sections.length / 2);
+        });
+
+        it("does NOT report bytes the file does not hold", () => {
+          // A section header describing more raw data than the buffer contains is
+          // a TRUNCATED IMAGE — a carved sample, a part-finished download — and a
+          // different fact from a scan that was cut short. Folding the two would
+          // put "bytes unscanned" on every truncated file, over bytes that are
+          // not there to scan. `available` is clamped to the buffer for exactly
+          // this row.
+          const data = new Uint8Array(0x100);
+          data.set(new TextEncoder().encode("HelloWorld\0"), 0);
+          const buf = buildMinimalPE32({ sections: [rdata(data)] });
+          const pe = parsePE(buf);
+          pe.sections[0].sizeOfRawData = 0x8000; // far past the end of the buffer
+
+          const { strings, stringScan } = extractStrings(buf, pe.sections, 0x400000, false);
+          expect([...strings.values()]).toContain("HelloWorld");
+          expect(stringScan).toBeUndefined();
+        });
       });
     });
 

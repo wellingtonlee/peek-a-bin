@@ -696,8 +696,13 @@ export default function App() {
       dispatch({ type: "SET_ANALYSIS_PHASE", phase: "extracting-strings" });
       disasmWorker
         .extractStrings(buffer, pe.sections, pe.optionalHeader.imageBase, pe.is64)
-        .then(({ strings, stringTypes }) => {
-          dispatch({ type: "SET_STRINGS", strings, stringTypes });
+        .then(({ strings, stringTypes, stringScan }) => {
+          // `stringScan` says which sections a bound cut the scan short in. It
+          // has to be carried through with the strings: the Strings tab, the MCP
+          // resource and the exported report all print the list's LENGTH, and a
+          // 1 MiB-per-section clip is reached by any large real binary
+          // (peek-a-bin-2py5).
+          dispatch({ type: "SET_STRINGS", strings, stringTypes, stringScan });
         })
         // Non-fatal: the PE is loaded and browsable without extracted strings.
         .catch((err) => console.error("[peek-a-bin] string extraction failed", err));

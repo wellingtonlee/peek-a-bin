@@ -11,6 +11,7 @@ export type AdmissionSubject =
   | "exports"
   | "resources"
   | "certificate"
+  | "strings"
   | "data-directories";
 
 export interface ParseAdmission {
@@ -56,9 +57,7 @@ export interface ParseAdmission {
  * **EMPTY MEANS THE PARSE WAS WHOLE**, so a caller may test `length` — the array
  * is never populated with "everything is fine" rows.
  *
- * NOT COVERED, and stated rather than implied: `extractStrings`' per-call
- * `MAX_STRING_SCAN_BYTES` budget (the string map carries no flag at all, and
- * plumbing one would cross a worker RPC and `AppState`), `parseDebugDirectory`'s
+ * NOT COVERED, and stated rather than implied: `parseDebugDirectory`'s
  * `DebugDirectory.truncated` and `DebugInfo.pdbPathTruncated` (that reader is
  * called separately, by the one panel that renders it, and reaches neither
  * consumer here), the 256-callback TLS cap, and every `authenticode.ts`
@@ -119,6 +118,22 @@ export function parseAdmissions(pe: PEFile): ParseAdmission[] {
         "The file declares a certificate table that could not be read, so this image is NOT " +
         "known to be unsigned — the certificate lies outside the file, or its structure did " +
         "not parse.",
+    });
+  }
+
+  // THE ONE ROW ORDINARY INPUT REACHES. `SECTION_SCAN_LIMIT` is 1 MiB per
+  // section, so any large real binary is clipped — every other admission here
+  // needs a crafted or absurd file. See `StringScanCoverage` (peek-a-bin-2py5).
+  if (pe.stringScan) {
+    const { clippedSections, unscannedBytes } = pe.stringScan;
+    out.push({
+      subject: "strings",
+      sentence:
+        `The string scan did not examine every byte the file holds: it stopped short in ` +
+        `${clippedSections.join(", ")}, leaving ${unscannedBytes.toLocaleString()} bytes ` +
+        `unscanned. The ${pe.strings.size.toLocaleString()} ` +
+        `${pe.strings.size === 1 ? "string" : "strings"} reported are a LOWER BOUND. This is a ` +
+        `bound on the SCAN and is reached by ordinary large binaries, not only by crafted ones.`,
     });
   }
 

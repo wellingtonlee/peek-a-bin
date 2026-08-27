@@ -17,7 +17,7 @@ import type { DetectPass, ImageBounds } from "../disasm/functionDetect";
 import { jumpTableTargets } from "../disasm/seeds";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
-import type { SectionHeader } from "../pe/types";
+import type { SectionHeader, StringScanCoverage } from "../pe/types";
 import { BlobSourceRegistry } from "./blobSource";
 import { REQUEST_TIMEOUT_MS, WorkerTimeoutError } from "./requestTimeout";
 import { prepareBinaryArgs } from "./transfer";
@@ -506,17 +506,27 @@ class DisasmWorkerClient {
     sections: SectionHeader[],
     imageBase: number,
     is64?: boolean,
-  ): Promise<{ strings: Map<number, string>; stringTypes: Map<number, "ascii" | "utf16le"> }> {
-    const result: { strings: [number, string][]; stringTypes: [number, "ascii" | "utf16le"][] } =
-      await this.send("extractStrings", {
-        source: this.sourceBlobs.sourceFor(buffer),
-        sections,
-        imageBase,
-        is64,
-      });
+  ): Promise<{
+    strings: Map<number, string>;
+    stringTypes: Map<number, "ascii" | "utf16le">;
+    stringScan?: StringScanCoverage;
+  }> {
+    const result: {
+      strings: [number, string][];
+      stringTypes: [number, "ascii" | "utf16le"][];
+      stringScan?: StringScanCoverage;
+    } = await this.send("extractStrings", {
+      source: this.sourceBlobs.sourceFor(buffer),
+      sections,
+      imageBase,
+      is64,
+    });
     return {
       strings: new Map(result.strings),
       stringTypes: new Map(result.stringTypes),
+      // Carried, not dropped: the caller stores these strings and then prints
+      // their count. Absent when the scan was whole (peek-a-bin-2py5).
+      ...(result.stringScan ? { stringScan: result.stringScan } : {}),
     };
   }
 

@@ -339,6 +339,40 @@ describe("dispatch — extractStrings", () => {
     expect(Array.isArray(strings)).toBe(true);
     expect(strings.map(([, s]) => s)).toContain("CreateFileW");
     expect(stringTypes.length).toBe(strings.length);
+    // A scan that read everything says nothing: `stringScan` is absent, not
+    // `undefined`, so a reply cannot claim a narrowing that did not occur.
+    expect("stringScan" in (result as object)).toBe(false);
+  });
+
+  it("carries what the scan did not read back across the RPC", async () => {
+    // THE FACT ONLY THE WORKER KNOWS. `extractStrings` runs here, so if the
+    // reply drops `stringScan` there is no second place to recover it from —
+    // and the main thread goes on to print the string count as a fact about the
+    // file. `SECTION_SCAN_LIMIT` is 1 MiB per section, so this is the narrowing
+    // an ordinary large binary meets (peek-a-bin-2py5).
+    const buffer = new ArrayBuffer(1024 * 1024 + 0x1000);
+    const result = (await dispatch(
+      "extractStrings",
+      {
+        source: buffer,
+        sections: [
+          {
+            name: ".rdata",
+            virtualAddress: 0x1000,
+            virtualSize: buffer.byteLength,
+            pointerToRawData: 0,
+            sizeOfRawData: buffer.byteLength,
+            characteristics: 0x40000040,
+          },
+        ],
+        imageBase: 0x400000,
+        is64: false,
+      },
+      state(),
+    )) as { stringScan?: { clippedSections: string[]; unscannedBytes: number } };
+
+    expect(result.stringScan?.clippedSections).toEqual([".rdata"]);
+    expect(result.stringScan?.unscannedBytes).toBe(buffer.byteLength - 1024 * 1024);
   });
 
   it("returns empty entry arrays for a section with no strings", async () => {

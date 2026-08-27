@@ -190,12 +190,16 @@ export function registerResources(server: McpServer, session: FileSession): void
   );
 
   // ── pe://{fileId}/strings ──
+  // Under a key for the imports resource's reason, and this is the one whose
+  // admission ORDINARY input reaches: `SECTION_SCAN_LIMIT` is 1 MiB per section,
+  // so any large real binary is scanned short (peek-a-bin-2py5).
   server.resource(
     "pe-strings",
     new ResourceTemplate("pe://{fileId}/strings", { list: undefined }),
     async (uri, { fileId }) =>
-      withFile(session, fileId, uri, (af) =>
-        Array.from(af.stringMap.entries()).map(([addr, value]) => {
+      withFile(session, fileId, uri, (af) => ({
+        ...admissionFor(af.pe, "strings"),
+        strings: Array.from(af.stringMap.entries()).map(([addr, value]) => {
           // Same as the imports resource: a string with no code referencing it
           // is noise, and which function references it is usually the question.
           const refs = af.stringXrefs.get(addr) ?? [];
@@ -207,7 +211,7 @@ export function registerResources(server: McpServer, session: FileSession): void
             xrefs: refs.map(hex),
           };
         }),
-      ),
+      })),
   );
 
   // ── pe://{fileId}/callgraph ──

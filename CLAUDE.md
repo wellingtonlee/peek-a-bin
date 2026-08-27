@@ -1746,6 +1746,28 @@ mistake.
   byte-identical (98/118, 20 vacuous), `corpus` byte-identical over four binaries, `corpus:arm64`
   51/51.
 
+- **…AND THE ONE PARSER NARROWING ORDINARY INPUT REACHES HAD NO CHANNEL AT ALL: THE STRING
+  SCAN'S.** `SECTION_SCAN_LIMIT` is 1 MiB *per section* (`MAX_STRING_SCAN_BYTES` is 64 MiB for the
+  whole call), and `extractStrings` returned `{ strings, stringTypes }` — so the Strings tab's
+  count, `pe://{id}/strings` and the report's `| Strings | N |` row all stated a clipped list's
+  length as a fact about the file, with no crafted input required. **`PEFile.stringScan`**
+  (`StringScanCoverage`: the sections a bound cut short and the bytes no pass looked at) is the
+  channel, absent when the scan was whole, and it travels `extractStrings` → the RPC reply →
+  `disasmClient`'s unpacker → `SET_STRINGS` → `PEFile`, with `mcp/session.ts` assigning it onto its
+  own `pe`. Four rules: the fact is collected in **`scanEndFor`**, the one place both bounds apply;
+  `ScanBudget.reach` is keyed on the `SectionHeader` **object**, since two sections may share a
+  name; the recorded reach is the **maximum across the four passes**, because by the time the third
+  pass reaches an early section the global budget may be spent and *the last pass's* answer would
+  report a section the first read whole (measured: 97 of 400 overlapping sections under `max`,
+  ~400 under `last`); and **bytes the file does not hold are excluded** — a section header
+  describing more than the buffer contains is a truncated image, a different fact. A list cannot
+  carry `TRUNCATION_MARKER` (an invented entry would be a falsehood inside a Map that feeds the
+  xref maps), so it is a flag plus the counts plus `parseAdmissions`' sixth subject. Ten controls,
+  all discriminating. **The population here is a fixture and that is stated at the field**: the
+  largest raw section across the six corpus binaries is 112,640 bytes, so all six report nothing;
+  the "a real image reaches this" claim is quoted from `MAX_STRING_SCAN_BYTES`' docstring, not
+  re-measured. (`peek-a-bin-2py5`)
+
 - **AN ADMISSION THAT STOPS AT THE BROWSER UI IS NO ADMISSION AT ALL ON THE TWO SURFACES THAT
   OUTLIVE THE SESSION.** No module under `src/mcp/` read any truncation flag, so
   `pe://{id}/imports` handed a client a short list as a complete one; `utils/exportSchema.ts`

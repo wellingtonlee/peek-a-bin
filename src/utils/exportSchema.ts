@@ -226,7 +226,7 @@ export function generateMarkdownReport(state: AppState): string {
 
   // Strings
   if (pe && pe.strings.size > 0) {
-    lines.push("## Strings");
+    lines.push(`## Strings${headingNote("strings")}`);
     lines.push("");
     lines.push("| Address | Value |");
     lines.push("|---------|-------|");

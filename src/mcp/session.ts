@@ -110,12 +110,19 @@ export class FileSession {
     const iatMap = buildIATLookup(pe.imports);
 
     // 3. Extract strings
-    const { strings: stringMap, stringTypes } = extractStrings(
-      buffer,
-      pe.sections,
-      imageBase,
-      is64,
-    );
+    const {
+      strings: stringMap,
+      stringTypes,
+      stringScan,
+    } = extractStrings(buffer, pe.sections, imageBase, is64);
+    // Recorded on `pe`, because `pe` is what every consumer of this session
+    // reads — `parseAdmissions` turns it into the sentence `load_pe` and
+    // `pe://{id}/strings` print, and without it both state a clipped list's
+    // length as a fact about the file. Assigned rather than spread because this
+    // object is local to the load and is the one the AnalyzedFile below holds;
+    // the browser's reducer replaces instead, for its own reason
+    // (peek-a-bin-2py5).
+    if (stringScan) pe.stringScan = stringScan;
 
     // 4. Detect driver mode
     const driverInfo = detectDriver(pe);

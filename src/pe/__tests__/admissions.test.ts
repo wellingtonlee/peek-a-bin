@@ -164,6 +164,26 @@ describe("parseAdmissions — each subject", () => {
     expect(found?.sentence).toContain("NOT known to be unsigned");
   });
 
+  it("reports a string scan that did not read every byte, and says why it matters", () => {
+    // THE ONE ROW ORDINARY INPUT REACHES, which is why the sentence says so:
+    // `SECTION_SCAN_LIMIT` is 1 MiB per section and any large real binary has
+    // more than that in `.rdata`. The bound itself is driven for real in
+    // `malformed.test.ts`; here the state is set directly.
+    const pe = parsePE(buildMinimalPE32());
+    const found = parseAdmissions({
+      ...pe,
+      strings: new Map([[0x402000, "kernel32.dll"]]),
+      stringScan: { clippedSections: [".rdata", ".data"], unscannedBytes: 1_234_567 },
+    }).find((a) => a.subject === "strings");
+
+    expect(found?.sentence).toContain(".rdata, .data");
+    expect(found?.sentence).toContain("1,234,567");
+    expect(found?.sentence).toContain("LOWER BOUND");
+    // The distinction that makes this row worth a different sentence from the
+    // five crafted-input ones beside it.
+    expect(found?.sentence).toContain("ordinary large binaries");
+  });
+
   it("reports the data-directory clamp, distinguishing its two reasons", () => {
     const overDeclared = parsePE(buildMinimalPE64({ numberOfRvaAndSizes: 40 }));
     const capped = parseAdmissions(overDeclared).find((a) => a.subject === "data-directories");
