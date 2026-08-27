@@ -222,8 +222,27 @@ function SignatureSection() {
       {open && cert?.signed && (
         <table>
           <tbody>
+            {/* THE WHOLE DN, which is what "Subject" means in X.509. These rows
+                printed the CN alone, so two publishers with the same CN and a
+                different O were one string on the page — and the CN is the half
+                of a DN that distinguishes least, which is exactly the wrong half
+                to keep when an analyst is comparing a signature against a
+                known-good one. `subjectCN` is still on the object for a caller
+                that wants the short form (peek-a-bin-4q8w). */}
             {cert.subject && <Row label="Subject">{cert.subject}</Row>}
             {cert.issuer && <Row label="Issuer">{cert.issuer}</Row>}
+            {/* WHAT ELSE WAS IN THE SET. Every row above describes the FIRST
+                certificate, and a real Authenticode signature carries the leaf
+                plus intermediates — with no count, the panel implied there was
+                one. Shown only when there is more than one, since "1" says
+                nothing a reader needs; not an anomaly and not amber, because a
+                chain is entirely normal. It is a COUNT, not a validated chain:
+                the SET is unordered and may hold unrelated certificates. */}
+            {cert.certificateCount !== undefined && cert.certificateCount > 1 && (
+              <Row label="Certificates">
+                {`${cert.certificateCount} in the signature; the fields above describe the first`}
+              </Row>
+            )}
             {cert.notBefore && <Row label="Valid From">{cert.notBefore}</Row>}
             {cert.notAfter && <Row label="Valid Until">{cert.notAfter}</Row>}
             <Row label="Signature Size">{cert.signatureSize.toLocaleString()} bytes</Row>

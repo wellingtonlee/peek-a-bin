@@ -52,16 +52,41 @@ const generalizedTime = (s: string) => der(0x18, new TextEncoder().encode(s));
 const OID_CN = [0x55, 0x04, 0x03];
 const OID_SIGNED_DATA = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
 
-/** X.501 Name holding a single CN attribute. */
-const name = (cn: string) => seq(set(seq(oid(OID_CN), printable(cn))));
+/** The attribute OIDs used below, by the short name the parser prints. */
+const DN_OIDS: Record<string, number[]> = {
+  CN: OID_CN,
+  C: [0x55, 0x04, 0x06],
+  L: [0x55, 0x04, 0x07],
+  O: [0x55, 0x04, 0x0a],
+  OU: [0x55, 0x04, 0x0b],
+  /** `pseudonym`, which this parser has no short name for. */
+  "2.5.4.65": [0x55, 0x04, 0x41],
+};
+
+/**
+ * X.501 `Name`: the CN first, then `extra` in order, each as its own RDN.
+ *
+ * A real signer's DN carries O, L, ST and C beside the CN, and the parser used
+ * to drop every one of them (`peek-a-bin-4q8w`), so there was nothing to fail
+ * against until this could emit them.
+ */
+const name = (cn: string, extra: { type: string; value: string }[] = []) =>
+  seq(
+    set(seq(oid(OID_CN), printable(cn))),
+    ...extra.map((a) => set(seq(oid(DN_OIDS[a.type]), printable(a.value)))),
+  );
 
 interface CertShape {
   issuer?: string;
   subject?: string;
+  /** Attributes emitted after the subject's CN, in order. */
+  subjectAttrs?: { type: string; value: string }[];
   notBefore?: Uint8Array;
   notAfter?: Uint8Array;
   /** Omit the optional [0] version field, shifting every later field index. */
   omitVersion?: boolean;
+  /** Certificates in the `[0] certificates` SET. Default 1. */
+  certificateCount?: number;
 }
 
 /** A structurally valid PKCS#7 SignedData wrapping one X.509 certificate. */
@@ -69,27 +94,39 @@ function buildPKCS7(shape: CertShape = {}): Uint8Array {
   const {
     issuer = "Test Issuer CA",
     subject = "Test Subject Corp",
+    subjectAttrs = [],
     notBefore = utcTime("240101000000Z"),
     notAfter = utcTime("261231235959Z"),
     omitVersion = false,
+    certificateCount = 1,
   } = shape;
 
-  const tbs = seq(
-    ...(omitVersion ? [] : [ctx0(int(0x02))]), // [0] version v3
-    int(0x01, 0x02, 0x03), // serialNumber
-    seq(oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b])), // signatureAlgorithm
-    name(issuer),
-    seq(notBefore, notAfter), // validity
-    name(subject),
-    seq(oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01])), // subjectPublicKeyInfo
-  );
-  const certificate = seq(tbs, seq(oid([0x2a])), der(0x03, new Uint8Array([0x00, 0xaa])));
+  const oneCertificate = (subjectCN: string) => {
+    const tbs = seq(
+      ...(omitVersion ? [] : [ctx0(int(0x02))]), // [0] version v3
+      int(0x01, 0x02, 0x03), // serialNumber
+      seq(oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b])), // signatureAlgorithm
+      name(issuer),
+      seq(notBefore, notAfter), // validity
+      name(subjectCN, subjectAttrs),
+      seq(oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01])), // subjectPublicKeyInfo
+    );
+    return seq(tbs, seq(oid([0x2a])), der(0x03, new Uint8Array([0x00, 0xaa])));
+  };
+  // The extras carry a distinguishing CN, so a reader that took the wrong
+  // element of the SET would be visible rather than merely wrong.
+  const certificates = concat([
+    oneCertificate(subject),
+    ...Array.from({ length: Math.max(0, certificateCount - 1) }, (_, i) =>
+      oneCertificate(`Intermediate CA ${i + 1}`),
+    ),
+  ]);
 
   const signedData = seq(
     int(0x01), // version
     set(), // digestAlgorithms
     seq(oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01])), // encapContentInfo
-    ctx0(certificate), // [0] certificates
+    der(0xa0, certificates), // [0] certificates
     set(), // signerInfos
   );
 
@@ -130,16 +167,155 @@ function parseCert(
 describe("parseSecurityDirectory", () => {
   it("extracts subject, issuer and validity from a well-formed signature", () => {
     const info = parseCert(buildPKCS7());
+    // `subject` and `issuer` are the WHOLE DN now — for a CN-only name that is
+    // `CN=<the CN>`, and `subjectCN`/`issuerCN` carry the CN on its own. The
+    // `toEqual` is exhaustive so a field added without a decision fails here.
     expect(info).toEqual({
       signed: true,
       revision: 0x0200,
       certificateType: 0x0002,
-      subject: "Test Subject Corp",
-      issuer: "Test Issuer CA",
+      subject: "CN=Test Subject Corp",
+      subjectCN: "Test Subject Corp",
+      issuer: "CN=Test Issuer CA",
+      issuerCN: "Test Issuer CA",
       notBefore: "2024-01-01 00:00:00 UTC",
       notAfter: "2026-12-31 23:59:59 UTC",
       signatureSize: expect.any(Number),
+      certificateCount: 1,
     });
+  });
+
+  it("renders every attribute of a Distinguished Name, in encoding order", () => {
+    // THE DEFECT: `extractCN` walked the RDNSequence for the CN and dropped O,
+    // OU, L, ST and C — so two publishers with the same CN and a different O
+    // were one string on the page, and the half of the DN that distinguishes
+    // least was the half that survived. Encoding order, not RFC 2253's reversed
+    // order: this string is for comparing against the file and against what
+    // another tool printed from the same bytes (peek-a-bin-4q8w).
+    const info = parseCert(
+      buildPKCS7({
+        subjectAttrs: [
+          { type: "O", value: "Acme Holdings" },
+          { type: "L", value: "Springfield" },
+          { type: "C", value: "US" },
+        ],
+      }),
+    );
+    expect(info?.subject).toBe("CN=Test Subject Corp, O=Acme Holdings, L=Springfield, C=US");
+    // The CN is still available on its own, so nothing that wanted the short
+    // form has to parse the DN back apart.
+    expect(info?.subjectCN).toBe("Test Subject Corp");
+    // The issuer is untouched by the subject's attributes — the two DNs are read
+    // from different TBSCertificate slots and a shared walk would prove nothing.
+    expect(info?.issuer).toBe("CN=Test Issuer CA");
+  });
+
+  it("names an attribute type it knows and spells the OID of one it does not", () => {
+    // An attribute this parser has no short name for is rendered in dotted
+    // decimal rather than SKIPPED, which is the difference between a partial DN
+    // and a silently narrowed one. 2.5.4.65 is `pseudonym`.
+    const info = parseCert(
+      buildPKCS7({
+        subjectAttrs: [
+          { type: "OU", value: "Release Engineering" },
+          { type: "2.5.4.65", value: "acme-build" },
+        ],
+      }),
+    );
+    expect(info?.subject).toBe("CN=Test Subject Corp, OU=Release Engineering, 2.5.4.65=acme-build");
+  });
+
+  it("decodes the wide and legacy string forms a DN value may use", () => {
+    // BMPString (UTF-16BE) and T61String are decoded BY HAND rather than by
+    // naming an encoding to `TextDecoder`: `utf-16be` and `t61` are label
+    // lookups a runtime without full ICU may not have, and a decoder that
+    // throws on a signature field is worse than a few lines of shifting. Both
+    // are real in the wild — Microsoft's own timestamp certificates carry
+    // BMPStrings.
+    const bmp = (text: string) => {
+      const out = new Uint8Array(text.length * 2);
+      for (let i = 0; i < text.length; i++) {
+        out[i * 2] = text.charCodeAt(i) >> 8;
+        out[i * 2 + 1] = text.charCodeAt(i) & 0xff;
+      }
+      return der(0x1e, out);
+    };
+    const t61 = (bytes: number[]) => der(0x14, new Uint8Array(bytes));
+
+    const subjectName = seq(
+      set(seq(oid(OID_CN), bmp("Ünïcode Ltd"))),
+      // 0xE9 is `é` in Latin-1, which is what T.61 amounts to for the characters
+      // a real DN uses.
+      set(seq(oid(DN_OIDS.O), t61([0x41, 0x63, 0x6d, 0xe9]))),
+    );
+    const tbs = seq(
+      ctx0(int(0x02)),
+      int(0x01),
+      seq(oid([0x2a])),
+      name("Test Issuer CA"),
+      seq(utcTime("240101000000Z"), utcTime("261231235959Z")),
+      subjectName,
+      seq(oid([0x2a])),
+    );
+    const info = parseCert(
+      seq(
+        oid(OID_SIGNED_DATA),
+        ctx0(seq(int(0x01), set(), seq(oid([0x2a])), ctx0(seq(tbs, seq(oid([0x2a])))), set())),
+      ),
+    );
+
+    expect(info?.subjectCN).toBe("Ünïcode Ltd");
+    expect(info?.subject).toBe("CN=Ünïcode Ltd, O=Acmé");
+  });
+
+  it("skips an attribute whose OID does not terminate, keeping the rest of the DN", () => {
+    // A trailing byte with the continuation bit set is an unterminated arc, and
+    // a PARTIAL OID names a different attribute type — so the attribute is
+    // dropped rather than guessed at. The rest of the DN must survive, which is
+    // the difference between a partial answer and a lost one.
+    const subjectName = seq(
+      set(seq(oid(OID_CN), printable("Test Subject Corp"))),
+      set(seq(der(0x06, new Uint8Array([0x55, 0x04, 0x80])), printable("dropped"))),
+      set(seq(oid(DN_OIDS.C), printable("US"))),
+    );
+    const tbs = seq(
+      ctx0(int(0x02)),
+      int(0x01),
+      seq(oid([0x2a])),
+      name("Test Issuer CA"),
+      seq(utcTime("240101000000Z"), utcTime("261231235959Z")),
+      subjectName,
+      seq(oid([0x2a])),
+    );
+    const info = parseCert(
+      seq(
+        oid(OID_SIGNED_DATA),
+        ctx0(seq(int(0x01), set(), seq(oid([0x2a])), ctx0(seq(tbs, seq(oid([0x2a])))), set())),
+      ),
+    );
+
+    expect(info?.subject).toBe("CN=Test Subject Corp, C=US");
+    expect(info?.subject).not.toContain("dropped");
+  });
+
+  it("counts the certificates in the SET, and describes the first", () => {
+    // A real Authenticode signature carries the leaf plus intermediates. Every
+    // field on `CertificateInfo` describes `certs[0]`, and with no count the
+    // object implied there was only one.
+    const info = parseCert(buildPKCS7({ certificateCount: 3 }));
+    expect(info?.certificateCount).toBe(3);
+    // The FIRST is still the one reported — the fixture gives the others a
+    // distinguishing CN, so taking the wrong element would show up here.
+    expect(info?.subjectCN).toBe("Test Subject Corp");
+    expect(info?.subjectCN).not.toContain("Intermediate");
+  });
+
+  it("reports a single-certificate signature as one, not as absent", () => {
+    // The control for the row above: `undefined` means the walk never reached
+    // the SET, `0` an empty SET and `1` an ordinary single certificate, and the
+    // panel shows the row only above 1. Collapsing them would make the count
+    // unreadable.
+    expect(parseCert(buildPKCS7())?.certificateCount).toBe(1);
   });
 
   it("reads GeneralizedTime validity fields", () => {
@@ -164,8 +340,8 @@ describe("parseSecurityDirectory", () => {
   it("shifts field indices when the optional version field is absent", () => {
     const info = parseCert(buildPKCS7({ omitVersion: true }));
     // Without [0] version the parser must not read issuer/subject one slot over.
-    expect(info?.subject).toBe("Test Subject Corp");
-    expect(info?.issuer).toBe("Test Issuer CA");
+    expect(info?.subjectCN).toBe("Test Subject Corp");
+    expect(info?.issuerCN).toBe("Test Issuer CA");
   });
 
   it("returns null when there is no security directory", () => {

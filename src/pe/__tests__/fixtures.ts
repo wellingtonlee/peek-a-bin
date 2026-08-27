@@ -225,6 +225,27 @@ export interface CertificateDef {
   /** CommonName of the first certificate's subject / issuer. */
   subjectCN?: string;
   issuerCN?: string;
+  /**
+   * Attributes emitted AFTER the CN in the subject's / issuer's Distinguished
+   * Name, each as its own RDN, in the order given.
+   *
+   * `rc.exe` has nothing to do with this one: a real Authenticode signer's DN
+   * carries O, L, ST and C beside the CN, and until `peek-a-bin-4q8w` the parser
+   * dropped every one of them — so there was nothing to fail against. `type` is
+   * a short name this parser knows (`O`, `OU`, `C`, …) or a dotted OID for the
+   * unknown-attribute case.
+   */
+  subjectAttrs?: { type: string; value: string }[];
+  issuerAttrs?: { type: string; value: string }[];
+  /**
+   * How many certificates to put in the `[0] certificates` SET. Default 1.
+   *
+   * A real signature carries the leaf plus one or more intermediates, and every
+   * field `parsePKCS7` reports describes the FIRST. The extra certificates are
+   * copies with a distinguishing CN, so a reader that silently took the wrong
+   * element would be visible.
+   */
+  certificateCount?: number;
   /** DER `UTCTime` bodies, i.e. `YYMMDDHHMMSSZ`. */
   notBefore?: string;
   notAfter?: string;
@@ -749,11 +770,46 @@ function ascii(s: string): Uint8Array {
   return out;
 }
 
-/** `Name ::= SEQUENCE OF SET OF SEQUENCE { AttributeType, AttributeValue }` with one CN. */
-function derName(cn: string): Uint8Array {
-  const OID_CN = new Uint8Array([0x55, 0x04, 0x03]); // 2.5.4.3
-  const attr = der(0x30, concat(der(0x06, OID_CN), der(0x13, ascii(cn))));
-  return der(0x30, der(0x31, attr));
+/** Short attribute names to OIDs, the inverse of `authenticode.ts`'s table. */
+const DN_OIDS: Record<string, number[]> = {
+  CN: [0x55, 0x04, 0x03],
+  C: [0x55, 0x04, 0x06],
+  L: [0x55, 0x04, 0x07],
+  ST: [0x55, 0x04, 0x08],
+  O: [0x55, 0x04, 0x0a],
+  OU: [0x55, 0x04, 0x0b],
+  E: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01],
+};
+
+/** A dotted OID to its DER content bytes, for the unknown-attribute case. */
+function derOIDBytes(dotted: string): Uint8Array {
+  const arcs = dotted.split(".").map(Number);
+  const out: number[] = [arcs[0] * 40 + arcs[1]];
+  for (const arc of arcs.slice(2)) {
+    const septets: number[] = [];
+    let v = arc;
+    do {
+      septets.unshift(v & 0x7f);
+      v = Math.floor(v / 128);
+    } while (v > 0);
+    for (let i = 0; i < septets.length - 1; i++) septets[i] |= 0x80;
+    out.push(...septets);
+  }
+  return new Uint8Array(out);
+}
+
+/**
+ * `Name ::= SEQUENCE OF SET OF SEQUENCE { AttributeType, AttributeValue }`.
+ *
+ * The CN first, then `extra` in order, each as its own RDN — which is how every
+ * real DN is encoded and what makes the rendered order assertable.
+ */
+function derName(cn: string, extra: { type: string; value: string }[] = []): Uint8Array {
+  const attr = (type: string, value: string) => {
+    const oid = DN_OIDS[type] ?? Array.from(derOIDBytes(type));
+    return der(0x31, der(0x30, concat(der(0x06, new Uint8Array(oid)), der(0x13, ascii(value)))));
+  };
+  return der(0x30, concat(attr("CN", cn), ...extra.map((e) => attr(e.type, e.value))));
 }
 
 /**
@@ -783,11 +839,29 @@ function buildPKCS7(def: CertificateDef): Uint8Array {
   const validity = der(0x30, concat(der(0x17, ascii(notBefore)), der(0x17, ascii(notAfter))));
   const spki = der(0x30, concat(sigAlg, der(0x03, new Uint8Array([0x00, 0x01]))));
 
-  const tbs = der(
-    0x30,
-    concat(version, serial, sigAlg, derName(issuer), validity, derName(subject), spki),
+  const oneCertificate = (subjectName: string) => {
+    const tbs = der(
+      0x30,
+      concat(
+        version,
+        serial,
+        sigAlg,
+        derName(issuer, def.issuerAttrs ?? []),
+        validity,
+        derName(subjectName, def.subjectAttrs ?? []),
+        spki,
+      ),
+    );
+    return der(0x30, concat(tbs, sigAlg, der(0x03, new Uint8Array([0x00, 0x01]))));
+  };
+  // The FIRST certificate is the one every reported field describes; the rest
+  // carry a distinguishing CN so a reader that took the wrong element would say
+  // so on the page rather than merely be wrong.
+  const count = Math.max(1, def.certificateCount ?? 1);
+  const certificate = concat(
+    oneCertificate(subject),
+    ...Array.from({ length: count - 1 }, (_, i) => oneCertificate(`Intermediate CA ${i + 1}`)),
   );
-  const certificate = der(0x30, concat(tbs, sigAlg, der(0x03, new Uint8Array([0x00, 0x01]))));
 
   const signedData = der(
     0x30,

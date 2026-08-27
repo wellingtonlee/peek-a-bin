@@ -984,8 +984,12 @@ describe("HeaderView digital signature", () => {
 
     expect(screen.getByText("Signed")).toBeTruthy();
     expect(screen.queryByText("No digital signature found in this binary.")).toBeNull();
-    expect(rowValue("Subject").textContent).toBe("Peekabin Test Publisher");
-    expect(rowValue("Issuer").textContent).toBe("Peekabin Test Root CA");
+    // THE WHOLE DN, not the CN alone: the row is labelled "Subject", and in
+    // X.509 that is the Distinguished Name. This fixture's DN carries only a CN,
+    // so the rendered form is `CN=<it>` — the multi-attribute case is asserted
+    // in its own row below (peek-a-bin-4q8w).
+    expect(rowValue("Subject").textContent).toBe("CN=Peekabin Test Publisher");
+    expect(rowValue("Issuer").textContent).toBe("CN=Peekabin Test Root CA");
     // The two DER `UTCTime` bodies, reformatted. `23` is a two-digit year below
     // 50, so it resolves to 2023 — the pivot is in `parseUTCTime` and is the one
     // piece of arithmetic in that walk.
@@ -1036,6 +1040,49 @@ describe("HeaderView digital signature", () => {
     expect(within(certRow).getAllByRole("button")[0].textContent).toBe(
       `0x${offset.toString(16).toUpperCase().padStart(8, "0")}`,
     );
+  });
+
+  it("prints the whole Distinguished Name, not just the CN", () => {
+    // The row is labelled "Subject", which in X.509 is the DN. It printed the CN
+    // alone, so two publishers sharing a CN and differing in O were one string
+    // on the page — and the CN is the half of a DN that distinguishes least
+    // (peek-a-bin-4q8w).
+    renderHeaders(
+      parsePE(
+        buildMinimalPE64({
+          certificate: {
+            subjectCN: "Peekabin Test Publisher",
+            subjectAttrs: [
+              { type: "O", value: "Peekabin Ltd" },
+              { type: "C", value: "GB" },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(rowValue("Subject").textContent).toBe(
+      "CN=Peekabin Test Publisher, O=Peekabin Ltd, C=GB",
+    );
+  });
+
+  it("says how many certificates the signature carries, above one", () => {
+    // Every row in this block describes the FIRST certificate, and a real
+    // Authenticode signature carries the leaf plus intermediates — with no count
+    // the panel implied there was one.
+    renderHeaders(
+      parsePE(buildMinimalPE64({ certificate: { ...SIGNED.certificate, certificateCount: 3 } })),
+    );
+    expect(rowValue("Certificates").textContent).toContain("3 in the signature");
+    // The fields above are still the leaf's: the fixture gives the intermediates
+    // a distinguishing CN.
+    expect(rowValue("Subject").textContent).not.toContain("Intermediate");
+  });
+
+  it("shows no Certificates row for an ordinary single-certificate signature", () => {
+    // The control: "1" tells a reader nothing, and a row on every signed file
+    // would be noise. Absence here is the claim.
+    renderHeaders(parsePE(buildMinimalPE64(SIGNED)));
+    expect(screen.queryByText("Certificates", { selector: "td" })).toBeNull();
   });
 
   it("still says Signed for a certificate type it cannot parse", () => {

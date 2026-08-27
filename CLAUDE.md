@@ -1746,6 +1746,28 @@ mistake.
   byte-identical (98/118, 20 vacuous), `corpus` byte-identical over four binaries, `corpus:arm64`
   51/51.
 
+- **A DISTINGUISHED NAME IS NOT ITS CN, AND A PKCS#7 `certificates` SET IS NOT ONE CERTIFICATE.**
+  `pe/authenticode.ts`'s `extractCN` walked the RDNSequence for the commonName and dropped O, OU, L,
+  ST and C, while the panel's row says **"Subject"** — which in X.509 is the whole DN. So two
+  publishers sharing a CN and differing in O were one string on screen, and the least
+  distinguishing half of the DN was the half kept. `subject`/`issuer` now hold the rendered DN
+  (`CN=…, O=…`, **encoding order**, not RFC 2253's reversed order, so the string can be compared
+  with the file and with another tool's output) and `subjectCN`/`issuerCN` the CN alone. An
+  attribute type with no short name is spelled as a **dotted OID rather than skipped** — skipping
+  is what made a DN read as its CN — and `decodeOID` refuses a truncated or unterminated encoding,
+  because a partial OID names a different attribute. `BMPString` and `T61String` are decoded **by
+  hand** (`TextDecoder("utf-16be")`/`"t61"` are label lookups a runtime without full ICU may lack,
+  and Microsoft's own timestamp certificates use BMPStrings); `UniversalString` is deliberately not
+  decoded and its attribute is skipped; `readDERString`'s `tag` argument is optional and only ever
+  widens. Separately, `CertificateInfo.certificateCount` is the size of the `certificates` SET —
+  every other field describes `certs[0]`, and a real signature carries the leaf plus intermediates.
+  It is a **count, not a validated chain** (the SET is unordered and may hold unrelated
+  certificates); `undefined`/`0`/`1` are three facts, and the panel shows the row only above 1.
+  **Both fixture builders had to gain `subjectAttrs` and `certificateCount` first** — each emitted
+  one certificate with a CN-only DN, so there was nothing to fail against. Nine controls, all
+  discriminating. **No binary here is signed**, so the evidence is fixtures alone and
+  `corpus:parserdiff` says nothing. (`peek-a-bin-4q8w`)
+
 - **…AND THE ONE PARSER NARROWING ORDINARY INPUT REACHES HAD NO CHANNEL AT ALL: THE STRING
   SCAN'S.** `SECTION_SCAN_LIMIT` is 1 MiB *per section* (`MAX_STRING_SCAN_BYTES` is 64 MiB for the
   whole call), and `extractStrings` returned `{ strings, stringTypes }` — so the Strings tab's

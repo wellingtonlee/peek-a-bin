@@ -1428,8 +1428,10 @@ describe("malformed PE handling", () => {
           certificate: { subjectCN: "Example Corp", issuerCN: "Example CA" },
         });
         const pe = parsePE(buf);
-        expect(pe.certificate?.subject).toBe("Example Corp");
-        expect(pe.certificate?.issuer).toBe("Example CA");
+        expect(pe.certificate?.subjectCN).toBe("Example Corp");
+        expect(pe.certificate?.issuerCN).toBe("Example CA");
+        // …and the whole DN, which for a CN-only name is just the CN attribute.
+        expect(pe.certificate?.subject).toBe("CN=Example Corp");
       });
     });
 

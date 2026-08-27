@@ -10,11 +10,42 @@ export interface CertificateInfo {
   signed: boolean;
   revision: number;
   certificateType: number;
+  /**
+   * The signer's **whole Distinguished Name**, rendered `CN=…, O=…, C=…`, or
+   * `null` when it could not be read.
+   *
+   * IT USED TO BE THE CN ALONE, which is a narrower answer wearing a complete
+   * one's shape: the row is labelled "Subject", and in X.509 a Subject *is* the
+   * DN. Two publishers with the same CN and different O were one string on the
+   * screen — and an analyst comparing a signature against a known-good one was
+   * comparing the half of the DN that distinguishes least. `subjectCN` is beside
+   * it for the common case where the CN is what a reader wants
+   * (`peek-a-bin-4q8w`).
+   */
   subject: string | null;
+  /** The CN attribute alone, or `null` when the DN carries none. */
+  subjectCN: string | null;
+  /** The issuer's whole DN, on `subject`'s rule. */
   issuer: string | null;
+  /** The issuer's CN attribute alone. */
+  issuerCN: string | null;
   notBefore: string | null;
   notAfter: string | null;
   signatureSize: number;
+  /**
+   * How many certificates the PKCS#7 `certificates` SET held.
+   *
+   * **NOT A VALIDATED CHAIN, and the name says count for that reason.** The SET
+   * is unordered and may carry intermediates, cross-certificates or certificates
+   * unrelated to this signer; nothing here validates or orders them. What it
+   * answers is the question the fields above used to beg: a real Authenticode
+   * signature carries the leaf *plus* intermediates, and every field on this
+   * object describes `certs[0]` alone with no indication that there were others.
+   *
+   * `undefined` when the walk did not reach the SET at all — which is a third
+   * thing from `0` (an empty SET) and from `1`.
+   */
+  certificateCount?: number;
 }
 
 // DER tag constants
@@ -24,6 +55,8 @@ const TAG_OID = 0x06;
 const TAG_UTF8_STRING = 0x0c;
 const TAG_PRINTABLE_STRING = 0x13;
 const TAG_IA5_STRING = 0x16;
+const TAG_T61_STRING = 0x14;
+const TAG_BMP_STRING = 0x1e;
 const TAG_UTC_TIME = 0x17;
 const TAG_GENERALIZED_TIME = 0x18;
 const TAG_CONTEXT_0 = 0xa0;
@@ -127,45 +160,172 @@ function readDERChildren(data: Uint8Array, start: number, length: number): DEREl
   return children;
 }
 
-function readDERString(data: Uint8Array, el: DERElement): string {
+/**
+ * A DER string element's text.
+ *
+ * `tag` is optional and only ever WIDENS what is decoded: without it the bytes
+ * are read as UTF-8, which is right for `UTF8String` and for the ASCII subsets
+ * (`PrintableString`, `IA5String`) and is what every pre-existing caller wants.
+ *
+ * The two wide/legacy forms are decoded BY HAND rather than by naming an
+ * encoding to `TextDecoder`: `utf-16be` and `t61`/`latin1` are label lookups that
+ * a runtime built without full ICU may not have, and a decoder that throws at
+ * startup on a signature field is a worse outcome than a few lines of shifting.
+ * `UniversalString` (UTF-32BE) is deliberately NOT decoded — it is vanishingly
+ * rare in a DN, and `readDNAttributes` skips an attribute it cannot read rather
+ * than rendering a hole.
+ */
+function readDERString(data: Uint8Array, el: DERElement, tag?: number): string {
   const bytes = data.subarray(el.contentOffset, el.contentOffset + el.contentLen);
+  if (tag === TAG_BMP_STRING) {
+    // UTF-16BE, two bytes per code unit. An odd trailing byte is dropped: half a
+    // code unit is not a character.
+    let out = "";
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+      out += String.fromCharCode((bytes[i] << 8) | bytes[i + 1]);
+    }
+    return out;
+  }
+  if (tag === TAG_T61_STRING) {
+    // Treated as Latin-1, which is what T.61 amounts to for the characters a
+    // real DN uses and what other PE tools print.
+    let out = "";
+    for (const byte of bytes) out += String.fromCharCode(byte);
+    return out;
+  }
   return new TextDecoder().decode(bytes);
 }
 
-// OID for CommonName (2.5.4.3)
-const OID_CN = new Uint8Array([0x55, 0x04, 0x03]);
+/**
+ * The attribute types a DN is conventionally spelled with, by OID.
+ *
+ * Anything not here is rendered in dotted-decimal form rather than dropped —
+ * skipping it is what made a DN read as its CN, and an unknown attribute is
+ * still evidence about the signer. `2.5.4.x` is `X520`; the email address is the
+ * one in common use from outside that arc.
+ */
+const DN_ATTRIBUTE_NAMES: Record<string, string> = {
+  "2.5.4.3": "CN",
+  "2.5.4.4": "SN",
+  "2.5.4.5": "SERIALNUMBER",
+  "2.5.4.6": "C",
+  "2.5.4.7": "L",
+  "2.5.4.8": "ST",
+  "2.5.4.9": "STREET",
+  "2.5.4.10": "O",
+  "2.5.4.11": "OU",
+  "2.5.4.12": "T",
+  "2.5.4.42": "GN",
+  "2.5.4.97": "OI",
+  "1.2.840.113549.1.9.1": "E",
+  "0.9.2342.19200300.100.1.25": "DC",
+};
 
-function oidEquals(data: Uint8Array, el: DERElement, target: Uint8Array): boolean {
-  if (el.contentLen !== target.length) return false;
-  for (let i = 0; i < target.length; i++) {
-    if (data[el.contentOffset + i] !== target[i]) return false;
+/** The CN's OID, needed on its own for {@link CertificateInfo.subjectCN}. */
+const OID_CN_TEXT = "2.5.4.3";
+
+/**
+ * Decode a DER OBJECT IDENTIFIER to dotted decimal.
+ *
+ * The first byte packs two arcs (`40 * a + b`, with `a` capped at 2 and `b`
+ * unbounded for `a === 2`); the rest are base-128 with the continuation bit set
+ * on every byte but the last. Returns null for a truncated or over-long
+ * encoding rather than a partial OID, because a partial OID would name a
+ * different attribute type.
+ */
+function decodeOID(data: Uint8Array, el: DERElement): string | null {
+  if (el.contentLen === 0) return null;
+  const first = data[el.contentOffset];
+  const arc1 = Math.min(2, Math.floor(first / 40));
+  const parts: number[] = [arc1, arc1 === 2 ? first - 80 : first % 40];
+  let value = 0;
+  let started = false;
+  for (let i = 1; i < el.contentLen; i++) {
+    const byte = data[el.contentOffset + i];
+    // 2^32 is far above any real arc and keeps this out of float territory.
+    if (value > 0xffffff) return null;
+    value = value * 128 + (byte & 0x7f);
+    started = true;
+    if ((byte & 0x80) === 0) {
+      parts.push(value);
+      value = 0;
+      started = false;
+    }
   }
-  return true;
+  // A trailing byte with the continuation bit set is an unterminated arc.
+  if (started) return null;
+  return parts.join(".");
 }
 
-function extractCN(data: Uint8Array, nameElement: DERElement): string | null {
-  // Name is a SEQUENCE of SETs of SEQUENCES (RDNs)
+/** The DER string types a DN value may legitimately use. */
+function isStringTag(tag: number): boolean {
+  return (
+    tag === TAG_UTF8_STRING ||
+    tag === TAG_PRINTABLE_STRING ||
+    tag === TAG_IA5_STRING ||
+    tag === TAG_T61_STRING ||
+    tag === TAG_BMP_STRING
+  );
+}
+
+/** One attribute of a DN, in the order the encoding lists it. */
+interface DNAttribute {
+  /** `CN`, `O`, … or the dotted OID when this parser has no name for it. */
+  type: string;
+  value: string;
+}
+
+/**
+ * Every attribute of a `Name`, in encoding order.
+ *
+ * `Name ::= SEQUENCE OF RelativeDistinguishedName`, and an RDN is a `SET OF
+ * AttributeTypeAndValue` — a set with more than one member is legal (and rare),
+ * so every member is collected rather than the first.
+ *
+ * An attribute whose OID or value this parser cannot read is SKIPPED rather than
+ * rendered as a hole, and that is the one thing this function still narrows
+ * silently: a DN is a set of claims and a partial one is not false, whereas an
+ * invented `?=?` would be.
+ */
+function readDNAttributes(data: Uint8Array, nameElement: DERElement): DNAttribute[] {
+  const out: DNAttribute[] = [];
   const rdns = readDERChildren(data, nameElement.contentOffset, nameElement.contentLen);
   for (const rdnSet of rdns) {
     if (rdnSet.tag !== TAG_SET) continue;
-    const attrs = readDERChildren(data, rdnSet.contentOffset, rdnSet.contentLen);
-    for (const attr of attrs) {
+    for (const attr of readDERChildren(data, rdnSet.contentOffset, rdnSet.contentLen)) {
       if (attr.tag !== TAG_SEQUENCE) continue;
       const parts = readDERChildren(data, attr.contentOffset, attr.contentLen);
       if (parts.length < 2) continue;
-      if (parts[0].tag === TAG_OID && oidEquals(data, parts[0], OID_CN)) {
-        const valTag = parts[1].tag;
-        if (
-          valTag === TAG_UTF8_STRING ||
-          valTag === TAG_PRINTABLE_STRING ||
-          valTag === TAG_IA5_STRING
-        ) {
-          return readDERString(data, parts[1]);
-        }
-      }
+      if (parts[0].tag !== TAG_OID || !isStringTag(parts[1].tag)) continue;
+      const oid = decodeOID(data, parts[0]);
+      if (oid === null) continue;
+      out.push({
+        type: DN_ATTRIBUTE_NAMES[oid] ?? oid,
+        value: readDERString(data, parts[1], parts[1].tag),
+      });
     }
   }
-  return null;
+  return out;
+}
+
+/**
+ * A DN rendered `CN=Acme Ltd, O=Acme, C=US`, or null when nothing was readable.
+ *
+ * Encoding order, not RFC 2253's reversed order: the point of this string is to
+ * be compared with what the file contains and with what another tool printed
+ * from the same bytes, and reversing it would make the two disagree for no gain.
+ * A value containing a comma is left as it is — escaping it would make the string
+ * something a reader could not paste back into a search.
+ */
+function renderDN(attrs: DNAttribute[]): string | null {
+  if (attrs.length === 0) return null;
+  return attrs.map((a) => `${a.type}=${a.value}`).join(", ");
+}
+
+/** The CN attribute of a DN, or null. The FIRST, if a DN carries several. */
+function cnOf(attrs: DNAttribute[]): string | null {
+  const cn = attrs.find((a) => a.type === DN_ATTRIBUTE_NAMES[OID_CN_TEXT]);
+  return cn ? cn.value : null;
 }
 
 /** DER times are ASCII digits; anything else would render as "NaN-ab-cd". */
@@ -228,7 +388,9 @@ export function parseSecurityDirectory(
       revision: wRevision,
       certificateType: wCertificateType,
       subject: null,
+      subjectCN: null,
       issuer: null,
+      issuerCN: null,
       notBefore: null,
       notAfter: null,
       signatureSize: dwLength,
@@ -242,7 +404,9 @@ export function parseSecurityDirectory(
       revision: wRevision,
       certificateType: wCertificateType,
       subject: null,
+      subjectCN: null,
       issuer: null,
+      issuerCN: null,
       notBefore: null,
       notAfter: null,
       signatureSize: dwLength,
@@ -260,7 +424,9 @@ export function parseSecurityDirectory(
       revision: wRevision,
       certificateType: wCertificateType,
       subject: null,
+      subjectCN: null,
       issuer: null,
+      issuerCN: null,
       notBefore: null,
       notAfter: null,
       signatureSize: dwLength,
@@ -279,7 +445,9 @@ function parsePKCS7(
     revision,
     certificateType: certType,
     subject: null,
+    subjectCN: null,
     issuer: null,
+    issuerCN: null,
     notBefore: null,
     notAfter: null,
     signatureSize,
@@ -318,6 +486,11 @@ function parsePKCS7(
 
   // First certificate in the set
   const certs = readDERChildren(data, certsElement.contentOffset, certsElement.contentLen);
+  // HOW MANY THERE WERE, recorded before the early return below: every field
+  // this function goes on to fill describes `certs[0]`, and a real Authenticode
+  // signature carries the leaf plus intermediates. Set even for an empty SET,
+  // because 0 and "the walk never reached the SET" are different facts.
+  base.certificateCount = certs.length;
   if (certs.length === 0) return base;
 
   const cert = certs[0];
@@ -342,8 +515,12 @@ function parsePKCS7(
   const validityEl = tbsChildren[idx + 3];
   const subjectEl = tbsChildren[idx + 4];
 
-  base.issuer = extractCN(data, issuerEl);
-  base.subject = extractCN(data, subjectEl);
+  const issuerAttrs = readDNAttributes(data, issuerEl);
+  const subjectAttrs = readDNAttributes(data, subjectEl);
+  base.issuer = renderDN(issuerAttrs);
+  base.issuerCN = cnOf(issuerAttrs);
+  base.subject = renderDN(subjectAttrs);
+  base.subjectCN = cnOf(subjectAttrs);
 
   // Validity: SEQUENCE { notBefore, notAfter }
   if (validityEl.tag === TAG_SEQUENCE) {
