@@ -142,10 +142,15 @@ describe("pe://{fileId}/imports", () => {
     const { session } = stubSession({ pe: samplePE() } as never);
     const imports = await body(captureResources(session).get("pe-imports")!, "imports");
 
-    const list = imports as unknown as {
-      library: string;
-      functions: { name: string; iatAddress?: string }[];
-    }[];
+    const doc = imports as unknown as {
+      incomplete?: string;
+      libraries: { library: string; functions: { name: string; iatAddress?: string }[] }[];
+    };
+    // THE LIST IS UNDER A KEY so the response has somewhere to say it is short,
+    // and the wrapper is unconditional — see the `incomplete` describe below.
+    // A whole parse says nothing.
+    expect(doc.incomplete).toBeUndefined();
+    const list = doc.libraries;
     expect(list).toHaveLength(1);
     expect(list[0].library).toBe("KERNEL32.dll");
     expect(list[0].functions.map((f) => f.name)).toEqual(["Sleep", "Ordinal_7"]);
@@ -171,10 +176,11 @@ describe("pe://{fileId}/imports", () => {
       }),
     );
     const { session } = stubSession({ pe } as never);
-    const imports = (await body(
-      captureResources(session).get("pe-imports")!,
-      "imports",
-    )) as unknown as { functions: { name: string; ordinal?: number }[] }[];
+    const imports = (
+      (await body(captureResources(session).get("pe-imports")!, "imports")) as unknown as {
+        libraries: { functions: { name: string; ordinal?: number }[] }[];
+      }
+    ).libraries;
 
     expect(imports[0].functions[0]).toMatchObject({ name: "WSAStartup", ordinal: 115 });
     // The control, in the same library: ws2_32 has no 60000, so a rule that
@@ -191,11 +197,98 @@ describe("pe://{fileId}/exports", () => {
     const { session } = stubSession({ pe: samplePE() } as never);
     const exports = await body(captureResources(session).get("pe-exports")!, "exports");
 
-    // Ordinals are Base-biased (Base 1), matching dumpbin.
-    expect(exports).toEqual([
-      { name: "Start", ordinal: 1, address: "0x1000" },
-      { name: "Stop", ordinal: 2, address: "0x1100" },
-    ]);
+    // Ordinals are Base-biased (Base 1), matching dumpbin. The `exports` key and
+    // the absent `incomplete` are the same shape decision as the imports
+    // resource: `toEqual` on the whole document, so a stray key would fail here.
+    expect(exports).toEqual({
+      exports: [
+        { name: "Start", ordinal: 1, address: "0x1000" },
+        { name: "Stop", ordinal: 2, address: "0x1100" },
+      ],
+    });
+  });
+});
+
+/**
+ * THE ADMISSION ON THE TWO LIST RESOURCES.
+ *
+ * A cut-short import or export table is shaped exactly like a complete small
+ * one, and these resources used to hand a client the bare array — the same defect
+ * the browser's tabs had, on a surface whose consumer is an LLM that has no way
+ * to notice a count looks small (`peek-a-bin-8pod`). The sentence, not a boolean,
+ * is the channel: a consumer that has never heard of the field still cannot be
+ * fooled by the value.
+ */
+describe("pe://{fileId}/imports and /exports — saying the list is short", () => {
+  it("carries a sentence for a cut-short import table, and per library", async () => {
+    const pe = samplePE();
+    const short = {
+      ...pe,
+      importsTruncated: true,
+      imports: [{ ...pe.imports[0], truncated: true }],
+    };
+    const { session } = stubSession({ pe: short } as never);
+    const doc = (await body(
+      captureResources(session).get("pe-imports")!,
+      "imports",
+    )) as unknown as {
+      incomplete?: string;
+      libraries: { incomplete?: string; functions: unknown[] }[];
+    };
+
+    expect(doc.incomplete).toContain("LOWER BOUND");
+    // Per-library as well as whole-table: each descriptor has its own thunk
+    // walk, so one library's list can be short while the rest are whole. The
+    // whole-table fact is the one with no row to hang on.
+    expect(doc.libraries[0].incomplete).toContain("lower bound");
+    // The list is still THERE. An admission that replaced the answer would be
+    // the mistake `analysisNotice`'s timeout kind exists to avoid.
+    expect(doc.libraries[0].functions).toHaveLength(2);
+  });
+
+  it("marks the table without marking a library whose own list is whole", async () => {
+    // The two flags are separate facts and the second must not be inferred from
+    // the first: a descriptor walk that stopped at its cap leaves every library
+    // it DID read complete, and saying otherwise would understate those lists.
+    const { session } = stubSession({ pe: { ...samplePE(), importsTruncated: true } } as never);
+    const doc = (await body(
+      captureResources(session).get("pe-imports")!,
+      "imports",
+    )) as unknown as {
+      incomplete?: string;
+      libraries: { incomplete?: string }[];
+    };
+    expect(doc.incomplete).toBeDefined();
+    expect("incomplete" in doc.libraries[0]).toBe(false);
+  });
+
+  it("carries a sentence for a cut-short export table", async () => {
+    const { session } = stubSession({ pe: { ...samplePE(), exportsTruncated: true } } as never);
+    const doc = (await body(
+      captureResources(session).get("pe-exports")!,
+      "exports",
+    )) as unknown as {
+      incomplete?: string;
+      exports: unknown[];
+    };
+    expect(doc.incomplete).toContain("LOWER BOUND");
+    expect(doc.exports).toHaveLength(2);
+  });
+
+  it("says nothing on either resource for a whole parse", async () => {
+    // THE CONTROL, and the half that catches a fix which marks everything: an
+    // ordinary binary must produce no `incomplete` key at all, on the
+    // omit-rather-than-false rule `PEFile.importsTruncated` itself follows.
+    const { session } = stubSession({ pe: samplePE() } as never);
+    const handlers = captureResources(session);
+    const imports = (await body(handlers.get("pe-imports")!, "imports")) as unknown as {
+      libraries: { incomplete?: string }[];
+    };
+    const exports = (await body(handlers.get("pe-exports")!, "exports")) as unknown as object;
+
+    expect("incomplete" in (imports as object)).toBe(false);
+    expect("incomplete" in imports.libraries[0]).toBe(false);
+    expect("incomplete" in exports).toBe(false);
   });
 });
 
@@ -299,9 +392,11 @@ describe("pe://{fileId}/imports — xrefs", () => {
       pe,
       importXrefs: new Map([[iat[0], [0x140001020]]]),
     } as never);
-    const imports = (await body(captureResources(session).get("pe-imports")!, "imports")) as {
-      functions: { name: string; xrefCount: number; xrefs: string[] }[];
-    }[];
+    const imports = (
+      (await body(captureResources(session).get("pe-imports")!, "imports")) as {
+        libraries: { functions: { name: string; xrefCount: number; xrefs: string[] }[] }[];
+      }
+    ).libraries;
 
     expect(imports[0].functions[0]).toMatchObject({
       name: "Sleep",

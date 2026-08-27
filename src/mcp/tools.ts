@@ -10,6 +10,7 @@ import { unsupportedOnArch } from "../disasm/arch";
 import { decompileFunction } from "../disasm/decompile/pipeline";
 import { inferSignature } from "../disasm/signatures";
 import { analyzeStackFrame } from "../disasm/stack";
+import { parseAdmissions } from "../pe/admissions";
 import { type ExportSchemaV1, validateImport } from "../utils/exportSchema";
 import { parseAddr, resolveExportPath } from "./paths";
 import type { AnalyzedFile, FileSession } from "./session";
@@ -97,6 +98,7 @@ export function registerTools(server: McpServer, session: FileSession): void {
         );
       }
       const pe = analyzed.pe;
+      const admissions = parseAdmissions(pe);
 
       return json({
         id: fileId,
@@ -116,6 +118,14 @@ export function registerTools(server: McpServer, session: FileSession): void {
         anomalyCount: analyzed.anomalies.length,
         isDriver: analyzed.driverInfo.isDriver,
         driverInfo: analyzed.driverInfo.isDriver ? analyzed.driverInfo : undefined,
+        // WHICH OF THE COUNTS ABOVE ARE LOWER BOUNDS. Every count in this
+        // response is read off a list the parser may have had to cut short, and
+        // a short list is shaped exactly like a complete small one — so without
+        // this the first thing a client learns about a file is a set of numbers
+        // it cannot qualify. Sentences rather than flags, because the consumer is
+        // an LLM: see `pe/admissions.ts`. Absent when the parse was whole, on
+        // `importsTruncated`'s omit-rather-than-false rule (peek-a-bin-8pod).
+        ...(admissions.length > 0 ? { incomplete: admissions.map((a) => a.sentence) } : {}),
       });
     },
   );

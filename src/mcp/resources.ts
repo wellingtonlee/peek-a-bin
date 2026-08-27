@@ -6,6 +6,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { type ParseAdmission, parseAdmissions } from "../pe/admissions";
 import { parseOrdinalImport, resolveOrdinal } from "../pe/ordinalTables";
 import type { AnalyzedFile, FileSession } from "./session";
 
@@ -45,6 +46,22 @@ function withFile(
       },
     ],
   };
+}
+
+/**
+ * `{ incomplete: <sentence> }` for one subject, or `{}` when that part of the
+ * parse was whole — spread into a response so the key is simply absent.
+ *
+ * Absent-rather-than-false is `PEFile.importsTruncated`'s own rule: a response
+ * built anywhere else cannot claim completeness by accident, and a client testing
+ * `"incomplete" in obj` gets the right answer.
+ */
+function admissionFor(
+  pe: AnalyzedFile["pe"],
+  subject: ParseAdmission["subject"],
+): { incomplete?: string } {
+  const found = parseAdmissions(pe).find((a) => a.subject === subject);
+  return found ? { incomplete: found.sentence } : {};
 }
 
 export function registerResources(server: McpServer, session: FileSession): void {
@@ -97,13 +114,34 @@ export function registerResources(server: McpServer, session: FileSession): void
   );
 
   // ── pe://{fileId}/imports ──
+  //
+  // THE LIST IS UNDER A KEY RATHER THAN AT THE TOP LEVEL, so the response has
+  // somewhere to say it is short. A cut-short import table is shaped exactly
+  // like a complete small one, and this resource used to hand a client the bare
+  // array — the same defect the browser's tabs had, on a surface whose consumer
+  // is an LLM that has no way to notice a count looks small. The wrapper is
+  // UNCONDITIONAL: a shape that changes with the file is worse to consume than
+  // one extra key. See `pe/admissions.ts` (peek-a-bin-8pod).
   server.resource(
     "pe-imports",
     new ResourceTemplate("pe://{fileId}/imports", { list: undefined }),
     async (uri, { fileId }) =>
-      withFile(session, fileId, uri, (af) =>
-        af.pe.imports.map((imp) => ({
+      withFile(session, fileId, uri, (af) => ({
+        // Present only when the table is short, and holding the sentence rather
+        // than a boolean: the value is the channel a consumer that has never
+        // heard of this field can still read.
+        ...admissionFor(af.pe, "imports"),
+        libraries: af.pe.imports.map((imp) => ({
           library: imp.libraryName,
+          // PER-LIBRARY, because each descriptor has its own thunk walk — one
+          // library's function list can be short while the rest are whole. The
+          // whole-table fact above is the one with no row to hang on.
+          ...(imp.truncated
+            ? {
+                incomplete:
+                  "This library's imported-name list was not read whole; the names below are a lower bound.",
+              }
+            : {}),
           functions: imp.functions.map((fn, i) => {
             const iatAddr = i < imp.iatAddresses.length ? imp.iatAddresses[i] : undefined;
             // Which call sites actually use this import. The browser's Imports
@@ -130,23 +168,25 @@ export function registerResources(server: McpServer, session: FileSession): void
             };
           }),
         })),
-      ),
+      })),
   );
 
   // ── pe://{fileId}/exports ──
+  // Under a key for the imports resource's reason.
   server.resource(
     "pe-exports",
     new ResourceTemplate("pe://{fileId}/exports", { list: undefined }),
     async (uri, { fileId }) =>
-      withFile(session, fileId, uri, (af) =>
-        af.pe.exports.map((e) => ({
+      withFile(session, fileId, uri, (af) => ({
+        ...admissionFor(af.pe, "exports"),
+        exports: af.pe.exports.map((e) => ({
           name: e.name,
           ordinal: e.ordinal,
           address: hex(e.address),
           ...(e.byOrdinal ? { byOrdinal: true } : {}),
           ...(e.forwarder ? { forwarder: e.forwarder } : {}),
         })),
-      ),
+      })),
   );
 
   // ── pe://{fileId}/strings ──

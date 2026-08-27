@@ -1,5 +1,7 @@
 import type { AppState } from "../hooks/usePEFile";
 import { getDisplayName } from "../hooks/usePEFile";
+import { type AdmissionSubject, parseAdmissions } from "../pe/admissions";
+import { TRUNCATION_MARKER } from "../pe/truncation";
 
 export interface ExportSchemaV1 {
   version: 1;
@@ -116,6 +118,31 @@ export function generateMarkdownReport(state: AppState): string {
   lines.push(`| Anomalies | ${state.anomalies?.length ?? 0} |`);
   lines.push("");
 
+  // WHICH OF THOSE COUNTS ARE LOWER BOUNDS.
+  //
+  // An exported report is a FILE THE USER KEEPS and may compare against another
+  // tool months later, so an unmarked narrowing here is durable in a way a screen
+  // is not — this file reproduced a cut-short import list as a complete one, with
+  // the Summary row above stating its length as fact. The block goes directly
+  // under the table because that is what it qualifies; the affected sections
+  // repeat it on their own headings, since a reader who scrolls to "## Imports"
+  // has left this table behind. Sentences come from `pe/admissions.ts`, shared
+  // with the MCP responses (peek-a-bin-8pod).
+  const admissions = pe ? parseAdmissions(pe) : [];
+  if (admissions.length > 0) {
+    lines.push("> **This parse was not complete.** The counts above and the lists below are a");
+    lines.push("> lower bound on what the file contains.");
+    lines.push(">");
+    for (const a of admissions) {
+      lines.push(`> - ${a.sentence}`);
+    }
+    lines.push("");
+  }
+
+  /** The admission for one section, as a heading suffix, or "". */
+  const headingNote = (subject: AdmissionSubject): string =>
+    admissions.some((a) => a.subject === subject) ? " (incomplete — see Summary)" : "";
+
   // Anomalies
   if (state.anomalies?.length) {
     lines.push("## Anomalies");
@@ -168,10 +195,15 @@ export function generateMarkdownReport(state: AppState): string {
 
   // Imports
   if (pe && pe.imports.length > 0) {
-    lines.push("## Imports");
+    lines.push(`## Imports${headingNote("imports")}`);
     lines.push("");
     for (const imp of pe.imports) {
-      lines.push(`### ${imp.libraryName}`);
+      // Per-library, because each descriptor has its own thunk walk: one
+      // library's list can be short while the rest are whole. A library NAME the
+      // parser could not finish already says so in the value it carries
+      // (`TRUNCATION_MARKER`), so the note here is about the list, not the name.
+      const short = imp.truncated ? " (incomplete — not every imported name was read)" : "";
+      lines.push(`### ${imp.libraryName}${short}`);
       lines.push("");
       for (const func of imp.functions) {
         lines.push(`- ${func}`);
@@ -182,7 +214,7 @@ export function generateMarkdownReport(state: AppState): string {
 
   // Exports
   if (pe && pe.exports.length > 0) {
-    lines.push("## Exports");
+    lines.push(`## Exports${headingNote("exports")}`);
     lines.push("");
     lines.push("| Ordinal | Name | Address |");
     lines.push("|---------|------|---------|");
@@ -199,9 +231,22 @@ export function generateMarkdownReport(state: AppState): string {
     lines.push("| Address | Value |");
     lines.push("|---------|-------|");
     for (const [addr, str] of pe.strings) {
-      const truncated = str.length > 60 ? str.slice(0, 60) + "..." : str;
+      // THE REPORT'S OWN CLIP USES THE PARSER'S MARKER, not a bare `...`.
+      // This file held two kinds of truncation: the parser's, which it
+      // reproduced without saying so, and this one, spelled differently from
+      // every other truncation in the tool. `TRUNCATION_MARKER` holds characters
+      // no string in a PE can contain, so a reader — or `isTruncatedValue` — can
+      // tell a clipped value from a complete one; three dots cannot, because a
+      // string may legitimately end in them.
+      //
+      // There is no need to check whether the parser already marked this value:
+      // `extractStrings` marks nothing (its budget cuts the SCAN, not a string,
+      // and that narrowing has no channel at all — see `parseAdmissions`' "not
+      // covered" list), so nothing in `pe.strings` can arrive marked. A guard
+      // here would be inert, and an inert guard reads as a rule that holds.
+      const clipped = str.length > 60 ? str.slice(0, 60) + TRUNCATION_MARKER : str;
       // Escape pipe characters for markdown table
-      const escaped = truncated.replace(/\|/g, "\\|");
+      const escaped = clipped.replace(/\|/g, "\\|");
       lines.push(`| 0x${addr.toString(16).toUpperCase()} | ${escaped} |`);
     }
     lines.push("");

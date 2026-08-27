@@ -12,12 +12,22 @@
  * that imports the harness re-imports the whole tool import graph.
  */
 
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { unsupportedOnArch } from "../../disasm/arch";
 import type { Xref } from "../../disasm/types";
+import { buildMinimalPE32 } from "../../pe/__tests__/fixtures";
+import { parsePE } from "../../pe/parser";
 import type { AnalyzedFile } from "../session";
 import { captureTools, stubSession, type ToolHandler, textOf } from "./harness";
 
@@ -404,6 +414,71 @@ describe("decompile_function — architecture refusal (peek-a-bin-9b1)", () => {
 
 /** Just enough PE shape for the tools that read `af.pe`. */
 const arm64ImageStub = { pe: { is64: true, sections: [] } } as unknown as Partial<AnalyzedFile>;
+
+/**
+ * `load_pe`'s SUMMARY, which is the first and often only thing a client learns
+ * about a file.
+ *
+ * Every count in that response is read off a list the parser may have had to cut
+ * short, and a short list is shaped exactly like a complete small one — so
+ * without an admission the client is handed numbers it cannot qualify, and its
+ * consumer is an LLM which has no way to notice that a count looks small
+ * (`peek-a-bin-8pod`). Driven through the real handler with a stub `loadFile`,
+ * since the tool reads the file off disk and the analysis itself is not what is
+ * under test here.
+ */
+describe("load_pe — which of its counts are lower bounds", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "peek-load-pe-")));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  /** `load_pe` against a session whose `loadFile` answers with this PE. */
+  async function loadReporting(pe: unknown): Promise<Record<string, unknown>> {
+    const buf = buildMinimalPE32();
+    const path = join(dir, "sample.exe");
+    writeFileSync(path, Buffer.from(buf));
+    const { session, file } = stubSession({
+      pe,
+      driverInfo: {
+        isDriver: false,
+        isWDM: false,
+        kernelModules: [],
+        kernelImportCount: 0,
+        reasons: [],
+      },
+    } as never);
+    (session as unknown as { loadFile: () => Promise<AnalyzedFile> }).loadFile = async () => file;
+    const loadPe = captureTools(session).get("load_pe")!;
+    return JSON.parse(textOf(await loadPe({ filePath: path })));
+  }
+
+  it("names each narrowing in words beside the counts", async () => {
+    const pe = parsePE(
+      buildMinimalPE32({
+        directories: {
+          imports: [{ libraryName: "KERNEL32.dll", functions: [{ name: "Sleep" }] }],
+        },
+      }),
+    );
+    const body = await loadReporting({ ...pe, importsTruncated: true });
+
+    expect(body.importCount).toBe(1);
+    const incomplete = body.incomplete as string[];
+    expect(incomplete).toHaveLength(1);
+    expect(incomplete[0]).toContain("LOWER BOUND");
+  });
+
+  it("says nothing for a whole parse", async () => {
+    // THE CONTROL: the key must be absent, not an empty array, on
+    // `importsTruncated`'s omit-rather-than-false rule — and a rule that reports
+    // something for every file would put a warning on every load.
+    const body = await loadReporting(parsePE(buildMinimalPE32()));
+    expect("incomplete" in body).toBe(false);
+  });
+});
 
 describe("load_pe / list_files report the architecture", () => {
   it("list_files carries arch next to is64", async () => {

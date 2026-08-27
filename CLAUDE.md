@@ -100,7 +100,9 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   is read back in two places (`ImportEntry.truncated`, `utils/exportSchema.ts`), so a drifted copy
   would make a reader stop recognising the admission rather than merely look different.
   `dataDirectories.ts` owns the derived facts about what the parser refused to read —
-  `dataDirectoryClamp`, `directoryDeclared`, `certificateUnreadable`, `resourcesUnreadable`.
+  `dataDirectoryClamp`, `directoryDeclared`, `certificateUnreadable`, `resourcesUnreadable` — and
+  `admissions.ts` turns those five facts into the SENTENCES the two session-outliving surfaces
+  print (`parseAdmissions`, read by the MCP resources, `load_pe` and the markdown report).
   `ordinalTables.ts`
   is generated from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it
   matches nothing. It also owns the **one declaration of the `Ordinal_<n>` spelling** —
@@ -1744,6 +1746,34 @@ mistake.
   byte-identical (98/118, 20 vacuous), `corpus` byte-identical over four binaries, `corpus:arm64`
   51/51.
 
+- **AN ADMISSION THAT STOPS AT THE BROWSER UI IS NO ADMISSION AT ALL ON THE TWO SURFACES THAT
+  OUTLIVE THE SESSION.** No module under `src/mcp/` read any truncation flag, so
+  `pe://{id}/imports` handed a client a short list as a complete one; `utils/exportSchema.ts`
+  reproduced the same list in a report **and** introduced a truncation of its own
+  (`slice(0, 60) + "..."`) spelled differently from every other truncation in the tool. An MCP
+  answer is consumed by something that **cannot ask a follow-up question** and a report is a file
+  the user keeps, so an unmarked narrowing there is durable in a way a screen is not.
+  **`pe/admissions.ts`'s `parseAdmissions(pe)` is the one declaration**, returning
+  `{ subject, sentence }` rows for the five facts on `PEFile` (imports, exports, resources — the
+  cut-short tree and the unreadable directory being *different* sentences — certificate, and the
+  data-directory clamp). **The value is PROSE, not a flag, and that is the design**: the consumers
+  are an LLM and a human reading a file months later, neither of whom can be relied on to know
+  what `truncated: true` means, so the sentence carries the fact on `TRUNCATION_MARKER`'s model
+  while `subject` is what a consumer that does know keys off. **Empty means the parse was whole.**
+  It is deliberately *not* `analysis/anomalies.ts` — that pass answers "what should an analyst look
+  at", carries a severity and includes findings unrelated to the parse; the overlap is two
+  sentences, not a predicate. Two shape rules: the MCP list resources moved their array **under a
+  key** (`{ incomplete?, libraries }`, `{ incomplete?, exports }`) because a bare array has nowhere
+  to say it is short, and the wrapper is **unconditional** since a shape that varies with the file
+  is worse to consume than one extra key; `ImportEntry.truncated` is carried **per library** beside
+  the whole-table fact, each descriptor having its own thunk walk. The report says it twice — under
+  the Summary table and on the `## Imports`/`## Exports`/`### <library>` headings — and those two
+  assertions are **split across two `it()`s** because within one the first failure hides the
+  second. Eight controls, all discriminating; `generateMarkdownReport` had **no test at all**
+  before this. Still not carried: `extractStrings`' scan budget (no channel anywhere),
+  `DebugDirectory.truncated`/`pdbPathTruncated` (that reader reaches neither consumer), the TLS
+  callback cap, and every `authenticode.ts` narrowing. (`peek-a-bin-8pod`)
+
 - **A DIRECTORY THE FILE DECLARES AND THE READER GAVE UP ON IS NOT A DIRECTORY THE FILE LACKS, AND
   THE CHANNEL IS DERIVED RATHER THAN A NEW `PEFile` FLAG.** `parsePE` reads the certificate table
   and the resource directory inside a `catch {}`, and each leaves its field `undefined` — which is
@@ -1775,8 +1805,8 @@ mistake.
   facts also reach `analysis/anomalies.ts` at `warning`, on the clamp's argument. Seven controls,
   all discriminating (two of them redden four and two *pre-existing* rows); all six real binaries
   report neither claim and read exactly the debug entries they declare (1 on x86, 3 on ARM64);
-  `corpus` byte-identical, `corpus:parserdiff` 98/118, `corpus:arm64` 51/51. Still not in MCP
-  output or the export file (`peek-a-bin-8pod`). (`peek-a-bin-wo8g`)
+  `corpus` byte-identical, `corpus:parserdiff` 98/118, `corpus:arm64` 51/51. Carried into MCP
+  output and the export file by the entry above. (`peek-a-bin-wo8g`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
