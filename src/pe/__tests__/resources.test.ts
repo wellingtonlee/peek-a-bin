@@ -19,9 +19,9 @@ import {
   MAX_TOTAL_ENTRIES,
   parseResourceDirectory,
   parseVersionInfo,
-  RESOURCE_STRING_TRUNCATION_MARKER,
   reconstructIcon,
 } from "../resources";
+import { TRUNCATION_MARKER } from "../truncation";
 import type { ResourceNode, SectionHeader } from "../types";
 import { buildMinimalPE32, buildMinimalPE64, type PEFixtureOptions } from "./fixtures";
 
@@ -440,11 +440,11 @@ describe("parseResourceDirectory", () => {
       );
       const id = tree.root[0].id as string;
       expect(typeof id).toBe("string");
-      expect(id.endsWith(RESOURCE_STRING_TRUNCATION_MARKER)).toBe(true);
+      expect(id.endsWith(TRUNCATION_MARKER)).toBe(true);
       // The clip itself is unchanged: the recovered PREFIX is still capped.
       // 0x41 FILL BYTES MAKE 0x4141 UTF-16 UNITS, not the letter "A" — the
       // old length-only assertion never had to notice which.
-      expect(id.slice(0, -RESOURCE_STRING_TRUNCATION_MARKER.length)).toBe("\u4141".repeat(4096));
+      expect(id.slice(0, -TRUNCATION_MARKER.length)).toBe("\u4141".repeat(4096));
     });
 
     it("marks a name the BUFFER cut short, not only one the cap did", () => {
@@ -466,7 +466,7 @@ describe("parseResourceDirectory", () => {
         { virtualAddress: RSRC_RVA, size },
         rsrcSections(size),
       );
-      expect(tree.root[0].id).toBe(`${"\u4242".repeat(7)}${RESOURCE_STRING_TRUNCATION_MARKER}`);
+      expect(tree.root[0].id).toBe(`${"\u4242".repeat(7)}${TRUNCATION_MARKER}`);
     });
 
     it("does not mark a name it read whole", () => {
@@ -655,8 +655,8 @@ describe("parseVersionInfo", () => {
      * complete one, in a table `ExpandedLeaf` prints verbatim. The clip is still
      * the clip; what changed is that it says so.
      */
-    expect(info.Key.endsWith(RESOURCE_STRING_TRUNCATION_MARKER)).toBe(true);
-    expect(info.Key.slice(0, -RESOURCE_STRING_TRUNCATION_MARKER.length)).toBe("A".repeat(4096));
+    expect(info.Key.endsWith(TRUNCATION_MARKER)).toBe(true);
+    expect(info.Key.slice(0, -TRUNCATION_MARKER.length)).toBe("A".repeat(4096));
   });
 
   it("does not mark a version string it read whole", () => {
@@ -685,7 +685,7 @@ describe("parseVersionInfo", () => {
 
     const info = parseVersionInfo(buf, RSRC_RVA, size, rsrcSections(buf.byteLength));
     expect(info.CompanyName).toBe("Contoso Ltd");
-    expect(JSON.stringify(info)).not.toContain(RESOURCE_STRING_TRUNCATION_MARKER);
+    expect(JSON.stringify(info)).not.toContain(TRUNCATION_MARKER);
   });
 
   it("does not mark a value of EXACTLY the cap's length that terminated", () => {
@@ -721,7 +721,7 @@ describe("parseVersionInfo", () => {
 
     const info = parseVersionInfo(buf, RSRC_RVA, size, rsrcSections(buf.byteLength));
     expect(info.Exact).toBe("C".repeat(CAP));
-    expect(info.Exact).not.toContain(RESOURCE_STRING_TRUNCATION_MARKER);
+    expect(info.Exact).not.toContain(TRUNCATION_MARKER);
   });
 });
 

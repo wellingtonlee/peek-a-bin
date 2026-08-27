@@ -94,7 +94,14 @@ Many entries below name a module as **the one declaration** of some rule. That p
 bearing: each of those exists because the same predicate had been hand-written at several sites
 and the copies drifted. Reuse them rather than re-rolling the logic.
 
-- **`pe/`** — PE parser (headers, imports, exports, resources, authenticode). `ordinalTables.ts`
+- **`pe/`** — PE parser (headers, imports, exports, resources, authenticode). `truncation.ts` owns
+  the **one declaration of `TRUNCATION_MARKER`** and `isTruncatedValue` — the admission spelled
+  *into a value* where the narrowed thing is a string; it was three copies in three files, and it
+  is read back in two places (`ImportEntry.truncated`, `utils/exportSchema.ts`), so a drifted copy
+  would make a reader stop recognising the admission rather than merely look different.
+  `dataDirectories.ts` owns the derived facts about what the parser refused to read —
+  `dataDirectoryClamp`, `directoryDeclared`, `certificateUnreadable`, `resourcesUnreadable`.
+  `ordinalTables.ts`
   is generated from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it
   matches nothing. It also owns the **one declaration of the `Ordinal_<n>` spelling** —
   `ORDINAL_IMPORT_PREFIX`, `formatOrdinalImport`, `parseOrdinalImport`, `resolveOrdinal` — because
@@ -1629,7 +1636,7 @@ mistake.
   a symbol server and a short one matches nothing while looking well-formed; a cap alone still lets
   a hostile record spend the whole cap. A declared size at or under the 24-byte fixed part is
   **not credible** and drops to the cap rather than being honoured. **When the scan is cut short
-  the VALUE says so, not just the type**: `pdbPath` carries `PDB_PATH_TRUNCATION_MARKER`
+  the VALUE says so, not just the type**: `pdbPath` carries `TRUNCATION_MARKER`
   (`… <truncated>`) beside the `pdbPathTruncated` flag, because a narrower answer must not wear a
   complete one's shape and the one render site prints `pdbPath` verbatim with no knowledge of the
   flag — there is no toast mechanism and one must not be invented for a bug fix. **The control that
@@ -1660,7 +1667,7 @@ mistake.
   matching nothing. Its parameter is the **`PEFile`, not `PEFile["imports"]`**, deliberately:
   whether the list is whole is a fact about the parse, so taking the file makes forgetting to ask a
   compile error. `""` still means "imports nothing" and `HeaderView` prints a different sentence for
-  each. `readCString`'s 1024-byte cap now appends `NAME_TRUNCATION_MARKER` (measured: 1024 silent
+  each. `readCString`'s 1024-byte cap now appends `TRUNCATION_MARKER` (measured: 1024 silent
   characters before), **but the marker alone would be wrong here** — unlike a PDB path these names
   reach a digest, so a truncated name also marks the entry, which makes the hash refuse; truncation
   is decided exactly ("stopped at the bound *and* no NUL sits at it") so a name of exactly 1024
@@ -1689,7 +1696,7 @@ mistake.
   stopped the walk. `depth >= MAX_DEPTH` and a repeat visit deliberately still do **not** set it and
   say so at their sites — both are judgements about a malformed *shape* rather than an unread entry.
   **The two resource STRING clips now carry `nygv`'s marker too**
-  (`RESOURCE_STRING_TRUNCATION_MARKER`): a resource name clipped at
+  (`TRUNCATION_MARKER`): a resource name clipped at
   `MAX_RESOURCE_STRING`, and a version-info key or value the walk stopped collecting. Both are
   rendered verbatim (`ordinalLabel`, `ExpandedLeaf`'s table) and **neither feeds a digest**, which is
   the stated asymmetry with `readCString` — there a marker had to additionally mark the entry so it

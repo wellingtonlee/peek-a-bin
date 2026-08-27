@@ -24,6 +24,7 @@ import { formatOrdinalImport } from "./ordinalTables";
 import { parsePdata } from "./pdata";
 import { parseResourceDirectory } from "./resources";
 import { findCodeSection } from "./sections";
+import { isTruncatedValue, TRUNCATION_MARKER } from "./truncation";
 import type {
   COFFHeader,
   DataDirectory,
@@ -44,31 +45,9 @@ import { normalizeOptionalHeader } from "./types";
 const textDecoder = new TextDecoder();
 
 /**
- * The admission appended to a name `readCString` could not read whole.
- *
- * It is the shape `peek-a-bin-nygv` settled on for the PDB path
- * (`PDB_PATH_TRUNCATION_MARKER`), for the same reason: a narrower answer must
- * not wear a complete one's shape, and the *value* is the only channel that
- * reaches a reader — the render sites print these strings verbatim and the app
- * has no toast mechanism.
- *
- * `…` and `<`/`>` are bytes no name this parser reads can contain: a PE import,
- * export or library name is an ASCII C string emitted by a linker, so the
- * marker cannot be confused with one, and it cannot survive a round trip
- * through anything that resolves a name (no API matches it, no ordinal table
- * holds it, no symbol is called it).
- */
-export const NAME_TRUNCATION_MARKER = "… <truncated>";
-
-/** Whether `readCString` had to cut this string short. One declaration. */
-export function isNameTruncated(name: string): boolean {
-  return name.endsWith(NAME_TRUNCATION_MARKER);
-}
-
-/**
  * Read a NUL-terminated ASCII string, bounded by `maxLength` and by the buffer.
  *
- * **A CUT-SHORT READ SAYS SO**, by appending {@link NAME_TRUNCATION_MARKER}.
+ * **A CUT-SHORT READ SAYS SO**, by appending {@link TRUNCATION_MARKER}.
  * The 1024-byte cap has been here since long before the marker and it is the
  * right bound — no linker emits a name near it — but it used to truncate
  * SILENTLY, so a crafted `.rdata` holding 1024 non-NUL bytes where a name
@@ -97,7 +76,7 @@ function readCString(view: DataView, offset: number, maxLength = 1024): string {
     new Uint8Array(view.buffer, view.byteOffset + offset, end - offset),
   );
   const terminated = end < view.byteLength && view.getUint8(end) === 0;
-  return terminated ? text : text + NAME_TRUNCATION_MARKER;
+  return terminated ? text : text + TRUNCATION_MARKER;
 }
 
 /**
@@ -637,7 +616,7 @@ function parseImports(
     // A name that could not be read whole does not describe this library, so
     // the entry is not whole either — see `readCString`'s docstring for why the
     // marker alone is not the answer where the value reaches a digest.
-    let entryTruncated = isNameTruncated(libraryName);
+    let entryTruncated = isTruncatedValue(libraryName);
 
     // Read import names from INT (Import Name Table)
     const thunkRVA = originalFirstThunk || firstThunk;
@@ -715,7 +694,7 @@ function parseImports(
           if (nameTableOffset >= 0 && nameTableOffset + 2 < view.byteLength) {
             // Skip hint (2 bytes)
             funcName = readCString(view, nameTableOffset + 2);
-            if (isNameTruncated(funcName)) entryTruncated = true;
+            if (isTruncatedValue(funcName)) entryTruncated = true;
           } else {
             // A declared import we cannot name: the entry is not whole.
             entryTruncated = true;
@@ -889,7 +868,7 @@ function parseExports(
       const name = readCString(view, nameOffset);
       // A name `readCString` could not read whole does not name this export, so
       // the table is not whole either — the same reading `parseImports` takes.
-      if (isNameTruncated(name)) tableTruncated = true;
+      if (isTruncatedValue(name)) tableTruncated = true;
 
       const existing = namesByIndex.get(addressIndex);
       if (existing) existing.push(name);
@@ -931,7 +910,7 @@ function parseExports(
       const forwarderOffset = rvaToFileOffsetIndexed(address, sectionIndex);
       if (forwarderOffset >= 0 && forwarderOffset < view.byteLength) {
         forwarder = readCString(view, forwarderOffset) || undefined;
-        if (forwarder && isNameTruncated(forwarder)) tableTruncated = true;
+        if (forwarder && isTruncatedValue(forwarder)) tableTruncated = true;
       }
     }
 

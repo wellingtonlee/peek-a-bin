@@ -1,5 +1,6 @@
 import { parseOrdinalImport, resolveOrdinal } from "./ordinalTables";
 import { buildSectionIndex, sectionRawLimitForRva } from "./parser";
+import { TRUNCATION_MARKER } from "./truncation";
 import type { PEFile } from "./types";
 
 // --- Rich Header ---
@@ -76,7 +77,7 @@ export interface DebugInfo {
    * The CodeView PDB path, **or an admission that it could not be read whole**.
    *
    * When {@link pdbPathTruncated} is set this string is a *prefix* of what the
-   * file holds followed by {@link PDB_PATH_TRUNCATION_MARKER}, and is therefore
+   * file holds followed by {@link TRUNCATION_MARKER}, and is therefore
    * not a path. See {@link parseDebugDirectory}'s scan-bound docstring for why
    * the admission is spelled into the value rather than only into this type.
    */
@@ -86,13 +87,6 @@ export interface DebugInfo {
   guid?: string;
   age?: number;
 }
-
-/**
- * The admission appended to {@link DebugInfo.pdbPath} when the scan was cut
- * short. It contains characters no Windows path may hold (`<`, `>`), so a value
- * carrying it cannot be mistaken for — or used as — a path.
- */
-export const PDB_PATH_TRUNCATION_MARKER = "… <truncated>";
 
 /**
  * The absolute ceiling on a PDB path scan, in bytes, used when the record's own
@@ -136,7 +130,7 @@ const CV_INFO_PDB70_HEADER_BYTES = 24;
  *
  * **THE READER-FACING ADMISSION IS NOW WHOLE**, and both halves of it are in
  * different places for a reason. A record whose *path* was cut short says so in
- * the VALUE, via {@link PDB_PATH_TRUNCATION_MARKER}, because the one render site
+ * the VALUE, via {@link TRUNCATION_MARKER}, because the one render site
  * prints that string verbatim. A directory whose *entry list* was cut short
  * cannot carry a marker — an invented row would be a lie inside the list — so it
  * says so on the return type ({@link DebugDirectory.truncated}) and on the
@@ -326,7 +320,7 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugDirec
         // rendered as a path is exactly that failure. `pdbPathTruncated` is the
         // machine-readable half, but a consumer that has never heard of it
         // still cannot be fooled, because the string itself carries
-        // `PDB_PATH_TRUNCATION_MARKER`. That matters concretely: the one render
+        // `TRUNCATION_MARKER`. That matters concretely: the one render
         // site prints `d.pdbPath` verbatim and knows nothing about the flag.
         // The app has no toast mechanism and one must not be invented for a bug
         // fix (see the `copyText` refusal), so the value *is* the channel.
@@ -346,7 +340,7 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugDirec
           // A NUL was found inside the bound: the path is whole.
           info.pdbPath = text;
         } else {
-          info.pdbPath = text + PDB_PATH_TRUNCATION_MARKER;
+          info.pdbPath = text + TRUNCATION_MARKER;
           info.pdbPathTruncated = true;
         }
       }

@@ -18,19 +18,17 @@ import {
   computeImphash,
   MAX_DEBUG_DIRECTORY_ENTRIES,
   MAX_PDB_PATH_BYTES,
-  PDB_PATH_TRUNCATION_MARKER,
   parseDebugDirectory,
 } from "../metadata";
 import {
   extractStrings,
-  isNameTruncated,
   MAX_EXPORT_ENTRIES,
   MAX_IMPORT_DESCRIPTORS,
   MAX_IMPORT_FUNCTIONS,
-  NAME_TRUNCATION_MARKER,
   parsePE,
 } from "../parser";
 import { MAX_ARM64_UNWIND_CODE_BYTES, MAX_PDATA_ENTRIES, parsePdata } from "../pdata";
+import { isTruncatedValue, TRUNCATION_MARKER } from "../truncation";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
 const TIMEOUT = 5000;
@@ -296,7 +294,7 @@ describe("malformed PE handling", () => {
       const pe = parsePE(buf);
       expect(pe.exports).toHaveLength(1);
       expect(pe.exports[0].forwarder).toMatch(/^A+… <truncated>$/);
-      expect(isNameTruncated(pe.exports[0].forwarder!)).toBe(true);
+      expect(isTruncatedValue(pe.exports[0].forwarder!)).toBe(true);
       expect(pe.exports[0].forwarder!.length).toBeLessThanOrEqual(buf.byteLength);
     });
 
@@ -668,8 +666,8 @@ describe("malformed PE handling", () => {
 
       const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
-      expect(info[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
-      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
+      expect(info[0].pdbPath).toContain(TRUNCATION_MARKER);
+      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + TRUNCATION_MARKER.length);
     });
 
     it("does not truncate a valid path when SizeOfData is zero", { timeout: TIMEOUT }, () => {
@@ -702,7 +700,7 @@ describe("malformed PE handling", () => {
       setSizeOfData(buf, 24 + 7); // room for "C:\\buil" and no terminator
       const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
-      expect(info[0].pdbPath).toBe(`C:\\buil${PDB_PATH_TRUNCATION_MARKER}`);
+      expect(info[0].pdbPath).toBe(`C:\\buil${TRUNCATION_MARKER}`);
       // A narrower answer must not wear a complete one's shape.
       expect(info[0].pdbPath).not.toBe(WELL_FORMED_PATH);
       expect(WELL_FORMED_PATH.startsWith(info[0].pdbPath ?? "")).toBe(false);
@@ -730,7 +728,7 @@ describe("malformed PE handling", () => {
 
       const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
-      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
+      expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + TRUNCATION_MARKER.length);
     });
 
     it("is bounded by the end of the file when that comes first", {
@@ -744,10 +742,8 @@ describe("malformed PE handling", () => {
 
       const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
-      expect(info[0].pdbPath?.length).toBeLessThan(
-        MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length,
-      );
-      expect(info[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
+      expect(info[0].pdbPath?.length).toBeLessThan(MAX_PDB_PATH_BYTES + TRUNCATION_MARKER.length);
+      expect(info[0].pdbPath).toContain(TRUNCATION_MARKER);
     });
   });
 
@@ -1025,9 +1021,9 @@ describe("malformed PE handling", () => {
       const pe = parsePE(buf);
 
       expect(pe.imports).toHaveLength(1);
-      expect(pe.imports[0].libraryName).toHaveLength(1024 + NAME_TRUNCATION_MARKER.length);
-      expect(pe.imports[0].libraryName.endsWith(NAME_TRUNCATION_MARKER)).toBe(true);
-      expect(isNameTruncated(pe.imports[0].libraryName)).toBe(true);
+      expect(pe.imports[0].libraryName).toHaveLength(1024 + TRUNCATION_MARKER.length);
+      expect(pe.imports[0].libraryName.endsWith(TRUNCATION_MARKER)).toBe(true);
+      expect(isTruncatedValue(pe.imports[0].libraryName)).toBe(true);
       // The function list itself is complete — one ordinal — so this row is the
       // NAME's and nothing else's.
       expect(pe.imports[0].functions).toEqual(["Ordinal_1"]);
@@ -1060,7 +1056,7 @@ describe("malformed PE handling", () => {
       const pe = parsePE(buf);
 
       expect(pe.imports[0].libraryName).toHaveLength(1024);
-      expect(isNameTruncated(pe.imports[0].libraryName)).toBe(false);
+      expect(isTruncatedValue(pe.imports[0].libraryName)).toBe(false);
       expect(pe.imports[0].truncated).toBeUndefined();
       expect(pe.importsTruncated).toBeUndefined();
       expect(computeImphash(pe)).toMatch(/^[0-9a-f]{32}$/);
@@ -1141,7 +1137,7 @@ describe("malformed PE handling", () => {
         expect(dbg.length).toBe(MAX_DEBUG_DIRECTORY_ENTRIES);
         const chars = dbg.reduce((n, d) => n + (d.pdbPath?.length ?? 0), 0);
         expect(chars).toBeLessThanOrEqual(
-          MAX_DEBUG_DIRECTORY_ENTRIES * (MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length),
+          MAX_DEBUG_DIRECTORY_ENTRIES * (MAX_PDB_PATH_BYTES + TRUNCATION_MARKER.length),
         );
         // Discriminating: the pre-fix figure is two orders of magnitude above
         // this, so the assertion is not satisfied by the defect.
@@ -1149,7 +1145,7 @@ describe("malformed PE handling", () => {
         // Each cut-short path still SAYS so — the per-record admission survives
         // the new per-directory bound.
         expect(dbg[0].pdbPathTruncated).toBe(true);
-        expect(dbg[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
+        expect(dbg[0].pdbPath).toContain(TRUNCATION_MARKER);
         // AND THE DIRECTORY SAYS SO TOO. The per-record marker above is the only
         // admission this walk used to make; a list stopped at 256 out of 38,034
         // declared entries was otherwise shaped exactly like a complete one.

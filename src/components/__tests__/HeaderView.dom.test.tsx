@@ -1066,7 +1066,7 @@ describe("HeaderView digital signature", () => {
    * pill and "No digital signature found in this binary.": a positive claim about
    * the FILE resting on the tool's own failure to read it. The distinction this
    * codebase insists on everywhere else — `computeImphash` refusing with `null`,
-   * `PDB_PATH_TRUNCATION_MARKER`, `ResourceTree.truncated` — was erased exactly
+   * `TRUNCATION_MARKER`, `ResourceTree.truncated` — was erased exactly
    * here. (peek-a-bin-wo8g)
    *
    * The fixture is the reachable route, through the real parser: directory 4

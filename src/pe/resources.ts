@@ -1,4 +1,5 @@
 import { rvaToFileOffset } from "./parser";
+import { TRUNCATION_MARKER } from "./truncation";
 import type { ResourceNode, ResourceTree, SectionHeader } from "./types";
 
 const MAX_DEPTH = 4;
@@ -17,37 +18,6 @@ export const MAX_TOTAL_ENTRIES = 65536;
 
 /** Resource name strings are short in practice; anything longer is junk. */
 const MAX_RESOURCE_STRING = 4096;
-
-/**
- * Appended to a resource string this reader could not read whole.
- *
- * `peek-a-bin-nygv`'s rule — the admission is spelled into the VALUE, because
- * the value is a string and every render site prints it verbatim: a resource id
- * goes through `ordinalLabel`, a version-info key and value straight into
- * `ExpandedLeaf`'s table. It holds characters no resource name and no version
- * string legitimately contains, so it cannot be mistaken for the file's own text.
- *
- * THE ASYMMETRY WITH `readCString` IS DELIBERATE AND IS THE STATED DECISION.
- * `parser.ts`'s import/export name reader appends `NAME_TRUNCATION_MARKER` **and**
- * marks the entry not-whole, so a marked name can never reach `computeImphash` —
- * there, a marker would otherwise change a digest. Nothing here feeds a digest,
- * a hash or any cross-tool comparison, so the marker alone is the whole fix and
- * no refusal accompanies it.
- *
- * Both truncations are decided EXACTLY, never by "we reached the bound":
- * `readResourceString` compares what it collected against the character count the
- * string's own uint16 header declares (which covers the cap and the buffer ending
- * mid-string with one test), and `readWString` records whether it actually dropped
- * a character. A string of exactly {@link MAX_RESOURCE_STRING} characters is
- * therefore not marked — `peek-a-bin-6qx9`'s off-by-one, in the other reader.
- *
- * A THIRD COPY OF THIS LITERAL now exists (`PDB_PATH_TRUNCATION_MARKER` in
- * `metadata.ts`, `NAME_TRUNCATION_MARKER` in `parser.ts`), following the
- * one-constant-per-reader pattern those two established. Folding the three into
- * one declaration is the right end state and is filed rather than done here,
- * because it touches two files this change does not own.
- */
-export const RESOURCE_STRING_TRUNCATION_MARKER = "… <truncated>";
 
 /**
  * The walk's entry allowance, and WHETHER THE WALK COVERED WHAT THE FILE
@@ -86,6 +56,21 @@ interface Budget {
 /**
  * Read a UTF-16LE length-prefixed string from the resource section.
  * Format: uint16 length (in chars), then length * uint16 chars.
+ *
+ * A STRING THIS READER COULD NOT FINISH CARRIES {@link TRUNCATION_MARKER}, and
+ * the marker is the WHOLE admission here — the asymmetry with `readCString` is
+ * deliberate. That reader additionally marks its entry, so a truncated import
+ * name can never reach `computeImphash`; nothing in this file feeds a digest, a
+ * hash or any cross-tool comparison (a resource id goes through `ordinalLabel`
+ * and a version-info key straight into `ExpandedLeaf`'s table, both printed
+ * verbatim), so no refusal accompanies it.
+ *
+ * Truncation is decided EXACTLY, never by "we reached the bound": what was
+ * collected is compared against the character count the string's own uint16
+ * header declares, which covers the {@link MAX_RESOURCE_STRING} clip and the
+ * buffer ending mid-string with one test. A string of exactly that length which
+ * terminated properly is therefore not marked — `peek-a-bin-6qx9`'s off-by-one,
+ * in the other reader.
  */
 function readResourceString(view: DataView, offset: number): string {
   if (offset + 2 > view.byteLength) return "";
@@ -104,7 +89,7 @@ function readResourceString(view: DataView, offset: number): string {
   // string's own header states, so falling short of it is the clip
   // ({@link MAX_RESOURCE_STRING}) *or* the buffer ending inside the string, and
   // reaching it exactly is a complete read either way.
-  return chars.length < declared ? text + RESOURCE_STRING_TRUNCATION_MARKER : text;
+  return chars.length < declared ? text + TRUNCATION_MARKER : text;
 }
 
 /**
@@ -297,7 +282,7 @@ export function parseVersionInfo(
     const str = String.fromCharCode(...chars);
     // `end` is deliberately unchanged by the marker: it is a FILE POSITION the
     // caller's walk continues from, and the marker is text for a reader.
-    return { str: dropped ? str + RESOURCE_STRING_TRUNCATION_MARKER : str, end: p };
+    return { str: dropped ? str + TRUNCATION_MARKER : str, end: p };
   }
 
   // DWORD align
