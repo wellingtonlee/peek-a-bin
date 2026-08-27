@@ -1125,6 +1125,14 @@ read "all of them compile" as "all of them are right".
   *move*, for every context consumer, measured against the real `DisassemblyView` and
   negative-controlled. Whether two renders of a virtualized list and a dagre-laid-out graph is
   *slow* still needs the React DevTools Profiler on a real binary in a real browser.
+- **SIX NEW ADMISSION SURFACES ARE UNSEEN IN A BROWSER, all landed this session and all fixture-
+  verified only.** The amber **Unreadable** pill and its sentence in the signature block; the
+  Resources pane's "could not be read" arm; the Debug Info heading's *Incomplete* marker; the
+  Strings toolbar's *N bytes unscanned* marker; the signature block's full **Distinguished Name**
+  row, which is now longer than the CN it replaced and sits in a two-column table nobody has
+  watched wrap; and its **Certificates** row. Each is a short string in a strip or table with a
+  fixed height, which is exactly the class jsdom cannot judge — it performs no layout. Added to
+  `peek-a-bin-v2u`.
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
 - **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**
