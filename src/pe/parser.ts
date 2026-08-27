@@ -19,6 +19,7 @@ import {
   IMAGE_ORDINAL_FLAG32,
   IMAGE_ORDINAL_FLAG64,
 } from "./constants";
+import { directoryDeclared } from "./dataDirectories";
 import { formatOrdinalImport } from "./ordinalTables";
 import { parsePdata } from "./pdata";
 import { parseResourceDirectory } from "./resources";
@@ -1443,11 +1444,25 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   // 11. Parse Resource Directory
   let resources: import("./types").ResourceTree | undefined;
   const resourceDir = dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE];
-  if (resourceDir && resourceDir.virtualAddress > 0 && resourceDir.size > 0) {
+  // `directoryDeclared` rather than the same three tests written out here: it is
+  // also the PREMISE of `resourcesUnreadable`, which is how `ResourcesView`
+  // tells "the reader failed on a declared directory" from "this file has no
+  // resources". A hand-written copy that drifts from this gate makes the view
+  // claim a read failed on a directory this call never attempted.
+  if (directoryDeclared(resourceDir)) {
     try {
       resources = parseResourceDirectory(buffer, resourceDir, sections);
     } catch {
-      // silently ignore malformed resources
+      // LEAVING `resources` UNDEFINED IS NOT "THERE ARE NONE", and the channel
+      // that says so is derived rather than swallowed here: `resourcesUnreadable`
+      // (`pe/dataDirectories.ts`) reads exactly this pair — a declared directory
+      // with no tree — and `ResourcesView` renders it. Nothing is recorded at
+      // this site on purpose; a flag beside `resources` would be a second
+      // declaration of a fact the two public fields already carry.
+      //
+      // No fixture reaches here today: `parseResourceDirectory` bounds every read
+      // on the buffer and answers a `truncated` tree where the RVA resolves
+      // nowhere. See `resourcesUnreadable`'s docstring. (peek-a-bin-wo8g)
     }
   }
 
@@ -1467,7 +1482,13 @@ export function parsePE(buffer: ArrayBuffer): PEFile {
   try {
     certificate = parseSecurityDirectory(buffer, dataDirectories) ?? undefined;
   } catch {
-    // silently ignore malformed certificates
+    // Same channel as the resource walk above: `certificateUnreadable`
+    // (`pe/dataDirectories.ts`) is a declared security directory with no
+    // `certificate`, and `HeaderView` renders it instead of the grey "Unsigned"
+    // pill it used to. This `catch` is the narrower of the two routes into that
+    // state — `parseSecurityDirectory` also *returns* null for a declared
+    // directory whose `WIN_CERTIFICATE` header does not fit in the file, which is
+    // the fixture-reachable one. (peek-a-bin-wo8g)
   }
 
   return {

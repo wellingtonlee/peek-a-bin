@@ -820,8 +820,12 @@ describe("HeaderView debug info", () => {
         }),
       ),
     );
-    const table = screen.getByText("Debug Info").nextElementSibling as HTMLElement;
-    const rows = Array.from(table.querySelectorAll("tbody tr"));
+    // Located through the block rather than off the heading's next sibling: the
+    // heading now carries an inline admission when the walk was cut short
+    // (`DebugDirectory.truncated`), so "the element after the h3" is not always
+    // the table.
+    const block = screen.getByText("Debug Info").closest("div") as HTMLElement;
+    const rows = Array.from(block.querySelectorAll("table tbody tr"));
     expect(rows.map((r) => r.children[0].textContent)).toEqual([
       "CodeView",
       "VC Feature",
@@ -831,6 +835,72 @@ describe("HeaderView debug info", () => {
     // An entry with no payload gets an em dash rather than an empty cell: a
     // blank there reads as a value the parser lost.
     expect(rows.slice(1).map((r) => r.children[1].textContent)).toEqual(["—", "—", "—"]);
+  });
+
+  /**
+   * THE ENTRY LIST'S OWN ADMISSION, which `MAX_DEBUG_DIRECTORY_ENTRIES`'
+   * docstring named as a known hole for two sessions: a record whose PATH was
+   * cut short says so in the value, but a directory whose ENTRY LIST was cut
+   * short said nothing, because the return type was a bare `DebugInfo[]`. A list
+   * cannot carry a marker — an invented row would be a falsehood inside the data
+   * — so the channel is the type and the heading. (peek-a-bin-wo8g)
+   *
+   * `size` here declares 64 entries where the fixture wrote one, so 63 the file
+   * claims went unread. The number is not asserted from the heading text: the
+   * heading says the walk was short, and the title carries the arithmetic.
+   */
+  it("says so when the directory declares more entries than were read", () => {
+    const buf = buildMinimalPE64({
+      directories: { debug: [{ type: 2, codeView: { guid: CV_GUID, age: 1, pdbPath: "a.pdb" } }] },
+    });
+    const pe = parsePE(buf);
+    // Overwrite the synthesized directory's size in place, so everything else
+    // about the fixture — including the record the one entry points at — is
+    // unchanged and the only difference is the count the file declares.
+    const declared = { ...pe.dataDirectories[6], size: 28 * 64 };
+    renderHeaders({
+      ...pe,
+      dataDirectories: pe.dataDirectories.map((d, i) => (i === 6 ? declared : d)),
+    });
+
+    expect(screen.getByText("Debug Info")).toBeTruthy();
+    expect(screen.getByText(/not every declared entry was read/)).toBeTruthy();
+    // The row that WAS read is still on the page: an admission that replaces the
+    // answer is the mistake `analysisNotice`'s timeout kind exists to avoid.
+    expect(rowValue("CodeView").textContent).toContain("a.pdb");
+  });
+
+  it("does not mark a whole directory incomplete", () => {
+    // The other half, and the one that keeps the admission from being noise on
+    // every real binary: the four x86 corpus binaries declare one entry and the
+    // two ARM64 ones three.
+    renderHeaders(
+      parsePE(
+        buildMinimalPE64({
+          directories: {
+            debug: [
+              { type: 2, codeView: { guid: CV_GUID, age: 1, pdbPath: "a.pdb" } },
+              { type: 13 },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(screen.getByText("Debug Info")).toBeTruthy();
+    expect(screen.queryByText(/not every declared entry was read/)).toBeNull();
+  });
+
+  it("renders the block for a declared directory that yielded no entries at all", () => {
+    // A debug directory whose RVA resolves into no section reads zero entries,
+    // and under the old `entries.length > 0` test the entire block vanished — the
+    // pane said nothing whatever about a directory the file declares, which is
+    // the same silence as the grey "Unsigned" pill above.
+    const pe = parsePE(
+      buildMinimalPE64({ dataDirectories: new Map([[6, { virtualAddress: 0x900000, size: 28 }]]) }),
+    );
+    renderHeaders(pe);
+    expect(screen.getByText("Debug Info")).toBeTruthy();
+    expect(screen.getByText(/not every declared entry was read/)).toBeTruthy();
   });
 
   it("renders a CodeView entry whose payload is not RSDS as an empty one", () => {
@@ -984,6 +1054,56 @@ describe("HeaderView digital signature", () => {
     expect(screen.queryByText("Issuer", { selector: "td" })).toBeNull();
     expect(rowValue("Certificate Type").textContent).toBe("0x1");
     expect(rowValue("Signature Size").textContent).toBe("12 bytes");
+  });
+
+  /**
+   * "UNREADABLE" IS A THIRD STATE AND THE PANEL USED TO HAVE TWO.
+   *
+   * `parseSecurityDirectory` answers `null` for a declared security directory
+   * whose `WIN_CERTIFICATE` header does not fit in the file — a truncated
+   * download, a carved sample, a crafted one — and `parsePE` swallows any throw
+   * into the same `undefined`. Every one of those rendered the grey **Unsigned**
+   * pill and "No digital signature found in this binary.": a positive claim about
+   * the FILE resting on the tool's own failure to read it. The distinction this
+   * codebase insists on everywhere else — `computeImphash` refusing with `null`,
+   * `PDB_PATH_TRUNCATION_MARKER`, `ResourceTree.truncated` — was erased exactly
+   * here. (peek-a-bin-wo8g)
+   *
+   * The fixture is the reachable route, through the real parser: directory 4
+   * declared at a file offset the fixture does not contain.
+   */
+  it("does not call a certificate it could not read unsigned", () => {
+    const pe = parsePE(
+      buildMinimalPE64({
+        dataDirectories: new Map([[4, { virtualAddress: 0x100000, size: 0x200 }]]),
+      }),
+    );
+    expect(pe.certificate).toBeUndefined();
+    renderHeaders(pe);
+
+    expect(screen.getByText("Unreadable")).toBeTruthy();
+    expect(screen.queryByText("Unsigned")).toBeNull();
+    expect(screen.queryByText("No digital signature found in this binary.")).toBeNull();
+    // The sentence names the directory it is talking about, derived from the
+    // file's own fields rather than restated, and says in words that this is not
+    // an unsigned binary — the claim a reader would otherwise carry away.
+    const said = screen.getByText(/could not be read/);
+    expect(said.textContent).toContain("0x100000");
+    expect(said.textContent).toContain("512 bytes");
+    expect(said.textContent).toContain("not an unsigned binary");
+  });
+
+  it("still says Unsigned for a file that declares no certificate", () => {
+    // THE CONTROL THAT CATCHES A FIX WHICH SIMPLY STOPS CLAIMING ANYTHING. An
+    // unsigned binary is the overwhelming majority of what this tool opens, and
+    // "Unsigned" is true of it; withdrawing the pill, or painting every file
+    // "Unreadable", trades one falsehood for a louder one.
+    const pe = parsePE(buildMinimalPE64());
+    renderHeaders(pe);
+    expect(screen.getByText("Unsigned")).toBeTruthy();
+    expect(screen.getByText("No digital signature found in this binary.")).toBeTruthy();
+    expect(screen.queryByText("Unreadable")).toBeNull();
+    expect(screen.queryByText(/could not be read/)).toBeNull();
   });
 
   it("folds the populated block away, keeping the badge", async () => {

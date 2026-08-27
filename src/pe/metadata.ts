@@ -134,15 +134,17 @@ const CV_INFO_PDB70_HEADER_BYTES = 24;
  * section's raw extent, applied beside this: a debug directory running off the
  * end of `.rdata` was reading the next section's bytes as entries.
  *
- * **THE READER-FACING ADMISSION IS ONLY PARTIAL AND THAT IS A KNOWN HOLE.**
- * A record whose *path* was cut short says so, in the value, via
- * {@link PDB_PATH_TRUNCATION_MARKER}. A directory whose *entry list* was cut
- * short says nothing, because the return type is a bare `DebugInfo[]` and its
- * one consumer (`HeaderView`) would have to change to carry a flag — the same
- * position `ResourceTree.truncated` sat in before anything rendered it. Since
- * only a crafted file can reach 256 where every real one declares 1 or 3, the
- * row count *is* legible; but a `debugTruncated` flag beside the table is the
- * honest completion and is deliberately left undone rather than pretended.
+ * **THE READER-FACING ADMISSION IS NOW WHOLE**, and both halves of it are in
+ * different places for a reason. A record whose *path* was cut short says so in
+ * the VALUE, via {@link PDB_PATH_TRUNCATION_MARKER}, because the one render site
+ * prints that string verbatim. A directory whose *entry list* was cut short
+ * cannot carry a marker — an invented row would be a lie inside the list — so it
+ * says so on the return type ({@link DebugDirectory.truncated}) and on the
+ * table's heading, which is `ResourceTree.truncated`'s channel and for the same
+ * reason: the bound is global to the walk and there is no row that is "the
+ * incomplete one". That is what closed the hole this docstring used to name
+ * (`peek-a-bin-wo8g`); widening the return type is what forced the render site to
+ * be revisited, exactly as `computeImphash`'s widened parameter did.
  */
 export const MAX_DEBUG_DIRECTORY_ENTRIES = 256;
 
@@ -163,11 +165,42 @@ const DEBUG_TYPE_NAMES: Record<number, string> = {
   16: "Repro",
 };
 
-export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[] {
-  // Data directory index 6 = Debug
-  if (pe.dataDirectories.length <= 6) return [];
+/**
+ * {@link parseDebugDirectory}'s answer: the records it read, and whether that is
+ * all of them.
+ *
+ * A BARE `DebugInfo[]` COULD NOT SAY THE SECOND THING, which is why this type
+ * exists. `IMAGE_DEBUG_DIRECTORY` has no count field — the count *is*
+ * `size / 28`, and `size` is a `uint32` straight off the file — so a walk stopped
+ * by {@link MAX_DEBUG_DIRECTORY_ENTRIES}, by the containing section's extent or
+ * by the end of the buffer returns a short array shaped exactly like a complete
+ * one. `truncated` is the only channel, since a list cannot carry a marker the
+ * way a string can: an invented row would be a falsehood inside the data.
+ */
+export interface DebugDirectory {
+  entries: DebugInfo[];
+  /**
+   * Set when **an entry the debug directory declares was not read** — whatever
+   * stopped the walk. Named for what it means rather than for the bound that is
+   * usually behind it (`ResourceTree.truncated`'s `stopped`-to-`incomplete`
+   * lesson, `peek-a-bin-dhcx`): the RVA resolving into no section sets it too,
+   * because that answer is otherwise byte-for-byte the one a file with no debug
+   * directory gets.
+   *
+   * Omitted rather than set `false` when the list is whole, on
+   * `PEFile.importsTruncated`'s rule, so a `DebugDirectory` built anywhere else
+   * cannot claim completeness by accident.
+   */
+  truncated?: boolean;
+}
+
+export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugDirectory {
+  // Data directory index 6 = Debug. Neither of these is an admission: the table
+  // not reaching index 6, or a zero address or size, is the file saying it has no
+  // debug directory.
+  if (pe.dataDirectories.length <= 6) return { entries: [] };
   const debugDir = pe.dataDirectories[6];
-  if (debugDir.virtualAddress === 0 || debugDir.size === 0) return [];
+  if (debugDir.virtualAddress === 0 || debugDir.size === 0) return { entries: [] };
 
   // Convert RVA to file offset
   const debugRVA = debugDir.virtualAddress;
@@ -178,7 +211,12 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
       break;
     }
   }
-  if (fileOffset === 0) return [];
+  // A DEBUG DIRECTORY THE SECTION TABLE CANNOT PLACE IS NOT AN ABSENT ONE. The
+  // two returns above have already established that the file declares one, so
+  // reaching here means it names an address no section holds and every entry it
+  // declares went unread — `parseResourceDirectory`'s unmapped-RVA case, which
+  // `peek-a-bin-dhcx` fixed in exactly this way.
+  if (fileOffset === 0) return { entries: [], truncated: true };
 
   const view = new DataView(buffer);
   const results: DebugInfo[] = [];
@@ -196,6 +234,12 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
     MAX_DEBUG_DIRECTORY_ENTRIES,
     Math.max(0, Math.floor((walkLimit - fileOffset) / entrySize)),
   );
+  // WHAT THE FILE DECLARES, against what the bounds above allowed. There is no
+  // count field in the format, so the declaration *is* `size / 28` — which makes
+  // this comparison exact rather than an approximation, and is why the flag can
+  // be derived here instead of being set at each of the three bounds.
+  const declaredEntries = Math.max(0, Math.floor(Math.max(0, debugDir.size) / entrySize));
+  const truncated = numEntries < declaredEntries;
 
   for (let i = 0; i < numEntries; i++) {
     const off = fileOffset + i * entrySize;
@@ -310,7 +354,7 @@ export function parseDebugDirectory(buffer: ArrayBuffer, pe: PEFile): DebugInfo[
 
     results.push(info);
   }
-  return results;
+  return truncated ? { entries: results, truncated: true } : { entries: results };
 }
 
 // --- Checksum Validation ---

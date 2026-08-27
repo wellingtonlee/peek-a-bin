@@ -139,6 +139,103 @@ describe("detectAnomalies — attacker-controlled section table", () => {
 });
 
 /**
+ * A DIRECTORY THE FILE DECLARES AND THE READER GAVE UP ON (peek-a-bin-wo8g).
+ *
+ * `parsePE` reads the certificate table and the resource directory behind a
+ * `catch {}`, and `parseSecurityDirectory` also answers `null` for a declared
+ * certificate whose header does not fit in the file. Every one of those left the
+ * field `undefined` — indistinguishable from a file that has neither — so the
+ * Headers panel said "Unsigned" and the Resources pane said "No resources
+ * found": positive claims about the FILE resting on the tool's own failure.
+ *
+ * This pass is here for `dataDirectoryClamp`'s reason and not by symmetry: the
+ * panels mark the fact where a reader looking at that directory would see it,
+ * and this is the surface an analyst opens on purpose — someone who never opens
+ * the Resources tab never learns the file declares resources nothing could walk.
+ *
+ * The liveness half is the last case: an ordinary fixture must raise neither, or
+ * the finding is noise on every binary the tool opens.
+ */
+describe("detectAnomalies — a declared directory the reader could not read", () => {
+  const CERT_TITLE = "Certificate table could not be read";
+  const RSRC_TITLE = "Resource directory could not be read";
+
+  it("raises a warning for a certificate the file does not contain", () => {
+    // Through the real parser: directory 4's address is a FILE OFFSET, and this
+    // one is past the end of the fixture — a truncated or carved sample.
+    const pe = parsePE(
+      buildMinimalPE64({
+        dataDirectories: new Map([[4, { virtualAddress: 0x100000, size: 0x200 }]]),
+      }),
+    );
+    const found = detectAnomalies(pe).find((a) => a.title === CERT_TITLE);
+    expect(found?.severity).toBe("warning");
+  });
+
+  it("says in words that the file is not unsigned", () => {
+    // Split from the severity above: two expectations in one `it` hide each
+    // other, and the whole point of the finding is the sentence.
+    const pe = parsePE(
+      buildMinimalPE64({
+        dataDirectories: new Map([[4, { virtualAddress: 0x100000, size: 0x200 }]]),
+      }),
+    );
+    const found = detectAnomalies(pe).find((a) => a.title === CERT_TITLE);
+    expect(found?.detail).toContain("not unsigned");
+    expect(found?.detail).toContain("0x100000");
+  });
+
+  it("raises a warning for a resource directory that produced no tree", () => {
+    // No fixture reaches `parsePE`'s resource `catch` — `parseResourceDirectory`
+    // bounds every read and flags an unresolvable RVA rather than throwing — so
+    // the state is built directly, exactly as `resourcesUnreadable`'s docstring
+    // says. See `src/pe/__tests__/unreadDirectories.test.ts`.
+    const pe = parsePE(
+      buildMinimalPE64({
+        directories: {
+          resources: [
+            { id: 3, names: [{ id: 1, langs: [{ lang: 1033, data: new Uint8Array([1]) }] }] },
+          ],
+        },
+      }),
+    );
+    const found = detectAnomalies({ ...pe, resources: undefined }).find(
+      (a) => a.title === RSRC_TITLE,
+    );
+    expect(found?.severity).toBe("warning");
+    expect(found?.detail).toContain("not that there are none");
+  });
+
+  it("raises NEITHER for a signed file with resources it read whole", () => {
+    // THE LIVENESS HALF, and the control against a predicate that fires on every
+    // file: both directories are declared here and both parsed.
+    const pe = parsePE(
+      buildMinimalPE64({
+        certificate: { subjectCN: "Acme" },
+        directories: {
+          resources: [
+            { id: 3, names: [{ id: 1, langs: [{ lang: 1033, data: new Uint8Array([1]) }] }] },
+          ],
+        },
+      }),
+    );
+    expect(pe.certificate?.signed).toBe(true);
+    expect(pe.resources?.entries).toHaveLength(1);
+    const titles = detectAnomalies(pe).map((a) => a.title);
+    expect(titles).not.toContain(CERT_TITLE);
+    expect(titles).not.toContain(RSRC_TITLE);
+  });
+
+  it("raises NEITHER for an ordinary file that declares neither directory", () => {
+    // The commonest file this tool opens: unsigned, no resources. Neither
+    // finding may appear, or the pass says something false about every binary.
+    const titles = detectAnomalies(parsePE(buildMinimalPE32())).map((a) => a.title);
+    expect(titles).not.toContain(CERT_TITLE);
+    expect(titles).not.toContain(RSRC_TITLE);
+  });
+});
+
+/**
  * THE DECLARED DATA DIRECTORY COUNT (peek-a-bin-dd94).
  *
  * `numberOfRvaAndSizes` is attacker-controlled and `parseDataDirectories` clamps

@@ -177,6 +177,58 @@ describe("ResourcesView — the empty cases", () => {
     expect(screen.getByText("No resources found in this PE file.")).toBeTruthy();
   });
 
+  /**
+   * A DECLARED DIRECTORY WITH NO TREE AT ALL IS A THIRD THING, and it reached
+   * the calmest of the three sentences. `parsePE` reads the resource directory
+   * inside a `catch {}`, so a reader that throws leaves `pe.resources`
+   * undefined — byte-for-byte what a PE with no resource directory produces —
+   * and the pane printed "No resources found in this PE file." over a file
+   * whose optional header says otherwise. (peek-a-bin-wo8g)
+   *
+   * THE POPULATION IS CURRENTLY EMPTY AND THE STATE IS THEREFORE BUILT
+   * DIRECTLY. `parseResourceDirectory` bounds every read on the buffer and
+   * recurses to a fixed depth, and an RVA resolving nowhere returns a tree
+   * flagged `truncated` rather than throwing (`peek-a-bin-dhcx`), so nothing
+   * here can make it throw — which is stated rather than papered over, and is
+   * why `resourcesUnreadable`'s own docstring calls this a guard rather than a
+   * repair. What this row proves is that the guard is wired: if the day comes,
+   * the pane says so instead of claiming the file is bare.
+   */
+  it("does not say the file has no resources when the reader gave up on a declared directory", () => {
+    const pe = parsePE(
+      buildMinimalPE64({
+        directories: {
+          resources: [
+            { id: 3, names: [{ id: 1, langs: [{ lang: 1033, data: new Uint8Array([1, 2]) }] }] },
+          ],
+        },
+      }),
+    );
+    // The parse succeeded; drop the tree to stand in for the `catch`.
+    expect(pe.resources!.entries).toHaveLength(1);
+    const declaredDir = pe.dataDirectories[2];
+    expect(declaredDir.virtualAddress).toBeGreaterThan(0);
+    renderResources({ ...pe, resources: undefined });
+
+    expect(screen.queryByText("No resources found in this PE file.")).toBeNull();
+    const notice = screen.getByText(/could not be read/);
+    expect(notice.textContent).toContain(declaredDir.virtualAddress.toString(16).toUpperCase());
+    expect(notice.textContent).toMatch(/not without resources/);
+  });
+
+  it("still says the file has none when no resource directory is declared", () => {
+    // THE CONTROL FOR THE ROW ABOVE, and the one that catches a fix which stops
+    // making any claim at all: most binaries this tool opens genuinely have no
+    // resource directory, and the calm sentence is true of every one of them.
+    // The fixture has a `.rsrc` SECTION and no directory entry pointing at it,
+    // which is exactly the pair the predicate has to tell apart.
+    const pe = peWithResourceBytes(new Uint8Array(16));
+    expect(pe.dataDirectories[2]?.virtualAddress ?? 0).toBe(0);
+    renderResources(pe);
+    expect(screen.getByText("No resources found in this PE file.")).toBeTruthy();
+    expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
   it("renders for a PE32 as well as a PE64", () => {
     // Nothing in this view is width-dependent (contrast `StringsView`, whose
     // address column is), asserted so a future `pe.is64` read needs a test.

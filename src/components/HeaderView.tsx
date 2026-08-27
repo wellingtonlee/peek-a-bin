@@ -3,15 +3,17 @@ import { useFileMetrics } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
   DataDirectoryNames as DATA_DIR_NAMES,
+  IMAGE_DIRECTORY_ENTRY_DEBUG,
   IMAGE_DIRECTORY_ENTRY_SECURITY,
   MachineTypes as MACHINE_TYPES,
   RelocTypeNames as RELOC_TYPE_NAMES,
   SubsystemNames as SUBSYSTEM_NAMES,
 } from "../pe/constants";
-import { dataDirectoryClamp } from "../pe/dataDirectories";
+import { certificateUnreadable, dataDirectoryClamp } from "../pe/dataDirectories";
 import {
   computeImphash,
   detectOverlay,
+  MAX_DEBUG_DIRECTORY_ENTRIES,
   parseDebugDirectory,
   parseRichHeader,
 } from "../pe/metadata";
@@ -183,6 +185,16 @@ function SignatureSection() {
 
   if (!pe) return null;
   const cert = pe.certificate;
+  // THREE STATES, NOT TWO. "Unsigned" is a claim about the FILE, and the panel
+  // used to make it whenever the parse produced no certificate — including for an
+  // image whose optional header declares an attribute certificate the reader
+  // could not read (the commonest route: a security directory pointing past the
+  // end of a truncated or carved file). The tool draws exactly this distinction
+  // everywhere else — `computeImphash` refuses with `null` rather than hashing a
+  // short list, a cut-short resource walk says so on its count line — and erased
+  // it here. `certificateUnreadable` is the one declaration of the pair that
+  // means it. (peek-a-bin-wo8g)
+  const certUnreadable = certificateUnreadable(pe);
 
   return (
     <section>
@@ -196,6 +208,10 @@ function SignatureSection() {
         {cert?.signed ? (
           <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
             Signed
+          </span>
+        ) : certUnreadable ? (
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-900/30 text-yellow-400">
+            Unreadable
           </span>
         ) : (
           <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-700 text-gray-400">
@@ -222,7 +238,12 @@ function SignatureSection() {
           </tbody>
         </table>
       )}
-      {open && !cert?.signed && (
+      {open && !cert?.signed && certUnreadable && (
+        <p className="text-yellow-400 text-xs">
+          {`The certificate table could not be read. The optional header declares one at file offset 0x${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_SECURITY].virtualAddress.toString(16).toUpperCase()} of ${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_SECURITY].size.toLocaleString()} bytes, and the reader stopped on it \u2014 the certificate lies outside the file, or its structure did not parse. This is not an unsigned binary.`}
+        </p>
+      )}
+      {open && !cert?.signed && !certUnreadable && (
         <p className="text-gray-500 text-xs">No digital signature found in this binary.</p>
       )}
     </section>
@@ -423,7 +444,10 @@ export function HeaderView() {
   // Every hook must run before the `!pe` early return below, otherwise the hook
   // count changes between renders and React throws on the transition.
   const richHeader = useMemo(() => (pe ? parseRichHeader(pe.buffer) : null), [pe]);
-  const debugInfo = useMemo(() => (pe ? parseDebugDirectory(pe.buffer, pe) : []), [pe]);
+  // `debug.truncated` means an entry the debug directory declares went unread —
+  // see `DebugDirectory`. The empty-and-whole default stands in for "no file
+  // open", which is a third thing again and renders nothing.
+  const debug = useMemo(() => (pe ? parseDebugDirectory(pe.buffer, pe) : { entries: [] }), [pe]);
   // Off the main thread above a threshold — a large image's checksum is a walk
   // over every byte in the file. See hooks/useFileMetrics.ts.
   const fileMetrics = useFileMetrics(pe);
@@ -724,12 +748,32 @@ export function HeaderView() {
         </table>
 
         {/* Debug Info */}
-        {debugInfo.length > 0 && (
+        {/* THE SECTION RENDERS ON `truncated` TOO, and that is not tidiness: a
+            declared debug directory whose RVA resolves into no section reads
+            zero entries, and under the old `length > 0` test the whole section
+            vanished — the pane said nothing at all about a directory the file
+            declares, which is the same silence the grey "Unsigned" pill was.
+            The admission sits on the HEADING rather than on a row, because the
+            three bounds behind it are global to the walk and no row is "the
+            incomplete one" (`ResourceTree.truncated`'s argument, and the
+            Imports tab's per-library marker is the contrasting case).
+            (peek-a-bin-wo8g) */}
+        {(debug.entries.length > 0 || debug.truncated) && (
           <div className="mt-3">
-            <h3 className="text-xs font-semibold text-gray-300 mb-1">Debug Info</h3>
+            <h3 className="text-xs font-semibold text-gray-300 mb-1 flex items-center gap-2">
+              <span>Debug Info</span>
+              {debug.truncated && (
+                <span
+                  className="text-yellow-400 text-[11px] font-normal"
+                  title={`The debug directory could not be read whole: the file declares ${Math.floor(Math.max(0, pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_DEBUG]?.size ?? 0) / 28)} entries and ${debug.entries.length} were read — at the ${MAX_DEBUG_DIRECTORY_ENTRIES}-entry cap, where the directory runs past its section or the end of the file, or where its address resolves into no section at all.`}
+                >
+                  Incomplete &mdash; not every declared entry was read
+                </span>
+              )}
+            </h3>
             <table>
               <tbody>
-                {debugInfo.map((d, i) => (
+                {debug.entries.map((d, i) => (
                   <tr key={i} className="border-b border-gray-800">
                     <td className="py-1 pr-4 text-gray-400">{d.typeName}</td>
                     <td className="py-1 text-gray-200">

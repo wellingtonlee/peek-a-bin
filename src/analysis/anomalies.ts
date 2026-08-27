@@ -1,5 +1,15 @@
-import { IMAGE_SCN_CNT_CODE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
-import { dataDirectoryClamp } from "../pe/dataDirectories";
+import {
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
+  IMAGE_DIRECTORY_ENTRY_SECURITY,
+  IMAGE_SCN_CNT_CODE,
+  IMAGE_SCN_MEM_EXECUTE,
+  IMAGE_SCN_MEM_WRITE,
+} from "../pe/constants";
+import {
+  certificateUnreadable,
+  dataDirectoryClamp,
+  resourcesUnreadable,
+} from "../pe/dataDirectories";
 import { type ChecksumResult, detectOverlay, validateChecksum } from "../pe/metadata";
 import type { PEFile } from "../pe/types";
 import { computeSectionEntropies } from "../utils/entropy";
@@ -172,6 +182,36 @@ export function detectAnomalies(pe: PEFile, metrics?: AnomalyMetrics): Anomaly[]
             detail: `The optional header declares ${dirClamp.declared} data directories. The PE format defines 16, and linkers write exactly 16, so ${dirClamp.present} were read and the rest ignored. A count this size is a common crafted-PE tell.`,
           },
     );
+  }
+
+  // Warning: the file declares a directory whose reader gave up on it.
+  //
+  // These two are on this pass for `dataDirectoryClamp`'s reason and not by
+  // symmetry: each panel marks the same fact where a reader looking at that
+  // directory would see it (the Digital Signature pill, the Resources pane's
+  // whole body), and this is the surface an analyst reads rather than the one
+  // they have to think to open — a user who never opens the Resources tab never
+  // learns the file declares resources this tool could not walk.
+  //
+  // Both predicates are exact — a declared directory with nothing parsed out of
+  // it — so neither can fire on a well-formed image, which is what makes them
+  // admissible here at `warning`: the file is malformed (a certificate table
+  // outside the file, or a resource walk that threw), and like the clamp above,
+  // no toolchain produces either by accident. Nothing here says code will run,
+  // so not `critical`. (peek-a-bin-wo8g)
+  if (certificateUnreadable(pe)) {
+    anomalies.push({
+      severity: "warning",
+      title: "Certificate table could not be read",
+      detail: `The optional header declares an attribute certificate of ${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_SECURITY].size.toLocaleString()} bytes at file offset 0x${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_SECURITY].virtualAddress.toString(16).toUpperCase()}, and the reader stopped on it — the certificate lies outside the file, or its structure did not parse. The file is not unsigned; its signature is unreadable, which a truncated or carved sample produces and so does a crafted one.`,
+    });
+  }
+  if (resourcesUnreadable(pe)) {
+    anomalies.push({
+      severity: "warning",
+      title: "Resource directory could not be read",
+      detail: `The file declares a resource directory of ${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE].size.toLocaleString()} bytes at RVA 0x${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE].virtualAddress.toString(16).toUpperCase()}, and the reader stopped on it. Nothing is known about the resources in this image — not that there are none.`,
+    });
   }
 
   // Warning: Checksum mismatch

@@ -1703,8 +1703,6 @@ mistake.
   binaries unflagged, which is the case rather than a formality. The full census of which parser
   admissions reach a screen is `peek-a-bin-ul9m`, summarised in `docs/verification.md`.
   (`peek-a-bin-dhcx`)
-  byte-identical over four binaries. **`ResourceTree.truncated` is still only half built — no view
-  renders it.** (`peek-a-bin-tmo9`)
 - **THE ATTACKER-CONTROLLED-BOUND CLASS WAS SWEPT DELIBERATELY, AND SEVEN MORE SITES WERE OPEN —
   including one that produced a WRONG NAME on real instructions.** `nygv` and `tmo9` were both
   found incidentally, so nobody had ever asked every reader in `src/pe/` the five questions the
@@ -1735,9 +1733,43 @@ mistake.
   O(image), and the section extent is the file's own statement). Deliberately **refused and handed
   back**: the two `catch {}` blocks in `parsePE` that render "Unsigned" and "No resources found"
   for a file that has both — the render site is the whole of the fix and those files are owned
-  elsewhere, the standing precedent being `ResourceTree.truncated`, set since before `tmo9` and
-  **still rendered by no view**. `corpus:parserdiff` byte-identical (98/118, 20 vacuous), `corpus`
-  byte-identical over four binaries, `corpus:arm64` 51/51.
+  elsewhere. **Both were taken up next and are the entry below.** `corpus:parserdiff`
+  byte-identical (98/118, 20 vacuous), `corpus` byte-identical over four binaries, `corpus:arm64`
+  51/51.
+
+- **A DIRECTORY THE FILE DECLARES AND THE READER GAVE UP ON IS NOT A DIRECTORY THE FILE LACKS, AND
+  THE CHANNEL IS DERIVED RATHER THAN A NEW `PEFile` FLAG.** `parsePE` reads the certificate table
+  and the resource directory inside a `catch {}`, and each leaves its field `undefined` — which is
+  byte-for-byte what a file that genuinely has neither produces. So `HeaderView` rendered the grey
+  **"Unsigned"** pill plus "No digital signature found in this binary." over an image whose
+  optional header declares an attribute certificate, and `ResourcesView` rendered "No resources
+  found in this PE file." over a declared resource directory: positive claims about the FILE
+  resting on the tool's own failure to read it. **`peek-a-bin-dd94`'s criterion decides the
+  channel** — *does the output already carry the fact?* — and here it does, because `parsePE`
+  opens each reader behind exactly "the directory is declared", so **"declared, and absent from the
+  parse" IS the failure**, over two already-public fields. `directoryDeclared`,
+  `certificateUnreadable` and `resourcesUnreadable` (`pe/dataDirectories.ts`, beside
+  `dataDirectoryClamp`) are the one declaration, and `parser.ts`'s resource gate is now the *same
+  call* — the load-bearing part, since a premise that drifts from the gate claims a read failed on
+  a directory nothing attempted. Three things to keep: the certificate half is **fixture-reachable
+  through the real parser** without any throw (`parseSecurityDirectory` returns null when the
+  `WIN_CERTIFICATE` header does not fit in the file, and reports `signed: true` with null fields
+  for every *other* malformation, which the panel already renders honestly); the resource half's
+  **population is empty and says so at three sites** (`parseResourceDirectory` bounds every read,
+  recurses to a fixed depth, and flags an unresolvable RVA rather than throwing, so it is a guard
+  on an unreachable `catch`, tested from directly-built state); and a **`truncated` tree must not
+  be reported unreadable**, since `dhcx`'s sentence is strictly more informative and a predicate
+  reading `entries.length` instead of `resources === undefined` would make it unreachable — the
+  arms are disjoint, so their order is inert and not claimed otherwise. `parseDebugDirectory` now
+  returns **`DebugDirectory`** (`{ entries, truncated }`) for the same reason at smaller stakes:
+  the format has no count field, so `numEntries < floor(size / 28)` is exact, a list cannot carry
+  `nygv`'s marker, and the block renders on `truncated` as well as on a non-empty list — a declared
+  directory whose RVA resolves nowhere read zero entries and made the whole block vanish. Both
+  facts also reach `analysis/anomalies.ts` at `warning`, on the clamp's argument. Seven controls,
+  all discriminating (two of them redden four and two *pre-existing* rows); all six real binaries
+  report neither claim and read exactly the debug entries they declare (1 on x86, 3 on ARM64);
+  `corpus` byte-identical, `corpus:parserdiff` 98/118, `corpus:arm64` 51/51. Still not in MCP
+  output or the export file (`peek-a-bin-8pod`). (`peek-a-bin-wo8g`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 

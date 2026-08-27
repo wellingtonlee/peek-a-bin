@@ -1,12 +1,14 @@
 import { Fragment, useCallback, useMemo, useState } from "react";
 import { useAppState } from "../hooks/usePEFile";
 import {
+  IMAGE_DIRECTORY_ENTRY_RESOURCE,
   ResourceTypeNames,
   RT_GROUP_ICON,
   RT_ICON,
   RT_MANIFEST,
   RT_VERSION,
 } from "../pe/constants";
+import { resourcesUnreadable } from "../pe/dataDirectories";
 import { rvaToFileOffset } from "../pe/parser";
 import { MAX_TOTAL_ENTRIES, parseVersionInfo, reconstructIcon } from "../pe/resources";
 import type { ResourceTree } from "../pe/types";
@@ -241,6 +243,30 @@ export function ResourcesView() {
     // Reachable without a leaf: the allowance is spent walking DIRECTORY
     // entries, so a root declaring more subdirectories than `MAX_TOTAL_ENTRIES`
     // exhausts it before `walkDirectory` ever descends to a data entry.
+    // A DECLARED DIRECTORY WITH NO TREE AT ALL IS THE READER HAVING FAILED, and
+    // it is the only one of these three arms where this pane knows nothing
+    // whatever about the resources — the arm below has a tree and can say the
+    // walk was cut short. (The ORDER of the two is not load-bearing and is not
+    // claimed to be: the arms are disjoint, since `truncated` is a field on a
+    // tree that exists. It reads first because it is the wider statement.)
+    // `resourcesUnreadable`
+    // (`pe/dataDirectories.ts`) is the one declaration of the pair, and it shares
+    // its premise with the gate `parsePE` opens the reader behind, so this cannot
+    // claim a failure on a directory nothing tried to read.
+    //
+    // ITS POPULATION IS CURRENTLY EMPTY AND SAYING SO IS THE POINT: no fixture
+    // reaches `parsePE`'s `catch` today, because `parseResourceDirectory` bounds
+    // every read on the buffer and flags an unresolvable RVA rather than
+    // throwing. This is the guard that stops the day it does throw from printing
+    // "No resources found in this PE file." over a file full of them.
+    // (peek-a-bin-wo8g)
+    if (pe && resourcesUnreadable(pe)) {
+      return (
+        <div className="p-4 text-xs text-yellow-400">
+          {`The resource directory could not be read. The file declares one at RVA 0x${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE].virtualAddress.toString(16).toUpperCase()} of ${pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE].size.toLocaleString()} bytes, and the reader stopped on it. This file is not without resources.`}
+        </div>
+      );
+    }
     if (pe?.resources?.truncated) {
       return (
         <div className="p-4 text-xs text-yellow-400">

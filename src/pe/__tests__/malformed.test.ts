@@ -641,7 +641,7 @@ describe("malformed PE handling", () => {
       // THE SAFETY CASE. Every bound below is only admissible because this row
       // is unchanged by them.
       const buf = withCodeView();
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info).toHaveLength(1);
       expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
       expect(info[0].pdbPathTruncated).toBeUndefined();
@@ -666,7 +666,7 @@ describe("malformed PE handling", () => {
       // expected to open the old number is ~265,000,000 — inside a render.
       expect(buf.byteLength - start).toBeGreaterThan(64 * MAX_PDB_PATH_BYTES);
 
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
       expect(info[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
       expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
@@ -687,7 +687,7 @@ describe("malformed PE handling", () => {
       // the field is read at all is the understating one below.
       const buf = withCodeView();
       setSizeOfData(buf, 0);
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
       expect(info[0].pdbPathTruncated).toBeUndefined();
     });
@@ -700,7 +700,7 @@ describe("malformed PE handling", () => {
       // the marker and cannot be mistaken for a path.
       const buf = withCodeView();
       setSizeOfData(buf, 24 + 7); // room for "C:\\buil" and no terminator
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
       expect(info[0].pdbPath).toBe(`C:\\buil${PDB_PATH_TRUNCATION_MARKER}`);
       // A narrower answer must not wear a complete one's shape.
@@ -713,7 +713,7 @@ describe("malformed PE handling", () => {
     }, () => {
       const buf = withCodeView();
       setSizeOfData(buf, 0xffffffff);
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPath).toBe(WELL_FORMED_PATH);
       expect(info[0].pdbPathTruncated).toBeUndefined();
     });
@@ -728,7 +728,7 @@ describe("malformed PE handling", () => {
       setSizeOfData(base, 0xffffffff);
       const buf = noNulAfter(base, start, 1 << 20);
 
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
       expect(info[0].pdbPath).toHaveLength(MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length);
     });
@@ -742,7 +742,7 @@ describe("malformed PE handling", () => {
       setSizeOfData(base, 0xffffffff);
       const buf = noNulAfter(base, start, 16); // far short of the cap
 
-      const info = parseDebugDirectory(buf, parsePE(buf));
+      const info = parseDebugDirectory(buf, parsePE(buf)).entries;
       expect(info[0].pdbPathTruncated).toBe(true);
       expect(info[0].pdbPath?.length).toBeLessThan(
         MAX_PDB_PATH_BYTES + PDB_PATH_TRUNCATION_MARKER.length,
@@ -1134,7 +1134,7 @@ describe("malformed PE handling", () => {
         // render on the main thread. AFTER: 256 entries, ~1.05M characters.
         const buf = codeViewGrid(1024 * 1024, 0xffffffff);
         const pe = parsePE(buf);
-        const dbg = parseDebugDirectory(buf, pe);
+        const dbg = parseDebugDirectory(buf, pe).entries;
 
         // Exactly AT the cap, which is the liveness half: a row asserting only
         // "<= 256" would pass against a walk that had stopped looking.
@@ -1150,6 +1150,11 @@ describe("malformed PE handling", () => {
         // the new per-directory bound.
         expect(dbg[0].pdbPathTruncated).toBe(true);
         expect(dbg[0].pdbPath).toContain(PDB_PATH_TRUNCATION_MARKER);
+        // AND THE DIRECTORY SAYS SO TOO. The per-record marker above is the only
+        // admission this walk used to make; a list stopped at 256 out of 38,034
+        // declared entries was otherwise shaped exactly like a complete one.
+        // (peek-a-bin-wo8g)
+        expect(parseDebugDirectory(buf, pe).truncated).toBe(true);
       });
 
       it("bounds the walk by the containing section, not by the file", { timeout: TIMEOUT }, () => {
@@ -1160,7 +1165,10 @@ describe("malformed PE handling", () => {
         // rather than merely the cost.
         const buf = codeViewGrid(0x100, 0xffffffff);
         const pe = parsePE(buf);
-        expect(parseDebugDirectory(buf, pe).length).toBe(Math.floor(0x100 / 28));
+        expect(parseDebugDirectory(buf, pe).entries.length).toBe(Math.floor(0x100 / 28));
+        // The section bound is a bound: the entries past it are ones the file's
+        // declared size claims and this walk did not read.
+        expect(parseDebugDirectory(buf, pe).truncated).toBe(true);
       });
 
       it("reads a well-formed debug directory exactly", { timeout: TIMEOUT }, () => {
@@ -1181,10 +1189,14 @@ describe("malformed PE handling", () => {
           },
         });
         const pe = parsePE(buf);
-        const dbg = parseDebugDirectory(buf, pe);
+        const dbg = parseDebugDirectory(buf, pe).entries;
         expect(dbg).toHaveLength(1);
         expect(dbg[0].pdbPath).toBe("C:\\src\\app.pdb");
         expect(dbg[0].pdbPathTruncated).toBeUndefined();
+        // THE OTHER HALF OF THE SAFETY CASE, and the one that keeps the flag
+        // honest: a well-formed directory must not be marked incomplete, or the
+        // admission is noise on every real binary rather than a signal.
+        expect(parseDebugDirectory(buf, pe).truncated).toBeUndefined();
       });
     });
 

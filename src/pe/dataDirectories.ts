@@ -1,4 +1,5 @@
-import type { PEFile } from "./types";
+import { IMAGE_DIRECTORY_ENTRY_RESOURCE, IMAGE_DIRECTORY_ENTRY_SECURITY } from "./constants";
+import type { DataDirectory, PEFile } from "./types";
 
 /**
  * What `parseDataDirectories` refused to read, derived rather than published.
@@ -64,4 +65,77 @@ export function dataDirectoryClamp(
     // else is the cap doing its job.
     reason: present < Math.min(declared, 16) ? "short-header" : "spec-maximum",
   };
+}
+
+/**
+ * Whether the file DECLARES a directory at `index`: a non-zero address and a
+ * non-zero size.
+ *
+ * One declaration because it is the gate `parsePE` opens each optional reader
+ * behind, *and* the premise of every "could not read it" admission derived from
+ * one — {@link certificateUnreadable}, {@link resourcesUnreadable}. If a view's
+ * premise and the parser's gate drift apart, the view claims a read failed on a
+ * directory the parser never attempted, which is a worse falsehood than the one
+ * those predicates exist to remove.
+ */
+export function directoryDeclared(dir: DataDirectory | undefined): dir is DataDirectory {
+  return dir !== undefined && dir.virtualAddress > 0 && dir.size > 0;
+}
+
+/**
+ * The file declares a certificate table and `parsePE` produced no
+ * {@link PEFile.certificate} for it — i.e. **the certificate could not be read**,
+ * which is a different fact from the file being unsigned.
+ *
+ * WHY THIS IS DERIVED AND NOT A `PEFile` FLAG, which is the whole decision here
+ * (`peek-a-bin-wo8g`, applying `peek-a-bin-dd94`'s criterion: *does the output
+ * already carry the fact?*). It does. `parseSecurityDirectory` answers `null`
+ * for a declared directory in exactly one circumstance — the `WIN_CERTIFICATE`
+ * header does not fit in the file — and `parsePE`'s `catch` around it adds any
+ * throw to the same channel; for every other malformation it returns
+ * `signed: true` with null fields, which the panel already renders. So
+ * "declared, and absent from the parse" **is** the failure, over two fields that
+ * are already public, and a flag beside them would be a second declaration that
+ * can disagree with the object it describes.
+ *
+ * The falsehood it removes: `HeaderView` rendered the grey **Unsigned** pill and
+ * "No digital signature found in this binary." over an image whose optional
+ * header declares an attribute certificate — a positive claim about the FILE
+ * standing on the tool's failure to read it. The tool draws that distinction
+ * everywhere else (`computeImphash`'s `null`, `ResourceTree.truncated`,
+ * `PDB_PATH_TRUNCATION_MARKER`) and erased it here.
+ */
+export function certificateUnreadable(
+  pe: Pick<PEFile, "dataDirectories" | "certificate">,
+): boolean {
+  return (
+    pe.certificate === undefined &&
+    directoryDeclared(pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_SECURITY])
+  );
+}
+
+/**
+ * The file declares a resource directory and `parsePE` produced no
+ * {@link PEFile.resources} for it — **the resource directory could not be read**,
+ * as against a file that has none.
+ *
+ * Same channel and same reasoning as {@link certificateUnreadable}: `parsePE`
+ * calls `parseResourceDirectory` behind exactly {@link directoryDeclared}, so a
+ * missing tree under a declared directory is the reader having failed.
+ *
+ * **THE POPULATION IS CURRENTLY EMPTY AND THAT IS STATED RATHER THAN IMPLIED.**
+ * `parseResourceDirectory` bounds every read on the buffer and recurses to a
+ * fixed `MAX_DEPTH`, and an RVA that resolves nowhere returns a tree flagged
+ * `truncated` rather than throwing (`peek-a-bin-dhcx`), so no fixture reaches
+ * `parsePE`'s `catch` today — a control that proves this arm renders has to
+ * build the state directly. It is a guard against that `catch` becoming
+ * reachable, not a repair of an observed defect; the certificate half above is
+ * the observed one. Without it, the day a reader does throw, the pane says "No
+ * resources found in this PE file." and nothing anywhere says otherwise.
+ */
+export function resourcesUnreadable(pe: Pick<PEFile, "dataDirectories" | "resources">): boolean {
+  return (
+    pe.resources === undefined &&
+    directoryDeclared(pe.dataDirectories[IMAGE_DIRECTORY_ENTRY_RESOURCE])
+  );
 }

@@ -454,7 +454,11 @@ function dataSection(name: string, rva: number, data: Uint8Array): SectionDef {
 describe("parseDebugDirectory", () => {
   it("returns an empty list when no debug directory is present", () => {
     const pe = parsePE(buildMinimalPE32());
-    expect(parseDebugDirectory(pe.buffer, pe)).toEqual([]);
+    // EMPTY *AND WHOLE*: `truncated` is omitted rather than false, so this is
+    // distinguishable from a declared directory that could not be read. The
+    // `toEqual` is exact on purpose — an extra key here would be the flag
+    // claiming a fact about a file that has no debug directory at all.
+    expect(parseDebugDirectory(pe.buffer, pe)).toEqual({ entries: [] });
   });
 
   it("names known debug types and falls back for unknown ones", () => {
@@ -470,7 +474,8 @@ describe("parseDebugDirectory", () => {
     });
     const pe = parsePE(buf);
     const info = parseDebugDirectory(pe.buffer, pe);
-    expect(info.map((d) => d.typeName)).toEqual(["POGO", "Type 999"]);
+    expect(info.entries.map((d) => d.typeName)).toEqual(["POGO", "Type 999"]);
+    expect(info.truncated).toBeUndefined();
   });
 
   it("extracts the GUID, age and PDB path from an RSDS CodeView record", () => {
@@ -501,7 +506,7 @@ describe("parseDebugDirectory", () => {
     }
 
     const pe = parsePE(buf);
-    const info = parseDebugDirectory(pe.buffer, pe);
+    const info = parseDebugDirectory(pe.buffer, pe).entries;
     expect(info).toHaveLength(1);
     expect(info[0].typeName).toBe("CodeView");
     expect(info[0].age).toBe(7);
@@ -546,7 +551,7 @@ describe("parseDebugDirectory", () => {
     guid.forEach((b, i) => fv.setUint8(cvOffset + 4 + i, b));
     fv.setUint32(cvOffset + 20, 1, true);
 
-    expect(parseDebugDirectory(buf, parsePE(buf))[0].guid).toBe(
+    expect(parseDebugDirectory(buf, parsePE(buf)).entries[0].guid).toBe(
       "DDCCBBAA-2211-4433-5566-778899AABBCC",
     );
   });
@@ -564,7 +569,7 @@ describe("parseDebugDirectory", () => {
     });
     const pe = parsePE(buf);
     expect(() => parseDebugDirectory(pe.buffer, pe)).not.toThrow();
-    expect(parseDebugDirectory(pe.buffer, pe)[0].pdbPath).toBeUndefined();
+    expect(parseDebugDirectory(pe.buffer, pe).entries[0].pdbPath).toBeUndefined();
   });
 
   it("stops at the end of the buffer when the declared size is absurd", () => {
@@ -578,7 +583,11 @@ describe("parseDebugDirectory", () => {
     const started = Date.now();
     const info = parseDebugDirectory(pe.buffer, pe);
     expect(Date.now() - started).toBeLessThan(5000);
-    expect(info.length).toBeLessThanOrEqual(Math.ceil(buf.byteLength / 28));
+    expect(info.entries.length).toBeLessThanOrEqual(Math.ceil(buf.byteLength / 28));
+    // …AND IT SAYS SO. A declared size of 0xFFFFFFFF is 153,391,689 entries;
+    // stopping at the buffer used to return a short array shaped exactly like a
+    // complete one. See `DebugDirectory.truncated` (peek-a-bin-wo8g).
+    expect(info.truncated).toBe(true);
   }, 10000);
 });
 
