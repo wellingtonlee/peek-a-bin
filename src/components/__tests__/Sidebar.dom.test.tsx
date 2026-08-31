@@ -566,3 +566,98 @@ describe("Sidebar call graph resize", () => {
     expect(screen.queryByRole("button", { name: "Resize panel height" })).toBeNull();
   });
 });
+
+describe("Sidebar width handle", () => {
+  /**
+   * THE SIDEBAR'S OWN GRIP, which had no test at all before this.
+   *
+   * It is a hand-rolled duplicate of `ResizeHandle orientation="horizontal"`
+   * (peek-a-bin-smcf) and it does NOT share that component's shape: it closes
+   * over `startX`/`startWidth` and computes an ABSOLUTE offset from mousedown,
+   * where `ResizeHandle` accumulates per-move DELTAS. Both are correct; the
+   * difference is why the two cannot simply be swapped, and it is pinned here
+   * so a later consolidation is a refactor under test rather than a rewrite.
+   *
+   * Arithmetic only. jsdom performs no layout, so nothing here has seen the
+   * sidebar change width — what is asserted is the number the handler computed
+   * and the string React wrote into the inline style.
+   */
+  const KEY = "peek-a-bin:sidebar-width";
+  beforeEach(() => localStorage.removeItem(KEY));
+  afterEach(() => localStorage.removeItem(KEY));
+
+  const aside = (c: HTMLElement) => c.querySelector("aside") as HTMLElement;
+  const grip = () => screen.getByRole("button", { name: "Resize sidebar" });
+
+  it("widens as the grip is dragged right, from the width at mousedown", () => {
+    const { container } = renderSidebar();
+    expect(aside(container).style.width).toBe("224px");
+    fireEvent.mouseDown(grip(), { clientX: 300 });
+    fireEvent.mouseMove(document, { clientX: 340 });
+    expect(aside(container).style.width).toBe("264px");
+    // ABSOLUTE, not accumulated: this move is measured from the 300 at
+    // mousedown, so it lands on 224 + 20 rather than 264 + 40.
+    fireEvent.mouseMove(document, { clientX: 320 });
+    expect(aside(container).style.width).toBe("244px");
+    fireEvent.mouseUp(document);
+  });
+
+  it("clamps to the minimum and the maximum", () => {
+    const { container } = renderSidebar();
+    fireEvent.mouseDown(grip(), { clientX: 300 });
+    fireEvent.mouseMove(document, { clientX: -5000 });
+    expect(aside(container).style.width).toBe("180px");
+    fireEvent.mouseMove(document, { clientX: 5000 });
+    expect(aside(container).style.width).toBe("400px");
+    fireEvent.mouseUp(document);
+  });
+
+  it("resizes by keyboard, one 16px step per arrow press", () => {
+    const { container } = renderSidebar();
+    fireEvent.keyDown(grip(), { key: "ArrowRight" });
+    expect(aside(container).style.width).toBe("240px");
+    fireEvent.keyDown(grip(), { key: "ArrowLeft" });
+    expect(aside(container).style.width).toBe("224px");
+    // Not its axis: the vertical keys must not move a horizontal handle.
+    fireEvent.keyDown(grip(), { key: "ArrowUp" });
+    expect(aside(container).style.width).toBe("224px");
+  });
+
+  it("sets the drag cursor on <body> and restores it on mouseup", () => {
+    renderSidebar();
+    fireEvent.mouseDown(grip(), { clientX: 300 });
+    expect(document.body.style.cursor).toBe("col-resize");
+    expect(document.body.style.userSelect).toBe("none");
+    fireEvent.mouseUp(document);
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+  });
+
+  it("marks itself active for the duration of a drag", () => {
+    // The one thing this handle has that `ResizeHandle` does not, and therefore
+    // the thing a consolidation would have to add or knowingly drop.
+    renderSidebar();
+    expect(grip().className).not.toContain("active");
+    fireEvent.mouseDown(grip(), { clientX: 300 });
+    expect(grip().className).toContain("active");
+    fireEvent.mouseUp(document);
+    expect(grip().className).not.toContain("active");
+  });
+
+  it("persists the width, and restores one inside the bounds it enforces", () => {
+    renderSidebar();
+    // Persisted from an effect keyed on the width, so unlike the Call Graph's
+    // height this path is correct on the keyboard for free — at the cost of a
+    // localStorage write on EVERY mousemove of a drag (peek-a-bin-smcf).
+    fireEvent.keyDown(grip(), { key: "ArrowRight" });
+    expect(localStorage.getItem(KEY)).toBe("240");
+    cleanup();
+
+    localStorage.setItem(KEY, "300");
+    expect(aside(renderSidebar().container).style.width).toBe("300px");
+    cleanup();
+
+    localStorage.setItem(KEY, "5000");
+    expect(aside(renderSidebar().container).style.width).toBe("224px");
+  });
+});
