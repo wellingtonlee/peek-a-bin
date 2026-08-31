@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../../test/domSetup";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
@@ -464,5 +464,105 @@ describe("Sidebar call graph render guard", () => {
   it("is absent when the cursor is outside every function", () => {
     const { container } = renderSidebar({ functions: FUNCS3, callGraph: GRAPH });
     expect(callGraphBox(container)).toBeNull();
+  });
+});
+
+describe("Sidebar call graph resize", () => {
+  /**
+   * ARITHMETIC, NEVER MOTION — the house standard for every drag in this repo.
+   * jsdom performs no layout, so nothing below has watched anything move or
+   * resize; what is asserted is the number the handler computed and the string
+   * React wrote into the inline style. `BottomPanels.dom.test.tsx` is the same
+   * assertion one panel over.
+   *
+   * `ResizeHandle` updates its `prevPosRef` on EVERY mousemove, so each move's
+   * delta is measured from the PREVIOUS move rather than from mousedown. That is
+   * why 500 -> 470 -> 480 gives 190 then 180, and not 190 then 140.
+   */
+  const KEY = "peek-a-bin:callgraph-height";
+  beforeEach(() => localStorage.removeItem(KEY));
+  afterEach(() => localStorage.removeItem(KEY));
+
+  /**
+   * BY NAME, not by role alone. The sidebar has TWO buttons that are resize
+   * handles — its own width grip is labelled "Resize sidebar" — so
+   * `getByRole("button")` is ambiguous here in a way it is not in the bottom
+   * panel's suite.
+   */
+  const grip = () => screen.getByRole("button", { name: "Resize panel height" });
+
+  it("offers a height handle distinct from the sidebar's own width handle", () => {
+    renderWithCallGraph();
+    const height = screen.getByRole("button", { name: "Resize panel height" });
+    const width = screen.getByRole("button", { name: "Resize sidebar" });
+    expect(height).not.toBe(width);
+  });
+
+  it("grows when the grip is dragged UP, because the block is anchored below", () => {
+    const { container } = renderWithCallGraph();
+    fireEvent.mouseDown(grip(), { clientY: 500 });
+    fireEvent.mouseMove(document, { clientY: 470 });
+    expect(callGraphBox(container)?.style.height).toBe("190px");
+    fireEvent.mouseMove(document, { clientY: 480 });
+    expect(callGraphBox(container)?.style.height).toBe("180px");
+    fireEvent.mouseUp(document);
+  });
+
+  it("clamps to the minimum and the maximum", () => {
+    const { container } = renderWithCallGraph();
+    fireEvent.mouseDown(grip(), { clientY: 500 });
+    fireEvent.mouseMove(document, { clientY: 5000 });
+    expect(callGraphBox(container)?.style.height).toBe("80px");
+    fireEvent.mouseMove(document, { clientY: -5000 });
+    expect(callGraphBox(container)?.style.height).toBe("400px");
+    fireEvent.mouseUp(document);
+  });
+
+  it("persists the height reached at the END of the drag, not the one it started at", () => {
+    const { container } = renderWithCallGraph();
+    fireEvent.mouseDown(grip(), { clientY: 500 });
+    fireEvent.mouseMove(document, { clientY: 460 });
+    fireEvent.mouseUp(document);
+    // THE REGRESSION `ResizeHandle`'s ref indirection EXISTS FOR, from the
+    // caller's side: `handleCallGraphResizeEnd` closes over `callGraphHeight`
+    // from its own render, so a mouseup handler captured at mousedown would
+    // store 160 -- the pre-drag height -- however far the user dragged.
+    expect(localStorage.getItem(KEY)).toBe("200");
+    expect(callGraphBox(container)?.style.height).toBe("200px");
+  });
+
+  it("resizes by keyboard, one 16px step per arrow press, and persists each step", () => {
+    const { container } = renderWithCallGraph();
+    // For a vertical handle ArrowUp is the DECREASE key and calls onResize(-16),
+    // which through `prev - delta` GROWS the block -- the same direction the
+    // mouse drag moves it.
+    fireEvent.keyDown(grip(), { key: "ArrowUp" });
+    expect(callGraphBox(container)?.style.height).toBe("176px");
+    expect(localStorage.getItem(KEY)).toBe("176");
+    fireEvent.keyDown(grip(), { key: "ArrowDown" });
+    expect(callGraphBox(container)?.style.height).toBe("160px");
+    expect(localStorage.getItem(KEY)).toBe("160");
+  });
+
+  it("restores a stored height, and refuses one outside the bounds it enforces", () => {
+    localStorage.setItem(KEY, "240");
+    expect(callGraphBox(renderWithCallGraph().container)?.style.height).toBe("240px");
+    cleanup();
+
+    // Out of range, unparseable and absent all fall to the default rather than
+    // being clamped: a number outside these bounds was not written here.
+    localStorage.setItem(KEY, "5000");
+    expect(callGraphBox(renderWithCallGraph().container)?.style.height).toBe("160px");
+    cleanup();
+
+    localStorage.setItem(KEY, "not-a-number");
+    expect(callGraphBox(renderWithCallGraph().container)?.style.height).toBe("160px");
+  });
+
+  it("offers no grip at all while the block is collapsed", async () => {
+    const { user } = renderWithCallGraph();
+    expect(screen.queryByRole("button", { name: "Resize panel height" })).not.toBeNull();
+    await user.click(screen.getByText("Call Graph"));
+    expect(screen.queryByRole("button", { name: "Resize panel height" })).toBeNull();
   });
 });

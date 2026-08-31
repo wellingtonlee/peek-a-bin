@@ -13,6 +13,7 @@ import {
 import { copyText } from "../utils/clipboard";
 import { generateMarkdownReport } from "../utils/exportSchema";
 import { focusOnMount } from "./focusOnMount";
+import { ResizeHandle } from "./ResizeHandle";
 import { SkeletonRows } from "./Skeleton";
 
 type SortMode = "address" | "alpha";
@@ -22,12 +23,28 @@ const MAX_WIDTH = 400;
 /** Pixels per arrow-key press when the resize handle has keyboard focus. */
 const RESIZE_STEP_PX = 16;
 const DEFAULT_WIDTH = 224;
-/**
- * Starting height of the Call Graph block. `peek-a-bin-llrq.2` adds the
- * min/max and the persisted state beside this; until then the block is a
- * fixed 160px, which is already enough to stop it pushing the list around.
- */
+const CALLGRAPH_MIN_HEIGHT = 80;
+const CALLGRAPH_MAX_HEIGHT = 400;
 const CALLGRAPH_DEFAULT_HEIGHT = 160;
+
+/**
+ * Restore the Call Graph block's height, on {@link loadWidth}'s model.
+ *
+ * The range check is what stops a stored value from producing a block taller
+ * than the sidebar: out-of-range, unparseable and absent all fall to the
+ * default rather than being clamped, since a number outside the bounds this
+ * session enforces was not written by this session.
+ */
+function loadCallGraphHeight(): number {
+  try {
+    const v = localStorage.getItem("peek-a-bin:callgraph-height");
+    if (v) {
+      const n = parseInt(v, 10);
+      if (n >= CALLGRAPH_MIN_HEIGHT && n <= CALLGRAPH_MAX_HEIGHT) return n;
+    }
+  } catch {}
+  return CALLGRAPH_DEFAULT_HEIGHT;
+}
 
 function loadWidth(): number {
   try {
@@ -85,6 +102,20 @@ export function Sidebar() {
       return true;
     }
   });
+  const [callGraphHeight, setCallGraphHeight] = useState(loadCallGraphHeight);
+  /**
+   * The live height, mirrored so {@link handleCallGraphResizeEnd} can read it
+   * without closing over a render.
+   *
+   * `ResizeHandle`'s ref indirection is enough for a MOUSE drag, where mouseup
+   * is a separate event after a commit — but its KEYBOARD path calls `onResize`
+   * and `onResizeEnd` synchronously in one handler, so a state-reading
+   * `onResizeEnd` still sees the PRE-press value however the callbacks are
+   * routed. Measured, not reasoned: `BottomPanelContainer` has exactly this
+   * defect today — one ArrowUp moves it to 236px and stores 220 — and it is
+   * filed rather than fixed here (peek-a-bin-llrq.2).
+   */
+  const callGraphHeightRef = useRef(callGraphHeight);
   const [graphOverviewOpen, setGraphOverviewOpen] = useState(() => {
     try {
       return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false";
@@ -183,6 +214,48 @@ export function Sidebar() {
     e.preventDefault();
     const delta = e.key === "ArrowLeft" ? -RESIZE_STEP_PX : RESIZE_STEP_PX;
     setWidth((w) => Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, w + delta)));
+  }, []);
+
+  /**
+   * `prev - delta`, and the sign is a judgement rather than a detail.
+   *
+   * The handle sits at the block's TOP edge and the block is anchored at the
+   * BOTTOM — Graph Overview and the footer below it are content-sized, and the
+   * `flex-1` list above absorbs the change — so dragging UP, a negative clientY
+   * delta, must GROW it. Same sign as `BottomPanelContainer`'s, and the OPPOSITE
+   * of this file's own width handle, whose grip is on the far edge from its
+   * anchor.
+   */
+  const handleCallGraphResize = useCallback((delta: number) => {
+    // The ref is the sequence's source of truth and the state mirrors it, rather
+    // than the other way round: several mousemoves can land in one tick, and
+    // each must see the previous one's result. Computed OUTSIDE the updater so
+    // the updater stays pure under StrictMode's double invocation.
+    const next = Math.max(
+      CALLGRAPH_MIN_HEIGHT,
+      Math.min(CALLGRAPH_MAX_HEIGHT, callGraphHeightRef.current - delta),
+    );
+    callGraphHeightRef.current = next;
+    setCallGraphHeight(next);
+  }, []);
+
+  /**
+   * Persisted at the END of a drag, not from an effect.
+   *
+   * The sidebar's own width persists from a `useEffect` above, which writes to
+   * localStorage on every mousemove of a drag; the bottom panel's shape is the
+   * better one and this follows it. `ResizeHandle` calls `onResizeEnd` from its
+   * KEYBOARD path too, so arrow-key resizing persists with no second mechanism.
+   *
+   * It reads {@link callGraphHeightRef} rather than the state it mirrors, which
+   * is what makes the stored value the POST-press one on BOTH paths. A
+   * `[callGraphHeight]` dependency would be correct for the mouse and wrong for
+   * the keyboard; see the ref's own note.
+   */
+  const handleCallGraphResizeEnd = useCallback(() => {
+    try {
+      localStorage.setItem("peek-a-bin:callgraph-height", String(callGraphHeightRef.current));
+    } catch {}
   }, []);
 
   const exportNames = useMemo(() => {
@@ -667,8 +740,19 @@ export function Sidebar() {
           className="flex flex-col overflow-hidden border-t border-gray-700"
           // No height at all when collapsed: a collapsed section still
           // reserving 160px of the list's space is this defect one step milder.
-          style={callersOpen ? { height: CALLGRAPH_DEFAULT_HEIGHT, maxHeight: "40%" } : undefined}
+          style={callersOpen ? { height: callGraphHeight, maxHeight: "40%" } : undefined}
         >
+          {/* NOT RENDERED WHILE COLLAPSED. A 4px `row-resize` strip over a block
+              showing nothing is merely useless; the keyboard TAB STOP it also
+              leaves behind is worse, because its arrow keys would silently
+              rewrite a persisted number the user cannot see. */}
+          {callersOpen && (
+            <ResizeHandle
+              orientation="vertical"
+              onResize={handleCallGraphResize}
+              onResizeEnd={handleCallGraphResizeEnd}
+            />
+          )}
           <button
             type="button"
             onClick={() => setCallersOpen(!callersOpen)}

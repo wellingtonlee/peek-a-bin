@@ -151,6 +151,20 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   rule pins a panel taller than the window. The clamped position is **derived, never written
   back** — a callback spreading that derived object into `poppedOut` replaces the user's stored
   position with the picture of it, which is how the corner resize lost one. All
+  **`Sidebar.tsx` is a flex column with ONE `flex-1` child, the function list, and
+  nothing whose height follows the CURSOR may sit above it** — the Call Graph
+  (Callers/Callees) block did, unbounded, so every caret move dragged the Functions
+  header, the filter box and every row vertically. It is below the list, bounded at
+  160px with `maxHeight: 40%` and its own scroller, and resizable. Two things there
+  are not copies of `BottomPanelContainer`'s and must not be "corrected" into them:
+  the wrapper takes **no `shrink-0`** (it competes with four content-sized siblings,
+  where the bottom band competes only with the disassembly view), and the list
+  carries a **`min-h-[120px]` floor**, because a `flex-1` scroll container's
+  automatic minimum is 0 by CSS Flexbox 4.5 so all negative free space landed on it
+  and a short window clipped the footer away. The persisted height is read from a
+  **ref, not from state**: `ResizeHandle`'s keyboard path calls `onResize` and
+  `onResizeEnd` synchronously, so a state-reading `onResizeEnd` stores the PRE-press
+  value — which `BottomPanelContainer` still does (`peek-a-bin-ob8e`). All
   six dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
 - **`hooks/`** — state (`usePEFile`), derived state, rows, search. `useDisassemblyKeyboard.ts` and
@@ -484,7 +498,7 @@ app root.
 **File naming**: components = PascalCase.tsx, hooks = useCamelCase.ts, modules = camelCase.ts.
 
 **localStorage**: `peek-a-bin:<feature>` namespace (`peek-a-bin:llm-profiles`, `:font-size`,
-`:view-mode`, `:chat:${fileName}`, `:report:${fileName}`, `:chat-width`). Legacy
+`:view-mode`, `:chat:${fileName}`, `:report:${fileName}`, `:chat-width`, `:callgraph-height`). Legacy
 `peek-a-bin:llm-settings` auto-migrates to `:llm-profiles` on first load.
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for

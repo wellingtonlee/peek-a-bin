@@ -622,6 +622,7 @@ All keys use the `peek-a-bin:` prefix:
 | `peek-a-bin:bottom-panel-height` | Tabbed bottom panel height |
 | `peek-a-bin:sections-open` | Sidebar sections panel collapsed state |
 | `peek-a-bin:callers-open` | Sidebar call graph panel collapsed state |
+| `peek-a-bin:callgraph-height` | Sidebar call graph panel height |
 | `peek-a-bin:graph-overview-open` | Sidebar graph overview collapsed state |
 | `peek-a-bin:scroll-sync` | Disassembly ↔ decompile scroll sync toggle |
 | `peek-a-bin:show-bytes` | Raw bytes column visibility |
