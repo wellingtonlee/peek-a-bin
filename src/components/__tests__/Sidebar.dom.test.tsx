@@ -3,7 +3,7 @@
 import "../../test/domSetup";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
 import { ANALYSIS_IN_PROGRESS, type AnalysisPhase, type AppState } from "../../hooks/usePEFile";
 import { Sidebar } from "../Sidebar";
@@ -46,12 +46,23 @@ const PHASES = Object.keys(ANALYSIS_IN_PROGRESS) as AnalysisPhase[];
 
 function renderSidebar(over: Partial<AppState> = {}) {
   const dispatch = vi.fn();
-  const { container } = render(
-    <AppHarness state={stateWithPE(harnessPE(), over)} dispatch={dispatch}>
+  // One `pe` for the whole mount, so a rerender does not hand the component a
+  // new object identity and invalidate memos that never asked to be.
+  const pe = harnessPE();
+  const tree = (o: Partial<AppState>) => (
+    <AppHarness state={stateWithPE(pe, o)} dispatch={dispatch}>
       <Sidebar />
-    </AppHarness>,
+    </AppHarness>
   );
-  return { dispatch, container, user: userEvent.setup() };
+  const { container, rerender } = render(tree(over));
+  return {
+    dispatch,
+    container,
+    user: userEvent.setup(),
+    // Bound to the same provider nesting above rather than spelled a second
+    // time at the call site.
+    rerender: (next: Partial<AppState>) => rerender(tree(next)),
+  };
 }
 
 /** The shimmer placeholders `SkeletonRows` draws; there is no text to query. */
@@ -244,8 +255,214 @@ describe("Sidebar virtualized list", () => {
     // needs rewriting. It is NOT a claim that rows should be absent in a browser.
     const { container } = renderSidebar({ functions: FUNCS });
     expect(container.textContent).not.toContain("sub_401000");
-    const list = container.querySelector(".flex-1.overflow-auto");
+    // TARGETED BY `data-panel`, NOT BY `.flex-1.overflow-auto`, and that is not
+    // cosmetic. Since peek-a-bin-llrq.1 the Call Graph body carries those same
+    // two classes, so a class selector returns whichever comes first in document
+    // order — today the function list, by coincidence of the very ordering that
+    // change introduced. Any future reordering would silently retarget this at a
+    // container full of caller/callee buttons and turn it red for a reason that
+    // has nothing to do with virtualization. (This case seeds no callGraph, so
+    // no Call Graph renders and the retarget cannot change today's result —
+    // which is the point: it was fixed while still inert.)
+    const list = container.querySelector('[data-panel="functions"]');
     expect(list).not.toBeNull();
     expect(within(list as HTMLElement).queryAllByRole("button")).toHaveLength(0);
+  });
+});
+
+/**
+ * THE CALL GRAPH BLOCK, and what its position is and is not evidence for.
+ *
+ * peek-a-bin-llrq: the block used to sit immediately ABOVE the Functions header,
+ * sized purely by its own content, so every cursor move changed the caller and
+ * callee counts and dragged the header, the filter box and every row up or down.
+ * It is below the list now.
+ *
+ * WHAT THESE SUITES ACTUALLY ASSERT is DOM ORDER, class-name SPELLING and inline
+ * STYLE — never geometry. jsdom performs no layout, so the user-visible claim
+ * ("the header holds still") has no instrument here at all and is left to
+ * peek-a-bin-llrq.6, a browser pass. The `data-panel` index test below is a
+ * PROXY: it discriminates against moving the block back and against nothing
+ * else. The header can still move in pixels because Sections grew.
+ *
+ * Three controls are known-inert for the same reason and are recorded rather
+ * than tuned away: widening `maxHeight` to 100%, deleting the list's
+ * `min-h-[120px]` floor, and restoring `shrink-0` on the wrapper each leave
+ * every assertion in this file green.
+ */
+
+/** A third function, so one cursor position has both a caller and a callee. */
+const A = IMAGE_BASE + 0x1000;
+const B = IMAGE_BASE + 0x1040;
+const C = IMAGE_BASE + 0x1080;
+const FUNCS3: DisasmFunction[] = [...FUNCS, { name: "sub_401080", address: C, size: 0x40 }];
+/** In no edge of {@link GRAPH}, so the block does not render with the cursor here. */
+const LONELY: DisasmFunction = { name: "sub_409000", address: IMAGE_BASE + 0x9000, size: 0x40 };
+/** Cursor in B => callers [A], callees [C]. */
+const GRAPH = new Map<number, number[]>([
+  [A, [B]],
+  [B, [C]],
+]);
+
+/**
+ * The sidebar's own TOP-LEVEL regions, in document order.
+ *
+ * Scoped to direct children of the `<aside>` on purpose: `call-graph-body` is
+ * also marked, but it is a child of `call-graph` rather than a sibling region,
+ * and letting it into this list would make an assertion about column ORDER read
+ * as one about nesting.
+ */
+const panels = (c: HTMLElement) =>
+  [...c.querySelectorAll("aside > [data-panel]")].map((e) => e.getAttribute("data-panel"));
+
+const callGraphBox = (c: HTMLElement) =>
+  c.querySelector('[data-panel="call-graph"]') as HTMLElement | null;
+
+function renderWithCallGraph(over: Partial<AppState> = {}) {
+  return renderSidebar({
+    functions: FUNCS3,
+    callGraph: GRAPH,
+    currentAddress: B,
+    ...over,
+  });
+}
+
+describe("Sidebar call graph placement", () => {
+  it("renders the block at all, which every absence assertion below depends on", () => {
+    renderWithCallGraph();
+    // THE LIVENESS HALF. `currentAddress` must land inside a function's
+    // [address, address + size) or `useContainingFunc` returns null, the guard
+    // is false and the block never mounts — at which point every "is absent"
+    // test below would pass by not looking.
+    expect(screen.getByText("Call Graph")).toBeTruthy();
+    expect(screen.getByText("Callers (1)")).toBeTruthy();
+    expect(screen.getByText("Callees (1)")).toBeTruthy();
+  });
+
+  it("sits below the function list, not above the Functions header", () => {
+    const { container } = renderWithCallGraph();
+    // FIVE entries, not the six regions `Sidebar` marks: the harness seeds no
+    // bookmarks, and it supplies no GraphOverviewContext.Provider (the context
+    // default is `{ data: null }`), so neither of those blocks renders here.
+    expect(panels(container)).toEqual([
+      "sections",
+      "functions-header",
+      "functions",
+      "call-graph",
+      "footer",
+    ]);
+  });
+
+  it("leaves the Functions header in place when the cross-reference count changes", () => {
+    // THE BUG REPORT, AS AN ASSERTION, and the shape matters. The cursor moves
+    // from a function with a caller and a callee to one with NEITHER, so the
+    // block goes from present to absent — the largest jump the old layout could
+    // produce. Rerendering between two states that both show the block would be
+    // inert: the index is equal either way, so it would pass with the block
+    // above the header too.
+    const { container, rerender } = renderWithCallGraph({
+      functions: [...FUNCS3, LONELY],
+    });
+    const before = panels(container).indexOf("functions-header");
+    expect(screen.getByText("Callers (1)")).toBeTruthy();
+
+    rerender({
+      functions: [...FUNCS3, LONELY],
+      callGraph: GRAPH,
+      currentAddress: LONELY.address,
+    });
+    expect(screen.queryByText("Call Graph")).toBeNull();
+    expect(panels(container).indexOf("functions-header")).toBe(before);
+  });
+});
+
+describe("Sidebar call graph cap", () => {
+  it("carries a fixed pixel height and a percentage ceiling", () => {
+    // Inline styles React wrote from a constant — not measurements. jsdom does
+    // no layout, so the rendered height of anything here is 0.
+    const { container } = renderWithCallGraph();
+    const box = callGraphBox(container);
+    expect(box?.style.height).toBe("160px");
+    expect(box?.style.maxHeight).toBe("40%");
+  });
+
+  it("stays 160px tall whether the function has three callees or three hundred", () => {
+    // NOT written as `expect(heightWith(3)).toBe(heightWith(300))`: that form is
+    // INERT against the regression it targets, because deleting the inline
+    // height makes both sides "" and they are still equal. The literal is the
+    // assertion.
+    const many = Array.from({ length: 300 }, (_, i) => ({
+      name: `sub_5${i.toString(16).padStart(5, "0")}`,
+      address: IMAGE_BASE + 0x50000 + i * 0x40,
+      size: 0x40,
+    }));
+    const graph = new Map<number, number[]>([[B, many.map((f) => f.address)]]);
+    const { container } = renderWithCallGraph({
+      functions: [...FUNCS3, ...many],
+      callGraph: graph,
+    });
+    expect(callGraphBox(container)?.style.height).toBe("160px");
+    // The liveness half: the height claim is only worth having over a block
+    // that really did render three hundred rows.
+    expect(container.querySelectorAll('[data-panel="call-graph-body"] li')).toHaveLength(300);
+  });
+
+  it("carries the scroller class NAME on its body (a string; Tailwind is not loaded)", () => {
+    const { container } = renderWithCallGraph();
+    const body = container.querySelector('[data-panel="call-graph-body"]');
+    expect(body?.className).toContain("overflow-auto");
+    expect(body?.className).toContain("flex-1");
+  });
+});
+
+describe("Sidebar call graph collapse", () => {
+  // `domSetup` unmounts between tests but does not clear storage, and this is
+  // the only suite in the file that writes any.
+  const KEY = "peek-a-bin:callers-open";
+  beforeEach(() => localStorage.removeItem(KEY));
+  afterEach(() => localStorage.removeItem(KEY));
+
+  it("reserves no height at all once collapsed", async () => {
+    const { container, user } = renderWithCallGraph();
+    expect(callGraphBox(container)?.style.height).toBe("160px");
+    await user.click(screen.getByText("Call Graph"));
+    // A collapsed section still holding 160px of the list's space would be this
+    // defect one step milder, so the style is dropped entirely rather than
+    // shrunk.
+    expect(callGraphBox(container)?.style.height).toBe("");
+    expect(container.querySelector('[data-panel="call-graph-body"]')).toBeNull();
+  });
+
+  it("starts collapsed when the stored preference says so, and writes it back", async () => {
+    localStorage.setItem(KEY, "false");
+    const { container, user } = renderWithCallGraph();
+    expect(callGraphBox(container)?.style.height).toBe("");
+    expect(container.querySelector('[data-panel="call-graph-body"]')).toBeNull();
+    await user.click(screen.getByText("Call Graph"));
+    expect(localStorage.getItem(KEY)).toBe("true");
+    expect(callGraphBox(container)?.style.height).toBe("160px");
+  });
+});
+
+describe("Sidebar call graph render guard", () => {
+  it("is absent with no call graph in state", () => {
+    const { container } = renderSidebar({ functions: FUNCS3, currentAddress: B });
+    expect(screen.queryByText("Call Graph")).toBeNull();
+    expect(callGraphBox(container)).toBeNull();
+  });
+
+  it("is absent when the cursor's function has neither a caller nor a callee", () => {
+    const { container } = renderSidebar({
+      functions: [...FUNCS3, LONELY],
+      callGraph: GRAPH,
+      currentAddress: LONELY.address,
+    });
+    expect(screen.queryByText("Call Graph")).toBeNull();
+    expect(callGraphBox(container)).toBeNull();
+  });
+
+  it("is absent when the cursor is outside every function", () => {
+    const { container } = renderSidebar({ functions: FUNCS3, callGraph: GRAPH });
+    expect(callGraphBox(container)).toBeNull();
   });
 });

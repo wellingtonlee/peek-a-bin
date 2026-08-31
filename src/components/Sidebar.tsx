@@ -22,6 +22,12 @@ const MAX_WIDTH = 400;
 /** Pixels per arrow-key press when the resize handle has keyboard focus. */
 const RESIZE_STEP_PX = 16;
 const DEFAULT_WIDTH = 224;
+/**
+ * Starting height of the Call Graph block. `peek-a-bin-llrq.2` adds the
+ * min/max and the persisted state beside this; until then the block is a
+ * fixed 160px, which is already enough to stop it pushing the list around.
+ */
+const CALLGRAPH_DEFAULT_HEIGHT = 160;
 
 function loadWidth(): number {
   try {
@@ -321,7 +327,7 @@ export function Sidebar() {
       />
 
       {/* Sections */}
-      <div className="p-2 border-b border-gray-700">
+      <div data-panel="sections" className="p-2 border-b border-gray-700">
         <button
           type="button"
           onClick={() => setSectionsOpen(!sectionsOpen)}
@@ -356,7 +362,7 @@ export function Sidebar() {
 
       {/* Bookmarks panel (only show if bookmarks exist) */}
       {state.bookmarks.length > 0 && (
-        <div className="relative p-2 border-b border-gray-700">
+        <div data-panel="bookmarks" className="relative p-2 border-b border-gray-700">
           <button
             type="button"
             onClick={() => setBookmarksOpen(!bookmarksOpen)}
@@ -482,86 +488,8 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Callers/Callees panel */}
-      {state.callGraph && activeFuncAddr !== null && (callers.length > 0 || callees.length > 0) && (
-        <div className="p-2 border-b border-gray-700">
-          <button
-            type="button"
-            onClick={() => setCallersOpen(!callersOpen)}
-            className="flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
-          >
-            <span className="text-[8px]">{callersOpen ? "▼" : "▶"}</span>
-            Call Graph
-          </button>
-          {callersOpen && (
-            <div className="mt-1.5 space-y-1.5">
-              {callers.length > 0 && (
-                <div>
-                  <div className="text-gray-500 text-[10px] mb-0.5">Callers ({callers.length})</div>
-                  <ul className="space-y-0.5">
-                    {callers.map((fn) => (
-                      <li key={fn.address}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            dispatch({
-                              type: "PUSH_CALL_STACK",
-                              address: state.currentAddress,
-                              name: getDisplayName(
-                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
-                                state.renames,
-                              ),
-                            });
-                            dispatch({ type: "SET_ADDRESS", address: fn.address });
-                            dispatch({ type: "SET_TAB", tab: "disassembly" });
-                          }}
-                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-blue-400 truncate transition-colors"
-                          title={`0x${fn.address.toString(16).toUpperCase()}`}
-                        >
-                          {getDisplayName(fn, state.renames)}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {callees.length > 0 && (
-                <div>
-                  <div className="text-gray-500 text-[10px] mb-0.5">Callees ({callees.length})</div>
-                  <ul className="space-y-0.5">
-                    {callees.map((fn) => (
-                      <li key={fn.address}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            dispatch({
-                              type: "PUSH_CALL_STACK",
-                              address: state.currentAddress,
-                              name: getDisplayName(
-                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
-                                state.renames,
-                              ),
-                            });
-                            dispatch({ type: "SET_ADDRESS", address: fn.address });
-                            dispatch({ type: "SET_TAB", tab: "disassembly" });
-                          }}
-                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-green-400 truncate transition-colors"
-                          title={`0x${fn.address.toString(16).toUpperCase()}`}
-                        >
-                          {getDisplayName(fn, state.renames)}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Functions header + filter */}
-      <div className="p-2 pb-1 border-b border-gray-700 space-y-1.5">
+      <div data-panel="functions-header" className="p-2 pb-1 border-b border-gray-700 space-y-1.5">
         <div className="flex items-center justify-between">
           <h3 className="text-gray-400 uppercase tracking-wider text-[10px] font-semibold">
             Functions ({filteredFunctions.length}
@@ -614,7 +542,20 @@ export function Sidebar() {
           <SkeletonRows count={20} />
         </div>
       ) : null}
-      <div ref={listRef} className={`flex-1 overflow-auto${awaitingFunctions ? " hidden" : ""}`}>
+      {/* `min-h-[120px]` is a FLOOR, not a nicety. This div is the only
+          `flex-1` child and its overflow is not `visible`, so per CSS Flexbox
+          4.5 its automatic minimum size is ZERO — every other section has a
+          content-based minimum and refuses to shrink, so all negative free
+          space lands here. Without a floor a short window drives the list to
+          0 and the overflow is clipped by the aside's own `overflow-hidden`,
+          silently eating the footer. The list is the sidebar's reason to
+          exist; the trade is that the footer clips slightly sooner on a very
+          short window. */}
+      <div
+        ref={listRef}
+        data-panel="functions"
+        className={`flex-1 overflow-auto min-h-[120px]${awaitingFunctions ? " hidden" : ""}`}
+      >
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,
@@ -706,6 +647,112 @@ export function Sidebar() {
         </div>
       </div>
 
+      {/* CALL GRAPH — BELOW THE FUNCTION LIST DELIBERATELY. Above it, this
+          block is sized by its own content and that content changes with the
+          cursor, so every caret move pushed the Functions header, the filter
+          box and every row in the list vertically. The list's top edge is the
+          thing that must not move, so everything whose height follows the
+          cursor sits underneath it (peek-a-bin-llrq).
+
+          NO `shrink-0` HERE, and that is the one place the BottomPanelContainer
+          analogue must not be copied: there the band's only competitor is the
+          whole disassembly view, so refusing to shrink costs nothing. Here it
+          competes with four other content-sized siblings, and refusing would
+          starve the one child that matters. The inline height is still the flex
+          BASE size, so ordinary layout gives exactly it; under negative free
+          space this block yields toward its own title instead. */}
+      {state.callGraph && activeFuncAddr !== null && (callers.length > 0 || callees.length > 0) && (
+        <div
+          data-panel="call-graph"
+          className="flex flex-col overflow-hidden border-t border-gray-700"
+          // No height at all when collapsed: a collapsed section still
+          // reserving 160px of the list's space is this defect one step milder.
+          style={callersOpen ? { height: CALLGRAPH_DEFAULT_HEIGHT, maxHeight: "40%" } : undefined}
+        >
+          <button
+            type="button"
+            onClick={() => setCallersOpen(!callersOpen)}
+            className="shrink-0 px-2 pt-2 flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
+          >
+            <span className="text-[8px]">{callersOpen ? "▼" : "▶"}</span>
+            Call Graph
+          </button>
+          {/* The scroller, so 300 callers scroll inside the block rather than
+              growing it. Padding lives here and on the header rather than on the
+              wrapper, or the scrollbar sits 8px inside the panel edge and the
+              bottom padding scrolls away. No `min-h-0` is needed: an element
+              whose overflow is not `visible` already has an automatic minimum
+              size of zero (CSS Flexbox 4.5). */}
+          {callersOpen && (
+            <div
+              data-panel="call-graph-body"
+              className="flex-1 overflow-auto px-2 pb-2 mt-1.5 space-y-1.5"
+            >
+              {callers.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">Callers ({callers.length})</div>
+                  <ul className="space-y-0.5">
+                    {callers.map((fn) => (
+                      <li key={fn.address}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            dispatch({
+                              type: "PUSH_CALL_STACK",
+                              address: state.currentAddress,
+                              name: getDisplayName(
+                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
+                                state.renames,
+                              ),
+                            });
+                            dispatch({ type: "SET_ADDRESS", address: fn.address });
+                            dispatch({ type: "SET_TAB", tab: "disassembly" });
+                          }}
+                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-blue-400 truncate transition-colors"
+                          title={`0x${fn.address.toString(16).toUpperCase()}`}
+                        >
+                          {getDisplayName(fn, state.renames)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {callees.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">Callees ({callees.length})</div>
+                  <ul className="space-y-0.5">
+                    {callees.map((fn) => (
+                      <li key={fn.address}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            dispatch({
+                              type: "PUSH_CALL_STACK",
+                              address: state.currentAddress,
+                              name: getDisplayName(
+                                containingFunc ?? { name: "unknown", address: 0, size: 0 },
+                                state.renames,
+                              ),
+                            });
+                            dispatch({ type: "SET_ADDRESS", address: fn.address });
+                            dispatch({ type: "SET_TAB", tab: "disassembly" });
+                          }}
+                          className="w-full text-left px-1.5 py-0.5 rounded hover:bg-gray-800 text-green-400 truncate transition-colors"
+                          title={`0x${fn.address.toString(16).toUpperCase()}`}
+                        >
+                          {getDisplayName(fn, state.renames)}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Graph Overview */}
       {graphOverview && (
         <div className="p-2 border-t border-gray-700">
@@ -793,7 +840,10 @@ export function Sidebar() {
       )}
 
       {/* Info + collapse */}
-      <div className="p-2 border-t border-gray-700 text-gray-500 flex items-center justify-between">
+      <div
+        data-panel="footer"
+        className="p-2 border-t border-gray-700 text-gray-500 flex items-center justify-between"
+      >
         <div>
           <div>{pe.is64 ? "PE32+ (64-bit)" : "PE32 (32-bit)"}</div>
           <div>{pe.sections.length} sections</div>
