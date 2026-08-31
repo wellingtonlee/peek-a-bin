@@ -531,16 +531,19 @@ describe("Sidebar call graph resize", () => {
     expect(callGraphBox(container)?.style.height).toBe("200px");
   });
 
-  it("resizes by keyboard, one 16px step per arrow press, and persists each step", () => {
+  it("resizes by keyboard, one 16px step per arrow press, and persists each step", async () => {
     const { container } = renderWithCallGraph();
     // For a vertical handle ArrowUp is the DECREASE key and calls onResize(-16),
     // which through `prev - delta` GROWS the block -- the same direction the
     // mouse drag moves it.
     fireEvent.keyDown(grip(), { key: "ArrowUp" });
     expect(callGraphBox(container)?.style.height).toBe("176px");
+    // `ResizeHandle` defers `onResizeEnd` by one microtask on this path.
+    await Promise.resolve();
     expect(localStorage.getItem(KEY)).toBe("176");
     fireEvent.keyDown(grip(), { key: "ArrowDown" });
     expect(callGraphBox(container)?.style.height).toBe("160px");
+    await Promise.resolve();
     expect(localStorage.getItem(KEY)).toBe("160");
   });
 

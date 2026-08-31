@@ -453,7 +453,7 @@ describe("ResizeHandle", () => {
     expect(screen.getByTestId("w").textContent).toBe("115");
   });
 
-  it("resizes by keyboard, one 16px step per arrow press, and ends each step", () => {
+  it("resizes by keyboard, one 16px step per arrow press, and ends each step", async () => {
     const onResize = vi.fn();
     const onResizeEnd = vi.fn();
     render(<ResizeHandle onResize={onResize} onResizeEnd={onResizeEnd} />);
@@ -461,7 +461,54 @@ describe("ResizeHandle", () => {
     fireEvent.keyDown(handle, { key: "ArrowRight" });
     fireEvent.keyDown(handle, { key: "ArrowLeft" });
     expect(onResize.mock.calls.map((c) => c[0])).toEqual([16, -16]);
+    // `onResize` lands inline; `onResizeEnd` is deferred by one microtask so a
+    // caller reading its own state sees the committed value. See the comment on
+    // `handleKeyDown` — the awaits below are the visible cost of that, and the
+    // reason they are here rather than in the mouse tests.
+    expect(onResizeEnd).not.toHaveBeenCalled();
+    await Promise.resolve();
     expect(onResizeEnd).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * THE CONTRACT, ASSERTED ONCE FOR ALL FOUR CALLERS rather than at each of them.
+   *
+   * The natural way to write `onResizeEnd` is to read the size out of the
+   * component's own render scope — all four call sites did, and three were wrong
+   * because of it (peek-a-bin-ob8e, peek-a-bin-a2ze). The mouse path was always
+   * fine: `mouseup` is a separate event, after React has committed the last
+   * `mousemove`. The keyboard path was not, because `onResize` and `onResizeEnd`
+   * ran in one handler with no render between them, so the callback the refs
+   * handed back had never seen the new size.
+   *
+   * This harness is deliberately the NAIVE caller — state, no ref — because that
+   * is the shape the component has to be safe for. `panelUtilities`' other
+   * keyboard test uses a `vi.fn()` and therefore cannot see this class at all: it
+   * can only say that `onResizeEnd` was called, never what a real caller would
+   * have stored.
+   */
+  it("hands onResizeEnd the size as of AFTER the keyboard step, not before it", async () => {
+    const stored: number[] = [];
+    function NaiveCaller() {
+      const [size, setSize] = useState(100);
+      return (
+        <ResizeHandle
+          onResize={(delta) => setSize((s) => s - delta)}
+          // Reads render state, with no ref anywhere. This is the shape that was
+          // broken and the shape the deferral exists to make safe.
+          onResizeEnd={() => stored.push(size)}
+        />
+      );
+    }
+    render(<NaiveCaller />);
+    const handle = screen.getByRole("button");
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    await Promise.resolve();
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    await Promise.resolve();
+    // 100 -> 84 -> 68 (ArrowRight is +16 through `s - delta`). Called inline the
+    // caller would have pushed [100, 84]: correct in shape, one step stale.
+    expect(stored).toEqual([84, 68]);
   });
 
   it("maps the arrow keys onto the handle's own axis and ignores the other axis", () => {

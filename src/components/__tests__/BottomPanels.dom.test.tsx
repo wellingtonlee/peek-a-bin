@@ -245,14 +245,19 @@ describe("BottomPanelContainer", () => {
      * `ResizeHandle` can hand back a callback that has seen the new height. The
      * caller has to keep the live value somewhere that is not a render.
      */
-    it("persists a KEYBOARD resize at its post-press height, not the pre-press one", () => {
+    it("persists a KEYBOARD resize at its post-press height, not the pre-press one", async () => {
       render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
       const handle = screen.getByRole("button", { name: "Resize panel height" });
+      // `ResizeHandle` defers `onResizeEnd` by one microtask on this path only,
+      // so that it runs after the commit; hence the awaits.
       fireEvent.keyDown(handle, { key: "ArrowUp" });
+      await Promise.resolve();
       expect(localStorage.getItem(HEIGHT_KEY)).toBe("236");
       fireEvent.keyDown(handle, { key: "ArrowUp" });
+      await Promise.resolve();
       expect(localStorage.getItem(HEIGHT_KEY)).toBe("252");
       fireEvent.keyDown(handle, { key: "ArrowDown" });
+      await Promise.resolve();
       expect(localStorage.getItem(HEIGHT_KEY)).toBe("236");
       expect(strip().style.height).toBe("236px");
     });

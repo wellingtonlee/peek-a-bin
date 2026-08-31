@@ -58,6 +58,24 @@ export function ResizeHandle({
   // Keyboard resizing. The onResize API is already delta-based, so arrow keys map
   // onto it directly — this gives keyboard users a resize path they previously had
   // no equivalent for, rather than just satisfying the linter.
+  //
+  // `onResizeEnd` IS DEFERRED TO A MICROTASK HERE, AND ONLY HERE. The mouse path
+  // calls it from `mouseup`, a separate event after React has committed the last
+  // `mousemove`, so a caller reading its own state sees the post-drag value. This
+  // path has no such gap: called inline, `onResize` and `onResizeEnd` run in ONE
+  // handler with no render between them, so a caller reading state is handed the
+  // PRE-press value however faithfully the refs above route the callbacks — the
+  // ref indirection cannot fix what has not been committed yet. That was a live
+  // defect in three of this component's four callers (peek-a-bin-ob8e,
+  // peek-a-bin-a2ze): one arrow press moved the bottom panel to 236px and stored
+  // 220, so the first press saved nothing and every later one saved a step
+  // behind.
+  //
+  // A microtask is enough, and that is MEASURED rather than assumed: React
+  // flushes a discrete event's updates synchronously before yielding, so the
+  // queued callback runs after the commit. The cost is that a caller's
+  // keyboard-persistence test must await one turn; the mouse path's stays
+  // synchronous because its timing is unchanged.
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const isHorizontal = orientation === "horizontal";
@@ -66,7 +84,7 @@ export function ResizeHandle({
       if (e.key !== decrease && e.key !== increase) return;
       e.preventDefault();
       onResizeRef.current(e.key === decrease ? -KEYBOARD_STEP_PX : KEYBOARD_STEP_PX);
-      onResizeEndRef.current?.();
+      queueMicrotask(() => onResizeEndRef.current?.());
     },
     [orientation],
   );

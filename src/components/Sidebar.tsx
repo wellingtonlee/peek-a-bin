@@ -103,19 +103,6 @@ export function Sidebar() {
     }
   });
   const [callGraphHeight, setCallGraphHeight] = useState(loadCallGraphHeight);
-  /**
-   * The live height, mirrored so {@link handleCallGraphResizeEnd} can read it
-   * without closing over a render.
-   *
-   * `ResizeHandle`'s ref indirection is enough for a MOUSE drag, where mouseup
-   * is a separate event after a commit — but its KEYBOARD path calls `onResize`
-   * and `onResizeEnd` synchronously in one handler, so a state-reading
-   * `onResizeEnd` still sees the PRE-press value however the callbacks are
-   * routed. Measured, not reasoned: `BottomPanelContainer` has exactly this
-   * defect today — one ArrowUp moves it to 236px and stores 220 — and it is
-   * filed rather than fixed here (peek-a-bin-llrq.2).
-   */
-  const callGraphHeightRef = useRef(callGraphHeight);
   const [graphOverviewOpen, setGraphOverviewOpen] = useState(() => {
     try {
       return localStorage.getItem("peek-a-bin:graph-overview-open") !== "false";
@@ -227,16 +214,9 @@ export function Sidebar() {
    * anchor.
    */
   const handleCallGraphResize = useCallback((delta: number) => {
-    // The ref is the sequence's source of truth and the state mirrors it, rather
-    // than the other way round: several mousemoves can land in one tick, and
-    // each must see the previous one's result. Computed OUTSIDE the updater so
-    // the updater stays pure under StrictMode's double invocation.
-    const next = Math.max(
-      CALLGRAPH_MIN_HEIGHT,
-      Math.min(CALLGRAPH_MAX_HEIGHT, callGraphHeightRef.current - delta),
+    setCallGraphHeight((prev) =>
+      Math.max(CALLGRAPH_MIN_HEIGHT, Math.min(CALLGRAPH_MAX_HEIGHT, prev - delta)),
     );
-    callGraphHeightRef.current = next;
-    setCallGraphHeight(next);
   }, []);
 
   /**
@@ -247,16 +227,17 @@ export function Sidebar() {
    * better one and this follows it. `ResizeHandle` calls `onResizeEnd` from its
    * KEYBOARD path too, so arrow-key resizing persists with no second mechanism.
    *
-   * It reads {@link callGraphHeightRef} rather than the state it mirrors, which
-   * is what makes the stored value the POST-press one on BOTH paths. A
-   * `[callGraphHeight]` dependency would be correct for the mouse and wrong for
-   * the keyboard; see the ref's own note.
+   * Reading `callGraphHeight` out of this render is correct because
+   * `ResizeHandle` guarantees both of its paths call this AFTER the resize has
+   * committed — `mouseup` is a separate event, and the keyboard step is deferred
+   * by a microtask for exactly this reason (peek-a-bin-a2ze). The rule has one
+   * declaration, there, rather than a private workaround here.
    */
   const handleCallGraphResizeEnd = useCallback(() => {
     try {
-      localStorage.setItem("peek-a-bin:callgraph-height", String(callGraphHeightRef.current));
+      localStorage.setItem("peek-a-bin:callgraph-height", String(callGraphHeight));
     } catch {}
-  }, []);
+  }, [callGraphHeight]);
 
   const exportNames = useMemo(() => {
     if (!pe) return new Set<string>();
