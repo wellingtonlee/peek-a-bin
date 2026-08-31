@@ -40,6 +40,20 @@ interface FloatingState {
 export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   const visiblePanels = panels.filter((p) => p.visible);
   const [height, setHeight] = useState(loadHeight);
+  /**
+   * The live height, mirrored so {@link handleResizeEnd} can read it without
+   * closing over a render.
+   *
+   * `ResizeHandle`'s ref indirection is enough for a MOUSE drag, where mouseup
+   * is a separate event after a commit. It is NOT enough for the KEYBOARD path,
+   * which calls `onResize` and `onResizeEnd` synchronously in one handler: React
+   * has not re-rendered in between, so a state-reading `onResizeEnd` is handed
+   * the PRE-press value however the callbacks are routed. Measured before the
+   * fix: one ArrowUp moved the panel to 236px and stored `220`, so the first
+   * press saved nothing and every later press saved the height from a step ago
+   * (peek-a-bin-ob8e).
+   */
+  const heightRef = useRef(height);
   const [activeTab, setActiveTab] = useState<string>("");
   /**
    * Which panels are floating, and where. **DELIBERATELY NOT PRUNED when a
@@ -115,14 +129,24 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   }, [visiblePanels.map((p) => p.id).join(","), activeTab, poppedOut]);
 
   const handleResize = useCallback((delta: number) => {
-    setHeight((prev) => Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, prev - delta)));
+    // The ref is the sequence's source of truth and the state mirrors it: several
+    // mousemoves can land in one tick and each must see the previous one's
+    // result. Computed OUTSIDE the updater so the updater stays pure under
+    // StrictMode's double invocation.
+    const next = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, heightRef.current - delta));
+    heightRef.current = next;
+    setHeight(next);
   }, []);
 
+  // Reads the ref rather than the state it mirrors, which is what makes the
+  // stored value the post-press one on the keyboard path as well as the mouse
+  // one. A `[height]` dependency would be correct for one and wrong for the
+  // other; see `heightRef`'s note.
   const handleResizeEnd = useCallback(() => {
     try {
-      localStorage.setItem("peek-a-bin:bottom-panel-height", String(height));
+      localStorage.setItem("peek-a-bin:bottom-panel-height", String(heightRef.current));
     } catch {}
-  }, [height]);
+  }, []);
 
   /**
    * Mint a floating position: the window's centre, through the same clamp.

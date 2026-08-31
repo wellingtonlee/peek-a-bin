@@ -228,6 +228,34 @@ describe("BottomPanelContainer", () => {
       fireEvent.keyDown(handle, { key: "ArrowDown" });
       expect(strip().style.height).toBe("220px");
     });
+
+    /**
+     * THE CROSSING THE OTHER TWO SUITES MISS, and the defect it caught was live
+     * (peek-a-bin-ob8e): one ArrowUp moved the panel to 236px and stored `220`,
+     * so the first press saved nothing and every later press saved the height
+     * from a step ago — reload and the panel came back one step behind.
+     *
+     * Neither existing half could see it. `panelUtilities.dom.test.tsx` drives
+     * `ResizeHandle`'s keyboard path with a `vi.fn()`, so it asserts that
+     * `onResizeEnd` is CALLED rather than what a real caller would store; the
+     * persistence test above it drives only the MOUSE path, which works, because
+     * mouseup is a separate event after a commit. `handleKeyDown` calls
+     * `onResize` and `onResizeEnd` synchronously in ONE handler, so React has
+     * not re-rendered in between and no amount of ref-routing inside
+     * `ResizeHandle` can hand back a callback that has seen the new height. The
+     * caller has to keep the live value somewhere that is not a render.
+     */
+    it("persists a KEYBOARD resize at its post-press height, not the pre-press one", () => {
+      render(<BottomPanelContainer panels={[panel("a", "Alpha")]} />);
+      const handle = screen.getByRole("button", { name: "Resize panel height" });
+      fireEvent.keyDown(handle, { key: "ArrowUp" });
+      expect(localStorage.getItem(HEIGHT_KEY)).toBe("236");
+      fireEvent.keyDown(handle, { key: "ArrowUp" });
+      expect(localStorage.getItem(HEIGHT_KEY)).toBe("252");
+      fireEvent.keyDown(handle, { key: "ArrowDown" });
+      expect(localStorage.getItem(HEIGHT_KEY)).toBe("236");
+      expect(strip().style.height).toBe("236px");
+    });
   });
 
   describe("popping a panel out", () => {
