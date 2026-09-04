@@ -361,3 +361,4 @@
 {"id":"int-a9fea9b7a98866b6a8cb4251fbe4ae9c","kind":"field_change","created_at":"2026-08-31T03:52:52.598920806Z","actor":"taylor","issue_id":"peek-a-bin-a2ze","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-d84ae170e572af007357283f26190c3a","kind":"field_change","created_at":"2026-08-31T03:53:12.515868821Z","actor":"taylor","issue_id":"peek-a-bin-smcf","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-a816750d5f0e3d8e8f3356f3d08e5ee9","kind":"field_change","created_at":"2026-08-31T03:54:03.796438992Z","actor":"taylor","issue_id":"peek-a-bin-smcf","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-7eb6a9ff94376e9419341cf019f44eb9","kind":"field_change","created_at":"2026-09-04T01:14:44.65565961Z","actor":"taylor","issue_id":"peek-a-bin-0cw1","extra":{"field":"status","new_value":"deferred","old_value":"open"}}

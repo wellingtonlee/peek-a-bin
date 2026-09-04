@@ -2072,6 +2072,15 @@ stating**, since it proves a change was confined to the path you meant.
   as a side effect of using `bd`, and history records it in its own commit rather than smuggling
   it into a code change.
 - **End the message with** `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
+- **Never pass unescaped backticks to a `bd` text flag — the SHELL executes them and silently
+  drops the fragment**, so the bead is written with a hole in it and nothing reports an error.
+  Almost every bead body here contains `` `code` ``, which makes this the default failure rather
+  than an edge case. Use a quoted heredoc (`--body-file -  <<'EOF'`) or `--append-notes "$(cat
+  file)"`, and **read it back with `bd show`** — that is the only confirmation. Two more things
+  `bd show` will mislead you about: its markdown renderer bolds `__tests__` into `**tests**` and
+  eats `<angle-bracket>` placeholders in prose, so a path or a placeholder copied out of a
+  rendered bead can be wrong even though the stored text is right. Indented code blocks survive
+  both; check with `bd show <id> --json` when it matters.
 
 ### Author identity
 
