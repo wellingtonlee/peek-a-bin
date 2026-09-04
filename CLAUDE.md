@@ -161,12 +161,32 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   where the bottom band competes only with the disassembly view), and the list
   carries a **`min-h-[120px]` floor**, because a `flex-1` scroll container's
   automatic minimum is 0 by CSS Flexbox 4.5 so all negative free space landed on it
-  and a short window clipped the footer away. The persisted height is read from a
-  **ref, not from state**: `ResizeHandle`'s keyboard path calls `onResize` and
-  `onResizeEnd` synchronously, so a state-reading `onResizeEnd` stores the PRE-press
-  value — which `BottomPanelContainer` still does (`peek-a-bin-ob8e`). All
+  and a short window clipped the footer away. Its height persists through
+  `ResizeHandle`'s `onResizeEnd` reading state in the obvious way, which is correct
+  **only because that component now guarantees it** — see the `ResizeHandle` entry
+  below. All
   six dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
+- **`ResizeHandle.tsx` guarantees `onResizeEnd` runs AFTER the resize it describes has
+  committed, and that guarantee is the reason its four callers may read their own state
+  in it.** The mouse path always could — `mouseup` is a separate event, after the last
+  `mousemove` committed. The keyboard path could not: it called `onResize` and
+  `onResizeEnd` inline in one handler, so React had not re-rendered between them and the
+  caller was handed the PRE-press value however the callbacks were routed. **Three of the
+  four callers were wrong because of it** — the bottom panel's height and the decompile
+  and chat widths all persisted a step behind on every arrow press, so the first press
+  saved nothing. The keyboard step is deferred by one microtask (measured: React flushes a
+  discrete event's updates before yielding); the mouse path is deliberately untouched, so
+  only keyboard-persistence tests pay an `await`. **Do not "simplify" that back to an
+  inline call, and do not re-add a per-caller ref** — the rule has one declaration here
+  and the contract is asserted once, in `panelUtilities.dom.test.tsx`, with a harness that
+  is deliberately the naive state-reading caller. A `vi.fn()` cannot see this class: it
+  says `onResizeEnd` was *called*, never what a real caller would have stored, which is
+  how three callers stayed broken under a green suite (`peek-a-bin-a2ze`,
+  `peek-a-bin-ob8e`). Its duplicate in `Sidebar.tsx` (the width grip) is **deliberately
+  not consolidated**: the two arithmetic forms differ at the clamps — drag past the
+  minimum and return the pointer to its start, and absolute-offset recovers to the
+  starting width while accumulated-delta flies to the maximum (`peek-a-bin-smcf`).
 - **`hooks/`** — state (`usePEFile`), derived state, rows, search. `useDisassemblyKeyboard.ts` and
   `useGraphSearch.ts` are seams extracted from `DisassemblyView`. Pure leaf modules
   (`asyncMetricState.ts`, `decompileTabsState.ts`, `modalScaffold.ts`, `listboxIds.ts`) exist so
@@ -1022,10 +1042,12 @@ read "all of them compile" as "all of them are right".
   the resize case are pinned as numbers, and **nothing has seen a panel be reachable or not** — that
   a 48px sliver or a 24px header band is enough to grab needs `peek-a-bin-v2u`. `handlePopOut`'s own
   call to the clamp is **provably inert** (centring can violate only the viewport-independent top
-  bound), reported rather than removed. What *is* covered end to end is `ResizeHandle`'s ref indirection:
-  `BottomPanelContainer`'s `handleResizeEnd` closes over `height` from its own render, so a mouseup
-  handler captured at mousedown would store the PRE-drag height — red under its own control from
-  both sides.
+  bound), reported rather than removed. What *is* covered end to end is `ResizeHandle`'s
+  **post-commit guarantee**, on both paths and from the caller's side: that a mouseup handler
+  captured at mousedown would store the PRE-drag height (the ref indirection), and that an
+  inline keyboard `onResizeEnd` stores the PRE-press one — the latter asserted with a harness
+  that is deliberately the naive state-reading caller, since a `vi.fn()` can only see that the
+  callback fired. Reverting the deferral reddens four tests across all three callers.
 - **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
   and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint (no 2D context, no
   `URL.createObjectURL`) — the preview's *reconstruction* has unit coverage, but no test and no
