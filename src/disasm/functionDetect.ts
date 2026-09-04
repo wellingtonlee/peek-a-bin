@@ -535,6 +535,8 @@ function recoverX64RvaChain(
   // has not modelled, and guessing there is how a table gets misread.
   let sought = jmpReg;
   let stage: "add" | "load" | "lea" = "add";
+  /** The add's non-destination operand: the base or the offset, settled by the load. */
+  let otherReg: string | null = null;
   let baseReg: string | null = null;
   let indexReg: string | null = null;
   let loadIndex = 0;
@@ -551,7 +553,21 @@ function recoverX64RvaChain(
       if (mn === "add") {
         const pair = regPair(p.opStr);
         if (pair && pair[0] === sought) {
-          baseReg = pair[1];
+          // The add's destination is always the register the jump reads. What
+          // is NOT fixed is which of the two operands is the table base and
+          // which is the loaded offset — GCC emits BOTH orders and only one
+          // used to be modelled, which cost a real bounded five-case switch at
+          // __gdtoa+0x9b in mingw output (peek-a-bin-oovn):
+          //
+          //     add rax, rdx   ; canonical — the jump register is the OFFSET
+          //     add rdx, rax   ; the mirror — the jump register is the BASE
+          //
+          // Both compute base+offset and differ only in where the sum lands.
+          // The load settles it: it writes the offset and reads through the
+          // base, so whichever pairing the load matches is the real one. That
+          // is a NARROWING, not a guess — a candidate that no scale-4 load
+          // corroborates is refused exactly as before.
+          otherReg = pair[1];
           stage = "load";
           continue;
         }
@@ -561,22 +577,38 @@ function recoverX64RvaChain(
     }
 
     if (stage === "load") {
-      if ((mn === "movsxd" || mn === "movsx" || mn === "mov") && destReg(p.opStr) === sought) {
+      if (mn === "movsxd" || mn === "movsx" || mn === "mov") {
+        const dest = destReg(p.opStr);
         const mem = parseScale4Load(p.opStr);
-        if (!mem || mem.base !== baseReg) return null;
-        indexReg = mem.index;
-        disp = mem.disp;
-        loadIndex = ri;
-        sought = baseReg;
-        stage = "lea";
-        continue;
+        // Canonical: the load writes the jump register, reading through the
+        // add's other operand. Mirrored: it writes the other operand, reading
+        // through the jump register.
+        // `otherReg` is non-null in this stage by construction, but say so
+        // rather than assert it: a null base must never match a null candidate.
+        const canonical =
+          otherReg !== null && dest === sought && mem !== null && mem.base === otherReg;
+        const mirrored =
+          otherReg !== null && dest === otherReg && mem !== null && mem.base === sought;
+        if (mem !== null && (canonical || mirrored)) {
+          indexReg = mem.index;
+          disp = mem.disp;
+          loadIndex = ri;
+          // The `lea` materialises the BASE, which is the other operand under
+          // the canonical reading and the jump register itself under the mirror.
+          baseReg = canonical ? (otherReg as string) : sought;
+          sought = baseReg;
+          stage = "lea";
+          continue;
+        }
+        // A load into either candidate that does not corroborate a pairing is a
+        // write to a register this walk is chasing, and falls to the guard below.
       }
       // Either register being rewritten here ends the walk: `sought` because
       // the jump then added something this walk has not modelled, `baseReg`
       // because the value added was not the one the `lea` produced. Following
       // the chain past either reports a table read from an address the program
       // never used.
-      if (destReg(p.opStr) === sought || destReg(p.opStr) === baseReg) return null;
+      if (destReg(p.opStr) === sought || destReg(p.opStr) === otherReg) return null;
       continue;
     }
 
