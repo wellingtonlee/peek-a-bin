@@ -87,8 +87,13 @@ type Shape =
  * The dense two-table reader (`readDenseRvaTable` / `recoverDenseByteTable`,
  * which is `peek-a-bin-6rge`'s subject) hangs off `readRvaTable` and is
  * therefore only ever reachable from the `register` shape, and only when
- * `recoverX64RvaChain` resolves a chain there. A `register` count of zero, or a
- * non-zero one with nothing recovered, both mean it did not run.
+ * `recoverX64RvaChain` resolves a chain there. A `register` count of zero means
+ * it did not run. A NON-ZERO ONE WITH NOTHING RECOVERED DOES NOT — measured on
+ * fwupdx64.efi.signed at 0x5f6d, where the chain resolves, `boundedCaseCount`
+ * returns 0 because the index comes from memory, and `readRvaTable` therefore
+ * DOES call `readDenseRvaTable`, which then correctly refuses at its `byte ptr`
+ * guard. Entering that reader and reading a table with it are different claims
+ * (peek-a-bin-6rge).
  */
 const READER: Record<Shape, string> = {
   "literal-indexed": "readAbsoluteTable",
@@ -187,6 +192,84 @@ function immediate(opStr: string): number | null {
   return dec ? parseInt(dec[1], 10) : null;
 }
 
+/**
+ * The index register of a `jmp <reg>` RVA-chain dispatch, or null.
+ *
+ * WHY THIS EXISTS. `parseIndexed` matches a BRACKETED operand, and a `jmp rax`
+ * has no brackets — so before this, `indexReg` was null for every `register`
+ * site, the `cmp`/`and` scan below was gated off, and the `bounded` column was a
+ * STRUCTURAL ZERO rather than a measurement. Worse, the `UNREAD dispatches
+ * carrying a bound` list filters on `bound !== null`, so it could never contain
+ * an x64 RVA-chain dispatch at all: on a 64-bit image the census reported
+ * "nothing to adjudicate" over exactly the population worth adjudicating, and a
+ * real bounded miss (peek-a-bin-oovn) sat inside it unseen (peek-a-bin-hwyf).
+ *
+ * IT IS DELIBERATELY NOT A REIMPLEMENTATION of `recoverX64RvaChain`. It answers
+ * one question — which register is the subscript — and it answers it only when
+ * the scale-4 load is ANCHORED: the load's base register must be the other
+ * operand of the `add` that feeds the jump. That anchor is what keeps this away
+ * from the false positives the `tableBase` docstring below records (28 of 32 Go
+ * `jmp reg` sites had an irrelevant `lea` in reach). An unanchored load is
+ * ignored rather than guessed at.
+ *
+ * Both `add` operand orders are accepted here, on purpose and independently of
+ * whether production accepts them: the census must be able to SEE a dispatch in
+ * order to report that the reader missed it. That asymmetry is the point —
+ * peek-a-bin-oovn is precisely a shape production refuses and the audit must not.
+ *
+ * WHAT IT STILL DOES NOT SEE, stated so the column is not over-read: the bound
+ * scan below compares the `cmp`/`and` operand against this register directly,
+ * where `boundedCaseCount` follows a narrowing `movzx`/`mov` back through
+ * `regPair` first. So fwupd's RECOVERED site at 0x65dc contributes no bound to
+ * the count — its index reaches `rax` via `movzx eax, dl` and the bound is
+ * `cmp dl, 0x5`. The column is therefore a LOWER BOUND on bounded register
+ * dispatches, not a census of them. Following the narrowing here would be a
+ * second copy of production's rule inside the audit, which is the trade this
+ * file declines everywhere else.
+ */
+function chainIndexReg(insns: readonly Instruction[], jmpAt: number): string | null {
+  const jumpReg = family(insns[jmpAt].opStr);
+  if (jumpReg === null) return null;
+
+  for (let j = jmpAt - 1; j >= 0 && j >= jmpAt - LOOKBACK; j--) {
+    const p = insns[j];
+    const mn = p.mnemonic.toLowerCase();
+    if (mn === "call") break;
+    if (mn !== "add") continue;
+    const pair = regPair(p.opStr);
+    if (!pair) continue;
+    // `add off, base` and `add base, off` both compute base+offset; which one
+    // the jump reads is the whole of the difference. Either way the OTHER
+    // operand is the register the scale-4 load must be based on.
+    if (pair[0] !== jumpReg && pair[1] !== jumpReg) continue;
+    const anchor = pair[0] === jumpReg ? pair[1] : pair[0];
+
+    for (let k = j - 1; k >= 0 && k >= jmpAt - LOOKBACK; k--) {
+      const q = insns[k];
+      const qmn = q.mnemonic.toLowerCase();
+      if (qmn === "call") return null;
+      if (qmn !== "movsxd" && qmn !== "movsx" && qmn !== "mov") continue;
+      const mem = parseIndexed(q.opStr);
+      if (!mem) continue;
+      // ANCHORED, or ignored: the load must read through the register the add
+      // pairs with the jump register.
+      if (mem.base !== null && mem.base !== anchor && mem.base !== jumpReg) continue;
+      return mem.index;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** `add a, b` -> the two register families, or null. */
+function regPair(opStr: string): [string, string] | null {
+  const m = opStr.match(/^\s*([a-z][a-z0-9]*)\s*,\s*([a-z][a-z0-9]*)\s*$/i);
+  if (!m) return null;
+  const a = family(m[1]);
+  const b = family(m[2]);
+  return a && b ? [a, b] : null;
+}
+
 function survey(insns: readonly Instruction[], tables: ReadonlyMap<number, number[]>): Site[] {
   const sites: Site[] = [];
   for (let i = 0; i < insns.length; i++) {
@@ -197,7 +280,7 @@ function survey(insns: readonly Instruction[], tables: ReadonlyMap<number, numbe
 
     const ix = parseIndexed(insn.opStr);
     const baseReg = shape === "register" ? family(insn.opStr) : (ix?.base ?? null);
-    const indexReg = ix?.index ?? null;
+    const indexReg = shape === "register" ? chainIndexReg(insns, i) : (ix?.index ?? null);
 
     let leaBase: number | null = null;
     let bound: number | null = null;
