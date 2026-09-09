@@ -6,7 +6,7 @@ import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { GhidraClient } from "../ghidra/client";
 import { streamEnhance } from "../llm/client";
 import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
-import { hasApiKey, loadDecompileServer, loadSettings } from "../llm/settings";
+import { hasApiKey, loadDecompileServer, loadSettings, NO_API_KEY_MESSAGE } from "../llm/settings";
 import type { PEFile } from "../pe/types";
 import { disasmWorker } from "../workers/disasmClient";
 import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
@@ -211,7 +211,21 @@ export function useDecompileTabs({
   const triggerAI = useCallback(
     (mode: "enhance" | "explain") => {
       if (!hasApiKey()) {
+        // Opening Settings is the right next step and is kept; what was missing
+        // is the sentence saying why it opened — see NO_API_KEY_MESSAGE.
+        //
+        // The message goes on the AI tab's own `error`, which `activeError`
+        // surfaces and DecompileView renders as its red banner — the same
+        // channel `LOAD_ERR` already uses for a stream failure. SET_TAB is
+        // dispatched with it, and is not defensive noise: `activeError` is the
+        // ACTIVE tab's error, so setting it on a tab that is not showing would
+        // put the explanation somewhere the user cannot see. Today both callers
+        // are the AI tab's own buttons, so this is a no-op for them; it is what
+        // makes the message visible from any other caller, and it matches the
+        // success path, which switches to the AI tab too.
         window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+        dispatch({ type: "SET_TAB", tab: "ai" });
+        dispatch({ type: "LOAD_ERR", tab: "ai", error: NO_API_KEY_MESSAGE });
         return;
       }
 

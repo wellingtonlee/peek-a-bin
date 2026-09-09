@@ -116,6 +116,30 @@ export function hasApiKey(): boolean {
   return loadSettings().apiKey.length > 0;
 }
 
+/**
+ * What a user is told when {@link hasApiKey} refuses an AI action.
+ *
+ * THE ONE DECLARATION, because both remaining gates — `useAIChat`'s
+ * `sendMessage` and `useDecompileTabs`' `triggerAI` — must say the same thing,
+ * and the sentence belongs beside the predicate it explains rather than being
+ * written out at each site.
+ *
+ * Both gates dispatch `peek-a-bin:open-settings` and return. The dispatch is
+ * right — Settings is where the remedy is, and it opens on the AI tab — but on
+ * its own it reads as a broken button: a click on Send or Enhance made the
+ * Settings dialog appear with nothing saying why, which is exactly what was
+ * reported. So each gate now ALSO sets the error state its own panel already
+ * renders. There is no toast mechanism in this app and one is deliberately not
+ * invented for a bug fix (`peek-a-bin-p0tz`'s rule); both panels already have a
+ * red banner fed by an `error` field, and that is the surface reused.
+ *
+ * It names the precondition and the remedy and stops there. It does NOT promise
+ * the action will resume once a key is saved — it will not. The gate has no
+ * retry; that needs a queued-intent mechanism and is a separate question.
+ */
+export const NO_API_KEY_MESSAGE =
+  "No API key configured — add one under Settings → AI, then try again.";
+
 // ── Decompile Server Settings ──
 
 export interface DecompileServerSettings {
