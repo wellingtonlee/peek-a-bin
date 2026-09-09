@@ -313,6 +313,29 @@ boolean>` in `usePEFile.ts` that `StatusBar` and `Sidebar` both read. It replace
 defaults any phase added later to "still analysing", i.e. a spinner that can never resolve. A new
 phase must fail the build here instead (`peek-a-bin-bo3b`).
 
+**There was a FOURTH such chain, in `FileLoader`, and it was DELETED rather than converted —
+along with the whole progress panel it gated, because none of it could render.** The component
+spelled `analysisPhase !== "idle" && analysisPhase !== "ready"`, one term shorter than the three
+sites above (it was missing `"failed"` as well as `"no-code"` and `"timed-out"`), and used it to
+show a four-step panel, disable the drop zone and hide the recents list. **`App` renders
+`FileLoader` only when `!state.peFile`, and `handleFile` dispatches RESET, SET_LOADING,
+SET_ANALYSIS_PHASE `"parsing"` and SET_PE_FILE from ONE synchronous callback** — React commits
+nothing mid-callback, so by the first paint either `peFile` is set and the component is unmounted,
+or the parse threw and the catch dispatched `"idle"`, **not** a terminal phase. `loading` could not
+rescue it either: SET_PE_FILE and SET_ERROR both clear it inside that same batch. **Measured, not
+reasoned** — a probe recording `useAppState()` from FileLoader's own mount point across a real load
+saw exactly two commits, both `{loading: false, phase: "idle"}`, and went red under a one-line
+`await` splitting the batch after SET_LOADING. So the panel, the disabled drop zone, the `fileName`
+"Analyzing …" line and `getStepStatus`'s (separately measured-redundant) `"failed"` arm were all
+unreachable. Deletion beat relocation because `ANALYSIS_STEPS` was **a second phase→label table
+grouping the same union differently**, so moving the panel would have meant keeping two tables for
+one fact; the steps a user actually waits on (detect functions, build xrefs) all run *after* this
+screen is gone, and what they see is the sidebar skeleton and the status-bar spinner, both of which
+already read `ANALYSIS_IN_PROGRESS`. `FileLoader`'s props are now `onFile` and `error` alone.
+**Consequence worth knowing: `AppState.loading` now has NO reader** — `SET_LOADING` is write-only
+state, left in place deliberately rather than swept up inside a component bead
+(`peek-a-bin-v3uh.13`).
+
 **`analysisNotice()` (`components/analysisNotice.ts`) has six kinds, and they are RANKED**:
 `"unsupported-arch"` → `"no-code-section"` → `"engine-unavailable"` → `"analysis-timed-out"` →
 `"analysis-failed"` → `"partial-detection"`. Each carries **`isFault`**, and **all five render

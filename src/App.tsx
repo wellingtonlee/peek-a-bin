@@ -824,13 +824,7 @@ export default function App() {
     <AppStateContext.Provider value={state}>
       <AppDispatchContext.Provider value={dispatch}>
         {!state.peFile ? (
-          <FileLoader
-            onFile={handleFile}
-            loading={state.loading}
-            error={state.error}
-            analysisPhase={state.analysisPhase}
-            fileName={state.fileName}
-          />
+          <FileLoader onFile={handleFile} error={state.error} />
         ) : (
           <div className="flex flex-col h-screen app-bg" style={fontStyle}>
             <AddressBar />

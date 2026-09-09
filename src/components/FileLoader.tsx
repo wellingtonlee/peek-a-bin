@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AnalysisPhase } from "../hooks/usePEFile";
 import { listAnnotationRecords, removeAnnotationsFor } from "../utils/annotationKey";
 import {
   deleteRecentFile,
@@ -23,10 +22,7 @@ interface FileLoaderProps {
    * keep paying the copy, which is by construction rather than by accident.
    */
   onFile: (buffer: ArrayBuffer, fileName: string, file?: File) => void;
-  loading: boolean;
   error: string | null;
-  analysisPhase: AnalysisPhase;
-  fileName?: string | null;
 }
 
 interface RecentFile {
@@ -37,33 +33,6 @@ interface RecentFile {
   bookmarks: number;
   renames: number;
   comments: number;
-}
-
-const ANALYSIS_STEPS = [
-  { label: "Parsing PE", phases: ["parsing"] },
-  { label: "Extracting strings", phases: ["extracting-strings"] },
-  {
-    label: "Detecting functions",
-    phases: ["detecting-functions", "recursive-descent", "gap-filling"],
-  },
-  { label: "Building xrefs", phases: ["building-xrefs"] },
-] as const;
-
-function getStepStatus(
-  stepIndex: number,
-  analysisPhase: AnalysisPhase,
-): "done" | "active" | "pending" {
-  const step = ANALYSIS_STEPS[stepIndex];
-  if ((step.phases as readonly string[]).includes(analysisPhase)) return "active";
-
-  const activeStepIndex = ANALYSIS_STEPS.findIndex((s) =>
-    (s.phases as readonly string[]).includes(analysisPhase),
-  );
-  if (analysisPhase === "ready") return "done";
-  // Analysis aborted — stop every remaining step showing as pending-forever.
-  if (analysisPhase === "failed") return "pending";
-  if (activeStepIndex === -1) return "pending";
-  return stepIndex < activeStepIndex ? "done" : "pending";
 }
 
 interface AnnotationCounts {
@@ -121,14 +90,36 @@ function formatRelativeTime(timestamp: number): string {
   return `${Math.floor(days / 7)}w ago`;
 }
 
-export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: FileLoaderProps) {
+/**
+ * The pre-file screen: drop zone, error, "try example" and the recents list.
+ *
+ * THERE IS DELIBERATELY NO PROGRESS PANEL HERE, AND RE-ADDING ONE WOULD BE DEAD
+ * CODE — the reason is in `App.tsx` and not visible from this file. `App`
+ * renders this component only when `!state.peFile`, and its `handleFile`
+ * dispatches RESET, SET_LOADING, SET_ANALYSIS_PHASE "parsing" and SET_PE_FILE
+ * from ONE synchronous callback. React cannot commit a render in the middle of
+ * that, so by the first paint after a drop either `peFile` is set — and this
+ * component is unmounted — or the parse threw, and the catch dispatches "idle",
+ * NOT a terminal phase. `loading` cannot rescue it either: SET_PE_FILE and
+ * SET_ERROR both clear it inside the same batch. So no in-flight phase and no
+ * truthy `loading` is ever observable while this component is mounted.
+ *
+ * It used to carry a four-step panel keyed off a second phase-to-label table
+ * (`ANALYSIS_STEPS`) plus a fourth hand-written `phase !== "idle" && !== "ready"`
+ * chain — the shape `ANALYSIS_IN_PROGRESS` exists to replace, one term shorter
+ * than the three sites peek-a-bin-bo3b converted. None of it could render. The
+ * steps a user really waits on (detect functions, build xrefs) all run *after*
+ * this screen is gone, and what they actually see is the sidebar skeleton and
+ * the status-bar spinner — both of which read `ANALYSIS_IN_PROGRESS`, the one
+ * declaration. Relocating the panel would have meant keeping two tables for one
+ * fact (peek-a-bin-v3uh.13).
+ */
+export function FileLoader({ onFile, error }: FileLoaderProps) {
   const [dragging, setDragging] = useState(false);
   const [loadingExample, setLoadingExample] = useState(false);
   const [loadingRecent, setLoadingRecent] = useState<string | null>(null);
   const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const isAnalyzing = analysisPhase !== "idle" && analysisPhase !== "ready";
 
   // Load recent files from IndexedDB + localStorage annotations
   useEffect(() => {
@@ -275,91 +266,49 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       <button
         type="button"
         aria-label="Drop a PE file here, or activate to browse"
-        disabled={isAnalyzing}
-        className={`flex flex-col items-center justify-center w-[600px] h-[350px] border-2 border-dashed rounded-xl transition-colors ${
-          isAnalyzing ? "" : "cursor-pointer"
-        } ${dragging ? "border-blue-400 bg-blue-400/10" : "border-gray-600 hover:border-gray-400"}`}
-        onDrop={isAnalyzing ? undefined : onDrop}
-        onDragOver={isAnalyzing ? undefined : onDragOver}
-        onDragLeave={isAnalyzing ? undefined : onDragLeave}
-        onClick={isAnalyzing ? undefined : () => inputRef.current?.click()}
+        className={`flex flex-col items-center justify-center w-[600px] h-[350px] border-2 border-dashed rounded-xl transition-colors cursor-pointer ${
+          dragging ? "border-blue-400 bg-blue-400/10" : "border-gray-600 hover:border-gray-400"
+        }`}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onClick={() => inputRef.current?.click()}
       >
-        {isAnalyzing || loading ? (
-          /* Loading progress */
-          <div className="flex flex-col items-center gap-4 px-8">
-            {fileName && (
-              <p className="text-sm text-gray-400 mb-2">
-                Analyzing <span className="text-gray-200 font-medium">{fileName}</span>
-              </p>
-            )}
-            <div className="flex flex-col gap-3 w-full">
-              {ANALYSIS_STEPS.map((step, i) => {
-                const status = getStepStatus(i, analysisPhase);
-                return (
-                  <div key={step.label} className="flex items-center gap-3">
-                    {status === "done" && <span className="text-green-400 w-5 text-center">✓</span>}
-                    {status === "active" && (
-                      <span className="text-yellow-400 w-5 text-center animate-pulse">●</span>
-                    )}
-                    {status === "pending" && (
-                      <span className="text-gray-600 w-5 text-center">○</span>
-                    )}
-                    <span
-                      className={
-                        status === "done"
-                          ? "text-gray-400"
-                          : status === "active"
-                            ? "text-gray-200"
-                            : "text-gray-600"
-                      }
-                    >
-                      {step.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          /* Normal drop zone content */
-          <>
-            <svg
-              aria-hidden="true"
-              className="w-16 h-16 mb-4 text-gray-500"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M9 8h6m-5 0a3 3 0 110 6H9l3 3m-3-3h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V17a2 2 0 01-2 2z"
-              />
-            </svg>
-            <p className="text-xl text-gray-300 mb-2">Drop a PE file here</p>
-            <p className="text-sm text-gray-500">or click to browse (.exe, .dll)</p>
-            {error && <p className="mt-4 text-sm text-red-400 max-w-md text-center">{error}</p>}
+        <svg
+          aria-hidden="true"
+          className="w-16 h-16 mb-4 text-gray-500"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={1.5}
+            d="M9 8h6m-5 0a3 3 0 110 6H9l3 3m-3-3h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V17a2 2 0 01-2 2z"
+          />
+        </svg>
+        <p className="text-xl text-gray-300 mb-2">Drop a PE file here</p>
+        <p className="text-sm text-gray-500">or click to browse (.exe, .dll)</p>
+        {error && <p className="mt-4 text-sm text-red-400 max-w-md text-center">{error}</p>}
 
-            {/* Divider + Try example */}
-            <div className="flex items-center gap-3 mt-5 w-48">
-              <hr className="flex-1 border-gray-700" />
-              <span className="text-xs text-gray-600">or</span>
-              <hr className="flex-1 border-gray-700" />
-            </div>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                loadExample();
-              }}
-              disabled={loading || loadingExample}
-              className="mt-3 text-sm text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loadingExample ? "Loading..." : "Try example: crackme01.exe"}
-            </button>
-          </>
-        )}
+        {/* Divider + Try example */}
+        <div className="flex items-center gap-3 mt-5 w-48">
+          <hr className="flex-1 border-gray-700" />
+          <span className="text-xs text-gray-600">or</span>
+          <hr className="flex-1 border-gray-700" />
+        </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            loadExample();
+          }}
+          disabled={loadingExample}
+          className="mt-3 text-sm text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loadingExample ? "Loading..." : "Try example: crackme01.exe"}
+        </button>
       </button>
 
       {/* Sibling of the drop zone, not a child: a form control nested inside a
@@ -374,7 +323,7 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
       />
 
       {/* Recent files */}
-      {recentFiles.length > 0 && !isAnalyzing && !loading && (
+      {recentFiles.length > 0 && (
         <div className="mt-6 w-[500px]">
           <p className="text-xs text-gray-600 uppercase tracking-wider mb-2">Recent analyses</p>
           <div className="flex flex-col gap-1">
