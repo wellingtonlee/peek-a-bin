@@ -693,6 +693,49 @@ describe("HeaderView anomaly banners", () => {
     renderHeaders(parsePE(buildMinimalPE64()));
     expect(screen.queryAllByTitle("Dismiss")).toEqual([]);
   });
+
+  // The three rows below are `AnomaliesView.dom.test.tsx`'s palette coverage,
+  // migrated to the surface that still paints anomalies. jsdom carries no
+  // Tailwind, so what discriminates here is the class-name STRING and nothing
+  // has seen a colour — but a string is enough for the `peek-a-bin-n7q1`
+  // question, which is whether two severities are told apart at all.
+  const bannerFor = (title: string) =>
+    (screen.getByText(title).closest("div.border-l-4") as HTMLElement).className;
+
+  it("paints each severity in its own colour", () => {
+    renderHeaders(parsePE(buildMinimalPE64()), { anomalies: ANOMALIES });
+    expect(bannerFor("Critical thing")).toContain("red-");
+    expect(bannerFor("Warning thing")).toContain("amber-");
+    expect(bannerFor("Info thing")).toContain("blue-");
+  });
+
+  it("never paints one severity in another's colour", () => {
+    // The half that fails when a palette entry is copied from its neighbour —
+    // `toContain("red-")` alone passes for a critical banner that is red
+    // everywhere AND for a warning banner that was given the critical's classes.
+    renderHeaders(parsePE(buildMinimalPE64()), { anomalies: ANOMALIES });
+    expect(bannerFor("Critical thing")).not.toMatch(/amber-|blue-/);
+    expect(bannerFor("Warning thing")).not.toMatch(/red-|blue-/);
+    expect(bannerFor("Info thing")).not.toMatch(/red-|amber-/);
+  });
+
+  it("renders a severity the palette does not know, in blue, instead of dropping it", () => {
+    // The population is a value that reached `AppState` over the MCP wire or out
+    // of a stale snapshot, past the type system. Before `ANOMALY_BADGE` was read
+    // here, such a row matched no entry in the hand-written order array and was
+    // silently absent from the page — worse than `peek-a-bin-p0qw`'s defect,
+    // which at least rendered the row in `info`'s blue.
+    const rogue = { severity: "fatal", title: "Rogue thing", detail: "rogue detail" };
+    renderHeaders(parsePE(buildMinimalPE64()), {
+      anomalies: [rogue as unknown as Anomaly, ...ANOMALIES],
+    });
+    expect(screen.getByText("Rogue thing")).toBeTruthy();
+    expect(screen.getByText("rogue detail")).toBeTruthy();
+    expect(bannerFor("Rogue thing")).toContain("blue-");
+    // And it is still one banner per anomaly — the unknown row is folded into
+    // `info`'s group, not duplicated across the three.
+    expect(screen.getAllByTitle("Dismiss")).toHaveLength(4);
+  });
 });
 
 describe("HeaderView with nothing to show", () => {

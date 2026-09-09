@@ -18,6 +18,7 @@ import {
   parseRichHeader,
 } from "../pe/metadata";
 import { COPY_FAILED_TITLE, copyText } from "../utils/clipboard";
+import { ANOMALY_BADGE, BADGE_RANK, type BadgeLevel } from "./severity";
 
 /**
  * Every COFF characteristic the PE format names.
@@ -393,7 +394,16 @@ function AnomalyBanners() {
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
   if (state.anomalies.length === 0) return null;
 
-  const severityConfig = {
+  /**
+   * The palette, keyed on {@link BadgeLevel} so a fourth `Anomaly["severity"]`
+   * fails the build here rather than rendering nothing. It stays local on
+   * purpose: `components/severity.ts` declares the mapping and the order, and
+   * the class names belong to whoever paints them (`peek-a-bin-rl95`).
+   */
+  const severityConfig: Record<
+    BadgeLevel,
+    { bg: string; border: string; text: string; icon: string; label: string }
+  > = {
     critical: {
       bg: "bg-red-900/40",
       border: "border-red-700/50",
@@ -416,16 +426,23 @@ function AnomalyBanners() {
       label: "text-blue-400",
     },
   };
-  const order: ("critical" | "warning" | "info")[] = ["critical", "warning", "info"];
+  // Derived, so the order has one declaration. A hand-written literal here was
+  // the fourth copy of it.
+  const order = (Object.keys(BADGE_RANK) as BadgeLevel[]).sort(
+    (a, b) => BADGE_RANK[a] - BADGE_RANK[b],
+  );
 
   return (
     <div className="space-y-1 mb-4">
-      {order.map((severity) => {
+      {order.map((level) => {
         const items = state.anomalies
           .map((a, i) => ({ ...a, idx: i }))
-          .filter((a) => a.severity === severity && !dismissed.has(a.idx));
+          // The fallback is the whole point: a severity that reached `AppState`
+          // past the type system used to match no `order` entry and vanish from
+          // the page. Blue and present beats absent.
+          .filter((a) => (ANOMALY_BADGE[a.severity] ?? "info") === level && !dismissed.has(a.idx));
         if (items.length === 0) return null;
-        const cfg = severityConfig[severity];
+        const cfg = severityConfig[level];
         return items.map((a) => (
           <div
             key={a.idx}
