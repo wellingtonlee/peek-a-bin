@@ -3,7 +3,6 @@ import type { Anomaly } from "../analysis/anomalies";
 import type { DriverInfo, IRPDispatchEntry } from "../analysis/driver";
 import type { DetectPass } from "../disasm/functionDetect";
 import type { DisasmFunction } from "../disasm/types";
-import type { AIScanFinding, BatchRenameResult } from "../llm/types";
 import type { PEFile, StringScanCoverage } from "../pe/types";
 
 export type ViewTab =
@@ -176,58 +175,7 @@ export interface AppState {
   iatMap: Map<number, { lib: string; func: string }>;
   driverInfo: DriverInfo | null;
   irpHandlers: IRPDispatchEntry[];
-  // AI features
-  batchRename: {
-    status: "idle" | "decompiling" | "running" | "review" | "applying";
-    progress: { done: number; total: number };
-    results: BatchRenameResult[];
-    error: string | null;
-  } | null;
-  aiReport: {
-    status: "idle" | "streaming" | "done" | "error";
-    content: string;
-    error: string | null;
-  } | null;
-  aiScanResults: AIScanFinding[];
-  aiScan: AIScanState;
 }
-
-/**
- * Outcome of the AI vulnerability scan, kept separate from `aiScanResults` so the
- * three outcomes stay distinguishable:
- *
- *   - `phase: "idle"`                        → never run for this binary
- *   - `phase: "complete"`, no findings       → ran, genuinely found nothing
- *   - `phase: "failed"`                      → ran, produced nothing usable
- *
- * An empty `aiScanResults` therefore means "clean" only when `phase` says the scan
- * actually completed. Collapsing the two is what made an unparseable response
- * render identically to a clean binary — the worst failure mode for a scanner,
- * because it reads as "your binary is fine".
- *
- * A run can also be partially successful: `phase: "complete"` with `failed > 0`
- * means some functions were scanned and others could not be, so the finding list
- * is real but incomplete.
- */
-export interface AIScanState {
-  phase: "idle" | "scanning" | "complete" | "failed";
-  /** Functions whose response came back and validated. */
-  scanned: number;
-  /** Functions whose request failed or whose response could not be parsed. */
-  failed: number;
-  /** Functions this run set out to scan. */
-  total: number;
-  /** First failure message from this run, retained for display. */
-  error: string | null;
-}
-
-const IDLE_SCAN: AIScanState = {
-  phase: "idle",
-  scanned: 0,
-  failed: 0,
-  total: 0,
-  error: null,
-};
 
 export type AppAction =
   | { type: "SET_LOADING" }
@@ -312,31 +260,6 @@ export type AppAction =
   | { type: "SET_IAT_MAP"; iatMap: Map<number, { lib: string; func: string }> }
   | { type: "SET_DRIVER_INFO"; driverInfo: DriverInfo }
   | { type: "SET_IRP_HANDLERS"; handlers: IRPDispatchEntry[] }
-  // Batch rename
-  | { type: "BATCH_RENAME_START"; total: number }
-  // `phase` moves the run from decompiling to the LLM stage. Without it the
-  // status could never leave "decompiling", so the modal's "Generating names…"
-  // branch was unreachable.
-  | { type: "BATCH_RENAME_PROGRESS"; done: number; phase?: "decompiling" | "running" }
-  | { type: "BATCH_RENAME_DONE"; results: BatchRenameResult[] }
-  | { type: "BATCH_RENAME_ERROR"; error: string }
-  | { type: "BATCH_RENAME_ACCEPT"; results: BatchRenameResult[] }
-  | { type: "BATCH_RENAME_DISMISS" }
-  // AI report
-  | { type: "AI_REPORT_START" }
-  | { type: "AI_REPORT_TOKEN"; content: string }
-  | { type: "AI_REPORT_DONE" }
-  | { type: "AI_REPORT_ERROR"; error: string }
-  | { type: "AI_REPORT_DISMISS" }
-  // AI scan
-  | { type: "AI_SCAN_START"; total: number }
-  // Dispatched once per successfully scanned function, including when that
-  // function produced no findings — that is what makes "scanned and clean"
-  // countable rather than indistinguishable from "not scanned".
-  | { type: "AI_SCAN_ADD"; findings: AIScanFinding[] }
-  | { type: "AI_SCAN_FAILED"; error: string }
-  | { type: "AI_SCAN_COMPLETE" }
-  | { type: "AI_SCAN_CLEAR" }
   | { type: "RESET" };
 
 export const initialState: AppState = {
@@ -370,10 +293,6 @@ export const initialState: AppState = {
   iatMap: new Map(),
   driverInfo: null,
   irpHandlers: [],
-  batchRename: null,
-  aiReport: null,
-  aiScanResults: [],
-  aiScan: { ...IDLE_SCAN },
 };
 
 const MAX_HISTORY = 50;
@@ -645,109 +564,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, driverInfo: action.driverInfo };
     case "SET_IRP_HANDLERS":
       return { ...state, irpHandlers: action.handlers };
-    // ── Batch Rename ──
-    case "BATCH_RENAME_START":
-      return {
-        ...state,
-        batchRename: {
-          status: "decompiling",
-          progress: { done: 0, total: action.total },
-          results: [],
-          error: null,
-        },
-      };
-    case "BATCH_RENAME_PROGRESS":
-      // Previously `status === "decompiling" ? "decompiling" : "running"`, which
-      // pinned the run to "decompiling" forever — the ternary could only ever
-      // re-select the status it was testing for. The caller now says explicitly
-      // when the phase changes, and progress alone leaves the status untouched.
-      return state.batchRename
-        ? {
-            ...state,
-            batchRename: {
-              ...state.batchRename,
-              status: action.phase ?? state.batchRename.status,
-              progress: { ...state.batchRename.progress, done: action.done },
-            },
-          }
-        : state;
-    case "BATCH_RENAME_DONE":
-      return state.batchRename
-        ? {
-            ...state,
-            batchRename: {
-              ...state.batchRename,
-              status: "review",
-              results: action.results,
-              error: null,
-            },
-          }
-        : state;
-    case "BATCH_RENAME_ERROR":
-      return state.batchRename
-        ? { ...state, batchRename: { ...state.batchRename, status: "idle", error: action.error } }
-        : state;
-    case "BATCH_RENAME_ACCEPT": {
-      const undo = pushUndo(state);
-      const accepted = action.results.filter((r) => r.accepted);
-      const newRenames = { ...state.renames };
-      for (const r of accepted) newRenames[r.address] = r.suggestedName;
-      return { ...state, ...undo, renames: newRenames, batchRename: null };
-    }
-    case "BATCH_RENAME_DISMISS":
-      return { ...state, batchRename: null };
-    // ── AI Report ──
-    case "AI_REPORT_START":
-      return { ...state, aiReport: { status: "streaming", content: "", error: null } };
-    case "AI_REPORT_TOKEN":
-      return state.aiReport
-        ? { ...state, aiReport: { ...state.aiReport, content: action.content } }
-        : state;
-    case "AI_REPORT_DONE":
-      return state.aiReport ? { ...state, aiReport: { ...state.aiReport, status: "done" } } : state;
-    case "AI_REPORT_ERROR":
-      return state.aiReport
-        ? { ...state, aiReport: { ...state.aiReport, status: "error", error: action.error } }
-        : state;
-    case "AI_REPORT_DISMISS":
-      return { ...state, aiReport: null };
-    // ── AI Scan ──
-    case "AI_SCAN_START":
-      // Clears findings and any error from the previous run, so a stale failure
-      // can never bleed into the next scan.
-      return {
-        ...state,
-        aiScanResults: [],
-        aiScan: { phase: "scanning", scanned: 0, failed: 0, total: action.total, error: null },
-      };
-    case "AI_SCAN_ADD":
-      return {
-        ...state,
-        aiScanResults: [...state.aiScanResults, ...action.findings],
-        aiScan: { ...state.aiScan, scanned: state.aiScan.scanned + 1 },
-      };
-    case "AI_SCAN_FAILED":
-      return {
-        ...state,
-        aiScan: {
-          ...state.aiScan,
-          failed: state.aiScan.failed + 1,
-          // Keep the first failure; later ones are usually the same cause.
-          error: state.aiScan.error ?? action.error,
-        },
-      };
-    case "AI_SCAN_COMPLETE":
-      return {
-        ...state,
-        aiScan: {
-          ...state.aiScan,
-          // Nothing usable came back at all → failed. Anything scanned, even with
-          // zero findings, is a real result the user can trust.
-          phase: state.aiScan.scanned === 0 && state.aiScan.failed > 0 ? "failed" : "complete",
-        },
-      };
-    case "AI_SCAN_CLEAR":
-      return { ...state, aiScanResults: [], aiScan: { ...IDLE_SCAN } };
     case "RESET":
       return {
         ...initialState,
