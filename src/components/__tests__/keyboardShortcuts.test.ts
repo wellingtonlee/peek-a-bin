@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { parseViewTab } from "../../hooks/usePEFile";
+import { parseViewTab, VIEW_TABS } from "../../hooks/usePEFile";
 import { SHORTCUT_GROUPS } from "../KeyboardShortcuts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -293,18 +293,34 @@ describe("DOC_ONLY_KEYS", () => {
 });
 
 describe("tab-switch range", () => {
-  /** The `1`–`9` row, whose second cell names every tab in order. */
-  const tabRow = docRows.find((r) => canonicalKeys(r.keyCell).includes("1-9"));
+  /**
+   * The digit range, DERIVED FROM `VIEW_TABS` rather than spelled.
+   *
+   * It was the literal `1-9` in three places here — the row finder, the panel
+   * comparison and a hard-coded `toBe(9)` on the tab-name count — which is a
+   * count in a test, the thing CLAUDE.md says not to write down: removing a tab
+   * left the finder looking for a row that no longer exists, so the guard failed
+   * by not finding its own subject rather than by disagreeing with anything.
+   * One tab per digit is the actual rule, so `1-${VIEW_TABS.length}` is what
+   * both lists must claim and what the row must name that many tabs for.
+   */
+  const TAB_RANGE = `1-${VIEW_TABS.length}`;
+  /** The digit-range row, whose second cell names every tab in order. */
+  const tabRow = docRows.find((r) => canonicalKeys(r.keyCell).includes(TAB_RANGE));
 
   it("is documented with the same range the panel shows", () => {
-    expect(tabRow, "docs/keyboard.md no longer documents a tab-switching key range").toBeDefined();
+    expect(
+      tabRow,
+      `docs/keyboard.md documents no tab-switching row for the range "${TAB_RANGE}". ` +
+        `There are ${VIEW_TABS.length} view tabs, so that is the range both lists must claim.`,
+    ).toBeDefined();
 
     const panelKeys = panelEntries.filter((e) => /switch tabs/i.test(e.action)).map((e) => e.key);
     expect(
       panelKeys,
       `docs/keyboard.md documents "${tabRow?.keyCell}" for tab switching; SHORTCUT_GROUPS ` +
         `must claim the same range.`,
-    ).toEqual(["1-9"]);
+    ).toEqual([TAB_RANGE]);
   });
 
   it("names one real tab per number in the range", () => {
@@ -331,6 +347,6 @@ describe("tab-switch range", () => {
       `docs/keyboard.md:${tabRow?.line} lists ${names.length} tab names but documents the key ` +
         `range "${tabRow?.keyCell}". Add or remove a tab name so the range matches — a wrong ` +
         `range here is exactly the drift this guard exists for.`,
-    ).toBe(9);
+    ).toBe(VIEW_TABS.length);
   });
 });

@@ -41,7 +41,6 @@ export const VIEW_TAB_LABELS: Record<ViewTab, string> = {
   hex: "Hex",
   strings: "Strings",
   resources: "Resources",
-  anomalies: "Anomalies",
 };
 
 /**
@@ -56,7 +55,6 @@ export const PARSER_DERIVED_TABS: readonly ViewTab[] = [
   "hex",
   "strings",
   "resources",
-  "anomalies",
 ];
 
 /** Tabs whose entire content is decoded instructions. */

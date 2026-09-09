@@ -25,8 +25,8 @@ describe("tabIds", () => {
     // change to it, including a wrong one.
     expect(tabId("disassembly")).toBe("view-tab-disassembly");
     expect(tabPanelId("disassembly")).toBe("view-tabpanel-disassembly");
-    expect(tabId("anomalies")).toBe("view-tab-anomalies");
-    expect(tabPanelId("anomalies")).toBe("view-tabpanel-anomalies");
+    expect(tabId("resources")).toBe("view-tab-resources");
+    expect(tabPanelId("resources")).toBe("view-tabpanel-resources");
   });
 
   it("gives every tab a distinct pair, and no id twice", () => {

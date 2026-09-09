@@ -28,7 +28,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     category: "Navigation",
     shortcuts: [
-      { key: "1-9", action: "Switch tabs" },
+      { key: "1-8", action: "Switch tabs" },
       { key: "G", action: "Focus address input" },
       { key: "Ctrl+G", action: "Go to address dialog" },
       { key: "Alt+\u2190/\u2192", action: "Back / Forward" },

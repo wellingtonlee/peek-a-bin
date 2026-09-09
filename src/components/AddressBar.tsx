@@ -13,7 +13,6 @@ import { serializeState, validateImport } from "../utils/exportSchema";
 import { fuzzyMatch } from "../utils/fuzzyMatch";
 import { VIEW_TAB_LABELS } from "./analysisNotice";
 import { focusOnMount } from "./focusOnMount";
-import { type BadgeLevel, maxBadgeLevel } from "./severity";
 import { tabId, tabPanelId } from "./tabIds";
 
 /**
@@ -31,29 +30,14 @@ const TABS: { id: ViewTab; label: string }[] = VIEW_TABS.map((id) => ({
 }));
 
 /**
- * The 1–9 shortcuts, derived from the same order so a digit always selects the
+ * The 1–8 shortcuts, derived from the same order so a digit always selects the
  * button at that position. Sliced at nine because a tenth tab has no single
- * key to be reached by; it would need a shortcut of its own.
+ * key to be reached by; it would need a shortcut of its own — a rule about a
+ * TENTH tab, so it stays true, and inert, at eight.
  */
 const TAB_KEYS: Record<string, ViewTab> = Object.fromEntries(
   VIEW_TABS.slice(0, 9).map((id, i) => [String(i + 1), id]),
 );
-
-/**
- * The tab badge's palette, keyed on the shared {@link BadgeLevel} and NOT on
- * either severity union.
- *
- * A third palette, and legitimately one: this is an 8px dot, so it takes the
- * `-500` shades where `AnomaliesView` paints a table row in
- * `-900/20`/`-300`/`-600`. What was duplicated across the three sites was never
- * the colours but the judgement — which severities are worse than which — and
- * that lives once now, in `./severity.ts`.
- */
-const BADGE_DOT: Record<BadgeLevel, string> = {
-  critical: "bg-red-500",
-  warning: "bg-amber-500",
-  info: "bg-blue-500",
-};
 
 interface Suggestion {
   label: string;
@@ -536,13 +520,24 @@ export function AddressBar() {
 
       <div className="w-px h-5 bg-gray-700 mx-1" />
 
-      {/* THE TABLIST, and it wraps only the nine tabs.
+      {/* THE TABLIST, and it wraps only the eight tabs.
           The toolbar around it holds Open, Back/Forward, Undo/Redo, the address
-          box and the AI buttons, none of which are tabs — `role="tablist"` on the
+          box and the AI chat button, none of which are tabs — `role="tablist"` on the
           toolbar itself would tell a screen reader there are twenty-odd tabs and
           make the arrows step through controls that switch nothing. The wrapper
           repeats the toolbar's own flex classes so it lays out identically; jsdom
-          performs no layout, so that is read rather than measured. */}
+          performs no layout, so that is read rather than measured.
+
+          NO TAB CARRIES A BADGE ANY MORE, and with it goes peek-a-bin-w50c's
+          accessible-name fix. That fix spelled a count into an `aria-label`
+          because the Anomalies tab announced itself as the single string
+          "Anomalies3" — the badge `<span>` sat inside the button with no
+          separator. It is MOOT rather than wrong: the count badge is gone with
+          the tab, so every button's content is its accessible name again and
+          `aria-label` would have nothing to add. The `scanNote` marker beside it
+          was genuinely load-bearing — an empty findings list from a FAILED scan
+          reads as a clean bill of health — and that hazard left with the
+          scanner it described. A future badged tab must re-derive both. */}
       <div
         role="tablist"
         aria-label="Views"
@@ -551,48 +546,6 @@ export function AddressBar() {
         onBlur={handleTablistBlur}
       >
         {TABS.map((tab, i) => {
-          const isAnomalies = tab.id === "anomalies";
-          const anomalyCount = isAnomalies
-            ? state.anomalies.length + state.aiScanResults.length
-            : 0;
-          // A scan that failed or only partly ran produces few or no findings, so
-          // the count alone reads as a clean result. Flag it separately.
-          const scanNote = !isAnomalies
-            ? null
-            : state.aiScan.phase === "failed"
-              ? "AI scan failed — findings are not a clean result"
-              : state.aiScan.phase === "complete" && state.aiScan.failed > 0
-                ? `AI scan incomplete — ${state.aiScan.failed} of ${state.aiScan.total} functions failed`
-                : null;
-          const scanNoteColor = state.aiScan.phase === "failed" ? "bg-red-500" : "bg-amber-500";
-          /* The worst severity across BOTH lists, from the one declaration of
-             what "worse" means. This used to be a hand-written
-             `severity === "critical" || severity === "high"` chain — a third
-             spelling of a predicate `AnomaliesView` had already had to convert
-             into two declared tables, and the shape a new union member joins on
-             whichever side the author left open. `severity.ts` maps each union
-             onto the level; only the paint is local, because an 8px dot wants
-             the `-500` shades where a table row wants `-900/20`. */
-          const maxSeverity =
-            isAnomalies && anomalyCount > 0
-              ? maxBadgeLevel(state.anomalies, state.aiScanResults)
-              : null;
-          const badgeColor = maxSeverity ? BADGE_DOT[maxSeverity] : "";
-          /* THE ACCESSIBLE NAME, which is not the label.
-             The count sits in a `<span>` inside the button with no separator, so
-             the Anomalies tab announced itself as the single string "Anomalies3"
-             — a screen reader reads "Anomalies3, button" with nothing saying what
-             the 3 counts (peek-a-bin-w50c, session 24). The badge is a glyph now
-             (`aria-hidden`) and the count is spelled into the name instead. Left
-             `undefined` when there is nothing to add, so an ordinary tab keeps
-             its content as its name and every existing by-name query still
-             resolves. */
-          const countLabel =
-            anomalyCount > 0 ? `${anomalyCount} finding${anomalyCount === 1 ? "" : "s"}` : null;
-          const ariaLabel =
-            countLabel || scanNote
-              ? [tab.label, countLabel, scanNote].filter(Boolean).join(" — ")
-              : undefined;
           const isActive = state.activeTab === tab.id;
           return (
             <button
@@ -616,26 +569,9 @@ export function AddressBar() {
                   ? "bg-blue-600 text-white"
                   : "text-gray-400 hover:text-white hover:bg-gray-700"
               }`}
-              title={scanNote ? `${tab.label} (${i + 1}) — ${scanNote}` : `${tab.label} (${i + 1})`}
-              aria-label={ariaLabel}
+              title={`${tab.label} (${i + 1})`}
             >
               {tab.label}
-              {isAnomalies && anomalyCount > 0 && (
-                <span
-                  aria-hidden="true"
-                  className={`${badgeColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
-                >
-                  {anomalyCount}
-                </span>
-              )}
-              {scanNote && (
-                <span
-                  aria-hidden="true"
-                  className={`${scanNoteColor} text-white text-[8px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none`}
-                >
-                  !
-                </span>
-              )}
             </button>
           );
         })}
