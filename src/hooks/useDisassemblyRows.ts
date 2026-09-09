@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Loop } from "../disasm/cfg";
+import type { BasicBlock, Loop } from "../disasm/cfg";
 import { buildCFG, detectLoops } from "../disasm/cfg";
 import { buildDataItems } from "../disasm/dataView";
 import type { DataItem, DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -7,6 +7,13 @@ import { IMAGE_SCN_MEM_EXECUTE } from "../pe/constants";
 import { disasmWorker } from "../workers/disasmClient";
 import { useSectionInfo } from "./useDerivedState";
 import { ANALYSIS_IN_PROGRESS, useAppState } from "./usePEFile";
+
+/**
+ * The empty answer from the shared CFG memo, hoisted so a function with nothing
+ * to build keeps one array identity across renders — every downstream memo keys
+ * on `cfg` by reference.
+ */
+const EMPTY_CFG: BasicBlock[] = [];
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
@@ -94,6 +101,8 @@ export interface UseDisassemblyRowsResult {
   funcMap: Map<number, DisasmFunction>;
   xrefMap: Map<number, number[]>;
   typedXrefMap: Map<number, Xref[]>;
+  /** The current function's basic blocks — the browser's one `buildCFG`. */
+  cfg: BasicBlock[];
   loopHeaders: Map<number, number>;
   loops: Loop[];
   bookmarkSet: Set<number>;
@@ -332,12 +341,37 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     return s;
   }, [state.bookmarks]);
 
-  // Loop detection for current function
-  const loops = useMemo((): Loop[] => {
-    if (!currentFunc || instructions.length === 0 || typedXrefMap.size === 0) return [];
-    const blocks = buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
-    return detectLoops(blocks);
+  /**
+   * The current function's basic blocks — **the one `buildCFG` the browser
+   * runs**, shared by everything downstream that wants a CFG.
+   *
+   * There were four call sites, all passing identical arguments: this hook's
+   * loop detection, `DisassemblyView`'s minimap layout, `CFGView`'s own layout,
+   * and `DisassemblyView`'s `buildCFGForNav` — the last of which is a
+   * `useCallback` invoked from the arrow/Tab handler, i.e. **once per keypress
+   * in graph mode**. Hoisting the build here gives all four one memoised answer.
+   *
+   * ITS GUARD IS DELIBERATELY WEAKER THAN {@link loops}'. The loop memo below
+   * keeps `typedXrefMap.size === 0`, which is part of the linear view's
+   * behaviour — loop markers do not appear until the xref pass has landed.
+   * Inheriting that here would mean **graph mode renders nothing** in the window
+   * between the disassembly arriving and `buildAllXrefs` finishing, because
+   * `CFGView` is now handed a layout rather than building its own. So the shared
+   * build asks only whether there is a function and something to decode.
+   */
+  const cfg = useMemo((): BasicBlock[] => {
+    if (!currentFunc || instructions.length === 0) return EMPTY_CFG;
+    return buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
   }, [currentFunc, instructions, typedXrefMap]);
+
+  // Loop detection for current function. The xref guard is this memo's own and
+  // must stay — see `cfg` above for why it is not shared. The other two arms of
+  // the old condition are subsumed: `cfg` is empty under both, and
+  // `detectLoops([])` returns `[]`.
+  const loops = useMemo((): Loop[] => {
+    if (typedXrefMap.size === 0) return [];
+    return detectLoops(cfg);
+  }, [cfg, typedXrefMap]);
 
   const loopHeaders = useMemo(() => {
     const m = new Map<number, number>();
@@ -414,6 +448,7 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
   return {
     instructions,
     rows,
+    cfg,
     funcMap,
     xrefMap,
     typedXrefMap,

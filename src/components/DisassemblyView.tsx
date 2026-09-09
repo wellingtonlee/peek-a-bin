@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { archForMachine } from "../disasm/arch";
-import { buildCFG, layoutCFG } from "../disasm/cfg";
+import { type CFGEdge, type LayoutBlock, layoutCFG } from "../disasm/cfg";
 import { canonReg } from "../disasm/decompile/ir";
 import { type FunctionSignature, inferSignature } from "../disasm/signatures";
 import { arm64UnwindContext, stackFrameFor } from "../disasm/stackFrame";
@@ -18,10 +18,10 @@ import { useSetGraphOverview } from "../hooks/useGraphOverview";
 import { useGraphSearch } from "../hooks/useGraphSearch";
 import { type ContextMenuState, useInsnContextMenu } from "../hooks/useInsnContextMenu";
 import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { loadFontSize } from "../llm/settings";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { type CopyFlash, copyText } from "../utils/clipboard";
-import { disasmWorker } from "../workers/disasmClient";
 import { AIChatPanel } from "./AIChatPanel";
 import { analysisNotice, VIEW_TAB_LABELS } from "./analysisNotice";
 import { BottomPanelContainer } from "./BottomPanelContainer";
@@ -150,6 +150,7 @@ export function DisassemblyView() {
     funcMap,
     xrefMap,
     typedXrefMap,
+    cfg,
     loopHeaders,
     loops,
     bookmarkSet,
@@ -610,10 +611,14 @@ export function DisassemblyView() {
     return () => el.removeEventListener("mousedown", handler);
   }, [viewMode]);
 
-  // Build CFG block map for graph keyboard navigation (lazy, only called when needed)
+  // Block maps for graph keyboard navigation (lazy, only called when needed).
+  //
+  // This ran its own `buildCFG` and is invoked from the arrow/Tab handler, i.e.
+  // ONCE PER KEYPRESS in graph mode — the site a mount-only instrument cannot
+  // see. It now indexes the shared `cfg`; the two Maps are cheap and stay per
+  // call so the callback keeps its lazy shape.
   const buildCFGForNav = useCallback(() => {
     if (!currentFunc) return null;
-    const cfg = buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
     const navBlocks = new Map<number, (typeof cfg)[0]>();
     const addrToBlock = new Map<number, number>();
     for (const b of cfg) {
@@ -621,7 +626,7 @@ export function DisassemblyView() {
       for (const insn of b.insns) addrToBlock.set(insn.address, b.id);
     }
     return { navBlocks, addrToBlock };
-  }, [currentFunc, instructions, typedXrefMap]);
+  }, [currentFunc, cfg]);
 
   const {
     handleGraphSearch,
@@ -934,19 +939,34 @@ export function DisassemblyView() {
     [pe, currentFunc, rows, state.renames, state.comments, state.fileName, sectionInfo],
   );
 
-  // Compute graph layout blocks/edges for minimap (only in graph mode)
-  const { graphBlocksForMinimap, graphEdgesForMinimap } = useMemo(() => {
-    if (viewMode !== "graph" || !currentFunc)
-      return { graphBlocksForMinimap: undefined, graphEdgesForMinimap: undefined };
-    const cfg = buildCFG(currentFunc, instructions, typedXrefMap, disasmWorker.jumpTables);
-    const layout = layoutCFG(cfg);
-    return { graphBlocksForMinimap: layout.blocks, graphEdgesForMinimap: layout.edges };
-  }, [viewMode, currentFunc, instructions, typedXrefMap]);
+  /**
+   * Font size, read during render exactly as `CFGView` reads it. Neither
+   * subscribes: App holds it in state and a change re-renders this tree, so both
+   * calls in one pass return the same number.
+   */
+  const fontSize = loadFontSize();
+
+  /**
+   * THE laid-out graph — dagre runs once per function, in graph mode only, and
+   * both the panel and the sidebar minimap read this one answer.
+   *
+   * **This fixed a defect as well as removing a second layout pass.**
+   * `layoutCFG(blocks, fontSize = 12)` sizes every node from
+   * `getCfgLayout(fontSize)`, and the minimap memo that used to live here called
+   * it with NO font size while `CFGView` passed the real `loadFontSize()`. At
+   * any non-default `--mono-font-size` the two disagreed, so the block geometry
+   * published to the sidebar overview — and the pan/viewport arithmetic computed
+   * against it — described a graph the panel was not drawing (`peek-a-bin-v3uh.4`).
+   */
+  const graphLayout = useMemo((): { blocks: LayoutBlock[]; edges: CFGEdge[] } | null => {
+    if (viewMode !== "graph" || !currentFunc) return null;
+    return layoutCFG(cfg, fontSize);
+  }, [viewMode, currentFunc, cfg, fontSize]);
 
   // Publish graph data to sidebar overview context
   const setGraphOverview = useSetGraphOverview();
   useEffect(() => {
-    if (viewMode !== "graph" || !graphBlocksForMinimap || !graphEdgesForMinimap) {
+    if (viewMode !== "graph" || !graphLayout) {
       setGraphOverview(null);
       return;
     }
@@ -956,23 +976,15 @@ export function DisassemblyView() {
       return;
     }
     setGraphOverview({
-      blocks: graphBlocksForMinimap,
-      edges: graphEdgesForMinimap,
+      blocks: graphLayout.blocks,
+      edges: graphLayout.edges,
       pan: graphPan,
       zoom: graphZoom,
       viewport: { width: container.clientWidth, height: container.clientHeight },
       onPanTo: setGraphPan,
       currentAddress: state.currentAddress,
     });
-  }, [
-    viewMode,
-    graphBlocksForMinimap,
-    graphEdgesForMinimap,
-    graphPan,
-    graphZoom,
-    state.currentAddress,
-    setGraphOverview,
-  ]);
+  }, [viewMode, graphLayout, graphPan, graphZoom, state.currentAddress, setGraphOverview]);
 
   // Clear graph overview on unmount
   useEffect(() => {
@@ -1343,12 +1355,10 @@ export function DisassemblyView() {
               )}
             </div>
           </div>
-        ) : currentFunc ? (
+        ) : currentFunc && graphLayout ? (
           <CFGView
-            func={currentFunc}
-            instructions={instructions}
-            typedXrefMap={typedXrefMap}
-            jumpTables={disasmWorker.jumpTables}
+            layout={graphLayout}
+            funcAddress={currentFunc.address}
             onNavigate={(addr) => {
               suppressScrollRef.current = true;
               dispatch({ type: "SET_ADDRESS", address: addr });

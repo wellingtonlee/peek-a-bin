@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { buildCFG, type CFGEdge, getCfgLayout, type LayoutBlock, layoutCFG } from "../disasm/cfg";
+import type { CFGEdge, LayoutBlock } from "../disasm/cfg";
+import { getCfgLayout } from "../disasm/cfg";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
 import { parseOperandTargets } from "../disasm/operands";
-import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
+import type { Instruction } from "../disasm/types";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import { loadFontSize } from "../llm/settings";
 import type { PEFile } from "../pe/types";
@@ -17,9 +18,15 @@ import { ColoredOperand, mnemonicClass } from "./shared";
  * from context inside this component instead of being threaded through the parent.
  *
  * What stays a prop, and why:
- *  - `func` / `instructions` / `typedXrefMap` / `jumpTables` — produced by
- *    `useDisassemblyRows` in the parent; re-running that hook here would duplicate
- *    disassembly work, not just relocate it.
+ *  - `layout` / `funcAddress` — the laid-out graph, built ONCE in the parent from
+ *    `useDisassemblyRows`' shared `cfg` and handed down. This component used to
+ *    take `func` / `instructions` / `typedXrefMap` / `jumpTables` and run its own
+ *    `buildCFG` + `layoutCFG`; the parent ran the same pair for the sidebar
+ *    minimap, and **passed no font size**, so at any non-default
+ *    `--mono-font-size` the minimap's geometry disagreed with this graph's
+ *    (`peek-a-bin-v3uh.4`). One layout, one font size, one answer. `funcAddress`
+ *    is all that survived of `func`: it is a change key for the auto-centre
+ *    effect, never read for content.
  *  - `pan` / `zoom` / `collapsedBlocks` and their setters — the parent reads graph
  *    pan/zoom back out (call-stack view snapshots, back-navigation restore, the
  *    sidebar minimap) and clears collapsed blocks on function change and on graph
@@ -30,10 +37,8 @@ import { ColoredOperand, mnemonicClass } from "./shared";
  *    driven by parent-owned navigation, the decompile panel and graph search.
  */
 export interface CFGViewProps {
-  func: DisasmFunction;
-  instructions: Instruction[];
-  typedXrefMap: Map<number, Xref[]>;
-  jumpTables?: Map<number, number[]>;
+  layout: { blocks: LayoutBlock[]; edges: CFGEdge[] };
+  funcAddress: number;
   onNavigate: (addr: number) => void;
   onAddressClick: (addr: number) => void;
   onDoubleClickAddr: (addr: number) => void;
@@ -62,10 +67,8 @@ const EDGE_COLORS: Record<CFGEdge["type"], string> = {
 };
 
 export function CFGView({
-  func,
-  instructions,
-  typedXrefMap,
-  jumpTables,
+  layout,
+  funcAddress,
   onNavigate,
   onAddressClick,
   onDoubleClickAddr,
@@ -119,13 +122,15 @@ export function CFGView({
     [dispatch],
   );
 
+  // Read during render, not subscribed to: App holds the font size in state and
+  // re-renders this whole tree when it changes, so this call and the identical
+  // one in `DisassemblyView` (which sized `layout` above) see the same value in
+  // the same pass. That agreement is what makes `cfgLayout` describe the blocks
+  // `layout` positioned.
   const fontSize = loadFontSize();
   const cfgLayout = useMemo(() => getCfgLayout(fontSize), [fontSize]);
 
-  const { blocks, edges } = useMemo(() => {
-    const cfg = buildCFG(func, instructions, typedXrefMap, jumpTables);
-    return layoutCFG(cfg, fontSize);
-  }, [func, instructions, typedXrefMap, jumpTables, fontSize]);
+  const { blocks, edges } = layout;
 
   const blockMap = useMemo(() => {
     const m = new Map<number, LayoutBlock>();
@@ -154,8 +159,9 @@ export function CFGView({
   // The array is deliberately narrow. This effect calls onPanChange/onZoomChange,
   // which drive the very `pan` and `zoom` props it reads, so completing the array
   // would make every user pan or zoom immediately re-center the graph on top of
-  // the gesture. `func.address` is likewise a change key the body never reads:
-  // it is what makes "on function change" mean anything.
+  // the gesture. `funcAddress` is likewise a change key the body never reads:
+  // it is what makes "on function change" mean anything (it arrives as its own
+  // prop now, `func` having gone with the layout move).
   // biome-ignore lint/correctness/useExhaustiveDependencies: this effect writes pan/zoom and must not re-run when they change, or user panning would be undone on the next render.
   useEffect(() => {
     if (blocks.length === 0) return;
@@ -190,7 +196,7 @@ export function CFGView({
       const centerX = (minX + maxX) / 2;
       onPanChange({ x: containerW / 2 - centerX * zoom, y: 20 - minY * zoom });
     }
-  }, [func.address, blocks.length, restorePanZoom]);
+  }, [funcAddress, blocks.length, restorePanZoom]);
 
   // Re-center when decompile panel opens (container width changes).
   //

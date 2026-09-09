@@ -705,6 +705,24 @@ no row can cover them and none was invented (`docs/verification.md`, `peek-a-bin
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
 
+**THE BROWSER BUILDS ONE CFG AND LAYS IT OUT ONCE, and both declarations are named.**
+`useDisassemblyRows`' **`cfg` memo is the only `buildCFG` call site in the browser** and
+`DisassemblyView`'s **`graphLayout` memo the only `layoutCFG`**; `CFGView` takes `layout` and
+`funcAddress` as props rather than the four inputs it used to rebuild from. There were four
+`buildCFG` calls with identical arguments — the loop memo, the minimap memo, `CFGView`'s own, and
+`buildCFGForNav`, which is a `useCallback` built inside the arrow/Tab handler and therefore ran
+**once per keypress in graph mode**, the site a mount-only instrument cannot see. Three things not
+to undo. **The shared memo must NOT inherit the `loops` memo's `typedXrefMap.size === 0` guard**:
+that guard is real behaviour for the linear view's loop markers and stays there, but on the shared
+build it would make graph mode render **nothing** in the window between the disassembly arriving
+and `buildAllXrefs` finishing, now that `CFGView` is handed a layout instead of building its own.
+The shared guard is `!currentFunc || instructions.length === 0` and nothing more. **`fontSize` is
+read during render in both `DisassemblyView` and `CFGView`, and neither subscribes** — App holds it
+in state and a change re-renders the tree, so the two calls in one pass agree; that agreement is
+what makes `CFGView`'s `cfgLayout` describe the blocks the parent positioned. And `graphLayout` is
+gated on `viewMode === "graph"`, so linear mode runs no dagre at all. **Render COUNT is what is
+measured here — nothing has timed a render** (`peek-a-bin-v3uh.4`).
+
 **Styling**: Tailwind utilities; runtime font size via a `--mono-font-size` CSS variable on the
 app root.
 
@@ -2380,6 +2398,8 @@ mistake.
 - **`collectArgs32`'s backwards push-walk stops at a call whose result feeds a following call, and the marker is `push eax` AFTER the call, not before it.** `call inner / push eax / call outer` makes the inner call an argument expression of the outer, so the pushes above it are the outer's; there is no call *between* the pushes and the inner call, which is why "stop at an intervening call boundary" would never fire. Deliberately an **admitted under-count, not a re-attribution** — handing the pushes to the outer call is a guess in the over-count direction, and an invented argument is the one error this codebase will not trade for a recovered one. (`peek-a-bin-f51x`)
 
 - **A `push` of a callee-saved register the function has not yet written is a register SAVE — and that, not the register and not the position, is the discriminator.** Without it the walk ran into the prologue and emitted `GetCommandLineW(edi, esi, ebx)` for an API declaring none. **Two rules refuted by this corpus:** "a push of ebx/esi/edi is a save" (t32 0x402c3f is a genuine argument), and "a save has a matching `pop` before the `ret`" (`push imm8 / pop reg` is a pervasive MSVC size idiom, and saves are often sunk to a mid-function block leader). `firstCalleeSavedWrites` (`lifter.ts`) precomputes the lowest address writing each of ebx/esi/edi/ebp; a push below its register's first write ends the walk. Three load-bearing constraints: the scope is **function-wide**; `mov X, X` is not a definition but `xor X, X` is (generalising the self-move test past `mov` turned four real `Sleep(esi)` calls per binary into `Sleep()`); and it is **restricted to the four callee-saved registers**, since under cdecl/stdcall every argument arrives on the stack so their entry values are opaque. The address-order approximation is one-directional: it drops an argument, never invents one. **Never answer this from `apitypes.ts`.** (`peek-a-bin-6lmh`)
+
+- **A default parameter is a place two callers can disagree, and `layoutCFG(blocks, fontSize = 12)` is where they did.** `CFGView` passed the real `loadFontSize()`; `DisassemblyView`'s sidebar-minimap memo, one screen away, **passed nothing**. Every node's box comes from `getCfgLayout(fontSize)` — `BLOCK_WIDTH` is `round(320 * fontSize / 12)` and a block's height is `max(BLOCK_MIN_HEIGHT, insns * INSN_HEIGHT + BLOCK_HEADER + 4)` — so at any non-default `--mono-font-size` the geometry published to the sidebar overview context described **a different graph from the one the panel drew**, and the pan/viewport arithmetic computed against it was arithmetic over the wrong boxes. Sharing one `graphLayout` fixes it, and **changes minimap output at non-default sizes**: that is a behaviour change, not a refactor, and it is filed under `### Fixed` separately from the sharing. Two things about the instrument. **The row must be parameterised over both a default and a non-default size**: `layoutCFG(cfg)` and `layoutCFG(cfg, 12)` are the same call, so restoring the defect leaves a 12-only row green and reddens only the 16 row — measured, and it is why both are in the table. And **what is assertable is the numbers handed to `setGraphOverview`, never that the minimap looks like the graph**: jsdom performs no layout, `DisassemblyPanel.dom.test.tsx` stubs `getContext` to null outright, and CLAUDE.md already names `DisassemblyMinimap` as a component that mounts and never paints — so the human check belongs in `peek-a-bin-v2u`. Nothing static could see any of it: both spellings typecheck, and no corpus harness renders React. (`peek-a-bin-v3uh.4`)
 
 - **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or `index.html` directly — `build/csp.test.ts` fails on drift. A meta CSP cannot go in `index.html` because it is also the dev entry point and Vite injects an inline React Refresh preamble there. The shipped `connect-src` omits non-localhost plain `http:`, so a LAN Ghidra server is blocked on the HTTP nginx deployment.
 

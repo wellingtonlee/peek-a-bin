@@ -3,9 +3,12 @@
 import "../../test/domSetup";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ReactNode, useCallback, useReducer, useRef } from "react";
+import { type ReactNode, useCallback, useMemo, useReducer, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getCfgLayout } from "../../disasm/cfg";
 import type { DisasmFunction, Instruction, Xref } from "../../disasm/types";
+import type { GraphOverviewData } from "../../hooks/useGraphOverview";
+import { GraphOverviewContext } from "../../hooks/useGraphOverview";
 import type { AnalysisPhase, AppAction, AppState } from "../../hooks/usePEFile";
 import {
   ANALYSIS_IN_PROGRESS,
@@ -80,6 +83,28 @@ import { AppHarness } from "./appStateHarness";
  * suite below still asserts on `InstructionDetail`'s real output.
  */
 let boomPanel: "detail" | "chat" | null = null;
+
+/**
+ * How many times `buildCFG` has run since the last {@link resetInstruments}.
+ *
+ * There were FOUR call sites in the browser, all with identical arguments, and
+ * the fourth — `DisassemblyView`'s `buildCFGForNav` — is a `useCallback`
+ * invoked from the arrow/Tab handler, so it ran ONCE PER KEYPRESS in graph mode.
+ * A mount-only instrument cannot see that one, which is why the count below is
+ * taken across three arrow presses as well as a mount.
+ */
+let buildCFGRuns = 0;
+
+vi.mock("../../disasm/cfg", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../disasm/cfg")>();
+  return {
+    ...actual,
+    buildCFG: (...args: Parameters<typeof actual.buildCFG>) => {
+      buildCFGRuns++;
+      return actual.buildCFG(...args);
+    },
+  };
+});
 
 vi.mock("../InstructionDetail", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../InstructionDetail")>();
@@ -235,6 +260,14 @@ const ARM64 = buildPE(IMAGE_FILE_MACHINE_ARM64);
 class ScriptedWorker {
   static posted: string[] = [];
   static built = 0;
+  /**
+   * Never answer `buildTypedXrefMap`, leaving `typedXrefMap` permanently empty.
+   *
+   * Stands in for the window every real load passes through: `buildAllXrefs` is
+   * the LAST stage, so there is a stretch during which the disassembly is on
+   * screen and the xref map is not there yet. Held open here rather than raced.
+   */
+  static withholdXrefs = false;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onerror: ((e: { message?: string }) => void) | null = null;
   onmessageerror: ((e: unknown) => void) | null = null;
@@ -250,6 +283,7 @@ class ScriptedWorker {
         result = INSNS;
         break;
       case "buildTypedXrefMap":
+        if (ScriptedWorker.withholdXrefs) return;
         result = XREFS;
         break;
       default:
@@ -258,6 +292,34 @@ class ScriptedWorker {
     setTimeout(() => this.onmessage?.({ data: { id: msg.id, result } }), 0);
   }
   terminate() {}
+}
+
+/**
+ * Everything `DisassemblyView` published to the sidebar overview context, in
+ * order, plus the last non-null entry.
+ *
+ * The real provider (`useGraphOverviewState`) keeps the value in state so
+ * `Sidebar` can draw it. Nothing renders it here — the sidebar is App's, not
+ * this pane's — so this probe only records, which additionally keeps `setData`
+ * REFERENTIALLY STABLE. That matters: `DisassemblyView`'s publishing effect
+ * lists `setGraphOverview` in its dependency array, so a setter whose identity
+ * changed with the data would re-fire the effect on its own output forever.
+ */
+const overviewPublished: (GraphOverviewData | null)[] = [];
+const lastOverview = (): GraphOverviewData => {
+  for (let i = overviewPublished.length - 1; i >= 0; i--) {
+    const d = overviewPublished[i];
+    if (d) return d;
+  }
+  throw new Error("nothing was ever published to the graph overview context");
+};
+
+function GraphOverviewProbe({ children }: { children: ReactNode }) {
+  const setData = useCallback((d: GraphOverviewData | null) => {
+    overviewPublished.push(d);
+  }, []);
+  const value = useMemo(() => ({ data: null, setData }), [setData]);
+  return <GraphOverviewContext.Provider value={value}>{children}</GraphOverviewContext.Provider>;
 }
 
 interface Mounted {
@@ -297,8 +359,10 @@ function mount(overrides: Partial<AppState> = {}, extra?: ReactNode) {
     }, []);
     return (
       <AppHarness state={state} dispatch={dispatch}>
-        <DisassemblyView />
-        {extra}
+        <GraphOverviewProbe>
+          <DisassemblyView />
+          {extra}
+        </GraphOverviewProbe>
       </AppHarness>
     );
   }
@@ -340,6 +404,10 @@ beforeEach(() => {
   ScriptedWorker.posted = [];
   ScriptedWorker.built = 0;
   boomPanel = null;
+  ScriptedWorker.withholdXrefs = false;
+  buildCFGRuns = 0;
+  overviewPublished.length = 0;
+  localStorage.clear();
   vi.stubGlobal("Worker", ScriptedWorker);
   // `ErrorBoundary.componentDidCatch` logs the stack, which is the point of it;
   // silenced so the deliberate throws below do not bury the run.
@@ -1259,5 +1327,146 @@ describe("a throw in a side panel does not take the listing", () => {
     });
     expect(screen.queryByRole("alert")).toBeNull();
     expect(insnRows(container)).toHaveLength(INSNS.length);
+  });
+});
+
+describe("graph mode: one CFG, one layout, one font size", () => {
+  /**
+   * Mount straight into graph mode and wait for the graph to be drawn.
+   *
+   * `viewMode` initialises from `peek-a-bin:view-mode`, so this is the mount the
+   * user gets when they last left the panel in graph mode — and it means the
+   * layout is built during the ordinary load rather than after a toggle.
+   */
+  async function mountGraph(fontSize?: number) {
+    localStorage.setItem("peek-a-bin:view-mode", "graph");
+    if (fontSize !== undefined) localStorage.setItem("peek-a-bin:font-size", String(fontSize));
+    const r = mount();
+    await waitFor(() => expect(r.container.querySelector(".cfg-block")).toBeTruthy());
+    return r;
+  }
+
+  /** Each drawn block's box, from the inline styles `CFGBlock` writes. */
+  const drawnBoxes = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll<HTMLElement>(".cfg-block")).map((b) => ({
+      left: b.style.left,
+      top: b.style.top,
+      width: b.style.width,
+      height: b.style.height,
+    }));
+
+  /** The same four numbers, as the overview context was told them. */
+  const publishedBoxes = (d: GraphOverviewData) =>
+    d.blocks.map((b) => ({
+      left: `${b.x}px`,
+      top: `${b.y}px`,
+      width: `${b.w}px`,
+      height: `${b.h}px`,
+    }));
+
+  /**
+   * THE BUG-FIX ROW, and it is parameterised for a reason.
+   *
+   * `layoutCFG(blocks, fontSize = 12)` sizes every node from
+   * `getCfgLayout(fontSize)`. `CFGView` passed the real `loadFontSize()`; the
+   * minimap memo in `DisassemblyView` PASSED NOTHING. So at any non-default
+   * `--mono-font-size` the geometry published to the sidebar overview described
+   * a graph the panel was not drawing, and the pan/viewport arithmetic computed
+   * against it was arithmetic over the wrong boxes.
+   *
+   * ASKED AT 12 ALONE THIS TEST IS WORTHLESS: `layoutCFG(cfg)` and
+   * `layoutCFG(cfg, 12)` are the same call, so the defect and the fix agree
+   * there. Restoring the defect (drop the second argument in
+   * `DisassemblyView`'s `graphLayout` memo) leaves the 12 row green and reddens
+   * the 16 row — which is the negative control, and the reason both sizes are
+   * in the table.
+   */
+  for (const fontSize of [12, 16]) {
+    it(`publishes the geometry the graph actually draws (font size ${fontSize})`, async () => {
+      const { container } = await mountGraph(fontSize);
+      const published = lastOverview();
+
+      // Liveness, twice over. A green comparison between two empty lists would
+      // say nothing, and neither would one taken at a font size the layout
+      // ignored: `BLOCK_WIDTH` is `round(320 * fontSize / 12)`, so this pins
+      // that the layout really was sized at the size under test.
+      expect(published.blocks.length).toBeGreaterThan(1);
+      expect(new Set(published.blocks.map((b) => b.w))).toEqual(
+        new Set([getCfgLayout(fontSize).BLOCK_WIDTH]),
+      );
+
+      expect(drawnBoxes(container)).toEqual(publishedBoxes(published));
+    });
+  }
+
+  it("lays a larger font out larger, so the two rows above are not the same numbers", async () => {
+    // The other half of the liveness argument: without this, both rows could be
+    // agreeing about a layout that never looked at the font size at all.
+    const small = await mountGraph(12);
+    const smallBoxes = drawnBoxes(small.container);
+    small.unmount();
+    overviewPublished.length = 0;
+
+    const large = await mountGraph(16);
+    expect(drawnBoxes(large.container)).not.toEqual(smallBoxes);
+  });
+
+  /**
+   * THE COUNT ROW. `buildCFG` has one call site now; it had four.
+   *
+   * THE THREE ARROW PRESSES ARE LOAD-BEARING. `buildCFGForNav` is built lazily
+   * inside the arrow/Tab handler, so it ran once per keypress and a mount-only
+   * count cannot see it. Reverting it to its own `buildCFG` is the negative
+   * control and adds exactly three.
+   *
+   * XREFS ARE WITHHELD SO THE NUMBER IS A NUMBER. `instructions` and
+   * `typedXrefMap` land from two separate worker round trips, so with both in
+   * play the shared memo's inputs change once or twice depending on whether the
+   * two resolutions batch — measured at 2 running this file alone and 1 under a
+   * full `--dir src` run, and worse, the second change can land DURING the
+   * keypresses and be miscounted as a keypress build. Holding the xref pass
+   * open leaves exactly one input change, so both readings below are exact.
+   *
+   * Pre-fix, the same mount built the CFG twice at once (the minimap memo and
+   * `CFGView`'s own; the `loops` memo declines while the xref map is empty) and
+   * once more per press: 1 → 2, and 1 → 5 across the three presses.
+   */
+  it("builds the CFG once per input change and never on a keypress", async () => {
+    ScriptedWorker.withholdXrefs = true;
+    const r = await mountGraph();
+    await waitFor(() => expect(lastOverview().blocks.length).toBeGreaterThan(1));
+    expect(buildCFGRuns).toBe(1);
+
+    // In graph mode there are TWO `role="application"` elements — the pane and
+    // the CFG viewport inside it — so the shared `pane()` helper is ambiguous
+    // here. `handleKeyDown` is bound to the outer one.
+    const user = userEvent.setup();
+    const before = r.state().currentAddress;
+    screen.getByRole("application", { name: "Disassembly viewer" }).focus();
+    await user.keyboard("{ArrowDown}{ArrowDown}{ArrowUp}");
+
+    // Liveness: the presses reached the graph handler. Without this the row
+    // passes whenever the keystrokes are absorbed by something else.
+    expect(r.state().currentAddress).not.toBe(before);
+    expect(buildCFGRuns).toBe(1);
+  });
+
+  it("keeps drawing the graph before the xref pass lands", async () => {
+    /**
+     * THE GUARD THAT MUST NOT BE INHERITED. The `loops` memo declines while
+     * `typedXrefMap` is empty — that is the linear view's behaviour and it
+     * stays. The shared `cfg` memo must NOT, because `CFGView` is handed a
+     * layout now: with the xref guard on the shared build, graph mode renders
+     * nothing in the window between the disassembly arriving and
+     * `buildAllXrefs` finishing.
+     */
+    ScriptedWorker.withholdXrefs = true;
+    localStorage.setItem("peek-a-bin:view-mode", "graph");
+    const r = mount();
+    await waitFor(() => expect(r.container.querySelector(".cfg-block")).toBeTruthy());
+    expect(lastOverview().blocks.length).toBeGreaterThan(1);
+    // ...and the linear view's loop markers still decline, which is the half of
+    // the old condition that had to stay behind.
+    expect(r.state().functions.length).toBeGreaterThan(0);
   });
 });

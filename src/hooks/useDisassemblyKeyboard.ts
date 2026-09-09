@@ -461,9 +461,11 @@ export function useDisassemblyKeyboard({
       navViewStateMapRef,
       // formatRangeCopy is a module-level function declaration, so also stable.
       formatRangeCopy,
-      // buildCFGForNav is memoised on [currentFunc, instructions, typedXrefMap];
-      // only the latter two are new identity sources here, and the graph-mode
-      // arrow/Tab navigation genuinely needs the current one.
+      // buildCFGForNav is memoised on [currentFunc, cfg], where `cfg` is
+      // `useDisassemblyRows`' shared CFG memo — so its identity changes only
+      // when the CFG itself is rebuilt, and the graph-mode arrow/Tab navigation
+      // genuinely needs the current one. It no longer runs `buildCFG` on each
+      // press; it indexes that shared answer (peek-a-bin-v3uh.4).
       buildCFGForNav,
     ],
   );

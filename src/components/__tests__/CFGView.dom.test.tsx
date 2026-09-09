@@ -4,8 +4,10 @@ import "../../test/domSetup";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { buildCFG, type CFGEdge, type LayoutBlock, layoutCFG } from "../../disasm/cfg";
 import type { DisasmFunction, Instruction } from "../../disasm/types";
 import type { AppState } from "../../hooks/usePEFile";
+import { loadFontSize } from "../../llm/settings";
 import { CFGView } from "../CFGView";
 import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
 
@@ -66,6 +68,21 @@ const DIAMOND: Instruction[] = [
 
 const FUNC: DisasmFunction = { name: "sub_401000", address: B, size: 12 };
 
+/**
+ * THE LAYOUT IS NOW A PROP, and that is the component's contract.
+ *
+ * `CFGView` used to take `func`/`instructions`/`typedXrefMap`/`jumpTables` and
+ * run `buildCFG` + `layoutCFG` itself, while `DisassemblyView` ran the same pair
+ * again for the sidebar minimap — with no font size, which is the defect
+ * `DisassemblyPanel.dom.test.tsx` pins. The parent now owns both passes.
+ *
+ * So the default here reproduces exactly what the component used to compute for
+ * itself, keeping every structural assertion below a claim about dagre's real
+ * output rather than about numbers a test invented. The scripted-layout case in
+ * "CFGView layout prop" is the one that shows the prop is actually read.
+ */
+const DIAMOND_LAYOUT = layoutCFG(buildCFG(FUNC, DIAMOND, new Map()), loadFontSize());
+
 /** `EDGE_COLORS` in CFGView.tsx, by edge type. */
 const COLOR = { fallthrough: "#4ade80", branch: "#fb923c", jump: "#ef4444" } as const;
 
@@ -106,10 +123,8 @@ function renderCFG(over: Partial<Props> = {}, state: Partial<AppState> = {}) {
       dispatch={dispatch}
     >
       <CFGView
-        func={FUNC}
-        instructions={DIAMOND}
-        typedXrefMap={new Map()}
-        jumpTables={undefined}
+        layout={DIAMOND_LAYOUT}
+        funcAddress={FUNC.address}
         highlightRegs={null}
         copiedAddr={null}
         editingComment={null}
@@ -260,6 +275,78 @@ describe("CFGView graph structure", () => {
   });
 });
 
+describe("CFGView layout prop", () => {
+  /**
+   * A layout dagre would never produce: two blocks at coordinates that are round
+   * numbers, in an order that is not the block order, with widths and heights
+   * nothing in `getCfgLayout` would pick. If the component went back to building
+   * its own graph these would all be dagre's numbers instead, so this is the
+   * assertion that the prop — rather than `func`/`instructions` — is what draws
+   * the page.
+   */
+  const scripted: { blocks: LayoutBlock[]; edges: CFGEdge[] } = {
+    blocks: [
+      {
+        id: 0,
+        startAddr: B,
+        endAddr: B + 4,
+        insns: [insn(B, "nop", "")],
+        succs: [1],
+        preds: [],
+        x: 700,
+        y: 300,
+        w: 111,
+        h: 77,
+      },
+      {
+        id: 1,
+        startAddr: B + 4,
+        endAddr: B + 6,
+        insns: [insn(B + 4, "hlt", "")],
+        succs: [],
+        preds: [0],
+        x: 40,
+        y: 900,
+        w: 222,
+        h: 33,
+      },
+    ],
+    edges: [{ from: 0, to: 1, type: "jump" }],
+  };
+
+  it("draws the blocks the layout prop names, at the layout prop's coordinates", () => {
+    const { container } = renderCFG({ layout: scripted });
+    const boxes = blockBoxes(container);
+    expect(boxes).toHaveLength(2);
+    // Geometry, verbatim. Anything the component recomputed would disagree:
+    // dagre never assigns a 111px node in a 320px-wide layout.
+    expect(
+      boxes.map((b) => ({
+        left: b.style.left,
+        top: b.style.top,
+        width: b.style.width,
+        height: b.style.height,
+      })),
+    ).toEqual([
+      { left: "700px", top: "300px", width: "111px", height: "77px" },
+      { left: "40px", top: "900px", width: "222px", height: "33px" },
+    ]);
+    // ...and the content, so this is not passing on an empty pair of divs.
+    const text = container.textContent ?? "";
+    expect(text).toContain("nop");
+    expect(text).toContain("hlt");
+    // The DIAMOND fixture's own mnemonics are absent: nothing here decoded it.
+    expect(text).not.toContain("jne");
+  });
+
+  it("draws one edge per edge the layout prop names", () => {
+    const { container } = renderCFG({ layout: scripted });
+    const paths = edgePaths(container);
+    expect(paths).toHaveLength(1);
+    expect(paths[0].getAttribute("stroke")).toBe(COLOR.jump);
+  });
+});
+
 describe("CFGView current block", () => {
   it("highlights the block holding the current address, and only it", () => {
     const { container } = renderCFG({}, { currentAddress: B + 8 });
@@ -327,7 +414,7 @@ describe("CFGView instruction interaction", () => {
 
 describe("CFGView empty graph", () => {
   it("survives a function with no instructions", () => {
-    const { container } = renderCFG({ instructions: [], func: { ...FUNC, size: 0 } });
+    const { container } = renderCFG({ layout: { blocks: [], edges: [] } });
     // No blocks and no crash. The panel is mounted from DisassemblyView before
     // a decode has necessarily produced anything for this range.
     expect(blockHeaders()).toHaveLength(0);
