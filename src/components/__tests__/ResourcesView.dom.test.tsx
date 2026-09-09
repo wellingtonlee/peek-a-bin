@@ -16,8 +16,10 @@ import {
   IMAGE_SCN_MEM_EXECUTE,
   IMAGE_SCN_MEM_READ,
   ResourceTypeNames,
+  RT_GROUP_ICON,
   RT_ICON,
   RT_MANIFEST,
+  RT_RCDATA,
   RT_VERSION,
 } from "../../pe/constants";
 import { parsePE, rvaToFileOffset } from "../../pe/parser";
@@ -65,10 +67,16 @@ import { AppHarness, stateWithPE } from "./appStateHarness";
  *    absent, and a real download is a browser behaviour a stub cannot stand in
  *    for. Its PRESENCE and its filename are asserted, which is the part a render
  *    test can settle.
- *  - **`RT_GROUP_ICON` previews are not rendered.** `reconstructIcon` ends in a
- *    `Blob` and `URL.createObjectURL` for an `<img src>`, so the arm is
- *    unreachable here for the same reason. Named as a gap rather than stubbed
- *    into a test that would assert nothing.
+ *  - **The `RT_GROUP_ICON` preview NEVER PAINTS**, and that half is still a gap.
+ *    The arm IS rendered now — `URL.createObjectURL`/`revokeObjectURL` are
+ *    stubbed below, because the OBJECT-URL LIFECYCLE is a real defect class and
+ *    a counter settles it exactly. What no stub can reach is the picture: jsdom
+ *    decodes no image and has no 2D context, so `<img src="blob:…">` is an
+ *    element with an attribute. Whether the reconstructed `.ico` is a valid
+ *    icon is measured by `resources.test.ts` over the bytes and by nothing here;
+ *    the human check belongs in `peek-a-bin-v2u`. THE CONTROL CONFIRMS IT:
+ *    replacing the reconstructed bytes with a single 0x00 — not an icon by any
+ *    reading — leaves every row in this file green.
  */
 
 /**
@@ -103,6 +111,43 @@ afterEach(() => {
   const messages = consoleError.mock.calls.map((c) => String(c[0]));
   consoleError.mockRestore();
   expect(messages).toEqual([]);
+});
+
+/**
+ * OBJECT URLS, COUNTED — the instrument for the group-icon leak.
+ *
+ * jsdom implements NEITHER `URL.createObjectURL` NOR `URL.revokeObjectURL`
+ * (verified against jsdom 28: both are `undefined` on `URL`), which is why the
+ * group-icon arm had never been rendered by any test and why the leak survived.
+ * They are not spies over a real implementation — there is nothing to spy on —
+ * so they are installed here and removed afterwards.
+ *
+ * THE ASSERTION THAT MATTERS IS THE PAIRING, not either count on its own: one
+ * revoke per create, across expand → collapse → unmount. A create count alone
+ * passes against the defect (which minted a URL per render and revoked none),
+ * and a revoke count alone passes against a component that revokes a URL it
+ * never minted.
+ */
+let mintedUrls: string[];
+let revokedUrls: string[];
+const hadObjectUrlApi = typeof URL.createObjectURL === "function";
+beforeEach(() => {
+  mintedUrls = [];
+  revokedUrls = [];
+  URL.createObjectURL = () => {
+    const url = `blob:peek-a-bin/${mintedUrls.length}`;
+    mintedUrls.push(url);
+    return url;
+  };
+  URL.revokeObjectURL = (url: string) => {
+    revokedUrls.push(url);
+  };
+});
+afterEach(() => {
+  if (!hadObjectUrlApi) {
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
+  }
 });
 
 const RSRC_RVA = 0x3000;
@@ -145,12 +190,15 @@ function withResources(pe: PEFile, entries: Entry[]): PEFile {
 
 function renderResources(pe: PEFile) {
   const dispatch = vi.fn();
-  const { container } = render(
+  // `unmount` is what the object-URL suite needs: the cleanup that revokes a
+  // blob URL runs on unmount, and `cleanup()` in `afterEach` is too late to
+  // assert against.
+  const { container, unmount } = render(
     <AppHarness state={stateWithPE(pe)} dispatch={dispatch}>
       <ResourcesView />
     </AppHarness>,
   );
-  return { container, dispatch, user: userEvent.setup() };
+  return { container, dispatch, unmount, user: userEvent.setup() };
 }
 
 /** The rows of the table under a given type heading. */
@@ -508,9 +556,11 @@ describe("ResourcesView — leaf previews", () => {
     expect(screen.getByText(xml).textContent).toBe(xml);
   });
 
-  it("renders nothing rather than throwing for an RVA in no section", async () => {
-    // `rvaToFileOffset` answers -1 and every preview arm returns null on it. The
-    // observable is that the detail row is empty and the tree is still standing.
+  it("says the RVA falls in no section, rather than rendering an empty box", async () => {
+    // `rvaToFileOffset` answers -1, so `resourceBytes` refuses with `unmapped`
+    // and the arm SAYS SO. It used to `return null`, which is the same empty
+    // `<tr>` a reader gets from an unhandled type — one blank row standing for
+    // two entirely different facts, neither of them stated.
     const pe = withResources(peWithResourceBytes(new Uint8Array(0x100)), [
       { type: RT_MANIFEST, name: 1, lang: 1033, rva: 0xdeadb, size: 16 },
     ]);
@@ -518,7 +568,9 @@ describe("ResourcesView — leaf previews", () => {
     await user.click(screen.getByRole("button", { name: "▶#1" }));
     const rows = rowsUnder("Manifest");
     expect(rows).toHaveLength(2);
-    expect(rows[1].textContent).toBe("");
+    expect(rows[1].textContent).toContain("its RVA falls in no section");
+    // The other refusal's sentence, so the two cannot be confused for one.
+    expect(rows[1].textContent).not.toContain("truncated");
   });
 
   it("says so when a version resource carries no strings", async () => {
@@ -532,9 +584,11 @@ describe("ResourcesView — leaf previews", () => {
     expect(screen.getByText("No version strings found")).toBeTruthy();
   });
 
-  it("renders no preview at all for a type with no preview arm", async () => {
-    // `ExpandedLeaf` returns null for anything but version, group-icon and
-    // manifest. Pinned so a new arm arrives with a test rather than silently.
+  it("previews a type with no dedicated arm as hex and ASCII", async () => {
+    // WAS `expect(rows[1].textContent).toBe("")` — the defect pinned as the
+    // rule. `ExpandedLeaf` returned null for anything but version, group-icon
+    // and manifest, so the caret on an RT_STRING flipped open onto an empty
+    // `<tr><td colSpan={5}>`.
     const pe = withResources(peWithResourceBytes(new Uint8Array(0x100)), [
       { type: 6, name: 7, lang: 1033, rva: RSRC_RVA, size: 32 },
     ]);
@@ -542,18 +596,22 @@ describe("ResourcesView — leaf previews", () => {
     await user.click(screen.getByRole("button", { name: "▶#7" }));
     const rows = rowsUnder("String Table");
     expect(rows).toHaveLength(2);
-    expect(rows[1].textContent).toBe("");
+    expect(rows[1].textContent).not.toBe("");
+    expect(rows[1].textContent).toContain("00 00 00 00");
   });
 
-  it("does not offer a preview for a STRING-typed resource, whatever it is named", async () => {
+  it("does not offer the VERSION arm to a STRING-typed resource, whatever it is named", async () => {
     // `ExpandedLeaf` maps a string type to `-1` before comparing, so a resource
-    // whose type is the literal text "16" cannot be mistaken for RT_VERSION.
+    // whose type is the literal text "16" cannot be mistaken for RT_VERSION. It
+    // takes the hex fallback below instead — which is a preview, so the check
+    // is that it is not the WRONG one.
     const pe = withResources(peWithResourceBytes(new Uint8Array(0x100)), [
       { type: "16", name: 1, lang: 1033, rva: RSRC_RVA, size: 0 },
     ]);
     const { user } = renderResources(pe);
     await user.click(screen.getByRole("button", { name: "▶#1" }));
     expect(screen.queryByText("No version strings found")).toBeNull();
+    expect(screen.getByText("This resource declares no bytes.")).toBeTruthy();
   });
 });
 
@@ -856,11 +914,13 @@ describe("ResourcesView — over a parsed resource directory", () => {
     await user.click(within(rows()[0]).getByRole("button", { name: "▶#1" }));
     // The readable one still decodes.
     expect(screen.getByText("<first />").tagName).toBe("PRE");
-    // The unreadable one renders an empty detail row instead of throwing.
+    // The unreadable one SAYS the file does not contain its bytes, instead of
+    // throwing and instead of the empty row it used to render.
     await user.click(within(rows()[2]).getByRole("button", { name: "▶#1" }));
     const after = rows();
     expect(after).toHaveLength(4);
-    expect(after[3].textContent).toBe("");
+    expect(after[3].textContent).toContain("past the end of the file");
+    expect(after[3].textContent).toContain("truncated");
   });
 });
 
@@ -1049,5 +1109,367 @@ describe("ResourcesView — a walk cut short by its budget", () => {
       expect(screen.getByText("No resources found in this PE file.")).toBeTruthy();
       expect(screen.queryByText(/could not be read whole/)).toBeNull();
     });
+  });
+});
+
+/**
+ * THE CARET THAT USED TO OPEN ONTO NOTHING.
+ *
+ * Every leaf row renders an expand caret, and `ExpandedLeaf` had arms for three
+ * types out of the ~20 the format defines. So on an RT_BITMAP, RT_STRING,
+ * RT_DIALOG or RT_RCDATA — most of what an ordinary binary carries — the arrow
+ * flipped to its open state and produced an empty `<tr><td colSpan={5}>`. Two of
+ * the rows above had PINNED THAT AS THE RULE with
+ * `expect(rows[1].textContent).toBe("")`.
+ *
+ * The fallback goes through `resourceBytes`, the ONE declaration of the bound,
+ * so the `RangeError` `peek-a-bin-p0qw` found on a truncated image cannot come
+ * back through a new call site: it is the same guard, and its refusal now prints
+ * a sentence rather than a blank row.
+ */
+describe("ResourcesView — the hex/ASCII fallback", () => {
+  /** A leaf of `body`'s bytes under a type with no dedicated preview arm. */
+  function peWithRcdata(body: Uint8Array, size = body.length): PEFile {
+    const section = new Uint8Array(Math.max(0x200, body.length));
+    section.set(body, 0);
+    return withResources(peWithResourceBytes(section), [
+      { type: RT_RCDATA, name: 1, lang: 1033, rva: RSRC_RVA, size },
+    ]);
+  }
+
+  async function expandRcdata(pe: PEFile) {
+    const { user, dispatch } = renderResources(pe);
+    await user.click(screen.getByRole("button", { name: "▶#1" }));
+    return { dispatch, detail: rowsUnder(ResourceTypeNames[RT_RCDATA])[1] };
+  }
+
+  it("prints the bytes as hex AND as ASCII, from the file's real buffer", async () => {
+    // Both halves, because each catches a different way of being wrong: a dump
+    // with no ASCII column is unreadable, and an ASCII column with no hex hides
+    // every non-printable byte behind a dot.
+    const { detail } = await expandRcdata(peWithRcdata(new TextEncoder().encode("PEEKABIN")));
+    expect(detail.textContent).toContain("50 45 45 4b 41 42 49 4e");
+    expect(detail.textContent).toContain("|PEEKABIN");
+  });
+
+  it("writes a non-printable byte as a dot in the ASCII column and as itself in hex", async () => {
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array([0x41, 0x00, 0x7f, 0x42])));
+    expect(detail.textContent).toContain("41 00 7f 42");
+    expect(detail.textContent).toContain("|A..B");
+  });
+
+  it("lays the dump out in 16-byte rows with resource-relative offsets", async () => {
+    // Resource-relative, not file offsets: nothing else on this tab shows a file
+    // offset, and the RVA beside it is the address the Hex tab wants.
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array(48).fill(0xcc)));
+    expect(detail.textContent).toContain("00000000  cc");
+    expect(detail.textContent).toContain("00000010  cc");
+    expect(detail.textContent).toContain("00000020  cc");
+    expect(detail.textContent).not.toContain("00000030");
+  });
+
+  it("states the whole count when the whole resource is shown", async () => {
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array(32).fill(1)));
+    expect(detail.textContent).toContain("32 bytes");
+    expect(detail.textContent).not.toContain("first");
+  });
+
+  it("ADMITS THE CAP ON THE COUNT LINE for a resource longer than the preview", async () => {
+    /**
+     * THE STAGE-7 CLASS: a narrower answer must not wear a complete one's shape.
+     * A preview that simply stopped at 256 bytes reads exactly like a 256-byte
+     * resource — and the Size column two cells away says otherwise, so the pane
+     * would contradict itself.
+     */
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array(300).fill(0x5a)));
+    expect(detail.textContent).toContain("first 256 of 300 bytes");
+    // The cap is real, not just admitted: the row at 0x100 is not printed.
+    expect(detail.textContent).toContain("000000f0  5a");
+    expect(detail.textContent).not.toContain("00000100");
+  });
+
+  it("does not claim a cap for a resource of exactly the preview length", async () => {
+    // Both sides of the boundary, on `peek-a-bin-6qx9`'s model: the off-by-one
+    // that reported a complete answer as short is the same defect mirrored.
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array(256).fill(7)));
+    expect(detail.textContent).toContain("256 bytes");
+    expect(detail.textContent).not.toContain("first");
+  });
+
+  it("says how much of a DECLARED size the file actually holds", async () => {
+    /**
+     * The other truncation, and it is a different fact from the cap: here the
+     * cut lands INSIDE the leaf, so `resourceBytes` clamps to the buffer and
+     * returns fewer bytes than the directory declares. Printing only the
+     * clamped count would state the file's own declared size as smaller than it
+     * is.
+     */
+    const pe = peWithRcdata(new Uint8Array(0x40).fill(0x33), 0x10000);
+    const { detail } = await expandRcdata(pe);
+    const available = pe.buffer.byteLength - rvaToFileOffset(RSRC_RVA, pe.sections);
+    expect(detail.textContent).toContain(
+      `the file holds ${available.toLocaleString()} of the 65,536 bytes the directory declares`,
+    );
+  });
+
+  it("says a resource declares no bytes rather than printing an empty dump", async () => {
+    const { detail } = await expandRcdata(peWithRcdata(new Uint8Array(0x40), 0));
+    expect(detail.textContent).toContain("This resource declares no bytes.");
+    expect(detail.querySelector("pre")).toBeNull();
+  });
+
+  it("shows the unreadable arm, and DOES NOT THROW, on a leaf past the end of a TRUNCATED file", async () => {
+    /**
+     * `peek-a-bin-p0qw`'s `RangeError` asked of the NEW call site. The fallback
+     * is the one arm every unhandled type reaches, so a hand-rolled
+     * `Math.min(size, byteLength - fileOff)` here would have reintroduced the
+     * defect across the whole population instead of one type.
+     *
+     * The file is cut so the section table still maps the leaf and the buffer
+     * does not contain its first byte — the exact shape `rvaToFileOffset` cannot
+     * see, because it answers against the section table alone.
+     */
+    const buf = buildMinimalPE64({
+      directorySectionName: ".rsrc",
+      directoryRVA: RSRC_RVA,
+      directories: {
+        resources: [
+          {
+            id: RT_RCDATA,
+            names: [{ id: 1, langs: [{ lang: 0x0409, data: new Uint8Array(32).fill(0xd7) }] }],
+          },
+        ],
+      },
+    });
+    const full = parsePE(buf);
+    const leafOff = rvaToFileOffset(full.resources!.entries[0].rva, full.sections);
+    const pe = parsePE(buf.slice(0, leafOff));
+    // The fixture: the row survives the cut and its bytes do not.
+    expect(pe.resources!.entries).toHaveLength(1);
+    expect(rvaToFileOffset(pe.resources!.entries[0].rva, pe.sections)).toBe(leafOff);
+    expect(leafOff).toBeGreaterThanOrEqual(pe.buffer.byteLength);
+
+    const { user } = renderResources(pe);
+    await user.click(screen.getByRole("button", { name: "▶#1" }));
+    const detail = rowsUnder(ResourceTypeNames[RT_RCDATA])[1];
+    expect(detail.textContent).toContain("past the end of the file");
+    // Not the empty box, and not the pane's ErrorBoundary either — the tree is
+    // still standing with its heading and its row.
+    expect(detail.querySelector("pre")).toBeNull();
+    // Not the pane's ErrorBoundary either: the row is still there, still open.
+    expect(screen.getByRole("button", { name: "▼#1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /RC Data/ })).toBeTruthy();
+  });
+
+  it("says a VERSION resource could not be read rather than that it carries no strings", async () => {
+    /**
+     * WHY THE GUARD SITS ABOVE RT_VERSION. `parseVersionInfo` bounds its own
+     * reads, so an unreachable resource came back `{}` and the arm printed "No
+     * version strings found" — a positive claim about the RESOURCE resting on
+     * the tool's own failure to reach it, which is `peek-a-bin-wo8g`'s class one
+     * level down from the directory.
+     */
+    const pe = withResources(peWithResourceBytes(new Uint8Array(0x100)), [
+      { type: RT_VERSION, name: 1, lang: 1033, rva: 0xdeadb, size: 64 },
+    ]);
+    const { user } = renderResources(pe);
+    await user.click(screen.getByRole("button", { name: "▶#1" }));
+    expect(screen.queryByText("No version strings found")).toBeNull();
+    expect(screen.getByText(/its RVA falls in no section/)).toBeTruthy();
+  });
+});
+
+/**
+ * THE GROUP-ICON PREVIEW'S OBJECT URL — one leaked blob per render, before this.
+ *
+ * `ExpandedLeaf` called `URL.createObjectURL` in the middle of RENDER and never
+ * called `URL.revokeObjectURL` anywhere, so the URL (and the blob behind it)
+ * stayed pinned to the document for the rest of the session — once per render
+ * of an expanded group icon, and this pane re-renders on every collapse, expand
+ * and download click.
+ *
+ * READ THE FILE-WIDE STUB ABOVE FIRST. jsdom implements neither function, which
+ * is exactly why nothing had ever rendered this arm.
+ */
+describe("ResourcesView — the group icon's object URL", () => {
+  /**
+   * A real `.rsrc` holding a one-entry `GRPICONDIR` at its start and the icon
+   * bytes it names 0x20 in, plus the hand-written tree naming both. Built to
+   * `reconstructIcon`'s own reading: `type` must be 1, `count` non-zero, and
+   * `nId` at +12 of the 14-byte `GRPICONDIRENTRY` must match an RT_ICON name.
+   */
+  function peWithGroupIcon(): PEFile {
+    const body = new Uint8Array(0x200);
+    const view = new DataView(body.buffer);
+    view.setUint16(0, 0, true); // reserved
+    view.setUint16(2, 1, true); // type: icon
+    view.setUint16(4, 1, true); // count
+    body[6] = 16; // width
+    body[7] = 16; // height
+    view.setUint16(6 + 6, 1, true); // planes
+    view.setUint16(6 + 8, 32, true); // bitCount
+    view.setUint32(6 + 10, 16, true); // bytesInRes
+    view.setUint16(6 + 12, 1, true); // nId -> the RT_ICON named 1
+    body.fill(0xaa, 0x20, 0x30);
+    return withResources(peWithResourceBytes(body), [
+      { type: RT_GROUP_ICON, name: 1, lang: 1033, rva: RSRC_RVA, size: 20 },
+      { type: RT_ICON, name: 1, lang: 1033, rva: RSRC_RVA + 0x20, size: 16 },
+      // A third type with no relation to the icon, so the re-render row below
+      // has a caret to toggle whose heading `rowsUnder`'s regex cannot confuse
+      // with "Group Icon".
+      { type: RT_RCDATA, name: 2, lang: 1033, rva: RSRC_RVA + 0x40, size: 16 },
+    ]);
+  }
+
+  const groupCaret = () =>
+    within(rowsUnder(ResourceTypeNames[RT_GROUP_ICON])[0]).getByRole("button", { name: "▶#1" });
+
+  it("builds a fixture the reconstruction really accepts", async () => {
+    // The liveness half. Every count below is 0 for a group icon that fails to
+    // reconstruct, so a green balance would say nothing about the lifecycle.
+    const { user } = renderResources(peWithGroupIcon());
+    await user.click(groupCaret());
+    expect(screen.getByAltText("Icon").getAttribute("src")).toBe(mintedUrls[0]);
+    expect(mintedUrls).toHaveLength(1);
+  });
+
+  it("mints the URL from an effect, not during render", async () => {
+    // The defect minted one per render. Expanding a SECOND leaf re-renders the
+    // whole pane, including the mounted icon, and must not mint again.
+    const { user } = renderResources(peWithGroupIcon());
+    await user.click(groupCaret());
+    expect(mintedUrls).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "▶#2" }));
+    await user.click(screen.getByRole("button", { name: "▼#2" }));
+    expect(mintedUrls).toHaveLength(1);
+    expect(revokedUrls).toEqual([]);
+  });
+
+  it("REVOKES ONCE PER CREATE across expand → collapse → unmount", async () => {
+    /**
+     * THE WHOLE INSTRUMENT FOR THIS REPAIR, and the reason it is a pairing
+     * rather than two counts: the defect passes a create-count assertion (it
+     * minted one on the first render) and passes a revoke-count assertion of
+     * zero for the collapsed case. Only `revoked === minted` at each step
+     * discriminates.
+     */
+    const openCaret = () =>
+      within(rowsUnder(ResourceTypeNames[RT_GROUP_ICON])[0]).getByRole("button", {
+        name: "▼#1",
+      });
+
+    const { user, unmount } = renderResources(peWithGroupIcon());
+    await user.click(groupCaret());
+    expect(mintedUrls).toHaveLength(1);
+    expect(revokedUrls).toEqual([]);
+
+    // Collapse: the child unmounts, so its cleanup runs.
+    await user.click(openCaret());
+    expect(mintedUrls).toHaveLength(1);
+    expect(revokedUrls).toEqual(mintedUrls);
+
+    // A second cycle, so the row cannot pass on a single lucky pairing.
+    await user.click(groupCaret());
+    expect(mintedUrls).toHaveLength(2);
+    expect(revokedUrls).toHaveLength(1);
+    await user.click(openCaret());
+    expect(revokedUrls).toEqual(mintedUrls);
+
+    // And the unmount path, which is the one `cleanup()` in `afterEach` would
+    // otherwise take after every assertion had already run.
+    await user.click(groupCaret());
+    expect(mintedUrls).toHaveLength(3);
+    expect(revokedUrls).toHaveLength(2);
+    unmount();
+    expect(revokedUrls).toEqual(mintedUrls);
+  });
+
+  it("says so, and mints nothing, when the icon cannot be reconstructed", async () => {
+    // `reconstructIcon` answers null when no RT_ICON matches the group's `nId`.
+    const pe = peWithGroupIcon();
+    pe.resources!.entries = pe.resources!.entries.filter((e) => e.type !== RT_ICON);
+    const { user } = renderResources(pe);
+    await user.click(groupCaret());
+    expect(screen.getByText("Could not reconstruct icon")).toBeTruthy();
+    expect(mintedUrls).toEqual([]);
+  });
+
+  it("keeps the group-icon arm OUT of the shared bounds guard, deliberately", async () => {
+    /**
+     * THE RECORDED ASYMMETRY. `buffer.slice` CLAMPS where `new Uint8Array(buf,
+     * off, len)` throws, so a past-the-end group icon yields an empty buffer and
+     * `reconstructIcon` answers null — the honest "could not reconstruct"
+     * sentence rather than the truncation sentence, and no `RangeError`. Routing
+     * this arm through `resourceBytes` "for consistency" is the change this row
+     * exists to fail.
+     */
+    const pe = peWithGroupIcon();
+    pe.resources!.entries[0] = { ...pe.resources!.entries[0], rva: RSRC_RVA + 0x100000 };
+    const { user } = renderResources(pe);
+    await user.click(groupCaret());
+    expect(screen.getByText("Could not reconstruct icon")).toBeTruthy();
+    expect(screen.queryByText(/past the end of the file/)).toBeNull();
+    expect(mintedUrls).toEqual([]);
+  });
+});
+
+/**
+ * THE RVA COLUMN — blue monospace text inside a plain `<td>`, since the tab was
+ * written.
+ *
+ * Every other blue address in this app is clickable: `SectionTable`'s rows,
+ * `HeaderView`'s `CopyableHex`, every operand in the listing. This one looked
+ * identical and did nothing, which is worse than plain text — a reader clicks
+ * it, gets nothing, and stops trusting the colour.
+ */
+describe("ResourcesView — the RVA goes to the Hex view", () => {
+  const pe = () =>
+    withResources(peWithResourceBytes(new Uint8Array(0x200)), [
+      { type: RT_RCDATA, name: 1, lang: 1033, rva: RSRC_RVA, size: 16 },
+    ]);
+
+  it("renders the RVA as a real control", () => {
+    renderResources(pe());
+    expect(screen.getByRole("button", { name: "0x3000" })).toBeTruthy();
+  });
+
+  it("dispatches the VA and the tab, in that order", async () => {
+    /**
+     * `imageBase + rva`, because the VA is what the rest of the app speaks and
+     * `HexView` derives its section from `state.currentAddress` alone — so the
+     * address has to land before the tab that reads it.
+     */
+    const file = pe();
+    const { user, dispatch } = renderResources(file);
+    await user.click(screen.getByRole("button", { name: "0x3000" }));
+    expect(dispatch.mock.calls.map((c) => c[0])).toEqual([
+      { type: "SET_ADDRESS", address: file.optionalHeader.imageBase + RSRC_RVA },
+      { type: "SET_TAB", tab: "hex" },
+    ]);
+  });
+
+  it("resolves that VA to the section the resource is in", () => {
+    /**
+     * A FIXTURE ROW, NOT A COMPONENT ROW, and it is here because it carries the
+     * argument for the destination: `HexView` derives its section by walking
+     * `pe.sections` for the one containing `currentAddress - imageBase`, which
+     * is `useSectionInfo`'s rule, and the VA this button dispatches lands inside
+     * `.rsrc`. That is why the Hex tab is right and the disassembly tab is not
+     * — a linear sweep of resource bytes is invented code, which this repo goes
+     * to some length to avoid elsewhere. Reverting the cell to a `<td>` does not
+     * redden this row, deliberately: it is about the address, not the control.
+     */
+    const file = pe();
+    const section = file.sections.find(
+      (sec) => RSRC_RVA >= sec.virtualAddress && RSRC_RVA < sec.virtualAddress + sec.virtualSize,
+    );
+    expect(section?.name).toBe(".rsrc");
+  });
+
+  it("does not expand the leaf — the two controls are separate", async () => {
+    const { user } = renderResources(pe());
+    await user.click(screen.getByRole("button", { name: "0x3000" }));
+    expect(rowsUnder(ResourceTypeNames[RT_RCDATA])).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "▶#1" })).toBeTruthy();
   });
 });

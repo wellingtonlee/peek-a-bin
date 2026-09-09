@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useMemo, useState } from "react";
-import { useAppState } from "../hooks/usePEFile";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useAppDispatch, useAppState } from "../hooks/usePEFile";
 import {
   IMAGE_DIRECTORY_ENTRY_RESOURCE,
   ResourceTypeNames,
@@ -13,8 +13,30 @@ import { rvaToFileOffset } from "../pe/parser";
 import { MAX_TOTAL_ENTRIES, parseVersionInfo, reconstructIcon } from "../pe/resources";
 import type { ResourceTree } from "../pe/types";
 
+type UnreadableReason = "unmapped" | "past-end";
+
 /**
- * The bytes a resource leaf names, or null when the file does not contain them.
+ * What {@link resourceBytes} answers.
+ *
+ * A UNION RATHER THAN `Uint8Array | null` BECAUSE THE TWO REFUSALS ARE TWO
+ * DIFFERENT FACTS ABOUT THE FILE, and a caller that has to print a sentence
+ * needs to know which. `unmapped` means the directory names an RVA that falls
+ * in no section — a malformed or hand-rolled directory; `past-end` means the
+ * section table maps it fine and the FILE is short of it — a truncated image.
+ * Collapsing them into one null is the same shape `HeaderView` refuses for
+ * imphash, where `""` means "imports nothing" and `null` means "the table is
+ * not whole".
+ *
+ * The reason is carried out of the GUARD rather than re-derived at the call
+ * site, which is the whole point: a second `rvaToFileOffset` comparison
+ * somewhere else is a second declaration of the bound, and it is exactly the
+ * copy that would drift back into the `RangeError` below.
+ */
+type ResourceRead = { bytes: Uint8Array; reason: null } | { bytes: null; reason: UnreadableReason };
+
+/**
+ * The bytes a resource leaf names, or {@link ResourceRead}'s refusal and the
+ * reason for it where the file does not contain them.
  *
  * THE GUARD IS `fileOff >= buffer.byteLength`, AND IT IS NOT PARANOIA.
  * `rvaToFileOffset` resolves an RVA against the SECTION TABLE and never sees the
@@ -36,10 +58,174 @@ function resourceBytes(
   rva: number,
   size: number,
   sections: import("../pe/types").SectionHeader[],
-): Uint8Array | null {
+): ResourceRead {
   const fileOff = rvaToFileOffset(rva, sections);
-  if (fileOff < 0 || fileOff >= buffer.byteLength) return null;
-  return new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff));
+  if (fileOff < 0) return { bytes: null, reason: "unmapped" };
+  if (fileOff >= buffer.byteLength) return { bytes: null, reason: "past-end" };
+  return {
+    bytes: new Uint8Array(buffer, fileOff, Math.min(size, buffer.byteLength - fileOff)),
+    reason: null,
+  };
+}
+
+/**
+ * The sentence each refusal prints. A `Record` over the union, on
+ * `DETECT_PASS_LABELS`' and `VIEW_TAB_LABELS`' model, so a third reason fails
+ * the build here rather than reaching the page as an unexplained empty box —
+ * which is the defect this whole arm exists to close.
+ */
+const UNREADABLE_SENTENCE: Record<UnreadableReason, string> = {
+  unmapped:
+    "This resource's bytes could not be read: its RVA falls in no section, so the directory names an address this image does not map.",
+  "past-end":
+    "This resource's bytes could not be read: the section table places them past the end of the file, so this image is truncated and does not contain them.",
+};
+
+function Unreadable({ reason }: { reason: UnreadableReason }) {
+  return (
+    <div className="ml-8 my-1 py-1 text-yellow-400 max-w-prose">{UNREADABLE_SENTENCE[reason]}</div>
+  );
+}
+
+/**
+ * How much of a leaf the hex fallback prints.
+ *
+ * A CAP WITH AN ADMISSION ON THE COUNT LINE, never a silent clip: a resource is
+ * routinely megabytes (a bitmap, an embedded payload) and a `<pre>` of all of
+ * it is a rendering cost for no reading benefit — but a preview that just stops
+ * is the narrower answer wearing a complete one's shape, so the count line says
+ * `first 256 of N bytes` and only says `N bytes` when N really is all of them.
+ */
+const PREVIEW_BYTES = 256;
+const PREVIEW_ROW = 16;
+
+/**
+ * The hex/ASCII fallback — WHAT EVERY LEAF WITH NO DEDICATED ARM USED TO SHOW
+ * INSTEAD OF NOTHING.
+ *
+ * Every leaf row renders an expand caret, and `ExpandedLeaf` handled only
+ * RT_VERSION, RT_GROUP_ICON and RT_MANIFEST. So clicking the caret on an
+ * RT_BITMAP, RT_STRING, RT_DIALOG or RT_RCDATA flipped the arrow to its open
+ * state and produced an empty `<tr><td colSpan={5}>` — a control that visibly
+ * did nothing, which reads as the pane being broken rather than as the type
+ * being unhandled. Those four are most of what an ordinary binary carries.
+ *
+ * OFFSETS ARE RESOURCE-RELATIVE, not file offsets: this pane never shows a file
+ * offset anywhere, and the RVA column beside it is the address a reader would
+ * take to the Hex tab. `size` is the DECLARED size and `bytes.length` what the
+ * file actually holds, which differ on a truncated image whose cut lands inside
+ * a leaf — so both are printed rather than one standing in for the other.
+ */
+function HexPreview({ bytes, size }: { bytes: Uint8Array; size: number }) {
+  const available = bytes.length;
+  const shown = bytes.subarray(0, PREVIEW_BYTES);
+  const lines: string[] = [];
+  for (let off = 0; off < shown.length; off += PREVIEW_ROW) {
+    const row = shown.subarray(off, off + PREVIEW_ROW);
+    const hex = Array.from(row, (b) => b.toString(16).padStart(2, "0"))
+      .join(" ")
+      .padEnd(PREVIEW_ROW * 3 - 1, " ");
+    const ascii = Array.from(row, (b) => (b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : "."))
+      .join("")
+      .padEnd(PREVIEW_ROW, " ");
+    lines.push(`${off.toString(16).padStart(8, "0")}  ${hex}  |${ascii}|`);
+  }
+  return (
+    <div className="ml-8 my-1">
+      <div className="text-gray-500 text-[10px]">
+        {available > shown.length
+          ? `Hex preview \u2014 first ${shown.length} of ${available.toLocaleString()} bytes`
+          : `Hex preview \u2014 ${available.toLocaleString()} bytes`}
+        {available < size &&
+          ` (the file holds ${available.toLocaleString()} of the ${size.toLocaleString()} bytes the directory declares)`}
+      </div>
+      {/* `available === 0` IMPLIES `size === 0` here and the sentence is safe
+          because of it: `resourceBytes` has already refused with `past-end`
+          wherever the offset is outside the buffer, so the clamp can only
+          return nothing when the directory asked for nothing. */}
+      {available === 0 ? (
+        <div className="text-gray-500 py-1">This resource declares no bytes.</div>
+      ) : (
+        <pre className="mt-1 p-2 bg-gray-800 border border-gray-700 rounded text-[10px] text-gray-300 overflow-auto max-h-60 whitespace-pre">
+          {lines.join("\n")}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/**
+ * THE GROUP-ICON PREVIEW, AND THE REASON IT IS ITS OWN COMPONENT: the object
+ * URL it needs must be REVOKED, and only a child with its own effect has a
+ * cleanup to revoke it in.
+ *
+ * `ExpandedLeaf` minted the URL with `URL.createObjectURL` in the middle of
+ * RENDER and never called `URL.revokeObjectURL` at all — so every render of an
+ * expanded group icon leaked another blob, pinned for the lifetime of the
+ * document, and this pane re-renders on every collapse, expand and download
+ * click. Minting during render is also wrong on its own terms: a render React
+ * throws away (a concurrent retry, StrictMode's double invoke) leaks a URL no
+ * cleanup will ever see, because no effect ever ran for it.
+ *
+ * The reconstruction is memoised so the effect key is stable across the parent
+ * re-renders that do not change the bytes; where it does change, the cleanup
+ * revokes the old URL before the next one is minted, so creates and revokes
+ * stay one-for-one.
+ */
+function GroupIconPreview({
+  rva,
+  size,
+  buffer,
+  sections,
+  resourceTree,
+}: {
+  rva: number;
+  size: number;
+  buffer: ArrayBuffer;
+  sections: import("../pe/types").SectionHeader[];
+  resourceTree: ResourceTree;
+}) {
+  const ico = useMemo(() => {
+    // `slice` CLAMPS rather than throwing, so a past-the-end offset yields an
+    // empty buffer and `reconstructIcon` answers null — the asymmetry with
+    // `resourceBytes` above is deliberate, not an unguarded site.
+    const fileOff = rvaToFileOffset(rva, sections);
+    if (fileOff < 0) return null;
+    const groupData = buffer.slice(fileOff, fileOff + size);
+
+    // Collect all RT_ICON entries from the resource tree
+    const iconEntries = new Map<number, { rva: number; size: number }>();
+    for (const entry of resourceTree.entries) {
+      const t = typeof entry.type === "number" ? entry.type : -1;
+      if (t === RT_ICON && typeof entry.name === "number") {
+        iconEntries.set(entry.name, { rva: entry.rva, size: entry.size });
+      }
+    }
+    return reconstructIcon(buffer, groupData, iconEntries, sections);
+  }, [buffer, rva, size, sections, resourceTree]);
+
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!ico) return;
+    const minted = URL.createObjectURL(new Blob([ico], { type: "image/x-icon" }));
+    setUrl(minted);
+    return () => {
+      URL.revokeObjectURL(minted);
+      setUrl(null);
+    };
+  }, [ico]);
+
+  if (!ico) return <div className="text-gray-500 ml-8 py-1">Could not reconstruct icon</div>;
+  if (!url) return null;
+  return (
+    <div className="ml-8 my-1">
+      <img
+        src={url}
+        alt="Icon"
+        className="max-w-[64px] max-h-[64px] bg-gray-700 border border-gray-600 rounded"
+      />
+    </div>
+  );
 }
 
 function getTypeName(id: number | string): string {
@@ -103,6 +289,28 @@ interface ExpandedLeafProps {
 function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: ExpandedLeafProps) {
   const numType = typeof typeId === "number" ? typeId : -1;
 
+  if (numType === RT_GROUP_ICON) {
+    return (
+      <GroupIconPreview
+        rva={rva}
+        size={size}
+        buffer={buffer}
+        sections={sections}
+        resourceTree={resourceTree}
+      />
+    );
+  }
+
+  // THE GUARD SITS ABOVE EVERY REMAINING ARM, and above RT_VERSION in
+  // particular: `parseVersionInfo` bounds its own reads, so on a truncated
+  // image it answered `{}` and the arm printed "No version strings found" — a
+  // positive claim about the RESOURCE resting on the tool's failure to reach
+  // its bytes, which is `peek-a-bin-wo8g`'s class one level down. The
+  // group-icon arm above is deliberately outside it; see {@link
+  // GroupIconPreview}.
+  const read = resourceBytes(buffer, rva, size, sections);
+  if (!read.bytes) return <Unreadable reason={read.reason} />;
+
   if (numType === RT_VERSION) {
     const info = parseVersionInfo(buffer, rva, size, sections);
     const keys = Object.keys(info);
@@ -122,44 +330,8 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
     );
   }
 
-  if (numType === RT_GROUP_ICON) {
-    // Reconstruct icon from group + individual RT_ICON entries.
-    // `slice` CLAMPS rather than throwing, so a past-the-end offset yields an
-    // empty buffer and `reconstructIcon` answers null — the asymmetry with
-    // `resourceBytes` above is deliberate, not an unguarded site.
-    const fileOff = rvaToFileOffset(rva, sections);
-    if (fileOff < 0) return null;
-    const groupData = buffer.slice(fileOff, fileOff + size);
-
-    // Collect all RT_ICON entries from the resource tree
-    const iconEntries = new Map<number, { rva: number; size: number }>();
-    for (const entry of resourceTree.entries) {
-      const t = typeof entry.type === "number" ? entry.type : -1;
-      if (t === RT_ICON && typeof entry.name === "number") {
-        iconEntries.set(entry.name, { rva: entry.rva, size: entry.size });
-      }
-    }
-
-    const icoBytes = reconstructIcon(buffer, groupData, iconEntries, sections);
-    if (!icoBytes) return <div className="text-gray-500 ml-8 py-1">Could not reconstruct icon</div>;
-
-    const blob = new Blob([icoBytes], { type: "image/x-icon" });
-    const url = URL.createObjectURL(blob);
-    return (
-      <div className="ml-8 my-1">
-        <img
-          src={url}
-          alt="Icon"
-          className="max-w-[64px] max-h-[64px] bg-gray-700 border border-gray-600 rounded"
-        />
-      </div>
-    );
-  }
-
   if (numType === RT_MANIFEST) {
-    const bytes = resourceBytes(buffer, rva, size, sections);
-    if (!bytes) return null;
-    const text = new TextDecoder("utf-8").decode(bytes);
+    const text = new TextDecoder("utf-8").decode(read.bytes);
     return (
       <pre className="ml-8 my-1 p-2 bg-gray-800 border border-gray-700 rounded text-[10px] text-gray-300 overflow-auto max-h-60 whitespace-pre-wrap">
         {text}
@@ -167,7 +339,8 @@ function ExpandedLeaf({ typeId, rva, size, buffer, sections, resourceTree }: Exp
     );
   }
 
-  return null;
+  // EVERY OTHER TYPE, rather than nothing. See {@link HexPreview}.
+  return <HexPreview bytes={read.bytes} size={size} />;
 }
 
 function downloadResource(
@@ -177,9 +350,9 @@ function downloadResource(
   sections: import("../pe/types").SectionHeader[],
   name: string,
 ) {
-  const bytes = resourceBytes(buffer, rva, size, sections);
-  if (!bytes) return;
-  const blob = new Blob([bytes]);
+  const read = resourceBytes(buffer, rva, size, sections);
+  if (!read.bytes) return;
+  const blob = new Blob([read.bytes]);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -190,6 +363,7 @@ function downloadResource(
 
 export function ResourcesView() {
   const state = useAppState();
+  const dispatch = useAppDispatch();
   const pe = state.peFile;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -211,6 +385,22 @@ export function ResourcesView() {
       return next;
     });
   }, []);
+
+  /**
+   * The RVA column's click. `imageBase + rva` is the VA the rest of the app
+   * speaks, and the two dispatches are the same pair `SectionTable`'s rows and
+   * `useInsnContextMenu`'s "show in hex" already use — address first, then the
+   * tab, so the tab that mounts already has the address to derive its section
+   * from.
+   */
+  const goToRva = useCallback(
+    (rva: number) => {
+      if (!pe) return;
+      dispatch({ type: "SET_ADDRESS", address: pe.optionalHeader.imageBase + rva });
+      dispatch({ type: "SET_TAB", tab: "hex" });
+    },
+    [dispatch, pe],
+  );
 
   const totalEntries = pe?.resources?.entries.length ?? 0;
   const typeCount = useMemo(() => {
@@ -379,8 +569,35 @@ export function ResourcesView() {
                               </td>
                               <td className="py-0.5 pr-4 text-gray-500">{langDisplay}</td>
                               <td className="py-0.5 pr-4 font-mono">{formatSize(entry.size)}</td>
-                              <td className="py-0.5 pr-4 font-mono text-blue-400">
-                                0x{entry.rva.toString(16).toUpperCase()}
+                              {/* A REAL CONTROL, because it was already dressed
+                                  as one. This cell has been `text-blue-400`
+                                  monospace since the tab was written — every
+                                  other blue address in this app is clickable
+                                  (`SectionTable`'s rows, `HeaderView`'s
+                                  `CopyableHex`, every operand in the listing) —
+                                  and this one was inert text inside a plain
+                                  `<td>`. An affordance that is not one is worse
+                                  than no affordance: a reader clicks it, gets
+                                  nothing, and learns to distrust the colour.
+
+                                  It goes to the HEX tab rather than the
+                                  disassembly: `.rsrc` is data, and `HexView`
+                                  derives its section from `state.currentAddress`
+                                  alone, so the VA resolves to `.rsrc` and its
+                                  own scroll-to-offset effect does the rest. The
+                                  disassembly tab would show a linear sweep of
+                                  resource bytes, which is the invented-code
+                                  reading this repo goes out of its way to avoid
+                                  elsewhere. */}
+                              <td className="py-0.5 pr-4 font-mono">
+                                <button
+                                  type="button"
+                                  onClick={() => goToRva(entry.rva)}
+                                  title="Show these bytes in the Hex view"
+                                  className="text-blue-400 hover:text-blue-300 hover:underline"
+                                >
+                                  0x{entry.rva.toString(16).toUpperCase()}
+                                </button>
                               </td>
                               <td className="py-0.5">
                                 <button
