@@ -36,7 +36,7 @@ import { loadFontSize } from "./llm/settings";
 import { parsePE } from "./pe/parser";
 import { dataSectionRanges, findCodeSection } from "./pe/sections";
 import { applyTheme, loadTheme } from "./styles/themes";
-import { validateAnnotations } from "./utils/exportSchema";
+import { annotationKey, loadAnnotations, saveAnnotations } from "./utils/annotationKey";
 import { saveRecentFile } from "./utils/recentFiles";
 import { disasmWorker } from "./workers/disasmClient";
 import { metricsWorker } from "./workers/metricsClient";
@@ -160,47 +160,54 @@ export default function App() {
     }
   }, [state.fileName]);
 
+  /**
+   * The key this image's annotations live under — the BUILD's key, not the file
+   * name's. See `utils/annotationKey.ts` for the format and for the content
+   * hash that was refused.
+   *
+   * **A MEMOISED STRING, AND THE STRING IS WHY.** `SET_STRINGS` replaces
+   * `state.peFile` with a new object, so an effect depending on the PE itself
+   * runs a second time mid-load — the same trap `analyzedBufferRef` exists for
+   * one effect below. The derived key is a *value*: it recomputes when the
+   * object's identity changes and comes back equal, so neither effect below
+   * re-fires and neither the load nor the persist can race the string
+   * extraction.
+   */
+  const annotationStorageKey = useMemo(
+    () => (state.peFile ? annotationKey(state.peFile) : null),
+    [state.peFile],
+  );
+
   // Load persisted bookmarks + renames from localStorage
   useEffect(() => {
-    if (!state.fileName) return;
-    try {
-      const raw = localStorage.getItem(`peek-a-bin:${state.fileName}`);
-      if (raw) {
-        // localStorage is editable by the user and by any script on this origin,
-        // so the parsed blob is untrusted — validate before it reaches the reducer.
-        const data = validateAnnotations(JSON.parse(raw));
-        if (data) {
-          dispatch({
-            type: "LOAD_PERSISTED",
-            bookmarks: data.bookmarks,
-            renames: data.renames,
-            comments: data.comments,
-          });
-        } else {
-          console.warn("[peek-a-bin] ignoring malformed persisted annotations");
-        }
-      }
-    } catch {
-      /* ignore corrupt data */
-    }
-  }, [state.fileName]);
+    if (!annotationStorageKey || !state.fileName) return;
+    // Untrusted input: localStorage is editable by the user and by any script on
+    // this origin, so `loadAnnotations` validates before anything reaches the
+    // reducer. It also adopts a legacy bare-name record if that is all there is,
+    // and deliberately leaves the legacy key in place.
+    const read = loadAnnotations(localStorage, annotationStorageKey, state.fileName);
+    if (!read) return;
+    dispatch({
+      type: "LOAD_PERSISTED",
+      bookmarks: read.payload.bookmarks,
+      renames: read.payload.renames,
+      comments: read.payload.comments,
+    });
+  }, [annotationStorageKey, state.fileName]);
 
   // Persist bookmarks + renames to localStorage
   useEffect(() => {
-    if (!state.fileName) return;
-    try {
-      localStorage.setItem(
-        `peek-a-bin:${state.fileName}`,
-        JSON.stringify({
-          bookmarks: state.bookmarks,
-          renames: state.renames,
-          comments: state.comments,
-        }),
-      );
-    } catch {
-      /* quota exceeded */
-    }
-  }, [state.fileName, state.bookmarks, state.renames, state.comments]);
+    if (!annotationStorageKey || !state.fileName) return;
+    // `fileName` rides along in the VALUE rather than in the key: the recents
+    // list on the loader screen is a list of names and now has to read them back
+    // out of the records it scans (peek-a-bin-v3uh.5).
+    saveAnnotations(localStorage, annotationStorageKey, {
+      fileName: state.fileName,
+      bookmarks: state.bookmarks,
+      renames: state.renames,
+      comments: state.comments,
+    });
+  }, [annotationStorageKey, state.fileName, state.bookmarks, state.renames, state.comments]);
 
   /**
    * The image this analysis chain has already been started for.

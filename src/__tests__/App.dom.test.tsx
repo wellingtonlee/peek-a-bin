@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "../test/domSetup";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
@@ -14,6 +14,8 @@ import { tabId, tabPanelId } from "../components/tabIds";
 import { VIEW_TABS } from "../hooks/usePEFile";
 import { buildMinimalPE32, buildMinimalPE64 } from "../pe/__tests__/fixtures";
 import { IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_MEM_READ } from "../pe/constants";
+import { parsePE } from "../pe/parser";
+import { annotationKey } from "../utils/annotationKey";
 // The far end of the wire, imported so the architecture refusal a test sees is
 // the PRODUCTION one. `dispatch` is the RPC switch `disasm.worker.ts` wraps, and
 // it is extracted precisely so a test can be the worker; hand-stubbing
@@ -1279,5 +1281,236 @@ describe("a throw in a dialog is dismissible and does not kill it for the sessio
       ).toBeTruthy();
     });
     expect(screen.queryAllByRole("alert")).toEqual([]);
+  });
+});
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ANNOTATION IDENTITY — the one place in this app where a user silently LOST
+ * work.
+ *
+ * Annotations were stored at `peek-a-bin:${fileName}`, with nothing else in the
+ * key. So dropping `v1/setup.exe`, renaming forty functions and then dropping
+ * `v2/setup.exe` handed v1's renames to v2's *addresses*, and v2's first save
+ * overwrote v1's record permanently. The mirror case was quieter and just as
+ * bad: renaming a file on disk lost every annotation it had.
+ *
+ * `utils/annotationKey.ts` carries the rule and its own node suite covers the
+ * pure halves. What is asserted HERE, and can only be asserted here, is that
+ * `App`'s two effects are wired to it: that the store the app actually writes is
+ * keyed on the build, that the migration fires through the real load effect, and
+ * that a second build of the same name does not disturb the first.
+ *
+ * The observable is `Sidebar`'s bookmarks panel, which renders `Bookmarks (N)`
+ * and each label whenever `state.bookmarks` is non-empty — reached by
+ * `resourceOnlyPE`, since it needs no disassembly.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+describe("annotations are keyed on the build, not on the file name", () => {
+  /** A record as the persist effect writes one. */
+  function record(fileName: string, label: string) {
+    return JSON.stringify({
+      fileName,
+      bookmarks: [{ address: 0x140001000, label }],
+      renames: {},
+      comments: {},
+    });
+  }
+
+  /**
+   * The bookmarks panel's heading text, or null when the panel is absent.
+   *
+   * `Sidebar` renders it only while `state.bookmarks` is non-empty, so its
+   * absence is the assertion for "this build has no annotations". The caret
+   * glyph shares the heading's button, hence the regex rather than an equality.
+   */
+  function bookmarkHeading(): string | null {
+    const el = screen.queryByText(/Bookmarks \(\d+\)/);
+    return el ? (el.textContent ?? "") : null;
+  }
+
+  /**
+   * Hand a buffer to App through the DROP handler.
+   *
+   * `openFile` above goes through the browse input, and `userEvent.upload`
+   * enforces the input's `accept=".exe,.dll,.sys,.ocx"` — so a file named
+   * `font-size`, which is the whole point of the collision case below, never
+   * reaches `handleFile` that way. A real drop has no such filter, and this is
+   * also the only place in this file that exercises `onDrop` at all.
+   */
+  function dropFile(buffer: ArrayBuffer, name: string) {
+    const zone = screen.getByLabelText(/drop a pe file here/i);
+    fireEvent.drop(zone, {
+      dataTransfer: { files: [new File([buffer], name, { type: "application/octet-stream" })] },
+    });
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("survives a REMOUNT: what the app wrote is what the next session reads", async () => {
+    const buffer = buildMinimalPE64({ timeDateStamp: 0x41414141 });
+    const key = annotationKey(parsePE(buffer));
+
+    // Seeded under the build key, which is what the app itself writes. The read
+    // half goes through the real load effect.
+    localStorage.setItem(key, record("setup.exe", "start_here"));
+
+    const first = render(<App />);
+    await openFile(buffer, "setup.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("start_here")).toBeTruthy();
+
+    // THE PERSIST EFFECT WRITES `fileName` INTO THE RECORD, and this is the only
+    // row that asserts the APP does so: `FileLoader.dom.test.tsx` seeds its own
+    // records, so it would stay green over a persist path that omitted the name
+    // and left the recents list with nothing to display (measured — that control
+    // reddened this row alone).
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(key) as string).fileName).toBe("setup.exe");
+    });
+    first.unmount();
+
+    // A fresh tree, and the record the first session left behind. The persist
+    // effect runs on load, so this also asserts it did not empty its own key.
+    render(<App />);
+    await openFile(buffer, "setup.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("start_here")).toBeTruthy();
+  });
+
+  it("survives a RENAME of the file, which the old key could not", async () => {
+    const buffer = buildMinimalPE64({ timeDateStamp: 0x42424242 });
+    localStorage.setItem(annotationKey(parsePE(buffer)), record("setup.exe", "renamed_ok"));
+
+    render(<App />);
+    // Same bytes, a name that appears nowhere in the store.
+    await openFile(buffer, "setup_v1_final.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("renamed_ok")).toBeTruthy();
+  });
+
+  it("MIGRATES a legacy bare-name record, and leaves the legacy key alone", async () => {
+    const buffer = buildMinimalPE64({ timeDateStamp: 0x43434343 });
+    const key = annotationKey(parsePE(buffer));
+    const legacy = record("setup.exe", "from_v0");
+    localStorage.setItem("peek-a-bin:setup.exe", legacy);
+
+    const first = render(<App />);
+    await openFile(buffer, "setup.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("from_v0")).toBeTruthy();
+
+    // Written forward under the build key…
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem(key) as string);
+      expect(stored.bookmarks).toEqual([{ address: 0x140001000, label: "from_v0" }]);
+      expect(stored.fileName).toBe("setup.exe");
+    });
+    // …and the legacy key is UNTOUCHED, byte for byte. Non-destructive on
+    // purpose: a user who reverts to an older build of the tool must still find
+    // their work, and a prefix-scanning deleter on the load path is the foot-gun
+    // this repo already refuses for `peek-a-bin:report:`.
+    expect(localStorage.getItem("peek-a-bin:setup.exe")).toBe(legacy);
+    first.unmount();
+
+    // With the legacy key gone the record can only come from the build key —
+    // which is what makes the previous assertion a claim about the migration
+    // rather than about the legacy read running twice.
+    localStorage.removeItem("peek-a-bin:setup.exe");
+    render(<App />);
+    await openFile(buffer, "setup.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("from_v0")).toBeTruthy();
+  });
+
+  it("does NOT migrate when the build key already holds a record", async () => {
+    const buffer = buildMinimalPE64({ timeDateStamp: 0x44444444 });
+    const key = annotationKey(parsePE(buffer));
+    localStorage.setItem(key, record("setup.exe", "current_wins"));
+    localStorage.setItem("peek-a-bin:setup.exe", record("setup.exe", "stale_legacy"));
+
+    render(<App />);
+    await openFile(buffer, "setup.exe");
+    await waitFor(() => {
+      expect(bookmarkHeading()).toMatch(/Bookmarks \(1\)/);
+    });
+    expect(screen.getByText("current_wins")).toBeTruthy();
+    expect(screen.queryByText("stale_legacy")).toBeNull();
+  });
+
+  it("TWO SAME-NAMED BUILDS DO NOT CLOBBER EACH OTHER — the defect itself", async () => {
+    // Same name, same size, different `timeDateStamp`: two builds of one
+    // binary, which is the most ordinary comparison workflow there is.
+    const v1 = buildMinimalPE64({ timeDateStamp: 1 });
+    const v2 = buildMinimalPE64({ timeDateStamp: 2 });
+    expect(v1.byteLength).toBe(v2.byteLength);
+    const k1 = annotationKey(parsePE(v1));
+    const k2 = annotationKey(parsePE(v2));
+    expect(k1).not.toBe(k2);
+
+    localStorage.setItem(k1, record("setup.exe", "v1_only"));
+
+    const first = render(<App />);
+    await openFile(v1, "setup.exe");
+    await waitFor(() => {
+      expect(screen.getByText("v1_only")).toBeTruthy();
+    });
+    first.unmount();
+
+    // v2, under the same name. It must see NONE of v1's work…
+    const second = render(<App />);
+    await openFile(v2, "setup.exe");
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
+    });
+    expect(screen.queryByText("v1_only")).toBeNull();
+    expect(bookmarkHeading()).toBeNull();
+    second.unmount();
+
+    // …and, the half that used to be permanent, v2's own save must not have
+    // destroyed v1's record. Under the old key it had, by now, been gone.
+    expect(JSON.parse(localStorage.getItem(k1) as string).bookmarks).toEqual([
+      { address: 0x140001000, label: "v1_only" },
+    ]);
+    render(<App />);
+    await openFile(v1, "setup.exe");
+    await waitFor(() => {
+      expect(screen.getByText("v1_only")).toBeTruthy();
+    });
+  });
+
+  it("a file NAMED like a setting cannot write over that setting", async () => {
+    // The flat-namespace half: `peek-a-bin:font-size` was both a real setting
+    // and the annotation key of a file called `font-size`.
+    localStorage.setItem("peek-a-bin:font-size", "13");
+    const buffer = buildMinimalPE64({ timeDateStamp: 0x45454545 });
+
+    render(<App />);
+    dropFile(buffer, "font-size");
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
+    });
+    // The persist effect has run by now — it runs on the load itself — so if the
+    // key were still the bare name this would be a JSON blob.
+    await waitFor(() => {
+      expect(localStorage.getItem(annotationKey(parsePE(buffer)))).not.toBeNull();
+    });
+    expect(localStorage.getItem("peek-a-bin:font-size")).toBe("13");
   });
 });

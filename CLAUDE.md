@@ -598,6 +598,26 @@ is orphaned and deliberately unmigrated** — the AI report wrote it, the featur
 that `peek-a-bin:report:` stays a prefix of nothing else) to reclaim a few KB the user can clear
 from devtools.
 
+**ANNOTATIONS ARE KEYED ON THE BUILD, NOT ON THE FILE NAME, AND `utils/annotationKey.ts` IS THE ONE
+DECLARATION OF BOTH THAT KEY AND ITS MIGRATION.** `peek-a-bin:annotations:<size>-<timeDateStamp, 8
+hex>[-<CodeView PDB GUID>]`, derived by `annotationKey(pe)`. It fixed **the only place in this app
+where a user silently lost work**: the key had been `peek-a-bin:${fileName}` with nothing else in
+it, so two builds of one binary under one name shared a record — v1's renames landed on v2's
+*addresses*, and v2's first save destroyed v1's permanently — while the same build renamed on disk
+lost every annotation. It was also a flat namespace shared with ~18 settings keys, so a file
+*named* `font-size` wrote over a setting. `fileName` moved **into the stored value**
+(`AnnotationRecord`) because the recents list is a list of names and now reads them back out of a
+prefix scan; `FileLoader`'s four-name `KNOWN_LS_KEYS` deny-list is deleted, and it was **inert**
+(the annotation-count test after it was the real filter), so that is a simplification rather than a
+fix — its one visible cost is that a legacy record is no longer *listed* on the loader screen until
+the file is opened once, which adopts it. Migration is one-time, on load, and **leaves the legacy
+bare-name key exactly where it is** —
+intentionally orphaned on `:report:`'s precedent above, which also makes it idempotent. **The
+metrics-worker content hash was REFUSED**: it makes annotation load async, so a rename made while
+the digest is in flight is written under the wrong key or lost. `recentFiles.ts`'s IndexedDB
+`keyPath: "name"` is **still name-keyed** and is deliberately a separate bead — the harm there is
+cached bytes, recoverable by re-dropping the file (`peek-a-bin-v3uh.5`).
+
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for
 cross-component communication.
 

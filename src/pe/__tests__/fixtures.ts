@@ -280,6 +280,17 @@ export interface PEFixtureOptions {
   richHeader?: RichHeaderDef;
   /** Append a `WIN_CERTIFICATE` past the last section and point directory 4 at it. */
   certificate?: CertificateDef;
+  /**
+   * The COFF header's `TimeDateStamp`. Defaults to 0, which is what every
+   * builder wrote unconditionally before this option existed.
+   *
+   * It is an option because it is half of a build's IDENTITY: annotations are
+   * keyed on `size` + `timeDateStamp` (`utils/annotationKey.ts`), so "two builds
+   * of one binary" is a pair of fixtures differing in exactly this field and
+   * there was nothing to differ on. Note MSVC's `/Brepro` writes a hash of the
+   * content here rather than a time.
+   */
+  timeDateStamp?: number;
 }
 
 /**
@@ -1023,7 +1034,7 @@ export function buildMinimalPE32(opts: PEFixtureOptions = {}): ArrayBuffer {
   // --- COFF Header ---
   view.setUint16(coffOffset, machine, true);
   view.setUint16(coffOffset + 2, numSections, true);
-  view.setUint32(coffOffset + 4, 0, true); // timeDateStamp
+  view.setUint32(coffOffset + 4, opts.timeDateStamp ?? 0, true); // timeDateStamp
   view.setUint32(coffOffset + 8, 0, true); // pointerToSymbolTable
   view.setUint32(coffOffset + 12, 0, true); // numberOfSymbols
   view.setUint16(coffOffset + 16, optionalHeaderSize, true);
@@ -1150,7 +1161,7 @@ export function buildMinimalPE64(opts: PEFixtureOptions = {}): ArrayBuffer {
   // --- COFF Header ---
   view.setUint16(coffOffset, machine, true);
   view.setUint16(coffOffset + 2, numSections, true);
-  view.setUint32(coffOffset + 4, 0, true);
+  view.setUint32(coffOffset + 4, opts.timeDateStamp ?? 0, true); // timeDateStamp
   view.setUint32(coffOffset + 8, 0, true);
   view.setUint32(coffOffset + 12, 0, true);
   view.setUint16(coffOffset + 16, optionalHeaderSize, true);

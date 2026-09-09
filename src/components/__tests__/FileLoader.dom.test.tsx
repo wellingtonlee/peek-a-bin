@@ -13,6 +13,7 @@ vi.mock("../../utils/recentFiles", () => ({
   deleteRecentFile: vi.fn(async () => {}),
 }));
 
+import { annotationKeyFor } from "../../utils/annotationKey";
 import { getRecentFiles, loadRecentFile } from "../../utils/recentFiles";
 
 /**
@@ -309,9 +310,21 @@ describe("FileLoader recent analyses", () => {
   });
 
   it("offers an annotations-only entry but will not load it", async () => {
+    // A BUILD-KEYED record, and the name comes out of the VALUE. Annotations are
+    // keyed on the image rather than on the file name (`utils/annotationKey.ts`),
+    // so this scan finds records by prefix and reads `fileName` back out of each
+    // one — which is why the record carries it at all (peek-a-bin-v3uh.5).
     localStorage.setItem(
-      "peek-a-bin:ghost.exe",
-      JSON.stringify({ bookmarks: [1, 2], renames: { 3: "x" }, comments: {} }),
+      annotationKeyFor({ size: 4096, timeDateStamp: 0x41414141 }),
+      JSON.stringify({
+        fileName: "ghost.exe",
+        bookmarks: [
+          { address: 0x1000, label: "a" },
+          { address: 0x2000, label: "b" },
+        ],
+        renames: { 3: "x" },
+        comments: {},
+      }),
     );
     renderLoader();
     const name = await screen.findByText("ghost.exe");
@@ -319,6 +332,42 @@ describe("FileLoader recent analyses", () => {
     // advertised, which is the reason the row exists at all.
     expect(screen.getByText("2 bookmarks, 1 rename")).toBeTruthy();
     expect((name.closest("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("no longer lists a LEGACY bare-name record, which is the documented cost", async () => {
+    // The other half of deleting `KNOWN_LS_KEYS`: the scan is the
+    // `peek-a-bin:annotations:` namespace only, so it cannot mistake a settings
+    // key for a file — and cannot see a pre-migration record either. The DATA is
+    // not lost (opening that file adopts it, non-destructively), but the row is
+    // gone until then. Deciding which bare `peek-a-bin:<x>` keys are files is
+    // exactly the deny-list this change exists to remove.
+    localStorage.setItem(
+      "peek-a-bin:ghost.exe",
+      JSON.stringify({ bookmarks: [{ address: 1, label: "a" }], renames: {}, comments: {} }),
+    );
+    renderLoader();
+    await waitFor(() => expect(vi.mocked(getRecentFiles)).toHaveBeenCalled());
+    expect(screen.queryByText("ghost.exe")).toBeNull();
+  });
+
+  it("ignores a settings key whose value could not be a record", async () => {
+    // The liveness half of the row above: with the prefix test in place these
+    // are skipped for a structural reason rather than by a four-name list, and
+    // the list that used to name the first four of them is gone.
+    for (const [k, v] of [
+      ["peek-a-bin:sidebar-width", "240"],
+      ["peek-a-bin:sections-open", "true"],
+      ["peek-a-bin:graph-overview-open", "false"],
+      ["peek-a-bin:callers-open", "true"],
+      ["peek-a-bin:font-size", "13"],
+    ]) {
+      localStorage.setItem(k, v);
+    }
+    renderLoader();
+    await waitFor(() => expect(vi.mocked(getRecentFiles)).toHaveBeenCalled());
+    // The heading is absent because the list is empty — the section is
+    // conditional on `recentFiles.length > 0`.
+    expect(screen.queryByText("Recent analyses")).toBeNull();
   });
 });
 

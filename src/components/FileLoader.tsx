@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnalysisPhase } from "../hooks/usePEFile";
+import { listAnnotationRecords, removeAnnotationsFor } from "../utils/annotationKey";
 import {
   deleteRecentFile,
   getRecentFiles as getRecentFilesFromIDB,
@@ -48,13 +49,6 @@ const ANALYSIS_STEPS = [
   { label: "Building xrefs", phases: ["building-xrefs"] },
 ] as const;
 
-const KNOWN_LS_KEYS = new Set([
-  "sidebar-width",
-  "sections-open",
-  "graph-overview-open",
-  "callers-open",
-]);
-
 function getStepStatus(
   stepIndex: number,
   analysisPhase: AnalysisPhase,
@@ -72,23 +66,40 @@ function getStepStatus(
   return stepIndex < activeStepIndex ? "done" : "pending";
 }
 
-function getLocalStorageAnnotations(name: string): {
+interface AnnotationCounts {
   bookmarks: number;
   renames: number;
   comments: number;
-} {
-  try {
-    const raw = localStorage.getItem(`peek-a-bin:${name}`);
-    if (!raw) return { bookmarks: 0, renames: 0, comments: 0 };
-    const data = JSON.parse(raw);
-    return {
-      bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks.length : 0,
-      renames: data.renames ? Object.keys(data.renames).length : 0,
-      comments: data.comments ? Object.keys(data.comments).length : 0,
-    };
-  } catch {
-    return { bookmarks: 0, renames: 0, comments: 0 };
+}
+
+const NO_ANNOTATIONS: AnnotationCounts = { bookmarks: 0, renames: 0, comments: 0 };
+
+/**
+ * Annotation counts per FILE NAME, folded out of the build-keyed records.
+ *
+ * Annotations are keyed on the build (`utils/annotationKey.ts`), so this map is
+ * a *display* fold and not an identity: it reads the name back out of each
+ * record's value. Where two builds share one name — the case that keying on the
+ * build exists to keep working — the richer record's counts are the ones shown,
+ * because this list is still name-keyed on the other side too
+ * (`recentFiles.ts` uses `keyPath: "name"`, and changing that is its own bead).
+ * Showing the richer of the two is a choice about a summary line; nothing here
+ * decides which record a load reads.
+ */
+function annotationCountsByName(): Map<string, AnnotationCounts> {
+  const byName = new Map<string, AnnotationCounts>();
+  for (const rec of listAnnotationRecords(localStorage)) {
+    if (rec.fileName === null) continue;
+    const total = rec.bookmarks + rec.renames + rec.comments;
+    const seen = byName.get(rec.fileName);
+    if (seen && seen.bookmarks + seen.renames + seen.comments >= total) continue;
+    byName.set(rec.fileName, {
+      bookmarks: rec.bookmarks,
+      renames: rec.renames,
+      comments: rec.comments,
+    });
   }
+  return byName;
 }
 
 function formatFileSize(bytes: number): string {
@@ -125,15 +136,17 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
     (async () => {
       const idbFiles = await getRecentFilesFromIDB();
 
-      // Also find localStorage-only entries (files with annotations but no buffer)
+      // ONE PREFIX SCAN, WHERE THIS USED TO BE A DENY-LIST. Annotation records
+      // live under `peek-a-bin:annotations:` now, so telling them apart from the
+      // ~18 settings keys sharing the `peek-a-bin:` namespace is a prefix test
+      // rather than four hand-written names (peek-a-bin-v3uh.5).
+      const annotations = annotationCountsByName();
+
+      // Also find annotation-only entries (files with annotations but no buffer)
       const idbNames = new Set(idbFiles.map((f) => f.name));
       const lsOnlyFiles: RecentFileEntry[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (!key?.startsWith("peek-a-bin:")) continue;
-        const name = key.slice("peek-a-bin:".length);
-        if (KNOWN_LS_KEYS.has(name) || idbNames.has(name)) continue;
-        const ann = getLocalStorageAnnotations(name);
+      for (const [name, ann] of annotations) {
+        if (idbNames.has(name)) continue;
         if (ann.bookmarks + ann.renames + ann.comments > 0) {
           lsOnlyFiles.push({ name, size: 0, lastOpened: 0 });
         }
@@ -141,13 +154,17 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
 
       if (cancelled) return;
 
-      const combined: RecentFile[] = idbFiles.map((f) => {
-        const ann = getLocalStorageAnnotations(f.name);
-        return { ...f, hasBuffer: true, ...ann };
-      });
+      const combined: RecentFile[] = idbFiles.map((f) => ({
+        ...f,
+        hasBuffer: true,
+        ...(annotations.get(f.name) ?? NO_ANNOTATIONS),
+      }));
       for (const f of lsOnlyFiles) {
-        const ann = getLocalStorageAnnotations(f.name);
-        combined.push({ ...f, hasBuffer: false, ...ann });
+        combined.push({
+          ...f,
+          hasBuffer: false,
+          ...(annotations.get(f.name) ?? NO_ANNOTATIONS),
+        });
       }
       // Sort by lastOpened (most recent first), then by annotation count for ls-only
       combined.sort(
@@ -194,9 +211,10 @@ export function FileLoader({ onFile, loading, error, analysisPhase, fileName }: 
   const handleRemoveRecent = useCallback(async (e: React.MouseEvent, name: string) => {
     e.stopPropagation();
     await deleteRecentFile(name);
-    try {
-      localStorage.removeItem(`peek-a-bin:${name}`);
-    } catch {}
+    // Every build-keyed record saved under this name, plus the legacy bare-name
+    // key. A user-initiated delete, which is the one place deleting is right —
+    // the LOAD path deliberately never deletes (`loadAnnotations`).
+    removeAnnotationsFor(localStorage, name);
     setRecentFiles((prev) => prev.filter((f) => f.name !== name));
   }, []);
 
