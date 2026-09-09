@@ -664,3 +664,407 @@ describe("Sidebar width handle", () => {
     expect(aside(renderSidebar().container).style.width).toBe("224px");
   });
 });
+
+/**
+ * THE ANNOTATIONS BLOCK — the user's own comments and renames as a list.
+ *
+ * Before peek-a-bin-v3uh.11 a comment appeared only inline at its own address
+ * and a rename only on the function it renamed, so "what have I annotated?" and
+ * "where did I write TODO?" had no answer anywhere in the app. The disassembly
+ * search does match comment text, but only across the rows currently rendered,
+ * so it cannot reach a comment in `.data` from `.text`.
+ *
+ * WHAT THESE SUITES ASSERT, AND WHAT THEY CANNOT. Rows, dispatches, edit
+ * mechanics and the STRINGS React wrote into `className`/`style` are all real
+ * assertions. THE BOUND IS NOT: jsdom performs no layout, so nothing here has
+ * seen the block stop growing or the Functions header hold still. Deleting
+ * `maxHeight`, deleting the body's `overflow-auto`, or deleting the function
+ * list's `min-h-[120px]` floor each leave every assertion in this file green —
+ * the same trio already recorded as inert at peek-a-bin-llrq.6, and left inert
+ * rather than tuned away. "The Functions header holds still" is a BROWSER claim
+ * with no instrument in this repo; it belongs to peek-a-bin-v2u.
+ */
+
+const CA = IMAGE_BASE + 0x1000;
+const CB = IMAGE_BASE + 0x2000;
+const HEX_A = `0x${CA.toString(16).toUpperCase()}`;
+const HEX_B = `0x${CB.toString(16).toUpperCase()}`;
+
+const annotationsBox = (c: HTMLElement) =>
+  c.querySelector('[data-panel="annotations"]') as HTMLElement | null;
+const annotationsBody = (c: HTMLElement) =>
+  c.querySelector('[data-panel="annotations-body"]') as HTMLElement | null;
+
+function renderAnnotated(over: Partial<AppState> = {}) {
+  return renderSidebar({
+    functions: FUNCS,
+    comments: { [CA]: "check the bounds here" },
+    renames: { [CB]: "parse_header" },
+    ...over,
+  });
+}
+
+describe("Sidebar annotations list", () => {
+  it("lists every comment and every rename with its address", () => {
+    // THE LIVENESS HALF. Every absence assertion below is worthless if the
+    // block never mounts, so this one names all four strings.
+    const { container } = renderAnnotated();
+    expect(annotationsBox(container)).not.toBeNull();
+    expect(screen.getByText("Annotations (2)")).toBeTruthy();
+    expect(screen.getByText("Comments (1)")).toBeTruthy();
+    expect(screen.getByText("Renames (1)")).toBeTruthy();
+    expect(screen.getByText("check the bounds here")).toBeTruthy();
+    expect(screen.getByText("parse_header")).toBeTruthy();
+    expect(screen.getByText(HEX_A)).toBeTruthy();
+    expect(screen.getByText(HEX_B)).toBeTruthy();
+  });
+
+  it("is absent when both maps are empty", () => {
+    const { container } = renderSidebar({ functions: FUNCS, comments: {}, renames: {} });
+    expect(annotationsBox(container)).toBeNull();
+    expect(screen.queryByText(/^Annotations/)).toBeNull();
+  });
+
+  it("renders with only comments, and with only renames", () => {
+    // The guard is on the SUM, and each sub-list has its own guard beneath it —
+    // so a file with one kind and not the other must show that kind and no
+    // empty heading for the other.
+    const { container, rerender } = renderAnnotated({ renames: {} });
+    expect(screen.getByText("Annotations (1)")).toBeTruthy();
+    expect(screen.getByText("Comments (1)")).toBeTruthy();
+    expect(screen.queryByText(/^Renames/)).toBeNull();
+
+    rerender({ functions: FUNCS, comments: {}, renames: { [CB]: "parse_header" } });
+    expect(annotationsBox(container)).not.toBeNull();
+    expect(screen.getByText("Annotations (1)")).toBeTruthy();
+    expect(screen.queryByText(/^Comments/)).toBeNull();
+    expect(screen.getByText("Renames (1)")).toBeTruthy();
+  });
+
+  it("orders each sub-list by address, not by the order the user annotated in", () => {
+    // NOT decoration. `Object.entries` returns integer-like keys in ascending
+    // numeric order only for array indices; an x64 image base puts every
+    // address here past 2^32 - 1, so without the sort these come back in
+    // INSERTION order. The fixture is deliberately inserted high-first, which
+    // is exactly what a real session produces when you annotate a callee first.
+    const { container } = renderSidebar({
+      functions: FUNCS,
+      comments: { [CB]: "second", [CA]: "first" },
+      renames: {},
+    });
+    const rows = [...(annotationsBody(container) as HTMLElement).querySelectorAll("li")];
+    // The trailing glyph is the row's own delete affordance.
+    expect(rows.map((r) => r.textContent)).toEqual([`${HEX_A}first✕`, `${HEX_B}second✕`]);
+  });
+});
+
+describe("Sidebar annotations navigation", () => {
+  it("jumps to the annotated address and switches to the disassembly tab", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.click(screen.getByText("check the bounds here"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_ADDRESS", address: CA });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: "disassembly" });
+  });
+
+  it("jumps from a rename row too, to the renamed function's own address", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.click(screen.getByText("parse_header"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_ADDRESS", address: CB });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: "disassembly" });
+  });
+});
+
+describe("Sidebar annotations editing", () => {
+  const editor = (name: "Edit comment" | "Edit name") =>
+    screen.getByRole("textbox", { name }) as HTMLInputElement;
+
+  it("opens an editor on double-click, focused, with the current text", async () => {
+    const { user } = renderAnnotated();
+    await user.dblClick(screen.getByText("check the bounds here"));
+    const input = editor("Edit comment");
+    expect(input.value).toBe("check the bounds here");
+    // `focusOnMount`, asserted rather than assumed: an editor the caret is not
+    // in is an editor the user has to click again.
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("commits a comment on Enter", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("check the bounds here"));
+    await user.clear(editor("Edit comment"));
+    await user.type(editor("Edit comment"), "TODO: revisit{Enter}");
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SET_COMMENT",
+      address: CA,
+      text: "TODO: revisit",
+    });
+  });
+
+  it("commits a rename on Enter", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("parse_header"));
+    await user.clear(editor("Edit name"));
+    await user.type(editor("Edit name"), "parse_dos_header{Enter}");
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "RENAME_FUNCTION",
+      address: CB,
+      name: "parse_dos_header",
+    });
+  });
+
+  it("abandons on Escape, dispatching nothing", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("check the bounds here"));
+    await user.clear(editor("Edit comment"));
+    await user.type(editor("Edit comment"), "half a thought{Escape}");
+    // WHAT THIS DOES AND DOES NOT ESTABLISH. Escape closes the editor and
+    // dispatches nothing — that half is real, and removing the Escape branch
+    // reddens this row. It is NOT evidence that Escape beats a blur fired by
+    // unmounting the focused input: jsdom fires no blur on removal (probed,
+    // not assumed), so the handler is simply gone by then. Whether a browser
+    // agrees is untested here, and the Bookmarks editor above has had exactly
+    // the same untested corner since long before this block existed.
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "SET_COMMENT" }));
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "DELETE_COMMENT" }));
+    expect(screen.getByText("check the bounds here")).toBeTruthy();
+  });
+
+  it("commits on blur, which is the path a click elsewhere takes", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("parse_header"));
+    await user.clear(editor("Edit name"));
+    await user.type(editor("Edit name"), "renamed_by_blur");
+    fireEvent.blur(editor("Edit name"));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "RENAME_FUNCTION",
+      address: CB,
+      name: "renamed_by_blur",
+    });
+  });
+
+  it("reads an emptied field as a DELETE, never as an empty annotation", async () => {
+    // A comment set to "" would render as a row with no text and a rename to ""
+    // as a function called nothing. One declaration, `commitAnnotation`, so the
+    // Enter and blur paths cannot come to disagree about it.
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("check the bounds here"));
+    await user.clear(editor("Edit comment"));
+    await user.type(editor("Edit comment"), "{Enter}");
+    expect(dispatch).toHaveBeenCalledWith({ type: "DELETE_COMMENT", address: CA });
+
+    await user.dblClick(screen.getByText("parse_header"));
+    await user.clear(editor("Edit name"));
+    fireEvent.blur(editor("Edit name"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "CLEAR_RENAME", address: CB });
+  });
+
+  it("does not navigate while the caret is being placed in the editor", async () => {
+    // THE `stopPropagation` CONTROL'S TARGET. The input is nested inside the
+    // row's own navigating <button> (the Bookmarks shape), so without the
+    // handler on the input the click that puts the caret in the field also
+    // bubbles to the button and jumps away mid-edit.
+    const { dispatch, user } = renderAnnotated();
+    await user.dblClick(screen.getByText("check the bounds here"));
+    dispatch.mockClear();
+    await user.click(editor("Edit comment"));
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Sidebar annotations context menu", () => {
+  const openMenu = (text: string) => {
+    const row = screen.getByText(text).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+  };
+
+  it("deletes a comment", async () => {
+    const { dispatch, user } = renderAnnotated();
+    openMenu("check the bounds here");
+    await user.click(screen.getByText("Delete comment"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "DELETE_COMMENT", address: CA });
+    expect(screen.queryByText("Delete comment")).toBeNull();
+  });
+
+  it("clears a rename", async () => {
+    const { dispatch, user } = renderAnnotated();
+    openMenu("parse_header");
+    await user.click(screen.getByText("Clear rename"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "CLEAR_RENAME", address: CB });
+  });
+
+  it("opens the editor from the menu, on the row the menu was opened over", async () => {
+    const { user } = renderAnnotated();
+    openMenu("parse_header");
+    await user.click(screen.getByText("Rename"));
+    expect((screen.getByRole("textbox", { name: "Edit name" }) as HTMLInputElement).value).toBe(
+      "parse_header",
+    );
+  });
+
+  it("names the two kinds differently, so the menu says what it will do", () => {
+    renderAnnotated();
+    openMenu("check the bounds here");
+    expect(screen.getByText("Edit comment")).toBeTruthy();
+    expect(screen.getByText("Delete comment")).toBeTruthy();
+    expect(screen.queryByText("Clear rename")).toBeNull();
+  });
+
+  it("dismisses on a click outside", async () => {
+    const { user } = renderAnnotated();
+    openMenu("check the bounds here");
+    expect(screen.getByText("Delete comment")).toBeTruthy();
+    await user.click(document.body);
+    expect(screen.queryByText("Delete comment")).toBeNull();
+  });
+});
+
+describe("Sidebar annotations row delete affordance", () => {
+  it("removes a comment and clears a rename without navigating", async () => {
+    const { dispatch, user } = renderAnnotated();
+    await user.click(screen.getByTitle(`Delete comment at ${HEX_A}`));
+    expect(dispatch).toHaveBeenCalledWith({ type: "DELETE_COMMENT", address: CA });
+    // The ✕ sits inside the row but outside the navigating button, and stops
+    // propagation anyway; deleting must not also jump there.
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "SET_ADDRESS", address: CA });
+
+    dispatch.mockClear();
+    await user.click(screen.getByTitle(`Clear rename at ${HEX_B}`));
+    expect(dispatch).toHaveBeenCalledWith({ type: "CLEAR_RENAME", address: CB });
+  });
+});
+
+describe("Sidebar annotations bound", () => {
+  /**
+   * INLINE STYLE AND CLASS-NAME STRINGS ONLY. See this section's header comment:
+   * every control on the bound itself is inert under jsdom (peek-a-bin-llrq.6).
+   * What these DO discriminate against is the bound being deleted from the
+   * source, which is the regression that would reach a browser.
+   */
+  it("carries a pixel cap and a percentage ceiling, and no fixed height", () => {
+    const { container } = renderAnnotated();
+    const box = annotationsBox(container) as HTMLElement;
+    expect(box.style.maxHeight).toBe("min(180px, 30%)");
+    // A CEILING, not a height: two comments must reserve two rows, not 180px.
+    expect(box.style.height).toBe("");
+  });
+
+  it("stays capped whether there are two annotations or three hundred", () => {
+    // Written as the literal rather than `expect(a).toBe(b)`, which is inert —
+    // delete the cap and both sides are "" and still equal.
+    const many: Record<number, string> = {};
+    for (let i = 0; i < 300; i++) many[IMAGE_BASE + 0x30000 + i * 0x10] = `note ${i}`;
+    const { container } = renderAnnotated({ comments: many, renames: {} });
+    expect(annotationsBox(container)?.style.maxHeight).toBe("min(180px, 30%)");
+    // The liveness half: the cap claim is only worth having over a block that
+    // really did render three hundred rows.
+    expect(container.querySelectorAll('[data-panel="annotations-body"] li')).toHaveLength(300);
+  });
+
+  it("scrolls inside its own body rather than growing the column", () => {
+    const { container } = renderAnnotated();
+    expect(annotationsBody(container)?.className).toContain("overflow-auto");
+  });
+
+  it("refuses `shrink-0` on the wrapper", () => {
+    // NOT a style preference. CLAUDE.md: the bottom band may refuse to shrink
+    // because its only competitor is the whole disassembly view; a sidebar
+    // block competes with four content-sized siblings, and refusing would
+    // starve the one child that matters.
+    expect(annotationsBox(renderAnnotated().container)?.className).not.toContain("shrink-0");
+  });
+});
+
+describe("Sidebar annotations collapse", () => {
+  const KEY = "peek-a-bin:annotations-open";
+  beforeEach(() => localStorage.removeItem(KEY));
+  afterEach(() => localStorage.removeItem(KEY));
+
+  it("hides the body and drops the cap once collapsed", async () => {
+    const { container, user } = renderAnnotated();
+    expect(annotationsBody(container)).not.toBeNull();
+    await user.click(screen.getByText("Annotations (2)"));
+    expect(annotationsBody(container)).toBeNull();
+    // A collapsed block still holding a ceiling over one header row is dead
+    // weight in the style map — the Call Graph's rule, one panel over.
+    expect(annotationsBox(container)?.style.maxHeight).toBe("");
+    expect(localStorage.getItem(KEY)).toBe("false");
+  });
+
+  it("starts collapsed when the stored preference says so", async () => {
+    localStorage.setItem(KEY, "false");
+    const { container, user } = renderAnnotated();
+    expect(annotationsBody(container)).toBeNull();
+    // The count is still readable while collapsed, which is what makes the
+    // header worth leaving in place.
+    expect(screen.getByText("Annotations (2)")).toBeTruthy();
+    await user.click(screen.getByText("Annotations (2)"));
+    expect(annotationsBody(container)).not.toBeNull();
+    expect(localStorage.getItem(KEY)).toBe("true");
+  });
+});
+
+describe("Sidebar probe ambiguity", () => {
+  /**
+   * peek-a-bin-llrq.3, EXTENDED TO THE ANNOTATIONS BLOCK.
+   *
+   * The guard exists because `.flex-1.overflow-auto` used to name the function
+   * list only by coincidence of document order, and a relocation would have
+   * retargeted every probe using it at a container full of caller/callee
+   * buttons — silently, with the suite still green. The Annotations body is a
+   * THIRD scroller and it sits ABOVE the list, so it is exactly the case that
+   * guard was written for.
+   *
+   * It is answered by construction rather than by ordering: the body carries
+   * `overflow-auto` and deliberately NOT `flex-1`, because a content-sized
+   * wrapper has no spare height for a grow term to claim.
+   */
+  /**
+   * Both collapse preferences cleared first. Every collapsible block here reads
+   * localStorage at mount, `domSetup` does not clear storage between tests, and
+   * an earlier suite in this file collapses the Call Graph — so without this the
+   * liveness half below fails for a reason that has nothing to do with probes.
+   */
+  beforeEach(() => {
+    localStorage.removeItem("peek-a-bin:callers-open");
+    localStorage.removeItem("peek-a-bin:annotations-open");
+  });
+  afterEach(() => {
+    localStorage.removeItem("peek-a-bin:callers-open");
+    localStorage.removeItem("peek-a-bin:annotations-open");
+  });
+
+  it("leaves [data-panel=functions] the first .flex-1.overflow-auto with every block mounted", () => {
+    const { container } = renderSidebar({
+      functions: FUNCS3,
+      callGraph: GRAPH,
+      currentAddress: B,
+      bookmarks: [{ address: CA, label: "entry" }],
+      comments: { [CA]: "check the bounds here" },
+      renames: { [CB]: "parse_header" },
+    });
+    // THE LIVENESS HALF: all three scrollers, and both optional blocks, really
+    // are in this document. Without it the guard passes by not looking.
+    expect(annotationsBody(container)).not.toBeNull();
+    expect(container.querySelector('[data-panel="call-graph-body"]')).not.toBeNull();
+    expect(panels(container)).toEqual([
+      "sections",
+      "bookmarks",
+      "annotations",
+      "functions-header",
+      "functions",
+      "call-graph",
+      "footer",
+    ]);
+
+    const list = container.querySelector('[data-panel="functions"]');
+    expect(container.querySelector(".flex-1.overflow-auto")).toBe(list);
+  });
+
+  it("keeps the annotations body out of that selector on purpose, not by luck", () => {
+    const { container } = renderAnnotated();
+    const body = annotationsBody(container) as HTMLElement;
+    expect(body.className).toContain("overflow-auto");
+    // The half that makes the guard above hold however the column is reordered.
+    expect(body.className.split(/\s+/)).not.toContain("flex-1");
+  });
+});

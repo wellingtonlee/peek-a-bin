@@ -28,6 +28,41 @@ const CALLGRAPH_MAX_HEIGHT = 400;
 const CALLGRAPH_DEFAULT_HEIGHT = 160;
 
 /**
+ * The Annotations block's ceiling — a CEILING, never a height, and the two are
+ * different decisions.
+ *
+ * The Call Graph block below the list carries an inline `height` because it is
+ * user-resizable and persists what the user chose; this block is sized by its
+ * own content and simply refuses to grow past the cap, so a session with two
+ * comments reserves two rows rather than 180px of blank space (the "a collapsed
+ * section still reserving 160px" defect, one step milder).
+ *
+ * BOTH TERMS ARE NEEDED. The pixel cap is what stops a long annotation list from
+ * pushing the Functions header down — the whole reason this block is bounded at
+ * all — and the percentage is what stops the cap itself from doing so on a short
+ * window, where 180px is most of the column.
+ */
+const ANNOTATIONS_MAX_HEIGHT = "min(180px, 30%)";
+
+/** Which of the two annotation maps a row came out of. */
+type AnnotationKind = "comment" | "rename";
+
+/**
+ * The map's entries in ADDRESS order.
+ *
+ * The sort is not decoration: `Object.entries` returns integer-like keys in
+ * ascending numeric order only for array indices (< 2^32 - 1), and an x64 image
+ * base puts every address in these maps past that — so the keys fall back to
+ * INSERTION order, i.e. the order the user happened to annotate in. Sorting here
+ * is what makes the two sub-lists read like the listing they point into.
+ */
+function sortedAnnotations(map: Record<number, string>): [number, string][] {
+  return Object.entries(map)
+    .map(([k, v]) => [Number(k), v] as [number, string])
+    .sort((a, b) => a[0] - b[0]);
+}
+
+/**
  * Restore the Call Graph block's height, on {@link loadWidth}'s model.
  *
  * The range check is what stops a stored value from producing a block taller
@@ -88,6 +123,25 @@ export function Sidebar() {
     null,
   );
   const [bookmarksOpen, setBookmarksOpen] = useState(true);
+  const [annotationsOpen, setAnnotationsOpen] = useState(() => {
+    try {
+      return localStorage.getItem("peek-a-bin:annotations-open") !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [editingAnnotation, setEditingAnnotation] = useState<{
+    kind: AnnotationKind;
+    address: number;
+    value: string;
+  } | null>(null);
+  const [annCtxMenu, setAnnCtxMenu] = useState<{
+    x: number;
+    y: number;
+    kind: AnnotationKind;
+    address: number;
+    value: string;
+  } | null>(null);
   const [sectionsOpen, setSectionsOpen] = useState(() => {
     try {
       return localStorage.getItem("peek-a-bin:sections-open") !== "false";
@@ -113,6 +167,7 @@ export function Sidebar() {
   const graphOverview = useGraphOverview();
   const bmCtxMenuRef = useRef<HTMLDivElement>(null);
   const fnCtxMenuRef = useRef<HTMLDivElement>(null);
+  const annCtxMenuRef = useRef<HTMLDivElement>(null);
 
   // Dismiss bookmark context menu on click/Escape. Clicks inside the menu are
   // ignored by the hook's ref check instead of being stopped from propagating
@@ -132,6 +187,17 @@ export function Sidebar() {
     active: fnCtxMenu !== null,
     ref: fnCtxMenuRef,
     onDismiss: () => setFnCtxMenu(null),
+    event: "click",
+    target: "window",
+    dismissOnEscape: true,
+    dismissIfRefMissing: true,
+  });
+
+  // Dismiss annotation context menu on click/Escape, on the same terms.
+  useDismissOnOutsideClick({
+    active: annCtxMenu !== null,
+    ref: annCtxMenuRef,
+    onDismiss: () => setAnnCtxMenu(null),
     event: "click",
     target: "window",
     dismissOnEscape: true,
@@ -165,6 +231,11 @@ export function Sidebar() {
       localStorage.setItem("peek-a-bin:graph-overview-open", String(graphOverviewOpen));
     } catch {}
   }, [graphOverviewOpen]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("peek-a-bin:annotations-open", String(annotationsOpen));
+    } catch {}
+  }, [annotationsOpen]);
 
   // Drag resize logic
   const handleMouseDown = useCallback(
@@ -245,6 +316,54 @@ export function Sidebar() {
     for (const e of pe.exports) s.add(e.name);
     return s;
   }, [pe]);
+
+  const commentEntries = useMemo(() => sortedAnnotations(state.comments), [state.comments]);
+  const renameEntries = useMemo(() => sortedAnnotations(state.renames), [state.renames]);
+  const annotationCount = commentEntries.length + renameEntries.length;
+
+  const jumpToAddress = useCallback(
+    (address: number) => {
+      dispatch({ type: "SET_ADDRESS", address });
+      dispatch({ type: "SET_TAB", tab: "disassembly" });
+    },
+    [dispatch],
+  );
+
+  /**
+   * ONE declaration of what committing an edit means, read by Enter and by blur.
+   *
+   * The two paths must not come to disagree about an emptied field, which is a
+   * DELETE rather than an empty annotation: a comment set to "" would render as
+   * a row with no text and a rename to "" as a function called nothing. The
+   * function-list rename above spells the same rule inline; it is spelled once
+   * here because this block has two committing paths per kind rather than one.
+   */
+  const commitAnnotation = useCallback(
+    (edit: { kind: AnnotationKind; address: number; value: string }) => {
+      const val = edit.value.trim();
+      if (edit.kind === "comment") {
+        if (val) dispatch({ type: "SET_COMMENT", address: edit.address, text: val });
+        else dispatch({ type: "DELETE_COMMENT", address: edit.address });
+      } else if (val) {
+        dispatch({ type: "RENAME_FUNCTION", address: edit.address, name: val });
+      } else {
+        dispatch({ type: "CLEAR_RENAME", address: edit.address });
+      }
+      setEditingAnnotation(null);
+    },
+    [dispatch],
+  );
+
+  const deleteAnnotation = useCallback(
+    (kind: AnnotationKind, address: number) => {
+      dispatch(
+        kind === "comment"
+          ? { type: "DELETE_COMMENT", address }
+          : { type: "CLEAR_RENAME", address },
+      );
+    },
+    [dispatch],
+  );
 
   // Callers/callees derivation
   const { callers, callees } = useMemo(() => {
@@ -365,6 +484,78 @@ export function Sidebar() {
       </aside>
     );
   }
+
+  /**
+   * One annotation row, shared by both sub-lists.
+   *
+   * A plain function called as `annotationRow(...)` rather than a component
+   * used as `<AnnotationRow/>`: the two sub-lists differ only in a colour and a
+   * verb, and a second component would need every piece of edit state threaded
+   * through it as props. Nothing here is a hook, so the early returns above are
+   * not in its way.
+   */
+  const annotationRow = (kind: AnnotationKind, address: number, value: string) => {
+    const edit =
+      editingAnnotation && editingAnnotation.kind === kind && editingAnnotation.address === address
+        ? editingAnnotation
+        : null;
+    const hex = `0x${address.toString(16).toUpperCase()}`;
+    return (
+      <li
+        key={address}
+        className="flex items-center gap-1 group"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setAnnCtxMenu({ x: e.clientX, y: e.clientY, kind, address, value });
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => jumpToAddress(address)}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            setEditingAnnotation({ kind, address, value });
+          }}
+          className="flex-1 text-left px-1.5 py-0.5 rounded hover:bg-gray-800 truncate"
+          title={`${value} @ ${hex}`}
+        >
+          <span className="text-gray-500 mr-1">{hex}</span>
+          {edit ? (
+            <input
+              ref={focusOnMount}
+              aria-label={kind === "comment" ? "Edit comment" : "Edit name"}
+              className="bg-gray-800 border border-blue-500 rounded px-1 text-gray-200 text-[11px] outline-none w-24"
+              value={edit.value}
+              // WITHOUT THIS the click that puts the caret in the field also
+              // reaches the row button wrapping it and navigates away mid-edit.
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setEditingAnnotation({ ...edit, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitAnnotation(edit);
+                if (e.key === "Escape") setEditingAnnotation(null);
+                e.stopPropagation();
+              }}
+              onBlur={() => commitAnnotation(edit)}
+            />
+          ) : (
+            <span className={kind === "comment" ? "text-green-400" : "text-blue-400"}>{value}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            deleteAnnotation(kind, address);
+          }}
+          className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 px-0.5"
+          title={kind === "comment" ? `Delete comment at ${hex}` : `Clear rename at ${hex}`}
+        >
+          ✕
+        </button>
+      </li>
+    );
+  };
 
   return (
     <aside
@@ -537,6 +728,85 @@ export function Sidebar() {
               >
                 Delete
               </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ANNOTATIONS — the user's own comments and renames, which until now
+          appeared NOWHERE but inline at their own address, so after an hour of
+          work there was no answer to "what have I annotated?".
+
+          ABOVE THE LIST, AND BOUNDED, and those are two separate judgements.
+          peek-a-bin-llrq's rule is that nothing whose height follows the CURSOR
+          may sit above the function list; this block's height follows USER
+          EDITS, exactly like Bookmarks one row up, so a cursor move cannot
+          budge the Functions header and the placement is permitted. What is
+          NOT permitted is unbounded growth: a real session produces far more
+          comments than bookmarks, and every one of them would push the header
+          down — the same visible defect arriving by a slower route. Hence the
+          cap.
+
+          NO `shrink-0`, and that is the one place BottomPanelContainer must not
+          be copied: there the band competes only with the disassembly view, so
+          refusing to shrink costs nothing. Here it competes with four other
+          content-sized siblings and refusing would starve the one child that
+          matters.
+
+          THE BODY IS `overflow-auto` BUT DELIBERATELY NOT `flex-1`. It needs no
+          grow term — the wrapper is content-sized up to its cap, so there is
+          never spare height to fill — and leaving it off keeps
+          `[data-panel="functions"]` the FIRST `.flex-1.overflow-auto` in the
+          document as a property rather than a coincidence of ordering
+          (peek-a-bin-llrq.3). Shrinking works without it: an element whose
+          overflow is not `visible` has an automatic minimum size of zero
+          (CSS Flexbox 4.5). */}
+      {annotationCount > 0 && (
+        <div
+          data-panel="annotations"
+          className="flex flex-col overflow-hidden border-b border-gray-700"
+          // No cap at all when collapsed: there is nothing to scroll, and a
+          // ceiling over a single header row is dead weight in the style map.
+          style={annotationsOpen ? { maxHeight: ANNOTATIONS_MAX_HEIGHT } : undefined}
+        >
+          <button
+            type="button"
+            onClick={() => setAnnotationsOpen(!annotationsOpen)}
+            className="shrink-0 px-2 pt-2 flex items-center gap-1 text-gray-400 uppercase tracking-wider text-[10px] font-semibold w-full text-left"
+          >
+            <span className="text-[8px]">{annotationsOpen ? "▼" : "▶"}</span>
+            Annotations ({annotationCount})
+          </button>
+          {/* Padding on the header and on the scroller rather than on the
+              wrapper, or the scrollbar sits 8px inside the panel edge and the
+              bottom padding scrolls away — the Call Graph body's rule. */}
+          {annotationsOpen && (
+            <div
+              data-panel="annotations-body"
+              className="overflow-auto px-2 pb-2 mt-1.5 space-y-1.5"
+            >
+              {commentEntries.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">
+                    Comments ({commentEntries.length})
+                  </div>
+                  <ul className="space-y-0.5">
+                    {commentEntries.map(([address, text]) =>
+                      annotationRow("comment", address, text),
+                    )}
+                  </ul>
+                </div>
+              )}
+              {renameEntries.length > 0 && (
+                <div>
+                  <div className="text-gray-500 text-[10px] mb-0.5">
+                    Renames ({renameEntries.length})
+                  </div>
+                  <ul className="space-y-0.5">
+                    {renameEntries.map(([address, name]) => annotationRow("rename", address, name))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -830,6 +1100,45 @@ export function Sidebar() {
             Graph Overview
           </button>
           {graphOverviewOpen && <GraphOverviewCanvas data={graphOverview} />}
+        </div>
+      )}
+
+      {/* ANNOTATION CONTEXT MENU — `fixed` and mounted at the aside's level,
+          not `absolute` inside the block the way the bookmark menu is. The
+          Annotations block is `overflow-hidden` with a scrolling body, so a
+          menu positioned inside it would be clipped by its own container the
+          moment it opened near the bottom edge. Same shape as the function
+          menu below, for the same reason. */}
+      {annCtxMenu && (
+        <div
+          ref={annCtxMenuRef}
+          className="fixed z-50 bg-gray-800 border border-gray-600 rounded shadow-lg py-1 text-xs"
+          style={{ left: annCtxMenu.x, top: annCtxMenu.y }}
+        >
+          <button
+            type="button"
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-gray-200"
+            onClick={() => {
+              setEditingAnnotation({
+                kind: annCtxMenu.kind,
+                address: annCtxMenu.address,
+                value: annCtxMenu.value,
+              });
+              setAnnCtxMenu(null);
+            }}
+          >
+            {annCtxMenu.kind === "comment" ? "Edit comment" : "Rename"}
+          </button>
+          <button
+            type="button"
+            className="w-full text-left px-3 py-1 hover:bg-gray-700 text-red-400"
+            onClick={() => {
+              deleteAnnotation(annCtxMenu.kind, annCtxMenu.address);
+              setAnnCtxMenu(null);
+            }}
+          >
+            {annCtxMenu.kind === "comment" ? "Delete comment" : "Clear rename"}
+          </button>
         </div>
       )}
 

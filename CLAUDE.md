@@ -175,7 +175,29 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   and a short window clipped the footer away. Its height persists through
   `ResizeHandle`'s `onResizeEnd` reading state in the obvious way, which is correct
   **only because that component now guarantees it** — see the `ResizeHandle` entry
-  below. All
+  below.
+  **The ANNOTATIONS block (comments + renames) sits ABOVE the list and is BOUNDED, and
+  those are two separate judgements.** The rule forbids a block whose height follows the
+  CURSOR above the list; this one follows USER EDITS, exactly like the Bookmarks block one
+  row up, so its placement is permitted. Unbounded growth is not: a session produces far
+  more comments than bookmarks and every one would push the Functions header down — the
+  same defect by a slower route. It carries `maxHeight: min(180px, 30%)` and its own
+  scroller, a **CEILING rather than a height** (unlike the Call Graph's, which is
+  user-resizable and persisted) so two comments reserve two rows; **no `shrink-0`**, for
+  the reason above; and a body that is `overflow-auto` but deliberately **NOT `flex-1`**,
+  which needs no grow term over a content-sized wrapper and is what keeps
+  `[data-panel="functions"]` the FIRST `.flex-1.overflow-auto` in the document as a
+  property rather than a coincidence of ordering — the probe-ambiguity guard in
+  `Sidebar.dom.test.tsx` covers it. **`sortedAnnotations` is not decoration**:
+  `Object.entries` returns integer-like keys in numeric order only for array indices, and
+  an x64 image base puts every address in these maps past 2^32 - 1, so unsorted they come
+  back in the order the user annotated in. **THE BOOKMARKS BLOCK IS STILL UNBOUNDED and
+  that is a known, deliberate asymmetry rather than an oversight** — flagged at
+  `peek-a-bin-v3uh.11` and left for the user to decide, since bounding it changes an
+  existing affordance and its population is much smaller. **Nothing here is verified as
+  layout**: jsdom performs no layout, so every assertion on the bound is a string, and
+  deleting the list's `min-h-[120px]` or the annotations wrapper's `overflow-hidden` is
+  measurably inert (`peek-a-bin-llrq.6`). All
   four dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
 - **`ResizeHandle.tsx` guarantees `onResizeEnd` runs AFTER the resize it describes has
@@ -1382,6 +1404,13 @@ read "all of them compile" as "all of them are right".
   watched wrap; and its **Certificates** row. Each is a short string in a strip or table with a
   fixed height, which is exactly the class jsdom cannot judge — it performs no layout. Added to
   `peek-a-bin-v2u`.
+- **The sidebar's Annotations block is BOUNDED IN SOURCE AND UNMEASURED AS LAYOUT.** Its cap,
+  its scroller and its refusal of `shrink-0` are asserted as the strings React wrote; jsdom
+  performs no layout, so "the Functions header holds still as annotations accumulate" has no
+  instrument here — the `peek-a-bin-llrq.6` position, one block over. Two of eleven controls
+  are **inert and reported**: deleting the list's `min-h-[120px]` floor and the annotations
+  wrapper's `overflow-hidden`. The hover-revealed delete glyph and the context menu's
+  placement are unseen for the same reason. Added to `peek-a-bin-v2u`.
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
 - **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**
