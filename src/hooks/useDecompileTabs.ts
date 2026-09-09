@@ -6,7 +6,7 @@ import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { GhidraClient } from "../ghidra/client";
 import { streamEnhance } from "../llm/client";
 import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
-import { hasApiKey, loadDecompileServer, loadSettings, NO_API_KEY_MESSAGE } from "../llm/settings";
+import { llmConfigProblem, loadDecompileServer, loadSettings } from "../llm/settings";
 import type { PEFile } from "../pe/types";
 import { disasmWorker } from "../workers/disasmClient";
 import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
@@ -210,9 +210,11 @@ export function useDecompileTabs({
 
   const triggerAI = useCallback(
     (mode: "enhance" | "explain") => {
-      if (!hasApiKey()) {
+      const problem = llmConfigProblem();
+      if (problem) {
         // Opening Settings is the right next step and is kept; what was missing
-        // is the sentence saying why it opened — see NO_API_KEY_MESSAGE.
+        // is the sentence saying why it opened — see llmConfigProblem, which
+        // owns both the check and the wording, so this site composes no text.
         //
         // The message goes on the AI tab's own `error`, which `activeError`
         // surfaces and DecompileView renders as its red banner — the same
@@ -225,7 +227,7 @@ export function useDecompileTabs({
         // success path, which switches to the AI tab too.
         window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
         dispatch({ type: "SET_TAB", tab: "ai" });
-        dispatch({ type: "LOAD_ERR", tab: "ai", error: NO_API_KEY_MESSAGE });
+        dispatch({ type: "LOAD_ERR", tab: "ai", error: problem.message });
         return;
       }
 

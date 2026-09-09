@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AIChatPanel } from "../../components/AIChatPanel";
 import { DecompileView } from "../../components/DecompileView";
 import { streamChat, streamEnhance } from "../../llm/client";
-import { NO_API_KEY_MESSAGE, saveProfiles } from "../../llm/settings";
+import { llmConfigProblem, saveProfiles } from "../../llm/settings";
 import { useAIChat } from "../useAIChat";
 import { useDecompileTabs } from "../useDecompileTabs";
 
@@ -55,6 +55,24 @@ vi.mock("../../llm/client", () => ({
   streamChat: vi.fn(),
   streamEnhance: vi.fn(),
 }));
+
+/**
+ * The sentence the gate is currently producing, read from its one declaration.
+ *
+ * Since `peek-a-bin-lh7o` the message names the active profile, so it is a
+ * function of `localStorage` and cannot be a constant here. Call it only after
+ * the store has been put into a refusing state — it throws otherwise, which is
+ * the liveness half: a test that set up a WORKING profile and then asserted the
+ * banner would fail loudly instead of comparing against an empty string.
+ */
+function gateMessage(): string {
+  const problem = llmConfigProblem();
+  if (!problem) throw new Error("gateMessage() called with a usable profile configured");
+  return problem.message;
+}
+
+/** Matches any refusal sentence, for the rows that assert there is none. */
+const NOT_READY = /is not ready:/;
 
 /** The state a user who has never opened Settings is in. */
 function withoutApiKey(): void {
@@ -185,8 +203,8 @@ describe("AI chat with no API key configured", () => {
 
     // The substance of the fix: a sentence naming the precondition and the
     // remedy is on the page. Asserted as the rendered text, not as a call.
-    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
-    expect(NO_API_KEY_MESSAGE).toContain("Settings");
+    expect(screen.getByText(gateMessage())).toBeTruthy();
+    expect(gateMessage()).toContain("Settings");
   });
 
   it("still opens Settings — the dispatch was right and is kept", () => {
@@ -238,7 +256,7 @@ describe("AI chat with no API key configured", () => {
 
     const box = screen.getByPlaceholderText("Ask about this binary...") as HTMLTextAreaElement;
     expect(box.value).toBe(question);
-    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
+    expect(screen.getByText(gateMessage())).toBeTruthy();
   });
 
   it("clears the box once a key is configured and the send goes through", () => {
@@ -264,7 +282,145 @@ describe("AI chat with no API key configured", () => {
     sendChat("hello");
 
     expect(vi.mocked(streamChat)).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText(NO_API_KEY_MESSAGE)).toBeNull();
+    expect(screen.queryByText(NOT_READY)).toBeNull();
+  });
+});
+
+describe("the gate says which profile it looked at, and what is wrong with it", () => {
+  /** Three profiles, the SECOND active, and only that one lacking a key. */
+  function threeProfilesActiveSecondUnkeyed(): void {
+    localStorage.clear();
+    saveProfiles({
+      activeId: "p2",
+      profiles: [
+        {
+          id: "p1",
+          name: "Personal",
+          provider: "anthropic",
+          apiKey: "sk-personal",
+          model: "claude-test",
+          baseUrl: "",
+          enhanceSource: "pseudocode",
+        },
+        {
+          id: "p2",
+          name: "Work",
+          provider: "anthropic",
+          apiKey: "",
+          model: "claude-test",
+          baseUrl: "",
+          enhanceSource: "pseudocode",
+        },
+        {
+          id: "p3",
+          name: "Local llama",
+          provider: "openai",
+          apiKey: "sk-local",
+          model: "llama-test",
+          baseUrl: "http://localhost:11434",
+          enhanceSource: "pseudocode",
+        },
+      ],
+    });
+  }
+
+  it("names the active profile and its position, so it does not read as lost settings", () => {
+    // `peek-a-bin-lh7o`: the check is scoped to the ACTIVE profile — correct,
+    // since that is the only one a request would use — but silently, so a user
+    // with three profiles and two of them keyed was told "No API key
+    // configured" and could reasonably conclude the app had lost their
+    // settings. The position is given only when there is more than one profile,
+    // which is the same condition under which StatusBar shows the profile badge
+    // the user then reaches for. Asserted as a literal, not derived, so a change
+    // to the wording has to be made on purpose.
+    threeProfilesActiveSecondUnkeyed();
+    render(<ChatHarness />);
+
+    sendChat("what does sub_401000 do?");
+
+    expect(
+      screen.getByText(/AI profile "Work" \(2 of 3\) is not ready: no API key\./),
+    ).toBeTruthy();
+  });
+
+  it("says nothing about position when there is only one profile", () => {
+    // The other direction: naming a position out of one is noise, and its
+    // absence is what makes the row above a measurement rather than a constant.
+    withoutApiKey();
+    render(<ChatHarness />);
+
+    sendChat("hello");
+
+    expect(screen.getByText(/AI profile "Default" is not ready: no API key\./)).toBeTruthy();
+    expect(screen.queryByText(/of 1\)/)).toBeNull();
+  });
+
+  it("refuses a profile that HAS a key but no model, and says which field", () => {
+    // The old gate was `apiKey.length > 0`, so this configuration passed and
+    // failed later as an HTTP error out of client.ts — after the user had been
+    // told the configuration was fine.
+    localStorage.clear();
+    saveProfiles({
+      activeId: "p1",
+      profiles: [
+        {
+          id: "p1",
+          name: "Default",
+          provider: "anthropic",
+          apiKey: "sk-test-key",
+          model: "   ",
+          baseUrl: "",
+          enhanceSource: "pseudocode",
+        },
+      ],
+    });
+    render(<ChatHarness />);
+
+    sendChat("hello");
+
+    expect(screen.getByText(/is not ready: no model\./)).toBeTruthy();
+    expect(screen.queryByText(/no API key/)).toBeNull();
+    expect(vi.mocked(streamChat)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a base URL that is not a web address", () => {
+    localStorage.clear();
+    saveProfiles({
+      activeId: "p1",
+      profiles: [
+        {
+          id: "p1",
+          name: "Gateway",
+          provider: "anthropic",
+          apiKey: "sk-test-key",
+          model: "claude-test",
+          baseUrl: "my-gateway:8080",
+          enhanceSource: "pseudocode",
+        },
+      ],
+    });
+    render(<ChatHarness />);
+
+    sendChat("hello");
+
+    expect(screen.getByText(/not a web address/)).toBeTruthy();
+    expect(vi.mocked(streamChat)).not.toHaveBeenCalled();
+  });
+
+  it("reaches the decompile panel's banner too — one function, both gates", () => {
+    // NO_API_KEY_MESSAGE was a constant both gates imported; the message is a
+    // function of the profile now, so the thing that has to stay true is that
+    // both still print the SAME sentence from the SAME source.
+    threeProfilesActiveSecondUnkeyed();
+    render(<DecompileHarness />);
+    openAiTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "Enhance" }));
+
+    expect(
+      screen.getByText(/AI profile "Work" \(2 of 3\) is not ready: no API key\./),
+    ).toBeTruthy();
+    expect(screen.getByText(gateMessage())).toBeTruthy();
   });
 });
 
@@ -276,7 +432,7 @@ describe("decompile Enhance/Explain with no API key configured", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Enhance" }));
 
-    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
+    expect(screen.getByText(gateMessage())).toBeTruthy();
   });
 
   it("explains the refusal in the panel's own error banner (Explain)", () => {
@@ -286,7 +442,7 @@ describe("decompile Enhance/Explain with no API key configured", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Explain" }));
 
-    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
+    expect(screen.getByText(gateMessage())).toBeTruthy();
   });
 
   it("still opens Settings, and asks for nothing", () => {
@@ -313,7 +469,7 @@ describe("decompile Enhance/Explain with no API key configured", () => {
     render(<DecompileHarness />);
     openAiTab();
 
-    expect(screen.queryByText(NO_API_KEY_MESSAGE)).toBeNull();
+    expect(screen.queryByText(NOT_READY)).toBeNull();
     expect(screen.getByText(/Choose/)).toBeTruthy();
   });
 
@@ -331,7 +487,7 @@ describe("decompile Enhance/Explain with no API key configured", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "trigger enhance out of band" }));
 
-    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
+    expect(screen.getByText(gateMessage())).toBeTruthy();
     // ...and the AI tab is what is now showing, which is what made it readable.
     expect(screen.getByText(/Choose/)).toBeTruthy();
   });

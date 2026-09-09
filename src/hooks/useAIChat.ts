@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { streamChat } from "../llm/client";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
-import { hasApiKey, loadSettings, NO_API_KEY_MESSAGE } from "../llm/settings";
+import { llmConfigProblem, loadSettings } from "../llm/settings";
 import type { ChatMessage } from "../llm/types";
 import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 import type { PEFile } from "../pe/types";
@@ -184,11 +184,13 @@ export function useAIChat(
       // Every refusal below returns false, and the caller keeps what the user
       // typed. See the docstring on UseAIChatResult.sendMessage.
       if (!content.trim() || state.streaming) return false;
-      if (!hasApiKey()) {
+      const problem = llmConfigProblem();
+      if (problem) {
         // Opening Settings is the right next step and is kept. What was missing
-        // is the sentence saying why it opened — see NO_API_KEY_MESSAGE.
+        // is the sentence saying why it opened — see llmConfigProblem, which
+        // owns both the check and the wording, so this site composes no text.
         window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-        dispatch({ type: "SET_ERROR", error: NO_API_KEY_MESSAGE });
+        dispatch({ type: "SET_ERROR", error: problem.message });
         return false;
       }
 
