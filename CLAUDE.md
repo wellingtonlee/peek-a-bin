@@ -620,6 +620,26 @@ metrics-worker content hash was REFUSED**: it makes annotation load async, so a 
 the digest is in flight is written under the wrong key or lost. `recentFiles.ts`'s IndexedDB
 `keyPath: "name"` is **still name-keyed** and is deliberately a separate bead — the harm there is
 cached bytes, recoverable by re-dropping the file (`peek-a-bin-v3uh.5`).
+**`hexPatches` IS NOT AUTO-PERSISTED, AND THAT REFUSAL IS THE DESIGN — it is guarded instead.**
+Bookmarks, renames and comments auto-persist per file, so `RESET` and a reload cost nothing; a byte
+patch is a byte of the **file**, held only in memory, and `RESET` returns `initialState` with a
+fresh Map. **It is not unpersistable**: `utils/exportSchema.ts` serialises it and `AddressBar`'s
+Import button restores it, which is a *deliberate* channel — a framing that called it "never
+persisted" is wrong and argues for the wrong change. Auto-persisting into the annotation blob is
+refused four ways: patches are file bytes rather than annotations; the blob is per-file and
+quota-bounded (its persist effect already swallows a quota throw in silence); the export channel
+already exists in the same toolbar; and a patch restored automatically would make a file **silently
+disassemble differently on reopen** with no affordance saying why. So `AddressBar.tsx` carries two
+guards over one predicate (`state.hexPatches.size > 0`): a `confirm` on the Open button naming the
+count and pointing at Export, and a `beforeunload` listener registered **only while a patch
+exists** — the tab-close route, which is the one route with no other affordance at all, and there
+was no `beforeunload` handler anywhere in `src/` before it. No toast was invented for either
+(`peek-a-bin-p0tz`'s rule); the unload handler supplies **no wording**, every current engine
+substituting its own. Any new "Close file"/`RESET` command — a command-palette entry, a shortcut —
+must route **through** `handleReset`, not around it. `confirm` is spied **file-wide** in
+`AddressBar.dom.test.tsx`: jsdom's unstubbed `window.confirm` returns `undefined`, which is falsy,
+so an unspied row that clicks Open with a patch present would silently stop dispatching `RESET`
+(`peek-a-bin-v3uh.6`).
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for
 cross-component communication.

@@ -3,7 +3,7 @@
 import "../../test/domSetup";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
 import { type AppState, VIEW_TABS, type ViewTab } from "../../hooks/usePEFile";
 import { AddressBar } from "../AddressBar";
@@ -59,6 +59,32 @@ function renderBar(over: Partial<AppState> = {}) {
   );
   return { dispatch, user: userEvent.setup() };
 }
+
+/**
+ * `confirm` IS SPIED FILE-WIDE, AND THAT IS A CORRECTNESS REQUIREMENT RATHER
+ * THAN TIDINESS.
+ *
+ * Unstubbed, jsdom's `window.confirm` is one of its "not implemented" stubs: it
+ * writes to the virtual console and returns `undefined`, which is FALSY. So the
+ * moment the Open button grew its guard, any test in this tree that clicks Open
+ * with a patch in state would silently stop dispatching `RESET` and would be
+ * asserting against a dialog nobody answered. Nothing in this file clicked Open
+ * before the guard landed, so no existing row had to be repaired — but the trap
+ * is for whoever adds the next one, hence the file-wide default rather than a
+ * per-test spy in the one describe that needs it.
+ *
+ * The default is `true` — "the user said go ahead" — so a row that does not care
+ * about the guard behaves exactly as it did before it existed.
+ */
+let confirmSpy: MockInstance<typeof window.confirm>;
+
+beforeEach(() => {
+  confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /**
  * The tab buttons, in DOM order, identified by carrying a `(N)` in the title.
@@ -555,5 +581,167 @@ describe("AddressBar recent addresses", () => {
       address: IMAGE_BASE + 0x1000,
     });
     expect(screen.queryByText("Recent Addresses")).toBeNull();
+  });
+});
+
+/**
+ * BYTE PATCHES ARE THE ONE THING `RESET` THROWS AWAY THAT NOTHING PUTS BACK,
+ * and this is the pair of guards that stands in for auto-persisting them
+ * (peek-a-bin-v3uh.6).
+ *
+ * The framing this suite is built on is a CORRECTION of an earlier one worth
+ * writing down, because the wrong version argues for a different change:
+ * `hexPatches` *is* persisted, through `utils/exportSchema.ts` and the
+ * Export/Import pair in this same toolbar. What is missing is
+ * AUTO-persistence and a guard, and auto-persistence is REFUSED — a patch is a
+ * byte of the file rather than an annotation, the annotation blob is per-file
+ * and quota-bounded, and a patch silently restored on reopen would make the
+ * disassembly differ with nothing on screen saying why. So the deliverable is
+ * two guards over one predicate, `state.hexPatches.size > 0`.
+ *
+ * WHAT THESE ROWS ARE AND ARE NOT EVIDENCE FOR. The confirm rows read the
+ * argument the component passed to `confirm`, which is the whole of what the
+ * component decides; that a browser renders that string legibly, or that a user
+ * reads it, is outside jsdom entirely (jsdom performs no layout and has no
+ * dialog). The `beforeunload` rows dispatch a CANCELABLE event and read
+ * `defaultPrevented`, which is exactly the request the platform acts on — but
+ * no browser has ever shown the resulting dialog here, and the handler
+ * deliberately supplies no wording, since every current engine substitutes its
+ * own.
+ */
+
+/** The Open button — a bare `dispatch({ type: "RESET" })` before this stage. */
+function openButton(): HTMLElement {
+  return screen.getByRole("button", { name: /^Open$/ });
+}
+
+/**
+ * One `harnessPE()`, hoisted, so a re-render that only changes `hexPatches`
+ * changes nothing else. Two calls would hand the component a new `peFile`
+ * identity and re-run every effect keyed on it, which would make the teardown
+ * row below evidence about the wrong thing.
+ */
+const PATCH_PE = harnessPE();
+
+function renderWithPatches(patches: [number, number][]) {
+  const dispatch = vi.fn();
+  const tree = (p: [number, number][]) => (
+    <AppHarness state={stateWithPE(PATCH_PE, { hexPatches: new Map(p) })} dispatch={dispatch}>
+      <AddressBar />
+    </AppHarness>
+  );
+  const view = render(tree(patches));
+  return {
+    dispatch,
+    user: userEvent.setup(),
+    /** Re-render with a different patch set, as `PATCH_BYTE`/`CLEAR_PATCHES` would. */
+    setPatches: (p: [number, number][]) => view.rerender(tree(p)),
+  };
+}
+
+/**
+ * Ask the page the question the platform asks when a tab closes, and report
+ * whether anything objected.
+ *
+ * `cancelable: true` is the load-bearing half: `preventDefault()` on a
+ * non-cancelable event is a no-op that sets no flag, so an uncancelable event
+ * would read as "not prevented" whether or not a handler ran — a row that could
+ * never go red.
+ */
+function unloadPrevented(): boolean {
+  const e = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(e);
+  return e.defaultPrevented;
+}
+
+describe("AddressBar guards byte patches against the Open button", () => {
+  it("asks before discarding them, naming the count and the channel that keeps them", async () => {
+    const { dispatch, user } = renderWithPatches([
+      [0x200, 0x90],
+      [0x201, 0xcc],
+    ]);
+    await user.click(openButton());
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const message = confirmSpy.mock.calls[0][0] ?? "";
+    // The count, so the prompt is about this session rather than a generic
+    // "are you sure"; and Export by name, because a user who says No needs to
+    // be told what to do instead — the prompt is the only place the tool says
+    // that patches are session-only.
+    expect(message).toContain("2");
+    expect(message).toMatch(/patch/i);
+    expect(message).toMatch(/export/i);
+    // Confirmed, so the reset still happens: the guard is a question, not a veto.
+    expect(dispatch).toHaveBeenCalledWith({ type: "RESET" });
+  });
+
+  it("dispatches nothing when the question is answered No", async () => {
+    confirmSpy.mockReturnValue(false);
+    const { dispatch, user } = renderWithPatches([[0x200, 0x90]]);
+    await user.click(openButton());
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    // Not merely "no RESET" — nothing at all, since a partial reset would be
+    // worse than either outcome.
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("says '1 byte patch' rather than '1 byte patches'", async () => {
+    const { user } = renderWithPatches([[0x200, 0x90]]);
+    await user.click(openButton());
+    expect(confirmSpy.mock.calls[0][0]).toContain("1 byte patch ");
+  });
+
+  /**
+   * THE NEGATIVE CONTROL FOR THE `size > 0` CONDITION. Drop it and this row is
+   * the one that reddens: a confirm on every Open is its own defect — the
+   * button's job is to load a file, and a modal question about nothing is how a
+   * guard trains a user to click through it. Predicted and confirmed.
+   */
+  it("does not ask at all when there is nothing to lose", async () => {
+    const { dispatch, user } = renderWithPatches([]);
+    await user.click(openButton());
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith({ type: "RESET" });
+  });
+});
+
+describe("AddressBar guards byte patches against the tab closing", () => {
+  it("prevents the unload while a patch exists", () => {
+    renderWithPatches([[0x200, 0x90]]);
+    expect(unloadPrevented()).toBe(true);
+  });
+
+  /**
+   * THE NEGATIVE CONTROL FOR THE LISTENER TEARDOWN, in two halves. This row
+   * covers the never-armed case; the row below covers the disarmed one, and it
+   * is that one the missing `removeEventListener` reddens.
+   */
+  it("leaves an unpatched session alone", () => {
+    renderWithPatches([]);
+    expect(unloadPrevented()).toBe(false);
+  });
+
+  it("disarms when the last patch is cleared", () => {
+    const { setPatches } = renderWithPatches([
+      [0x200, 0x90],
+      [0x201, 0xcc],
+    ]);
+    expect(unloadPrevented()).toBe(true);
+    // One left: still armed, so the teardown is not being read off "the Map
+    // changed".
+    setPatches([[0x201, 0xcc]]);
+    expect(unloadPrevented()).toBe(true);
+    // CLEAR_PATCHES, or the last UNDO_PATCH.
+    setPatches([]);
+    expect(unloadPrevented()).toBe(false);
+  });
+
+  it("arms when the first patch arrives, not only at mount", () => {
+    const { setPatches } = renderWithPatches([]);
+    expect(unloadPrevented()).toBe(false);
+    setPatches([[0x200, 0x90]]);
+    expect(unloadPrevented()).toBe(true);
   });
 });

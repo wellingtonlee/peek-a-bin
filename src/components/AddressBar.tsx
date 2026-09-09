@@ -39,6 +39,22 @@ const TAB_KEYS: Record<string, ViewTab> = Object.fromEntries(
   VIEW_TABS.slice(0, 9).map((id, i) => [String(i + 1), id]),
 );
 
+/**
+ * What the Open button asks before it throws a session's byte patches away.
+ *
+ * Pure, and it names both halves the user needs: HOW MANY patches are at stake,
+ * and the one channel in this toolbar that keeps them. Naming Export is the
+ * point — a confirm that only says "are you sure" leaves a user who says No
+ * with nothing to do differently.
+ */
+function patchLossPrompt(count: number): string {
+  const patches = count === 1 ? "1 byte patch" : `${count} byte patches`;
+  return (
+    `${patches} will be discarded — byte patches live only in this session and are ` +
+    "not saved with the file. Use Export first if you want to keep them.\n\nOpen another file anyway?"
+  );
+}
+
 interface Suggestion {
   label: string;
   address: number;
@@ -334,9 +350,66 @@ export function AddressBar() {
     onDismiss: () => setShowSuggestions(false),
   });
 
+  /**
+   * The Open button, guarded by the one thing in `AppState` that `RESET` throws
+   * away and nothing puts back.
+   *
+   * `hexPatches` is not an annotation. Bookmarks, renames and comments
+   * auto-persist to localStorage per file, so `RESET` costs nothing that a
+   * reload does not restore; a patch is a byte of the *file*, held only in
+   * memory, and `RESET` returns `initialState` with a fresh Map (usePEFile.ts).
+   * So the bare `dispatch({ type: "RESET" })` this replaced discarded them
+   * silently, from a button sitting one gap away from Back/Forward and titled
+   * "Load new file" — a click a user makes without deciding anything.
+   *
+   * AUTO-PERSISTENCE IS REFUSED, and the confirm is what replaces it. Patches
+   * are file bytes rather than annotations, the annotation blob is per-file and
+   * quota-bounded (its persist effect already swallows a quota throw in
+   * silence), a deliberate channel that does keep them already exists in this
+   * same toolbar (Export/Import), and a patch restored automatically
+   * would make a file DISASSEMBLE DIFFERENTLY on reopen with nothing on screen
+   * saying why. So the prompt names the count and points at Export, which is
+   * both the remedy and the reason there is no third option.
+   *
+   * `confirm` bare, as `DisassemblyView`'s >50,000-line export prompt already
+   * does: this app has no toast mechanism and one is not invented for a guard
+   * (peek-a-bin-p0tz's rule, from the clipboard sweep).
+   */
   const handleReset = useCallback(() => {
+    const count = state.hexPatches.size;
+    if (count > 0 && !confirm(patchLossPrompt(count))) return;
     dispatch({ type: "RESET" });
-  }, [dispatch]);
+  }, [dispatch, state.hexPatches]);
+
+  /**
+   * The route the Open guard cannot reach: closing the tab, reloading, or
+   * navigating away. It is the ONLY way to lose a patch with no affordance in
+   * front of it at all, and there was no `beforeunload` handler anywhere in
+   * `src/` before this.
+   *
+   * Registered ONLY while a patch exists, which is the whole of the rule — a
+   * listener left in place unconditionally makes every reload of an unpatched
+   * session ask a question with no subject, which is its own defect and is the
+   * negative control for this effect. Keyed on the COUNT rather than on the Map
+   * so an unrelated `PATCH_BYTE`/`UNDO_PATCH` pair does not re-register it,
+   * while the last `UNDO_PATCH` or `CLEAR_PATCHES` tears it down.
+   *
+   * The prose is deliberately absent. Every current browser ignores whatever a
+   * handler puts in `returnValue` and shows its own wording, so a sentence here
+   * would be dead text that reads as if it were on screen; `preventDefault()`
+   * is the request, and `returnValue` is set beside it only because the older
+   * spelling is what some engines still consult.
+   */
+  const patchCount = state.hexPatches.size;
+  useEffect(() => {
+    if (patchCount === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [patchCount]);
 
   const importInputRef = useRef<HTMLInputElement>(null);
 

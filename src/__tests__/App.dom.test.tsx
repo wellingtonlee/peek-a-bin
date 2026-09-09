@@ -1514,3 +1514,67 @@ describe("annotations are keyed on the build, not on the file name", () => {
     expect(localStorage.getItem("peek-a-bin:font-size")).toBe("13");
   });
 });
+
+/**
+ * THE TAB-CLOSE GUARD, THROUGH THE REAL APP — the integration half of
+ * peek-a-bin-v3uh.6, whose mechanics (arming, disarming, the count in the Open
+ * prompt) are pinned in `components/__tests__/AddressBar.dom.test.tsx`.
+ *
+ * What only this file can settle is that the guard is WIRED: that a patch
+ * reaching the real `appReducer` through a real user action arms a real
+ * `beforeunload` listener. The route used is the analysis IMPORT, and it is the
+ * honest one rather than a convenience — `utils/exportSchema.ts` plus this
+ * toolbar's Import button is the channel that actually persists `hexPatches`,
+ * i.e. the very channel the Open prompt points a user at. `HexView`'s grid is
+ * the other producer and is out of reach: it is virtualized, and `virtual-core`
+ * renders zero rows in jsdom.
+ *
+ * NOT EVIDENCE ABOUT: any browser's unload dialog. `defaultPrevented` is the
+ * request the platform acts on and is exactly what is asserted; the wording, the
+ * dialog and whether a user can escape it are all outside jsdom.
+ */
+describe("a session with byte patches is guarded against the tab closing", () => {
+  /** One analysis file, in the schema `serializeState` writes. */
+  function analysisJSON(hexPatches: [number, number][]): File {
+    const body = JSON.stringify({
+      version: 1,
+      fileName: "sample.dll",
+      exportedAt: new Date().toISOString(),
+      bookmarks: [],
+      renames: {},
+      comments: {},
+      hexPatches,
+    });
+    return new File([body], "sample.dll-analysis.json", { type: "application/json" });
+  }
+
+  /** Cancelable, or `preventDefault()` sets no flag and the row cannot go red. */
+  function unloadPrevented(): boolean {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  }
+
+  it("arms only once a patch is in state", async () => {
+    render(<App />);
+    const user = await openFile(resourceOnlyPE());
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /^Headers/ })).toBeTruthy();
+    });
+
+    // A freshly opened file has nothing at risk, so nothing objects. This is
+    // also the control for the effect's own condition: without `size > 0` the
+    // listener would be registered here too and this expectation would fail.
+    expect(unloadPrevented()).toBe(false);
+
+    const jsonInput = document.querySelector<HTMLInputElement>('input[accept=".json"]');
+    if (!jsonInput) throw new Error("AddressBar rendered no analysis-import input");
+    await user.upload(jsonInput, analysisJSON([[0x200, 0x90]]));
+
+    // `FileReader` resolves on a later turn, so the arming is awaited rather
+    // than assumed.
+    await waitFor(() => {
+      if (!unloadPrevented()) throw new Error("beforeunload is not armed yet");
+    });
+  });
+});
