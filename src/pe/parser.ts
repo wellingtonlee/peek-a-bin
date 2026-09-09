@@ -58,8 +58,8 @@ const textDecoder = new TextDecoder();
  *
  * THE MARKER IS NOT ENOUGH ON ITS OWN, and that asymmetry is the finding.
  * A PDB path is read *out* of the tool by a human; these names are also read by
- * `computeImphash`, `matchesApi`, `resolveOrdinal` and the IAT map. A marker
- * there changes a hash rather than merely labelling a string, which is the
+ * `computeImphash`, `resolveOrdinal` and the IAT map. A marker there changes a
+ * hash rather than merely labelling a string, which is the
  * `Ordinal_<n>` trap again. So `parseImports` additionally treats a truncated
  * name as evidence that the entry is **not whole** (`ImportEntry.truncated`),
  * which propagates to `PEFile.importsTruncated`, which makes `computeImphash`
@@ -682,7 +682,7 @@ function parseImports(
         // addresses the loader will use. Inventing a placeholder name to keep
         // the arrays the same length was the other option and is the
         // `Ordinal_<n>` trap: it would put a fabricated symbol into a list that
-        // feeds `computeImphash` and `matchesApi`.
+        // feeds `computeImphash` and the IAT map.
         //
         // The structural fix is one array of `{ name, iatAddress }` pairs, so
         // the desync is unrepresentable. Not taken here: it changes a `PEFile`

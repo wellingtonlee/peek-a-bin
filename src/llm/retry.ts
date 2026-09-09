@@ -162,9 +162,18 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * Caps how many LLM requests are in flight at once and enforces a minimum gap
  * between request starts.
  *
- * The vulnerability scanner fires up to 20 requests and batch rename loops over
- * batches; without spacing, a burst reliably trips a 429 that then has to be
- * retried. A slot is held for the whole streamed response, not just the fetch.
+ * NO BULK CALLER REMAINS, AND THE SIZING PREDATES THAT. The numbers were chosen
+ * against the vulnerability scanner, which fired up to 20 requests, and batch
+ * rename, which looped over batches — without spacing, that burst reliably
+ * tripped a 429 that then had to be retried. Both features are gone
+ * (`peek-a-bin-1xc5`), so that measurement describes a workload this app no
+ * longer has, and nothing here has been re-measured against the one it does.
+ *
+ * The class stays because the defect class does. Chat is single-flight, but
+ * `useDecompileTabs` can have a low tab, a high tab and an explain tab in flight
+ * at once, and a chat can overlap an enhance — so concurrent requests are still
+ * ordinary, merely interactive rather than bulk. A slot is held for the whole
+ * streamed response, not just the fetch.
  */
 export class RequestLimiter {
   private active = 0;
@@ -231,9 +240,13 @@ export class RequestLimiter {
 }
 
 /**
- * Shared across every LLM call in the app. Two concurrent requests lets an
- * interactive chat proceed alongside a running scan without letting a bulk loop
- * saturate the provider.
+ * Shared across every LLM call in the app. Two concurrent requests was chosen to
+ * let an interactive chat proceed alongside a running vulnerability scan without
+ * letting that bulk loop saturate the provider; the scan is gone, so what the
+ * cap now bounds is two *interactive* requests overlapping — a chat beside an
+ * enhance, or two decompile tabs. Whether 2 and 250 ms are the right numbers for
+ * that workload has not been measured, and the pair is deliberately left where
+ * the bulk measurement put it rather than adjusted on a guess.
  */
 export const llmLimiter = new RequestLimiter(2, 250);
 

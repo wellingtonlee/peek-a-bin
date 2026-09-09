@@ -66,9 +66,13 @@ export function providerDefaults(provider: LLMProvider): ProviderDefaults {
 /**
  * Which feature is making the call. Used to pick a token budget — an 8K ceiling
  * was previously hardcoded twice for Anthropic and omitted entirely for OpenAI,
- * so a long report could be truncated on one provider and unbounded on the other.
+ * so a long answer could be truncated on one provider and unbounded on the other.
+ *
+ * `"report"`, `"batch-rename"` and `"vuln-scan"` went with the features that sent
+ * them (`peek-a-bin-1xc5`). The two that remain happen to share a ceiling; see
+ * {@link TASK_MAX_TOKENS} for why that is not a reason to collapse the table.
  */
-export type LLMTask = "chat" | "report" | "enhance" | "batch-rename" | "vuln-scan";
+export type LLMTask = "chat" | "enhance";
 
 /**
  * Per-task output ceilings.
@@ -85,13 +89,26 @@ export type LLMTask = "chat" | "report" | "enhance" | "batch-rename" | "vuln-sca
  * across the whole model range a user can type into the settings box. The visible
  * tradeoff is that a thinking model may pause before its first token, since the
  * stream reader only renders `text` deltas.
+ *
+ * THE TWO SURVIVING BUDGETS COINCIDE, AND THIS IS STILL A TABLE ON PURPOSE. The
+ * three tasks that differed (report at 32768, batch rename and the vulnerability
+ * scanner at 8192) were removed with their features, leaving one value written
+ * twice — which reads like a constant waiting to be inlined. It is not. The
+ * defect this module exists to prevent is a ceiling written at the call site:
+ * 8K was hardcoded twice on the Anthropic path and left off the OpenAI one
+ * entirely, and `models.ts` is the single source of model IDs and token budgets
+ * precisely so a budget cannot be spelled anywhere else. A `Record<LLMTask, …>`
+ * is what enforces that — a new task fails the build here rather than silently
+ * inheriting somebody's number. Collapsing it would also make the coincidence
+ * permanent, where today the two are independently adjustable.
+ *
+ * One consequence, and it is a real reduction: with both values equal, no call
+ * to `streamChat` can distinguish the table from a constant, so `client.test.ts`
+ * no longer pins that it varies by task — only typecheck does.
  */
 export const TASK_MAX_TOKENS: Record<LLMTask, number> = {
   chat: 16384,
-  report: 32768,
   enhance: 16384,
-  "batch-rename": 8192,
-  "vuln-scan": 8192,
 };
 
 export function maxTokensFor(task: LLMTask): number {

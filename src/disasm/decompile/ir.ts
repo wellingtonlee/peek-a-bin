@@ -682,7 +682,7 @@ export function walkStmts(stmts: IRStmt[], fn: (e: IRExpr) => void): void {
  * two further specialisations of it in `cleanup.ts` under other names
  * (`repairStmt`, `cleanupStmt`) — four independent switches over `IRStmt` that
  * had to be hand-synced. That is the shape `sections.ts`, `ripRelative.ts`,
- * `funcInsns.ts` and `apiLists.ts` were each created to end (peek-a-bin-svwt).
+ * `funcInsns.ts` and `stackIdiom.ts` were each created to end (peek-a-bin-svwt).
  *
  * **Both end in an exhaustive `never` binding, deliberately.** A new `IRStmt`
  * kind carrying a nested body is exactly the failure the duplication made

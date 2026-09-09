@@ -190,6 +190,17 @@ describe("streamChat — happy path", () => {
   });
 });
 
+// THIS SUITE LOST A TEST AND THE GAP IS DELIBERATE. It used to hold a third
+// case, "varies the budget by task", which sent `"batch-rename"` and expected
+// 8192 against the `"report"` case's 32768 below it. With `LLMTask` down to
+// `"chat" | "enhance"` (`peek-a-bin-1xc5` removed the three bulk features) both
+// surviving budgets are 16384, so NO call to `streamChat` can distinguish the
+// `Record<LLMTask, number>` from a constant — the test became unwritable as
+// stated. It was deleted rather than rewritten around an invented third value,
+// and the two product budgets were deliberately NOT kept artificially apart to
+// keep it alive. What is left pinning the table is `typecheck` (a new task must
+// appear in the `Record`) plus the `?? TASK_MAX_TOKENS.chat` fallback, and the
+// argument for keeping the table at all is in `models.ts`'s own docstring.
 describe("streamChat — token budget", () => {
   function bodyOf(call: number): Record<string, unknown> {
     return JSON.parse(fetchMock.mock.calls[call][1].body);
@@ -204,11 +215,11 @@ describe("streamChat — token budget", () => {
         ANTHROPIC,
         new AbortController().signal,
         cb,
-        "report",
+        "chat",
         TEST_OPTS,
       ),
     );
-    expect(bodyOf(0).max_tokens).toBe(32768);
+    expect(bodyOf(0).max_tokens).toBe(16384);
   });
 
   it("sends max_tokens on OpenAI too — the branch previously had no limit at all", async () => {
@@ -220,27 +231,11 @@ describe("streamChat — token budget", () => {
         OPENAI,
         new AbortController().signal,
         cb,
-        "vuln-scan",
+        "enhance",
         TEST_OPTS,
       ),
     );
-    expect(bodyOf(0).max_tokens).toBe(8192);
-  });
-
-  it("varies the budget by task", async () => {
-    fetchMock.mockResolvedValue(fakeResponse([]));
-    await collect((cb) =>
-      streamChat(
-        [{ role: "user", content: "hi" }],
-        "sys",
-        ANTHROPIC,
-        new AbortController().signal,
-        cb,
-        "batch-rename",
-        TEST_OPTS,
-      ),
-    );
-    expect(bodyOf(0).max_tokens).toBe(8192);
+    expect(bodyOf(0).max_tokens).toBe(16384);
   });
 });
 
