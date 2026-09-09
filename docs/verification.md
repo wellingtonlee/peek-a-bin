@@ -506,6 +506,37 @@ re-taken.)
 
 **Not verified. Say so rather than implying otherwise:**
 
+- **THE TLS-CALLBACK SEEDS AND THE EXPORT UNIT FIX ARE FIXTURE-VERIFIED ONLY, AND NO BINARY ON THIS
+  MACHINE CAN FALSIFY EITHER (2026-09-09, `peek-a-bin-j4uk.2`).** Both premises were **measured at
+  `0870e14`**, not assumed: every one of the six corpus binaries has **no TLS data directory at
+  all** (`tlsDirectory` is `undefined` for t32, t64, w64, w32, t64-arm, w64-arm) and **zero
+  exports** (`npm run corpus:parserdiff` prints `0 exports` for each and marks both export gates
+  VACUOUS; `find / -xdev -iname '*.dll'` still finds no DLL here). So `npm run corpus` is
+  byte-identical over the four x86 binaries with `functions` unmoved (**260 / 279 / 258 / 275**),
+  27/27 gates and `VERDICT: no regression`; `npm run corpus:arm64` is 51/51; `corpus:parserdiff` is
+  98/118 with the same 20 vacuous rows. **That is the expected result and it is stated positively**
+  — it proves the change is confined to a path no corpus binary takes, and it means the whole case
+  rests on synthetic fixtures plus reading. Named holes, none of them closeable here: nothing
+  exercises **`App.tsx`'s** threading of `tlsCallbacks` (the corpus path goes through
+  `FileSession`, and no DOM suite asserts the option), so the browser half is verified by
+  typecheck and reading alone; no real image has ever had a callback seeded, so the
+  `strongStarts`-versus-withdrawal interaction has been observed only on the hand-built `g7yp`
+  fixture; `TLSDirectory.callbacksTruncated` has never been produced by a real file; and **the
+  export fix has never been observed to recover a single start**, because loading a DLL is the only
+  way to see it. The export defect's own invisibility is the point of the entry: `corpus/sweep.ts`
+  loads through the same `FileSession` that dropped the seeds, so for as long as the option has
+  existed the harness and the browser were detecting functions from different seed sets, and **no
+  instrument in this repo could see it**. `src/mcp/__tests__/detectSeedUnits.test.ts` is the
+  standing guard — a runtime half over a fixture PE32 (which additionally measures that
+  `DetectResult.omitted` is byte-for-byte identical whether the export was kept or dropped, i.e.
+  that the narrowing is silent in the one channel a narrower answer has) and a static half over
+  `session.ts`' source text, because a value import of `../session` pulls `capstone-wasm` into the
+  MCP suite. Every negative control discriminated: dropping `strongStarts.add` reddens exactly one
+  row; spelling the callbacks as RVAs reddens four; deleting either detector's bounds check reddens
+  exactly its own out-of-section row; deriving `callbacksTruncated` from the list's length instead
+  of at the drop site reddens exactly the boundary row; and reverting either `session.ts` line
+  reddens exactly its own static row. **None was inert.**
+
 > **A DATE-STAMP THAT APPLIES TO EVERY RENDER FIGURE BELOW (2026-09-09, `peek-a-bin-1xc5`).** Batch
 > Rename, the AI Report, the Vulnerability Scanner and the **Anomalies view tab** were removed on
 > that date, taking `AnomaliesView.tsx`, `AIDialogs.dom.test.tsx`, `AnomaliesView.dom.test.tsx`,

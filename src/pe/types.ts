@@ -191,7 +191,26 @@ export interface TLSDirectory {
   endAddressOfRawData: number;
   addressOfIndex: number;
   addressOfCallBacks: number;
+  /**
+   * The callback array, **as VAs** — the pointers are written image-based and
+   * this reader keeps them verbatim. That unit is what `detectFunctions`'
+   * `tlsCallbacks` option wants; see the note there, since nothing in the type
+   * system holds the two together and `peek-a-bin-yrh` was this class one
+   * field over.
+   */
   callbacks: number[];
+  /**
+   * Set only when `MAX_TLS_CALLBACKS` stopped the walk with a non-zero pointer
+   * still to read — so a short list can never be mistaken for a whole one.
+   *
+   * Absent is the ordinary case and means the array terminated (or the image
+   * ends mid-array, which is a fact about the image rather than about this
+   * budget). Decided at the drop site rather than from a remainder, on
+   * `ResourceTree.incomplete`'s model. Nothing renders it yet — the census of
+   * which parser admissions reach a surface is peek-a-bin-ul9m — but detection
+   * now seeds from this list, so a clip costs function starts.
+   */
+  callbacksTruncated?: boolean;
   sizeOfZeroFill: number;
   characteristics: number;
 }

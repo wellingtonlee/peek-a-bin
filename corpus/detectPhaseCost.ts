@@ -118,6 +118,7 @@ import { createWorkerState, dispatch } from "../src/workers/dispatch";
 const PHASES = [
   "pdata-seeds",
   "handler-seeds",
+  "tls-seeds",
   "entry-point",
   "exports",
   "prologue-scan",

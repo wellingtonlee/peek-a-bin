@@ -513,6 +513,127 @@ describe("detectFunctions — seeds", () => {
   });
 });
 
+describe("detectFunctions — TLS callbacks (peek-a-bin-j4uk.2)", () => {
+  // A TLS callback is a file-declared entry point: the loader calls every entry
+  // of `AddressOfCallBacks` BEFORE the image's entry point. Nothing inside the
+  // image calls one, so recursive descent never reaches it and the gap fill
+  // finds it, if at all, with no boundary — which is why the directory has to
+  // be read as evidence and not merely reported as an anomaly.
+  //
+  // The unit is the hazard: `parseTLSDirectory` keeps the array's pointers as
+  // the format writes them, image-based, so these are VAs like `baseAddress`
+  // and no arithmetic belongs at any call site. `BASE` is 0x401000 against a
+  // 0x400000 image base, so an RVA-spelled callback is numerically BELOW the
+  // section and every one of these tests fails — which is the point of writing
+  // it down (peek-a-bin-yrh was this class one field over).
+  const empty = new Uint8Array(0x100);
+
+  it("makes a callback nothing in the image reaches a function with a size", () => {
+    const { functions } = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE + 0x20],
+    });
+
+    expect(functions.map((f) => [f.address, f.size])).toEqual([[BASE + 0x20, 0x100 - 0x20]]);
+  });
+
+  it("names it __tls_callback_<addr>, as the handler seeds name theirs", () => {
+    const { functions } = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE + 0x20],
+    });
+
+    expect(functions[0].name).toBe(`__tls_callback_${(BASE + 0x20).toString(16)}`);
+  });
+
+  it("seeds every callback in the array, in address order", () => {
+    const { functions } = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE + 0x40, BASE + 0x10],
+    });
+
+    expect(functions.map((f) => f.address)).toEqual([BASE + 0x10, BASE + 0x40]);
+  });
+
+  it("ignores a callback outside this section", () => {
+    // Not a malformed file: the directory addresses the whole image, and a
+    // callback may legitimately live in another executable section while
+    // `bytes` here is one section. `BASE + 0x100` is `endAddress` exactly and
+    // pins the half-open bound.
+    const { functions } = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE - 1, BASE + 0x100, BASE + 0x1000],
+    });
+
+    expect(functions).toEqual([]);
+  });
+
+  it("lets an export name and the entry-point name win at a shared address", () => {
+    // The synthetic name gives way to a real one, exactly as `__handler_` does:
+    // the TLS block is seeded ahead of both for that reason alone.
+    const viaExport = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE],
+      exports: [{ name: "TlsInit", address: BASE }],
+    }).functions;
+    const viaEntry = detectFunctions(empty, BASE, true, ctxOf(), {
+      tlsCallbacks: [BASE + 0x20],
+      entryPoint: BASE + 0x20,
+    }).functions;
+
+    expect(viaExport[0].name).toBe("TlsInit");
+    expect(viaEntry[0].name).toBe("entry_point");
+  });
+
+  describe("it is a STRONG start, so a crossing jump cannot withdraw it", () => {
+    // The g7yp/qe8z shape, aimed at the one seed that is unreached by
+    // construction. `interiorBranchedOverStarts`' first admission withdraws a
+    // candidate that nothing outside the previous function calls when a
+    // conditional jump that function can execute straddles it — and a TLS
+    // callback satisfies "nothing calls it" for every image, because the caller
+    // is the loader. In `addrSet` alone it would be withdrawn here; in
+    // `strongStarts` the walk skips it on its first line.
+    //
+    //   0x00  je 0x401014    ; crosses the callback and lands back in the parent
+    //   0x02  ..             ; parent body (one-byte fillers)
+    //   0x10  .. ret         ; THE TLS CALLBACK
+    //   0x14  .. ret         ; the parent resumes
+    //   0x16  cc cc          ; padding — 0x18 is the next real function
+    const CB = 0x10;
+    const RESUME = 0x14;
+    const NEXT = 0x18;
+    /** 0x40 decodes as a one-byte filler and is not padding, so it starts nothing. */
+    const filled = (len: number, parts: Record<number, number[]>): Uint8Array => {
+      const out = new Uint8Array(len).fill(0x40);
+      for (const [off, bytes] of Object.entries(parts)) out.set(bytes, Number(off));
+      return out;
+    };
+    const img = () =>
+      filled(0x20, {
+        0x00: [0x74, RESUME - 0x02],
+        [CB]: [0x40, 0xc3],
+        [RESUME]: [0x40, 0xc3],
+        0x16: [0xcc, 0xcc],
+        [NEXT]: [0x40, 0xc3],
+      });
+    const detect = (options: Parameters<typeof detectFunctions>[4]) =>
+      detectFunctions(img(), BASE, false, ctxOf({ cs32: fakeCs() }), options).functions;
+
+    it("keeps the callback, and the parent ends at it", () => {
+      const funcs = detect({ entryPoint: BASE, tlsCallbacks: [BASE + CB] });
+
+      expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + CB, BASE + NEXT]);
+      expect(funcs[0].size).toBe(CB);
+    });
+
+    it("withdraws the very same address when only a byte pattern names it", () => {
+      // The negative half, and the reason the assertion above is not vacuous:
+      // with no TLS seed the crossing jcc is still there and the fixture still
+      // decodes the same, so anything the detector DID find at 0x10 without
+      // this option would have been withdrawn. `BASE + CB` is absent from a run
+      // that does not name it, which is what makes the seed the whole cause.
+      const funcs = detect({ entryPoint: BASE });
+
+      expect(funcs.map((f) => f.address)).toEqual([BASE, BASE + NEXT]);
+    });
+  });
+});
+
 describe("detectFunctions — prologue scanning", () => {
   const at = (offset: number, bytes: number[], len = 0x40) =>
     detectFunctions(image(len, { [offset]: bytes }), BASE, true, ctxOf()).functions.map(
@@ -3062,6 +3183,7 @@ describe("detectFunctions — the phase tap", () => {
   const EXPECTED: DetectPhase[] = [
     "pdata-seeds",
     "handler-seeds",
+    "tls-seeds",
     "entry-point",
     "exports",
     "prologue-scan",
@@ -3078,9 +3200,11 @@ describe("detectFunctions — the phase tap", () => {
 
   /**
    * A PE32 image with a decoder and an IAT, which is the one configuration in
-   * which all fourteen phases run: `sweep`/`sweep-scan`, `seh32-relation`,
+   * which every phase runs: `sweep`/`sweep-scan`, `seh32-relation`,
    * `interior-starts` and `tail-calls` need a decoder, and `thunk-names`
-   * additionally needs a non-empty `iatMap`.
+   * additionally needs a non-empty `iatMap`. The count is deliberately not
+   * spelled out — `EXPECTED` above is the statement of it and goes stale in
+   * one place rather than two.
    */
   const everyPhase = (tap: (p: DetectPhase, ms: number) => void) => {
     const img = image(0x40, {
@@ -3162,6 +3286,7 @@ describe("detectFunctions — the phase tap", () => {
     expect(seen).toEqual([
       "pdata-seeds",
       "handler-seeds",
+      "tls-seeds",
       "entry-point",
       "exports",
       "prologue-scan",

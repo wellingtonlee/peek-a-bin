@@ -1171,6 +1171,24 @@ function extractUTF16Strings(
 }
 
 /**
+ * The most TLS callbacks that will be read out of the null-terminated array.
+ *
+ * The array carries no count, so the only bound the format supplies is its
+ * terminator — which a crafted file simply omits. The cap is what stops the
+ * walk, and unlike every other budget in this file it now bounds *evidence*
+ * rather than only display: a clipped list under-seeds function detection
+ * (`detectFunctions`' `tlsCallbacks`), so a dropped entry costs a function
+ * start rather than a line of prose.
+ *
+ * 256 is what this reader has always used and is left where it is. Real images
+ * register a handful — MSVC emits one per translation unit with a `__declspec
+ * (thread)` destructor, and none of the six corpus binaries registers any at
+ * all — so the cap is orders of magnitude above anything a linker writes, and
+ * the case it exists for is a file that never terminates the array.
+ */
+export const MAX_TLS_CALLBACKS = 256;
+
+/**
  * Parse TLS Directory
  */
 function parseTLSDirectory(
@@ -1201,16 +1219,31 @@ function parseTLSDirectory(
 
   // Walk callback array (null-terminated VA pointers)
   const callbacks: number[] = [];
+  let callbacksTruncated = false;
   if (addressOfCallBacks) {
     const cbRVA = addressOfCallBacks - imageBase;
     const cbOffset = rvaToFileOffsetIndexed(cbRVA, sectionIndex);
     if (cbOffset >= 0) {
       let pos = cbOffset;
-      for (let i = 0; i < 256; i++) {
-        // safety limit
+      for (;;) {
+        // The end of the file. A NUL-terminated array that runs off the buffer
+        // means the IMAGE is short, which is a different fact from this
+        // reader's own budget and deliberately not spelled as one — the same
+        // split `parseResourceDirectory` makes between an unread entry and a
+        // malformed shape.
         if (pos + ptrSize > view.byteLength) break;
         const cbAddr = readPtr(pos);
+        // The array's own terminator: the answer is whole.
         if (cbAddr === 0) break;
+        if (callbacks.length >= MAX_TLS_CALLBACKS) {
+          // THE DROP SITE, and the condition is exact rather than
+          // `remaining > 0`: control only reaches here having already read a
+          // non-zero pointer the list will not keep, so an array of exactly
+          // MAX_TLS_CALLBACKS entries plus its terminator is NOT marked
+          // (peek-a-bin-dhcx).
+          callbacksTruncated = true;
+          break;
+        }
         callbacks.push(cbAddr);
         pos += ptrSize;
       }
@@ -1223,6 +1256,7 @@ function parseTLSDirectory(
     addressOfIndex,
     addressOfCallBacks,
     callbacks,
+    ...(callbacksTruncated ? { callbacksTruncated: true } : {}),
     sizeOfZeroFill,
     characteristics,
   };

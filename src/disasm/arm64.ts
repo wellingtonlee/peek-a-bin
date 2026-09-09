@@ -1160,6 +1160,19 @@ export function detectArm64Functions(
     entryPoint?: number;
     pdataFunctions?: CodeRange[];
     handlerAddresses?: number[];
+    /**
+     * TLS callbacks, **as VAs** — `PEFile.tlsDirectory.callbacks` verbatim, the
+     * same unit `baseAddress` is in. The hazard, and why it is written down at
+     * a declaration rather than left to the reader, is in
+     * `functionDetect.ts`' copy of this field; this bag is hand-synced with
+     * that one, so the two must gain a field together or an A64 image with a
+     * TLS callback silently keeps the old behaviour.
+     *
+     * An ARM64 image registers TLS callbacks exactly as an x64 one does — the
+     * directory is machine-independent — so this is not a symmetry edit
+     * (peek-a-bin-j4uk.2).
+     */
+    tlsCallbacks?: number[];
   },
   /**
    * The session's memo of this section's decode. Detection is the first of the
@@ -1185,6 +1198,17 @@ export function detectArm64Functions(
     if (!inSection(ha)) continue;
     addrSet.add(ha);
     nameMap.set(ha, `__handler_${ha.toString(16)}`);
+  }
+
+  // Seeded ahead of the entry point and the exports so a real name wins at a
+  // shared address, as with the `__handler_` names above. There is no
+  // `strongStarts` on this path — the A64 detector has no
+  // `interiorBranchedOverStarts` and nothing here withdraws a start — so the
+  // set of two lines this needs on x86 is one line here.
+  for (const cb of options?.tlsCallbacks ?? []) {
+    if (!inSection(cb)) continue;
+    addrSet.add(cb);
+    nameMap.set(cb, `__tls_callback_${cb.toString(16)}`);
   }
 
   if (options?.entryPoint !== undefined && inSection(options.entryPoint)) {

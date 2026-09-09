@@ -422,6 +422,14 @@ class DisasmWorkerClient {
       entryPoint?: number;
       pdataFunctions?: { beginAddress: number; endAddress: number }[];
       handlerAddresses?: number[];
+      /**
+       * TLS callbacks, **as VAs** — see `detectFunctions`' own copy of this
+       * field for the unit hazard. Plain numbers, so unlike `dataWindows` this
+       * travels inside `options` and needs nothing from `prepareBinaryArgs`;
+       * `dispatch` forwards `args.options` wholesale and needs no edge of its
+       * own.
+       */
+      tlsCallbacks?: number[];
       dataWindows?: DataWindow[];
     },
   ): Promise<{ functions: DisasmFunction[]; omitted: DetectPass[] }> {

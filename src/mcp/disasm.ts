@@ -95,6 +95,12 @@ export function detectFunctionsFromBytes(
     pdataFunctions?: { beginAddress: number; endAddress: number }[];
     handlerAddresses?: number[];
     /**
+     * TLS callbacks, **as VAs** — see `detectFunctions`' own copy of this
+     * field for the unit hazard. Forwarded to whichever detector `arch`
+     * selects; both read it.
+     */
+    tlsCallbacks?: number[];
+    /**
      * Readable spans outside the code section — `.rdata` above all — so the
      * x64 RVA jump tables that live there can be read. Built by
      * `buildDataWindows`; passed straight through, since there is no worker

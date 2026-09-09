@@ -323,6 +323,12 @@ export default function App() {
           entryPoint: pe.optionalHeader.imageBase + pe.optionalHeader.addressOfEntryPoint,
           pdataFunctions,
           handlerAddresses,
+          // Already VAs — `parseTLSDirectory` keeps the array's pointers as the
+          // format writes them, image-based. Passed through with NO arithmetic,
+          // which is the one thing to get right here: `imageBase +` would put
+          // every callback out of the section's range and drop it (see the
+          // option's own docstring).
+          tlsCallbacks: pe.tlsDirectory?.callbacks,
           // `.rdata` &c: an x64 switch's jump table lives outside .text, so
           // without these the detector reads none of its entries. Packed into
           // one transferable buffer by the client, not cloned per window.

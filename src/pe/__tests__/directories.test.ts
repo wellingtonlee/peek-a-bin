@@ -12,7 +12,7 @@ import {
   IMAGE_REL_BASED_DIR64,
   IMAGE_REL_BASED_HIGHLOW,
 } from "../constants";
-import { parsePE } from "../parser";
+import { MAX_TLS_CALLBACKS, parsePE } from "../parser";
 import { buildMinimalPE32, buildMinimalPE64 } from "./fixtures";
 
 const PE32_BASE = 0x00400000;
@@ -413,6 +413,57 @@ describe("parseTLSDirectory", () => {
     expect(tls?.callbacks).toEqual([PE64_BASE + 0x1000, PE64_BASE + 0x1040]);
     expect(tls?.sizeOfZeroFill).toBe(8);
     expect(tls?.characteristics).toBe(0x00300000);
+  });
+
+  it("does not mark an array of exactly MAX_TLS_CALLBACKS entries short", () => {
+    // The boundary in the benign direction. Before peek-a-bin-j4uk.2 the cap
+    // was the loop counter, so "the list is short" was inferrable only from
+    // its length — and a file with exactly the cap's worth of callbacks is
+    // WHOLE. Decided at the drop site instead: control reaches the flag only
+    // having read a further non-zero pointer, and there is none here because
+    // the builder writes the terminator.
+    const buf = buildMinimalPE32({
+      directories: {
+        tls: {
+          callbacks: Array.from(
+            { length: MAX_TLS_CALLBACKS },
+            (_, i) => PE32_BASE + 0x1000 + i * 4,
+          ),
+        },
+      },
+    });
+
+    const tls = parsePE(buf).tlsDirectory;
+    expect(tls?.callbacks).toHaveLength(MAX_TLS_CALLBACKS);
+    expect(tls?.callbacksTruncated).toBeUndefined();
+  });
+
+  it("marks the list short when a callback past the cap was read and dropped", () => {
+    // One more than the cap. The dropped entry now costs a FUNCTION START, not
+    // a line of prose: `detectFunctions` seeds `strongStarts` from this list,
+    // and nothing else in the image names a TLS callback.
+    const buf = buildMinimalPE32({
+      directories: {
+        tls: {
+          callbacks: Array.from(
+            { length: MAX_TLS_CALLBACKS + 1 },
+            (_, i) => PE32_BASE + 0x1000 + i * 4,
+          ),
+        },
+      },
+    });
+
+    const tls = parsePE(buf).tlsDirectory;
+    expect(tls?.callbacks).toHaveLength(MAX_TLS_CALLBACKS);
+    expect(tls?.callbacksTruncated).toBe(true);
+  });
+
+  it("says nothing about truncation for an ordinary short array", () => {
+    const buf = buildMinimalPE64({
+      directories: { tls: { callbacks: [PE64_BASE + 0x1000] } },
+    });
+
+    expect(parsePE(buf).tlsDirectory?.callbacksTruncated).toBeUndefined();
   });
 
   it("leaves callbacks empty when AddressOfCallBacks is unmapped", () => {

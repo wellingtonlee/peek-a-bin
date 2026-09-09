@@ -611,6 +611,47 @@ describe("detectArm64Functions", () => {
     expect(jumpTableSpans).toEqual([]);
   });
 
+  // peek-a-bin-j4uk.2. The TLS data directory is machine-independent, so an
+  // ARM64 image registers callbacks exactly as an x64 one does; this option bag
+  // is hand-synced with `functionDetect.ts`' and gained the field in the same
+  // commit. `PEFile.tlsDirectory.callbacks` holds VAs, the unit `baseAddress`
+  // is in, so nothing converts at any call site.
+  describe("TLS callbacks", () => {
+    it("makes a callback nothing in the image reaches a function with a size", () => {
+      const { functions } = detectArm64Functions(new Uint8Array(64), BASE, ctx(fakeCs(code(16))), {
+        tlsCallbacks: [BASE + 16],
+      });
+
+      expect(functions.map((f) => [f.address - BASE, f.size])).toEqual([[16, 48]]);
+    });
+
+    it("names it __tls_callback_<addr>", () => {
+      const { functions } = detectArm64Functions(new Uint8Array(64), BASE, ctx(fakeCs(code(16))), {
+        tlsCallbacks: [BASE + 16],
+      });
+
+      expect(functions[0].name).toBe(`__tls_callback_${(BASE + 16).toString(16)}`);
+    });
+
+    it("ignores a callback outside this section", () => {
+      // `BASE + 64` is `endAddress` exactly, which pins the half-open bound.
+      const { functions } = detectArm64Functions(new Uint8Array(64), BASE, ctx(fakeCs(code(16))), {
+        tlsCallbacks: [BASE - 4, BASE + 64, BASE + 0x1000],
+      });
+
+      expect(functions).toEqual([]);
+    });
+
+    it("lets an export name win at a shared address", () => {
+      const { functions } = detectArm64Functions(new Uint8Array(64), BASE, ctx(fakeCs(code(16))), {
+        tlsCallbacks: [BASE],
+        exports: [{ name: "TlsInit", address: BASE }],
+      });
+
+      expect(functions[0].name).toBe("TlsInit");
+    });
+  });
+
   it("finds nothing at all in an image with no recorded starts and no calls", () => {
     // Notably it does NOT fall back to a prologue byte scan — that is the x86
     // heuristic this module exists to avoid running on ARM64 bytes.

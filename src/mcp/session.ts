@@ -162,10 +162,26 @@ export class FileSession {
       iatMap,
       driverMode,
       {
-        exports: pe.exports.map((e) => ({ name: e.name, address: e.address })),
+        // `ExportEntry.address` is an **RVA** (see its docstring in
+        // `pe/types.ts`), and every address in this bag is a **VA** — the
+        // `entryPoint` on the next line converts, and so do `pdataFunctions`
+        // and `handlerAddresses` above. This one did not, for as long as the
+        // option has existed, so every export seed landed outside
+        // `[textBase, textBase + len)` and the detector dropped it: no seed and
+        // no name, on the MCP path AND on `npm run corpus`, which loads through
+        // this same `FileSession`. The browser converts correctly in
+        // `App.tsx`, so the harness and the app were detecting functions from
+        // different seed sets — invisible because all six corpus binaries are
+        // EXEs with zero exports and no DLL exists on this machine
+        // (peek-a-bin-j4uk.2).
+        exports: pe.exports.map((e) => ({ name: e.name, address: imageBase + e.address })),
         entryPoint: imageBase + pe.optionalHeader.addressOfEntryPoint,
         pdataFunctions,
         handlerAddresses,
+        // Already VAs, so NO arithmetic — the opposite of the line above, and
+        // the reason both are commented: `parseTLSDirectory` keeps the callback
+        // array's pointers as the format writes them, image-based.
+        tlsCallbacks: pe.tlsDirectory?.callbacks,
         // `.rdata` and the other readable data sections. Without them an x64
         // switch is invisible: the compiler puts its RVA table there, so the
         // detector can recover the dispatch chain and still read no entries.

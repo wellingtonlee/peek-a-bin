@@ -208,6 +208,7 @@ export type DetectPass = "call-targets" | "jump-tables" | "thunk-names" | "tail-
 export type DetectPhase =
   | "pdata-seeds"
   | "handler-seeds"
+  | "tls-seeds"
   | "entry-point"
   | "exports"
   | "prologue-scan"
@@ -1991,6 +1992,29 @@ export function detectFunctions(
     pdataFunctions?: { beginAddress: number; endAddress: number }[];
     handlerAddresses?: number[];
     /**
+     * TLS callbacks, **as VAs** — `PEFile.tlsDirectory.callbacks` verbatim.
+     *
+     * **THE UNIT IS THE WHOLE HAZARD HERE AND NOTHING IN THE TYPE SYSTEM HOLDS
+     * IT.** `baseAddress` is a VA, and `parseTLSDirectory` reads the callback
+     * array's pointers image-based and keeps them as they are, so the two
+     * already agree — but they agree by two separate readings of the format,
+     * not by construction. Both are `number`; a caller that subtracts
+     * `imageBase` "to get an RVA like everything else" compiles, and every
+     * callback then falls outside `[baseAddress, endAddress)` and is dropped
+     * silently. That is peek-a-bin-yrh's shape one field over, and it is
+     * `ExportEntry.address`' shape in the other direction — that one really IS
+     * an RVA, and `mcp/session.ts` passed it raw for as long as the option has
+     * existed (peek-a-bin-j4uk.2).
+     *
+     * A TLS callback is a file-declared entry point the loader calls *before*
+     * the entry point, which is why it belongs in `strongStarts` beside the
+     * entry point, the exports and the `.pdata` begins rather than beside the
+     * byte-pattern guesses: the evidence is a table the linker wrote. Nothing
+     * in the image calls one, so recursive descent never reaches it and the
+     * gap fill finds it, if at all, with no boundary.
+     */
+    tlsCallbacks?: number[];
+    /**
      * Extra readable spans of the image — `.rdata` above all — for jump tables
      * that do not live in the code section. `bytes` is always readable and is
      * searched first; anything here is additional.
@@ -2054,10 +2078,15 @@ export function detectFunctions(
   };
   /**
    * Starts named by a linker-written table *this parser reads*: a `.pdata`
-   * begin, an unwind handler, the entry point, an export.
+   * begin, an unwind handler, the entry point, an export, a TLS callback.
    * {@link interiorBranchedOverStarts} will not withdraw one of these no matter
    * what the surrounding code looks like — the evidence for them is a table the
    * linker wrote, not an inference from bytes.
+   *
+   * The TLS callback is the member that most needs this protection rather than
+   * `addrSet` alone: nothing in the image calls one, so it is unreached by
+   * construction, and an unreached candidate the previous function jumps over
+   * is precisely what the second admission withdraws (peek-a-bin-j4uk.2).
    *
    * Read the membership rule literally rather than as "everything the file
    * names". MSVC's 32-bit SEH scope table names `__finally` funclet addresses
@@ -2107,6 +2136,20 @@ export function detectFunctions(
     }
   }
   phase("handler-seeds");
+
+  // TLS callbacks. Seeded *before* the entry point and the exports so a real
+  // name wins at a shared address, exactly as the synthetic `__handler_` names
+  // above give way to them.
+  if (options?.tlsCallbacks) {
+    for (const cb of options.tlsCallbacks) {
+      if (cb >= baseAddress && cb < endAddress) {
+        addrSet.add(cb);
+        strongStarts.add(cb);
+        nameMap.set(cb, `__tls_callback_${cb.toString(16)}`);
+      }
+    }
+  }
+  phase("tls-seeds");
 
   if (options?.entryPoint !== undefined) {
     const ep = options.entryPoint;
