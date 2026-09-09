@@ -2315,8 +2315,13 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
   });
 
   it("never asks when the caller sent no extents", async () => {
-    // `llm/decompileForLLM.ts` is that caller. No extents means no summary, so
-    // the whole section is never wanted and the section never crosses at all.
+    // `llm/decompileForLLM.ts` was that caller until `peek-a-bin-1xc5` deleted
+    // it with the AI bulk features. `functions` is still optional and this still
+    // pins what omitting it does, but the case now has no live caller on the
+    // browser path — `useDecompileTabs` passes extents — so read it as the
+    // contract for an older or future caller rather than as a measurement of
+    // one. No extents means no summary, so the whole section is never wanted and
+    // the section never crosses at all.
     const { client, worker } = await loadClient();
 
     const result = await drive(worker, freshState(), () => ask(client, fnA, { extents: false }));

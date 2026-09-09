@@ -24,9 +24,9 @@
  * there would close an import cycle. One declaration of slot identity is worth
  * more than one fewer file.
  *
- * THREE CALL SITES DELIBERATELY DO NOT COME THROUGH HERE, and they are all the
- * same site: `mcp/tools.ts`, `hooks/useDecompileTabs.ts` and
- * `llm/decompileForLLM.ts` each build a `StackFrame` only to hand it to
+ * TWO CALL SITES DELIBERATELY DO NOT COME THROUGH HERE, and they are the same
+ * site: `mcp/tools.ts` and `hooks/useDecompileTabs.ts` each build a `StackFrame`
+ * only to hand it to
  * `decompileFunction`, and the decompiler refuses ARM64 above them — in
  * `mcp/tools.ts` before the address is even resolved, and in
  * `workers/dispatch.ts` for the browser. Routing them here would be inert at

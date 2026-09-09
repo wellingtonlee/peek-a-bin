@@ -108,14 +108,22 @@ describe("nothing builds a typed xref map without saying where the image is", ()
   it("finds the call sites at all", () => {
     // If this drops to nothing the sweep below passes vacuously — which is
     // exactly the state the bug shipped in.
-    expect(calls.length).toBeGreaterThanOrEqual(5);
+    //
+    // THE FLOOR WENT 5 → 4 BECAUSE A CALLER GENUINELY WENT AWAY, not because it
+    // was in the way. `llm/decompileForLLM.ts` was the fifth; it was deleted
+    // with the AI bulk features (batch rename, report, vulnerability scanner)
+    // in `peek-a-bin-1xc5`, so there is no call site left for the sweep below
+    // to judge. Lowering a liveness threshold is otherwise exactly the "tune the
+    // guard until it passes" move this repo warns about, and the next reader has
+    // to be able to tell the two apart from this comment alone: move the floor
+    // again only when you can name the caller that stopped existing.
+    expect(calls.length).toBeGreaterThanOrEqual(4);
     const files = new Set(calls.map(([file]) => file));
     for (const expected of [
       "mcp/disasm.ts",
       "mcp/session.ts",
       "workers/dispatch.ts",
       "hooks/useDisassemblyRows.ts",
-      "llm/decompileForLLM.ts",
     ]) {
       expect(files, `${expected} should still call the xref map builder`).toContain(expected);
     }
