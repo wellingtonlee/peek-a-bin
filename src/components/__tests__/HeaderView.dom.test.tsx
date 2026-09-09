@@ -1017,6 +1017,11 @@ describe("HeaderView digital signature", () => {
       subjectCN: "Peekabin Test Publisher",
       issuerCN: "Peekabin Test Root CA",
       notBefore: "230115090000Z",
+      // 2026-01-15 — PERMANENTLY IN THE PAST, so every test taking this fixture
+      // is in the EXPIRED arm and renders the amber Expiry row. Kept as it is:
+      // the `23`/`26` pair is what pins the `UTCTime` pivot in the rows below,
+      // and the expiry arms get their own explicit dates in the suite at the
+      // bottom of this block rather than moving this one.
       notAfter: "260115085959Z",
     },
   };
@@ -1026,7 +1031,9 @@ describe("HeaderView digital signature", () => {
     const pe = parsePE(buf);
     renderHeaders(pe);
 
-    expect(screen.getByText("Signed")).toBeTruthy();
+    // "Signed (unverified)", not "Signed": the pill states the fact the parse
+    // established. See the unverified-scope suite below (peek-a-bin-v3uh.9).
+    expect(screen.getByText("Signed (unverified)")).toBeTruthy();
     expect(screen.queryByText("No digital signature found in this binary.")).toBeNull();
     // THE WHOLE DN, not the CN alone: the row is labelled "Subject", and in
     // X.509 that is the Distinguished Name. This fixture's DN carries only a CN,
@@ -1131,8 +1138,9 @@ describe("HeaderView digital signature", () => {
 
   it("still says Signed for a certificate type it cannot parse", () => {
     // A non-PKCS#7 attribute certificate. `parseSecurityDirectory` returns early
-    // without a subject or an issuer — so the badge must still read "Signed" and
-    // the rows that have no value must be absent rather than blank.
+    // without a subject or an issuer — so the badge must still read
+    // "Signed (unverified)" and the rows that have no value must be absent
+    // rather than blank.
     renderHeaders(
       parsePE(
         buildMinimalPE64({
@@ -1140,7 +1148,7 @@ describe("HeaderView digital signature", () => {
         }),
       ),
     );
-    expect(screen.getByText("Signed")).toBeTruthy();
+    expect(screen.getByText("Signed (unverified)")).toBeTruthy();
     expect(screen.queryByText("Subject", { selector: "td" })).toBeNull();
     expect(screen.queryByText("Issuer", { selector: "td" })).toBeNull();
     expect(rowValue("Certificate Type").textContent).toBe("0x1");
@@ -1201,7 +1209,222 @@ describe("HeaderView digital signature", () => {
     const { user } = renderHeaders(parsePE(buildMinimalPE64(SIGNED)));
     await user.click(screen.getByRole("button", { name: /Digital Signature/ }));
     expect(screen.queryByText("Peekabin Test Publisher")).toBeNull();
-    expect(screen.getByText("Signed")).toBeTruthy();
+    expect(screen.getByText("Signed (unverified)")).toBeTruthy();
+    // The scope sentence folds away with the rows it qualifies — it is a
+    // statement about the block, not a second badge.
+    expect(screen.queryByText(/computed no Authenticode digest/)).toBeNull();
+  });
+
+  /**
+   * A GREEN "Signed" PILL OVER A CERTIFICATE NOTHING VERIFIED.
+   *
+   * `cert.signed` is set by ONE fact — a `WIN_CERTIFICATE` header parsed — and
+   * the block then rendered a green badge plus Subject, Issuer, Valid From and
+   * Valid Until, with no statement anywhere that:
+   *
+   *  - no Authenticode digest was computed, SO A FILE MODIFIED AFTER SIGNING
+   *    RENDERED IDENTICALLY TO AN INTACT ONE, which is the single most common
+   *    thing an analyst opens this panel to find out;
+   *  - the signature value was never checked, so an arbitrary PKCS#7 blob
+   *    claiming `CN=Microsoft Corporation` rendered green (the fixture here IS
+   *    such a blob — it carries no digest and no signature value at all);
+   *  - "Valid Until" was printed and compared against nothing, so an expired
+   *    certificate read as live.
+   *
+   * Green is the universal spelling of a signature that VERIFIED. This is the
+   * `peek-a-bin-wo8g` / `peek-a-bin-dd94` criterion one level up: a positive
+   * claim about the file resting on the tool's own not-having-looked. `CLAUDE.md`
+   * is scrupulous about it internally — "the PKCS#7 blob carries no digest and no
+   * signature value, because nothing in this tool verifies either" — and that
+   * honesty stopped at `docs/`. (`peek-a-bin-v3uh.9`)
+   *
+   * NOT the digest itself: computing the Authenticode PE hash and comparing it
+   * against `SpcIndirectDataContent` is a separate bead. This suite is the
+   * honesty tier — say what was checked, and mark expiry.
+   */
+  describe("says what it did not verify", () => {
+    /** A certificate that expired in 2001, whichever year it is read in. */
+    const EXPIRED: PEFixtureOptions = {
+      certificate: { ...SIGNED.certificate, notAfter: "010101000000Z" },
+    };
+    /** The last year `UTCTime`'s two-digit pivot puts in the future. */
+    const CURRENT: PEFixtureOptions = {
+      certificate: { ...SIGNED.certificate, notAfter: "491231235959Z" },
+    };
+
+    it("does not call the signature verified", () => {
+      renderHeaders(parsePE(buildMinimalPE64(SIGNED)));
+      // THE ROW THAT WOULD FAIL IF THE PILL WENT BACK TO A BARE GREEN "Signed".
+      expect(screen.getByText("Signed (unverified)")).toBeTruthy();
+      expect(screen.queryByText("Signed")).toBeNull();
+      // And the chip is neutral rather than the green a verified answer wears.
+      // Not a claim about a rendered colour — jsdom performs no layout and
+      // paints nothing — only that the class naming the verified palette is
+      // absent from the element that carries the word.
+      const pill = screen.getByText("Signed (unverified)");
+      expect(pill.className).not.toContain("green");
+      expect(pill.className).toContain("blue");
+    });
+
+    it("states exactly what was and was not checked, whenever it says Signed", () => {
+      renderHeaders(parsePE(buildMinimalPE64(SIGNED)));
+      const said = screen.getByText(/computed no Authenticode digest/);
+      // Each clause is a separate hole a reader would otherwise fill in
+      // themselves. The digest one is first because it is the one with a
+      // consequence for the FILE rather than for the certificate.
+      expect(said.textContent).toContain("parsed the WIN_CERTIFICATE and PKCS#7 SignedData");
+      expect(said.textContent).toContain("modified after signing looks exactly like an intact one");
+      expect(said.textContent).toContain("did not check the signature value");
+      expect(said.textContent).toContain("did not build a certificate chain");
+      expect(said.textContent).toContain("consulted no trust store");
+      expect(said.textContent).toContain("Nothing above says this signature is valid");
+    });
+
+    it("states it for a certificate type the walk could not parse", () => {
+      // The arm where the pill is very nearly the only thing on screen: no
+      // subject, no issuer, no dates. The scope sentence is MORE load-bearing
+      // here, not less — there is nothing else for a reader to calibrate on.
+      renderHeaders(
+        parsePE(
+          buildMinimalPE64({
+            certificate: { certificateType: 0x0001, raw: new Uint8Array([1, 2, 3, 4]) },
+          }),
+        ),
+      );
+      expect(screen.getByText("Signed (unverified)")).toBeTruthy();
+      expect(screen.getByText(/computed no Authenticode digest/)).toBeTruthy();
+    });
+
+    it("marks an expired certificate, against the fixture's own bytes", () => {
+      const pe = parsePE(buildMinimalPE64(EXPIRED));
+      // DERIVED FROM THE FIXTURE, NOT RESTATED: the expected instant is computed
+      // here from the `UTCTime` body the fixture wrote, with this file's own
+      // two-digit pivot, so a parser that hardcoded an epoch or dropped the
+      // pivot fails rather than agreeing with itself. `01` is below 50, hence
+      // 2001.
+      const body = EXPIRED.certificate?.notAfter as string;
+      const yy = Number(body.slice(0, 2));
+      const expected = Date.UTC(
+        yy >= 50 ? 1900 + yy : 2000 + yy,
+        Number(body.slice(2, 4)) - 1,
+        Number(body.slice(4, 6)),
+        Number(body.slice(6, 8)),
+        Number(body.slice(8, 10)),
+        Number(body.slice(10, 12)),
+      );
+      expect(pe.certificate?.notAfterMs).toBe(expected);
+      expect(expected).toBeLessThan(Date.now());
+
+      renderHeaders(pe);
+      expect(rowValue("Valid Until").textContent).toBe("2001-01-01 00:00:00 UTC");
+      const expiry = rowValue("Expiry");
+      expect(expiry.textContent).toContain("Certificate expired on 2001-01-01 00:00:00 UTC");
+      // EXPIRY IS A FACT ABOUT THE CERTIFICATE, NOT ABOUT THE SIGNATURE, and the
+      // row says so: a signature countersigned while the certificate was live
+      // stays valid afterwards, and this tool reads no countersignature at all.
+      expect(expiry.textContent).toContain("not about the signature");
+      expect(expiry.textContent).toContain("no countersignature timestamp was read");
+      // THE PILL MUST NOT MOVE. An expired certificate is not a broken
+      // signature, and painting the badge on expiry would state the verdict this
+      // whole change exists to withhold.
+      expect(screen.getByText("Signed (unverified)")).toBeTruthy();
+    });
+
+    it("says nothing about expiry for a certificate that has not expired", () => {
+      // THE CONTROL. A row on every signed file would be noise, and "not
+      // expired" is already what the printed date says.
+      const pe = parsePE(buildMinimalPE64(CURRENT));
+      expect(pe.certificate?.notAfterMs).toBe(Date.UTC(2049, 11, 31, 23, 59, 59));
+      expect(pe.certificate?.notAfterMs as number).toBeGreaterThan(Date.now());
+      renderHeaders(pe);
+      expect(rowValue("Valid Until").textContent).toBe("2049-12-31 23:59:59 UTC");
+      expect(screen.queryByText("Expiry", { selector: "td" })).toBeNull();
+      expect(screen.queryByText(/Certificate expired on/)).toBeNull();
+      // The scope sentence is not conditional on expiry — it qualifies the
+      // block, and a signature nothing verified is unverified either way.
+      expect(screen.getByText(/computed no Authenticode digest/)).toBeTruthy();
+    });
+
+    /**
+     * THE ROW THAT STOPS THE FIX FROM CLAIMING A VALIDITY IT CANNOT KNOW.
+     *
+     * `certificateValidityState` has THREE states, and this is the third. A
+     * `notAfter` whose digits do not name a real instant is printed above and
+     * comparable with nothing; folding it in with `"current"` would silently
+     * assert that such a certificate is live, which is the same defect as the
+     * green pill one level down.
+     */
+    it("claims neither for a date it could not read as a calendar time", () => {
+      // Reachable through the REAL parser: `isDigits` promises ASCII digits and
+      // nothing more, so a thirteenth month reaches the formatter and is printed.
+      const pe = parsePE(
+        buildMinimalPE64({
+          certificate: { ...SIGNED.certificate, notAfter: "241301000000Z" },
+        }),
+      );
+      expect(pe.certificate?.notAfter).toBe("2024-13-01 00:00:00 UTC");
+      expect(pe.certificate?.notAfterMs).toBeNull();
+      renderHeaders(pe);
+      // The date is still shown — the bytes say what they say.
+      expect(rowValue("Valid Until").textContent).toBe("2024-13-01 00:00:00 UTC");
+      // NEITHER CLAIM. Not "expired" (the rolled-over instant is in the past, so
+      // an unchecked epoch would have said so) and not silence, which is what
+      // the "current" arm renders and would read as "this certificate is live".
+      const expiry = rowValue("Expiry");
+      expect(expiry.textContent).toContain("Not checked");
+      expect(expiry.textContent).toContain("not a calendar time");
+      expect(expiry.textContent).not.toContain("expired on");
+    });
+
+    it("shows no expiry row where there is no date to qualify", () => {
+      // The control for the row above: the caveat hangs off "Valid Until", so a
+      // certificate whose validity field the walk rejected outright — too short
+      // to be a `UTCTime` — gets NEITHER row. A caveat about a row that is not
+      // on screen is noise, and this is what keeps the "unknown" arm from
+      // becoming one.
+      const pe = parsePE(
+        buildMinimalPE64({ certificate: { ...SIGNED.certificate, notAfter: "2401" } }),
+      );
+      expect(pe.certificate?.notAfter).toBeNull();
+      expect(pe.certificate?.notAfterMs).toBeNull();
+      renderHeaders(pe);
+      expect(screen.queryByText("Valid Until", { selector: "td" })).toBeNull();
+      expect(screen.queryByText("Expiry", { selector: "td" })).toBeNull();
+      // Still unverified, and still says so.
+      expect(screen.getByText(/computed no Authenticode digest/)).toBeTruthy();
+    });
+
+    /**
+     * THE TWO ARMS THIS CHANGE MUST NOT TOUCH — one test each, because
+     * `domSetup.ts` cleans up per test rather than per render.
+     *
+     * Neither has a signature to qualify, so neither may grow the scope
+     * sentence: printing "nothing was verified" over a file that declares no
+     * certificate would be a third claim about a file that has made none, and
+     * over the `Unreadable` arm it would compete with the sentence already
+     * there (`peek-a-bin-wo8g`).
+     */
+    it("adds nothing to the Unsigned arm", () => {
+      renderHeaders(parsePE(buildMinimalPE64()));
+      expect(screen.getByText("Unsigned")).toBeTruthy();
+      expect(screen.getByText("No digital signature found in this binary.")).toBeTruthy();
+      expect(screen.queryByText(/computed no Authenticode digest/)).toBeNull();
+      expect(screen.queryByText("Expiry", { selector: "td" })).toBeNull();
+    });
+
+    it("adds nothing to the Unreadable arm", () => {
+      renderHeaders(
+        parsePE(
+          buildMinimalPE64({
+            dataDirectories: new Map([[4, { virtualAddress: 0x100000, size: 0x200 }]]),
+          }),
+        ),
+      );
+      expect(screen.getByText("Unreadable")).toBeTruthy();
+      expect(screen.getByText(/could not be read/)).toBeTruthy();
+      expect(screen.queryByText(/computed no Authenticode digest/)).toBeNull();
+      expect(screen.queryByText("Expiry", { selector: "td" })).toBeNull();
+    });
   });
 });
 

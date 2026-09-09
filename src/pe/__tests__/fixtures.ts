@@ -246,7 +246,17 @@ export interface CertificateDef {
    * element would be visible.
    */
   certificateCount?: number;
-  /** DER `UTCTime` bodies, i.e. `YYMMDDHHMMSSZ`. */
+  /**
+   * DER `UTCTime` bodies, i.e. `YYMMDDHHMMSSZ`.
+   *
+   * **THE DEFAULT `notAfter` IS HISTORICAL AND EVERY CALLER THAT TAKES IT IS IN
+   * THE EXPIRED ARM.** It is `260115085959Z` — 2026-01-15, which was in the
+   * future when it was written and is in the past now. `HeaderView` compares
+   * `notAfter` against `Date.now()` since `peek-a-bin-v3uh.9`, so a suite
+   * asserting anything about expiry must pass an EXPLICIT and unambiguous date
+   * (`010101000000Z`, `491231235959Z`) rather than inheriting one that moves
+   * arm as the calendar turns.
+   */
   notBefore?: string;
   notAfter?: string;
 }
@@ -826,6 +836,9 @@ function buildPKCS7(def: CertificateDef): Uint8Array {
   const subject = def.subjectCN ?? "Contoso Software";
   const issuer = def.issuerCN ?? "Contoso Root CA";
   const notBefore = def.notBefore ?? "230115090000Z";
+  // 2026-01-15 — HISTORICAL, i.e. every caller inheriting it renders the expired
+  // row. Deliberately not moved: changing it would silently change what ~10
+  // callers of this builder assert. See `CertificateDef.notAfter`.
   const notAfter = def.notAfter ?? "260115085959Z";
 
   // 1.2.840.113549.1.1.11 (sha256WithRSAEncryption), used only as a placeholder

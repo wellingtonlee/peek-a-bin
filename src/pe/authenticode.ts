@@ -31,6 +31,29 @@ export interface CertificateInfo {
   issuerCN: string | null;
   notBefore: string | null;
   notAfter: string | null;
+  /**
+   * `notAfter` as a Unix epoch in milliseconds, or `null` when the date could
+   * not be read *as a calendar time* — which is a THIRD thing from an absent
+   * date and from a readable one.
+   *
+   * **It exists so that nothing outside this file re-parses the display
+   * string.** `notAfter` is already formatted (`YYYY-MM-DD HH:MM:SS UTC`), and
+   * the only reason a caller wants a number is to compare it against now — so a
+   * caller that scanned the text back apart would be A SECOND DECLARATION OF
+   * THE DER TIME FORMAT, including the `UTCTime` two-digit pivot at 50, in a
+   * file that has never seen a DER byte. That is the class this codebase closes
+   * by hand everywhere else (`ORDINAL_IMPORT_PREFIX`, `TRUNCATION_MARKER`,
+   * `pe/sections.ts`), and here the two copies would drift silently: a wrong
+   * epoch renders as a *confident* expiry claim, since neither spelling is
+   * ill-typed and nothing cross-checks them.
+   *
+   * `null` and a non-null `notAfter` **can hold at once**, and that pairing is
+   * the interesting one: the components are ASCII digits (which is all
+   * `isDigits` promises) but do not name a real instant — `241301000000Z`
+   * renders `2024-13-01 00:00:00 UTC` and denotes nothing. The date is printed
+   * and no comparison is made; see {@link certificateValidityState}.
+   */
+  notAfterMs: number | null;
   signatureSize: number;
   /**
    * How many certificates the PKCS#7 `certificates` SET held.
@@ -337,7 +360,58 @@ function isDigits(str: string): boolean {
   return true;
 }
 
-function parseUTCTime(data: Uint8Array, el: DERElement): string | null {
+/**
+ * A DER time, both ways a caller wants it: the text the panel prints and the
+ * instant it denotes.
+ *
+ * The two are produced HERE, together, from one reading of the bytes. Splitting
+ * them — text out of the parser and the epoch out of a second scan of the text
+ * — is the drift `CertificateInfo.notAfterMs` documents at length.
+ */
+interface DERTime {
+  text: string;
+  /** `null` when the components are digits but do not name a real instant. */
+  ms: number | null;
+}
+
+/**
+ * The instant six calendar components denote, or `null` if they denote none.
+ *
+ * `isDigits` promises only that the field is ASCII digits, so `241301000000Z`
+ * reaches here with a thirteenth month. `Date.UTC` does not reject it — it rolls
+ * over to 2025-01-01 — so an unchecked epoch would silently disagree with the
+ * text printed beside it, which is worse than having no epoch: a rolled-over
+ * date is a confident answer about the wrong instant. The ROUND TRIP is the
+ * check, and it is one comparison per component rather than six range tables:
+ * an instant that reads back as the components it was built from is exactly one
+ * the components name. A leap second (`sec` 60) is refused by it too, correctly
+ * — there is no such instant in the Date model, so nothing here can compare it.
+ */
+function epochFor(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  min: number,
+  sec: number,
+): number | null {
+  const ms = Date.UTC(year, month - 1, day, hour, min, sec);
+  if (!Number.isFinite(ms)) return null;
+  const back = new Date(ms);
+  if (
+    back.getUTCFullYear() !== year ||
+    back.getUTCMonth() !== month - 1 ||
+    back.getUTCDate() !== day ||
+    back.getUTCHours() !== hour ||
+    back.getUTCMinutes() !== min ||
+    back.getUTCSeconds() !== sec
+  ) {
+    return null;
+  }
+  return ms;
+}
+
+function parseUTCTime(data: Uint8Array, el: DERElement): DERTime | null {
   const str = readDERString(data, el);
   if (str.length < 12 || !isDigits(str.substring(0, 12))) return null;
   const year = parseInt(str.substring(0, 2), 10);
@@ -347,10 +421,22 @@ function parseUTCTime(data: Uint8Array, el: DERElement): string | null {
   const hour = str.substring(6, 8);
   const min = str.substring(8, 10);
   const sec = str.substring(10, 12);
-  return `${fullYear}-${month}-${day} ${hour}:${min}:${sec} UTC`;
+  return {
+    text: `${fullYear}-${month}-${day} ${hour}:${min}:${sec} UTC`,
+    // The pivot is applied ONCE, above, and both halves read `fullYear` — so a
+    // 1997 certificate cannot print one year and compare as another.
+    ms: epochFor(
+      fullYear,
+      parseInt(month, 10),
+      parseInt(day, 10),
+      parseInt(hour, 10),
+      parseInt(min, 10),
+      parseInt(sec, 10),
+    ),
+  };
 }
 
-function parseGeneralizedTime(data: Uint8Array, el: DERElement): string | null {
+function parseGeneralizedTime(data: Uint8Array, el: DERElement): DERTime | null {
   const str = readDERString(data, el);
   if (str.length < 14 || !isDigits(str.substring(0, 14))) return null;
   const year = str.substring(0, 4);
@@ -359,7 +445,53 @@ function parseGeneralizedTime(data: Uint8Array, el: DERElement): string | null {
   const hour = str.substring(8, 10);
   const min = str.substring(10, 12);
   const sec = str.substring(12, 14);
-  return `${year}-${month}-${day} ${hour}:${min}:${sec} UTC`;
+  return {
+    text: `${year}-${month}-${day} ${hour}:${min}:${sec} UTC`,
+    ms: epochFor(
+      parseInt(year, 10),
+      parseInt(month, 10),
+      parseInt(day, 10),
+      parseInt(hour, 10),
+      parseInt(min, 10),
+      parseInt(sec, 10),
+    ),
+  };
+}
+
+/**
+ * Whether the first certificate's validity period has run out — `"expired"`,
+ * `"current"` or `"unknown"`.
+ *
+ * **THREE STATES, and `"unknown"` is the point of the function.** A certificate
+ * whose `notAfter` could not be read as an instant must render NEITHER claim:
+ * folding it in with `"current"` would make the tool assert a validity it has
+ * no evidence for, which is the whole class this bead closes one level up.
+ * (`peek-a-bin-v3uh.9`)
+ *
+ * **It is a fact about the CERTIFICATE and never about the signature**, and
+ * nothing that reads it may change what the signature pill says. Authenticode
+ * signatures are routinely countersigned by a timestamp authority, and a
+ * signature made while the certificate was live stays valid after it expires —
+ * this tool reads no countersignature timestamp at all, so it cannot tell the
+ * ordinary expired-but-still-valid case from a signature made after expiry.
+ * Expiry is worth showing; it is not a verdict.
+ *
+ * `nowMs` is a PARAMETER rather than a `Date.now()` inside, so every arm is
+ * reachable from a test without touching the clock — `vi.useFakeTimers()`
+ * deadlocks `waitFor` and `userEvent` in this repo, and a suite that pinned
+ * "expired" against the real clock would flip on a date.
+ *
+ * The comparison is `nowMs > notAfterMs`, because `notAfter` names the LAST
+ * second the certificate is valid rather than the first second it is not — so a
+ * certificate is `"current"` throughout that second, and a `>=` would call a
+ * live certificate dead for it.
+ */
+export function certificateValidityState(
+  cert: Pick<CertificateInfo, "notAfterMs">,
+  nowMs: number,
+): "expired" | "current" | "unknown" {
+  if (cert.notAfterMs === null) return "unknown";
+  return nowMs > cert.notAfterMs ? "expired" : "current";
 }
 
 export function parseSecurityDirectory(
@@ -393,6 +525,7 @@ export function parseSecurityDirectory(
       issuerCN: null,
       notBefore: null,
       notAfter: null,
+      notAfterMs: null,
       signatureSize: dwLength,
     };
   }
@@ -409,6 +542,7 @@ export function parseSecurityDirectory(
       issuerCN: null,
       notBefore: null,
       notAfter: null,
+      notAfterMs: null,
       signatureSize: dwLength,
     };
   }
@@ -429,6 +563,7 @@ export function parseSecurityDirectory(
       issuerCN: null,
       notBefore: null,
       notAfter: null,
+      notAfterMs: null,
       signatureSize: dwLength,
     };
   }
@@ -450,6 +585,7 @@ function parsePKCS7(
     issuerCN: null,
     notBefore: null,
     notAfter: null,
+    notAfterMs: null,
     signatureSize,
   };
 
@@ -528,10 +664,25 @@ function parsePKCS7(
     if (validityChildren.length >= 2) {
       const nb = validityChildren[0];
       const na = validityChildren[1];
-      if (nb.tag === TAG_UTC_TIME) base.notBefore = parseUTCTime(data, nb);
-      else if (nb.tag === TAG_GENERALIZED_TIME) base.notBefore = parseGeneralizedTime(data, nb);
-      if (na.tag === TAG_UTC_TIME) base.notAfter = parseUTCTime(data, na);
-      else if (na.tag === TAG_GENERALIZED_TIME) base.notAfter = parseGeneralizedTime(data, na);
+      const before =
+        nb.tag === TAG_UTC_TIME
+          ? parseUTCTime(data, nb)
+          : nb.tag === TAG_GENERALIZED_TIME
+            ? parseGeneralizedTime(data, nb)
+            : null;
+      const after =
+        na.tag === TAG_UTC_TIME
+          ? parseUTCTime(data, na)
+          : na.tag === TAG_GENERALIZED_TIME
+            ? parseGeneralizedTime(data, na)
+            : null;
+      base.notBefore = before?.text ?? null;
+      base.notAfter = after?.text ?? null;
+      // `notBefore` gets no epoch: nothing reads one. A not-yet-valid
+      // certificate is a real thing, but the panel makes no claim about it and
+      // an unpublished field would be a second reading with no reader to keep
+      // it honest.
+      base.notAfterMs = after?.ms ?? null;
     }
   }
 

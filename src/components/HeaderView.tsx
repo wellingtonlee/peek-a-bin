@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { useFileMetrics } from "../hooks/useFileMetrics";
 import { useAppDispatch, useAppState } from "../hooks/usePEFile";
+import { certificateValidityState } from "../pe/authenticode";
 import {
   DataDirectoryNames as DATA_DIR_NAMES,
   IMAGE_DIRECTORY_ENTRY_DEBUG,
@@ -196,6 +197,11 @@ function SignatureSection() {
   // it here. `certificateUnreadable` is the one declaration of the pair that
   // means it. (peek-a-bin-wo8g)
   const certUnreadable = certificateUnreadable(pe);
+  // `Date.now()` in the render pass, and the comparison itself in `pe/`, where
+  // the format lives. A component that scanned the formatted `notAfter` string
+  // back apart would be a second declaration of the DER time format — pivot
+  // included — in a file that has never seen a DER byte.
+  const expiry = cert ? certificateValidityState(cert, Date.now()) : "unknown";
 
   return (
     <section>
@@ -206,9 +212,19 @@ function SignatureSection() {
       >
         <span className="text-[8px]">{open ? "\u25BC" : "\u25B6"}</span>
         Digital Signature
+        {/* "SIGNED (UNVERIFIED)", IN A NEUTRAL CHIP, BECAUSE THAT IS THE FACT THE
+            PARSE ESTABLISHED. `cert.signed` is set by "a WIN_CERTIFICATE header
+            was parsed" and by nothing else: no Authenticode digest is computed
+            anywhere in this tool, no signature value is checked, no chain is
+            built and no trust store is consulted. A GREEN "Signed" is the
+            universal spelling of a signature that VERIFIED — so a file modified
+            after signing, and an arbitrary PKCS#7 blob claiming
+            `CN=Microsoft Corporation`, both rendered exactly like an intact
+            Microsoft binary. Green is the claim; the chip is neutral now.
+            The sentence in the block is the rest of the fix. */}
         {cert?.signed ? (
-          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
-            Signed
+          <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-900/30 text-blue-300">
+            Signed (unverified)
           </span>
         ) : certUnreadable ? (
           <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-900/30 text-yellow-400">
@@ -246,6 +262,37 @@ function SignatureSection() {
             )}
             {cert.notBefore && <Row label="Valid From">{cert.notBefore}</Row>}
             {cert.notAfter && <Row label="Valid Until">{cert.notAfter}</Row>}
+            {/* EXPIRY IS A FACT ABOUT THE CERTIFICATE AND NOT ABOUT THE
+                SIGNATURE, so it renders here and NEVER on the pill. "Valid
+                Until" was printed and never compared against anything, so an
+                expired certificate read as live. A signature countersigned by a
+                timestamp authority while the certificate was live stays valid
+                after it expires — and this tool reads no countersignature at
+                all, so it cannot tell that ordinary case from a signature made
+                after expiry. Hence a row, in words, rather than a verdict.
+
+                Three states, not two: a `notAfter` whose digits do not name a
+                real instant is printed above and comparable with nothing, and
+                saying so is the whole reason `certificateValidityState` has an
+                `"unknown"` arm. The `"current"` arm renders no row — the block
+                claims nothing it did not check, and "not expired" is already
+                what the printed date says. */}
+            {cert.notAfter && expiry === "expired" && (
+              <Row label="Expiry">
+                <span className="text-yellow-400">
+                  {`Certificate expired on ${cert.notAfter}. This is a fact about the certificate, not about the signature \u2014 no countersignature timestamp was read.`}
+                </span>
+              </Row>
+            )}
+            {cert.notAfter && expiry === "unknown" && (
+              <Row label="Expiry">
+                <span className="text-yellow-400">
+                  {
+                    "Not checked \u2014 the date above is not a calendar time this tool can compare against now."
+                  }
+                </span>
+              </Row>
+            )}
             <Row label="Signature Size">{cert.signatureSize.toLocaleString()} bytes</Row>
             <Row label="Revision">
               0x{cert.revision.toString(16).toUpperCase().padStart(4, "0")}
@@ -257,6 +304,21 @@ function SignatureSection() {
             </Row>
           </tbody>
         </table>
+      )}
+      {/* WHAT WAS AND WAS NOT CHECKED, on the `Unreadable` sentence's precedent
+          directly below — grey rather than amber, because this is the scope of
+          the answer and not a fault in the file. It is rendered whenever the
+          pill says Signed, INCLUDING for a certificate type the walk could not
+          parse, where the rows above are absent and the pill is the only thing
+          on screen. */}
+      {open && cert?.signed && (
+        <p className="text-gray-400 text-xs mt-2">
+          This tool parsed the WIN_CERTIFICATE and PKCS#7 SignedData structure and read the first
+          certificate's fields. It computed no Authenticode digest, so a file modified after signing
+          looks exactly like an intact one here; it did not check the signature value, did not build
+          a certificate chain and consulted no trust store. Nothing above says this signature is
+          valid or that this publisher is who the certificate claims.
+        </p>
       )}
       {open && !cert?.signed && certUnreadable && (
         <p className="text-yellow-400 text-xs">

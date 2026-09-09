@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { parseSecurityDirectory } from "../authenticode";
+import { certificateValidityState, parseSecurityDirectory } from "../authenticode";
 import type { DataDirectory } from "../types";
 
 const TIMEOUT = 5000;
@@ -180,6 +180,7 @@ describe("parseSecurityDirectory", () => {
       issuerCN: "Test Issuer CA",
       notBefore: "2024-01-01 00:00:00 UTC",
       notAfter: "2026-12-31 23:59:59 UTC",
+      notAfterMs: Date.UTC(2026, 11, 31, 23, 59, 59),
       signatureSize: expect.any(Number),
       certificateCount: 1,
     });
@@ -327,6 +328,12 @@ describe("parseSecurityDirectory", () => {
     );
     expect(info?.notBefore).toBe("2024-01-01 00:00:00 UTC");
     expect(info?.notAfter).toBe("2099-12-31 23:59:59 UTC");
+    // The epoch comes off the OTHER DER time tag by the same route, so both
+    // spellings of a validity date are comparable. Hand-computed literal beside
+    // the arithmetic, so a wrong month-index would fail rather than agree with
+    // itself.
+    expect(info?.notAfterMs).toBe(4102444799000);
+    expect(info?.notAfterMs).toBe(Date.UTC(2099, 11, 31, 23, 59, 59));
   });
 
   it("applies the UTCTime 50-year pivot", () => {
@@ -335,6 +342,13 @@ describe("parseSecurityDirectory", () => {
     );
     expect(info?.notBefore).toBe("2049-01-01 00:00:00 UTC");
     expect(info?.notAfter).toBe("1950-01-01 00:00:00 UTC");
+    // AND THE EPOCH TAKES THE SAME PIVOT, from the same `fullYear`. Hand-computed:
+    // 1950-01-01T00:00:00Z is 20 years before the epoch, i.e. negative. If the
+    // two halves ever read different years, this is the row that says so —
+    // `notAfter` would print 1950 while the panel compared 2050 against now and
+    // called a 76-year-expired certificate current.
+    expect(info?.notAfterMs).toBe(-631152000000);
+    expect(info?.notAfterMs).toBe(Date.UTC(1950, 0, 1, 0, 0, 0));
   });
 
   it("shifts field indices when the optional version field is absent", () => {
@@ -630,5 +644,131 @@ describe("DER fuzzing", () => {
         expect(() => parseCert(mutated), `byte ${i} = 0x${poison.toString(16)}`).not.toThrow();
       }
     }
+  });
+});
+
+/**
+ * `notAfterMs` AND `certificateValidityState`.
+ *
+ * The panel printed "Valid Until" and compared it against nothing, so an expired
+ * certificate rendered exactly like a live one. The comparison needs an instant,
+ * and the ONE place allowed to turn DER bytes into one is the parser — a view
+ * that scanned the formatted string back apart would be a second declaration of
+ * the DER time format, `UTCTime`'s two-digit pivot included, and the two copies
+ * would drift into a *confident* wrong expiry claim with nothing cross-checking
+ * them. (`peek-a-bin-v3uh.9`)
+ *
+ * `nowMs` is a parameter for a measured reason: `vi.useFakeTimers()` deadlocks
+ * `waitFor` and `userEvent` in this repo, and a suite pinning "expired" against
+ * the real clock flips arm on a date. Every arm below is reached with an
+ * explicit instant and the tests are stable forever.
+ */
+describe("certificate expiry", () => {
+  /** 2026-12-31 23:59:59 UTC, the node fixture's default `notAfter`. */
+  const NOT_AFTER = Date.UTC(2026, 11, 31, 23, 59, 59);
+
+  it("reports the notAfter epoch beside the text, from one reading of the bytes", () => {
+    const info = parseCert(buildPKCS7({ notAfter: utcTime("261231235959Z") }));
+    expect(info?.notAfter).toBe("2026-12-31 23:59:59 UTC");
+    // Hand-computed: 1798761599000. The literal is beside the arithmetic so a
+    // month-index or second-vs-millisecond slip fails rather than agreeing with
+    // its own restatement.
+    expect(info?.notAfterMs).toBe(1798761599000);
+    expect(info?.notAfterMs).toBe(NOT_AFTER);
+  });
+
+  it("calls a certificate expired only after the last second it is valid", () => {
+    const cert = { notAfterMs: NOT_AFTER };
+    // `notAfter` names the LAST second of validity, so the certificate is
+    // current throughout it and expired one millisecond later. The boundary is
+    // asserted from both sides: a `>=` here would call a live certificate dead
+    // for its final second, and no other row could see the difference.
+    expect(certificateValidityState(cert, NOT_AFTER - 1)).toBe("current");
+    expect(certificateValidityState(cert, NOT_AFTER)).toBe("current");
+    expect(certificateValidityState(cert, NOT_AFTER + 1)).toBe("expired");
+  });
+
+  it("reports a long-past certificate expired and a far-future one current", () => {
+    const past = parseCert(buildPKCS7({ notAfter: utcTime("000101000000Z") }));
+    const future = parseCert(buildPKCS7({ notAfter: utcTime("491231235959Z") }));
+    expect(past?.notAfterMs).toBe(Date.UTC(2000, 0, 1, 0, 0, 0));
+    expect(future?.notAfterMs).toBe(Date.UTC(2049, 11, 31, 23, 59, 59));
+    // Against the REAL clock, which is safe for exactly these two dates: the
+    // year 2000 is behind every machine that can run this and 2049 is the last
+    // year `UTCTime`'s pivot puts in the future.
+    const now = Date.now();
+    expect(certificateValidityState(past as { notAfterMs: number | null }, now)).toBe("expired");
+    expect(certificateValidityState(future as { notAfterMs: number | null }, now)).toBe("current");
+  });
+
+  /**
+   * THE THIRD ARM, AND THE REASON THERE ARE THREE.
+   *
+   * Folding an unreadable date in with `"current"` makes the tool assert a
+   * validity it has no evidence for — the exact class this bead closes one level
+   * up, where a green pill asserted a signature nothing verified. `"unknown"`
+   * renders NEITHER claim.
+   */
+  it("answers unknown, never current, for a date it could not read", () => {
+    expect(certificateValidityState({ notAfterMs: null }, Date.now())).toBe("unknown");
+    // And the parser produces that state for real bytes: a validity field the
+    // walk rejected outright leaves both halves null.
+    const info = parseCert(buildPKCS7({ notAfter: utcTime("nonsense!") }));
+    expect(info?.notAfter).toBeNull();
+    expect(info?.notAfterMs).toBeNull();
+    expect(certificateValidityState(info as { notAfterMs: number | null }, Date.now())).toBe(
+      "unknown",
+    );
+  });
+
+  it("refuses an epoch for digits that do not name a real instant, and still prints them", () => {
+    // `isDigits` promises ASCII digits and nothing more, so a thirteenth month
+    // reaches the formatter. `Date.UTC` would ROLL IT OVER to 2025-01-01 — an
+    // epoch silently disagreeing with the text printed beside it, which is worse
+    // than no epoch, because it is a confident answer about the wrong instant.
+    const info = parseCert(buildPKCS7({ notAfter: utcTime("241301000000Z") }));
+    expect(info?.notAfter).toBe("2024-13-01 00:00:00 UTC");
+    expect(info?.notAfterMs).toBeNull();
+    // The rolled-over instant is in the past, so a parser without the round-trip
+    // check would have called this expired — a claim about a date that denotes
+    // nothing.
+    expect(Date.UTC(2024, 12, 1, 0, 0, 0)).toBeLessThan(Date.now());
+    expect(certificateValidityState(info as { notAfterMs: number | null }, Date.now())).toBe(
+      "unknown",
+    );
+  });
+
+  it("refuses a day the month does not have, and a leap second", () => {
+    const feb30 = parseCert(buildPKCS7({ notAfter: utcTime("240230000000Z") }));
+    expect(feb30?.notAfter).toBe("2024-02-30 00:00:00 UTC");
+    expect(feb30?.notAfterMs).toBeNull();
+    // 2016-12-31T23:59:60Z was a real leap second and is not an instant the Date
+    // model holds, so nothing here can compare it.
+    const leap = parseCert(buildPKCS7({ notAfter: generalizedTime("20161231235960Z") }));
+    expect(leap?.notAfter).toBe("2016-12-31 23:59:60 UTC");
+    expect(leap?.notAfterMs).toBeNull();
+  });
+
+  it("accepts a leap day the month does have", () => {
+    // The control for the two rows above: the round-trip check must reject an
+    // impossible date without rejecting an unusual valid one.
+    const info = parseCert(buildPKCS7({ notAfter: utcTime("240229120000Z") }));
+    expect(info?.notAfter).toBe("2024-02-29 12:00:00 UTC");
+    expect(info?.notAfterMs).toBe(Date.UTC(2024, 1, 29, 12, 0, 0));
+  });
+
+  it("gives every unparsable-certificate arm a null epoch rather than omitting it", () => {
+    // The four early returns in `parseSecurityDirectory` and `parsePKCS7`'s
+    // `base` all answer "signed, details unknown", and `notAfterMs` must be
+    // present-and-null there like `notAfter` is — an absent field would make
+    // `certificateValidityState` read `undefined` and, being neither null nor a
+    // number, compare as `NaN`: "current".
+    const badType = parseCert(new Uint8Array([1, 2, 3, 4]), { certType: 0x0001 });
+    expect(badType?.notAfterMs).toBeNull();
+    expect(certificateValidityState(badType as { notAfterMs: number | null }, 0)).toBe("unknown");
+    const shortHeader = parseCert(new Uint8Array([1, 2, 3, 4]), { dwLength: 4 });
+    expect(shortHeader?.notAfterMs).toBeNull();
+    const notDER = parseCert(new Uint8Array([0xff, 0xff, 0xff]));
+    expect(notDER?.notAfterMs).toBeNull();
   });
 });

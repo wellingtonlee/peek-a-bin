@@ -2012,6 +2012,52 @@ mistake.
   `corpus` byte-identical, `corpus:parserdiff` 98/118, `corpus:arm64` 51/51. Carried into MCP
   output and the export file by the entry above. (`peek-a-bin-wo8g`)
 
+- **A GREEN "Signed" PILL IS A VERIFIED ANSWER'S SHAPE, AND THE PARSE ESTABLISHED ONLY THAT A
+  `WIN_CERTIFICATE` HEADER READ.** The same class as the four entries above — a positive claim
+  resting on the tool's own not-having-looked — on the surface a user reads rather than on a
+  narrowing. Nothing here computes an Authenticode digest, checks a signature value, builds a
+  chain or consults a trust store, and `notAfter` was printed and compared against nothing, so a
+  file modified after signing, an arbitrary PKCS#7 blob claiming `CN=Microsoft Corporation` and an
+  expired certificate all rendered identically to an intact Microsoft binary. `CLAUDE.md` said all
+  of this internally and **the honesty stopped at `docs/`**. Three parts. **The pill** reads
+  `Signed (unverified)` in a NEUTRAL chip — none of the three colours already in that block, since
+  it is not a fault (amber `Unreadable`) and not an absence (grey `Unsigned`) — with a grey scope
+  sentence under the table naming each hole, on the `Unreadable` sentence's precedent but grey
+  because it states the *scope of the answer*, not a problem with the file; it renders whenever the
+  pill says Signed, **including** for a certificate type the walk could not parse, the arm where
+  the pill is nearly the only thing on screen. **Expiry is a fact about the CERTIFICATE, never
+  about the signature, and the pill does not move on it**: Authenticode signatures are routinely
+  countersigned, a signature made while the certificate was live stays valid afterwards, and this
+  tool reads no countersignature timestamp at all — so it is an amber ROW beside Valid Until,
+  saying in words which of the two it is a fact about. **The view must not re-parse the display
+  string**: `notAfter` is already formatted, so a component scanning it back apart would be a
+  SECOND DECLARATION OF THE DER TIME FORMAT (pivot at 50 included) in a file that has never seen a
+  DER byte, and a wrong epoch renders as a *confident* expiry claim with nothing cross-checking it.
+  So `parseUTCTime`/`parseGeneralizedTime` return `{ text, ms }` from one reading and
+  `CertificateInfo.notAfterMs` carries it, the pivot applied once with both halves reading the same
+  `fullYear`; `notBefore` gets no epoch, nothing reading one. **`certificateValidityState(cert,
+  nowMs)` has THREE states** — `expired | current | unknown` — because folding an unreadable date
+  in with `current` asserts a validity there is no evidence for, which is the green pill's own
+  defect one level down; `nowMs` is a parameter so every arm is reachable **without touching the
+  clock** (`vi.useFakeTimers()` deadlocks `waitFor` and `userEvent` here), and the comparison is
+  `>` since `notAfter` names the last valid second. **A null epoch beside a non-null `notAfter` is
+  the interesting pairing**: `isDigits` promises digits and nothing more, `Date.UTC` *rolls over* a
+  thirteenth month rather than rejecting it, so `epochFor` reads the instant back component by
+  component — February 30th and a leap second refused by the same test, February 29th the control
+  that it does not over-refuse. **`buildPKCS7`'s default `notAfter` (`260115085959Z`) is now
+  HISTORICAL, so every caller inheriting it is in the expired arm**; it is deliberately not moved
+  and every expiry assertion passes an explicit date. Three controls, all discriminating: delete
+  the sentence → 4 red, all new, no pre-existing row; return `current` for a null epoch → 4 red; hardcode
+  the epoch → 8 red including the DOM differential against the fixture's own bytes — where the
+  happy path's exhaustive `toEqual` is measurably NOT the row that catches it, so the rows deriving
+  an instant from bytes the parser was not handed are the ones doing the work. **FIXTURE-
+  VERIFIED ONLY — no binary on this machine is signed**, so `corpus:parserdiff` says nothing, no
+  real `SignedData` has reached this code, and jsdom does no layout so the chip and both rows are
+  asserted as text (`peek-a-bin-v2u`). **Computing the Authenticode PE hash and comparing it
+  against `SpcIndirectDataContent` is a SEPARATE BEAD** — that is the tier that would let the pill
+  claim anything positive; the neutral pill is the honest one until it lands.
+  (`peek-a-bin-v3uh.9`)
+
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
 - **`RegState.defs` is keyed by literal operand text deliberately; ask `wroteAnyAlias` rather than canonicalising the map.** The map stores the last-written *expression*, which carries the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as eight. But arity is width-blind, and `collectArgs64` probing the literal 64-bit name missed every sub-width setup and broke out of the loop — the write then had no reader and DCE deleted it, giving `ExitProcess()` with the exit code gone, in well-typed C. `wroteAnyAlias` answers the width-blind question over the width-exact map and returns a **boolean**, so the recorded expression can never be substituted at the call site (`peek-a-bin-urs` cannot return through it). The suite had pinned the defect as the rule under a KNOWN BUG comment. And: when you build an oracle to verify a change, land the oracle — the instrument for this one was lost with a scratch worktree (`peek-a-bin-02fa`). (`peek-a-bin-qb2x`)
