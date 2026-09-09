@@ -10,6 +10,7 @@ import {
   disassemble,
   hybridDisassemble,
   mapInsn,
+  type XrefInsn,
 } from "../functionDetect";
 import { MAX_SEH32_HEAD_INSNS } from "../seh32";
 import type { Instruction } from "../types";
@@ -2677,6 +2678,47 @@ describe("buildTypedXrefMap", () => {
 
   it("returns nothing for an empty instruction list", () => {
     expect(buildTypedXrefMap([])).toEqual([]);
+  });
+
+  it("takes an XrefInsn — four fields, no bytes", () => {
+    // The contract `disasmClient.buildTypedXrefMap` strips its request down to.
+    // This row is mostly a compile-level statement: the literal has no `bytes`
+    // member at all, so if this function ever grows a `bytes` read it stops
+    // typechecking here instead of reading `undefined` on the worker side.
+    //
+    // Both classifying arms are exercised over the narrowed shape, because
+    // `size` is the field a `bytes`-shaped strip is most likely to take with
+    // it — `resolveRipTarget` is `address + size + disp`, so a RIP row is the
+    // only one that can tell an exact narrowing from a lucky one.
+    const narrowed: XrefInsn[] = [
+      { address: BASE, mnemonic: "call", opStr: "0x401100", size: 5 },
+      { address: BASE + 0x10, mnemonic: "lea", opStr: "rax, [rip + 0x100]", size: 7 },
+    ];
+
+    expect(buildTypedXrefMap(narrowed)).toEqual([
+      [0x401100, [{ from: BASE, type: "call" }]],
+      [BASE + 0x10 + 7 + 0x100, [{ from: BASE + 0x10, type: "data" }]],
+    ]);
+  });
+
+  it("answers identically whether or not the instructions carry bytes", () => {
+    // The equivalence half of the client-side strip, stated where the consumer
+    // lives. Not a control: it is green with `bytes` present and with it
+    // absent, which is exactly the claim.
+    const withBytes = [
+      insn("call", "0x401100", BASE),
+      insn("lea", "rax, [rip + 0x100]", BASE + 0x10, 7),
+      insn("mov", "eax, dword ptr [0x404000]", BASE + 0x20),
+    ];
+    const without: XrefInsn[] = withBytes.map(({ address, mnemonic, opStr, size }) => ({
+      address,
+      mnemonic,
+      opStr,
+      size,
+    }));
+
+    expect(buildTypedXrefMap(without)).toEqual(buildTypedXrefMap(withBytes));
+    expect(buildTypedXrefMap(without)).toHaveLength(3);
   });
 
   it("classifies a direct call as a call xref", () => {

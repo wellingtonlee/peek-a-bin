@@ -13,7 +13,7 @@ import {
 } from "../disasm/funcInsns";
 // Type-only: erased at compile time, so this adds no runtime edge to
 // functionDetect (and none to Capstone through it).
-import type { DetectPass, ImageBounds } from "../disasm/functionDetect";
+import type { DetectPass, ImageBounds, XrefInsn } from "../disasm/functionDetect";
 import { jumpTableTargets } from "../disasm/seeds";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
@@ -545,6 +545,22 @@ class DisasmWorkerClient {
    * bitmasks and status constants as references to addresses outside the image
    * (peek-a-bin-jfp). Two plain numbers, so nothing here is binary and
    * `prepareBinaryArgs` leaves the object alone.
+   *
+   * **The request carries {@link XrefInsn}s, not `Instruction`s.** This is the
+   * one RPC that sends a decoded array back *up* to the worker one message
+   * after the worker produced it, and `prepareBinaryArgs` walks top level only
+   * — `instructions` is an array, so every element's `bytes` is a separate
+   * `Uint8Array` over its own tiny `ArrayBuffer` and structured clone
+   * serialises each one individually. That per-buffer overhead is the whole
+   * cost of the array (peek-a-bin-9gc9 measured 652 ms of clone for the same
+   * array on a 669 KiB `.text`), and the consumer never reads a byte of it.
+   *
+   * Not peek-a-bin-7mf's refused reply packing: that was the **down**
+   * direction, and the refusal was that a shared buffer forces the receiver to
+   * re-slice. Not peek-a-bin-9a8's refused section-upload cache either: there
+   * is no key here, so nothing can go stale. This is 9gc9's own rule — *send
+   * only what the consumer reads* — and the narrowing is the consumer's own
+   * declared parameter type, so it cannot drift from what the consumer reads.
    */
   async buildTypedXrefMap(
     instructions: Instruction[],
@@ -553,8 +569,19 @@ class DisasmWorkerClient {
     const boundsKey = imageBounds ? `${imageBounds.base}:${imageBounds.size}` : "";
     const cached = this.xrefCache.get(instructions);
     if (cached && cached.boundsKey === boundsKey) return cached.map;
+    // Annotated, never inferred: the annotation is what makes the strip
+    // checked in both directions. A field added to `XrefInsn` fails to compile
+    // here (missing property) rather than arriving as `undefined` on the far
+    // side. The cache above stays keyed on the caller's own array identity, so
+    // narrowing what is *sent* changes no key.
+    const narrowed: XrefInsn[] = instructions.map((insn) => ({
+      address: insn.address,
+      mnemonic: insn.mnemonic,
+      opStr: insn.opStr,
+      size: insn.size,
+    }));
     const entries: [number, Xref[]][] = await this.send("buildTypedXrefMap", {
-      instructions,
+      instructions: narrowed,
       imageBounds,
     });
     const result = new Map(entries);

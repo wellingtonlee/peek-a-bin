@@ -373,6 +373,26 @@ arm** — it is the one parser-derived answer coming back over this RPC, and an 
 there by symmetry would empty the tab the notice has just told the user to open
 (`peek-a-bin-ex2`, `peek-a-bin-736`).
 
+**`buildTypedXrefMap` is the one RPC that sends a decoded array back UP to the worker, and it
+sends `XrefInsn` rather than `Instruction`.** `prepareBinaryArgs` walks top level only, so an
+array argument has every element's `bytes` structured-cloned as its own `ArrayBuffer` — that
+per-buffer overhead is the whole cost of the array (`corpus/replyCloneCost.ts` rows A and D at
+`0870e14` on t64: 115.2 → 85.1 ms, so **26% of the clone is the field nobody reads**). The
+consumer reads `address`, `mnemonic`, `opStr` and — via `resolveRipTarget`, so invisible to a grep
+for `insn.` — `size`. **The deliverable is the TYPE, not the client's `.map()`**: `XrefInsn`
+(`functionDetect.ts`, beside `ImageBounds`, on `ripRelative.ts`'s `RipInsn` model) is the
+consumer's own parameter type, `Instruction` satisfies it structurally so every direct caller is
+unchanged, and the client's strip is **annotated `XrefInsn[]`, never inferred** — so a `bytes`
+read added to the consumer fails to compile instead of reading `undefined` on the worker side,
+and a field added to `XrefInsn` fails to compile at the strip instead of being posted short.
+Dropping `size` fails to typecheck *inside* `functionDetect.ts` against `RipInsn`, which is what
+makes the narrowing provably exact rather than lucky. **This is neither `peek-a-bin-7mf`'s refused
+reply packing (the DOWN direction, refused because a shared buffer forces the receiver to
+re-slice) nor `peek-a-bin-9a8`'s refused section-upload cache (refused because no key is both
+cheap and sound); it has no key at all and packs nothing.** It is `peek-a-bin-9gc9`'s own rule —
+send only what the consumer reads. The remaining 74% is stage 3b's case and is deliberately left
+to be decided with the number in hand (`peek-a-bin-v3uh.3`).
+
 **Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive
 + gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs → extract strings.
 All async, phased via `analysisPhase`. The decoder is chosen from `coffHeader.machine`

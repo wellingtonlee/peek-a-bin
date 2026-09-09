@@ -450,6 +450,12 @@ describe("DisasmWorkerClient — byte arguments are sliced and transferred", () 
   it("does not transfer the tiny per-instruction buffers in an Instruction[]", async () => {
     // A transfer list with one entry per instruction is far slower than
     // cloning them; the args walk is deliberately top-level only.
+    //
+    // Asked of `detectIRPDispatches`, which still sends the whole decoded
+    // array: `buildTypedXrefMap` used to be the vehicle here, but it now
+    // strips to `XrefInsn` and so has no `bytes` to leave out of the transfer
+    // list. The claim being made is about `prepareBinaryArgs`, so it needs an
+    // RPC that really does post per-instruction buffers.
     const { client, worker } = await loadClient();
     const instructions = Array.from({ length: 4 }, (_, i) => ({
       address: 0x1000 + i,
@@ -459,7 +465,7 @@ describe("DisasmWorkerClient — byte arguments are sliced and transferred", () 
       size: 1,
     }));
 
-    void client.buildTypedXrefMap(instructions);
+    void client.detectIRPDispatches(instructions, true);
 
     expect(worker.transfers[0]).toEqual([]);
     expect(worker.received[0].args.instructions[0].bytes.byteLength).toBe(4);
@@ -881,6 +887,125 @@ describe("DisasmWorkerClient — the image bounds reach the worker", () => {
 
     expect(await client.buildTypedXrefMap(instructions, bounds)).toBe(map);
     expect(worker.posted).toHaveLength(1);
+  });
+});
+
+/**
+ * peek-a-bin-v3uh.3: `buildTypedXrefMap` is the one RPC that sends a decoded
+ * `Instruction[]` back *up* to the worker one message after the worker produced
+ * it, and `prepareBinaryArgs` walks top level only — so every element's `bytes`
+ * used to be structured-cloned as its own `ArrayBuffer`. The consumer reads
+ * `address`, `mnemonic`, `opStr` and (through `resolveRipTarget`) `size`, and
+ * never a byte, so the request carries `XrefInsn`s.
+ *
+ * Not peek-a-bin-7mf's refused reply packing (that was the *down* direction, and
+ * the objection was a shared buffer forcing the receiver to re-slice) and not
+ * peek-a-bin-9a8's refused section-upload cache (there is no key here, so there
+ * is nothing to go stale). This is peek-a-bin-9gc9's own rule: send only what
+ * the consumer reads.
+ */
+describe("DisasmWorkerClient — buildTypedXrefMap sends only the fields it reads", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** t64.exe's mapping, so the bounded fallback arm is the real one. */
+  const bounds = { base: 0x140000000, size: 0x1e000 };
+
+  /**
+   * Distinctive bytes, and one instruction per classifying arm: a direct call,
+   * a `[rip ± 0x..]` displacement (the only arm that reads `size`) and an
+   * absolute operand that reaches the bounded fallback scan.
+   */
+  const full = (): Instruction[] => [
+    {
+      address: 0x140001000,
+      bytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x01]),
+      mnemonic: "call",
+      opStr: "0x140002000",
+      size: 5,
+    },
+    {
+      address: 0x140001005,
+      bytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x02, 0x03, 0x04]),
+      mnemonic: "lea",
+      opStr: "rax, [rip + 0x100]",
+      size: 7,
+    },
+    {
+      address: 0x14000100c,
+      bytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x05, 0x06]),
+      mnemonic: "mov",
+      opStr: "eax, dword ptr [0x140004000]",
+      size: 6,
+    },
+  ];
+
+  it("posts elements carrying exactly the four fields — no bytes at all", async () => {
+    const { client, worker } = await loadClient();
+
+    void client.buildTypedXrefMap(full(), bounds);
+
+    // `received` is post-structured-clone, i.e. what the worker really sees.
+    const posted = worker.received[0].args.instructions;
+    expect(posted).toHaveLength(3);
+    for (const el of posted) {
+      // Exact key set, not just `!("bytes" in el)`: that also pins `comment`
+      // and `source` out, and fails if a field is silently added to the wire
+      // without `XrefInsn` being widened to declare it.
+      expect(Object.keys(el).sort()).toEqual(["address", "mnemonic", "opStr", "size"]);
+    }
+    expect(posted[1]).toEqual({
+      address: 0x140001005,
+      mnemonic: "lea",
+      opStr: "rax, [rip + 0x100]",
+      size: 7,
+    });
+  });
+
+  it("leaves the caller's own instructions untouched", async () => {
+    // The strip builds new objects; the array the caller still holds — and
+    // which the xref cache is keyed on by identity — must not be edited.
+    const { client, worker } = await loadClient();
+    const mine = full();
+
+    void client.buildTypedXrefMap(mine, bounds);
+
+    expect(worker.posted[0].args.instructions).not.toBe(mine);
+    expect(mine[1].bytes).toEqual(new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x02, 0x03, 0x04]));
+  });
+
+  it("answers identically to the same request carrying bytes", async () => {
+    // THE EQUIVALENCE DIFFERENTIAL. Both sides are the real
+    // `buildTypedXrefMap` behind the real `dispatch`; the only difference is
+    // the payload, so an equal answer is the proof that the strip is harmless
+    // rather than merely smaller.
+    //
+    // This is deliberately NOT a control for the strip: it is green whether or
+    // not the client strips. What proves the narrowing EXACT is dropping
+    // `size` too, which reddens every `[rip ± 0x..]` row here and in
+    // `functionDetect.test.ts` — `resolveRipTarget` is `address + size + disp`.
+    const { client, worker } = await loadClient();
+    const state = createWorkerState(Promise.resolve());
+
+    const pending = client.buildTypedXrefMap(full(), bounds);
+    const stripped = worker.received[0].args;
+    worker.reply(worker.posted[0].id, await dispatch("buildTypedXrefMap", stripped, state));
+    const viaClient = await pending;
+
+    const viaFull = (await dispatch(
+      "buildTypedXrefMap",
+      { instructions: full(), imageBounds: bounds },
+      state,
+    )) as [number, Xref[]][];
+
+    expect(Array.from(viaClient.entries())).toEqual(viaFull);
+    // Liveness: an empty map compares equal to an empty map, so the row would
+    // pass over a payload that classified nothing. One xref per arm.
+    expect(viaFull).toHaveLength(3);
+    expect(viaClient.get(0x140002000)).toEqual([{ from: 0x140001000, type: "call" }]);
+    expect(viaClient.get(0x140001005 + 7 + 0x100)).toEqual([{ from: 0x140001005, type: "data" }]);
+    expect(viaClient.get(0x140004000)).toEqual([{ from: 0x14000100c, type: "data" }]);
   });
 });
 

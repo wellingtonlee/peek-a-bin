@@ -447,6 +447,33 @@ function printImage(r: Row): void {
     `  budget A-D ${budget.toFixed(1)} ms — the whole of what any scheme here competes for; ` +
       `C saves ${(r.a - r.c).toFixed(1)} ms of it, C+ saves ${(r.a - r.cPlus).toFixed(1)} ms`,
   );
+  console.log(
+    `  A-D ${budget.toFixed(1)} ms is ALSO exactly what peek-a-bin-v3uh.3 took off the UP ` +
+      `direction: buildTypedXrefMap`,
+  );
+  console.log(
+    `  sends this same array back to the worker and now sends XrefInsn (address, mnemonic, ` +
+      `opStr, size)`,
+  );
+  console.log(
+    `  instead. So D itself — ${r.d.toFixed(1)} ms, ` +
+      `${((r.d / r.a) * 100).toFixed(0)}% of A — is what remains on that RPC and is what ` +
+      `stage 3b`,
+  );
+  console.log(
+    "  (compute the map in the dispatch arm that produced the array, pre-seed the client's",
+  );
+  console.log(
+    `  xrefCache) would additionally save. Measured at 0870e14 on t64.exe: A 115.2 ms, ` +
+      `D 85.1 ms,`,
+  );
+  console.log(
+    "  A-D 30.1 ms over 16844 instructions of a 60 KiB .text — so 3b's remaining share is",
+  );
+  console.log(
+    "  ~2.8x stage 3a's, which is the number that bead has to be decided with. Re-run rather",
+  );
+  console.log("  than quoting these: they are wall clock, and the ratio is the claim.");
 }
 
 /**

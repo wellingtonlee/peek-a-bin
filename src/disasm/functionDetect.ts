@@ -2981,6 +2981,29 @@ export interface ImageBounds {
 }
 
 /**
+ * The minimum an instruction has to expose for xref classification.
+ *
+ * `Instruction` satisfies it structurally, so every direct caller passes one
+ * unchanged. The point of naming the narrowing is the *other* direction: this
+ * declaration is what `disasmClient.buildTypedXrefMap` strips its request down
+ * to before posting, and it is typed against this interface — so a `bytes`
+ * read added inside {@link buildTypedXrefMap} fails to compile rather than
+ * silently reading `undefined` on the worker side, and a field added here
+ * fails to compile in the client rather than being silently dropped.
+ *
+ * `size` is here because it is read *indirectly*, by `resolveRipTarget`: a
+ * RIP displacement is `address + size + disp`, so the field is invisible to a
+ * grep for `insn.` over this function's body and is load-bearing for every
+ * `[rip ± 0x..]` row. Modelled on `RipInsn` in `ripRelative.ts`.
+ */
+export interface XrefInsn {
+  address: number;
+  mnemonic: string;
+  opStr: string;
+  size: number;
+}
+
+/**
  * Below this, a hex token in an operand is a constant rather than an address —
  * the floor the loose scan has always applied, kept because it is also what
  * stops small immediates in an image based at 0 from being read as references.
@@ -3007,9 +3030,13 @@ const MIN_DATA_XREF_ADDRESS = 0x10000;
  *
  * Omitting `imageBounds` keeps the unbounded behaviour: "nobody said where the
  * image is" is not the same claim as "everything is in range".
+ *
+ * The parameter is {@link XrefInsn}, not `Instruction`: this reads four fields
+ * and never `bytes`, and saying so in the type is what lets the worker client
+ * post the narrowed objects instead of the whole decoded array.
  */
 export function buildTypedXrefMap(
-  instructions: Instruction[],
+  instructions: readonly XrefInsn[],
   imageBounds?: ImageBounds,
 ): [number, Xref[]][] {
   const lo = imageBounds ? imageBounds.base : 0;
