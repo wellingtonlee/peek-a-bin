@@ -5,7 +5,16 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ReactNode, useEffect, useReducer, useRef } from "react";
+import {
+  createContext,
+  memo,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { describe, expect, it } from "vitest";
 import {
   AppDispatchContext,
@@ -39,7 +48,24 @@ import {
  *    depends on what a render of the *real* tree costs — a virtualized list, a
  *    dagre-laid-out graph — and that still needs React DevTools Profiler on a
  *    real binary in a real browser. This closes the bead's structural blocker,
- *    not the bead.
+ *    not the bead. **Nothing measured in this file is evidence that anything
+ *    got faster**, and no change made on its evidence may claim so.
+ *
+ * WHAT THE SECOND `describe` ADDS, and why it is here rather than in a report:
+ * two of the three remedies `peek-a-bin-qvv` proposes are INERT as stated, and
+ * both refusals are executable so the next agent does not re-derive them.
+ * `App` owns the `useReducer` and renders the whole tree inline in its own JSX,
+ * so a consumer re-renders because its PARENT did, not because a context value
+ * changed — which is the wrong end of every context-shaped remedy. Splitting
+ * the context changes nothing until the new state also moves into a provider
+ * that takes `children`; `React.memo` changes nothing because every expensive
+ * leaf either reads the context or is handed `currentAddress`.
+ *
+ * WHAT DID LAND on that evidence: the two cursor branches of `appReducer` now
+ * compare before replacing, so an identical payload returns `state` itself.
+ * That removes the *rows-rebuilt-cursor-still* render and **leaves the arrow
+ * key at two**, which the fourth test asserts so the change cannot be
+ * over-read.
  *  - **No `StrictMode`**, deliberately: it double-invokes render, which would
  *    double every number below and measure React's development behaviour rather
  *    than the app's.
@@ -219,11 +245,17 @@ describe("renders per cursor move", () => {
     });
   });
 
-  it("costs a full-tree render when rows are rebuilt and the cursor has not moved", async () => {
-    // The bead's fifth fact: the effect's deps are [currentIndex, rows, dispatch]
-    // and neither reducer branch has a no-op check, so a rename, a bookmark or a
-    // hex patch — anything that rebuilds `rows` — re-renders everything for a
-    // value that did not change.
+  it("costs ONE render when rows are rebuilt and the cursor has not moved", async () => {
+    // The effect's deps are [currentIndex, rows, dispatch], so anything that
+    // rebuilds `rows` re-dispatches both cursor fields with an IDENTICAL
+    // payload. This used to cost 2 — one for the rerender, one more for the
+    // effect's redundant dispatches — and the assertion below pinned that 2 as
+    // the rule while the docstring beside it called it waste. The two reducer
+    // branches now compare before replacing, so the second pass is gone.
+    //
+    // Measured against the real view at 9178da0: 6 of the 12 cursor dispatches
+    // a load plus three arrow keys produces carry a payload the state already
+    // holds, 4 of them during the load's `rows` rebuilds.
     const counts: Counts = {};
     const { rerender } = render(<Tree counts={counts} rows={ROWS} />);
     const before = { ...counts };
@@ -232,30 +264,289 @@ describe("renders per cursor move", () => {
     const delta = Object.fromEntries(
       Object.entries(counts).map(([k, v]) => [k, v - (before[k] ?? 0)]),
     );
-    // 1 for the rerender itself, 1 for the effect's redundant dispatches.
-    expect(delta.HexView).toBe(2);
-    expect(delta.StatusBar).toBe(2);
+    // 1 for the rerender itself, and nothing for the effect.
+    expect(delta.HexView).toBe(1);
+    expect(delta.StatusBar).toBe(1);
   });
 
-  it("produces a NEW state object for an identical cursor payload", () => {
-    // The render above is only wasted because the reducer cannot tell that
-    // nothing changed. Asked of the reducer directly, with no renderer involved.
-    const withBlock = appReducer(initialState, {
-      type: "SET_CURRENT_BLOCK",
-      block: { startAddr: 0x1000, endAddr: 0x1005 },
-    });
+  it("still costs TWO renders per arrow key — the no-op guard does NOT touch this", async () => {
+    // THE LIMIT OF THE CHANGE, asserted so it cannot be over-read. A cursor move
+    // genuinely changes the instruction, and the two dispatches are batched into
+    // one pass, so guarding them removes nothing here. The bead's headline
+    // complaint — one whole-tree render per keystroke — is UNCHANGED.
+    const counts: Counts = {};
+    const user = userEvent.setup();
+    const { getByTestId } = render(<Tree counts={counts} rows={ROWS} />);
+    getByTestId("view").focus();
+    const before = { ...counts };
+    await user.keyboard("{ArrowDown}");
+    expect(counts.HexView - before.HexView).toBe(2);
+  });
+
+  it("returns the SAME state object for an identical cursor payload", () => {
+    // The render above was only wasted because the reducer could not tell that
+    // nothing had changed. Asked of the reducer directly, with no renderer
+    // involved. `SET_OMITTED_PASSES` is the precedent and carries the same
+    // comment; these two branches now follow it.
+    const block = { startAddr: 0x1000, endAddr: 0x1005 };
+    const withBlock = appReducer(initialState, { type: "SET_CURRENT_BLOCK", block });
+    expect(withBlock).not.toBe(initialState);
+    // A structurally equal payload in a FRESH object — which is what the cursor
+    // effect builds every time, so an identity check alone would be inert here.
     const again = appReducer(withBlock, {
       type: "SET_CURRENT_BLOCK",
       block: { startAddr: 0x1000, endAddr: 0x1005 },
     });
-    expect(again).not.toBe(withBlock);
-    expect(again.currentBlock).toEqual(withBlock.currentBlock);
+    expect(again).toBe(withBlock);
+
+    // ...and a real change still replaces.
+    const moved = appReducer(withBlock, {
+      type: "SET_CURRENT_BLOCK",
+      block: { startAddr: 0x1000, endAddr: 0x1006 },
+    });
+    expect(moved).not.toBe(withBlock);
+    expect(moved.currentBlock).toEqual({ startAddr: 0x1000, endAddr: 0x1006 });
+
+    // The instruction half compares `bytes` element-wise, not by identity.
+    const withInsn = appReducer(initialState, {
+      type: "SET_CURRENT_INSTRUCTION",
+      instruction: { bytes: [0x8b, 0xec], size: 2 },
+    });
+    expect(
+      appReducer(withInsn, {
+        type: "SET_CURRENT_INSTRUCTION",
+        instruction: { bytes: [0x8b, 0xec], size: 2 },
+      }),
+    ).toBe(withInsn);
+    // A one-byte difference at the same size and length must still replace, or
+    // the comparison is a length check wearing a value check's clothes.
+    expect(
+      appReducer(withInsn, {
+        type: "SET_CURRENT_INSTRUCTION",
+        instruction: { bytes: [0x8b, 0xed], size: 2 },
+      }),
+    ).not.toBe(withInsn);
 
     const nulled = appReducer(initialState, { type: "SET_CURRENT_INSTRUCTION", instruction: null });
-    // Contrast SET_OMITTED_PASSES, which DOES return `state` for a no-op — the
-    // pattern exists in this reducer, it just is not applied here.
-    expect(nulled).not.toBe(initialState);
-    expect(nulled.currentInstruction).toBeNull();
+    expect(nulled).toBe(initialState);
+  });
+});
+
+/** One arrow key, counting every consumer. */
+async function perKey(Root: (p: { counts: Counts }) => ReactNode) {
+  const counts: Counts = {};
+  const user = userEvent.setup();
+  const { getByTestId } = render(<Root counts={counts} />);
+  getByTestId("view").focus();
+  const before = { ...counts };
+  await user.keyboard("{ArrowDown}");
+  return Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, v - (before[k] ?? 0)]));
+}
+
+/** The cursor fields, moved off `AppState` into a context of their own. */
+interface Cursor {
+  insn: { size: number } | null;
+}
+const CursorState = createContext<Cursor>({ insn: null });
+const CursorSet = createContext<(c: Cursor) => void>(() => {});
+
+function SplitStatusBar({ counts }: { counts: Counts }) {
+  const cursor = useContext(CursorState);
+  useCount(counts, "StatusBar");
+  return <span>{cursor.insn?.size ?? "-"}</span>;
+}
+
+function SplitView({ counts }: { counts: Counts }) {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const setCursor = useContext(CursorSet);
+  useCount(counts, "DisassemblyView");
+  const i = ROWS.findIndex((r) => r.addr === state.currentAddress);
+  useEffect(() => {
+    setCursor({ insn: { size: ROWS[i]?.size ?? 0 } });
+  }, [i, setCursor]);
+  return (
+    <button
+      type="button"
+      data-testid="view"
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowDown") return;
+        const next = ROWS[Math.min(i + 1, ROWS.length - 1)];
+        if (next) dispatch({ type: "SET_ADDRESS", address: next.addr });
+      }}
+    >
+      {state.currentAddress}
+    </button>
+  );
+}
+
+function SplitConsumers({ counts }: { counts: Counts }) {
+  return (
+    <>
+      <SplitView counts={counts} />
+      <SplitStatusBar counts={counts} />
+      <Bystander counts={counts} name="HexView" />
+      <Bystander counts={counts} name="Sidebar" />
+    </>
+  );
+}
+
+/**
+ * THE THREE OPTIONS `peek-a-bin-qvv` LISTS, MEASURED — and two of them are
+ * INERT as the bead states them. Executable rather than written down, because
+ * otherwise the next agent re-derives them at the cost of a session.
+ *
+ * The finding that decides all three: **`App` owns the `useReducer` and renders
+ * the whole tree inline in its own JSX** (`App.tsx`, `useReducer` at the top,
+ * providers at the bottom of the same function). So a consumer re-renders
+ * because its PARENT re-rendered, not because a context value changed — and
+ * every remedy aimed at the context is answering the wrong question.
+ */
+describe("the options this bead lists, measured", () => {
+  it("option 1, splitting the context, is INERT while the reducer lives in App", async () => {
+    // A second context holding only the cursor fields, with its state still held
+    // by the App-shaped component. Every consumer still wakes up twice, because
+    // that component re-renders and recreates every child element — so the
+    // context it read them through never enters into it.
+    function Naive({ counts }: { counts: Counts }) {
+      const [state, dispatch] = useReducer(appReducer, {
+        ...initialState,
+        currentAddress: ROWS[0].addr,
+      });
+      const [cursor, setCursor] = useState<Cursor>({ insn: null });
+      return (
+        <AppStateContext.Provider value={state}>
+          <AppDispatchContext.Provider value={dispatch}>
+            <CursorState.Provider value={cursor}>
+              <CursorSet.Provider value={setCursor}>
+                <SplitConsumers counts={counts} />
+              </CursorSet.Provider>
+            </CursorState.Provider>
+          </AppDispatchContext.Provider>
+        </AppStateContext.Provider>
+      );
+    }
+    // THE REFUSAL: identical to the unsplit number in the first test above.
+    expect(await perKey(Naive)).toEqual({
+      DisassemblyView: 2,
+      StatusBar: 2,
+      HexView: 2,
+      Sidebar: 2,
+    });
+  });
+
+  it("...and works only once the cursor state is in a provider taking `children`", async () => {
+    // The shape that DOES buy something, and what it costs to reach: the cursor
+    // state must live in a provider COMPONENT that takes `children`, so its own
+    // state change leaves the children element identical and React bails out of
+    // the subtree. That is options 1 and 3 together, not either alone.
+    function CursorProvider({ children }: { children: ReactNode }) {
+      const [cursor, setCursor] = useState<Cursor>({ insn: null });
+      return (
+        <CursorState.Provider value={cursor}>
+          <CursorSet.Provider value={setCursor}>{children}</CursorSet.Provider>
+        </CursorState.Provider>
+      );
+    }
+    function Lifted({ counts }: { counts: Counts }) {
+      const [state, dispatch] = useReducer(appReducer, {
+        ...initialState,
+        currentAddress: ROWS[0].addr,
+      });
+      return (
+        <AppStateContext.Provider value={state}>
+          <AppDispatchContext.Provider value={dispatch}>
+            <CursorProvider>
+              <SplitConsumers counts={counts} />
+            </CursorProvider>
+          </AppDispatchContext.Provider>
+        </AppStateContext.Provider>
+      );
+    }
+    // Halved for everyone but the status bar — and note what is NOT bought: the
+    // arrow key still costs ONE whole-tree render, because `SET_ADDRESS` is
+    // still in App's reducer. The bead's "each arrow key re-renders the whole
+    // app" SURVIVES this change; it is halved, not removed.
+    expect(await perKey(Lifted)).toEqual({
+      DisassemblyView: 1,
+      StatusBar: 2,
+      HexView: 1,
+      Sidebar: 1,
+    });
+  });
+
+  it("option 2, React.memo on the expensive leaves, is INERT in every shape this tree has", async () => {
+    const MemoContextConsumer = memo(function MemoContextConsumer({ counts }: { counts: Counts }) {
+      // The shape of CFGView, HexView, Sidebar and StatusBar, all four of which
+      // call `useAppState()` — memo cannot stop a context-driven re-render.
+      const state = useAppState();
+      useCount(counts, "memo+context");
+      return <span>{state.activeTab}</span>;
+    });
+    const MemoFreshProps = memo(function MemoFreshProps(_: {
+      counts: Counts;
+      data: number[];
+      onX: () => void;
+    }) {
+      useCount(_.counts, "memo+freshProps");
+      return null;
+    });
+    const MemoStable = memo(function MemoStable({ counts }: { counts: Counts }) {
+      useCount(counts, "memo+stableProps");
+      return null;
+    });
+
+    function Root({ counts }: { counts: Counts }) {
+      const [state, dispatch] = useReducer(appReducer, {
+        ...initialState,
+        currentAddress: ROWS[0].addr,
+      });
+      return (
+        <AppStateContext.Provider value={state}>
+          <AppDispatchContext.Provider value={dispatch}>
+            <DisassemblyViewish counts={counts} rows={ROWS} />
+            <MemoContextConsumer counts={counts} />
+            {/* An inline array and an inline closure: what `InsnRow` is handed. */}
+            <MemoFreshProps counts={counts} data={[1, 2, 3]} onX={() => {}} />
+            <MemoStable counts={counts} />
+          </AppDispatchContext.Provider>
+        </AppStateContext.Provider>
+      );
+    }
+
+    expect(await perKey(Root)).toEqual({
+      DisassemblyView: 2,
+      // Reads the context, so memo is bypassed entirely.
+      "memo+context": 2,
+      // Props are recreated by the parent's render, so memo's compare fails.
+      "memo+freshProps": 2,
+      // The one shape memo helps — and no expensive leaf here is in it.
+      "memo+stableProps": 0,
+    });
+  });
+
+  it("still has every expensive leaf in one of the two inert shapes", () => {
+    // The liveness half of the row above: it is a measurement of two SHAPES, and
+    // it only bears on this app while the real components are in them.
+    for (const f of ["CFGView", "HexView", "Sidebar", "StatusBar"]) {
+      expect(read(`components/${f}.tsx`)).toContain("useAppState()");
+    }
+    // `DisassemblyRows` and `DisassemblyMinimap` read no context — but the rows
+    // are handed `currentAddress`, which changes on every cursor move by
+    // definition, so memoising them cannot help either.
+    expect(read("components/DisassemblyRows.tsx")).not.toContain("useAppState()");
+    const view = read("components/DisassemblyView.tsx");
+    expect(view.slice(view.indexOf("<InsnRow"), view.indexOf("<InsnRow") + 1400)).toContain(
+      "currentAddress={state.currentAddress}",
+    );
+  });
+
+  it("still has App holding the reducer and rendering the tree inline", () => {
+    // The premise of all three refusals. If App is ever restructured so the
+    // providers take `children`, every number above has to be re-taken.
+    const app = read("App.tsx");
+    expect(app).toContain("useReducer(appReducer, initialState)");
+    expect(app).toContain("<AppStateContext.Provider value={state}>");
   });
 });
 
