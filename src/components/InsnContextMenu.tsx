@@ -73,6 +73,27 @@ export function InsnContextMenu({
       {hint && <span className="text-gray-500 text-[9px] ml-4">{hint}</span>}
     </button>
   );
+  /**
+   * A horizontal rule between groups.
+   *
+   * ITS RELATIONSHIP TO THE ITEM BELOW IT IS PURE CONVENTION. A rule is a
+   * sibling expression carrying, by hand, whatever condition guards the group
+   * it introduces — nothing in the type system, in `tsc` or in Biome connects
+   * the two. So removing an item and leaving its rule renders a trailing rule
+   * or two rules in a row, and adding a conditional item without one silently
+   * merges two groups.
+   *
+   * That has happened: peek-a-bin-1xc5.1 removed the "Scan for vulnerabilities"
+   * item and had to remove the `{isFuncHead && sep}` above it in the same
+   * breath, or a function head would have ended the menu on a rule (no
+   * selection) or shown two (with one).
+   *
+   * `__tests__/InsnContextMenu.dom.test.tsx` is the guard: it sweeps all 32
+   * combinations of the five conditions that gate an entry and asserts that no
+   * two rules are adjacent and that the menu neither opens nor ends on one.
+   * IF YOU ADD OR REMOVE AN ENTRY HERE, that suite is what will tell you the
+   * rules still line up.
+   */
   const sep = <div className="border-t border-gray-800 my-0.5" />;
   return (
     <div
