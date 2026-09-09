@@ -109,6 +109,7 @@ import { Capstone, Const } from "capstone-wasm";
 import { archForMachine } from "../src/disasm/arch";
 import {
   ARM64_INSN_SIZE,
+  ARM64_MAX_THUNK_BYTES,
   ARM64_MIN_DECODE_FRACTION,
   ARM64_MIN_MEASURED_WORDS,
   Arm64DecodeRateError,
@@ -122,6 +123,7 @@ import {
 } from "../src/disasm/arm64Operands";
 import { capstoneHandle, loadCapstoneModule } from "../src/disasm/capstoneReader";
 import type { CapstoneHandle } from "../src/disasm/capstoneWindow";
+import { buildIATLookup } from "../src/disasm/operands";
 import { arm64UnwindContext, stackFrameFor } from "../src/disasm/stackFrame";
 import type { DisasmFunction, Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
@@ -511,6 +513,175 @@ export function auditLiteralPools(
   return [
     gate("literal pool: pool word presented as an instruction", asCode.length, live, asCode),
     report("literal pool: words of pool", covered.size, live),
+  ];
+}
+
+// ── 5b. import thunk names ─────────────────────────────────────────────────
+
+/**
+ * An INDEPENDENT reading of the thunk chain, sharing nothing with
+ * `arm64ThunkSlot`.
+ *
+ * `readPrologueFrame` above is the precedent and the reason is identical: a
+ * differential is only a differential while the two readings are actually two.
+ * This one walks the function FORWARDS with its own regexes and its own notion
+ * of which register holds what, where the production reader walks BACKWARDS
+ * from the `br` through `classifyArm64Br`'s last-write chain. Importing
+ * `arm64ThunkSlot` here would turn both gates below into a comparison of one
+ * implementation with itself, and every row would stay green for ever.
+ *
+ * It reads exactly the shapes A64 can spell an import thunk with:
+ *
+ *   adrp xA, #page [ / add xA, xA, #imm ] / ldr|ldar|ldapr|ldur xB, [xA{, #off}] / br xB
+ *
+ * and declines everything else. A decline is `null`, which makes the row it
+ * feeds unjudgeable rather than green — see `slots resolved` beside the gates.
+ */
+export function independentThunkSlot(body: readonly Instruction[]): number | null {
+  if (body.length < 3 || body.length > 4) return null;
+
+  const last = body[body.length - 1];
+  if (last.mnemonic.toLowerCase() !== "br") return null;
+  const brReg = /^([wx]\d{1,2})$/i.exec(last.opStr.trim())?.[1]?.toLowerCase().slice(1);
+  if (brReg === undefined) return null;
+
+  const adrp = /^([wx]\d{1,2})\s*,\s*#?(0x[0-9a-fA-F]+|\d+)$/i.exec(body[0].opStr.trim());
+  if (body[0].mnemonic.toLowerCase() !== "adrp" || !adrp) return null;
+  let baseReg = adrp[1].toLowerCase().slice(1);
+  let value = Number(adrp[2]);
+
+  let i = 1;
+  if (body[i].mnemonic.toLowerCase() === "add") {
+    const add = /^([wx]\d{1,2})\s*,\s*([wx]\d{1,2})\s*,\s*#?(0x[0-9a-fA-F]+|\d+)$/i.exec(
+      body[i].opStr.trim(),
+    );
+    if (!add) return null;
+    if (add[2].toLowerCase().slice(1) !== baseReg) return null;
+    baseReg = add[1].toLowerCase().slice(1);
+    value += Number(add[3]);
+    i++;
+  }
+  if (i !== body.length - 2) return null;
+
+  const mn = body[i].mnemonic.toLowerCase();
+  if (mn !== "ldr" && mn !== "ldar" && mn !== "ldapr" && mn !== "ldur") return null;
+  const ld =
+    /^([wx]\d{1,2})\s*,\s*\[\s*([wx]\d{1,2})\s*(?:,\s*#?(-?(?:0x[0-9a-fA-F]+|\d+))\s*)?\]$/i.exec(
+      body[i].opStr.trim(),
+    );
+  if (!ld) return null;
+  if (ld[2].toLowerCase().slice(1) !== baseReg) return null;
+  if (ld[1].toLowerCase().slice(1) !== brReg) return null;
+  return value + (ld[3] === undefined ? 0 : Number(ld[3]));
+}
+
+/** A function reduced to the plain data these two gates judge. */
+export interface ThunkSubject {
+  name: string;
+  address: number;
+  size: number;
+  isThunk: boolean;
+  /** The function's own instructions, in address order. */
+  body: readonly Instruction[];
+}
+
+/**
+ * Each function reduced to name, extent and its own instructions.
+ *
+ * The slice is the audit's, not the detector's: `auditThunks` must be able to
+ * ask its question of a function the production pass never looked at, which is
+ * what makes gate 2 (a thunk left `sub_`) askable at all.
+ */
+export function thunkSubjects(
+  functions: readonly DisasmFunction[],
+  insns: readonly Instruction[],
+): ThunkSubject[] {
+  return functions.map((f) => ({
+    name: f.name,
+    address: f.address,
+    size: f.size,
+    isThunk: f.isThunk === true,
+    body: insns.filter((i) => i.address >= f.address && i.address < f.address + f.size),
+  }));
+}
+
+/**
+ * Import thunk naming, against the linker's own import address table.
+ *
+ * Two gates, and they fail in OPPOSITE directions, which is the whole design.
+ * Naming is a claim a reader acts on — an analyst reads `GetStringTypeW` in the
+ * sidebar and stops looking — so a WRONG name is strictly worse than none, and
+ * that is gate 1. But a rule can always reach zero wrong names by naming
+ * nothing, which is this repository's most frequently recurring failure, so
+ * gate 2 asks the completeness question and is gateable for a precise reason:
+ * a slot that resolves in the IAT IS the proof the name was available.
+ *
+ * The oracle is outside the code under test twice over — {@link
+ * independentThunkSlot} re-reads the chain forwards, and `iatMap` is the
+ * linker's table as the PE parser read it, not anything the disassembler
+ * decided.
+ *
+ * The three report rows are the liveness halves. `thunk-shaped found` is the
+ * denominator both gates are drawn from; without it, silencing the pass leaves
+ * gate 1 green VACUOUSLY, which is precisely the shape the literal-pool row
+ * carries a warning about. Measured at 4167aa3: 2 found, 1 named, 1 resolved on
+ * each of t64-arm.exe and w64-arm.exe.
+ */
+export function auditThunks(
+  subjects: readonly ThunkSubject[],
+  iatMap: ReadonlyMap<number, { lib: string; func: string }>,
+): Row[] {
+  const shaped = subjects.filter(
+    (f) =>
+      f.size > 0 &&
+      f.size <= ARM64_MAX_THUNK_BYTES &&
+      f.body.length > 0 &&
+      classifyArm64Branch(f.body[f.body.length - 1].mnemonic, f.body[f.body.length - 1].opStr)
+        ?.indirect === true,
+  );
+
+  const misnamed: string[] = [];
+  const unnamed: string[] = [];
+  let named = 0;
+  let resolved = 0;
+
+  for (const f of shaped) {
+    const slot = independentThunkSlot(f.body);
+    if (slot !== null && iatMap.has(slot)) resolved++;
+    if (f.isThunk) {
+      named++;
+      const want = slot === null ? undefined : iatMap.get(slot);
+      if (want === undefined || want.func !== f.name) {
+        misnamed.push(
+          `${fmt(f.address)} named ${f.name}, slot ${slot === null ? "unresolved" : fmt(slot)}` +
+            ` holds ${want === undefined ? "no import" : `${want.lib}!${want.func}`}`,
+        );
+      }
+      continue;
+    }
+    // Still `sub_`. A resolving slot is the proof the name was there to take.
+    if (slot !== null && iatMap.has(slot)) {
+      unnamed.push(`${fmt(f.address)} ${f.name} -> ${fmt(slot)} ${iatMap.get(slot)!.func}`);
+    }
+  }
+
+  // A named function the shape filter did not even admit is its own falsehood,
+  // and it belongs in gate 1 rather than going unasked: it means the production
+  // pass and this reader disagree about what a thunk IS, not merely about which
+  // import one reaches.
+  for (const f of subjects) {
+    if (!f.isThunk) continue;
+    if (shaped.includes(f)) continue;
+    misnamed.push(`${fmt(f.address)} named ${f.name} but is not thunk-shaped here`);
+  }
+
+  const live = `${shaped.length} thunk-shaped of ${subjects.length} functions, ${iatMap.size} IAT slots`;
+  return [
+    gate("thunk: named against a slot the IAT does not hold", misnamed.length, live, misnamed),
+    gate("thunk: thunk-shaped left sub_ with a slot the IAT holds", unnamed.length, live, unnamed),
+    report("thunk: thunk-shaped functions found", shaped.length, live),
+    report("thunk: functions named from the IAT", named, live),
+    report("thunk: chains this reader resolved into the IAT", resolved, live),
   ];
 }
 
@@ -1146,6 +1317,7 @@ async function auditImage(key: ArmBinKey, file: string): Promise<Row[]> {
     ...auditRefs(insns, byAddr),
     ...auditJumpTables(insns, af.jumpTables, byAddr, ex),
     ...auditLiteralPools(insns, byAddr),
+    ...auditThunks(thunkSubjects(af.functions, insns), buildIATLookup(pe.imports)),
     ...auditFrames(pe, insns, imageBase, af.functions),
   ];
 }

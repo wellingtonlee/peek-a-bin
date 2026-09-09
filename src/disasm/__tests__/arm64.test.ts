@@ -24,11 +24,13 @@ import {
 import {
   ARM64_DECODE_WINDOW,
   ARM64_INSN_SIZE,
+  ARM64_MAX_THUNK_BYTES,
   ARM64_MIN_DECODE_FRACTION,
   ARM64_MIN_MEASURED_WORDS,
   type Arm64Context,
   Arm64DecodeRateError,
   Arm64SweepCache,
+  arm64ThunkSlot,
   classifyArm64Br,
   decorateArm64Sweep,
   detectArm64Functions,
@@ -673,7 +675,7 @@ describe("detectArm64Functions", () => {
       });
 
       expect(functions.map((f) => f.address - BASE)).toEqual([0]);
-      expect(omitted).toEqual(["call-targets", "jump-tables"]);
+      expect(omitted).toEqual(["call-targets", "jump-tables", "thunk-names"]);
     });
 
     it("reports nothing omitted with a decoder, and the bl target proves it", () => {
@@ -703,15 +705,22 @@ describe("detectArm64Functions", () => {
       );
 
       expect(functions.map((f) => f.name)).toEqual(["DllMain"]);
-      expect(omitted).toEqual(["call-targets", "jump-tables"]);
+      expect(omitted).toEqual(["call-targets", "jump-tables", "thunk-names"]);
     });
 
-    it("does not claim to have lost passes it never had", () => {
-      // Thunk naming and tail-call detection are x86-only by design. Listing
-      // them would report a design decision as a degradation.
+    it("does not claim to have lost the one pass it never had", () => {
+      // Tail-call detection is x86-only by design; listing it would report a
+      // design decision as a degradation.
+      //
+      // `thunk-names` USED to be asserted absent here for the same reason, and
+      // that assertion was correct until peek-a-bin-j4uk.3 gave the A64
+      // detector a thunk pass. Keeping it would have been the failure this
+      // repository names most often — a rule outliving the fact it rested on —
+      // so it moved to the other side, and the pass now has to be listed
+      // whenever it did not run.
       const { omitted } = detectArm64Functions(new Uint8Array(64), BASE, ctx(null));
 
-      expect(omitted).not.toContain("thunk-names");
+      expect(omitted).toContain("thunk-names");
       expect(omitted).not.toContain("tail-calls");
     });
   });
@@ -1403,7 +1412,7 @@ describe("Arm64SweepCache", () => {
       new Arm64SweepCache(),
     );
 
-    expect(r.omitted).toEqual(["call-targets", "jump-tables"]);
+    expect(r.omitted).toEqual(["call-targets", "jump-tables", "thunk-names"]);
     expect(r.functions.map((f) => f.address)).toEqual([BASE]);
   });
 });
@@ -1800,5 +1809,233 @@ describe("archForMachine", () => {
       unsupportedArchMessage("Decompilation"),
     );
     expect(unsupportedOnArch("Decompilation", "unsupported")).not.toContain("ARM64 images");
+  });
+});
+
+/**
+ * peek-a-bin-j4uk.3. Import thunk naming, the pass ARM64 arrived without.
+ *
+ * CLAUDE.md illustrates `DetectPass` with exactly this absence — "without
+ * thunk-names an import thunk is sub_401000 instead of CreateFileW" — and until
+ * this landed the A64 detector named functions from the exports and nothing
+ * else, so the one import thunk in each corpus binary read `sub_14000FFC8` in
+ * the sidebar while the `add` two instructions above it already carried the
+ * inline comment `KERNEL32.dll!GetStringTypeW`.
+ *
+ * MEASURED SHAPE CENSUS at 4167aa3, over t64-arm.exe and w64-arm.exe: 2
+ * thunk-shaped functions per image; 1 resolves an IAT slot and is renamed
+ * (`GetStringTypeW` on both); the other is a lone `br x1` the fixed-width sweep
+ * decoded out of alignment padding. The three-step `adrp`/`add`/`ldar`/`br`
+ * form is what both images use; the two-instruction `adrp`/`ldr`/`br` form does
+ * not occur in either, so it is verified HERE and nowhere else.
+ */
+describe("arm64ThunkSlot", () => {
+  const SLOT_PAGE = 0x14001d000;
+  const SLOT = SLOT_PAGE + 0x218;
+
+  /** `[mnemonic, opStr]` pairs laid out one word apart from `BASE`. */
+  function body(rows: [string, string][]): Instruction[] {
+    return rows.map(([mnemonic, opStr], i) => ({
+      address: BASE + i * ARM64_INSN_SIZE,
+      bytes: new Uint8Array(4),
+      mnemonic,
+      opStr,
+      size: ARM64_INSN_SIZE,
+    }));
+  }
+
+  /** The MSVC A64 guarded-import thunk, verbatim from t64-arm.exe 0x14000ffc8. */
+  const guarded: [string, string][] = [
+    ["adrp", `x8, #0x${SLOT_PAGE.toString(16)}`],
+    ["add", "x8, x8, #0x218"],
+    ["ldar", "x9, [x8]"],
+    ["br", "x9"],
+  ];
+
+  it("resolves the three-step adrp/add/ldar/br form the corpus actually uses", () => {
+    expect(arm64ThunkSlot(body(guarded))).toBe(SLOT);
+  });
+
+  it("resolves the two-instruction adrp/ldr/br form, which folds the offset into the load", () => {
+    // No `add` at all. Before peek-a-bin-j4uk.3 `classifyArm64Br` required one
+    // and answered `slot: null` here — a resolvable slot reported as
+    // unresolvable. FIXTURE-ONLY: neither corpus binary contains this shape, so
+    // `npm run corpus:arm64` cannot make this row red.
+    expect(
+      arm64ThunkSlot(
+        body([
+          ["adrp", `x16, #0x${SLOT_PAGE.toString(16)}`],
+          ["ldr", "x16, [x16, #0x218]"],
+          ["br", "x16"],
+        ]),
+      ),
+    ).toBe(SLOT);
+  });
+
+  it("returns the COMPLETED address, never the adrp page base", () => {
+    // peek-a-bin-vg3 verbatim, and not hypothetical: the IAT of both corpus
+    // binaries begins at a 4 KiB boundary, so the page base IS an IAT entry —
+    // the first one — and a reader stopping there names every thunk after the
+    // wrong import with full confidence.
+    expect(arm64ThunkSlot(body(guarded))).not.toBe(SLOT_PAGE);
+  });
+
+  it("refuses a blr: a thunk tail-jumps, and a call comes back", () => {
+    // This is the shape imports are reached by on A64 — 31 and 39 such call
+    // sites per corpus binary, inside ordinary functions of median size 504
+    // bytes. Naming their container after the import would be a falsehood.
+    const rows: [string, string][] = [...guarded.slice(0, 3), ["blr", "x9"]];
+    expect(arm64ThunkSlot(body(rows))).toBeNull();
+  });
+
+  it("refuses a br on a register the chain never loaded", () => {
+    const rows: [string, string][] = [...guarded.slice(0, 3), ["br", "x1"]];
+    expect(arm64ThunkSlot(body(rows))).toBeNull();
+  });
+
+  it("refuses a lone br, the sweep's own alignment-padding artefact", () => {
+    // Exactly the second candidate in each corpus binary (0x1400040e0 and
+    // 0x1400042c8): a `br x1` with nothing in front of it that is an
+    // instruction at all.
+    expect(arm64ThunkSlot(body([["br", "x1"]]))).toBeNull();
+  });
+
+  it("refuses a direct b, which has a static target and is not a thunk", () => {
+    const rows: [string, string][] = [...guarded.slice(0, 3), ["b", "#0x140002000"]];
+    expect(arm64ThunkSlot(body(rows))).toBeNull();
+  });
+});
+
+describe("detectArm64Functions names import thunks", () => {
+  const SLOT_PAGE = 0x14001d000;
+  const SLOT = SLOT_PAGE + 0x218;
+  const THUNK = BASE + 32;
+
+  /** `adrp`/`add`/`ldar`/`br` at `THUNK`, plus filler so the sweep is whole. */
+  function thunkWords(): Map<number, { mnemonic: string; opStr: string }> {
+    const words = code(16);
+    words.set(THUNK, { mnemonic: "adrp", opStr: `x8, #0x${SLOT_PAGE.toString(16)}` });
+    words.set(THUNK + 4, { mnemonic: "add", opStr: "x8, x8, #0x218" });
+    words.set(THUNK + 8, { mnemonic: "ldar", opStr: "x9, [x8]" });
+    words.set(THUNK + 12, { mnemonic: "br", opStr: "x9" });
+    return words;
+  }
+
+  function iatCtx(map: Map<number, { lib: string; func: string }>): Arm64Context {
+    return { cs: fakeCs(thunkWords()), stringMap: new Map(), iatMap: map, driverMode: false };
+  }
+
+  const pdataWithThunk = [
+    { beginAddress: BASE, endAddress: THUNK },
+    { beginAddress: THUNK, endAddress: THUNK + 16 },
+  ];
+
+  it("names a thunk after the import its slot holds, and marks it a thunk", () => {
+    const { functions } = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      iatCtx(new Map([[SLOT, { lib: "KERNEL32.dll", func: "GetStringTypeW" }]])),
+      { pdataFunctions: pdataWithThunk },
+    );
+
+    const thunk = functions.find((f) => f.address === THUNK);
+    expect(thunk?.name).toBe("GetStringTypeW");
+    // `isThunk` is what `mcp/resources.ts` and `mcp/tools.ts` publish; the x86
+    // pass sets it beside the name and this must match or the two readers
+    // disagree about the same fact.
+    expect(thunk?.isThunk).toBe(true);
+  });
+
+  it("leaves the address alone — naming is not detection", () => {
+    const named = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      iatCtx(new Map([[SLOT, { lib: "KERNEL32.dll", func: "GetStringTypeW" }]])),
+      { pdataFunctions: pdataWithThunk },
+    );
+    const unnamed = detectArm64Functions(new Uint8Array(64), BASE, iatCtx(new Map()), {
+      pdataFunctions: pdataWithThunk,
+    });
+
+    expect(named.functions.map((f) => f.address)).toEqual(unnamed.functions.map((f) => f.address));
+    expect(named.functions.map((f) => f.size)).toEqual(unnamed.functions.map((f) => f.size));
+  });
+
+  it("leaves a thunk whose slot is not an import as sub_", () => {
+    const { functions } = detectArm64Functions(new Uint8Array(64), BASE, iatCtx(new Map()), {
+      pdataFunctions: pdataWithThunk,
+    });
+
+    const thunk = functions.find((f) => f.address === THUNK);
+    expect(thunk?.name).toBe(`sub_${THUNK.toString(16).toUpperCase()}`);
+    expect(thunk?.isThunk).toBeUndefined();
+  });
+
+  it("does NOT rename a function the file itself named", () => {
+    // The `sub_` guard, `functionDetect.ts:2706`'s rule. An export name is the
+    // file's own statement about the address and outranks an inference drawn
+    // from four instructions; dropping the guard renames `MyExport` to
+    // `GetStringTypeW` and loses the only name a user can look up.
+    const { functions } = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      iatCtx(new Map([[SLOT, { lib: "KERNEL32.dll", func: "GetStringTypeW" }]])),
+      { pdataFunctions: pdataWithThunk, exports: [{ name: "MyExport", address: THUNK }] },
+    );
+
+    const thunk = functions.find((f) => f.address === THUNK);
+    expect(thunk?.name).toBe("MyExport");
+    expect(thunk?.isThunk).toBeUndefined();
+  });
+
+  it("does not consider a function larger than four words", () => {
+    // The bound is a bound, not a hint: a 20-byte function whose last four
+    // instructions happen to be a thunk chain is doing something else as well.
+    const big = [{ beginAddress: THUNK - 4, endAddress: THUNK + 16 }];
+    expect(ARM64_MAX_THUNK_BYTES).toBe(16);
+    const { functions } = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      iatCtx(new Map([[SLOT, { lib: "KERNEL32.dll", func: "GetStringTypeW" }]])),
+      { pdataFunctions: big },
+    );
+
+    expect(functions[0].size).toBe(20);
+    expect(functions[0].name).toBe(`sub_${(THUNK - 4).toString(16).toUpperCase()}`);
+  });
+
+  it("lists thunk-names in omitted when there is no decoder, and never tail-calls", () => {
+    // Once the pass exists, a run without it is a NARROWER answer and must say
+    // so, or the caller cannot tell a thunk this build declined to name from a
+    // function that is not a thunk. `tail-calls` stays unlisted because the A64
+    // detector genuinely has no such pass on any path.
+    const { omitted } = detectArm64Functions(
+      new Uint8Array(64),
+      BASE,
+      { cs: null, stringMap: new Map(), iatMap: new Map(), driverMode: false },
+      { pdataFunctions: pdataWithThunk },
+    );
+
+    expect(omitted).toContain("thunk-names");
+    expect(omitted).toContain("call-targets");
+    expect(omitted).toContain("jump-tables");
+    expect(omitted).not.toContain("tail-calls");
+  });
+
+  it("lists thunk-names when the section is refused as not A64", () => {
+    // The `Arm64DecodeRateError` path. `.pdata`, the exports and the entry
+    // point are still the linker's own record, so detection answers — but the
+    // thunk pass needs the sweep it just refused.
+    const { omitted, functions } = detectArm64Functions(
+      new Uint8Array(4096),
+      BASE,
+      ctx(fakeCs(new Map())),
+      { pdataFunctions: pdataWithThunk },
+    );
+
+    expect(omitted).toContain("thunk-names");
+    expect(omitted).not.toContain("tail-calls");
+    // Still answered from the file's own record.
+    expect(functions.length).toBe(2);
   });
 });

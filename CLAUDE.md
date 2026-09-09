@@ -140,6 +140,14 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   `stack.ts`'s; `stackFrame.ts` dispatches between the two), `arm64Xref.ts`. Everything x86-shaped
   — the decompiler, x86 xrefs, IRP dispatch, signatures — **declines on ARM64 rather than
   guessing**. Gated by `npm run corpus:arm64`.
+  `arm64.ts` also owns `arm64ThunkSlot`, the **one declaration of "which IAT slot does this
+  thunk-shaped function branch through"** — it re-rolls neither grammar, taking the branch half
+  from `classifyArm64Branch` and the address half from `classifyArm64Br`'s `runtime-pointer` arm,
+  and returns the **completed** address rather than the `adrp` page base (peek-a-bin-vg3: both
+  corpus binaries put the IAT at a 4 KiB boundary, so the page base is itself an import entry).
+  It returns a SLOT, not a name — whether a slot is an import is the IAT's business, which is what
+  lets `corpus/arm64.ts` re-derive the slot independently and judge the name against the linker's
+  table (`peek-a-bin-j4uk.3`).
 - **`disasm/decompile/`** — IR lifting → SSA → folding → structuring → cleanup → type inference →
   promotion → struct synthesis → emission.
 - **`components/`** — the disassembly view is split across `DisassemblyView.tsx` (orchestration),
@@ -807,7 +815,7 @@ Deliberately outside `npm test` — they need real MSVC binaries not in the repo
 Nothing here is re-checked unless someone re-runs it.
 
 - **`npm run corpus`** — the four x86 binaries, and nothing else.
-- **`npm run corpus:arm64`** (`corpus/arm64.ts`) — `t64-arm.exe` / `w64-arm.exe`, **51 gate
+- **`npm run corpus:arm64`** (`corpus/arm64.ts`) — `t64-arm.exe` / `w64-arm.exe`, **55 gate
   assertions, all 0**.
 - **`npm run corpus:comments`** — the ARM64 comment audit plus an x86 comment digest.
 - **Path-taking censuses, outside the gated run**: `corpus:jumptables`, `corpus:gridserve`,
@@ -1060,8 +1068,9 @@ Each of these has an oracle outside the code under test.
 
 ### The ARM64 gated run (`npm run corpus:arm64`, `corpus/arm64.ts`)
 
-**51 gate assertions, all 0.** Every row has an oracle outside the code under test plus a liveness
-half, because a population-based audit fails by silently matching nothing:
+**55 gate assertions, all 0** (51 before `peek-a-bin-j4uk.3` added two rows per binary). Every row
+has an oracle outside the code under test plus a liveness half, because a population-based audit
+fails by silently matching nothing:
 
 - **The sweep against the A64 encoding** — four bytes, four-byte boundary, strictly increasing,
   inside the section. The ISA, not a heuristic, so every row is provably not an instruction the
@@ -1093,6 +1102,18 @@ half, because a population-based audit fails by silently matching nothing:
   grammar names was actually withheld from the stream the view renders. Measured rather than
   argued: silence the grammar and this row goes **vacuously green** while the unreachability row
   goes red. `words of pool` beside it is what makes a vacuous green visible.
+- **Import thunk names, against the linker's own IAT — TWO GATES at 0, failing in OPPOSITE
+  directions.** A thunk NAMED against a slot the import table does not hold, and a thunk-SHAPED
+  function left `sub_` whose slot *does* resolve. The second is what makes the first non-vacuous:
+  a rule reaches zero wrong names by naming nothing, and gate 2 is gateable precisely because a
+  resolving slot IS the proof the name was available. `independentThunkSlot` in the harness re-reads
+  the chain FORWARDS with its own regexes where production walks backwards from the `br`, so the
+  row is a differential and not a restatement — replace it with an import of `arm64ThunkSlot` and
+  both gates go green for ever. Three report rows are the liveness halves (thunk-shaped found /
+  named / chains resolved): 2 / 1 / 1 on each binary. The **red direction of both gates has no real
+  population** — both binaries name their one thunk correctly — so it is controlled in
+  `build/arm64Audit.test.ts` instead (`peek-a-bin-j4uk.3`).
+
 - **An unreachable decoded word inside a `.pdata` extent — GATE at 0**, and the row to read,
   because its rule (reachability) shares nothing with either production rule and is therefore the
   independent oracle over both. Deliberately the *strict* reading, hence a **lower bound**.
@@ -1403,6 +1424,14 @@ read "all of them compile" as "all of them are right".
     leave the stream.
   - **Epilogue unwind scopes are unaudited** — the walk stops at `end` and the per-epilog code
     lists after it are read past and never judged.
+  - **Import thunk naming is gated, but on a POPULATION OF ONE PER IMAGE.** Both binaries contain
+    exactly one thunk-shaped function whose slot resolves, and it is `GetStringTypeW` in both —
+    so the gate is exercised, not vacuous, but it is two data points. **A64 MSVC does not route
+    imports through thunks the way x86 does**: 31 and 39 import call sites are `adrp`/`ldr`/`blr`
+    INLINE inside ordinary functions (median containing size 504 bytes), which is a call and not a
+    thunk. The **two-instruction `adrp`/`ldr`/`br` form occurs in neither binary**, so that arm of
+    `classifyArm64Br` is fixture-only, and the `sub_` guard has no corpus control either — no
+    binary here exports anything.
   - **The `bl` call graph is counted, not verified.** No oracle checks an edge.
   - **ARM64 performance is measured only in Capstone call counts.** The wall-clock figures in
     `Arm64SweepCache`'s docstring are not re-derived and no ARM64 timing has been taken on this

@@ -1,7 +1,7 @@
 /**
  * Negative controls for the ARM64 audit rows the corpus cannot make red.
  *
- * `corpus/arm64.ts` gates twenty rows. Ten of them can be turned red by
+ * `corpus/arm64.ts` gates twenty-two rows. Ten of them can be turned red by
  * perturbing this repo's own code — misalign the sweep's probe advance, move the
  * decode-rate floor, put the `adrp`/`add` target a page out, drop
  * `readArm64Table`'s alignment guard, make `Arm64SweepCache` truncate or never
@@ -30,9 +30,12 @@ import {
   auditPdata,
   auditRefs,
   auditSweep,
+  auditThunks,
   auditWildBranches,
+  independentThunkSlot,
   makeExtents,
   type Row,
+  type ThunkSubject,
 } from "../corpus/arm64";
 import type { Instruction } from "../src/disasm/types";
 
@@ -486,5 +489,212 @@ describe("auditLiteralPools", () => {
 
     expect(row(rows, "literal pool: pool word presented as an instruction").value).toBe(0);
     expect(row(rows, "literal pool: words of pool").value).toBe(0);
+  });
+});
+
+/**
+ * peek-a-bin-j4uk.3. The two import-thunk gates.
+ *
+ * Both are exercised by the real binaries — 2 thunk-shaped functions and 1
+ * named per image — so unlike most rows in this file they are not unexercised.
+ * They are controlled here anyway for the halves the corpus cannot reach: a
+ * WRONG name (both binaries name theirs correctly, so gate 1's red direction
+ * has no real population), a thunk-shaped function left `sub_` (gate 2's red
+ * direction, likewise), and the shapes `independentThunkSlot` must refuse.
+ *
+ * The independent reader is the point of the pair. It walks the chain FORWARDS
+ * with its own regexes where `arm64ThunkSlot` walks BACKWARDS from the `br`, so
+ * the gate is a differential rather than a restatement — and if it were ever
+ * replaced by an import of the production reader, every row here would go green
+ * and stay green.
+ */
+describe("auditThunks", () => {
+  const SLOT_PAGE = 0x14001d000;
+  const SLOT = SLOT_PAGE + 0x218;
+  const THUNK = BASE + 0x40;
+  const IAT = new Map([
+    // Both corpus binaries put the IAT at a 4 KiB boundary, so the `adrp` page
+    // base IS an entry — the first one. That collision is what makes the
+    // page-base control discriminate rather than merely fail to name.
+    [SLOT_PAGE, { lib: "KERNEL32.dll", func: "GetStartupInfoW" }],
+    [SLOT, { lib: "KERNEL32.dll", func: "GetStringTypeW" }],
+  ]);
+
+  /** The MSVC A64 guarded-import thunk, verbatim from t64-arm.exe 0x14000ffc8. */
+  const guardedBody = [
+    insn(THUNK, "adrp", `x8, #0x${SLOT_PAGE.toString(16)}`),
+    insn(THUNK + 4, "add", "x8, x8, #0x218"),
+    insn(THUNK + 8, "ldar", "x9, [x8]"),
+    insn(THUNK + 12, "br", "x9"),
+  ];
+
+  function subject(over: Partial<ThunkSubject> = {}): ThunkSubject {
+    return {
+      name: "GetStringTypeW",
+      address: THUNK,
+      size: 16,
+      isThunk: true,
+      body: guardedBody,
+      ...over,
+    };
+  }
+
+  const gate1 = "thunk: named against a slot the IAT does not hold";
+  const gate2 = "thunk: thunk-shaped left sub_ with a slot the IAT holds";
+
+  it("passes a correctly named thunk, and says the population was not empty", () => {
+    const rows = auditThunks([subject()], IAT);
+
+    expect(row(rows, gate1).value).toBe(0);
+    expect(row(rows, gate2).value).toBe(0);
+    expect(row(rows, "thunk: thunk-shaped functions found").value).toBe(1);
+    expect(row(rows, "thunk: functions named from the IAT").value).toBe(1);
+    expect(row(rows, "thunk: chains this reader resolved into the IAT").value).toBe(1);
+  });
+
+  it("reddens gate 1 on the peek-a-bin-vg3 defect: the adrp PAGE BASE as the slot", () => {
+    // A reader stopping at the page base names this thunk `GetStartupInfoW` —
+    // a real import, spelled confidently, and the wrong one. Every other gate
+    // in the file is blind to it: the name is well-formed, the function is
+    // thunk-shaped, and the slot it claims really is in the IAT.
+    const r = row(auditThunks([subject({ name: "GetStartupInfoW" })], IAT), gate1);
+
+    expect(r.value).toBe(1);
+    expect(r.rows[0]).toContain("GetStartupInfoW");
+    expect(r.rows[0]).toContain(SLOT.toString(16));
+  });
+
+  it("reddens gate 1 for a name no IAT slot holds at all", () => {
+    const r = row(auditThunks([subject({ name: "CreateFileW" })], IAT), gate1);
+
+    expect(r.value).toBe(1);
+  });
+
+  it("reddens gate 1 for a function marked a thunk that is not thunk-shaped", () => {
+    // A disagreement about what a thunk IS, not about which import one reaches.
+    const notShaped = subject({
+      name: "GetStringTypeW",
+      size: 8,
+      body: [insn(THUNK, "ret"), insn(THUNK + 4, "nop")],
+    });
+    const r = row(auditThunks([notShaped], IAT), gate1);
+
+    expect(r.value).toBe(1);
+    expect(r.rows[0]).toContain("not thunk-shaped");
+  });
+
+  it("reddens gate 2 when a resolvable thunk is left sub_ — the silenced-pass case", () => {
+    // This is the half that makes a vacuous green visible. Silencing the pass
+    // takes gate 1 to 0 by naming nothing; gate 2 and `functions named` are what
+    // report it. Measured against the real binaries: gate 1 green, gate 2 RED
+    // 1 on each, `named` 0.
+    const rows = auditThunks([subject({ name: `sub_${THUNK.toString(16)}`, isThunk: false })], IAT);
+
+    expect(row(rows, gate1).value).toBe(0);
+    expect(row(rows, gate2).value).toBe(1);
+    expect(row(rows, "thunk: functions named from the IAT").value).toBe(0);
+    // …while the chain still resolves, which is the proof the name was there.
+    expect(row(rows, "thunk: chains this reader resolved into the IAT").value).toBe(1);
+  });
+
+  it("does not fault a sub_ whose slot is not an import", () => {
+    // A `br` through a slot nothing imports is a guarded or delay-load target
+    // the loader fills at run time. There is no name to take, so leaving it
+    // `sub_` is correct and must not gate.
+    const rows = auditThunks([subject({ name: `sub_${THUNK.toString(16)}`, isThunk: false })], new Map());
+
+    expect(row(rows, gate2).value).toBe(0);
+    expect(row(rows, "thunk: chains this reader resolved into the IAT").value).toBe(0);
+    // Still thunk-SHAPED, so the denominator is not silently empty.
+    expect(row(rows, "thunk: thunk-shaped functions found").value).toBe(1);
+  });
+
+  it("reports an empty population as empty rather than as green", () => {
+    const rows = auditThunks([subject({ size: 8, body: [insn(THUNK, "ret")] })], IAT);
+
+    expect(row(rows, "thunk: thunk-shaped functions found").value).toBe(0);
+    expect(row(rows, gate1).live).toContain("0 thunk-shaped");
+  });
+});
+
+describe("independentThunkSlot", () => {
+  const SLOT_PAGE = 0x14001d000;
+  const A = BASE;
+
+  const rows = (spec: [string, string][]) =>
+    spec.map(([m, o], i) => insn(A + i * 4, m, o));
+
+  it("reads the three-step adrp/add/ldar/br form", () => {
+    expect(
+      independentThunkSlot(
+        rows([
+          ["adrp", `x8, #0x${SLOT_PAGE.toString(16)}`],
+          ["add", "x8, x8, #0x218"],
+          ["ldar", "x9, [x8]"],
+          ["br", "x9"],
+        ]),
+      ),
+    ).toBe(SLOT_PAGE + 0x218);
+  });
+
+  it("reads the two-instruction adrp/ldr/br form", () => {
+    expect(
+      independentThunkSlot(
+        rows([
+          ["adrp", `x16, #0x${SLOT_PAGE.toString(16)}`],
+          ["ldr", "x16, [x16, #0x218]"],
+          ["br", "x16"],
+        ]),
+      ),
+    ).toBe(SLOT_PAGE + 0x218);
+  });
+
+  it("refuses a chain whose load does not write the branched register", () => {
+    // The whole content of the reading: without this the audit would agree with
+    // any `adrp`/`br` pair that happened to sit four words apart.
+    expect(
+      independentThunkSlot(
+        rows([
+          ["adrp", `x8, #0x${SLOT_PAGE.toString(16)}`],
+          ["add", "x8, x8, #0x218"],
+          ["ldar", "x9, [x8]"],
+          ["br", "x10"],
+        ]),
+      ),
+    ).toBeNull();
+  });
+
+  it("refuses a chain whose load does not read the adrp's register", () => {
+    expect(
+      independentThunkSlot(
+        rows([
+          ["adrp", `x8, #0x${SLOT_PAGE.toString(16)}`],
+          ["add", "x8, x8, #0x218"],
+          ["ldar", "x9, [x11]"],
+          ["br", "x9"],
+        ]),
+      ),
+    ).toBeNull();
+  });
+
+  it("refuses a blr, and anything not beginning at an adrp", () => {
+    expect(
+      independentThunkSlot(
+        rows([
+          ["adrp", `x16, #0x${SLOT_PAGE.toString(16)}`],
+          ["ldr", "x16, [x16, #0x218]"],
+          ["blr", "x16"],
+        ]),
+      ),
+    ).toBeNull();
+    expect(
+      independentThunkSlot(
+        rows([
+          ["mov", "x16, x0"],
+          ["ldr", "x16, [x16, #0x218]"],
+          ["br", "x16"],
+        ]),
+      ),
+    ).toBeNull();
   });
 });

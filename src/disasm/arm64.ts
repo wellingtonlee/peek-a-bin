@@ -17,7 +17,7 @@
  * `unsupportedOnArch` in ./arch.ts.
  */
 
-import { findArm64AddressRefs, findArm64LiteralPools } from "./arm64Operands";
+import { classifyArm64Branch, findArm64AddressRefs, findArm64LiteralPools } from "./arm64Operands";
 import { type CapstoneHandle, createScan, requireCapstone } from "./capstoneWindow";
 import { type DetectPass, type DetectResult, mapInsn, stringComment } from "./functionDetect";
 import { SectionMemo } from "./sectionMemo";
@@ -1006,13 +1006,110 @@ export function classifyArm64Br(brOpStr: string, recent: Instruction[]): Arm64Br
   // The value is from memory, which already settles it: there is no static
   // target. Resolving the slot is a courtesy, and failing to resolve it does not
   // change the answer.
-  const iAdd = lastWrite(load.addr, iLoad - 1);
-  const add = iAdd < 0 ? null : parseAddImm(recent[iAdd].mnemonic, recent[iAdd].opStr);
+  const iProducer = lastWrite(load.addr, iLoad - 1);
+  if (iProducer < 0) return { kind: "runtime-pointer", slot: null };
+  const producer = recent[iProducer];
+
+  // Two shapes reach the same slot, and only the first was read here before.
+  //
+  //   adrp xA, #page / add xA, xA, #imm / ldar xB, [xA] / br xB   (three steps)
+  //   adrp xA, #page /                    ldr  xB, [xA, #imm] / br xB  (two)
+  //
+  // The two-instruction form folds the offset into the LOAD and emits no `add`
+  // at all, so the walk below used to meet an `adrp` where it required an `add`
+  // and answer `slot: null` — a resolvable slot reported as unresolvable, which
+  // is peek-a-bin-mxw's census in miniature. Reading the direct producer costs
+  // three lines and cannot change what any existing caller does:
+  // `findArm64JumpTables` acts on `kind === "table"` alone, and both arms here
+  // return `runtime-pointer` either way (peek-a-bin-j4uk.3).
+  //
+  // **The two-instruction arm is fixture-only on this corpus.** Neither
+  // t64-arm.exe nor w64-arm.exe contains it — both spell their one import thunk
+  // the three-step way — so it is controlled in the unit suite and nothing in
+  // `npm run corpus:arm64` exercises it.
+  const direct = parseAdrp(producer.mnemonic, producer.opStr);
+  if (direct) return { kind: "runtime-pointer", slot: direct.target + load.offset };
+
+  const add = parseAddImm(producer.mnemonic, producer.opStr);
   if (!add) return { kind: "runtime-pointer", slot: null };
-  const iPage = lastWrite(add.base, iAdd - 1);
+  const iPage = lastWrite(add.base, iProducer - 1);
   const page = iPage < 0 ? null : parseAdrp(recent[iPage].mnemonic, recent[iPage].opStr);
   if (!page) return { kind: "runtime-pointer", slot: null };
   return { kind: "runtime-pointer", slot: page.target + add.imm + load.offset };
+}
+
+/**
+ * Largest function this reader will consider an import thunk, in bytes.
+ *
+ * Four A64 words. The longest real shape is `adrp`/`add`/`ldar`/`br`, which is
+ * exactly four; `functionDetect.ts`' x86 thunk pass uses the same 16 and gets
+ * two or three instructions for it, the widths being what differ rather than
+ * the intent.
+ */
+export const ARM64_MAX_THUNK_BYTES = 16;
+
+/**
+ * The instructions of an address-sorted sweep lying in `[start, end)`.
+ *
+ * A binary search rather than a filter or an address->index Map: the sweep is
+ * tens of thousands of entries and detection's cost is a standing concern
+ * (peek-a-bin-6dv3), while the candidates asking are a handful of functions of
+ * at most four instructions each.
+ */
+function bodyOf(insns: readonly Instruction[], start: number, end: number): Instruction[] {
+  let lo = 0;
+  let hi = insns.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (insns[mid].address < start) lo = mid + 1;
+    else hi = mid;
+  }
+  const out: Instruction[] = [];
+  for (let i = lo; i < insns.length && insns[i].address < end; i++) out.push(insns[i]);
+  return out;
+}
+
+/**
+ * The IAT slot a thunk-shaped function tail-branches through, or `null`.
+ *
+ * An import thunk loads a pointer the loader wrote and jumps to it. On x86 that
+ * is one instruction (`jmp [__imp_X]`) and the operand carries the slot; A64
+ * cannot put a 64-bit address in a 32-bit instruction, so the same thing takes
+ * three or four and the slot is the sum of an `adrp` page and an offset.
+ *
+ * **Both halves of the reading are existing declarations and neither is
+ * re-rolled here.** The branch half is `classifyArm64Branch`
+ * (`arm64Operands.ts`, the single A64 branch grammar), which is also what
+ * excludes `blr`: a thunk TAIL-jumps, and a call whose control returns is an
+ * ordinary indirect call sitting inside a larger function. The address half is
+ * {@link classifyArm64Br}, whose `runtime-pointer` arm exists for precisely
+ * this shape — its own docstring calls it "a guarded-import or delay-load
+ * thunk" — and whose `slot` is the completed sum, never the `adrp` page base.
+ * That distinction is peek-a-bin-vg3's defect verbatim: on both corpus binaries
+ * the IAT begins at a 4 KiB boundary, so the page base IS an IAT entry (the
+ * first one) and a reader that stopped at it would name every thunk after the
+ * wrong import, confidently.
+ *
+ * `body` is the function's OWN instructions and nothing else, which is what
+ * bounds the backward walk: a chain cannot be completed out of a neighbouring
+ * function's registers.
+ *
+ * Returning the slot rather than the name keeps this a statement about the
+ * instruction stream. Whether the slot is an import is the IAT's business, and
+ * the caller asks it — which is also what lets `corpus/arm64.ts` re-derive the
+ * slot independently and judge the name against the linker's own table.
+ */
+export function arm64ThunkSlot(body: readonly Instruction[]): number | null {
+  if (body.length < 2) return null;
+  const last = body[body.length - 1];
+  const branch = classifyArm64Branch(last.mnemonic, last.opStr);
+  // `jump` + `indirect` is `br` and the PAuth `braa`/`brab` forms. Only the
+  // plain `br` occurs on this corpus; the authenticated ones are the same
+  // control transfer by the grammar's own classification, so admitting them
+  // costs nothing and inventing a second mnemonic list would cost a drift.
+  if (branch === null || branch.kind !== "jump" || !branch.indirect) return null;
+  const kind = classifyArm64Br(last.opStr, body.slice(0, -1));
+  return kind.kind === "runtime-pointer" ? kind.slot : null;
 }
 
 /**
@@ -1232,13 +1329,29 @@ export function detectArm64Functions(
   let jumpTables = new Map<number, number[]>();
   /** Byte extents of the tables above — see {@link Arm64JumpTables.spans}. */
   let jumpTableSpans: [number, number][] = [];
+  /**
+   * The sweep, once it exists, for the thunk pass at the bottom of this
+   * function. Empty whenever there was no decoder or the section was refused,
+   * which is exactly when `omitted` says `"thunk-names"` did not run.
+   */
+  let sweptInsns: Instruction[] = [];
   // Kept, unlike `disassembleArm64` above, because the evidence already in
   // `addrSet` is the file's own and does not come from the decoder. What it
   // costs is stated rather than left for the caller to guess (peek-a-bin-4s9):
   // no `bl` targets, so every leaf function `.pdata` is allowed to omit is
-  // missing, and no dispatch tables. Thunk naming and tail-call detection are
-  // not listed — the ARM64 detector has no such pass to lose.
-  const omitted: DetectPass[] = ctx.cs ? [] : ["call-targets", "jump-tables"];
+  // missing, no dispatch tables, and no thunk names.
+  //
+  // `"thunk-names"` joined this list at peek-a-bin-j4uk.3, WITH the pass that
+  // made it true. Until then the comment here read "the ARM64 detector has no
+  // such pass to lose", which was honest; leaving it there once the pass exists
+  // would be the house's own worst failure — a narrower answer wearing a
+  // complete one's shape, since the caller cannot see the difference between a
+  // thunk this build declined to name and a function that is not a thunk.
+  //
+  // `"tail-calls"` stays unlisted, and that is not an oversight: the A64
+  // detector genuinely has no tail-call pass, on any path, so listing it would
+  // claim a decoder cost the file's own record never had.
+  const omitted: DetectPass[] = ctx.cs ? [] : ["call-targets", "jump-tables", "thunk-names"];
   if (ctx.cs) {
     try {
       const insidePdata = rangeTest(options?.pdataFunctions);
@@ -1250,6 +1363,11 @@ export function detectArm64Functions(
       const insns = cache
         ? cache.sweep(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer)
         : sweepArm64(bytes, baseAddress, ctx.cs, ctx.chpeMetadataPointer);
+      // Held for the thunk pass below, which runs after the sizes loop because
+      // it needs each function's extent. It reads the SAME array — nothing here
+      // sweeps twice, and `Arm64SweepCache` is neither consulted again nor
+      // written to (peek-a-bin-kis).
+      sweptInsns = insns;
       for (const insn of insns) {
         if (insn.mnemonic !== "bl") continue;
         const m = insn.opStr.match(BL_TARGET);
@@ -1270,7 +1388,7 @@ export function detectArm64Functions(
       // a missing decoder applies here: answer with what the file states, and
       // say which passes did not run.
       if (!(err instanceof Arm64DecodeRateError)) throw err;
-      omitted.push("call-targets", "jump-tables");
+      omitted.push("call-targets", "jump-tables", "thunk-names");
     }
   }
 
@@ -1289,6 +1407,50 @@ export function detectArm64Functions(
       functions[i].size = functions[i + 1].address - functions[i].address;
     } else {
       functions[i].size = endAddress - functions[i].address;
+    }
+  }
+
+  // --- Thunk names ---
+  //
+  // The x86 detector has had this pass since long before ARM64 arrived
+  // (`functionDetect.ts`, "Thunk detection"), and CLAUDE.md illustrates
+  // `DetectPass` with its absence: "without thunk-names an import thunk is
+  // sub_401000 instead of CreateFileW". On A64 the same function was
+  // `sub_14000FFC8` in the sidebar, the call graph, every xref panel and every
+  // `bl` in the listing, while the `add` two instructions above it already
+  // carried the inline comment `KERNEL32.dll!GetStringTypeW` — the name was
+  // resolved and simply never joined to anything.
+  //
+  // WHAT THIS COSTS AND WHAT IT DOES NOT TOUCH. Only `DisasmFunction.name` and
+  // `.isThunk` change. The sweep is the one already in hand, `Arm64SweepCache`
+  // is untouched, no instruction's `comment` or `source` moves, and no address
+  // enters or leaves `functions` — naming is not detection (peek-a-bin-kis,
+  // peek-a-bin-gb40).
+  //
+  // POPULATION, measured at 4167aa3 over the two real binaries: 2 functions per
+  // image are thunk-shaped (size <= 16, ending in an indirect jump); 1 per image
+  // resolves a slot the IAT holds and is renamed — `GetStringTypeW` on both.
+  // The other is a lone `br x1` the fixed-width sweep decoded out of alignment
+  // padding, which resolves nothing and is left `sub_`. Imports are otherwise
+  // reached INLINE on this architecture — 31 and 39 `adrp`/`ldr`/`blr` call
+  // sites inside ordinary functions, median containing size 504 bytes — and
+  // those are calls, not thunks, which is why the branch test demands a `jump`
+  // rather than a `call`.
+  //
+  // The `sub_` guard is `functionDetect.ts:2706`'s rule: an export name, an
+  // `entry_point`, a `__handler_` or a `__tls_callback_` is the file's own
+  // statement about the address and outranks an inference drawn from four
+  // instructions.
+  if (sweptInsns.length > 0 && ctx.iatMap.size > 0) {
+    for (const fn of functions) {
+      if (fn.name !== `sub_${fn.address.toString(16).toUpperCase()}`) continue;
+      if (fn.size <= 0 || fn.size > ARM64_MAX_THUNK_BYTES) continue;
+      const slot = arm64ThunkSlot(bodyOf(sweptInsns, fn.address, fn.address + fn.size));
+      if (slot === null) continue;
+      const iat = ctx.iatMap.get(slot);
+      if (!iat) continue;
+      fn.name = iat.func;
+      fn.isThunk = true;
     }
   }
 
