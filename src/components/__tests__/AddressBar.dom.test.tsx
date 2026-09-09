@@ -1,19 +1,18 @@
 // @vitest-environment jsdom
 
 import "../../test/domSetup";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
 import { type AppState, VIEW_TABS, type ViewTab } from "../../hooks/usePEFile";
-import type { AIScanFinding } from "../../llm/types";
 import { AddressBar } from "../AddressBar";
 import { VIEW_TAB_LABELS } from "../analysisNotice";
 import { tabId, tabPanelId } from "../tabIds";
 import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
 
 /**
- * The tab bar, and the 1–9 shortcuts that are supposed to agree with it.
+ * The tab bar, and the 1–8 shortcuts that are supposed to agree with it.
  *
  * `AddressBar`'s own docstring makes a claim no test could previously reach:
  * the button order and the digit map are both derived from `VIEW_TABS`, "so a
@@ -46,18 +45,6 @@ import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarnes
  * `aria-selected` on these buttons to assert instead (see the note on that test).
  */
 
-function aiFinding(severity: AIScanFinding["severity"], title: string): AIScanFinding {
-  return {
-    severity,
-    title,
-    description: "",
-    functionAddress: IMAGE_BASE + 0x1000,
-    functionName: "sub_401000",
-    remediation: "",
-    source: "ai-scan",
-  };
-}
-
 const FUNCS: DisasmFunction[] = [
   { name: "sub_401000", address: IMAGE_BASE + 0x1000, size: 0x40 },
   { name: "sub_401040", address: IMAGE_BASE + 0x1040, size: 0x40 },
@@ -77,7 +64,7 @@ function renderBar(over: Partial<AppState> = {}) {
  * The tab buttons, in DOM order, identified by carrying a `(N)` in the title.
  *
  * BY TITLE AND NOT BY ROLE, deliberately, even though they are `role="tab"` now:
- * this helper is what the 1-9 headline test below reads the advertised digit out
+ * this helper is what the 1-8 headline test below reads the advertised digit out
  * of, and a helper that selected on the role would be assuming the very thing
  * `AddressBar tablist semantics` sets out to check. `document.querySelectorAll`
  * rather than `getAllByRole("button")` for the same reason — the role is what
@@ -127,86 +114,16 @@ describe("AddressBar tab bar", () => {
     expect(active[0].textContent).toBe(VIEW_TAB_LABELS.strings);
     expect(active[0].getAttribute("aria-selected")).toBe("true");
   });
-
-  it("badges the anomalies tab with the combined static and AI finding count", () => {
-    renderBar({
-      anomalies: [{ severity: "warning", title: "a", detail: "d" }],
-      aiScanResults: [aiFinding("high", "b"), aiFinding("low", "c")],
-    });
-    const anomalies = tabButtons()[VIEW_TABS.indexOf("anomalies")];
-    // 1 static + 2 AI. The badge is the only place the two lists are summed.
-    expect(anomalies.textContent).toBe(`${VIEW_TAB_LABELS.anomalies}3`);
-  });
-});
-
-describe("AddressBar anomaly badge severity", () => {
-  /**
-   * THE BADGE'S COLOUR HAD NO TEST AT ALL, which is how a third hand-written
-   * severity chain survived beside two declared tables. `AnomaliesView`'s own
-   * docstring named it: "STILL NOT UNIFIED WITH `AddressBar.tsx`'s status dot …
-   * The two agree today. Nothing makes them agree tomorrow."
-   *
-   * Read beside `severity.test.ts`, which is where the combinations live. This
-   * is the half that can only be asked of a render: that the level chosen there
-   * reaches the page as a colour. CLASS NAMES AS STRINGS — Tailwind is
-   * deliberately out of the test config, so `bg-red-500` carries no colour here;
-   * what this discriminates is red from amber from blue, which is the
-   * peek-a-bin-n7q1 distinction.
-   */
-  const badge = () => {
-    const tab = tabButtons()[VIEW_TABS.indexOf("anomalies")];
-    const span = tab.querySelector("span");
-    if (!span) throw new Error("anomalies tab rendered no badge");
-    return span;
-  };
-
-  it("paints the badge in the worst severity present, not the first", () => {
-    renderBar({
-      anomalies: [{ severity: "info", title: "a", detail: "d" }],
-      aiScanResults: [aiFinding("high", "b")],
-    });
-    // THE CROSS-LIST CASE, and the one the old chain had to spell by hand: the
-    // only critical-grade thing here is an AI `high`, a value the anomaly
-    // vocabulary does not even have.
-    expect(badge().className).toContain("bg-red-500");
-    expect(badge().className).not.toContain("amber");
-    expect(badge().textContent).toBe("2");
-  });
-
-  it("paints amber for a medium finding and a warning anomaly alike", () => {
-    renderBar({ aiScanResults: [aiFinding("medium", "b")] });
-    expect(badge().className).toContain("bg-amber-500");
-    cleanup();
-    renderBar({ anomalies: [{ severity: "warning", title: "a", detail: "d" }] });
-    expect(badge().className).toContain("bg-amber-500");
-  });
-
-  it("paints blue when everything present is mild", () => {
-    renderBar({
-      anomalies: [{ severity: "info", title: "a", detail: "d" }],
-      aiScanResults: [aiFinding("low", "b")],
-    });
-    expect(badge().className).toContain("bg-blue-500");
-    expect(badge().className).not.toContain("red");
-  });
-
-  it("renders no badge at all when there is nothing to report", () => {
-    renderBar();
-    const tab = tabButtons()[VIEW_TABS.indexOf("anomalies")];
-    // `maxBadgeLevel` answers `null` here rather than `"info"`, and this is the
-    // difference that makes: an empty result is not a mild result.
-    expect(tab.querySelector("span")).toBeNull();
-    expect(tab.textContent).toBe(VIEW_TAB_LABELS.anomalies);
-  });
 });
 
 describe("AddressBar tablist semantics", () => {
   /**
-   * peek-a-bin-w50c. The bar was nine plain buttons: no `role`, no
+   * peek-a-bin-w50c. The bar was nine plain buttons (eight now — the
+   * Anomalies tab went with peek-a-bin-1xc5.5): no `role`, no
    * `aria-selected`, no `aria-controls`, and the current tab conveyed only by a
    * CSS class. The bead deliberately did not patch half of it, because the
    * WAI-ARIA pattern is a bargain — the roles promise ONE tab stop and arrow
-   * navigation, and roles without the keyboard half tell a user "tab 3 of 9" and
+   * navigation, and roles without the keyboard half tell a user "tab 3 of 8" and
    * then leave the arrows dead.
    *
    * WHAT THESE TESTS ARE AND ARE NOT. Every assertion below is about the DOM the
@@ -218,17 +135,17 @@ describe("AddressBar tablist semantics", () => {
    */
   const tabs = () => screen.getAllByRole("tab") as HTMLButtonElement[];
 
-  it("is one tablist holding exactly the nine view tabs", () => {
+  it("is one tablist holding exactly the eight view tabs", () => {
     renderBar();
     const list = screen.getByRole("tablist");
     // Named, because a tablist with no accessible name is announced as an
     // anonymous group. And scoped: the toolbar around it holds Open,
-    // Back/Forward, Undo/Redo and the AI buttons, none of which switch a view,
+    // Back/Forward, Undo/Redo and the AI chat button, none of which switch a view,
     // so a `role="tablist"` on the toolbar itself would claim twenty-odd tabs.
     expect(list.getAttribute("aria-label")).toBe("Views");
     expect(within(list).getAllByRole("tab")).toHaveLength(VIEW_TABS.length);
     expect(tabs().map((b) => b.textContent)).toEqual(VIEW_TABS.map((t) => VIEW_TAB_LABELS[t]));
-    // The tab bar and the tablist are the same nine buttons, not two overlapping
+    // The tab bar and the tablist are the same eight buttons, not two overlapping
     // sets: `tabButtons()` finds them by their `(N)` title and this finds them
     // by role, so a role added to the wrong control fails here.
     expect(tabs()).toEqual(tabButtons());
@@ -239,7 +156,7 @@ describe("AddressBar tablist semantics", () => {
     const selected = tabs().filter((b) => b.getAttribute("aria-selected") === "true");
     expect(selected).toHaveLength(1);
     expect(selected[0].textContent).toBe(VIEW_TAB_LABELS.hex);
-    // The other eight must say `false` rather than omitting the attribute: an
+    // The other seven must say `false` rather than omitting the attribute: an
     // absent `aria-selected` on a `role="tab"` reads as "not selected" to most
     // readers but is not the same statement, and the APG spells it on every tab.
     for (const tab of tabs()) {
@@ -263,10 +180,10 @@ describe("AddressBar tablist semantics", () => {
 
   it("is a single tab stop, on the selected tab", async () => {
     renderBar({ activeTab: "exports" });
-    // THE ROVING TABINDEX, stated as the invariant rather than as nine
+    // THE ROVING TABINDEX, stated as the invariant rather than as eight
     // attributes: exactly one 0, all the rest -1. A static tabindex — every tab
-    // 0, which is what nine plain buttons were — puts nine stops in the Tab
-    // order and is the thing the ARIA pattern exists to remove.
+    // 0, which is what the plain buttons were — puts one stop per tab in the
+    // Tab order and is the thing the ARIA pattern exists to remove.
     const zeros = tabs().filter((b) => b.tabIndex === 0);
     expect(zeros).toHaveLength(1);
     expect(zeros[0].textContent).toBe(VIEW_TAB_LABELS.exports);
@@ -396,21 +313,6 @@ describe("AddressBar tablist semantics", () => {
     expect(tabs().some((b) => b === document.activeElement)).toBe(false);
   });
 
-  it("names the anomalies tab with its count instead of running the two together", () => {
-    renderBar({
-      anomalies: [{ severity: "warning", title: "a", detail: "d" }],
-      aiScanResults: [aiFinding("high", "b")],
-    });
-    const anomalies = tabs()[VIEW_TABS.indexOf("anomalies")];
-    // The badge is inside the button with no separator, so the accessible name
-    // used to be the single string "Anomalies2" — read as "Anomalies2, button",
-    // with nothing whatever saying what the 2 counts (peek-a-bin-w50c, note 1).
-    // The glyph is `aria-hidden` now and the count is spelled into the name.
-    expect(anomalies.textContent).toBe(`${VIEW_TAB_LABELS.anomalies}2`);
-    expect(anomalies.getAttribute("aria-label")).toBe("Anomalies — 2 findings");
-    expect(anomalies.getAttribute("aria-label")).not.toMatch(/Anomalies\d/);
-  });
-
   it("leaves a tab with nothing to add unnamed, so its label is its name", () => {
     renderBar();
     const headers = tabs()[VIEW_TABS.indexOf("headers")];
@@ -421,7 +323,7 @@ describe("AddressBar tablist semantics", () => {
   });
 });
 
-describe("AddressBar 1-9 shortcuts", () => {
+describe("AddressBar 1-8 shortcuts", () => {
   /**
    * THE HEADLINE. Every digit is read out of the button that advertises it and
    * then pressed, so the two `.map`s over `VIEW_TABS` are checked against each
@@ -446,18 +348,24 @@ describe("AddressBar 1-9 shortcuts", () => {
     }
   });
 
-  it("covers all nine digits and leaves 0 alone", async () => {
+  it("claims one digit per tab and leaves every other digit alone", async () => {
     const { dispatch, user } = renderBar();
-    // Nine tabs today, so every digit 1-9 is claimed; the assertion is derived
-    // from VIEW_TABS so a tenth tab does not silently go unreachable here.
+    // EIGHT tabs today, so 1-8 are claimed and 9 is not. Both halves are derived
+    // from VIEW_TABS rather than spelled: `TAB_KEYS` maps exactly
+    // `VIEW_TABS.slice(0, 9)`, so a ninth tab would claim 9 and a tenth still
+    // could not be reached by a single key.
     expect(VIEW_TABS.length).toBeLessThanOrEqual(9);
     for (let i = 1; i <= VIEW_TABS.length; i++) {
       dispatch.mockClear();
       await user.keyboard(String(i));
       expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: VIEW_TABS[i - 1] });
     }
+    // 0 was never a tab, and every digit past the last tab stopped being one
+    // when that tab was removed — a digit still bound to a tab that no longer
+    // exists is the failure this rules out.
     dispatch.mockClear();
     await user.keyboard("0");
+    for (let i = VIEW_TABS.length + 1; i <= 9; i++) await user.keyboard(String(i));
     expect(dispatch).not.toHaveBeenCalled();
   });
 

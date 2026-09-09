@@ -48,7 +48,6 @@ const DisassemblyView = lazy(() =>
 const HexView = lazy(() => import("./components/HexView").then((m) => ({ default: m.HexView })));
 
 import { AddressBar } from "./components/AddressBar";
-import { AnomaliesView } from "./components/AnomaliesView";
 import { CommandPalette } from "./components/CommandPalette";
 import { DialogBoundary } from "./components/DialogBoundary";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -708,7 +707,6 @@ export default function App() {
     { key: "hex", Component: HexView, isLazy: true },
     { key: "strings", Component: StringsView },
     { key: "resources", Component: ResourcesView },
-    { key: "anomalies", Component: AnomaliesView },
   ];
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -783,8 +781,8 @@ export default function App() {
           /* ONE BOUNDARY PER PANE, and the placement is the whole point.
              A single boundary around this map — which is what was here — put
              every tab behind one `hasError`: a throw in the Hex view replaced
-             headers, sections, disassembly, imports, exports, strings,
-             resources and anomalies with the same fallback, and since the
+             headers, sections, disassembly, imports, exports, strings and
+             resources with the same fallback, and since the
              boundary sat ABOVE the tab switch, changing tabs could not recover
              it either. Every visited tab stays mounted (`mountedTabs`), so the
              blast radius was every tab the user had ever opened

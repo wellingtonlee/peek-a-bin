@@ -498,16 +498,16 @@ describe("the notice's prose cannot disagree with the buttons", () => {
       //  * "Sections" IS AN AMBIGUOUS BUTTON NAME. The sidebar renders its own
       //    collapsible "Sections (1)" header, so a name query for the tab
       //    matches two buttons in a loaded app.
-      //  * A TAB BUTTON'S ACCESSIBLE NAME IS NOT ITS LABEL. The Anomalies tab
-      //    carries a count badge inside the button and the two ran together
+      //  * A TAB BUTTON'S ACCESSIBLE NAME WAS NOT ITS LABEL. The Anomalies tab
+      //    carried a count badge inside the button and the two ran together
       //    with no separator, so its name was the string "Anomalies3" — read as
-      //    "Anomalies3, button", with nothing saying what the 3 counted. Fixed
-      //    with the tablist work (peek-a-bin-w50c): the badge is `aria-hidden`
-      //    and the name is now "Anomalies — 3 findings". The title query stays,
-      //    because the FIRST reason above is unaffected and the title is also
-      //    what carries the digit.
+      //    "Anomalies3, button", with nothing saying what the 3 counted
+      //    (peek-a-bin-w50c). That tab is gone (peek-a-bin-1xc5.5) and no tab
+      //    carries a badge now, so this reason is MOOT rather than wrong — but
+      //    the title query stays, because the FIRST reason above is unaffected
+      //    and the title is also what carries the digit.
       //
-      // The title also carries the 1-9 shortcut digit, so asserting on it
+      // The title also carries the 1-8 shortcut digit, so asserting on it
       // checks the thing CLAUDE.md says is derived — that the bar and its
       // `TAB_KEYS` map both come from `VIEW_TABS`, in that order.
       const title = `${label} (${VIEW_TABS.indexOf(tab) + 1})`;
@@ -633,8 +633,8 @@ describe("an image no decoder here reads", () => {
       const label = VIEW_TAB_LABELS[tab];
       expect(still).toContain(label);
       // By title rather than by accessible name -- the sidebar renders its own
-      // "Sections" button, and the Anomalies tab carries a count badge. See the
-      // no-code suite above, where both traps were found by a failing test.
+      // "Sections" button. See the no-code suite above, where this trap and the
+      // now-moot badge one were both found by a failing test.
       const title = `${label} (${VIEW_TABS.indexOf(tab) + 1})`;
       const buttons = screen.getAllByRole("tab").filter((b) => b.getAttribute("title") === title);
       expect(buttons).toHaveLength(1);
@@ -750,8 +750,8 @@ describe("the tab bar routes", () => {
    * through the pane's own class instead.
    */
   function panes(): HTMLElement[] {
-    // Each tab is wrapped in a div that is either `h-full` or `hidden`. All nine
-    // wrappers are rendered from the first file onward — see the tablist suite
+    // Each tab is wrapped in a div that is either `h-full` or `hidden`. All
+    // eight wrappers are rendered from the first file onward — see the tablist suite
     // below for why — so this counts WRAPPERS, and whether a tab's component is
     // mounted is a question about the wrapper's CONTENT.
     return Array.from(document.querySelectorAll<HTMLElement>("div.h-full, div.hidden")).filter(
@@ -909,7 +909,7 @@ describe("the tab bar and the panes are one tablist", () => {
    * same panel, which is the shape a copy-paste error takes.
    *
    * WHAT IT IS NOT EVIDENCE OF: jsdom has no screen reader, so nothing here says
-   * a reader announces "Sections, tab 3 of 9" or reads the panel when the tab is
+   * a reader announces "Sections, tab 3 of 8" or reads the panel when the tab is
    * activated. peek-a-bin-v2u stays open.
    */
   it("gives every tab a panel, and every panel back its tab", async () => {
@@ -1137,7 +1137,7 @@ describe("a throw in the chrome does not blank the page", () => {
     // which of the chrome regions went — which a blank page cannot.
     expect(chromeAlert("Sidebar").textContent).toContain("sidebar exploded");
 
-    // The neighbours: AddressBar's tablist still has all nine tabs, and one of
+    // The neighbours: AddressBar's tablist still has all eight tabs, and one of
     // them still SWITCHES and renders its pane's real content. Asserting the
     // tab bar alone would not say the app is usable — the tab bar rendering is
     // what a boundary around AddressBar would have taken, not what a boundary

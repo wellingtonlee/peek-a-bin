@@ -11,7 +11,7 @@ Press `?` in the app to see an interactive shortcuts panel.
 | `Ctrl+G` / `Cmd+G` | Go to address dialog |
 | `Ctrl+P` / `Cmd+P` | Command palette |
 | `?` | Toggle keyboard shortcuts panel |
-| `1`–`9` | Switch tabs (Disasm, Headers, Sections, Imports, Exports, Hex, Strings, Resources, Anomalies) |
+| `1`–`8` | Switch tabs (Disasm, Headers, Sections, Imports, Exports, Hex, Strings, Resources) |
 | `←` / `→` | Move between view tabs — only while the tab bar itself has focus; press `Enter` or `Space` to switch to the focused tab |
 | `Home` / `End` | Move to the first or last view tab — only while the tab bar itself has focus |
 | `Alt+Left` | Navigate back in history |
@@ -94,13 +94,13 @@ All annotation shortcuts (`B`, `N`, `;`) and interaction features (context menus
   from `SHORTCUT_GROUPS` in `src/components/KeyboardShortcuts.tsx`, which is the
   single source of truth — update it and this file together
 - The view tabs are a WAI-ARIA tablist: the whole bar is a single `Tab` stop, and
-  `←`/`→`/`Home`/`End` move between the nine tabs **once focus is inside it**. Those
+  `←`/`→`/`Home`/`End` move between the eight tabs **once focus is inside it**. Those
   four keys do nothing anywhere else — the disassembly view owns the unmodified
   arrows — which is why they are documented here but not listed in the `?` panel,
-  where every other entry is a global binding. `1`–`9` switch tabs from anywhere and
+  where every other entry is a global binding. `1`–`8` switch tabs from anywhere and
   need no focus
 - Moving between tabs with the arrows moves FOCUS only; `Enter` or `Space` selects the
-  focused tab. Two of the nine panes are code-split and mount on first use, so
+  focused tab. Two of the eight panes are code-split and mount on first use, so
   selecting one on the way past would load and permanently mount them both
 - Graph mode keyboard navigation requires focus on the graph container — click the graph area or press `Space` to enter graph mode
 - `Escape` in graph view restores the full view state (linear/graph mode, pan position, zoom level)

@@ -996,14 +996,25 @@ describe("every surface that reports a failure uses the shared decision", () => 
  * The notice's promise, checked against what the parser actually produced.
  *
  * peek-a-bin-8ru3, the half of it that is not about text on a screen. The
- * notice tells the user that Headers, Sections, Imports, Exports, Hex, Strings,
- * Resources and Anomalies are "still available" for an image whose machine type
- * has no decoder — but `PARSER_DERIVED_TABS` is a hand-written list, so that
- * sentence is a claim about *other modules* and nothing was checking it. If the
- * refusal reached any of them, the notice would be confidently pointing the
- * user at eight empty tabs, which is a worse answer than the bare failure it
- * replaced. The MCP path needed an explicit `decodable` guard in
- * `FileSession.loadFile` for exactly this, so the assumption is not free.
+ * notice tells the user that Headers, Sections, Imports, Exports, Hex, Strings
+ * and Resources are "still available" for an image whose machine type has no
+ * decoder — but `PARSER_DERIVED_TABS` is a hand-written list, so that sentence
+ * is a claim about *other modules* and nothing was checking it. If the refusal
+ * reached any of them, the notice would be confidently pointing the user at
+ * seven empty tabs, which is a worse answer than the bare failure it replaced.
+ * The MCP path needed an explicit `decodable` guard in `FileSession.loadFile`
+ * for exactly this, so the assumption is not free.
+ *
+ * ONE SUBJECT HERE IS NO LONGER A TAB and is asserted anyway: anomalies. The
+ * Anomalies tab is gone (peek-a-bin-1xc5.5), so `detectAnomalies` is absent
+ * from `PARSER_DERIVED_TABS` and from the partition test at the bottom — but
+ * its answer still reaches the user, through `HeaderView`'s `AnomalyBanners`
+ * on the Headers tab, and through MCP and the Markdown export. So the
+ * invariance is unchanged in substance: the machine word must not move the
+ * anomaly list. Dropping that row when the tab went would have removed the
+ * only assertion that the refusal path leaves the anomaly answer alone, which
+ * is how a guard that still earns its keep gets deleted for having lost its
+ * original headline.
  *
  * The claim is really an *invariance*: the machine word must change what the
  * disassembler does and nothing else. So the same image is built twice with
@@ -1130,7 +1141,10 @@ describe("an image with no decoder keeps every parser-derived view", () => {
     expect([...arm.stringTypes.entries()]).toEqual([...x86.stringTypes.entries()]);
   });
 
-  it("derives anomalies, which are read off the parsed image on the main thread", () => {
+  it("derives the same anomalies, which now reach the user via the Headers banners", () => {
+    // NOT a tab any more, and deliberately still here — see the docstring
+    // above. `HeaderView`'s `AnomalyBanners` renders this list, so the refusal
+    // path changing it would change what an ARM32 image tells an analyst.
     const arm = detectAnomalies(armnt);
     expect(arm.length).toBeGreaterThan(0);
     expect(arm).toEqual(detectAnomalies(i386));
@@ -1164,7 +1178,6 @@ describe("an image with no decoder keeps every parser-derived view", () => {
       "hex",
       "strings",
       "resources",
-      "anomalies",
     ];
     const notice = analysisNotice({
       machine: armnt.coffHeader.machine,

@@ -14,13 +14,12 @@ export type ViewTab =
   | "exports"
   | "hex"
   | "strings"
-  | "resources"
-  | "anomalies";
+  | "resources";
 
 /**
  * Every view tab, in the order the tab bar shows them.
  *
- * Exported because that order is also the 1–9 keyboard shortcuts: `AddressBar`
+ * Exported because that order is also the 1–8 keyboard shortcuts: `AddressBar`
  * builds both its buttons and its `TAB_KEYS` map from this array, so the tab a
  * digit selects cannot disagree with the tab at that position. Display names
  * are not here — they live in `components/analysisNotice.ts`, which is where
@@ -35,7 +34,6 @@ export const VIEW_TABS: readonly ViewTab[] = [
   "hex",
   "strings",
   "resources",
-  "anomalies",
 ];
 
 /** Narrow an untrusted string (e.g. the `#tab=` URL param) to a ViewTab. */
