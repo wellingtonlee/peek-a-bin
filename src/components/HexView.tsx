@@ -37,18 +37,74 @@ function parseBytePattern(input: string): (number | null)[] | null {
   return bytes.length > 0 ? bytes : null;
 }
 
-function findBytePatternMatches(data: Uint8Array, pattern: (number | null)[]): number[] {
-  const matches: number[] = [];
-  if (pattern.length === 0) return matches;
+/**
+ * How many byte-pattern matches one search reports.
+ *
+ * The cap bounds the highlight set and the work of building it. It is a property
+ * of the SCAN and not of the section, so whether it was reached is part of the
+ * answer rather than something the caller may infer — see
+ * {@link BytePatternMatches.truncated}.
+ */
+export const MAX_BYTE_PATTERN_MATCHES = 1000;
+
+/**
+ * One byte-pattern scan's result, and the admission that travels with it.
+ *
+ * This is the `TRUNCATION_MARKER` / `ImportEntry.truncated` /
+ * `ResourceTree.incomplete` / `PEFile.stringScan` family in view form: a
+ * narrower answer must not wear a complete one's shape. Before this the scan
+ * broke at the cap and the toolbar printed the length, so a section with a
+ * million occurrences of `00` reported "1000 matches" as a fact about itself.
+ *
+ * `truncated` is decided **exactly** — "a match beyond the cap exists" — and NOT
+ * "we collected {@link MAX_BYTE_PATTERN_MATCHES}", which is the off-by-one
+ * `peek-a-bin-dhcx` found one reader over in `ResourceTree`, where a directory
+ * holding exactly its budget claimed to be short over a complete answer. A
+ * result of exactly the cap's size is a WHOLE answer and is not marked.
+ */
+interface BytePatternMatches {
+  offsets: number[];
+  truncated: boolean;
+}
+
+function findBytePatternMatches(data: Uint8Array, pattern: (number | null)[]): BytePatternMatches {
+  const offsets: number[] = [];
+  if (pattern.length === 0) return { offsets, truncated: false };
   const end = data.length - pattern.length;
   outer: for (let i = 0; i <= end; i++) {
     for (let j = 0; j < pattern.length; j++) {
       if (pattern[j] !== null && data[i + j] !== pattern[j]) continue outer;
     }
-    matches.push(i);
-    if (matches.length >= 1000) break;
+    // The scan stops ON the match that would EXCEED the cap, never on the one
+    // that fills it. That is the whole of what makes `truncated` exact, and it
+    // costs at most one further walk over bytes this loop was already covering
+    // — the cap was never an asymptotic bound, it is a bound on the result.
+    if (offsets.length === MAX_BYTE_PATTERN_MATCHES) {
+      return { offsets, truncated: true };
+    }
+    offsets.push(i);
   }
-  return matches;
+  return { offsets, truncated: false };
+}
+
+/**
+ * The one sentence the byte search reports: the count, the `+` marking a count
+ * that is a floor rather than a total, the scope, and the admission.
+ *
+ * The admission goes on the COUNT LINE and not on a match, because the bound is
+ * global to the scan and no single match is "the incomplete one" — the same half
+ * of that choice `ResourceTree.incomplete` takes, as against
+ * `ImportEntry.truncated`, which is per-library because each descriptor has its
+ * own walk.
+ *
+ * The SCOPE is here for a second reason of the same class: the scan covers
+ * `sectionBytes`, one section, so an unscoped count reads as a fact about the
+ * FILE (`peek-a-bin-2py5`'s `stringScan` shape at much smaller stakes).
+ */
+function matchSummary(count: number, truncated: boolean, scope: string): string {
+  const plural = count === 1 ? "match" : "matches";
+  const admission = truncated ? ` (search stopped at ${MAX_BYTE_PATTERN_MATCHES})` : "";
+  return `${count}${truncated ? "+" : ""} ${plural} in ${scope}${admission}`;
 }
 
 function entropyColor(entropy: number): string {
@@ -80,6 +136,8 @@ export function HexView() {
   const [byteSearch, setByteSearch] = useState("");
   const [byteMatches, setByteMatches] = useState<Set<number>>(new Set());
   const [matchCount, setMatchCount] = useState(0);
+  /** Whether {@link findBytePatternMatches} stopped short of the section. */
+  const [matchesTruncated, setMatchesTruncated] = useState(false);
   const [selectedOffset, setSelectedOffset] = useState<number | null>(null);
   const [selectionEnd, setSelectionEnd] = useState<number | null>(null);
   const [editingByte, setEditingByte] = useState<number | null>(null);
@@ -204,21 +262,24 @@ export function HexView() {
     if (!sectionBytes || !byteSearch.trim()) {
       setByteMatches(new Set());
       setMatchCount(0);
+      setMatchesTruncated(false);
       return;
     }
     const pattern = parseBytePattern(byteSearch);
     if (!pattern) {
       setByteMatches(new Set());
       setMatchCount(0);
+      setMatchesTruncated(false);
       return;
     }
-    const offsets = findBytePatternMatches(sectionBytes, pattern);
+    const { offsets, truncated } = findBytePatternMatches(sectionBytes, pattern);
     const s = new Set<number>();
     for (const off of offsets) {
       for (let j = 0; j < pattern.length; j++) s.add(off + j);
     }
     setByteMatches(s);
     setMatchCount(offsets.length);
+    setMatchesTruncated(truncated);
   }, [sectionBytes, byteSearch]);
 
   // Track the strip's width *in device pixels* so the block count can follow it.
@@ -603,6 +664,11 @@ export function HexView() {
   });
 
   const addrWidth = pe?.is64 ? 16 : 8;
+  /**
+   * What the byte search actually covers. `sectionBytes` is ONE section, so
+   * every sentence the search prints names it; see {@link matchSummary}.
+   */
+  const searchScope = sectionInfo?.name ?? "this section";
 
   if (!pe || !sectionBytes) {
     return <div className="p-4 text-gray-400 text-sm">No section data to display.</div>;
@@ -654,15 +720,17 @@ export function HexView() {
           value={byteSearch}
           onChange={(e) => setByteSearch(e.target.value)}
           placeholder="Byte search (e.g. 4D 5A ?? 00)..."
+          title={`Byte search in ${searchScope} — hex bytes, ?? wildcard`}
+          aria-label={`Byte search in ${searchScope}`}
           className="w-44 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />
         {byteSearch && matchCount > 0 && (
           <span className="text-gray-500 text-[10px]">
-            {matchCount} match{matchCount !== 1 ? "es" : ""}
+            {matchSummary(matchCount, matchesTruncated, searchScope)}
           </span>
         )}
         {byteSearch && matchCount === 0 && parseBytePattern(byteSearch) && (
-          <span className="text-red-400 text-[10px]">No matches</span>
+          <span className="text-red-400 text-[10px]">No matches in {searchScope}</span>
         )}
 
         {selectionCount > 1 && (

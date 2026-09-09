@@ -2057,6 +2057,34 @@ mistake.
   against `SpcIndirectDataContent` is a SEPARATE BEAD** — that is the tier that would let the pill
   claim anything positive; the neutral pill is the honest one until it lands.
   (`peek-a-bin-v3uh.9`)
+- **…AND THE ONE PLACE THE WHOLE CLASS HAD NEVER BEEN APPLIED IS A VIEW-SIDE SCAN: the hex
+  tab's byte search.** `findBytePatternMatches` (`components/HexView.tsx`) broke at a bare literal
+  `1000` and returned a `number[]`, and the toolbar printed `{matchCount} matches` — so a search
+  for a common byte over an ordinary section reported **"1000 matches" as a fact about the
+  section**, indistinguishable from a complete count. It needs no crafted file, which puts it
+  beside `2py5` rather than the crafted-input entries above. It returns `{ offsets, truncated }`
+  against a named `MAX_BYTE_PATTERN_MATCHES` now, and **`truncated` is decided EXACTLY: the break
+  is taken on the match that would EXCEED the cap, never on the one that fills it**, so a result of
+  exactly the cap is a whole answer and is not marked — `truncated: offsets.length >= MAX` is
+  precisely `dhcx`'s off-by-one, is the first negative control, and reddens *only* the
+  exactly-at-the-cap row. It costs at most one further walk over bytes the loop already covered;
+  the cap bounds the RESULT (the offsets and the highlight `Set`), never the scan's asymptotics.
+  **The admission goes on the COUNT LINE, not on a row** — `ResourceTree.incomplete`'s half of that
+  choice, the bound being global to the scan so no single match is "the incomplete one" — and
+  `matchSummary` is the one declaration of the sentence, so the `+` marking the value as a floor
+  and the `(search stopped at N)` naming what happened cannot come apart. **The second half is the
+  SCOPE**: the scan covers `sectionBytes`, ONE section, so an unscoped count reads as a claim about
+  the FILE and `No matches` is the stronger falsehood; both sentences name the section from
+  `searchScope` (`sectionInfo?.name`, the same value the `<select>` shows) and the input carries a
+  matching `title`/`aria-label`. **The affordance alone would not do** — a `title` is invisible
+  until hovered and the count line is where the claim is made. Both sides of the boundary are
+  pinned in `HexView.dom.test.tsx` against a section that is exactly N copies of one byte, which is
+  sound only because `buildMinimalPE64` writes `sizeOfRawData` as the section's own `data.length`,
+  so `sectionBytes` is exactly that array with no padding in the window. **Held out deliberately
+  and claiming nothing**: the scan is still main-thread on every keystroke, the cap was not raised,
+  and the debounce plus next/prev navigation are their own bead — the debounce brings the two
+  measured jsdom traps (fake timers deadlock `waitFor`/`userEvent`; advance SHORT of the boundary
+  first or the control is inert, as it came back twice). (`peek-a-bin-v3uh.7`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 

@@ -9,7 +9,9 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AppState } from "../../hooks/usePEFile";
-import { HexView } from "../HexView";
+import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
+import { parsePE } from "../../pe/parser";
+import { HexView, MAX_BYTE_PATTERN_MATCHES } from "../HexView";
 import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
 
 /**
@@ -37,6 +39,9 @@ import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarnes
  * over the real section bytes of a real parsed PE and reports a count. That is
  * an end-to-end path through the component with an observable answer, wildcards
  * included, and nothing exercised it before.
+ *
+ * That count is also where this component's one truncation admission lives, and
+ * both sides of its boundary are pinned below — see "HexView byte search cap".
  */
 
 /** `.rdata` in the harness fixture — the export tables, so it has real content. */
@@ -59,6 +64,49 @@ function renderHex(over: Partial<AppState> = {}) {
 const sectionSelect = () => screen.getByRole("combobox") as HTMLSelectElement;
 const byteSearchBox = () => screen.getByPlaceholderText(/^Byte search/);
 const gotoBox = () => screen.getByPlaceholderText("Offset or VA (hex)");
+
+/** RVA of {@link renderFilled}'s one section, and the byte it is filled with. */
+const FILL_VA = 0x1000;
+const FILL_BYTE = "AA";
+
+/**
+ * A PE whose ONE section holds exactly `occurrences` copies of `AA` and nothing
+ * else, so a one-byte `AA` search has a count known by construction rather than
+ * counted out of a fixture nobody controls.
+ *
+ * The layout detail this rests on: `buildMinimalPE64` writes `sizeOfRawData` as
+ * the section's own `data.length`, NOT the file-aligned length, so
+ * `HexView`'s `sectionBytes` window is exactly this array and the zero padding
+ * up to file alignment is outside anything the scan sees. Were that not so, the
+ * boundary fixtures below would be off by however much padding landed in the
+ * window and neither side of the cap could be pinned.
+ */
+function renderFilled(occurrences: number) {
+  const data = new Uint8Array(occurrences).fill(0xaa);
+  const pe = parsePE(
+    buildMinimalPE64({
+      imageBase: IMAGE_BASE,
+      sections: [
+        {
+          name: ".fill",
+          virtualAddress: FILL_VA,
+          virtualSize: data.length,
+          data,
+          characteristics: 0x40000040, // INITIALIZED_DATA | MEM_READ
+        },
+      ],
+    }),
+  );
+  render(
+    <AppHarness
+      state={stateWithPE(pe, { currentAddress: IMAGE_BASE + FILL_VA })}
+      dispatch={vi.fn()}
+    >
+      <HexView />
+    </AppHarness>,
+  );
+  return { user: userEvent.setup() };
+}
 
 describe("HexView section selector", () => {
   it("offers every section with its raw size", () => {
@@ -97,15 +145,15 @@ describe("HexView byte search", () => {
     // "Pa" of the fixture's one export name, which parsePE puts in .rdata.
     const { user } = renderHex();
     await user.type(byteSearchBox(), "50 61");
-    expect(await screen.findByText(/^1 match$/)).toBeTruthy();
+    expect(await screen.findByText("1 match in .rdata")).toBeTruthy();
   });
 
   it("uses the singular for one and the plural otherwise", async () => {
     const { user } = renderHex();
     // 0x00 occurs many times in an export directory.
     await user.type(byteSearchBox(), "00 00");
-    const label = await screen.findByText(/matches$/);
-    expect(label.textContent).toMatch(/^\d+ matches$/);
+    const label = await screen.findByText(/ matches in \.rdata$/);
+    expect(label.textContent).toMatch(/^\d+ matches in \.rdata$/);
     expect(Number(/^(\d+)/.exec(label.textContent ?? "")?.[1])).toBeGreaterThan(1);
   });
 
@@ -114,13 +162,13 @@ describe("HexView byte search", () => {
     // "P?rseHeader" — the wildcard has to match 'a' for this to find anything,
     // which is the whole of parseBytePattern's wildcard branch.
     await user.type(byteSearchBox(), "50 ?? 72 73 65");
-    expect(await screen.findByText(/^1 match$/)).toBeTruthy();
+    expect(await screen.findByText("1 match in .rdata")).toBeTruthy();
   });
 
   it("says so when a well-formed pattern matches nothing", async () => {
     const { user } = renderHex();
     await user.type(byteSearchBox(), "DE AD BE EF");
-    expect(await screen.findByText("No matches")).toBeTruthy();
+    expect(await screen.findByText("No matches in .rdata")).toBeTruthy();
   });
 
   it("stays silent for a pattern it cannot parse", async () => {
@@ -128,16 +176,76 @@ describe("HexView byte search", () => {
     // Not "no matches" — the input is not a byte pattern at all, and claiming
     // the file lacks it would be a different and false statement.
     await user.type(byteSearchBox(), "zz");
-    expect(screen.queryByText("No matches")).toBeNull();
+    expect(screen.queryByText(/^No matches/)).toBeNull();
     expect(screen.queryByText(/match/)).toBeNull();
   });
 
   it("clears the report when the box is emptied", async () => {
     const { user } = renderHex();
     await user.type(byteSearchBox(), "50 61");
-    expect(await screen.findByText(/^1 match$/)).toBeTruthy();
+    expect(await screen.findByText("1 match in .rdata")).toBeTruthy();
     await user.clear(byteSearchBox());
     expect(screen.queryByText(/match/)).toBeNull();
+  });
+});
+
+describe("HexView byte search cap", () => {
+  /**
+   * BOTH SIDES OF THE BOUNDARY, which is the whole point of these two rows.
+   *
+   * `peek-a-bin-dhcx` found this exact off-by-one one reader over: a
+   * `ResourceTree` holding EXACTLY its budget claimed to be short over a
+   * complete answer. So `truncated` is "a match beyond the cap exists", not
+   * "we collected the cap" — and the negative control for that is to spell it
+   * `offsets.length >= MAX_BYTE_PATTERN_MATCHES`, which reddens the
+   * exactly-at-the-cap row below while leaving the over-the-cap one green.
+   */
+  it("admits the cap when the scan stopped short of the section", async () => {
+    const { user } = renderFilled(MAX_BYTE_PATTERN_MATCHES + 1);
+    await user.type(byteSearchBox(), FILL_BYTE);
+    expect(
+      await screen.findByText(
+        `${MAX_BYTE_PATTERN_MATCHES}+ matches in .fill ` +
+          `(search stopped at ${MAX_BYTE_PATTERN_MATCHES})`,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("reports exactly the cap as a plain, whole count", async () => {
+    const { user } = renderFilled(MAX_BYTE_PATTERN_MATCHES);
+    await user.type(byteSearchBox(), FILL_BYTE);
+    // A result of exactly the cap's size IS the complete answer.
+    expect(await screen.findByText(`${MAX_BYTE_PATTERN_MATCHES} matches in .fill`)).toBeTruthy();
+    expect(screen.queryByText(/search stopped at/)).toBeNull();
+    expect(screen.queryByText(/\+ matches/)).toBeNull();
+  });
+
+  it("reports an ordinary count with no admission", async () => {
+    const { user } = renderFilled(3);
+    await user.type(byteSearchBox(), FILL_BYTE);
+    expect(await screen.findByText("3 matches in .fill")).toBeTruthy();
+    expect(screen.queryByText(/search stopped at/)).toBeNull();
+  });
+});
+
+describe("HexView byte search scope", () => {
+  /**
+   * The scan runs over `sectionBytes` — ONE section — so an unscoped count reads
+   * as a fact about the FILE. `peek-a-bin-2py5`'s `stringScan` shape at much
+   * smaller stakes.
+   */
+  it("names the searched section in the affordance and in the count", async () => {
+    // `.text` in the harness fixture is four `CC` bytes, so the count is known.
+    const { user } = renderHex({ currentAddress: IMAGE_BASE + 0x1000 });
+    expect(sectionSelect().value).toBe(".text");
+    expect(screen.getByLabelText("Byte search in .text")).toBe(byteSearchBox());
+    await user.type(byteSearchBox(), "CC");
+    expect(await screen.findByText("4 matches in .text")).toBeTruthy();
+  });
+
+  it("follows the selected section rather than naming one of them always", () => {
+    renderHex({ currentAddress: IMAGE_BASE + RDATA_VA });
+    expect(screen.getByLabelText("Byte search in .rdata")).toBe(byteSearchBox());
   });
 });
 
