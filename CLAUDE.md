@@ -557,6 +557,30 @@ suite's **derived-`open` test does not cover a distinct branch** — `children` 
 and neither pure rule takes it, so no perturbation reddens that case alone. The test is kept and
 its docstring corrected; do not restore the "only coverage of that branch" claim.
 
+**The command palette is a COMMAND surface, and what a row does is a discriminated union
+(`ResultTarget`: `navigate | event | action`) closed by a `never` assert.** It replaced an
+`action?: string` read by one `if`, under which "no action" and "an action nobody handles" were the
+same shape — a malformed entry navigated to address 0 rather than failing. `PALETTE_COMMANDS`
+(`CommandPalette.tsx`, module level) is the table: two events, three annotation actions, and
+**one `SET_TAB` entry per `VIEW_TABS` member labelled `Go to ${VIEW_TAB_LABELS[tab]}`, DERIVED** —
+that map is the one declaration of a tab's name, so no tab name is spelled here. **An event a
+command fires must be one something ALREADY listens for**, and the closed `PaletteEventName` union
+does not establish that (measured: a member for an unlistened event type-checks clean), so it is
+derived from `PALETTE_EVENTS` and `components/__tests__/paletteEvents.test.ts` reads that array
+back against the tree's `addEventListener` calls — a node test, since `import.meta.url` is not a
+`file:` URL under jsdom. Three refusals are load-bearing: `peek-a-bin:show-xrefs` is **out** though
+it is listened for (it needs a `detail.address` and its listener is inside `DisassemblyView`, so
+from another tab it is the silent no-op this union exists to prevent); `RESET` and `CLEAR_PATCHES`
+are **out** because each discards the user's work and already has an entry point where a
+confirmation belongs; and **no new event was invented**, which is why Toggle graph view, Go to
+entry point and Show in hex are simply absent. The **15-per-category cap now admits itself** with a
+dimmed count line (`showing the first 15 matches`) after the last row of each cut-short
+category — `role="presentation"`, no `tabIndex`, deliberately NOT a `role="option"`, or the arrow
+keys would land on it. It says "the first 15" rather than "N more" because an exact remainder means
+matching every candidate on every keystroke over categories holding millions of entries; `collect()`
+stops at the first match past the cap. Long-form, including what is still unverified, in
+`docs/gotchas.md` (`peek-a-bin-v3uh.10`).
+
 **`main.tsx` still puts no boundary above `<App/>`**, deliberately: that is a whole-page fallback
 whose argument is crash reporting rather than partial function, and it is a separate question
 (`peek-a-bin-t23y`).
@@ -673,7 +697,10 @@ so an unspied row that clicks Open with a patch present would silently stop disp
 (`peek-a-bin-v3uh.6`).
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for
-cross-component communication.
+cross-component communication. **Dispatching one nothing listens for is silent** — it fires and
+returns `true` — so the command palette may only name events from `PALETTE_EVENTS`, which
+`components/__tests__/paletteEvents.test.ts` checks against the tree's `addEventListener` calls.
+Adding a palette entry is not a reason to add an event.
 
 **`DisplayRow` has exactly one declaration** — the exported union in `useDisassemblyRows.ts`.
 JumpArrows and DisassemblyMinimap used to keep private narrowed copies that had to be hand-synced;

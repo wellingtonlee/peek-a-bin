@@ -5,7 +5,10 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DisasmFunction } from "../../disasm/types";
-import { CommandPalette } from "../CommandPalette";
+import { VIEW_TABS, type ViewTab } from "../../hooks/usePEFile";
+import { fuzzyMatch } from "../../utils/fuzzyMatch";
+import { VIEW_TAB_LABELS } from "../analysisNotice";
+import { CommandPalette, PALETTE_COMMANDS } from "../CommandPalette";
 import { AppHarness, EXPORT_RVA, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
 
 /**
@@ -42,7 +45,8 @@ import { AppHarness, EXPORT_RVA, harnessPE, IMAGE_BASE, stateWithPE } from "./ap
  * and one long enough to be worth trapping focus out of. Checked against the
  * other four categories: `fuzzyMatch` is a subsequence test, and "handler" is
  * not a subsequence of "kernel32.dll!createfilew", "kernel32.dll!readfile",
- * "parseheader", or any of the four AI command labels.
+ * "parseheader", or any label in `PALETTE_COMMANDS` (checked below, so the
+ * claim cannot go stale as the command table grows).
  */
 function handlerFuncs(): DisasmFunction[] {
   return Array.from({ length: 20 }, (_, i) => ({
@@ -108,7 +112,7 @@ describe("CommandPalette results", () => {
     expect(texts.some((t) => /unsupported machine type/.test(t))).toBe(true);
     expect(texts.some((t) => /AI: Open Chat/.test(t))).toBe(true);
     // Every category heading is rendered above its first row.
-    for (const heading of ["Functions", "Imports", "Exports", "Strings", "AI Commands"]) {
+    for (const heading of ["Functions", "Imports", "Exports", "Strings", "Commands"]) {
       expect(screen.getByText(heading)).toBeTruthy();
     }
   });
@@ -353,7 +357,7 @@ describe("CommandPalette without a loaded file", () => {
   });
   afterEach(() => warn.mockRestore());
 
-  it("still offers the AI commands and searches nothing else", async () => {
+  it("offers nothing at all, the command table included", async () => {
     const dispatch = vi.fn();
     render(
       <AppHarness state={{ ...stateWithPE(harnessPE()), peFile: null }} dispatch={dispatch}>
@@ -361,10 +365,155 @@ describe("CommandPalette without a loaded file", () => {
       </AppHarness>,
     );
     const user = userEvent.setup();
-    // `results` short-circuits on a null peFile, so even the AI commands are
-    // withheld. Recorded as the behaviour it is, not asserted as desirable.
-    await user.type(combobox(), "AI: Open Chat");
+    // `results` short-circuits on a null peFile, so even the commands — several
+    // of which (Open Settings) would work perfectly well with no file open —
+    // are withheld. Recorded as the behaviour it is, not asserted as desirable;
+    // it is unchanged by the command table landing.
+    await user.type(combobox(), "Open Settings");
     expect(options()).toHaveLength(0);
     expect(screen.getByText("No results")).toBeTruthy();
+  });
+});
+
+/** The one command whose action is `SET_TAB` for `tab`. */
+function tabCommand(tab: ViewTab) {
+  const found = PALETTE_COMMANDS.filter(
+    (c) =>
+      c.target.kind === "action" &&
+      c.target.action.type === "SET_TAB" &&
+      c.target.action.tab === tab,
+  );
+  expect(found).toHaveLength(1);
+  return found[0];
+}
+
+/** The admission line a cut-short category renders, or null. */
+function capNotices(): HTMLElement[] {
+  return screen.queryAllByText(/showing the first 15 matches/);
+}
+
+describe("CommandPalette commands", () => {
+  it("keeps the function fixture out of the command table's way", () => {
+    // The claim `handlerFuncs`' docstring makes, asserted rather than asserted
+    // in prose: a query of "handler" must reach the Functions category alone,
+    // or the cap tests below are counting rows from two categories.
+    for (const cmd of PALETTE_COMMANDS) expect(fuzzyMatch("handler", cmd.label)).toBe(false);
+  });
+
+  it("lists a matching command under the Commands heading", async () => {
+    const { user } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), "Open Settings");
+    expect(labelsOf()).toEqual(["Open Settings"]);
+    // No address column for a command: there is no address to go to, and "0x0"
+    // is what the single hard-coded entry used to print.
+    expect(options()[0].textContent).not.toMatch(/0x/);
+    expect(screen.getByText("Commands")).toBeTruthy();
+  });
+
+  it("labels every tab command from VIEW_TAB_LABELS, derived", () => {
+    // The whole point of the map: no tab name is spelled in the palette, so a
+    // tab cannot be called one thing on its button and another here. Spelling
+    // any one of them as a literal in the table reddens this row.
+    expect(VIEW_TABS.length).toBeGreaterThan(0);
+    for (const tab of VIEW_TABS) {
+      expect(tabCommand(tab).label).toBe(`Go to ${VIEW_TAB_LABELS[tab]}`);
+    }
+  });
+
+  it("renders a tab command under the label VIEW_TAB_LABELS gives it", async () => {
+    const tab: ViewTab = "sections";
+    const { user } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), `Go to ${VIEW_TAB_LABELS[tab]}`);
+    expect(labelsOf()).toEqual([tabCommand(tab).label]);
+  });
+
+  it("dispatches the AppAction for a tab command and navigates nowhere", async () => {
+    const tab: ViewTab = "sections";
+    const { user, dispatch, onClose } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), `Go to ${VIEW_TAB_LABELS[tab]}`);
+    await user.keyboard("{Enter}");
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab });
+    // A navigation would also have dispatched SET_ADDRESS, for address 0.
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "SET_ADDRESS" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatches the AppAction for a plain action command", async () => {
+    const { user, dispatch, onClose } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), "Toggle Bookmark");
+    await user.keyboard("{Enter}");
+    // No address on the action: the reducer reads state.currentAddress, which
+    // is the cursor, exactly as the B shortcut does.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith({ type: "TOGGLE_BOOKMARK" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires the window event for the settings command and dispatches nothing", async () => {
+    const seen = vi.fn();
+    window.addEventListener("peek-a-bin:open-settings", seen);
+    try {
+      const { user, dispatch, onClose } = renderPalette({ functions: handlerFuncs() });
+      await user.type(combobox(), "Open Settings");
+      await user.keyboard("{Enter}");
+      expect(seen).toHaveBeenCalledTimes(1);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("peek-a-bin:open-settings", seen);
+    }
+  });
+
+  it("offers one command per view tab, so a ninth tab is not forgotten", () => {
+    for (const tab of VIEW_TABS) expect(tabCommand(tab)).toBeTruthy();
+  });
+});
+
+describe("CommandPalette cap admission", () => {
+  it("admits a category the cap cut short", async () => {
+    // 20 functions match, 15 are shown. Before this the other five were simply
+    // absent, and a cut-short category looked exactly like a complete one.
+    const { user } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), "handler");
+    expect(options()).toHaveLength(15);
+    const notices = capNotices();
+    expect(notices).toHaveLength(1);
+    // Directly after the last row of the category it is talking about.
+    const following = options()[14].compareDocumentPosition(notices[0]);
+    expect(following & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("says nothing when the whole match list fits", async () => {
+    const { user } = renderPalette({ functions: handlerFuncs().slice(0, 3) });
+    await user.type(combobox(), "handler");
+    expect(options()).toHaveLength(3);
+    expect(capNotices()).toHaveLength(0);
+  });
+
+  it("is a count line, not a row: unselectable and out of the option list", async () => {
+    const { user } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), "handler");
+    const notice = capNotices()[0];
+    expect(notice.getAttribute("role")).toBe("presentation");
+    expect(notice.getAttribute("tabindex")).toBeNull();
+    expect(options()).not.toContain(notice);
+    // The listbox holds 15 options and no sixteenth thing pretending to be one.
+    const list = document.getElementById(combobox().getAttribute("aria-controls") as string);
+    expect(within(list as HTMLElement).getAllByRole("option")).toHaveLength(15);
+    // Arrowing past the end lands on the last real row, never on the notice.
+    for (let i = 0; i < 20; i++) await user.keyboard("{ArrowDown}");
+    expect(activeOption()).toBe(options()[14]);
+    expect(activeOption()).not.toBe(notice);
+  });
+
+  it("admits each cut-short category separately", async () => {
+    // "e" matches in every category; only Functions overflows the cap here, so
+    // exactly one notice must appear rather than one per category or one for
+    // the whole list.
+    const { user } = renderPalette({ functions: handlerFuncs() });
+    await user.type(combobox(), "e");
+    expect(labelsOf().filter((t) => /handler_/.test(t))).toHaveLength(15);
+    expect(capNotices()).toHaveLength(1);
   });
 });

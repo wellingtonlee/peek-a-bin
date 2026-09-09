@@ -1260,7 +1260,10 @@ describe("a throw in a dialog is dismissible and does not kill it for the sessio
     await user.keyboard("{Control>}p{/Control}");
     await waitFor(() => {
       expect(
-        screen.getByPlaceholderText("Search functions, imports, exports, strings..."),
+        // A prefix, not the whole string: what is being asserted is that the
+        // palette itself is back, and its placeholder gains a category
+        // whenever the palette does (it named four when this was written).
+        screen.getByPlaceholderText(/^Search functions, imports, exports, strings/),
       ).toBeTruthy();
     });
     expect(screen.queryAllByRole("alert")).toEqual([]);
@@ -1277,7 +1280,10 @@ describe("a throw in a dialog is dismissible and does not kill it for the sessio
     await user.keyboard("{Control>}p{/Control}");
     await waitFor(() => {
       expect(
-        screen.getByPlaceholderText("Search functions, imports, exports, strings..."),
+        // A prefix, not the whole string: what is being asserted is that the
+        // palette itself is back, and its placeholder gains a category
+        // whenever the palette does (it named four when this was written).
+        screen.getByPlaceholderText(/^Search functions, imports, exports, strings/),
       ).toBeTruthy();
     });
     expect(screen.queryAllByRole("alert")).toEqual([]);
