@@ -400,3 +400,4 @@
 {"id":"int-0c346be43137fcc74dae329f026a6d89","kind":"field_change","created_at":"2026-09-09T17:32:11.184357922Z","actor":"taylor","issue_id":"peek-a-bin-r2u5","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-9998ad60251c61c770c8547583a7b6e6","kind":"field_change","created_at":"2026-09-09T17:32:12.065059693Z","actor":"taylor","issue_id":"peek-a-bin-lh7o","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-a0c765aa041815376f9abc80f7fe3c36","kind":"field_change","created_at":"2026-09-09T17:32:40.588406654Z","actor":"taylor","issue_id":"peek-a-bin-leto","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-5995fa940edc7d1262a3d4b002c97e6b","kind":"field_change","created_at":"2026-09-09T17:50:54.23976221Z","actor":"taylor","issue_id":"peek-a-bin-leto","extra":{"field":"status","new_value":"open","old_value":"closed"}}
