@@ -16,9 +16,31 @@ export interface DisasmFunction {
   isThunk?: boolean;
 }
 
+/**
+ * What kind of reference one address makes to another.
+ *
+ * NAMED, rather than spelled inline in `Xref`, so the three tables that fold it
+ * onto a colour or a letter can be `Record<XrefType, …>` and a fifth member
+ * fails the build — the closed-union rule `VIEW_TAB_LABELS`, `DETECT_PASS_LABELS`
+ * and `severity.ts`'s `ANOMALY_BADGE` already carry. While it was inline there
+ * was nothing to key on, so all four tables were `Record<string, …>`: a new kind
+ * reached the screen as grey "?" in `InstructionDetail` and as grey text in
+ * `XrefPanel`, silently, with the `?? fallback` at each use site doing exactly
+ * what it looks like it is there to prevent (peek-a-bin-v3uh.8).
+ *
+ * `XrefPanel` additionally kept its OWN copy of this union, which is the drift
+ * half of the same class; it imports this one now.
+ *
+ * The `?? fallback`s at the use sites STAY. They answer a different question —
+ * these values arrive over a `postMessage` from the worker, so a `Record` cannot
+ * make an unexpected one impossible at runtime. What the `Record` buys is that
+ * the fifth member cannot be ADDED here without every table being revisited.
+ */
+export type XrefType = "call" | "jmp" | "branch" | "data";
+
 export interface Xref {
   from: number;
-  type: "call" | "jmp" | "branch" | "data";
+  type: XrefType;
 }
 
 export interface StackVar {

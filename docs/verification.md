@@ -779,6 +779,68 @@ re-taken.)
     `InsnContextMenu.dom.test.tsx` (58 tests), which landed alongside and is not part of this
     removal — so the dom-suite count in the date-stamp above is **31** on the integrated tree and
     30 at `263bd5d`.
+- **`XrefType` AND `phaseLabels`: THE CLOSED-UNION RULE'S EVIDENCE IS A TYPECHECK COUNTERFACTUAL,
+  AND THE WHOLE CHANGE IS RUNTIME-INERT BY DESIGN (2026-09-09, `peek-a-bin-v3uh.8`).** Four tables
+  folding a closed union onto a colour, a letter or a sentence were `Record<string, …>`:
+  `XrefPanel`'s `typeColors` and its chip palette, `InstructionDetail`'s `TYPE_COLORS` and
+  `TYPE_LABELS`, and `StatusBar`'s `phaseLabels`. The xref union had no name at all — it was
+  spelled inline in `Xref` — so nothing *could* be keyed on it, and `XrefPanel` kept a second copy
+  of it besides. `XrefType` is now declared once in `disasm/types.ts`.
+  - **The counterfactual, measured in both directions, and it is the entire case for the change.**
+    Add a fifth member (`"syscall"`) to the xref union and run `npm run typecheck`: **0 errors at
+    base `2ef4a26`**, **4 errors after** — `InstructionDetail.tsx` 157 and 164, `XrefPanel.tsx` 21
+    and 244, each `TS2741: Property 'syscall' is missing … but required in type
+    'Record<XrefType, string>'`. The bead predicted **3**, one per table it enumerated; the fourth
+    is `XrefPanel`'s `CHIP_ON`, a table this change *created* out of a ternary chain the bead did
+    not name (`t === "call" ? … : t === "jmp" ? … : t === "branch" ? … : <purple>` — whose last arm
+    is "everything else", not "data", so a fifth kind wore `data`'s colour: `AnomaliesView`'s shape
+    at `peek-a-bin-p0qw`). Prediction falsified upward, and the reason is recorded rather than
+    tuned away.
+  - **The same counterfactual for `AnalysisPhase`: 1 → 2.** A twelfth phase reddened only
+    `ANALYSIS_IN_PROGRESS` before; it now reddens `StatusBar`'s `phaseLabels` as well.
+  - **THE CONTROL THAT MATTERS MOST CAME BACK INERT, AND THAT IS THE FINDING RATHER THAN A GAP.**
+    Widening all four `Record`s back to `Record<string, …>` — i.e. reverting the whole change's
+    type-level content while leaving every entry in place — leaves **all 76 tests across the three
+    suites green**. There is no runtime perturbation that can distinguish the two, because a
+    `Record`'s key type is erased: what it buys is that a fifth member cannot be ADDED without
+    every table being revisited. **The `?? fallback`s at the five use sites were therefore KEPT**
+    (`?? "text-gray-400"`, `?? "?"`). They answer a different question — these values arrive over
+    a `postMessage` from the worker, so no type can make an unexpected one impossible at runtime —
+    and removing them would have been a different and worse change.
+  - **A SECOND INERT, NARROWER AND SEPARATELY REPORTED: `phaseLabels`' five `null` entries are
+    UNREACHABLE AT RUNTIME.** The render site is behind `ANALYSIS_IN_PROGRESS[phase]`, which
+    excludes every terminal phase, so no terminal phase can ever look its label up. Reverting the
+    render gate from `isAnalyzing && phaseLabel !== null` to `isAnalyzing` alone leaves all 27
+    `StatusBar.dom.test.tsx` rows green — the `!== null` half is an assertion, not a branch. No row
+    was invented to appear to cover it; the test file's own docstring says so, and the five `null`s
+    exist for the compile-time obligation measured above. What the suite *does* assert is the
+    observable half, table-driven over all eleven phases: the six in-progress ones render their
+    sentence inside a `text-yellow-400` span carrying the spinner, the five terminal ones render no
+    phase sentence and no spinner. A row pins that the test's own split agrees with
+    `ANALYSIS_IN_PROGRESS`, so the table cannot drift into testing its own opinion.
+  - **Six runtime controls, all discriminating**: `typeColors.data` → `branch`'s orange (1 red);
+    `CHIP_ON.branch` → the old fall-through's purple (2 red — the per-kind row *and* the
+    all-four-distinct row, which is the one a fall-through actually trips); `TYPE_LABELS.branch`
+    `"B"` → `"D"` (3 red); `TYPE_COLORS.data` → the `?? fallback`'s grey (1 red — distinctness
+    correctly survives, grey being no other kind's colour); `phaseLabels.parsing` → `null` (1 red);
+    dropping `<Spinner/>` from the phase branch (6 red).
+  - **Suite counts, and a CORRECTION to the figure the bead was briefed with.** At base `2ef4a26`
+    `npx vitest run --dir src` reads **142 files / 4975 tests**, not the 4947 the brief stated —
+    re-measured by reverting every changed file and running it, because the delta would otherwise
+    not have reconciled. After: **143 / 5003**, i.e. **+1 file / +28 tests** (XrefPanel 33 → 42,
+    StatusBar 15 → 27, the new `InstructionDetail.dom.test.tsx` at 7, `analysisNotice.test.ts`
+    unchanged at 100 — one guard rewritten, none added). `--dir build` goes **14 / 275 → 14 / 277**,
+    and the +2 is a CONFIRMATION rather than a cost: `build/domTestNaming.test.ts` is table-driven
+    over every `*.dom.test.tsx`, so a new dom suite adds exactly its docblock row and its
+    `domSetup` row — the new file being picked up there is the evidence it is registered as a
+    component test at all. A first `--dir src` run reported 2 failures in `analysisNotice.test.ts` that a re-run did not
+    reproduce; the box was loaded, and the file passes alone.
+  - **What this does NOT establish.** Tailwind is not loaded under jsdom, so every colour
+    assertion is a CLASS NAME string and no colour has been computed or seen; `XrefPanel`'s rows
+    are virtualized behind `stubLayoutRect`, so a row in the document is still not a row on screen;
+    and `InstructionDetail.dom.test.tsx` is the component's first dedicated suite but renders only
+    the "Xrefs To" column — the rest of the panel remains covered only by
+    `DisassemblyPanel.dom.test.tsx` mounting it through the real `DisassemblyView`.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.

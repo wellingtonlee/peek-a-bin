@@ -888,7 +888,14 @@ describe("every surface that reports a failure uses the shared decision", () => 
   it("the status bar states the notice ahead of the spinner and the green tick", () => {
     const source = readFileSync(join(SRC, "components", "StatusBar.tsx"), "utf8");
     const notice = source.search(/\{\s*notice\s*\?/);
-    const spinner = source.search(/:\s*isAnalyzing\s*\?/);
+    // `\b`, not `\s*\?`. This guard is about the ORDER of the three branches,
+    // and the old pattern additionally pinned the spinner branch's condition to
+    // the bare token — so widening it to `isAnalyzing && phaseLabel !== null`
+    // (peek-a-bin-v3uh.8) took the branch out of the search rather than out of
+    // order, which is a guard failing on a change it has no opinion about.
+    // CLAUDE.md's warning about this family exactly: "write the pattern so a
+    // reformat cannot break it."
+    const spinner = source.search(/:\s*isAnalyzing\b/);
     const ready = source.search(/:\s*phase\s*===\s*"ready"\s*\?/);
 
     expect(notice).toBeGreaterThan(-1);
@@ -976,19 +983,38 @@ describe("every surface that reports a failure uses the shared decision", () => 
     expect(source).not.toMatch(/error: `Analysis failed: \$\{/);
   });
 
-  it("the status bar has no label for a phase it cannot render", () => {
+  it("the status bar gives no label to any phase the notice owns", () => {
     // The exact defect this replaces: `phaseLabels` carried `failed: "Analysis
     // failed"`, but its only render site sits behind `isAnalyzing`, which
     // excludes "failed" — so the label was unreachable and control fell through
     // to the "Engine ready" branch. Anyone re-adding it would be re-adding dead
     // code and, worse, would think the case was covered.
+    //
+    // STATED POSITIVELY SINCE peek-a-bin-v3uh.8, and it covers strictly more
+    // than it did. `phaseLabels` is a `Record<AnalysisPhase, string | null>`
+    // now, so a key's ABSENCE — which is all the old `not.toMatch(/failed/)`
+    // could look for — is no longer available to anyone: every phase must be
+    // written down, and the terminal ones say `null`. That lets the guard name
+    // all five rather than only the one the defect was about, and a re-added
+    // label is caught by the `null` assertion for its own phase rather than by
+    // a bare token search that its own explanatory comment could trip.
     const source = readFileSync(join(SRC, "components", "StatusBar.tsx"), "utf8");
     const phaseMap = source.slice(
       source.indexOf("const phaseLabels"),
       source.indexOf("const SECTION_CHAR_FLAGS"),
     );
     expect(phaseMap.length).toBeGreaterThan(0);
-    expect(phaseMap).not.toMatch(/failed/);
+    // Every phase `ANALYSIS_IN_PROGRESS` marks terminal. `idle` and `ready`
+    // have their own branches below the spinner; `failed`, `no-code` and
+    // `timed-out` are `analysisNotice` kinds.
+    for (const phase of ["idle", "ready", "failed", '"no-code"', '"timed-out"']) {
+      expect(phaseMap).toMatch(new RegExp(`${phase}:\\s*null,`));
+    }
+    // The liveness half: a scrape whose slice missed the map would satisfy
+    // nothing above, but a scrape that caught only the map's HEAD would satisfy
+    // the `idle` row alone. The six working phases must be in the same slice.
+    expect(phaseMap).toMatch(/parsing: "Parsing PE\.\.\.",/);
+    expect(phaseMap).toMatch(/"building-xrefs": "Building xrefs\.\.\.",/);
   });
 });
 

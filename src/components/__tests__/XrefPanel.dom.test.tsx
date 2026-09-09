@@ -194,6 +194,67 @@ describe("XrefPanel", () => {
       expect(chip.className).toContain("bg-gray-800");
       expect(chip.className).not.toContain("bg-red-800");
     });
+
+    /**
+     * EVERY kind, not just `jmp` above. The chip palette WAS a ternary chain
+     * whose last arm was "everything that is not call/jmp/branch" rather than
+     * "data", so a fifth kind would have worn `data`'s purple; it is a
+     * `Record<XrefType, string>` now and a fifth kind fails the build instead
+     * (peek-a-bin-v3uh.8). Written as a table over the four so that the
+     * `data` case — the one the old chain's fall-through hid — is asked
+     * directly rather than being whatever is left over.
+     */
+    it.each([
+      ["call", "bg-green-800"],
+      ["jmp", "bg-red-800"],
+      ["branch", "bg-orange-800"],
+      ["data", "bg-purple-800"],
+    ])("gives the %s chip its own enabled style", (kind, cls) => {
+      renderPanel();
+      expect(screen.getByRole("button", { name: kind }).className).toContain(cls);
+    });
+
+    it("gives no two chips the same enabled style", () => {
+      renderPanel();
+      // The property the table above cannot state case by case, and the one the
+      // ternary chain actually broke: a fall-through makes two kinds share a
+      // palette entry, which still passes a per-case assertion written against
+      // the fall-through's own colour.
+      const styles = ["call", "jmp", "branch", "data"].map(
+        (t) => screen.getByRole("button", { name: t }).className,
+      );
+      expect(new Set(styles).size).toBe(4);
+    });
+  });
+
+  /**
+   * THE ROW'S KIND COLUMN, over all four kinds. `typeColors` is a SECOND table
+   * in the same component — bare text where the chip is a filled badge — and it
+   * is deliberately not shared with the chip's, nor with `InstructionDetail`'s
+   * table of the same shape: a palette is the caller's, and what has one
+   * declaration is `XrefType` itself. Both tables are keyed on that union now,
+   * so the `?? "text-gray-400"` in the row and the `?? "?"` in the other panel
+   * can no longer be reached by a kind someone ADDED — only by one that arrived
+   * over the worker's `postMessage`, which is the case they are actually for.
+   */
+  describe("the kind column", () => {
+    it.each([
+      ["call", "text-green-400"],
+      ["data", "text-purple-400"],
+      ["jmp", "text-red-400"],
+      ["branch", "text-orange-400"],
+    ])("renders a %s row in its own colour", (kind, cls) => {
+      renderPanel();
+      // The fixture's four xrefs are one of each kind, in `from` order, which is
+      // the default sort — so the row for a kind is the row whose first column
+      // says so, found rather than indexed.
+      const cell = rows()
+        .map((r) => r.children[0] as HTMLElement)
+        .find((c) => c.textContent === kind);
+      expect(cell).toBeTruthy();
+      expect(cell?.className).toContain(cls);
+      expect(cell?.className).not.toContain("text-gray-400");
+    });
   });
 
   /**

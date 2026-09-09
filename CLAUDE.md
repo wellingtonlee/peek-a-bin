@@ -674,6 +674,34 @@ counterfactual is confirmed and is the whole justification for keeping the modul
 `AnomalyBanners` unrewired, a fourth severity produced **zero** typecheck errors in `HeaderView` —
 the only error was in `severity.ts`, the module the alternative plan would have deleted.
 
+**`XrefType` (`disasm/types.ts`) and `StatusBar`'s `phaseLabels` JOINED THAT FAMILY, and the xref
+half had to NAME the union before anything could be keyed on it.** The four kinds were spelled
+inline in `Xref` — plus a second private copy in `XrefPanel.tsx` — so the four tables folding them
+onto a colour or a letter were `Record<string, …>` of necessity: `XrefPanel`'s `typeColors` and
+its chip palette (a ternary chain whose last arm was "everything that is not the three above", the
+`AnomaliesView` shape again), and `InstructionDetail`'s `TYPE_COLORS`/`TYPE_LABELS`. All four are
+`Record<XrefType, …>` now, and `XREF_TYPES` — the chip list and the initial filter set, previously
+a literal array written twice — is **derived from the chip table**, because an array is the one
+shape in this family that cannot fail the build on a new member. `phaseLabels` is
+`Record<AnalysisPhase, string | null>` with an explicit `null` for the five terminal phases; the
+comment explaining why there is no `"failed"` label (its render site is behind
+`ANALYSIS_IN_PROGRESS`, so the failure states are `analysisNotice`'s) is **kept as the reason those
+entries are null**, since a `Record<string, …>` cannot tell "deliberately has no sentence" from
+"nobody thought about it".
+**THREE THINGS NOT TO UNDO.** (1) **The three palettes are deliberately NOT merged.** `XrefPanel`'s
+row column, its chips and `InstructionDetail`'s letter badges hold overlapping class strings by
+*coincidence*, and `severity.ts`'s own paragraph above is explicit that a palette is legitimately
+the caller's — one shared table would be a second declaration of a decision two components are
+allowed to make differently. **The union is the thing with one declaration.** (2) **The
+`?? fallback`s at the five use sites STAY** (`?? "text-gray-400"`, `?? "?"`): these values cross a
+`postMessage`, so no type makes an unexpected one impossible at runtime, and what the `Record` buys
+is that a fifth member cannot be *added* silently. (3) **The evidence is a typecheck counterfactual
+and the change is runtime-inert by construction** — measured at **0 → 4** errors for a fifth xref
+kind and **1 → 2** for a twelfth phase, while widening all four `Record`s back to
+`Record<string, …>` leaves all 76 tests across the three suites green. A second, narrower inert is
+recorded rather than papered over: `phaseLabels`' five `null`s are **unreachable at runtime**, so
+no row can cover them and none was invented (`docs/verification.md`, `peek-a-bin-v3uh.8`).
+
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
 

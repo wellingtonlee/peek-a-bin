@@ -3,6 +3,7 @@ import { useContainingFunc, useSectionInfo } from "../hooks/useDerivedState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import {
   ANALYSIS_IN_PROGRESS,
+  type AnalysisPhase,
   getDisplayName,
   useAppDispatch,
   useAppState,
@@ -16,17 +17,42 @@ import {
 import { analysisNotice } from "./analysisNotice";
 import { Skeleton } from "./Skeleton";
 
-// No entry for "failed": its render site below is behind `isAnalyzing`, which
-// excludes it, so a label here was unreachable and the bar fell through to a
-// green "Engine ready" over a dead analysis. The failure states are `notice`'s
-// now — see ./analysisNotice.ts.
-const phaseLabels: Record<string, string> = {
+/**
+ * The sentence the bar shows beside its spinner, per phase.
+ *
+ * `null` is the ORIGINAL FINDING, kept and now spelled: there is no label for
+ * "failed", because the render site below is behind `isAnalyzing` — which
+ * `ANALYSIS_IN_PROGRESS` excludes it from — so a label here was unreachable and
+ * the bar fell through to a green "Engine ready" over a dead analysis. The
+ * failure states are `notice`'s; see ./analysisNotice.ts. The same reasoning
+ * covers the other four terminal phases: `idle` and `ready` have their own
+ * branches further down, and `no-code` and `timed-out` are `analysisNotice`
+ * kinds for exactly the reason `failed` is.
+ *
+ * WAS `Record<string, string>` with those five simply absent, which is a
+ * different statement: a SIXTH phase would also have been absent, and if it were
+ * an in-progress one the bar would have spun with no sentence at all — the shape
+ * `ANALYSIS_IN_PROGRESS` was introduced (peek-a-bin-bo3b) to stop, one field
+ * over. `Record<AnalysisPhase, string | null>` makes the author of a new phase
+ * answer the question; writing `null` is a decision, leaving it out is not an
+ * option (peek-a-bin-v3uh.8).
+ *
+ * The five `null`s are UNREACHABLE AT RUNTIME and no test can redden them —
+ * their whole value is this compile-time obligation. See the docstring in
+ * StatusBar.dom.test.tsx.
+ */
+const phaseLabels: Record<AnalysisPhase, string | null> = {
+  idle: null,
   parsing: "Parsing PE...",
   "extracting-strings": "Extracting strings...",
   "detecting-functions": "Detecting functions...",
   "recursive-descent": "Recursive descent...",
   "gap-filling": "Gap filling...",
   "building-xrefs": "Building xrefs...",
+  ready: null,
+  failed: null,
+  "no-code": null,
+  "timed-out": null,
 };
 
 const SECTION_CHAR_FLAGS: [number, string][] = [
@@ -271,7 +297,23 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
           >
             {notice.label}
           </span>
-        ) : isAnalyzing ? (
+        ) : isAnalyzing && phaseLabel !== null ? (
+          // The `!== null` half is UNREACHABLE and is an assertion rather than
+          // a branch: every phase `ANALYSIS_IN_PROGRESS` marks true has a
+          // sentence in `phaseLabels`, and the `Record<AnalysisPhase, string |
+          // null>` is what keeps that true as phases are added. It is written
+          // out because the alternative — letting a null render — is a spinner
+          // with no sentence beside it, which is the "spinner that can never
+          // resolve" class this file already carries one fix for.
+          //
+          // KEEP THE CONDITION ON ONE LINE WITH THE TERNARY COLON BEFORE IT.
+          // `analysisNotice.test.ts` asserts this branch's POSITION in the
+          // chain by searching for that colon followed by the condition's first
+          // token, so a comment between the two hides the branch from a guard
+          // that is right to exist. The two halves are deliberately not written
+          // out together anywhere in this file either — a scraper that cannot
+          // tell prose from code otherwise matches its own explanation, which
+          // is a control this comment was measured coming back green under.
           <span className="text-yellow-400">
             <Spinner />
             {phaseLabel}

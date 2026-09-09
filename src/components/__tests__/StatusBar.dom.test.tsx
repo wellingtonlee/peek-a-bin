@@ -6,6 +6,7 @@ import { useReducer } from "react";
 import { describe, expect, it } from "vitest";
 import type { AnalysisPhase, AppState } from "../../hooks/usePEFile";
 import {
+  ANALYSIS_IN_PROGRESS,
   AppDispatchContext,
   AppStateContext,
   appReducer,
@@ -209,4 +210,84 @@ describe("StatusBar notice colour follows isFault", () => {
       expect(cls).toContain(notice?.isFault ? "text-red-400" : "text-amber-400");
     },
   );
+});
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE PHASE SENTENCE, OVER EVERY MEMBER OF `AnalysisPhase`.
+ *
+ * `StatusBar`'s `phaseLabels` was a `Record<string, string>` holding six of the
+ * eleven phases, with the other five simply ABSENT and a comment explaining that
+ * "failed" was left out on purpose. The comment's finding was right and is kept;
+ * the SHAPE was the problem. A `Record<string, …>` cannot tell "deliberately has
+ * no sentence" from "nobody thought about it", so a twelfth phase would also be
+ * absent — and if it were an in-progress one the bar would have spun with no
+ * sentence beside it, which is the defect `ANALYSIS_IN_PROGRESS` was introduced
+ * one field over to stop (peek-a-bin-bo3b). It is
+ * `Record<AnalysisPhase, string | null>` now, so writing `null` is a decision the
+ * author of a new phase has to make (peek-a-bin-v3uh.8).
+ *
+ * *** THE FIVE `null`s CANNOT BE COVERED BY A RUNTIME ROW, AND THIS IS THE
+ * HONEST STATEMENT OF THAT. *** The render site is behind `ANALYSIS_IN_PROGRESS`,
+ * which excludes every terminal phase, so no terminal phase can ever look its
+ * label up: there is no perturbation of `phaseLabels`' null entries that reddens
+ * anything here. The rows below assert the OBSERVABLE half — that a terminal
+ * phase puts no phase sentence on screen, which is a property of the render site
+ * rather than of those entries. Their whole value is the compile-time
+ * obligation, measured as a typecheck counterfactual and recorded in
+ * docs/verification.md. Do not add a row that appears to cover them.
+ *
+ * The table is `Record<AnalysisPhase, string | null>` so that a twelfth phase
+ * fails to compile HERE too, rather than quietly going untested. It restates the
+ * six sentences rather than importing them, so a reworded label is a visible
+ * diff instead of a tautology.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+describe("StatusBar's phase sentence", () => {
+  const SENTENCES: Record<AnalysisPhase, string | null> = {
+    idle: null,
+    parsing: "Parsing PE...",
+    "detecting-functions": "Detecting functions...",
+    "recursive-descent": "Recursive descent...",
+    "gap-filling": "Gap filling...",
+    "building-xrefs": "Building xrefs...",
+    "extracting-strings": "Extracting strings...",
+    ready: null,
+    failed: null,
+    "no-code": null,
+    "timed-out": null,
+  };
+
+  const PHASES = Object.keys(SENTENCES) as AnalysisPhase[];
+  const IN_PROGRESS = PHASES.filter((p) => SENTENCES[p] !== null);
+  const TERMINAL = PHASES.filter((p) => SENTENCES[p] === null);
+
+  it("agrees with ANALYSIS_IN_PROGRESS about which phases are working phases", () => {
+    // The liveness half, and the one that makes the two lists below mean
+    // anything: a sentence is owed exactly to a phase the app calls in-flight.
+    // Without this the table could drift into testing its own opinion.
+    expect(IN_PROGRESS.filter((p) => !ANALYSIS_IN_PROGRESS[p])).toEqual([]);
+    expect(TERMINAL.filter((p) => ANALYSIS_IN_PROGRESS[p])).toEqual([]);
+    expect(IN_PROGRESS).toHaveLength(6);
+    expect(TERMINAL).toHaveLength(5);
+  });
+
+  it.each(IN_PROGRESS)("shows the sentence for %s, beside a spinner", (phase) => {
+    mount({ analysisPhase: phase });
+    const sentence = SENTENCES[phase] ?? "";
+    const span = screen.getByText(sentence, { exact: false });
+    expect(span.textContent).toContain(sentence);
+    // The spinner and the sentence are one span. Asserting the sentence alone
+    // would pass over a bar that had stopped saying anything is happening.
+    expect(span.querySelector("svg.animate-spin")).toBeTruthy();
+    expect(span.className).toContain("text-yellow-400");
+  });
+
+  it.each(TERMINAL)("shows no phase sentence at all for %s", (phase) => {
+    mount({ analysisPhase: phase });
+    for (const s of Object.values(SENTENCES)) {
+      if (s !== null) expect(screen.queryByText(s, { exact: false })).toBeNull();
+    }
+    expect(document.querySelector("svg.animate-spin")).toBeNull();
+  });
 });

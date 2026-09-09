@@ -1,11 +1,46 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DisasmFunction, Xref } from "../disasm/types";
+import type { DisasmFunction, Xref, XrefType } from "../disasm/types";
 import { binarySearchFunc } from "../hooks/useDerivedState";
 
-type XrefType = "call" | "jmp" | "branch" | "data";
 type SortKey = "from" | "to" | "type";
 type ScopeMode = "all" | "address" | "function" | "instruction";
+
+/**
+ * The filter chip's style while its kind is ENABLED. A second palette in this
+ * file on purpose — the chip is a filled badge and the row's kind column is bare
+ * text, so they are different decisions about the same union rather than one
+ * decision written twice.
+ *
+ * WAS a ternary chain, `t === "call" ? … : t === "jmp" ? … : t === "branch" ? …
+ * : <purple>`, which is the shape `AnomaliesView` was corrected out of at
+ * peek-a-bin-p0qw: the last arm is not "data", it is "everything that is not the
+ * three above", so a fifth kind would have worn `data`'s colour with nothing
+ * failing.
+ */
+const CHIP_ON: Record<XrefType, string> = {
+  call: "bg-green-800 text-green-300",
+  jmp: "bg-red-800 text-red-300",
+  branch: "bg-orange-800 text-orange-300",
+  data: "bg-purple-800 text-purple-300",
+};
+
+/**
+ * Every kind, in chip order, DERIVED from the table above rather than written
+ * out a second time.
+ *
+ * The literal `["call", "jmp", "branch", "data"]` it replaces appeared twice —
+ * as the chip list and as the initial filter set — and an array is the one shape
+ * in this family that CANNOT fail the build on a new member (CLAUDE.md makes the
+ * same point about `VIEW_TAB_LABELS` being a `Record` where an array "would
+ * silently drop it"). A kind missing from the list gets no chip, so it can never
+ * be filtered out and never appears in the header count's denominator.
+ *
+ * The cast is sound by construction — `CHIP_ON` is a `Record<XrefType, …>`, so
+ * its keys ARE the union; TypeScript's `Object.keys` is just typed `string[]`.
+ * `CHIP_ON` is what the build fails on, and this follows it.
+ */
+const XREF_TYPES = Object.keys(CHIP_ON) as XrefType[];
 
 interface FlatXref {
   type: XrefType;
@@ -59,9 +94,7 @@ export function XrefPanel({
    */
   useEffect(() => () => clearTimeout(filterTimerRef.current), []);
 
-  const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(
-    new Set(["call", "jmp", "branch", "data"]),
-  );
+  const [typeFilter, setTypeFilter] = useState<Set<XrefType>>(new Set(XREF_TYPES));
   const [sortKey, setSortKey] = useState<SortKey>("from");
   const [sortAsc, setSortAsc] = useState(true);
   const [scopeMode, setScopeMode] = useState<ScopeMode>(scopeAddress != null ? "address" : "all");
@@ -102,7 +135,7 @@ export function XrefPanel({
       for (const xref of xrefs) {
         const fromFn = binarySearchFunc(sortedFuncs, xref.from);
         result.push({
-          type: xref.type as XrefType,
+          type: xref.type,
           fromAddr: xref.from,
           toAddr,
           fromFuncName: fromFn?.name ?? "",
@@ -203,7 +236,12 @@ export function XrefPanel({
     overscan: 30,
   });
 
-  const typeColors: Record<string, string> = {
+  // Keyed on the union, not on `string`, so a fifth kind cannot render here as
+  // the `?? "text-gray-400"` below. Deliberately NOT shared with
+  // `InstructionDetail`'s table of the same shape: a palette is the caller's,
+  // and these two agree today only by coincidence (severity.ts says the same of
+  // its own readers). The union is the thing with one declaration.
+  const typeColors: Record<XrefType, string> = {
     call: "text-green-400",
     jmp: "text-red-400",
     branch: "text-orange-400",
@@ -251,21 +289,13 @@ export function XrefPanel({
           Cross-References ({filtered.length}/{allXrefs.length})
         </span>
         <div className="flex items-center gap-1 ml-2">
-          {(["call", "jmp", "branch", "data"] as XrefType[]).map((t) => (
+          {XREF_TYPES.map((t) => (
             <button
               type="button"
               key={t}
               onClick={() => toggleType(t)}
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
-                typeFilter.has(t)
-                  ? t === "call"
-                    ? "bg-green-800 text-green-300"
-                    : t === "jmp"
-                      ? "bg-red-800 text-red-300"
-                      : t === "branch"
-                        ? "bg-orange-800 text-orange-300"
-                        : "bg-purple-800 text-purple-300"
-                  : "bg-gray-800 text-gray-600"
+                typeFilter.has(t) ? CHIP_ON[t] : "bg-gray-800 text-gray-600"
               }`}
             >
               {t}

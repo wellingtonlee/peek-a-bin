@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { FunctionSignature } from "../disasm/signatures";
-import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
+import type { DisasmFunction, Instruction, StackFrame, Xref, XrefType } from "../disasm/types";
 import { binarySearchFunc } from "../hooks/useDerivedState";
 import { getDisplayName } from "../hooks/usePEFile";
 
@@ -142,14 +142,26 @@ function breakdownEncoding(insn: Instruction): ByteSegment[] {
   return segments;
 }
 
-const TYPE_COLORS: Record<string, string> = {
+/**
+ * The xref-kind palette and its one-letter labels, keyed on the UNION so a fifth
+ * kind fails the build here rather than reaching the panel as the grey `?` the
+ * `?? fallback`s below spell.
+ *
+ * Deliberately NOT shared with `XrefPanel`'s table of the same shape. The two
+ * hold the same four class strings today, which is a coincidence and not a
+ * contract: this panel writes a single letter into a `w-3` cell beside an
+ * address, the other writes the kind's full name into a `w-12` column, and
+ * `severity.ts`'s own paragraph is explicit that a palette is legitimately the
+ * caller's. What gets one declaration is `XrefType` (peek-a-bin-v3uh.8).
+ */
+const TYPE_COLORS: Record<XrefType, string> = {
   call: "text-green-400",
   jmp: "text-red-400",
   branch: "text-orange-400",
   data: "text-purple-400",
 };
 
-const TYPE_LABELS: Record<string, string> = {
+const TYPE_LABELS: Record<XrefType, string> = {
   call: "C",
   jmp: "J",
   branch: "B",
@@ -191,7 +203,7 @@ export function InstructionDetail({
   // Xrefs FROM: parse branch/call target
   const xrefFrom = useMemo(() => {
     const mn = insn.mnemonic;
-    let type: Xref["type"] | null = null;
+    let type: XrefType | null = null;
     if (mn === "call") type = "call";
     else if (mn === "jmp") type = "jmp";
     else if (mn.startsWith("j")) type = "branch";
@@ -217,10 +229,15 @@ export function InstructionDetail({
         const disp = parseInt(ripMatch[2], 16);
         const target = insn.address + insn.size + sign * disp;
         const iat = iatMap.get(target);
+        // Annotated rather than cast: in an object literal with no contextual
+        // type a fresh `"data"` widens to `string`, which is what the old
+        // `as Xref["type"]` was working around. The annotation is checked; the
+        // cast was not.
+        const kind: XrefType = type ?? "data";
         return {
           address: target,
           name: iat ? `${iat.lib}!${iat.func}` : null,
-          type: type ?? ("data" as Xref["type"]),
+          type: kind,
         };
       }
     }
