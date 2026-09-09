@@ -287,7 +287,16 @@ class ScriptedWorker {
         // `withXrefs`, and the two shapes are what the dispatch really answers
         // with. The client pre-seeds its `xrefCache` from `xrefs`, so the
         // `buildTypedXrefMap` arm below is now reached only on a fallback.
-        result = { instructions: INSNS, xrefs: XREFS };
+        // `withholdXrefs` has to suppress the FUSED half too, not just the
+        // `buildTypedXrefMap` arm below. peek-a-bin-w96b moved the xref map
+        // into this reply, so withholding only the separate RPC stopped
+        // withholding anything at all — the map arrived with the instructions,
+        // which is a second genuine input change, and the CFG-count row went
+        // 1 -> 2. Found on the integrated tree; neither agent could see it
+        // alone, because each was right about its own half.
+        result = ScriptedWorker.withholdXrefs
+          ? { instructions: INSNS }
+          : { instructions: INSNS, xrefs: XREFS };
         break;
       case "buildTypedXrefMap":
         if (ScriptedWorker.withholdXrefs) return;
