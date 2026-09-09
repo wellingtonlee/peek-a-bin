@@ -1,6 +1,12 @@
 # AI Features
 
-Peek-a-Bin integrates 4 AI-powered analysis tools, plus enhance/explain functionality. All use SSE streaming via `streamChat()` from `src/llm/client.ts`.
+Peek-a-Bin integrates two AI-powered analysis tools — chat, and enhance/explain in the decompile
+panel. Both use SSE streaming via `streamChat()` from `src/llm/client.ts`.
+
+> Three further features — **Batch Auto-Rename**, the **AI Analysis Report** and the
+> **Vulnerability Scanner** — were removed on 2026-09-09 (`peek-a-bin-1xc5`) along with the
+> Anomalies view tab. Their sections are gone from this document rather than marked deprecated;
+> the CHANGELOG entry records what went and what survived it.
 
 ## LLM Profile Configuration
 
@@ -50,17 +56,24 @@ The **OpenAI** provider option works with any OpenAI-compatible API:
 
 ## Request Handling
 
-Everything below applies to every AI feature on this page, since they all go through
+Everything below applies to both AI features on this page, since they both go through
 `streamChat()` in `src/llm/client.ts`.
 
 ### Token budgets
 
 `src/llm/models.ts` holds a per-task output ceiling, applied via `maxTokensFor(task)` and sent
 as `max_tokens` on **both** providers — an 8K ceiling was previously hardcoded twice for
-Anthropic and omitted entirely for OpenAI, so a long report could be truncated on one provider
-and unbounded on the other. `TASK_MAX_TOKENS` in that file is the source of truth; the tasks
-are `chat`, `report`, `enhance`, `batch-rename` and `vuln-scan`, and `report` gets the largest
-budget.
+Anthropic and omitted entirely for OpenAI, so a long answer could be truncated on one provider
+and unbounded on the other. `TASK_MAX_TOKENS` in that file is the source of truth. `LLMTask` is
+now `chat | enhance` and **both budgets are 16384**; `report` (32768), `batch-rename` and
+`vuln-scan` (8192 each) went with the features that sent them.
+
+The two surviving values coinciding is not a reason to inline them — read the long docstring on
+`TASK_MAX_TOKENS`, which argues the `Record<LLMTask, number>` is what stops a ceiling being
+spelled at a call site again. One real reduction follows from it and is recorded in
+[verification.md](verification.md): with both values equal, no call to `streamChat` can
+distinguish the table from a constant, so nothing at runtime pins that the budget varies by
+task — only `typecheck` and the `?? TASK_MAX_TOKENS.chat` fallback do.
 
 These are caps, not reservations. They are sized generously because every call streams, so the
 timeout pressure that motivates small ceilings on non-streaming requests does not apply. For
@@ -98,35 +111,36 @@ read as a one-off blip. The `onRetry` callback lets a view show a "retrying…" 
 ### Concurrency limiting
 
 A shared `RequestLimiter` (`llmLimiter`) caps how many LLM requests are in flight at once and
-enforces a minimum gap between request starts. The bulk features — the vulnerability scanner
-and batch rename — otherwise fire bursts that reliably trip a 429 that then has to be retried.
-A slot is held for the whole streamed response, not just the fetch, and is released before a
-backoff sleep so a backing-off request does not hold it. The current setting is small on
-purpose: enough for an interactive chat to proceed alongside a running scan, not enough for a
-bulk loop to saturate the provider. Values live in `src/llm/retry.ts`.
+enforces a minimum gap between request starts. A slot is held for the whole streamed response,
+not just the fetch, and is released before a backoff sleep so a backing-off request does not
+hold it. Values live in `src/llm/retry.ts`.
 
-### Response validation
-
-Features that expect JSON back (batch rename, vulnerability scan) parse it through
-`src/llm/responseSchema.ts` rather than a bare `JSON.parse` in a `catch {}`:
-
-- `unwrapJSON()` strips Markdown code fences — one implementation, replacing per-caller regexes
-  that both mishandled a fence whose info string was not exactly `json`.
-- `parseBatchRenameResponse()` / `parseScanResponse()` validate against zod schemas and return
-  a discriminated `ParseResult` (`{ ok: true, value }` or `{ ok: false, error }`). They never
-  throw.
-- Callers surface the failure. Previously a truncated or malformed response was
-  indistinguishable from a legitimate "nothing to report".
+**No bulk caller remains, and the sizing predates that.** The 2-in-flight / 250 ms pair was
+chosen against the vulnerability scanner, which fired up to 20 requests, and against batch
+rename's batch loop — without spacing, that burst reliably tripped a 429 that then had to be
+retried. **That measurement describes a workload this app no longer has and must not be
+restated as if it still applied**; nothing has been re-measured against the current one. The
+class stays because the defect class does: chat is single-flight, but `useDecompileTabs` can
+have a low tab, a high tab and an explain tab in flight at once, and a chat can overlap an
+enhance — so concurrent requests are still ordinary, merely *interactive* rather than bulk. The
+numbers are deliberately left where the bulk measurement put them rather than adjusted on a
+guess; `RequestLimiter`'s and `llmLimiter`'s own docstrings are the current statement of this.
 
 ## AI Chat
 
 **Shortcut:** `Ctrl+Shift+A` | **Command palette:** "AI: Open Chat"
 
-Multi-turn streaming conversation with full binary context. The AI automatically receives:
+Multi-turn streaming conversation with binary context. `buildSystemPrompt` in
+`src/hooks/useAIChat.ts` takes exactly three things and sends:
 
-- PE metadata (headers, sections, imports/exports, anomalies)
-- Active function pseudocode (when viewing a function)
-- Driver analysis info (when a driver is detected)
+- File name, architecture, entry point, image base, and the section table (name, R/W/X flags,
+  virtual size)
+- Active function pseudocode, when viewing a function, truncated at 6000 characters
+
+> **This list was wrong before this revision** and is corrected here rather than trimmed: it
+> claimed imports/exports, anomalies and driver-detection info were sent as well. None of the
+> three ever reached `buildSystemPrompt`, whose whole signature is `(pe, fileName, currentCode)`.
+> Read that function, not this table, when it matters.
 
 ### Features
 
@@ -142,102 +156,6 @@ Multi-turn streaming conversation with full binary context. The AI automatically
 | `peek-a-bin:chat:${fileName}` | Chat messages for a specific file |
 | `peek-a-bin:chat-width` | Chat panel width in pixels |
 
-## Batch Auto-Rename
-
-**Toolbar:** Rename button | **Command palette:** "AI: Batch Rename Functions"
-
-Automatically generates meaningful names for unnamed functions:
-
-1. Decompiles all unnamed functions (not user-renamed, not thunks, size > 16 bytes) via the worker
-2. Batches pseudocode to the LLM in groups of 6
-3. Parses JSON rename suggestions from the LLM response
-4. Opens a review modal with:
-   - Current name vs. suggested name
-   - Confidence score (color-coded)
-   - Reasoning for each suggestion
-   - Accept/reject toggles per function
-5. Bulk actions: Accept All, Accept High Confidence, Reject All
-6. Accepted renames are dispatched with full undo support
-
-## AI Analysis Report
-
-**Toolbar:** Report button | **Command palette:** "AI: Generate Analysis Report"
-
-Generates a comprehensive Markdown report. `buildReportContext()` in `src/hooks/useAIReport.ts`
-assembles:
-
-- PE headers and metadata
-- Notable imports (filtered against a 39-entry watchlist, capped at 50; falls back to the first
-  30 imports if none match) and the first 20 exports
-- Security anomalies
-- Driver detection info
-- Decompiled key functions
-- Interesting strings
-
-> The *request* context is bounded by those per-section item caps, not by a token budget —
-> nothing counts or enforces input tokens. The *response* is capped by the per-task budget for
-> `"report"` (see [Token budgets](#token-budgets)), which is the most generous of the five.
-
-The report includes:
-- Executive summary and binary classification
-- Capability analysis
-- API and string analysis
-- Risk assessment
-- Indicators of Compromise (IOCs)
-
-**Features:**
-- Streams to a full-page modal with live Markdown rendering
-- Cached per file in localStorage with "Regenerate" button
-- Downloadable as `.md` file
-
-### localStorage
-
-| Key | Description |
-|-----|-------------|
-| `peek-a-bin:report:${fileName}` | Cached report for a specific file |
-
-## Vulnerability Scanner
-
-**Context menu:** Right-click function → "Scan for vulnerabilities" | **Command palette:** "AI: Scan Suspicious Functions"
-
-### Single Function Scan
-
-Right-click any function in linear or graph mode to scan it for security issues. The function's pseudocode is sent to the LLM with a vulnerability scanning prompt.
-
-### Bulk Scan
-
-The "Scan" toolbar button or command palette action scans every function that references an API
-in the `DANGEROUS_APIS` set in `src/hooks/useVulnScanner.ts` (32 entries). Names are matched with
-a trailing `A`/`W` stripped, so `CreateProcessW` matches `CreateProcess`. The categories are:
-
-- Memory: `VirtualAlloc`, `VirtualAllocEx`, `VirtualProtect`, `VirtualProtectEx`,
-  `NtAllocateVirtualMemory`, `MapViewOfFile`, `NtMapViewOfSection`
-- Cross-process: `WriteProcessMemory`, `ReadProcessMemory`, `NtWriteVirtualMemory`,
-  `CreateRemoteThread`, `NtCreateThread`, `OpenProcess`, `NtOpenProcess`
-- Execution: `CreateProcess`, `ShellExecute`, `WinExec`
-- Injection / hooking: `SetWindowsHookEx`, `LoadLibrary`, `GetProcAddress`
-- Crypto: `CryptEncrypt`, `CryptDecrypt`, `BCryptEncrypt`, `BCryptDecrypt`
-
-> This list is **not** the same as the 39-entry `notableAPIs` watchlist used to build the AI
-> report context in `src/hooks/useAIReport.ts`. That one is broader (registry, network, file
-> I/O, anti-debug) and serves a different purpose; the two sets share only 17 names. **Neither
-> contains `NtCreateSection`**, despite earlier revisions of this document listing it. Consult
-> the source before relying on either set.
-
-### Results
-
-Findings appear in the **Anomalies** tab under "AI Security Findings":
-- Severity badges (Critical, High, Medium, Low)
-- Clickable function names navigate to disassembly
-- Collapsible descriptions and remediation text
-
-An empty result is **not** the same as a clean binary. Scan progress and outcome are tracked
-separately from the finding list, in `AIScanState` (`state.aiScan`), precisely so the two stay
-distinguishable — a run that produced nothing usable reports `failed`, and a run that scanned
-some functions but not others reports `complete` with a non-zero failure count, meaning the
-findings are real but incomplete. See
-[Architecture → `AIScanState`](architecture.md#aiscanstate) for the phase table.
-
 ## Enhance / Explain
 
 Available in the decompile panel's **AI** sub-tab:
@@ -249,11 +167,12 @@ Enhance and Explain are mutually exclusive — starting one cancels the other. R
 
 ## Command Palette Integration
 
-Four AI commands are available in the command palette (`Ctrl+P`):
+One AI command is available in the command palette (`Ctrl+P`):
 
 | Command | Description |
 |---------|-------------|
 | AI: Open Chat | Open the AI chat panel |
-| AI: Batch Rename Functions | Start batch auto-rename workflow |
-| AI: Generate Analysis Report | Generate analysis report |
-| AI: Scan Suspicious Functions | Bulk scan for vulnerabilities |
+
+Enhance and Explain have no palette entry — they are buttons on the decompile panel's **AI**
+sub-tab. The three commands that were here (Batch Rename Functions, Generate Analysis Report,
+Scan Suspicious Functions) went with their features.

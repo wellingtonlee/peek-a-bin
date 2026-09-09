@@ -11,9 +11,17 @@
  * There IS a renderer now (jsdom plus @testing-library/react, opted into per
  * file — see CLAUDE.md's "Component tests"), so these answers are additionally
  * checked in effect: `Modal.dom.test.tsx` drives the trap, the lock and the
- * naming through the real component, and the dialog suites beside it check
- * which arguments each dialog passes to `accidentalDismissAllowed` — the one
- * thing a pure test of the rule structurally cannot see. `focusableWithin` is
+ * naming through the real component.
+ *
+ * WHAT THAT SENTENCE USED TO CLAIM, AND NO LONGER CAN. It went on to say the
+ * dialog suites beside it check which arguments each dialog passes to
+ * `accidentalDismissAllowed` — "the one thing a pure test of the rule
+ * structurally cannot see". That was `AIDialogs.dom.test.tsx`, and it went with
+ * the batch-rename and AI-report dialogs at `peek-a-bin-1xc5`. The observation
+ * about pure tests stands; the coverage does not. Nothing now renders a caller
+ * that passes anything but `(false, false)` — see the note on
+ * `accidentalDismissAllowed` below for which of its rows are consequently inert.
+ * `focusableWithin` is
  * still the one function here that needs a real element; it is exercised only
  * through those renders, and under jsdom its `offsetParent` filter runs against
  * a stand-in (see `src/test/domSetup.ts`) rather than against a browser.
@@ -238,6 +246,16 @@ export function unlockBodyScroll(state: ScrollLockState): {
  *
  * The visible Cancel/Close button stays either way, so WCAG 2.1.2 is satisfied
  * regardless; this only decides whether the *accidental* dismissal is offered.
+ *
+ * THREE OF THE FOUR ROWS NOW HAVE NO CALLER THAT CAN PRODUCE THEM, measured at
+ * `peek-a-bin-1xc5` rather than read off the imports: gutting this function to
+ * `return true`, with its own unit test excluded, failed 4 tests before that
+ * change (all in `AIDialogs.dom.test.tsx`) and passes the whole suite after it.
+ * The batch-rename and AI-report dialogs were the only callers that ever passed
+ * a true; `DialogBoundary.tsx` still reaches `(false, false) → true`. The rows
+ * are kept — a rule worth stating is worth keeping written down, and a caller
+ * with real in-flight work is one feature away — but a green row here is now
+ * evidence about the rule, not about the app.
  */
 export function accidentalDismissAllowed(risk: {
   /** A request is running that closing would abandon or waste. */
