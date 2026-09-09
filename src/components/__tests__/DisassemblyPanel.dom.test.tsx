@@ -833,7 +833,7 @@ describe("the load's disassembly request", () => {
 });
 
 /**
- * `useDisassemblyKeyboard`'s `handleKeyDown` is a `useCallback` with a 37-entry
+ * `useDisassemblyKeyboard`'s `handleKeyDown` is a `useCallback` with a 38-entry
  * dependency array that CLAUDE.md calls "the behaviour", and
  * `hooks/__tests__/disasmHandlerDeps.test.ts` checks that array against the
  * function body over the TypeScript AST. Nothing had ever pressed a key.
@@ -963,6 +963,150 @@ describe("the keyboard", () => {
     const r = await mountReady();
     await user.keyboard("{ArrowDown}");
     expect(r.state().currentAddress).toBe(TEXT_VA);
+  });
+});
+
+/**
+ * The four bindings added at peek-a-bin-v3uh.12, all of which had no keyboard
+ * route at all before it: walking the function list needed the mouse or the
+ * sidebar, nothing reached the top or bottom of a section, and the search
+ * cursor advanced only while the search INPUT held focus — which is the one
+ * place `handleKeyDown` returns early.
+ */
+describe("function stepping, Home/End and the search cursor", () => {
+  /** SET_ADDRESS actions the view dispatched after `mark`. */
+  const movesSince = (r: Mounted, mark: number) =>
+    r.actions.slice(mark).filter((a) => a.type === "SET_ADDRESS");
+
+  it("steps to the next and previous function with `]` and `[`", async () => {
+    const user = userEvent.setup();
+    const r = await mountReady({ currentAddress: A[1] }); // inside FN_A, not at its head
+    pane().focus();
+    await user.keyboard("]");
+    expect(r.state().currentAddress).toBe(FN_B.address);
+    await user.keyboard("[[");
+    expect(r.state().currentAddress).toBe(FN_A.address);
+  });
+
+  it("does nothing at either end of the function list", async () => {
+    // CLAMPING IS A REFUSAL, NOT A RE-DISPATCH. `sortedFuncs[last].address` is
+    // below the cursor at every row of the last function but its first, so
+    // clamping by dispatching that address would move the cursor BACKWARDS on a
+    // forward key — `seekAddressableRow`'s own rule for the arrows, one binding
+    // over. The assertion is therefore on the ACTION LOG as well as on the
+    // address: a state check alone passes against a handler that re-dispatches
+    // the address it already holds, and at A[8] it would not even be the
+    // address it already holds.
+    const user = userEvent.setup();
+    const last = await mountReady({ currentAddress: A[8] }); // FN_B's `ret`
+    pane().focus();
+    let mark = last.actions.length;
+    await user.keyboard("]");
+    expect(movesSince(last, mark)).toEqual([]);
+    expect(last.state().currentAddress).toBe(A[8]);
+    last.unmount();
+
+    const first = await mountReady({ currentAddress: A[1] }); // inside FN_A
+    pane().focus();
+    mark = first.actions.length;
+    await user.keyboard("[[");
+    expect(movesSince(first, mark)).toEqual([]);
+    expect(first.state().currentAddress).toBe(A[1]);
+  });
+
+  it("jumps to the first and last row of the listing with Home and End", async () => {
+    const user = userEvent.setup();
+    const r = await mountReady({ currentAddress: A[5] });
+    pane().focus();
+    await user.keyboard("{Home}");
+    expect(r.state().currentAddress).toBe(A[0]);
+    await user.keyboard("{End}");
+    expect(r.state().currentAddress).toBe(A[INSNS.length - 1]);
+    // And back, so neither is a one-way key that happened to match the fixture.
+    await user.keyboard("{Home}");
+    expect(r.state().currentAddress).toBe(A[0]);
+  });
+
+  it("dispatches NOTHING for End on the last row", async () => {
+    // The discriminating control for going through `seekAddressableRow` rather
+    // than indexing `rows[rows.length - 1]` directly: the helper answers null
+    // when `to === from`, so the press is a true no-op. A bare index
+    // re-dispatches the address the cursor already holds — invisible in
+    // `currentAddress`, visible in the action log.
+    //
+    // HOME HAS NO SUCH CASE AND THAT IS A FACT ABOUT THE ROWS, not an omission:
+    // row 0 is FN_A's LABEL, which carries the same address as the instruction
+    // below it, and `binarySearchRows` resolves a shared address to the LAST
+    // row holding it — so a cursor at A[0] sits at index 1 and Home is a real
+    // one-row move. It is asserted positively above.
+    //
+    // The OTHER half of the helper — skipping an addressless row — is inert at
+    // both extremes and cannot be reached from here at all: a separator is the
+    // only row `rowAddress` answers null for, and `useDisassemblyRows` emits
+    // one only where a further instruction follows, so no listing it builds can
+    // begin or end with one. That fallback is covered as arithmetic in
+    // `hooks/__tests__/rowSearch.test.ts` instead.
+    const user = userEvent.setup();
+    const bottom = await mountReady({ currentAddress: A[INSNS.length - 1] });
+    pane().focus();
+    const mark = bottom.actions.length;
+    await user.keyboard("{End}");
+    expect(movesSince(bottom, mark)).toEqual([]);
+    expect(bottom.state().currentAddress).toBe(A[INSNS.length - 1]);
+  });
+
+  /**
+   * Open the search box, run `query` through the real debounced input, and hand
+   * focus back to the pane — which is what makes F3 reachable at all, since
+   * `handleKeyDown` returns above every binding while an INPUT is focused.
+   *
+   * `fireEvent.change` plus a real 200ms wait rather than `userEvent` under
+   * `vi.useFakeTimers()`: both `waitFor` and `userEvent` deadlock against fake
+   * timers, and the toolbar debounces the query by 150ms.
+   */
+  async function searchFor(query: string) {
+    const user = userEvent.setup();
+    const r = await mountReady();
+    pane().focus();
+    await user.keyboard("{Control>}f{/Control}");
+    const input = await screen.findByPlaceholderText("Search... (/regex/)");
+    fireEvent.change(input, { target: { value: query } });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    pane().focus();
+    return { user, r };
+  }
+
+  it("advances and reverses the match cursor with F3 and Shift+F3", async () => {
+    // `xor eax, eax` appears twice in the stream, at A[3] and A[7].
+    const { user, r } = await searchFor("xor");
+    expect(r.container.textContent).toContain("1/2");
+    const first = r.state().currentAddress;
+    expect([A[3], A[7]]).toContain(first);
+
+    await user.keyboard("{F3}");
+    const second = r.state().currentAddress;
+    expect(second).not.toBe(first);
+    expect([A[3], A[7]]).toContain(second);
+    expect(r.container.textContent).toContain("2/2");
+
+    // Wraps forward, then walks back — so this is a cursor, not a toggle.
+    await user.keyboard("{F3}");
+    expect(r.state().currentAddress).toBe(first);
+    await user.keyboard("{Shift>}{F3}{/Shift}");
+    expect(r.state().currentAddress).toBe(second);
+  });
+
+  it("is a no-op when the search found nothing", async () => {
+    const { user, r } = await searchFor("nosuchmnemonic");
+    expect(r.container.textContent).toContain("No matches");
+    const before = r.state().currentAddress;
+    const mark = r.actions.length;
+    await user.keyboard("{F3}");
+    await user.keyboard("{Shift>}{F3}{/Shift}");
+    expect(movesSince(r, mark)).toEqual([]);
+    expect(r.state().currentAddress).toBe(before);
   });
 });
 

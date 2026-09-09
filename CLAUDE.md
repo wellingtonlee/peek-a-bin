@@ -924,6 +924,20 @@ keeping the exemptions left the suite green. It now asserts the other direction 
 `build/guardShape.test.ts` — an instrument judging the audit, because a guard whose population has
 emptied passes by no longer looking (`peek-a-bin-w50c`).
 
+**…AND THE LIVENESS HALF WAS ONLY HALF THE HOLE: `DOC_ONLY_KEYS` NOW HAS A THIRD DIRECTION —
+*no entry may name a token `SHORTCUT_GROUPS` binds*.** Liveness asks whether the DOC still
+documents an exempted key. It cannot ask the thing that actually goes stale, which is whether the
+key is still **panel-less**: an exemption only *skips* a doc→panel check, so the moment a key
+acquires a panel binding its entry starts excusing an absence that is no longer an absence, and
+nothing anywhere fails. **Measured, not reasoned** — binding Home/End for the disassembly listing
+(`peek-a-bin-v3uh.12`) left the pre-existing guard **135/135 green** with both exemptions still
+claiming the keys "live only while the tab bar has focus", which by then was false prose no test
+could see. `"home"` and `"end"` are gone from the map; re-adding either reddens the new assertion
+**and nothing else**, which is the measurement. **`"left"`/`"right"` stay exactly as they are** —
+bare arrows are deliberately absent from the `?` panel because every other row there is a *global*
+binding (`peek-a-bin-w50c`), and Home/End left that population by acquiring a global spelling of
+their own, not by the rule changing.
+
 **Two AST guards pin the threshold-and-worker pattern and fail in OPPOSITE directions** —
 `analysis/__tests__/anomalyOffThread.test.ts` and `hooks/__tests__/fileMetricsOffThread.test.ts`.
 Dropping the anomaly threshold puts multi-second walks on the main thread for a large file;
@@ -2484,7 +2498,7 @@ mistake.
 
 - **A multi-line `biome-ignore` needs `//` on every line.** Biome only honours the directive on the line immediately preceding the offence, so put prose in a normal comment block above a single-line directive; getting it wrong leaves bare text inside JSX and breaks the parse.
 
-- **`DisassemblyView.tsx` is ~1620 lines even after the split — read it in chunks.** The two extracted seams are `hooks/useDisassemblyKeyboard.ts` (`handleKeyDown`, with a **37-entry** dependency array that *is* the behaviour — copy it verbatim if you move it, and keep the `//` comments explaining why a stable value is listed or a value omitted) and `hooks/useGraphSearch.ts`. That array only began doing anything when `useDisassemblySearch`'s return was memoised; before that `search` had a fresh identity every render and the `useCallback` memoised nothing. `hooks/__tests__/disasmHandlerDeps.test.ts` fails the build if it drifts in either direction. `CFGView` takes 23 props. Neither extraction has ever been rendered.
+- **`DisassemblyView.tsx` is ~1620 lines even after the split — read it in chunks.** The two extracted seams are `hooks/useDisassemblyKeyboard.ts` (`handleKeyDown`, with a **38-entry** dependency array that *is* the behaviour — copy it verbatim if you move it, and keep the `//` comments explaining why a stable value is listed or a value omitted) and `hooks/useGraphSearch.ts`. That array only began doing anything when `useDisassemblySearch`'s return was memoised; before that `search` had a fresh identity every render and the `useCallback` memoised nothing. `hooks/__tests__/disasmHandlerDeps.test.ts` fails the build if it drifts in either direction. `CFGView` takes 23 props. Neither extraction has ever been rendered.
 
 - **A callback declared later in a component cannot go in an earlier hook's dependency array** — it is a `const`, so the array hits its temporal dead zone at hook-call time. Not hypothetical: `handleKeyDown` closed over `handleDecompileToggle` (declared ~340 lines later) without it in the deps, so D opened the decompile panel but could not close it. The fix is a ref assigned *during render*; an effect is too late, because a keypress can be handled before effects flush.
 

@@ -53,6 +53,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { key: "Ctrl+P", action: "Command palette" },
       { key: "Ctrl+F", action: "Search disassembly" },
+      { key: "F3 / Shift+F3", action: "Next / previous search match" },
       { key: "/", action: "Search in graph mode" },
     ],
   },
@@ -68,6 +69,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { key: "\u2191 / \u2193", action: "Navigate instructions" },
       { key: "PgUp / PgDn", action: "Scroll 40 instructions" },
+      { key: "Home / End", action: "First / last instruction in the listing" },
+      { key: "[ / ]", action: "Previous / next function" },
       { key: "Space", action: "Toggle graph / linear view" },
       { key: "; (semicolon)", action: "Add / edit comment" },
       { key: "N", action: "Rename function" },

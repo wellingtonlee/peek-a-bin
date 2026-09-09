@@ -13,7 +13,7 @@ Press `?` in the app to see an interactive shortcuts panel.
 | `?` | Toggle keyboard shortcuts panel |
 | `1`–`8` | Switch tabs (Disasm, Headers, Sections, Imports, Exports, Hex, Strings, Resources) |
 | `←` / `→` | Move between view tabs — only while the tab bar itself has focus; press `Enter` or `Space` to switch to the focused tab |
-| `Home` / `End` | Move to the first or last view tab — only while the tab bar itself has focus |
+| `Home` / `End` | Move to the first or last view tab — only while the tab bar itself has focus. Everywhere else these keys belong to the disassembly listing (see below) |
 | `Alt+Left` | Navigate back in history |
 | `Alt+Right` | Navigate forward in history |
 | `Alt+H` | Recent addresses dropdown (searchable) |
@@ -25,6 +25,7 @@ Press `?` in the app to see an interactive shortcuts panel.
 |-----|--------|
 | `Ctrl+F` | Search disassembly (supports `/regex/` and `/regex/i` syntax) |
 | `/` | Search in graph mode (opens search overlay in CFG view) |
+| `F3` / `Shift+F3` | Jump to the next or previous search match, without refocusing the search box |
 
 ## Disassembly
 
@@ -32,6 +33,8 @@ Press `?` in the app to see an interactive shortcuts panel.
 |-----|--------|
 | `Arrow Up/Down` | Navigate instructions |
 | `PgUp` / `PgDn` | Scroll 40 instructions |
+| `Home` / `End` | Jump to the first or last instruction in the listing — unless focus is inside the view tab bar, which owns these keys for itself |
+| `[` / `]` | Move to the previous or next function. A step off either end of the function list does nothing |
 
 ## Clipboard
 
@@ -94,11 +97,12 @@ All annotation shortcuts (`B`, `N`, `;`) and interaction features (context menus
   from `SHORTCUT_GROUPS` in `src/components/KeyboardShortcuts.tsx`, which is the
   single source of truth — update it and this file together
 - The view tabs are a WAI-ARIA tablist: the whole bar is a single `Tab` stop, and
-  `←`/`→`/`Home`/`End` move between the eight tabs **once focus is inside it**. Those
-  four keys do nothing anywhere else — the disassembly view owns the unmodified
-  arrows — which is why they are documented here but not listed in the `?` panel,
-  where every other entry is a global binding. `1`–`8` switch tabs from anywhere and
-  need no focus
+  `←`/`→`/`Home`/`End` move between the eight tabs **once focus is inside it**. `←`/`→`
+  do nothing anywhere else — the disassembly view owns the unmodified arrows — which is
+  why they are documented here but not listed in the `?` panel, where every other entry
+  is a global binding. `Home`/`End` are listed there, because outside the bar they are a
+  binding of the disassembly listing; the two scopes never overlap, since only one of
+  them can hold focus. `1`–`8` switch tabs from anywhere and need no focus
 - Moving between tabs with the arrows moves FOCUS only; `Enter` or `Space` selects the
   focused tab. Two of the eight panes are code-split and mount on first use, so
   selecting one on the way past would load and permanently mount them both

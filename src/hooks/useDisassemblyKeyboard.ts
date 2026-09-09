@@ -31,6 +31,7 @@ import type { DisasmFunction, Instruction } from "../disasm/types";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { copyText } from "../utils/clipboard";
+import { binarySearchFunc } from "./useDerivedState";
 import { type DisplayRow, rowAddress, seekAddressableRow } from "./useDisassemblyRows";
 import type { UseDisassemblySearchResult } from "./useDisassemblySearch";
 import type { ContextMenuState } from "./useInsnContextMenu";
@@ -67,6 +68,8 @@ export interface UseDisassemblyKeyboardArgs {
   pe: PEFile | null;
   currentIndex: number;
   currentFunc: DisasmFunction | null;
+  /** Every detected function by ascending address — the `[` / `]` step list. */
+  sortedFuncs: DisasmFunction[];
   virtualizer: Virtualizer<HTMLDivElement, Element>;
   viewMode: "linear" | "graph";
   graphPan: { x: number; y: number };
@@ -116,6 +119,7 @@ export function useDisassemblyKeyboard({
   pe,
   currentIndex,
   currentFunc,
+  sortedFuncs,
   virtualizer,
   viewMode,
   graphPan,
@@ -346,6 +350,71 @@ export function useDisassemblyKeyboard({
         return;
       }
 
+      // `[` / `]` — step to the previous / next detected function. Walking the
+      // function list is the core loop of triage and had no keyboard binding at
+      // all: it needed the mouse, or the sidebar's own list.
+      //
+      // `binarySearchFunc` is the ONE declaration of "which function contains
+      // this address" and is reused rather than re-derived — but it answers
+      // `null` in the padding BETWEEN two functions, which is a position no
+      // index names. There the base is the boundary itself, so `]` reaches the
+      // function above the cursor and `[` the one below it, rather than
+      // skipping whichever one the cursor just left.
+      //
+      // A step off either end does NOTHING rather than re-dispatching the
+      // terminal function's address: that address is frequently BELOW the
+      // cursor (anywhere but the function's first row), so clamping by
+      // dispatching would move the cursor backwards on a forward key. Same rule
+      // `seekAddressableRow`'s docstring states for the arrows — a downward key
+      // must never move the cursor up.
+      if (e.key === "[" || e.key === "]") {
+        e.preventDefault();
+        if (sortedFuncs.length === 0) return;
+        const step = e.key === "]" ? 1 : -1;
+        const containing = binarySearchFunc(sortedFuncs, currentAddress);
+        const idx = containing
+          ? sortedFuncs.indexOf(containing)
+          : sortedFuncs.filter((f) => f.address <= currentAddress).length - (step > 0 ? 1 : 0);
+        const target = idx + step;
+        if (target >= 0 && target < sortedFuncs.length) {
+          dispatch({ type: "SET_ADDRESS", address: sortedFuncs[target].address });
+        }
+        return;
+      }
+
+      // Home / End — the first and last addressable row of the listing. Until
+      // now these keys existed only inside the view tablist, so there was no
+      // keyboard route to the top or bottom of a section.
+      //
+      // `seekAddressableRow` rather than `rows[0]` / `rows[rows.length - 1]`
+      // for the reason the arrow arms use it, plus one this pair depends on:
+      // it answers `null` when `to === from`, so pressing Home on the first row
+      // dispatches NOTHING instead of re-setting the address the cursor already
+      // holds. (Its skip half is inert here — a separator is the only
+      // addressless row and `useDisassemblyRows` emits one only where a further
+      // instruction follows, so neither extreme of a real listing can be one.)
+      if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        const target = e.key === "Home" ? 0 : rows.length - 1;
+        const idx = seekAddressableRow(rows, currentIndex, target);
+        const addr = idx === null ? null : rowAddress(rows[idx]);
+        if (addr !== null) dispatch({ type: "SET_ADDRESS", address: addr });
+        return;
+      }
+
+      // F3 / Shift+F3 — advance / reverse the search match cursor. Both already
+      // existed behind the toolbar's arrow buttons and were reachable from the
+      // keyboard only while the search input itself had focus, which is the one
+      // place these presses cannot arrive (the INPUT guard above returns first).
+      // `preventDefault` because F3 is find-again in the browser chrome.
+      if (e.key === "F3") {
+        e.preventDefault();
+        if (search.searchMatches.length === 0) return;
+        if (e.shiftKey) search.handleSearchPrev();
+        else search.handleSearchNext();
+        return;
+      }
+
       // Graph mode arrow key navigation
       if (
         viewMode === "graph" &&
@@ -430,6 +499,7 @@ export function useDisassemblyKeyboard({
       renames,
       pe,
       currentFunc,
+      sortedFuncs,
       virtualizer,
       callStack,
       viewMode,

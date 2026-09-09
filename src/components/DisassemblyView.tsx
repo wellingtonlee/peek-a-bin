@@ -692,6 +692,7 @@ export function DisassemblyView() {
     pe,
     currentIndex,
     currentFunc,
+    sortedFuncs,
     virtualizer,
     viewMode,
     graphPan,

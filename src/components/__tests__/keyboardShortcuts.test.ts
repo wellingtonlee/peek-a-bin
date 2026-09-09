@@ -30,17 +30,21 @@ const DOC = readFileSync(DOC_PATH, "utf-8");
  */
 const DOC_ONLY_KEYS = new Map([
   ["?", 'rendered in the panel footer ("Press ? to toggle this panel"), not as a row'],
-  // The view tablist's own keys (peek-a-bin-w50c). WIDGET-SCOPED, not global:
+  // The view tablist's own arrows (peek-a-bin-w50c). WIDGET-SCOPED, not global:
   // they are live only while focus is inside the tab bar, and the unmodified
   // arrows belong to the disassembly view everywhere else. Every other row of
   // the `?` panel is a binding that works from anywhere, so listing these there
-  // would state something false about four very common keys — and the same job
+  // would state something false about two very common keys — and the same job
   // already has a global spelling in the panel, `1`-`9`. Documented in
   // docs/keyboard.md, where the row can carry the scope in its own description.
+  //
+  // `home` and `end` USED to sit here for the same reason and no longer do:
+  // peek-a-bin-v3uh.12 bound them in the disassembly listing, so the `?` panel
+  // does list them and the exemption became a false claim. Nothing failed when
+  // it did — see the third direction below, which is the guard that now catches
+  // that.
   ["left", "view tablist arrow navigation: live only while the tab bar has focus"],
   ["right", "view tablist arrow navigation: live only while the tab bar has focus"],
-  ["home", "view tablist Home: live only while the tab bar has focus"],
-  ["end", "view tablist End: live only while the tab bar has focus"],
 ]);
 
 /** Spelling differences that survive canonicalization, mapped onto one token. */
@@ -289,6 +293,38 @@ describe("DOC_ONLY_KEYS", () => {
         `shortcut is gone and the exemption should go with it, or a doc row was ` +
         `deleted by accident.`,
     ).toBe(true);
+  });
+
+  /**
+   * THE OTHER HALF OF THE SAME HOLE, and it was open for real.
+   *
+   * The liveness check above asks whether the DOC still documents an exempted
+   * key. It cannot ask the question that actually goes stale, which is whether
+   * the key is still PANEL-LESS. An exemption only ever *skips* a doc→panel
+   * check, so the moment a key acquires a `SHORTCUT_GROUPS` binding, its entry
+   * here starts excusing an absence that is no longer an absence — and every
+   * assertion in this file stays green, including the liveness one, because the
+   * doc row it names is still there.
+   *
+   * That is exactly what `home` and `end` did at peek-a-bin-v3uh.12: binding
+   * Home/End for the disassembly listing moved no row in this suite, and the
+   * stated reason ("live only while the tab bar has focus") became prose no
+   * test could see was false. Re-adding either token to DOC_ONLY_KEYS reddens
+   * this assertion and nothing else — which is the measurement that the hole
+   * was real rather than theoretical.
+   */
+  it.each([...DOC_ONLY_KEYS.entries()])('"%s" is genuinely panel-less', (token, reason) => {
+    const panelTokens = new Set(panelEntries.flatMap((e) => canonicalKeys(e.key)));
+    const binder = panelEntries.find((e) => canonicalKeys(e.key).includes(token));
+
+    expect(
+      panelTokens.has(token),
+      `DOC_ONLY_KEYS excuses "${token}" from the "?" panel because it is ${reason} — but ` +
+        `SHORTCUT_GROUPS now binds it: "${binder?.key}" (${binder?.category} — ` +
+        `${binder?.action}). The exemption is stale, and it is a SILENT staleness: an ` +
+        `exemption only skips a check, so nothing else in this file can fail because of ` +
+        `it. Delete the entry.`,
+    ).toBe(false);
   });
 });
 

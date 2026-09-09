@@ -3,11 +3,11 @@
  * keyboard handler.
  *
  * WHY THIS EXISTS: `useDisassemblySearch` returns one object that is a single
- * entry in `handleKeyDown`'s 37-entry dependency array. While that object was a
+ * entry in `handleKeyDown`'s 38-entry dependency array. While that object was a
  * bare literal it had a fresh identity every render, so `handleKeyDown`'s
  * `useCallback` memoised nothing and every other entry in its array was inert —
  * a missing entry was harmless because the callback was rebuilt regardless.
- * Memoising the search object (peek-a-bin-imm) flipped all 37 entries from
+ * Memoising the search object (peek-a-bin-imm) flipped all of its entries from
  * inert to load-bearing at once. From then on a param that is read but not
  * declared freezes at the value it had when the callback was last rebuilt,
  * which is peek-a-bin-ehv exactly (D opened the decompile panel but could not
@@ -156,7 +156,7 @@ describe("useDisassemblySearch's returned object", () => {
       isMemoisedReturn,
       "useDisassemblySearch must return a useMemo. Returning a bare object literal gives " +
         "`search` a fresh identity every render, which silently makes handleKeyDown's " +
-        "useCallback in useDisassemblyKeyboard.ts memoise nothing and turns all 37 of its " +
+        "useCallback in useDisassemblyKeyboard.ts memoise nothing and turns all of its " +
         "dependency entries back into decoration (peek-a-bin-imm).",
     ).toBe(true);
   });
