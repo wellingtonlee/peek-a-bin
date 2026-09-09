@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { parseSecurityDirectory } from "../authenticode";
 import {
+  IMAGE_FILE_MACHINE_AMD64,
   IMAGE_SCN_CNT_CODE,
   IMAGE_SCN_CNT_INITIALIZED_DATA,
   IMAGE_SCN_MEM_EXECUTE,
@@ -27,7 +28,12 @@ import {
   MAX_IMPORT_FUNCTIONS,
   parsePE,
 } from "../parser";
-import { MAX_ARM64_UNWIND_CODE_BYTES, MAX_PDATA_ENTRIES, parsePdata } from "../pdata";
+import {
+  MAX_ARM64_UNWIND_CODE_BYTES,
+  MAX_PDATA_ENTRIES,
+  MAX_SCOPE_TABLE_ENTRIES,
+  parsePdata,
+} from "../pdata";
 import { isTruncatedValue, TRUNCATION_MARKER } from "../truncation";
 import { buildMinimalPE32, buildMinimalPE64, type SectionDef } from "./fixtures";
 
@@ -1523,6 +1529,157 @@ describe("malformed PE handling", () => {
         const rs = unwindFlood(8 * 4, 8 * 4);
         expect(rs).toHaveLength(4);
         expect(rs.every((r) => r.arm64Frame)).toBe(true);
+      });
+    });
+
+    describe("x64 .pdata scope table", () => {
+      /**
+       * `records` x64 `RUNTIME_FUNCTION`s all naming ONE `UNWIND_INFO` whose
+       * language-specific data claims `count` 16-byte scope records.
+       *
+       * THE PRODUCT IS THE POINT, and it is `peek-a-bin-tmo9`'s shape exactly:
+       * `Count` is a `uint32` from the file, the entry count is a second
+       * file-supplied number, and every entry may name the same record — so the
+       * cost is `records x Count x 16` unless BOTH factors are bounded.
+       * `MAX_PDATA_ENTRIES` bounds the first; the section extent and
+       * `MAX_SCOPE_TABLE_ENTRIES` bound the second.
+       *
+       * `entries: "valid"` writes `count` regions that each pass checks (2),
+       * (3) and (4) — ascending, inside the function, resolvable handler — so
+       * that the bound under test is the only thing that can refuse the table.
+       * Without that the degenerate-region test refuses a zero-filled overrun
+       * too and the assertion proves only that *something* said no.
+       */
+      function scopeFlood(opts: {
+        records: number;
+        count: number;
+        xdataBytes: number;
+        entries?: "valid" | "zero";
+      }) {
+        // The guarded function must be long enough to contain `count` regions
+        // at a stride of 4, or check (2) refuses them for leaving it.
+        const textBytes = opts.count * 4 + 16;
+        const pdataBytes = opts.records * 12;
+        // RVAs are DERIVED from the sizes, not written as round literals: at
+        // 100,000 records `.pdata`'s virtual extent is 1.2 MB, so fixed RVAs
+        // 0x100000/0x200000 overlap and `.xdata`'s RVA resolves inside `.pdata`
+        // — which silently costs the UNWIND_INFO read the test is about.
+        const page = (n: number) => Math.ceil(n / 0x1000) * 0x1000;
+        const TEXT_RVA = 0x2000;
+        const PDATA_RVA = page(TEXT_RVA + textBytes);
+        const XDATA_RVA = page(PDATA_RVA + pdataBytes);
+        const textAt = 0x400;
+        const pdataAt = textAt + textBytes;
+        const xdataAt = pdataAt + pdataBytes;
+
+        const sect = (name: string, rva: number, at: number, len: number) => ({
+          name,
+          virtualSize: len,
+          virtualAddress: rva,
+          sizeOfRawData: len,
+          pointerToRawData: at,
+          pointerToRelocations: 0,
+          pointerToLinenumbers: 0,
+          numberOfRelocations: 0,
+          numberOfLinenumbers: 0,
+          characteristics: 0x40000040,
+        });
+        const sections = [
+          sect(".text", TEXT_RVA, textAt, textBytes),
+          sect(".pdata", PDATA_RVA, pdataAt, pdataBytes),
+          sect(".xdata", XDATA_RVA, xdataAt, opts.xdataBytes),
+        ];
+        // THE BUFFER IS SIZED TO HOLD THE WHOLE CLAIMED TABLE while `xdataBytes`
+        // sizes only the SECTION, so that the section extent is the operative
+        // bound and removing it is a control that discriminates. Sized to
+        // `xdataBytes` instead, the buffer refuses the same read and the section
+        // bound could be deleted with every row still green.
+        const claimed = opts.entries === "valid" ? 12 + 4 + opts.count * 16 + 16 : 0;
+        const buf = new ArrayBuffer(xdataAt + Math.max(opts.xdataBytes, claimed));
+        const dv = new DataView(buf);
+
+        for (let i = 0; i < opts.records; i++) {
+          const o = pdataAt + i * 12;
+          dv.setUint32(o, TEXT_RVA, true);
+          dv.setUint32(o + 4, TEXT_RVA + textBytes, true);
+          dv.setUint32(o + 8, XDATA_RVA, true); // all naming ONE record
+        }
+
+        dv.setUint8(xdataAt, ((0x1 & 0x1f) << 3) | 1); // version 1, EHANDLER
+        dv.setUint8(xdataAt + 1, 0x04);
+        dv.setUint8(xdataAt + 2, 0x00); // no unwind codes: handler RVA at +4
+        dv.setUint32(xdataAt + 4, TEXT_RVA, true); // handler, resolvable
+        dv.setUint32(xdataAt + 8, opts.count, true); // Count
+        if (opts.entries === "valid") {
+          for (let i = 0; i < opts.count; i++) {
+            const o = xdataAt + 12 + i * 16;
+            if (o + 16 > buf.byteLength) break;
+            dv.setUint32(o, TEXT_RVA + i * 4, true);
+            dv.setUint32(o + 4, TEXT_RVA + i * 4 + 2, true);
+            dv.setUint32(o + 8, TEXT_RVA, true);
+            dv.setUint32(o + 12, 0, true);
+          }
+        }
+        return parsePdata(
+          buf,
+          { virtualAddress: PDATA_RVA, size: pdataBytes },
+          sections,
+          IMAGE_FILE_MACHINE_AMD64,
+        );
+      }
+
+      it("bounds the table by the SECTION, once per record", { timeout: 60_000 }, () => {
+        // 20,000 records each claiming 60,000 scope records — under
+        // MAX_SCOPE_TABLE_ENTRIES, so the cap does not fire and the section
+        // extent is the only thing left. The 960 KB of entries the count claims
+        // ARE in the buffer and every one of them is individually valid, so
+        // with the section bound removed this fixture admits 20,000 tables of
+        // 60,000 entries: 1.2 BILLION `ScopeTableEntry` objects out of a 2.4 MB
+        // file, in `parsePE`, on the main thread. Measured: the control does not
+        // finish inside the 60 s timeout.
+        const rs = scopeFlood({
+          records: 20_000,
+          count: 60_000,
+          xdataBytes: 0x1000,
+          entries: "valid",
+        });
+        expect(rs).toHaveLength(20_000);
+        // Not one table admitted, and the records themselves are intact — a
+        // refusal costs the scope table and nothing else.
+        expect(rs.some((r) => r.scopeTable !== undefined)).toBe(false);
+        expect(rs.every((r) => r.handlerAddress === 0x2000)).toBe(true);
+      });
+
+      it("caps Count even where the section would supply it", { timeout: 60_000 }, () => {
+        // The backstop, isolated: `.xdata` is made large enough that the extent
+        // test passes, and every entry is individually valid, so
+        // MAX_SCOPE_TABLE_ENTRIES is the only thing left to refuse the table.
+        const over = 4 + (MAX_SCOPE_TABLE_ENTRIES + 1) * 16 + 16;
+        expect(
+          scopeFlood({
+            records: 1,
+            count: MAX_SCOPE_TABLE_ENTRIES + 1,
+            xdataBytes: over,
+            entries: "valid",
+          })[0].scopeTable,
+        ).toBeUndefined();
+        // LIVENESS, and the half that makes the assertion above non-vacuous: one
+        // fewer entry is at the cap and IS read whole, out of the same section.
+        expect(
+          scopeFlood({
+            records: 1,
+            count: MAX_SCOPE_TABLE_ENTRIES,
+            xdataBytes: over,
+            entries: "valid",
+          })[0].scopeTable,
+        ).toHaveLength(MAX_SCOPE_TABLE_ENTRIES);
+      });
+
+      it("refuses a Count of 0xFFFFFFFF without reading an entry", { timeout: TIMEOUT }, () => {
+        // `count * 16` is 68 GB. The cap refuses it at the count word, so
+        // nothing allocates and nothing is read.
+        const rs = scopeFlood({ records: 4, count: 0xffffffff, xdataBytes: 0x1000 });
+        expect(rs.every((r) => r.scopeTable === undefined)).toBe(true);
       });
     });
 

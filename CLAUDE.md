@@ -110,7 +110,10 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   that string is a *wire format* the parser writes and `computeImphash` reads back, not a label. `sections.ts` owns `findCodeSection`/`isCodeSection`/`dataSectionRanges` (the
   `.text`-or-executable predicate, previously written at seven sites). `buildSectionIndex()` +
   `rvaToFileOffsetIndexed()` in `parser.ts` are the batch form of `rvaToFileOffset`.
-  `arm64Unwind.ts` decodes both ARM64 unwind encodings.
+  `arm64Unwind.ts` decodes both ARM64 unwind encodings. `pdata.ts`'s `readScopeTable` is the
+  **one declaration of the `__C_specific_handler` scope-table reading** and of the structural
+  check that decides whether the language-specific data is one at all — see the gotcha; nothing
+  consumes `RuntimeFunction.scopeTable` yet.
 - **`disasm/`** — engine, types, CFG, operand parsing, stack analysis, signatures.
   - `capstoneWindow.ts` owns **every** call into the Capstone decoder; nothing else may call
     `cs.disasm`. `capstoneReader.ts` is the decoder underneath — a hand-written `cs_insn`
@@ -2107,6 +2110,40 @@ mistake.
   and the debounce plus next/prev navigation are their own bead — the debounce brings the two
   measured jsdom traps (fake timers deadlock `waitFor`/`userEvent`; advance SHORT of the boundary
   first or the control is inert, as it came back twice). (`peek-a-bin-v3uh.7`)
+- **THE x64 `.pdata` LANGUAGE-SPECIFIC DATA IS NOT SELF-DESCRIBING, SO THE SCOPE TABLE IS
+  PUBLISHED ONLY BEHIND A FOUR-PART STRUCTURAL CHECK.** `UNWIND_INFO` says only *that* a handler
+  exists and gives its RVA; the bytes after it are whatever **that handler's** convention says, and
+  the handler has no symbol in a stripped image. Three conventions share the slot in ordinary MSVC
+  output — `__C_specific_handler` (`uint32 Count` + `Count` x `{Begin, End, Handler, JumpTarget}`,
+  all RVAs), `__GSHandlerCheck` (one `uint32` cookie frame offset) and `__CxxFrameHandler3` (one
+  `uint32` `FuncInfo` RVA) — so reading the first word as a `Count` reports a cookie offset of 0x30
+  as "48 guarded regions". `readScopeTable` (`pe/pdata.ts`) admits a table only when: (1) `Count >=
+  1`, at or under `MAX_SCOPE_TABLE_ENTRIES`, and `4 + Count * 16` fits inside the containing
+  section's raw extent and the buffer; (2) every region has `begin < end` and lies inside
+  `[rf.beginAddress, rf.endAddress)`; (3) `begin` is non-decreasing; (4) `handler` is 0, 1 or a
+  resolvable RVA and `jumpTarget` is 0 or inside the function. Check (2) is what makes a wrong
+  reading almost unpassable — a `__try` region is lexically inside its function by construction.
+  **Semantics the consumer depends on**: `handler == 1` is the FORMAT'S OWN spelling of
+  `EXCEPTION_EXECUTE_HANDLER` and must never be resolved as an address; `jumpTarget == 0` marks the
+  entry a `__finally` whose funclet is `handler`; otherwise `handler` is the **filter function's**
+  RVA and `jumpTarget` the `__except` body's. **`undefined` means "the record did not say", NEVER
+  "there are no regions"** (`arm64Frame`'s rule), and a failure yields **nothing rather than a
+  short table** — `peek-a-bin-tmo9` pointed the other way, since a caller cannot tell a two-region
+  table from the first two regions of a five-region one and would draw the `__try` around the wrong
+  span. The bound is that same product class in the file already bitten by it: `records x Count x
+  16`, so the **section** is the primary bound (`sectionRawLimitForRva` over `unwindInfoAddress` —
+  *not* `parseX64Pdata`'s `limit`, which bounds `.pdata` while the record is in `.xdata`) with
+  `MAX_SCOPE_TABLE_ENTRIES` the backstop. **THE CENSUS IS THE OTHER HALF OF THIS COMMIT AND IS IN
+  `docs/gotchas.md`**, stamped `0870e14`: of t64's 50 handler-bearing records 30 validate, 2 are
+  UHANDLER-only and **18 are the `/GS` population** (w64: 46 / 28 / 2 / 16), the tables carry 34 and
+  32 entries with a maximum of 2, and **31 of t64's 34 entries are `__finally`** — the shape any
+  consumer has to be built around. Two independent corroborations: the 50 and 46 are exactly the
+  functions that emit `__try`, and the 18 are exactly the 18 t64 functions found carrying a `/GS`
+  cookie xor. **The two corpus-level controls are INERT and reported**: the four checks are
+  mutually redundant on well-formed output (t64's 20 refusals split 12 by check (1), 6 by (2), 2 by
+  (3), and removing (2) sends its 6 to (4)), so the discriminating form is the unit tests, where all
+  twelve controls redden — publishing `[]` instead of `undefined` reddens 11. Nothing consumes the
+  field, so output is byte-identical **by construction**. (`peek-a-bin-j4uk.4`)
 
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 

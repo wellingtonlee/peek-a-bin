@@ -6,7 +6,7 @@ import {
   type SectionIndex,
   sectionRawLimitForRva,
 } from "./parser";
-import type { DataDirectory, RuntimeFunction, SectionHeader } from "./types";
+import type { DataDirectory, RuntimeFunction, ScopeTableEntry, SectionHeader } from "./types";
 
 /** UNWIND_INFO flag: the record carries an exception handler. */
 const UNW_FLAG_EHANDLER = 0x1;
@@ -41,6 +41,38 @@ const ARM64_ENTRY_SIZE = 8;
  * the file itself provides and cannot inflate beyond the image.
  */
 export const MAX_PDATA_ENTRIES = 1 << 20;
+
+/** One `__C_specific_handler` scope-table entry: four `uint32` RVAs. */
+const SCOPE_ENTRY_SIZE = 16;
+
+/**
+ * The most `__C_specific_handler` scope-table entries that will be read out of
+ * one `UNWIND_INFO` record's language-specific data.
+ *
+ * **THE BACKSTOP FOR EXACTLY THE `peek-a-bin-tmo9` PRODUCT CLASS, IN THE FILE
+ * THAT HAS ALREADY BEEN BITTEN BY IT.** The table's `Count` is a `uint32` the
+ * file supplies, multiplied by 16 bytes, once per handler-bearing `.pdata`
+ * record — and the record count is itself file-supplied, so the cost is
+ * `records x Count x 16` unless both are bounded. `MAX_PDATA_ENTRIES` bounds
+ * the first factor; this bounds the second.
+ *
+ * **The primary bound is the section, not this number.** `readScopeTable` is
+ * given the raw extent of the section holding the `UNWIND_INFO` record
+ * (`sectionRawLimitForRva`), and a `Count` whose entries do not fit inside it
+ * yields **no table at all** rather than a clamped one — see `readScopeTable`
+ * for why a short read is not an option here. So on a well-formed image this
+ * constant is never the operative bound, and on a crafted one the section bound
+ * has already refused before it is consulted.
+ *
+ * 2^16 is far above anything a compiler emits: an entry is one `__try` region,
+ * so a table of 65,536 of them is a function with 65,536 lexical `__try`
+ * blocks. Measured over the corpus at `0870e14`, the largest real table on
+ * either x64 binary carries **2** entries (t64: 30 valid tables, 34 entries in
+ * total, 26 of the tables holding one; w64: 28 and 32) — more than four orders
+ * of magnitude of headroom. At 16 bytes an entry the cap admits a 1 MiB table,
+ * which the section bound would have to agree to as well.
+ */
+export const MAX_SCOPE_TABLE_ENTRIES = 1 << 16;
 
 /**
  * The most `.xdata` unwind-code bytes that will be decoded across one whole
@@ -234,6 +266,129 @@ function entryCountFor(offset: number, size: number, limit: number, entrySize: n
 }
 
 /**
+ * Read the `__C_specific_handler` scope table out of an x64 `UNWIND_INFO`
+ * record's language-specific data, or answer `undefined`.
+ *
+ * `tableOffset` is the file offset of the data itself — the four bytes
+ * immediately after the handler RVA. For `__C_specific_handler` that is:
+ *
+ * ```c
+ * struct { uint32 Count; struct { uint32 Begin, End, Handler, JumpTarget; } ScopeRecord[Count]; }
+ * ```
+ *
+ * all four members being RVAs. See {@link ScopeTableEntry} for what `Handler`
+ * and `JumpTarget` mean, which is not simply "two more addresses":
+ * `Handler === 1` is the format's own spelling of `EXCEPTION_EXECUTE_HANDLER`,
+ * and `JumpTarget === 0` marks the entry a `__finally` whose funclet is
+ * `Handler`; otherwise `Handler` is the **filter function's** RVA and
+ * `JumpTarget` the `__except` body's.
+ *
+ * **THE LANGUAGE-SPECIFIC DATA IS NOT SELF-DESCRIBING, AND THAT IS THE WHOLE
+ * PROBLEM THIS FUNCTION SOLVES.** `UNWIND_INFO` says only that a handler exists
+ * and gives its RVA; the bytes after it are whatever *that* handler's
+ * convention says, and the handler is a linker-chosen address with no symbol in
+ * a stripped image. Three conventions share the slot in ordinary MSVC output:
+ *
+ * | handler                | language-specific data                        |
+ * |------------------------|-----------------------------------------------|
+ * | `__C_specific_handler` | `Count` + `Count` x 16-byte scope records      |
+ * | `__GSHandlerCheck`     | a single `uint32` cookie frame offset          |
+ * | `__CxxFrameHandler3`   | a single `uint32` `FuncInfo` RVA               |
+ *
+ * and the combining forms (`__GSHandlerCheck_SEH`, `__GSHandlerCheck_EH`) put a
+ * scope table *before* the cookie offset. So reading the first word as a
+ * `Count` unconditionally would hand a caller a cookie frame offset — a small
+ * integer like 0x28 — as "40 guarded regions", and a `FuncInfo` RVA as
+ * hundreds of thousands of them.
+ *
+ * **The check below is therefore a self-validating structural test, and its
+ * value is that the format's own redundancy makes it decidable WITH NO
+ * SYMBOLS.** Four parts, any failure withholding the table entirely:
+ *
+ * 1. `Count >= 1`, at or below {@link MAX_SCOPE_TABLE_ENTRIES}, and
+ *    `4 + Count * 16` fitting inside both the containing section's raw extent
+ *    and the buffer. This is the part that refuses `__GSHandlerCheck` and
+ *    `__CxxFrameHandler3`: a cookie offset read as a count claims a table
+ *    tens of times larger than the whole `.xdata` section, and a `FuncInfo`
+ *    RVA claims one larger than the image. **It is also the bound**, which is
+ *    why it is not merely a plausibility test — see
+ *    {@link MAX_SCOPE_TABLE_ENTRIES}.
+ * 2. Every region satisfies `begin < end` and lies inside
+ *    `[beginAddress, endAddress)` — the extent of the very record the table
+ *    hangs off. A `__try` region is lexically inside its function by
+ *    construction, so this is a property of correct output rather than a
+ *    heuristic, and it is what makes a table read out of the wrong bytes
+ *    almost impossible to pass: the regions would have to be four RVAs that
+ *    happen to land inside one 100-byte function.
+ * 3. `begin` is non-decreasing across entries. The compiler emits scope
+ *    records in address order, so a table that is not sorted is not a table.
+ * 4. `handler` is 0, 1, or an RVA the section table resolves, and `jumpTarget`
+ *    is 0 or inside the function. The 0-and-1 exemptions are the format's, not
+ *    a slack allowance.
+ *
+ * **A FAILURE YIELDS NOTHING, NEVER A SHORT TABLE**, and that asymmetry is
+ * deliberate. `peek-a-bin-tmo9`'s lesson in the other direction — a walk cut
+ * short at a bound is shaped exactly like a complete short list — applies with
+ * full force here: a caller cannot tell a two-region table from the first two
+ * regions of a five-region one, and it would draw a `__try` around the wrong
+ * span. `undefined` says "the record did not say", which is a claim a caller
+ * can act on honestly; a truncated table is a claim that is simply wrong. Hence
+ * no `TRUNCATION_MARKER`-style admission either: there is no value to spell it
+ * into.
+ *
+ * **What this function does NOT establish**, so a caller does not over-read it:
+ * a table that validates is *structurally* a `__C_specific_handler` table, not
+ * provably one. Nothing here reads the handler's code, and a
+ * `__GSHandlerCheck_SEH` record carries a genuine scope table followed by a
+ * cookie offset the check neither reaches nor needs. Conversely a *withheld*
+ * table is not evidence that the function has no `__try`: it is the ordinary
+ * answer for every `/GS`-only and C++ record in the image.
+ */
+function readScopeTable(
+  view: DataView,
+  tableOffset: number,
+  beginAddress: number,
+  endAddress: number,
+  sectionLimit: number,
+  sectionIndex: SectionIndex,
+): ScopeTableEntry[] | undefined {
+  // (1) The count and the extent it implies.
+  const limit = Math.min(
+    view.byteLength,
+    sectionLimit >= 0 ? sectionLimit : Number.POSITIVE_INFINITY,
+  );
+  if (tableOffset < 0 || tableOffset + 4 > limit) return undefined;
+  const count = view.getUint32(tableOffset, true);
+  if (count < 1 || count > MAX_SCOPE_TABLE_ENTRIES) return undefined;
+  if (tableOffset + 4 + count * SCOPE_ENTRY_SIZE > limit) return undefined;
+
+  const entries: ScopeTableEntry[] = [];
+  let previousBegin = 0;
+  for (let i = 0; i < count; i++) {
+    const off = tableOffset + 4 + i * SCOPE_ENTRY_SIZE;
+    const begin = view.getUint32(off, true);
+    const end = view.getUint32(off + 4, true);
+    const handler = view.getUint32(off + 8, true);
+    const jumpTarget = view.getUint32(off + 12, true);
+
+    // (2) The region is a region, and it is inside the function it describes.
+    if (begin >= end) return undefined;
+    if (begin < beginAddress || end > endAddress) return undefined;
+    // (3) Address order.
+    if (begin < previousBegin) return undefined;
+    previousBegin = begin;
+    // (4) The two fields that are addresses only sometimes.
+    if (handler > 1 && rvaToFileOffsetIndexed(handler, sectionIndex) < 0) return undefined;
+    if (jumpTarget !== 0 && (jumpTarget < beginAddress || jumpTarget >= endAddress)) {
+      return undefined;
+    }
+
+    entries.push({ begin, end, handler, jumpTarget });
+  }
+  return entries;
+}
+
+/**
  * x64 (and IA64) RUNTIME_FUNCTION: beginAddress (u32), endAddress (u32),
  * unwindInfoAddress (u32), all RVAs.
  */
@@ -291,6 +446,21 @@ function parseX64Pdata(
             unwindOffset + 4 + codesSize + (codesSize % 4 ? 4 - (codesSize % 4) : 0);
           if (handlerOffset + 4 <= view.byteLength) {
             rf.handlerAddress = view.getUint32(handlerOffset, true);
+            // The language-specific data begins immediately after the handler
+            // RVA. Whether it is a scope table at all is decided structurally —
+            // see `readScopeTable`, which withholds rather than guessing. The
+            // bound is the raw extent of the section holding the UNWIND_INFO
+            // record, which is NOT `limit` above: that one bounds the `.pdata`
+            // table, and the record lives in `.xdata`.
+            const table = readScopeTable(
+              view,
+              handlerOffset + 4,
+              beginAddress,
+              endAddress,
+              sectionRawLimitForRva(unwindInfoAddress, sectionIndex),
+              sectionIndex,
+            );
+            if (table) rf.scopeTable = table;
           }
         }
       }

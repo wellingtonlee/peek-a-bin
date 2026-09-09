@@ -673,3 +673,290 @@ describe("parsePE — .pdata schema follows the machine type", () => {
     ]);
   });
 });
+
+/**
+ * The x64 `__C_specific_handler` scope table — the language-specific data that
+ * follows the handler RVA. `peek-a-bin-j4uk.4`.
+ *
+ * The fixture places three sections in a buffer much LARGER than the `.xdata`
+ * section, so that the extent test can be shown to be bounded by the SECTION
+ * rather than by the end of the file: `.xdata` runs to file offset 0x900 while
+ * the buffer runs to 0x2000. `.text` exists so that a handler RVA can be made
+ * to resolve, which check (4) requires of anything above 1.
+ *
+ * The guarded function is `[0x1000, 0x1100)` throughout, so a region's
+ * containment can be reasoned about by reading the literals.
+ */
+describe("parsePdata — x64 scope table", () => {
+  const FN_BEGIN = 0x1000;
+  const FN_END = 0x1100;
+  const XDATA_VA = 0x4000;
+  const XDATA_OFFSET = 0x800;
+  /** One past the last byte of `.xdata`'s raw data — the operative bound. */
+  const XDATA_LIMIT = 0x900;
+  const BUFFER_SIZE = 0x2000;
+  const UNW_FLAG_EHANDLER = 0x1;
+  const UNW_FLAG_UHANDLER = 0x2;
+
+  /**
+   * One handler-bearing `.pdata` record over `[0x1000, 0x1100)`, with `lsd`
+   * written as raw `uint32` words where the language-specific data goes.
+   *
+   * `countOfCodes` is 0, so the handler RVA lands at `unwindOffset + 4` and the
+   * language-specific data at `unwindOffset + 8`.
+   */
+  function build(lsd: number[], flags = UNW_FLAG_EHANDLER) {
+    const buffer = new ArrayBuffer(BUFFER_SIZE);
+    const view = new DataView(buffer);
+
+    // .pdata: one 12-byte RUNTIME_FUNCTION.
+    view.setUint32(0x600, FN_BEGIN, true);
+    view.setUint32(0x604, FN_END, true);
+    view.setUint32(0x608, XDATA_VA, true);
+
+    // .xdata: UNWIND_INFO, handler RVA, then the language-specific data.
+    view.setUint8(XDATA_OFFSET, versionFlags(1, flags));
+    view.setUint8(XDATA_OFFSET + 1, 0x04); // size of prolog
+    view.setUint8(XDATA_OFFSET + 2, 0x00); // count of codes
+    view.setUint8(XDATA_OFFSET + 3, 0x00);
+    view.setUint32(XDATA_OFFSET + 4, 0x1080, true); // handler RVA
+    lsd.forEach((w, i) => {
+      const at = XDATA_OFFSET + 8 + i * 4;
+      if (at + 4 <= BUFFER_SIZE) view.setUint32(at, w, true);
+    });
+
+    const section = (name: string, va: number, raw: number, size: number): SectionHeader => ({
+      name,
+      virtualSize: size,
+      virtualAddress: va,
+      sizeOfRawData: size,
+      pointerToRawData: raw,
+      pointerToRelocations: 0,
+      pointerToLinenumbers: 0,
+      numberOfRelocations: 0,
+      numberOfLinenumbers: 0,
+      characteristics: 0x40000040,
+    });
+
+    return parsePdata(
+      buffer,
+      { virtualAddress: 0x3000, size: 12 },
+      [
+        section(".text", FN_BEGIN, 0x400, 0x200),
+        section(".pdata", 0x3000, 0x600, 0x100),
+        section(".xdata", XDATA_VA, XDATA_OFFSET, XDATA_LIMIT - XDATA_OFFSET),
+      ],
+      IMAGE_FILE_MACHINE_AMD64,
+    );
+  }
+
+  /**
+   * A well-formed language-specific data block: the `Count` word derived from
+   * the regions that follow it, each region a `[begin, end, handler,
+   * jumpTarget]` tuple. Tests that need a `Count` DISAGREEING with what follows
+   * — which is the whole `__GSHandlerCheck` case — pass a raw word array
+   * instead.
+   */
+  const lsd = (...regions: Array<[number, number, number, number]>) => [
+    regions.length,
+    ...regions.flat(),
+  ];
+
+  /** Two well-formed `__finally` regions. */
+  const twoRegions = lsd([0x1010, 0x1020, 0x1080, 0], [0x1030, 0x1040, 0x1090, 0]);
+
+  it("reads a valid two-region table", () => {
+    const [rf] = build(twoRegions);
+    expect(rf.scopeTable).toEqual([
+      { begin: 0x1010, end: 0x1020, handler: 0x1080, jumpTarget: 0 },
+      { begin: 0x1030, end: 0x1040, handler: 0x1090, jumpTarget: 0 },
+    ]);
+    // The record's own fields are untouched by the new read.
+    expect(rf.beginAddress).toBe(FN_BEGIN);
+    expect(rf.endAddress).toBe(FN_END);
+    expect(rf.handlerAddress).toBe(0x1080);
+  });
+
+  it("round-trips handler == 1, the format's spelling of EXCEPTION_EXECUTE_HANDLER", () => {
+    // Not an RVA, and deliberately not resolved as one: check (4) exempts 0 and
+    // 1 explicitly, so a `__except (EXCEPTION_EXECUTE_HANDLER)` with no filter
+    // funclet is admitted rather than refused for naming an unmapped address.
+    const [rf] = build(lsd([0x1010, 0x1020, 1, 0x1050]));
+    expect(rf.scopeTable).toEqual([{ begin: 0x1010, end: 0x1020, handler: 1, jumpTarget: 0x1050 }]);
+  });
+
+  it("round-trips a __finally, whose jumpTarget is 0 and whose handler is the funclet", () => {
+    const [rf] = build(lsd([0x1010, 0x1020, 0x1080, 0]));
+    expect(rf.scopeTable?.[0]).toEqual({
+      begin: 0x1010,
+      end: 0x1020,
+      handler: 0x1080,
+      jumpTarget: 0,
+    });
+  });
+
+  /**
+   * `Count` = `n` over `n` regions that are each INDIVIDUALLY VALID — ascending,
+   * inside the function, with a resolvable handler and a zero jump target — so
+   * that checks (2), (3) and (4) all pass and the extent test is the only thing
+   * that can refuse the table.
+   *
+   * That isolation is the point, and it was arrived at by a control coming back
+   * inert: with filler entries of `0x1010` the degenerate-region test caught the
+   * overrun too, so removing the extent test moved nothing and the test proved
+   * only that *something* refused. `.xdata` holds 0x100 bytes and the data
+   * begins 8 bytes in, so 15 entries fit and 16 do not; the buffer has 0x2000
+   * and would supply either.
+   */
+  const validRegions = (n: number) =>
+    lsd(
+      ...Array.from(
+        { length: n },
+        (_, i) => [0x1000 + i * 4, 0x1002 + i * 4, 0x1080, 0] as [number, number, number, number],
+      ),
+    );
+
+  it("withholds a table whose Count * 16 overruns the containing SECTION", () => {
+    // This is the part of check (1) that refuses a `__GSHandlerCheck` cookie
+    // offset read as a count, and the census at 0870e14 shows it doing exactly
+    // that for 12 of t64's 20 refusals (counts of 1072, 1504, 1936, 2096, 2784).
+    // 4 + 16 * 16 = 260 bytes against `.xdata`'s remaining 248.
+    expect(build(validRegions(16))[0].scopeTable).toBeUndefined();
+    // Liveness in two directions: one fewer entry fits and IS read, so the
+    // refusal is the extent rather than the fixture or the entries.
+    expect(build(validRegions(15))[0].scopeTable).toHaveLength(15);
+  });
+
+  it("withholds a table whose Count is 0", () => {
+    // An empty table is not a thing the compiler emits, and admitting one would
+    // publish `[]` — the "there are no regions" claim the field must never make.
+    const [rf] = build([0, 0x1010, 0x1020, 0x1080, 0x0000]);
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table with a region outside the function", () => {
+    expect(build(lsd([0x0f00, 0x1020, 0x1080, 0]))[0].scopeTable).toBeUndefined();
+    expect(build(lsd([0x1010, 0x1200, 0x1080, 0]))[0].scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table with a degenerate region", () => {
+    expect(build(lsd([0x1020, 0x1020, 0x1080, 0]))[0].scopeTable).toBeUndefined();
+    expect(build(lsd([0x1040, 0x1020, 0x1080, 0]))[0].scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table whose begins are not in address order", () => {
+    // Both regions are individually valid and inside the function; only their
+    // ORDER is wrong, so nothing but check (3) can refuse this.
+    const [rf] = build(lsd([0x1030, 0x1040, 0x1080, 0], [0x1010, 0x1020, 0x1090, 0]));
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("admits two regions sharing a begin — non-decreasing, not strictly increasing", () => {
+    // Nested `__try` blocks starting at the same address are ordinary output, so
+    // check (3) must not be a strict comparison.
+    const [rf] = build(lsd([0x1010, 0x1020, 0x1080, 0], [0x1010, 0x1040, 0x1090, 0]));
+    expect(rf.scopeTable).toHaveLength(2);
+  });
+
+  it("withholds a table whose handler resolves to no section", () => {
+    const [rf] = build(lsd([0x1010, 0x1020, 0x99999999, 0]));
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table whose jumpTarget is outside the function", () => {
+    const [rf] = build(lsd([0x1010, 0x1020, 0x1080, 0x1200]));
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("withholds a __GSHandlerCheck-shaped LSD — one u32 cookie offset", () => {
+    // THE CASE THE CHECK EXISTS FOR. `__GSHandlerCheck`'s language-specific data
+    // is a single `uint32` frame offset of the stack cookie, followed by
+    // whatever the linker packed next. Read as a `Count` it claims a table of
+    // that many 16-byte records.
+    //
+    // A SMALL cookie offset (0x30 = 48 entries, which is what t64 actually
+    // carries at six sites) fits inside `.xdata` here, so check (1) passes it
+    // and the region test is what refuses it — measured, that is exactly how the
+    // corpus splits: 12 refusals by extent, 6 by region, 2 by order.
+    const small = build([0x30, 0x00000000, 0x00000000, 0x00000000, 0x00000000]);
+    expect(small[0].scopeTable).toBeUndefined();
+    // A LARGE one (a cookie offset like t64's 2096) cannot fit and is refused by
+    // check (1) before any entry is read.
+    const large = build([2096]);
+    expect(large[0].scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table for a __CxxFrameHandler3-shaped LSD — one FuncInfo RVA", () => {
+    // A `FuncInfo` RVA read as a count claims hundreds of thousands of entries.
+    const [rf] = build([0x00004010]);
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("reads a table off a UHANDLER record as well as an EHANDLER one", () => {
+    // Both flags share one handler RVA and one language-specific-data slot, so
+    // the schema question is the same for either.
+    const [rf] = build(twoRegions, UNW_FLAG_UHANDLER);
+    expect(rf.scopeTable).toHaveLength(2);
+  });
+
+  it("leaves scopeTable undefined for a record with no handler at all", () => {
+    // `undefined` MEANS "THE RECORD DID NOT SAY". There is no handler here, so
+    // there is no language-specific data to read — which is not the claim that
+    // the function guards nothing.
+    const [rf] = build(twoRegions, 0);
+    expect(rf.handlerAddress).toBeUndefined();
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table when the language-specific data is past the section", () => {
+    // The Count word itself does not fit: `.xdata` is 0x100 bytes and the record
+    // is placed so the LSD begins past its end.
+    const buffer = new ArrayBuffer(BUFFER_SIZE);
+    const view = new DataView(buffer);
+    view.setUint32(0x600, FN_BEGIN, true);
+    view.setUint32(0x604, FN_END, true);
+    view.setUint32(0x608, XDATA_VA + 0xf8, true);
+    const at = XDATA_OFFSET + 0xf8;
+    view.setUint8(at, versionFlags(1, UNW_FLAG_EHANDLER));
+    view.setUint32(at + 4, 0x1080, true);
+    view.setUint32(at + 8, 2, true); // a Count, past `.xdata`'s 0x900 limit
+
+    const section = (name: string, va: number, raw: number, size: number): SectionHeader => ({
+      name,
+      virtualSize: size,
+      virtualAddress: va,
+      sizeOfRawData: size,
+      pointerToRawData: raw,
+      pointerToRelocations: 0,
+      pointerToLinenumbers: 0,
+      numberOfRelocations: 0,
+      numberOfLinenumbers: 0,
+      characteristics: 0x40000040,
+    });
+    const [rf] = parsePdata(
+      buffer,
+      { virtualAddress: 0x3000, size: 12 },
+      [
+        section(".text", FN_BEGIN, 0x400, 0x200),
+        section(".pdata", 0x3000, 0x600, 0x100),
+        section(".xdata", XDATA_VA, XDATA_OFFSET, XDATA_LIMIT - XDATA_OFFSET),
+      ],
+      IMAGE_FILE_MACHINE_AMD64,
+    );
+    // The handler is still read — it is inside the buffer — but the table is not.
+    expect(rf.scopeTable).toBeUndefined();
+  });
+
+  it("withholds a table but keeps the record when the check fails", () => {
+    // A refusal costs the scope table and nothing else: the extent
+    // `functionDetect` treats as authoritative is unaffected.
+    const [rf] = build([2096]);
+    expect(rf).toEqual({
+      beginAddress: FN_BEGIN,
+      endAddress: FN_END,
+      unwindInfoAddress: XDATA_VA,
+      handlerFlags: UNW_FLAG_EHANDLER,
+      handlerAddress: 0x1080,
+    });
+  });
+});

@@ -271,6 +271,40 @@ export interface RelocationBlock {
   entries: RelocationEntry[];
 }
 
+/**
+ * One region of a `__C_specific_handler` scope table — the language-specific
+ * data an x64 `UNWIND_INFO` carries after its handler RVA, which is how MSVC
+ * records `__try`/`__except`/`__finally` for C SEH.
+ *
+ * All four fields are RVAs, in the same sense as `RuntimeFunction`'s. The two
+ * that are not always addresses are the whole reason this structure is worth
+ * reading, and `pe/pdata.ts`'s `readScopeTable` docstring is the long form:
+ *
+ *  - **`handler === 1` is the FORMAT'S OWN spelling of
+ *    `EXCEPTION_EXECUTE_HANDLER`** — a `__except (EXCEPTION_EXECUTE_HANDLER)`
+ *    needs no filter funclet, so the linker writes the constant where a filter
+ *    RVA would go rather than emitting a function that returns it. It is not an
+ *    RVA and must never be resolved as one.
+ *  - **`jumpTarget === 0` means the entry is a `__finally`** (a termination
+ *    handler), and then `handler` is the RVA of the finally funclet itself.
+ *  - Otherwise the entry is a `__except`: `handler` is the **filter
+ *    function's** RVA and `jumpTarget` is the RVA of the `__except` body, i.e.
+ *    where control resumes inside the guarded function.
+ *
+ * `handler === 0` occurs and is left as read: the format gives it no meaning
+ * this project has needed, and inventing one would be a claim.
+ */
+export interface ScopeTableEntry {
+  /** RVA of the first byte of the guarded region. */
+  begin: number;
+  /** RVA one past the last byte of the guarded region. */
+  end: number;
+  /** Filter RVA, finally-funclet RVA, or the literal 1 / 0 — see above. */
+  handler: number;
+  /** RVA of the `__except` body, or 0 for a `__finally` — see above. */
+  jumpTarget: number;
+}
+
 export interface RuntimeFunction {
   beginAddress: number; // RVA
   endAddress: number; // RVA
@@ -287,6 +321,24 @@ export interface RuntimeFunction {
    * say", never "there is no frame": `disasm/arm64Frame.ts` refuses on it.
    */
   arm64Frame?: import("./arm64Unwind").Arm64UnwindFrame;
+  /**
+   * x64 only: the `__C_specific_handler` scope table out of this record's
+   * language-specific data — the regions a `__try` guards, in the compiler's own
+   * order. See {@link ScopeTableEntry} for what each field means and
+   * `pe/pdata.ts`'s `readScopeTable` for the structural check that admits one.
+   *
+   * **`undefined` MEANS "THE RECORD DID NOT SAY", NEVER "THERE ARE NO
+   * REGIONS"** — exactly as `arm64Frame` above states for itself, and for the
+   * same reason: a consumer that reads absence as an empty region list would
+   * report a guarded function as unguarded. The language-specific data is not
+   * self-describing (nothing in the record names the handler it belongs to), so
+   * a table is published only when a four-part structural check passes, and it
+   * is withheld for a `__GSHandlerCheck` or `__CxxFrameHandler3` record, for a
+   * hostile `Count`, and for any table whose regions contradict the function
+   * they claim to describe. All three are ordinary and none of them is evidence
+   * that the function has no `__try`.
+   */
+  scopeTable?: ScopeTableEntry[];
 }
 
 export interface ResourceNode {
