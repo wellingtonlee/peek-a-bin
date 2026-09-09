@@ -5,6 +5,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Anomaly } from "../../analysis/anomalies";
+import { IRP_MAJOR_FUNCTIONS, type IRPDispatchEntry } from "../../analysis/driver";
 import { MAX_SYNC_FILE_METRIC_BYTES } from "../../hooks/asyncMetricState";
 import type { AppState } from "../../hooks/usePEFile";
 import {
@@ -1468,5 +1469,140 @@ describe("HeaderView derives its labels from the values, not from beside them", 
     renderHeaders(parsePE(patchHeader(buildMinimalPE64(), { coffCharacteristics: 0x0040 })));
     expect(rowValue("Characteristics").textContent).not.toContain("none");
     expect(rowValue("Characteristics").textContent).toContain("(unknown bits: 0x0040)");
+  });
+});
+
+/**
+ * THE KERNEL-DRIVER SECTION, moved here with the block itself.
+ *
+ * These rows were `AnomaliesView.dom.test.tsx`'s `describe("AnomaliesView — the
+ * kernel driver section")` and came across unchanged in substance when the block
+ * moved to this tab: the same seven questions, asked of `HeaderView` and of a
+ * `parsePE(buildMinimalPE64())` fixture rather than of `harnessPE()`.
+ *
+ * `driverInfo` and `irpHandlers` are SUPPLIED, never computed. `detectDriver`
+ * and `detectIRPDispatches` have their own suite in
+ * `src/analysis/__tests__/driver.test.ts`, which is also where the vocabulary's
+ * completeness is pinned (`toHaveLength(0x1c)`); nothing about *which* image is a
+ * driver, or which instruction installs a handler, is decided in this file.
+ *
+ * jsdom performs no layout, so nothing below is a claim about where on the page
+ * this section sits, whether the table overflows its column, or whether either
+ * address column is visible. What is asserted is the document: the gate, the
+ * pill's two spellings, the row set, the two navigation dispatches.
+ */
+describe("HeaderView — the kernel driver section", () => {
+  const driver = {
+    isDriver: true,
+    reasons: ["imports ntoskrnl.exe"],
+    isWDM: true,
+    kernelImportCount: 17,
+    kernelModules: ["ntoskrnl.exe", "hal.dll"],
+  };
+
+  const irp = (over: Partial<IRPDispatchEntry> = {}): IRPDispatchEntry => ({
+    irpMajor: 0x0e,
+    irpName: IRP_MAJOR_FUNCTIONS[0x0e],
+    handlerAddress: 0x140003000,
+    instructionAddress: 0x140001100,
+    ...over,
+  });
+
+  const renderDriver = (over: Partial<AppState> = {}) =>
+    renderHeaders(parsePE(buildMinimalPE64()), over);
+
+  it("is absent for a file that is not a driver", () => {
+    renderDriver({ driverInfo: { ...driver, isDriver: false }, irpHandlers: [irp()] });
+    expect(screen.queryByText("Kernel Driver")).toBeNull();
+    // And the IRP table with it — an IRP row on a non-driver would be the view
+    // asserting something the analysis did not.
+    expect(screen.queryByText("IRP_MJ_DEVICE_CONTROL")).toBeNull();
+  });
+
+  it("is absent for a file no driver detection ran on at all", () => {
+    // The other half of the gate: `driverInfo` is `null` in `initialState`, so
+    // the optional chain and the `isDriver` test are two different refusals and
+    // the rest of the Headers tab must render through both.
+    renderDriver();
+    expect(screen.queryByText("Kernel Driver")).toBeNull();
+    expect(screen.getByText("COFF Header")).toBeTruthy();
+  });
+
+  it("distinguishes a WDM driver from a native one", () => {
+    const { unmount } = renderDriver({ driverInfo: driver });
+    expect(screen.getByText("WDM DRIVER")).toBeTruthy();
+    expect(screen.getByText("17 kernel APIs")).toBeTruthy();
+    expect(screen.getByText("Modules: ntoskrnl.exe, hal.dll")).toBeTruthy();
+    unmount();
+    renderDriver({ driverInfo: { ...driver, isWDM: false } });
+    expect(screen.getByText("NATIVE DRIVER")).toBeTruthy();
+  });
+
+  it("omits the dispatch table when no handler was recovered", () => {
+    renderDriver({ driverInfo: driver, irpHandlers: [] });
+    expect(screen.getByText("Kernel Driver")).toBeTruthy();
+    expect(screen.queryByText("IRP Dispatch Table")).toBeNull();
+  });
+
+  it("names each major function from the ANALYSIS's answer, not a copy of it", () => {
+    /**
+     * The one declaration of the IRP major-function vocabulary is
+     * `IRP_MAJOR_FUNCTIONS` in `src/analysis/driver.ts`, and
+     * `detectIRPDispatches` has already resolved it into
+     * `IRPDispatchEntry.irpName` — refusing any index the table does not name.
+     * The view used to hold a byte-for-byte second copy and prefer it
+     * (`IRP_NAMES[handler.irpMajor] ?? handler.irpName`), so a drift between the
+     * copies would have been resolved in the VIEW's favour and the analysis's
+     * answer silently discarded.
+     *
+     * This row is the guard: the name rendered must be the one on the entry.
+     * A restored local table fails it — which is the reason it travelled with
+     * the block rather than being left behind on the tab that is going away.
+     */
+    renderDriver({
+      driverInfo: driver,
+      irpHandlers: [irp({ irpMajor: 0x0e, irpName: "IRP_MJ_RENAMED_UPSTREAM" })],
+    });
+    expect(screen.getByText("IRP_MJ_RENAMED_UPSTREAM")).toBeTruthy();
+    expect(screen.queryByText("IRP_MJ_DEVICE_CONTROL")).toBeNull();
+  });
+
+  it("renders the real vocabulary for every major function the analysis can emit", () => {
+    // Liveness half of the row above: the guard must not pass by rendering
+    // nothing. Every index `detectIRPDispatches` accepts is asked for. The
+    // table's own completeness is pinned in `analysis/__tests__/driver.test.ts`.
+    const handlers = Object.entries(IRP_MAJOR_FUNCTIONS).map(([k, name]) =>
+      irp({ irpMajor: Number(k), irpName: name }),
+    );
+    expect(handlers.length).toBe(28);
+    renderDriver({ driverInfo: driver, irpHandlers: handlers });
+    const table = screen.getByText("IRP Dispatch Table").nextElementSibling as HTMLTableElement;
+    const rows = Array.from(table.querySelectorAll<HTMLTableRowElement>("tbody tr"));
+    expect(rows).toHaveLength(handlers.length);
+    expect(rows.map((r) => r.cells[0].textContent)).toEqual(
+      handlers.map((h) => `0x${h.irpMajor.toString(16).toUpperCase().padStart(2, "0")}`),
+    );
+    expect(rows.map((r) => r.cells[1].textContent)).toEqual(handlers.map((h) => h.irpName));
+  });
+
+  it("says N/A rather than 0x0 for a handler whose address was not recovered", () => {
+    renderDriver({ driverInfo: driver, irpHandlers: [irp({ handlerAddress: 0 })] });
+    expect(screen.getByText("N/A")).toBeTruthy();
+    // Not a button: there is nowhere to jump to.
+    expect(screen.getByText("N/A").tagName).toBe("SPAN");
+  });
+
+  it("jumps to the handler and to the instruction that installed it", async () => {
+    const { dispatch, user } = renderDriver({
+      driverInfo: driver,
+      irpHandlers: [irp({ handlerAddress: 0x140003000, instructionAddress: 0x140001100 })],
+    });
+    await user.click(screen.getByRole("button", { name: "0x140003000" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_ADDRESS", address: 0x140003000 });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: "disassembly" });
+    dispatch.mockClear();
+    await user.click(screen.getByRole("button", { name: "0x140001100" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_ADDRESS", address: 0x140001100 });
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_TAB", tab: "disassembly" });
   });
 });

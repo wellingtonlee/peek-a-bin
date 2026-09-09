@@ -455,6 +455,117 @@ function AnomalyBanners() {
   );
 }
 
+/**
+ * The kernel-driver block: the WDM/NATIVE pill, the kernel-API census, and the
+ * IRP dispatch table with both of its navigation columns.
+ *
+ * WHY IT IS ON THE HEADERS TAB. It was `AnomaliesView.tsx:222-288` until the
+ * Anomalies tab was removed, and it never belonged there: `detectDriver` and
+ * `detectIRPDispatches` state *facts about the image*, the way every other
+ * block on this tab does, where an anomaly carries a severity and an opinion
+ * about what an analyst should look at. Relocating it rather than letting the
+ * tab's deletion take it is the point of the change — `SET_IRP_HANDLERS`,
+ * `AppState.irpHandlers` and `detectIRPDispatches` all survive that deletion
+ * and keep feeding `utils/exportSchema.ts` and the MCP surfaces, so losing this
+ * block would have left the state live on the wire and write-only on screen
+ * beyond `App.tsx`'s bare "| N IRP handlers" count. These two address columns
+ * are the ONLY navigable UI for a recovered IRP handler anywhere in the app.
+ *
+ * A SEPARATE COMPONENT, NOT A BLOCK INSIDE `HeaderView`, for the reason
+ * {@link AnomalyBanners} is one and `HeaderView`'s own hook list states: every
+ * hook there must run above the `!pe` early return, so a block that wants
+ * `useAppState`/`useAppDispatch` and answers `null` on a gate of its own has to
+ * own its render. Adding either hook to `HeaderView` would put them below that
+ * return for a file-less render and change the hook count between renders.
+ *
+ * The markup is the original's, unchanged, wrapped in one `<section>`: the
+ * parent is a `space-y-6` column in which every sibling is a single element, so
+ * a bare fragment would have had the column's gap inserted *between* this
+ * block's heading, pill and table, whose spacing is carried by their own
+ * `mb-*`/`mt-6` classes.
+ *
+ * THE IRP NAME PRINTED IS `IRPDispatchEntry.irpName` — the analysis's own
+ * resolution of `analysis/driver.ts`'s `IRP_MAJOR_FUNCTIONS`, which
+ * `detectIRPDispatches` has already done and which refuses any index that table
+ * does not name. There is deliberately no second copy of that vocabulary here:
+ * there was one once, and it was *preferred* over the entry
+ * (`IRP_NAMES[handler.irpMajor] ?? handler.irpName`), so a drift between the
+ * copies would have been resolved in the view's favour and the analysis's
+ * answer silently discarded. `HeaderView.dom.test.tsx` carries the guard.
+ */
+function DriverSection() {
+  const { driverInfo, irpHandlers } = useAppState();
+  const dispatch = useAppDispatch();
+  if (!driverInfo?.isDriver) return null;
+
+  return (
+    <section>
+      <h2 className="text-gray-200 font-semibold text-base mb-3 mt-6">Kernel Driver</h2>
+      <div className="flex items-center gap-4 text-xs text-gray-400 mb-4 bg-amber-900/20 border border-amber-700/30 rounded px-3 py-2">
+        <span className="text-amber-400 font-semibold">
+          {driverInfo.isWDM ? "WDM" : "NATIVE"} DRIVER
+        </span>
+        <span>{driverInfo.kernelImportCount} kernel APIs</span>
+        <span>Modules: {driverInfo.kernelModules.join(", ")}</span>
+      </div>
+
+      {irpHandlers.length > 0 && (
+        <>
+          <h3 className="text-gray-300 font-medium text-sm mb-2">IRP Dispatch Table</h3>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 text-left border-b border-gray-700">
+                <th className="py-1.5 px-2 w-16">MJ Code</th>
+                <th className="py-1.5 px-2 w-64">IRP Name</th>
+                <th className="py-1.5 px-2 w-40">Handler Address</th>
+                <th className="py-1.5 px-2 w-40">Instruction Address</th>
+              </tr>
+            </thead>
+            <tbody>
+              {irpHandlers.map((handler, i) => (
+                <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/50">
+                  <td className="py-1.5 px-2 text-gray-400 font-mono">
+                    0x{handler.irpMajor.toString(16).toUpperCase().padStart(2, "0")}
+                  </td>
+                  <td className="py-1.5 px-2 text-gray-300">{handler.irpName}</td>
+                  <td className="py-1.5 px-2">
+                    {handler.handlerAddress > 0 ? (
+                      <button
+                        type="button"
+                        className="text-blue-400 hover:underline font-mono"
+                        onClick={() => {
+                          dispatch({ type: "SET_ADDRESS", address: handler.handlerAddress });
+                          dispatch({ type: "SET_TAB", tab: "disassembly" });
+                        }}
+                      >
+                        0x{handler.handlerAddress.toString(16).toUpperCase()}
+                      </button>
+                    ) : (
+                      <span className="text-gray-600 font-mono">N/A</span>
+                    )}
+                  </td>
+                  <td className="py-1.5 px-2">
+                    <button
+                      type="button"
+                      className="text-blue-400 hover:underline font-mono"
+                      onClick={() => {
+                        dispatch({ type: "SET_ADDRESS", address: handler.instructionAddress });
+                        dispatch({ type: "SET_TAB", tab: "disassembly" });
+                      }}
+                    >
+                      0x{handler.instructionAddress.toString(16).toUpperCase()}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function HeaderView() {
   const { peFile: pe } = useAppState();
   const dispatch = useAppDispatch();
@@ -504,6 +615,9 @@ export function HeaderView() {
     <div className="p-4 space-y-6 text-xs overflow-auto h-full">
       {/* Anomaly Banners */}
       <AnomalyBanners />
+
+      {/* The kernel-driver block, relocated off the removed Anomalies tab. */}
+      <DriverSection />
 
       {/* COFF Header */}
       <section>
