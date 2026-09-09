@@ -89,14 +89,14 @@ interface State {
  *    half-working app that gets worked around instead of reported.
  *
  * NOT TAKEN HERE, and the reason is a mechanism rather than a judgement:
- *  - **The six dialogs** (`CommandPalette`, `KeyboardShortcuts`, `SettingsModal`,
- *    `GoToAddressModal`, `BatchRenameModal`, `AIReportPanel`) are still a blank
- *    page, and they pass the criterion easily — they are overlays, so the whole
- *    app underneath survives. What they need is not this fallback. A dialog's
- *    subtree carries its own backdrop, focus trap and Escape handler, so a
- *    boundary that catches leaves the fallback floating in `App`'s root with the
- *    dialog still `open` in state; and because `hasError` never clears (below),
- *    one throw in the palette would kill all six for the rest of the session.
+ *  - **The four dialogs** (`CommandPalette`, `KeyboardShortcuts`, `SettingsModal`,
+ *    `GoToAddressModal`) are still a blank page, and they pass the criterion
+ *    easily — they are overlays, so the whole app underneath survives. What
+ *    they need is not this fallback. A dialog's subtree carries its own
+ *    backdrop, focus trap and Escape handler, so a boundary that catches
+ *    leaves the fallback floating in `App`'s root with the dialog still
+ *    `open` in state; and because `hasError` never clears (below), one throw
+ *    in the palette would kill all four for the rest of the session.
  *    The right shape is a modal-placed fallback plus a reset keyed on the
  *    dialog's own `open` transition — a NAMED reset trigger, which does not
  *    contradict the rule below — and that is a second recovery semantic threaded

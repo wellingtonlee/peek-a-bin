@@ -1657,7 +1657,10 @@ describe("malformed PE handling", () => {
      * `parseImports` builds `functions` and `iatAddresses` as PARALLEL arrays
      * paired by index by four consumers — `disasm/operands.ts`'s
      * `buildIATLookup` (which is what labels a call site in the disassembly),
-     * `ImportsView`, `useVulnScanner` and `mcp/resources.ts`.
+     * `ImportsView`, `CommandPalette` and `mcp/resources.ts`. A fifth,
+     * `useVulnScanner`, has since been removed, and `CommandPalette` was
+     * absent from this census until then — so the count is four either way,
+     * not three. `parser.ts`'s own comment carries the re-derivation.
      *
      * These three rows are the same family as the bounds above but a different
      * failure: `peek-a-bin-tmo9` built the truncation machinery and three paths

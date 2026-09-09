@@ -15,9 +15,26 @@ import { Modal } from "../Modal";
  * dialog that has been closed renders neither its children nor a fallback — is
  * invisible from App, because every dialog renders null when closed anyway, so
  * the observable outcome is identical and only a render counter can tell the two
- * apart. And the **derived-open shape** that `BatchRenameModal` and
- * `AIReportPanel` use, where the caller both computes `open` from `AppState` and
- * mounts the child conditionally, needs a caller under the test's control.
+ * apart. And the **derived-open shape**, where the caller both computes `open`
+ * from `AppState` and mounts the child behind that same condition, so the
+ * boundary's `children` are literally `false` for the whole closed period.
+ *
+ * THAT SHAPE IS RETAINED WITH NO CALLER IN THE APP TODAY. It existed for
+ * `BatchRenameModal` and `AIReportPanel`, both since removed; all four dialogs
+ * `App` mounts now pass `open` down as a prop and leave the child mounted, each
+ * doing its own `if (!open) return null`, so the boundary always sees an
+ * element. **Be precise about what the retained case does and does not buy**,
+ * because the obvious claim is wrong: it is NOT distinct branch coverage.
+ * `children` is read at exactly one line of `DialogBoundary` (`return
+ * this.props.children`), and neither `dialogBoundaryRender` nor
+ * `dialogBoundaryReset` takes it — so no decision in the component depends on
+ * the children value, and no perturbation can redden this case without also
+ * reddening the plain-shape case beside it. What it is, and why it is kept: a
+ * cheap regression pin on the REACT interaction — that a boundary whose
+ * children were `false` for the whole closed period mounts them on the reopen
+ * that clears the fallback. It discriminates (disabling the reset reddens it),
+ * so it is kept rather than deleted with its last production caller; it just
+ * must not be cited as the only cover for a branch that does not exist.
  */
 
 /** A dialog that throws on every render while `explode` is set. */
@@ -166,9 +183,12 @@ describe("re-opening a broken dialog", () => {
   });
 
   it("does so for a caller that mounts its child conditionally", () => {
-    // `BatchRenameModal` and `AIReportPanel`: `open` is derived from `AppState`
-    // and the child is mounted behind the same condition, so the boundary sees
-    // `false` as its children for the whole closed period.
+    // The derived-open shape: `open` is derived from state and the child is
+    // mounted behind the same condition, so the boundary sees `false` as its
+    // children for the whole closed period. No dialog in the app is wired this
+    // way today, and this is the same component branch as the case above with a
+    // different children value — a React-interaction pin, not extra branch
+    // coverage. The file docstring carries the full reasoning.
     reopen(true);
     expect(screen.getByRole("button", { name: "the real dialog" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();

@@ -87,7 +87,7 @@ function DialogErrorFallback({
  * A render-error backstop for the app's modal dialogs.
  *
  * SEPARATE FROM {@link ./ErrorBoundary} BECAUSE THE MECHANISM DIFFERS, not
- * because the criterion does. The six dialogs pass that component's test — "guard
+ * because the criterion does. The four dialogs pass that component's test — "guard
  * a region exactly when the app is still worth using without it" — trivially, as
  * they are overlays; what they could not use was its fallback. Two reasons, and
  * both are why this file exists (`peek-a-bin-pikv`):
@@ -108,7 +108,7 @@ function DialogErrorFallback({
  *    class in a different file and keep their behaviour exactly.
  *
  * WHY THE BOUNDARY IS OUTSIDE THE DIALOG RATHER THAN INSIDE `Modal`. Putting it
- * around `Modal`'s children would be one declaration instead of six call sites,
+ * around `Modal`'s children would be one declaration instead of four call sites,
  * and it does not work: every one of these dialogs runs hooks, memos and an
  * `if (!open) return null` ABOVE the `<Modal>` it returns, so the common case —
  * a throw while computing what to show — happens before `Modal` renders at all
