@@ -39,7 +39,10 @@ function chatStub(over: Partial<UseAIChatResult> = {}): UseAIChatResult {
     messages: [],
     streaming: false,
     error: null,
-    sendMessage: vi.fn(),
+    // `sendMessage` reports whether it ACCEPTED the message; the panel clears
+    // its box only on `true`. The stub says yes by default — the refusal case
+    // has its own row below (`peek-a-bin-r2u5`).
+    sendMessage: vi.fn(() => true),
     clearChat: vi.fn(),
     cancelStream: vi.fn(),
     ...over,
@@ -232,6 +235,21 @@ describe("AIChatPanel input", () => {
     await ui.click(screen.getByRole("button", { name: "Send" }));
     expect(chat.sendMessage).toHaveBeenCalledWith("what does sub_401000 do?");
     expect(box.value).toBe("");
+  });
+
+  it("KEEPS what was typed when the hook refuses the message", async () => {
+    // `peek-a-bin-r2u5`: the box was cleared unconditionally, so when the
+    // API-key gate refused a send the user lost the question as well as the
+    // action. The panel is not told why — only that nothing was taken — so this
+    // row stands for all three of `sendMessage`'s refusals; which one it was is
+    // `useAIChat.dom.test.tsx`'s business.
+    const { user: ui, chat } = renderPanel({ sendMessage: vi.fn(() => false) });
+    const box = screen.getByPlaceholderText("Ask about this binary...") as HTMLTextAreaElement;
+    await ui.type(box, "a long question I do not want to retype");
+    await ui.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(chat.sendMessage).toHaveBeenCalledWith("a long question I do not want to retype");
+    expect(box.value).toBe("a long question I do not want to retype");
   });
 
   it("sends on Enter", async () => {

@@ -213,7 +213,45 @@ describe("AI chat with no API key configured", () => {
     // The refused message must not appear as a user bubble: the gate returns
     // before ADD_USER, and the empty-state hint is still the whole transcript.
     expect(screen.getByText("Ask about the current binary or function.")).toBeTruthy();
-    expect(screen.queryByText("hello")).toBeNull();
+    // Scoped to the transcript rather than the document: since
+    // `peek-a-bin-r2u5` the text is still in the TEXTAREA, deliberately, so a
+    // bare `queryByText` now matches the input box and would fail over the
+    // repair. What is being asserted is that nothing else holds it.
+    const bubbles = screen.queryAllByText("hello").filter((el) => el.tagName !== "TEXTAREA");
+    expect(bubbles).toHaveLength(0);
+  });
+
+  it("keeps the question in the box, so it does not have to be retyped", () => {
+    // `peek-a-bin-r2u5`. The banner tells the user to "try again" — which, while
+    // `AIChatPanel` cleared its textarea unconditionally after calling, meant
+    // retyping. This is the one refusal that ever destroyed anything: the panel
+    // refuses to call `sendMessage` with blank input at all, and while a stream
+    // is in flight the textarea is disabled and Send is a Stop button, so those
+    // two refusals were never reachable with text in the box. Driven through the
+    // real hook and the real panel, because the claim is about what is on screen
+    // afterwards.
+    withoutApiKey();
+    render(<ChatHarness />);
+
+    const question = "what does the loop at sub_401000+0x2c actually compare?";
+    sendChat(question);
+
+    const box = screen.getByPlaceholderText("Ask about this binary...") as HTMLTextAreaElement;
+    expect(box.value).toBe(question);
+    expect(screen.getByText(NO_API_KEY_MESSAGE)).toBeTruthy();
+  });
+
+  it("clears the box once a key is configured and the send goes through", () => {
+    // The other direction, and the control for the row above: an ACCEPTED send
+    // still empties the box. Without this, preserving the input would be
+    // satisfied by a panel that had simply stopped clearing.
+    withApiKey();
+    render(<ChatHarness />);
+
+    sendChat("hello");
+
+    const box = screen.getByPlaceholderText("Ask about this binary...") as HTMLTextAreaElement;
+    expect(box.value).toBe("");
   });
 
   it("clears the explanation once a key is configured and the send goes through", () => {
