@@ -4,7 +4,7 @@
 
 - [Keyboard Shortcuts](keyboard.md) — all hotkeys for navigation, annotations, graph mode, and AI
 - [Theming](theming.md) — built-in themes, custom themes, color token reference
-- [AI Features](ai-features.md) — chat, batch rename, reports, vulnerability scanner, LLM profiles
+- [AI Features](ai-features.md) — chat, enhance/explain, LLM profiles, request handling
 
 ## Server Guides
 
@@ -48,7 +48,7 @@ repeating it.
 |-------------------------|--------|
 | Keyboard shortcuts | [keyboard.md](keyboard.md) — and `SHORTCUT_GROUPS` in `src/components/KeyboardShortcuts.tsx`, which is the source of truth the in-app `?` panel renders from |
 | Theme system, color tokens, font size | [theming.md](theming.md) |
-| AI features (chat, batch rename, report, scanner, LLM profiles) | [ai-features.md](ai-features.md) |
+| AI features (chat, enhance/explain, LLM profiles) | [ai-features.md](ai-features.md) |
 | MCP server tools, resources, or setup CLI | [mcp-server.md](mcp-server.md) |
 | Ghidra server API or deployment | [ghidra-server.md](ghidra-server.md) |
 | State, workers, rendering, or the analysis pipeline | [architecture.md](architecture.md) |

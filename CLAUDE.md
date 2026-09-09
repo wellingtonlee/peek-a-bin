@@ -165,7 +165,7 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   `ResizeHandle`'s `onResizeEnd` reading state in the obvious way, which is correct
   **only because that component now guarantees it** — see the `ResizeHandle` entry
   below. All
-  six dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
+  four dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
   `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
 - **`ResizeHandle.tsx` guarantees `onResizeEnd` runs AFTER the resize it describes has
   committed, and that guarantee is the reason its four callers may read their own state
@@ -209,10 +209,14 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   test most 32-bit values pass, so decoding also requires the call site (`ioctlCodeArgIndex`);
   without that gate the emitter produced 1475 confident wrong IOCTL comments.
 - **`llm/`** — `models.ts` is the single source of model IDs and token budgets — **never write a
-  model ID anywhere else**. `apiLists.ts` owns `DANGEROUS_APIS`/`NOTABLE_APIS` (notable is a
-  superset by construction) and `matchesApi`; `decompileForLLM.ts` is the one
-  decompile-for-context routine; `retry.ts` the backoff policy; `responseSchema.ts` zod
-  validation.
+  model ID anywhere else**; `client.ts` is `streamChat`, `prompt.ts` the system prompts,
+  `settings.ts` the profile store and `hasApiKey()` gate, `retry.ts` the backoff policy and the
+  shared `RequestLimiter`. **`apiLists.ts`, `decompileForLLM.ts` and `responseSchema.ts` were
+  deleted at `peek-a-bin-1xc5`** with the three AI features that used them, so
+  `DANGEROUS_APIS`/`NOTABLE_APIS`, `matchesApi`, the decompile-for-context routine and the zod
+  response validation are gone; no surviving feature expects JSON back. `LLMTask` is `chat |
+  enhance` and both budgets are 16384 — read `TASK_MAX_TOKENS`' docstring before inlining it, and
+  `docs/verification.md` for the runtime pin that coincidence cost.
 - **`ghidra/`** — REST client for the optional server in `ghidra-server/`; powers the decompile
   panel's **High Level** tab. Not a decompiler.
 - **`mcp/`** — MCP server (tools, resources, session, Capstone wrapper), `cli.ts`, `clients.ts`,
@@ -221,9 +225,12 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (34 top-level
-fields) and an `AppAction` discriminated union (55 action types), both counted at `1c3de72` —
-counts drift, so re-measure rather than trusting them. Access via `useAppState()` /
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (30 top-level
+fields) and an `AppAction` discriminated union (39 action types), both counted at `263bd5d` —
+counts drift, so re-measure rather than trusting them. (They were 34 / 55 at `1c3de72` and stayed
+there until `peek-a-bin-1xc5` removed the three AI features' state. **Count the union by unique
+`type: "…"` string, not by `| {` lines** — six members span several lines, which is how a
+re-measurement during that epic came back 6 short in both directions.) Access via `useAppState()` /
 `useAppDispatch()`. New state = add an action to the union, handle it in the `appReducer` switch.
 
 `appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. **Two
@@ -232,8 +239,8 @@ reference** (a new equal object causes pointless re-renders), and every mutating
 **replaces** rather than mutates — the annotation undo/redo snapshots hold direct references to
 annotation objects, so an in-place mutation would corrupt history retroactively.
 
-**`VIEW_TABS` (in `usePEFile.ts`) is the single declaration of the nine view tabs and their
-order.** `AddressBar`'s tab bar and its 1-9 `TAB_KEYS` shortcut map are both derived from it, with
+**`VIEW_TABS` (in `usePEFile.ts`) is the single declaration of the eight view tabs and their
+order.** `AddressBar`'s tab bar and its 1-8 `TAB_KEYS` shortcut map are both derived from it, with
 labels from `VIEW_TAB_LABELS` in `components/analysisNotice.ts` — previously written out three
 times, so a tab could be called one thing on its button and another in the notice telling you to
 open it. `VIEW_TAB_LABELS` is a `Record<ViewTab, string>` and fails the build on a missing tab
@@ -293,8 +300,12 @@ union, so a sixth member fails the build the way `DETECT_PASS_LABELS` and `VIEW_
 of the same union — the maximum severity across anomalies and findings — with its own
 `=== "critical" || === "high"` chain and a third palette; it was closed at `1591289` by
 `components/severity.ts`, and the paragraph on that module below is the current statement of the
-rule. **Read that one for the identifiers**, which are `BADGE_RANK`, `ANOMALY_BADGE` and
-`FINDING_BADGE`.
+rule. **Read that one for the identifiers**, which are `BADGE_RANK` and `ANOMALY_BADGE`.
+**`AnomaliesView.tsx` and `AddressBar.tsx`'s badge no longer exist** — the Anomalies view tab went
+at `peek-a-bin-1xc5` — so both defects above are history rather than live sites. **The narrative
+is kept deliberately**: they were two of the nine defects the renderer found, they are the reason
+this class is written down at all, and the current holder of the rule is the severity paragraph
+below, whose reader is now `HeaderView`'s `AnomalyBanners`.
 
 Rank reasoning, which is the part to preserve: the two **properties of the file** come first
 because each survives the engine being fixed (an ARM32 resource-only DLL has no disassembly on a
@@ -404,7 +415,7 @@ so a wire value like `call-targets` cannot reach the screen and a fifth pass fai
 **There is ONE `ErrorBoundary` PER TAB PANE, and the placement is the whole of what it buys.** A
 single boundary around `renderMainView()` — which is what was there — put every tab behind one
 `hasError`: `App` keeps every visited tab in the tree class-hidden, so a throw in the Hex view
-replaced headers, sections, disassembly, imports, exports, strings, resources and anomalies as
+replaced headers, sections, disassembly, imports, exports, strings and resources as
 well, and because `hasError` is never cleared on a re-render and the boundary sat *above* the tab
 switch, changing tabs could not recover it either. The only exit was a page reload, which discards
 the parsed image and the worker's disassembly to recover from what may have been one bad render.
@@ -430,7 +441,7 @@ with the first** — `componentDidCatch` logs the stack either way and the fallb
 *names* the region, which a blank page does not.
 
 **`AddressBar` is deliberately LEFT LOUD, and the argument is a measurement rather than a
-preference**: it owns the global `window` keydown handler carrying the 1-9 `TAB_KEYS` map, so a
+preference**: it owns the global `window` keydown handler carrying the 1-8 `TAB_KEYS` map, so a
 boundary would remove **both** routes to another tab, not just the buttons, leaving an app pinned
 to whichever tab was showing. No partial function is bought, so the boundary would only convert an
 unmistakable blank page into a half-working app that gets worked around instead of reported. The
@@ -445,7 +456,7 @@ decompile panel, which is `p0qw`'s own argument one level down. **`DecompileView
 no boundary on purpose**: they *are* the pane in the mode that shows them, so the pane's boundary is
 already the right radius.
 
-**The six dialogs are guarded by a DIFFERENT class, `DialogBoundary.tsx`, and the split is the
+**The four dialogs are guarded by a DIFFERENT class, `DialogBoundary.tsx`, and the split is the
 mechanism rather than the criterion.** They pass the criterion trivially — they are overlays — but
 could not use `ErrorBoundary`'s fallback for two reasons, and both are now measured rather than
 argued. (1) A dialog's subtree carries its own backdrop, focus trap, scroll lock and Escape, all of
@@ -464,14 +475,20 @@ or that same pre-`open` code throws again with the boundary spent; and the reset
 painting the fallback first. `dialogBoundaryRender` and `dialogBoundaryReset` are the rules, pure,
 in `modalScaffold.ts`. **The wrong version was built first and measured**: wrapping each dialog in
 the existing `ErrorBoundary` passes a naive blast-radius assertion and fails both halves that matter
-(`peek-a-bin-pikv`).
+(`peek-a-bin-pikv`). Six became four at `peek-a-bin-1xc5` (`BatchRenameModal` and `AIReportPanel`
+went with their features); the four are `CommandPalette`, `KeyboardShortcuts`, `SettingsModal` and
+`GoToAddressModal`. Two consequences recorded in `docs/verification.md` rather than argued away:
+`accidentalDismissAllowed` now has **three of four rows no caller can produce**, and the component
+suite's **derived-`open` test does not cover a distinct branch** — `children` is read at one line
+and neither pure rule takes it, so no perturbation reddens that case alone. The test is kept and
+its docstring corrected; do not restore the "only coverage of that branch" claim.
 
 **`main.tsx` still puts no boundary above `<App/>`**, deliberately: that is a whole-page fallback
 whose argument is crash reporting rather than partial function, and it is a separate question
 (`peek-a-bin-t23y`).
 
 **The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `AddressBar`
-renders `role="tablist"` around exactly the nine tabs (not the toolbar, which also holds
+renders `role="tablist"` around exactly the eight tabs (not the toolbar, which also holds
 Open/Back/Forward/Undo/Redo and the address field), each `role="tab"` with `aria-selected`, `id`,
 `aria-controls` and a **roving tabindex that follows FOCUS, not selection** — cleared when focus
 leaves, so tabbing back in lands on the tab that is showing. **Activation is MANUAL**: arrows move
@@ -490,16 +507,29 @@ keyboard user cannot reach the region they just switched to. The arrows are docu
 *global* binding, and bare arrows belong to the disassembly view everywhere outside the bar
 (`peek-a-bin-w50c`).
 
-**A severity's ORDER is declared once, in `components/severity.ts`; the PALETTE is not.**
-`ANOMALY_BADGE` and `FINDING_BADGE` fold two different unions onto one `BadgeLevel`, `BADGE_RANK`
-orders it, and `maxBadgeLevel` reduces both lists at once. `AnomaliesView` and `AddressBar` each
-keep their own `Record<BadgeLevel, …>` of class names, because a table row (`-900/20`, `-300`,
-`-600`) and an 8px dot (`-500`) legitimately differ — sharing the mapping is the point, sharing the
-colours is not. The unknown-value fallbacks stay **at the call sites and are deliberately
-different**: an unknown severity sorts *last* and paints *blue* in `AnomaliesView` but reads as the
-*mildest* in `maxBadgeLevel`, which is why the module exports raw lookups rather than one total
-function — folding them would have quietly changed a sort an existing test pins
-(`peek-a-bin-rl95`).
+**A severity's ORDER is declared once, in `components/severity.ts`, and the module now has ONE
+reader.** It exports exactly `BadgeLevel`, `BADGE_RANK` (the order) and `ANOMALY_BADGE` (the fold
+from `Anomaly["severity"]` onto that level). `HeaderView`'s `AnomalyBanners` is the reader: it
+derives display order from `BADGE_RANK` by rank, filters through `ANOMALY_BADGE` with a `?? "info"`
+fallback, and keeps its own `severityConfig` `Record<BadgeLevel, …>` of class names — the palette
+is deliberately still the caller's, since a banner and a table row legitimately differ.
+`FINDING_BADGE` and `maxBadgeLevel` were deleted at `peek-a-bin-1xc5` along with `AIScanFinding`
+and `AddressBar`'s badge, **and with them the "unknown sorts last vs. reads as mildest"
+asymmetry** that the previous version of this paragraph explained — there is only one reader now,
+so there is only one fallback and nothing to hold apart (`peek-a-bin-rl95` is the record of why it
+was split when there were two).
+
+**A fourth severity fails the build, but as a TWO-STEP CHAIN rather than one failure, and the
+mechanism is worth stating precisely** (`peek-a-bin-1xc5` stage 7 — the bead's single-failure
+description was wrong and was corrected by measurement). Step 1: adding a member to
+`Anomaly["severity"]` reddens **`ANOMALY_BADGE`** alone; `severityConfig` does *not* fail here,
+because `BadgeLevel` is its own union, independent of `Anomaly["severity"]`. Step 2: the author's
+forced next move — widening `BadgeLevel` to satisfy step 1 — reddens **`BADGE_RANK`** *and*
+**`severityConfig`**. So either the new severity is deliberately mapped onto an existing level, in
+which case it renders, or two more tables fail the build; it cannot reach the page silently. **The
+counterfactual is confirmed and is the whole justification for keeping the module**: with
+`AnomalyBanners` unrewired, a fourth severity produced **zero** typecheck errors in `HeaderView` —
+the only error was in `severity.ts`, the module the alternative plan would have deleted.
 
 **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
 Space.
@@ -507,19 +537,26 @@ Space.
 **Styling**: Tailwind utilities; runtime font size via a `--mono-font-size` CSS variable on the
 app root.
 
-**AI features**: four tools — Chat (`useAIChat`), Batch Rename (`useBatchRename`), Report
-(`useAIReport`), Vulnerability Scanner (`useVulnScanner`) — all using `streamChat()` from
-`src/llm/client.ts`. Chat panel is local state in `DisassemblyView`; the other three keep state in
-`AppState`. Triggered via custom events (`peek-a-bin:open-chat`, `:batch-rename`,
-`:generate-report`, `:ai-scan`). Markdown via `marked` in `MarkdownRenderer.tsx`.
+**AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
+sub-tab (`useDecompileTabs`) — both using `streamChat()` from `src/llm/client.ts`. **Neither keeps
+state in `AppState`**: the chat panel is local state in `DisassemblyView` and the enhance/explain
+results are the decompile-tab hook's. The only AI custom event left is `peek-a-bin:open-chat`.
+Markdown via `marked` in `MarkdownRenderer.tsx`. Batch Rename, the AI Report and the Vulnerability
+Scanner were removed at `peek-a-bin-1xc5`, taking `:batch-rename`, `:generate-report` and
+`:ai-scan` with them. Both survivors are still gated by `hasApiKey()`, which bounces to Settings
+with no message when no key is configured — that gate was **not** changed.
 
 ## Conventions
 
 **File naming**: components = PascalCase.tsx, hooks = useCamelCase.ts, modules = camelCase.ts.
 
 **localStorage**: `peek-a-bin:<feature>` namespace (`peek-a-bin:llm-profiles`, `:font-size`,
-`:view-mode`, `:chat:${fileName}`, `:report:${fileName}`, `:chat-width`, `:callgraph-height`). Legacy
-`peek-a-bin:llm-settings` auto-migrates to `:llm-profiles` on first load.
+`:view-mode`, `:chat:${fileName}`, `:chat-width`, `:callgraph-height`). Legacy
+`peek-a-bin:llm-settings` auto-migrates to `:llm-profiles` on first load. **`:report:${fileName}`
+is orphaned and deliberately unmigrated** — the AI report wrote it, the feature went at
+`peek-a-bin-1xc5`, and a prefix-scanning deleter on the load path is a foot-gun (nothing enforces
+that `peek-a-bin:report:` stays a prefix of nothing else) to reclaim a few KB the user can clear
+from devtools.
 
 **Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for
 cross-component communication.
@@ -975,6 +1012,20 @@ read "all of them compile" as "all of them are right".
 
 ### Not verified. Say so rather than implying otherwise:
 
+> **DATE-STAMP FOR EVERY RENDER FIGURE BELOW (2026-09-09, `peek-a-bin-1xc5`).** Batch Rename, the
+> AI Report, the Vulnerability Scanner and the Anomalies view tab were removed, taking
+> `AnomaliesView.tsx`, `AIDialogs.dom.test.tsx` and `AnomaliesView.dom.test.tsx` with them. **The
+> narratives below are amended, never renumbered: "nine defects" stays nine.** Two of the nine were
+> in `AnomaliesView` and a third was a tab-button name that no longer exists; they were found, they
+> were real, and that evidence is the case for having closed the render gap in the first place.
+> What is now stale is the arithmetic: at `263bd5d` the tree holds **30** `*.dom.test.tsx` suites,
+> **38** files under `src/components/`, **four** dialogs and **eight** view tabs, and the
+> per-component and per-dialog censuses have **not** been re-taken. (**31** dom suites on the
+> integrated tree: `peek-a-bin-r8tt` landed alongside with `InsnContextMenu.dom.test.tsx`, which is
+> not part of this removal.) The three reductions this
+> removal *causes* are enumerated in `docs/verification.md`, as their own entries rather than as
+> edits to these.
+
 - **THE RENDER GAP IS CLOSED: every component under `src/components/` plus `App` itself is now
   rendered by a suite that asserts on it.** Measured, not recalled — 31 `*.dom.test.tsx` suites, and
   a per-component scan names 40 of the 41 files; the one it does not is `ModalBackdrop`, which
@@ -998,12 +1049,16 @@ read "all of them compile" as "all of them are right".
     many-to-one, so the `;` shortcut mounted N identical `<textarea>`s, each running `focusOnMount`.
   - **`AnomaliesView` picked its AI-findings colour with a hand-written chain over the severity
     string** — the `n7q1` shape again — and keyed both anomaly tables `Record<string, …>`, so a
-    fourth severity would have compiled, sorted last and rendered in `info`'s blue.
+    fourth severity would have compiled, sorted last and rendered in `info`'s blue. (That component
+    was removed at `peek-a-bin-1xc5`; the current holder of the rule is the severity paragraph
+    above, read by `HeaderView`'s `AnomalyBanners`.)
   - **`ResourcesView` returned a keyless shorthand fragment as the element of a `.map`**, so every
     render of a populated tab logged React's key warning and reconciled rows by index.
   - **`App`'s tab bar gave the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
     sat inside the button with no separator. Fixed at `6f99fdf` with `peek-a-bin-w50c`: the badge
-    is `aria-hidden` and the count is spelled into an `aria-label` instead.
+    is `aria-hidden` and the count is spelled into an `aria-label` instead. (That tab and its badge
+    were removed at `peek-a-bin-1xc5`, so the fix is now MOOT rather than wrong — kept on the
+    record because it is one of the nine.)
   Two more from *closing* two of the named holes above — found not by a render failing but by
   having to state, for the first time, what the block being rendered was supposed to print:
   - **`parseDebugDirectory` printed the CodeView PDB GUID in file byte order.** `CV_INFO_PDB70`'s
@@ -1273,7 +1328,7 @@ read "all of them compile" as "all of them are right".
   resolved against the document in both directions — and `XrefPanel`'s two "To" buttons now carry
   `aria-label`s that tell them apart, asserted through testing-library's name computation. **None of
   that is evidence about a screen reader or a browser focus algorithm**, neither of which exists
-  here: nothing says a reader announces "Sections, tab 3 of 9", reads the panel on activation, or
+  here: nothing says a reader announces "Sections, tab 3 of 8", reads the panel on activation, or
   honours `aria-labelledby`. Two further reasoned-not-observed points: a hidden panel is out of the
   a11y tree only because `hidden` carries `display: none` in a browser, which it does not here; and
   the extra tab stop on panes that *do* contain focusable content costs one Tab, which nobody has
@@ -1283,6 +1338,27 @@ read "all of them compile" as "all of them are right".
   computation, which is jsdom and not an assistive technology.
 - **MCP → browser WebSocket annotation sync has never been exercised end to end**, in particular
   since the 127.0.0.1 bind change.
+- **THREE THINGS THE AI-FEATURE REMOVAL STOPPED PINNING (2026-09-09, `263bd5d`,
+  `peek-a-bin-1xc5`).** Full records, with the measurements and controls, in
+  `docs/verification.md`; this is the index entry.
+  1. **The token-budget table has no discriminating runtime test.** `LLMTask` is `chat | enhance`
+     and both budgets are 16384, so no call to `streamChat` can distinguish the
+     `Record<LLMTask, number>` from a constant. `client.test.ts`'s "varies the budget by task" was
+     **deleted with an in-file comment**, not repaired with an invented third value, and the two
+     budgets were deliberately *not* held apart to keep it alive. Typecheck and the
+     `?? TASK_MAX_TOKENS.chat` fallback are what remain.
+  2. **`modalScaffold.test.ts` passes over branches no code path can reach — THREE of four rows,
+     measured.** `accidentalDismissAllowed` lost two of its three non-constant callers; only
+     `(false, false)` is still reached, via `DialogBoundary.tsx`. Gutting the function to
+     `return true` failed 4 tests before the removal and passes the whole suite after it. The rows
+     are kept and the docstrings say so; a green row there is evidence about the rule, not the app.
+  3. **63 rendering tests and 43 negative controls went unreplaced.** `AIDialogs.dom.test.tsx`
+     (27 tests) and `AnomaliesView.dom.test.tsx` (36 tests, 43 controls) were deleted with their
+     subjects; only 3 migrated, into `HeaderView.dom.test.tsx`. Suite counts for the removal
+     **alone**, at `263bd5d`: `--dir src` 142 files / 4895 tests → 136 / 4735, `--dir build`
+     14/273 → 14/269. The integrated tree reads 137 / 4793 and 14 / 271 — the difference is
+     `peek-a-bin-r8tt`'s `InsnContextMenu.dom.test.tsx` (58 tests), landed alongside and not part
+     of this removal.
 - **`@vitest/coverage-v8` is not installed**, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.
@@ -1419,7 +1495,7 @@ mistake.
 
 - **A PC-relative `LDR (literal)` is the ISA marking its own data — on A64 the only data-marking rule here needing no inference.** The instruction carries a signed 19-bit word offset and states the datum's width in its destination register (4/8/16 bytes for `w`,`s`/`x`,`d`/`q`), so the pool is read off one instruction; it matters because the fixed-width sweep decodes every word whatever it holds, and a pool word that happens to be a valid encoding renders as a plausible instruction *inside a `.pdata` extent*, i.e. presented as linker-vouched code. `findArm64LiteralPools` (`arm64Operands.ts`) is the grammar, `literalPoolTest` (`arm64.ts`) applies it. Five things: the pools are **not** a caller's fact and are derived inside `decorateArm64Sweep` from `raw` itself, because a forwarding step is exactly what `gb40` found falling out of step, and it reaches callers a `DetectResult` field would miss; `sweepArm64` and `Arm64SweepCache` stay untouched, only what is *presented* differs; a load sitting inside another load's pool is not honoured (one pass, not a fixpoint — re-admitting could only mark more, and short is the direction to err); a misaligned target and `prfm <prfop>, <label>` are both refused; and **`source` was judged separately and deliberately not changed** — the `.pdata` extent really is the linker's record, so downgrading on suspicion would dim 25k words to make one honest, and the answer where a word is *provably* data is to withhold it. (`peek-a-bin-qiws`)
 
-- **The ARM64 stack frame comes out of `.pdata`, and the packed `FrameSize` field means the frame DELTA, not the total allocation.** `analyzeStackFrame` is an x86 operand grammar that refuses A64; `disasm/arm64Frame.ts` is the **second grammar**, reading what the linker already wrote down, and `disasm/stackFrame.ts` is the one place that dispatches between them. `pe/arm64Unwind.ts` decodes both encodings — the packed `.pdata` word and the `.xdata` unwind codes. Six things: `FrameSize` states `E - x29` exactly, so a crude total-allocation reader is measuring the wrong thing; an area allocated *below* the frame pointer is outside every unwind record in both encodings, by design, so `frameSize` is a lower bound for a chained function; **`frameSize` is the record's total and `frameDelta` the delta, and conflating them was a live defect no gate saw** (the corpus was 51/51 green with it in place) — `arm64Unwind.test.ts` is the whole instrument; a **negative** delta is refused, being x86's `addressesOwnFrame` rule reached from the A64 side (`peek-a-bin-s7hl`); the unwind codes run **backwards through the prologue** and carry more bytes after `end` that must not be counted, and two table errors there were caught by the corpus rather than by reading; and the var list has **no oracle** and is reported, not gated, with pre-index writeback, register offsets and the two-slot `ldp`/`stp` each excluded for its own reason. **The SIGNATURE was refused on evidence**: `.pdata` carries no arity information, AAPCS64 has no home space so any positional rule would gate on an empty population, and `inferSignature` returns null rather than a count nothing can check. **Only one call site was converted** — `mcp/tools.ts`, `useDecompileTabs.ts` and `decompileForLLM.ts` build a `StackFrame` only for `decompileFunction`, which refuses A64 above them, so routing them through the dispatcher would be inert at best and would hand an x86 lifter another architecture's frame at worst. (`peek-a-bin-hof0`)
+- **The ARM64 stack frame comes out of `.pdata`, and the packed `FrameSize` field means the frame DELTA, not the total allocation.** `analyzeStackFrame` is an x86 operand grammar that refuses A64; `disasm/arm64Frame.ts` is the **second grammar**, reading what the linker already wrote down, and `disasm/stackFrame.ts` is the one place that dispatches between them. `pe/arm64Unwind.ts` decodes both encodings — the packed `.pdata` word and the `.xdata` unwind codes. Six things: `FrameSize` states `E - x29` exactly, so a crude total-allocation reader is measuring the wrong thing; an area allocated *below* the frame pointer is outside every unwind record in both encodings, by design, so `frameSize` is a lower bound for a chained function; **`frameSize` is the record's total and `frameDelta` the delta, and conflating them was a live defect no gate saw** (the corpus was 51/51 green with it in place) — `arm64Unwind.test.ts` is the whole instrument; a **negative** delta is refused, being x86's `addressesOwnFrame` rule reached from the A64 side (`peek-a-bin-s7hl`); the unwind codes run **backwards through the prologue** and carry more bytes after `end` that must not be counted, and two table errors there were caught by the corpus rather than by reading; and the var list has **no oracle** and is reported, not gated, with pre-index writeback, register offsets and the two-slot `ldp`/`stp` each excluded for its own reason. **The SIGNATURE was refused on evidence**: `.pdata` carries no arity information, AAPCS64 has no home space so any positional rule would gate on an empty population, and `inferSignature` returns null rather than a count nothing can check. **Only one call site was converted** — `mcp/tools.ts` and `useDecompileTabs.ts` build a `StackFrame` only for `decompileFunction`, which refuses A64 above them, so routing them through the dispatcher would be inert at best and would hand an x86 lifter another architecture's frame at worst. (A third, `decompileForLLM.ts`, made the same choice for the same reason and went at `peek-a-bin-1xc5`; the judgement is unchanged, the population is one smaller.) (`peek-a-bin-hof0`)
 
 - **In every arch dispatch, the `"unsupported"` arm must be checked *before* the `"arm64"` arm.** `dispatch.ts` and `mcp/disasm.ts` branch on `state.arch` in a chain whose tail is the x86 path, so testing ARM64 first drops an unsupported image straight into x86 — a full screen of plausible instructions the file does not contain, with no coverage signal to notice it by, since an x86 linear sweep decodes essentially any byte string. `WorkerState.arch`'s docstring says this too; keep both true.
 

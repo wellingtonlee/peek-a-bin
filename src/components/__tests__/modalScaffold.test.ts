@@ -231,21 +231,33 @@ describe("body scroll lock", () => {
   });
 });
 
+// THREE OF THESE FOUR ROWS NOW ASSERT OVER INPUTS NO CALL SITE CAN PRODUCE, and
+// that is recorded here rather than resolved by deleting them. The callers that
+// passed a `true` — the batch-rename dialog and the AI report panel — went at
+// `peek-a-bin-1xc5`, leaving `DialogBoundary.tsx` as the only live caller and
+// `(false, false)` as the only live row. Measured, not read: gutting the
+// function to `return true` with this describe excluded failed 4 tests before
+// that removal and passes the whole suite after it. The rule is worth keeping
+// written down and a caller with real in-flight work is one feature away, so the
+// rows stay — but do not read a green run here as evidence about the app.
 describe("accidentalDismissAllowed", () => {
   it("offers Escape and backdrop click to an idle dialog", () => {
-    // The go-to-address, palette, shortcuts and batch-rename-error dialogs.
+    // The go-to-address, palette and shortcuts dialogs, and `DialogBoundary`'s
+    // own fallback — the only combination any live caller now produces.
     expect(accidentalDismissAllowed({ inFlight: false, unsavedWork: false })).toBe(true);
   });
 
   it("withholds it while a request is in flight", () => {
-    // Batch rename mid-run, or a report still streaming: dismissing abandons
-    // work that has already been paid for and is not written down anywhere.
+    // Historically: batch rename mid-run, or a report still streaming, where
+    // dismissing abandons work already paid for and written down nowhere. No
+    // live caller passes this today (see the note above the describe).
     expect(accidentalDismissAllowed({ inFlight: true, unsavedWork: false })).toBe(false);
   });
 
   it("withholds it from a dialog holding uncommitted decisions", () => {
-    // The batch-rename review table: dismissing drops both the suggestions and
-    // every accept/reject the user has clicked.
+    // Historically: the batch-rename review table, where dismissing drops both
+    // the suggestions and every accept/reject the user has clicked. No live
+    // caller passes this today (see the note above the describe).
     expect(accidentalDismissAllowed({ inFlight: false, unsavedWork: true })).toBe(false);
   });
 

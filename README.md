@@ -17,7 +17,7 @@ Browser-based PE disassembler. All analysis client-side via WebAssembly.
 - **ARM64** — PE32+ ARM64 images disassemble via a fixed-width sweep, with A64-aware CFG, jump arrows and cross-references; the decompiler is x86-only and says so rather than guessing. An image whose machine type has no decoder here (ARM32/Thumb, IA-64, RISC-V, MIPS) is refused visibly instead of being decoded as x86, and still shows its headers, sections, imports, exports, resources and strings
 - **Decompiler** — IR-based built-in decompiler with SSA, type inference, and struct synthesis; optional Ghidra server for high-level output
 - **Control Flow Graph** — inline IDA-style graph view with collapsible blocks, keyboard navigation, and pan/zoom
-- **AI-Powered Analysis** — chat, batch auto-rename, analysis reports, vulnerability scanner (bring your own API key)
+- **AI-Powered Analysis** — chat, and enhance/explain in the decompile panel (bring your own API key)
 - **Kernel Driver Analysis** — `.sys` driver detection, suspicious API flagging, IOCTL decoder, IRP dispatch table
 - **Annotations** — bookmarks, renames, comments with undo/redo and export/import
 - **Cross-References** — function calls, strings, imports, data section references
@@ -45,7 +45,7 @@ npm run dev
 |-------|-------------|
 | [Keyboard Shortcuts](docs/keyboard.md) | All hotkeys and navigation |
 | [Theming](docs/theming.md) | Themes, custom colors, font size |
-| [AI Features](docs/ai-features.md) | Chat, batch rename, reports, vulnerability scanner |
+| [AI Features](docs/ai-features.md) | Chat, enhance/explain, LLM profiles |
 | [Ghidra Server](docs/ghidra-server.md) | Optional high-level decompilation server |
 | [MCP Server](docs/mcp-server.md) | AI agent integration tools and resources |
 | [Architecture](docs/architecture.md) | State management, worker, rendering pipeline |

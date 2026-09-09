@@ -37,7 +37,11 @@ The pipeline is phased via `analysisPhase` state:
 3. **Disassemble:** Hybrid recursive descent + linear sweep, seeded with jump-table case targets (`disasm/seeds.ts`); gap-fill regions marked separately
 4. **Xrefs:** Cross-references built for calls, jumps, strings, imports, and data sections
 5. **Strings:** ASCII and UTF-16LE string extraction with address mapping
-6. **Anomalies:** Security characteristic scanning (WX sections, packer indicators, etc.)
+6. **Anomalies:** Security characteristic scanning (WX sections, packer indicators, etc.).
+   The stage is unchanged; what moved is where the result is read. The Anomalies view tab was
+   removed on 2026-09-09 (`peek-a-bin-1xc5`), so `AppState.anomalies` now surfaces as
+   dismissible banners on the **Headers** tab (`HeaderView`'s `AnomalyBanners`), through MCP
+   (`pe://{fileId}/anomalies`, `detect_anomalies`) and in the Markdown export
 7. **Driver:** `.sys` driver detection (NATIVE subsystem, WDM flag, kernel imports)
 
 `AnalysisPhase` also has a terminal `"failed"` value. If any stage of the chain rejects, the
@@ -386,29 +390,15 @@ points at it (kept so a malformed file still shows its named exports).
 
 `useReducer` + React Context in `src/hooks/usePEFile.ts`.
 
-- **`AppState`**: 45 fields covering PE data, analysis results, UI state, annotations, AI state
-- **`AppAction`**: Discriminated union with 53 action types
+- **`AppState`**: 30 top-level fields covering PE data, analysis results, UI state and
+  annotations, counted at `263bd5d`
+- **`AppAction`**: Discriminated union with 39 action types, counted at `263bd5d`
+
+> Both counts drift — re-measure rather than trusting them. They fell from 34 / 55 when the
+> three AI features were removed (`peek-a-bin-1xc5`); the figures printed here before that were
+> 45 / 53, which matched neither the tree nor `CLAUDE.md`.
 - **Access:** `useAppState()` for reading, `useAppDispatch()` for dispatching
 - **Annotations:** Bookmarks, renames, comments auto-persist to localStorage per file with undo/redo via snapshot stack
-
-### `AIScanState`
-
-The vulnerability scanner's progress and outcome live in `state.aiScan` (an `AIScanState`),
-kept separate from the `aiScanResults` finding list so that three outcomes stay
-distinguishable:
-
-| `phase` | Meaning |
-|---------|---------|
-| `"idle"` | Never run for this binary |
-| `"scanning"` | In flight; `scanned` / `failed` / `total` track progress |
-| `"complete"` | Ran to completion — an empty finding list here genuinely means "nothing found" |
-| `"failed"` | Ran but produced nothing usable |
-
-An empty `aiScanResults` therefore means "clean" **only** when `phase` says the scan actually
-completed. Collapsing the two is what made an unparseable model response render identically to
-a clean binary. A run can also be partially successful: `phase: "complete"` with `failed > 0`
-means some functions were scanned and others could not be, so the finding list is real but
-incomplete. `error` retains the first failure message from the run.
 
 ## Worker Architecture
 
@@ -590,9 +580,6 @@ Custom events for decoupled communication:
 | Event | Purpose |
 |-------|---------|
 | `peek-a-bin:open-chat` | Open AI chat panel |
-| `peek-a-bin:batch-rename` | Start batch auto-rename |
-| `peek-a-bin:generate-report` | Generate AI report |
-| `peek-a-bin:ai-scan` | Start vulnerability scan |
 | `peek-a-bin:open-settings` | Open the settings modal (e.g. when no API key is configured) |
 | `peek-a-bin:show-xrefs` | Open the xref panel filtered to an address |
 | `peek-a-bin:font-size-changed` | Font size setting changed |
@@ -616,7 +603,6 @@ All keys use the `peek-a-bin:` prefix:
 | `peek-a-bin:decompile-server` | Ghidra server settings |
 | `peek-a-bin:chat:${fileName}` | AI chat messages per file |
 | `peek-a-bin:chat-width` | Chat panel width |
-| `peek-a-bin:report:${fileName}` | Cached AI report per file |
 | `peek-a-bin:sidebar-width` | Sidebar width |
 | `peek-a-bin:decompile-width` | Decompile panel width |
 | `peek-a-bin:bottom-panel-height` | Tabbed bottom panel height |
@@ -628,6 +614,13 @@ All keys use the `peek-a-bin:` prefix:
 | `peek-a-bin:show-bytes` | Raw bytes column visibility |
 
 Per-file annotation keys are derived from the filename and stored automatically.
+
+**One key is orphaned and deliberately not migrated.** `peek-a-bin:report:${fileName}` held
+the cached AI report; the feature that wrote it was removed on 2026-09-09
+(`peek-a-bin-1xc5`) and nothing reads or deletes the key now. A prefix-scanning deleter on
+the load path is a foot-gun — `peek-a-bin:report:` is a prefix of nothing else *today* and
+nothing enforces that it stays so — for a few KB of a per-origin quota the user can clear
+from devtools. The bytes are left where they are.
 
 ## Annotations & Export
 

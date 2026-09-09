@@ -9,9 +9,19 @@
  * (peek-a-bin-vrl). So the regression this file exists for is invisible to every
  * assertion about *output*: an edit that drops the second argument, or drops the
  * size-threshold branch, keeps the anomaly list perfectly correct and freezes
- * the tab for several seconds on a large file. There is no renderer in this repo
- * — no jsdom, no @testing-library/react — so App's effect never executes under
- * vitest and nothing else can notice (peek-a-bin-v4s3).
+ * the main thread for several seconds on a large file.
+ *
+ * TWO CLAUSES OF THAT SENTENCE HAVE ROTTED AND ARE CORRECTED HERE RATHER THAN
+ * TRIMMED, because neither is a reason to touch the guard. (1) It said "freezes
+ * the tab", meaning the Anomalies view tab; that tab was removed at
+ * `peek-a-bin-1xc5` and the freeze now lands on the Headers tab's banner strip,
+ * on MCP's `pe://{id}/anomalies` and on the Markdown export. The subject of
+ * every assertion below is App.tsx's `detectAnomalies` effect, which is
+ * untouched by that removal. (2) It said "there is no renderer in this repo";
+ * there is — `src/__tests__/App.dom.test.tsx` mounts the real `App` — but it
+ * never drives a file past `MAX_SYNC_FILE_METRIC_BYTES`, so the threshold branch
+ * still executes under no test and this AST guard is still the only instrument
+ * (peek-a-bin-v4s3).
  *
  * Read over the TypeScript AST rather than as text, following
  * `hooks/__tests__/disasmHandlerDeps.test.ts`. CLAUDE.md's warning about
