@@ -660,13 +660,21 @@ function parseImports(
         // **`functions` AND `iatAddresses` ARE PARALLEL ARRAYS PAIRED BY INDEX
         // BY FOUR CONSUMERS** — `disasm/operands.ts`'s `buildIATLookup`
         // (`iatAddresses[i]` -> `functions[i]`, which is what labels a call site
-        // in the disassembly), `ImportsView`, `useVulnScanner` and
-        // `mcp/resources.ts`. The IAT address used to be pushed
-        // unconditionally while the name was pushed only if its hint/name
-        // record resolved, so ONE unresolvable name RVA shifted every later
-        // name up one slot and **mislabelled every remaining call site in that
-        // library, on real instructions, with another import's name**. That is
-        // a wrong value, not a missing one, and no flag repairs it.
+        // in the disassembly), `ImportsView`, `CommandPalette` (which pairs
+        // them to give an import's palette entry the address it jumps to) and
+        // `mcp/resources.ts`. A FIFTH, `useVulnScanner`, has since been
+        // removed — and `CommandPalette` was absent from this census until
+        // then, so the count is four either way rather than three: re-derive
+        // it with `grep -rn iatAddresses src/` and check each hit for an
+        // index pairing, since `App.tsx` and `mcp/session.ts` flatten
+        // `iatAddresses` alone and are NOT consumers of the invariant.
+        //
+        // The IAT address used to be pushed unconditionally while the name was
+        // pushed only if its hint/name record resolved, so ONE unresolvable
+        // name RVA shifted every later name up one slot and **mislabelled
+        // every remaining call site in that library, on real instructions,
+        // with another import's name**. That is a wrong value, not a missing
+        // one, and no flag repairs it.
         //
         // So a slot contributes to BOTH arrays or to NEITHER, which is what
         // keeps the pairing an invariant rather than a convention. `funcIndex`

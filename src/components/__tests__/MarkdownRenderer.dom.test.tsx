@@ -10,9 +10,9 @@ import { MarkdownRenderer } from "../MarkdownRenderer";
  * The one place LLM output reaches `innerHTML`.
  *
  * `MarkdownRenderer` is 32 lines and every AI feature's output goes through it —
- * the chat panel, the AI report, and anything added later. It runs `marked`
- * (which has not sanitized by default since v5) and then `DOMPurify.sanitize`,
- * and hands the result to `dangerouslySetInnerHTML`.
+ * the chat panel today, and anything added later. It runs `marked` (which has
+ * not sanitized by default since v5) and then `DOMPurify.sanitize`, and hands
+ * the result to `dangerouslySetInnerHTML`.
  *
  * WHY THAT IS THE INTERESTING PROPERTY. `content` is a model response, and the
  * prompts this app builds quote the analysed binary: `useAIChat`'s
@@ -24,10 +24,10 @@ import { MarkdownRenderer } from "../MarkdownRenderer";
  * transparent pipe), which is exactly why the sanitize call is the load-bearing
  * line rather than the prompt.
  *
- * It was reached before this suite existed — `AIDialogs.dom.test.tsx` renders
- * `AIReportPanel`, which renders this — but only for two benign markdown
- * fixtures. Nothing had ever asked it a hostile question, and the sanitize call
- * could have been deleted with the whole tree green.
+ * It was reached before this suite existed — `AIChatPanel.dom.test.tsx` renders
+ * `AIChatPanel`, which renders this — but only for two benign markdown fixtures.
+ * Nothing had ever asked it a hostile question, and the sanitize call could
+ * have been deleted with the whole tree green.
  *
  * THE HONEST BOUND. Every row below is a specific vector against
  * `dompurify@3.4.13` under jsdom 28. It is a regression pin on this
