@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { streamChat } from "../llm/client";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
-import { hasApiKey, loadSettings } from "../llm/settings";
+import { hasApiKey, loadSettings, NO_API_KEY_MESSAGE } from "../llm/settings";
 import type { ChatMessage } from "../llm/types";
 import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 import type { PEFile } from "../pe/types";
@@ -18,6 +18,7 @@ type ChatAction =
   | { type: "STREAM_TOKEN"; content: string }
   | { type: "STREAM_DONE" }
   | { type: "STREAM_ERROR"; error: string }
+  | { type: "SET_ERROR"; error: string }
   | { type: "LOAD"; messages: ChatMessage[] }
   | { type: "CLEAR" };
 
@@ -47,6 +48,14 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, streaming: false };
     case "STREAM_ERROR":
       return { ...state, streaming: false, error: action.error };
+    // A failure that happens BEFORE anything is sent, so it must not touch
+    // `streaming` or the message list: reusing STREAM_ERROR here would be
+    // harmless today only because the caller has already established that no
+    // stream is in flight, which is a fact about that one call site rather than
+    // about this action. The next action to add a user message (`ADD_USER`) or
+    // begin a stream clears it, so the banner cannot outlive the condition.
+    case "SET_ERROR":
+      return { ...state, error: action.error };
     case "LOAD":
       return { ...state, messages: action.messages };
     case "CLEAR":
@@ -159,7 +168,10 @@ export function useAIChat(
     (content: string) => {
       if (!content.trim() || state.streaming) return;
       if (!hasApiKey()) {
+        // Opening Settings is the right next step and is kept. What was missing
+        // is the sentence saying why it opened — see NO_API_KEY_MESSAGE.
         window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
+        dispatch({ type: "SET_ERROR", error: NO_API_KEY_MESSAGE });
         return;
       }
 
