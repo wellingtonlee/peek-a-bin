@@ -48,9 +48,7 @@ const DisassemblyView = lazy(() =>
 const HexView = lazy(() => import("./components/HexView").then((m) => ({ default: m.HexView })));
 
 import { AddressBar } from "./components/AddressBar";
-import { AIReportPanel } from "./components/AIReportPanel";
 import { AnomaliesView } from "./components/AnomaliesView";
-import { BatchRenameModal } from "./components/BatchRenameModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { DialogBoundary } from "./components/DialogBoundary";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -62,11 +60,8 @@ import { ResourcesView } from "./components/ResourcesView";
 import { SettingsModal } from "./components/SettingsModal";
 import { StatusBar } from "./components/StatusBar";
 import { StringsView } from "./components/StringsView";
-import { useAIReport } from "./hooks/useAIReport";
-import { useBatchRename } from "./hooks/useBatchRename";
 import { GraphOverviewContext, useGraphOverviewState } from "./hooks/useGraphOverview";
 import { useMcpSync } from "./hooks/useMcpSync";
-import { useVulnScanner } from "./hooks/useVulnScanner";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
@@ -79,9 +74,6 @@ export default function App() {
   const [driverBannerDismissed, setDriverBannerDismissed] = useState(false);
   const [noticeDismissed, setNoticeDismissed] = useState(false);
   const [fontSize, setFontSize] = useState(() => loadFontSize());
-  const aiReport = useAIReport(state, dispatch);
-  const batchRename = useBatchRename(state, dispatch);
-  const vulnScanner = useVulnScanner(state, dispatch);
 
   // Apply theme on mount and when changed
   useEffect(() => {
@@ -134,21 +126,6 @@ export default function App() {
     window.addEventListener("peek-a-bin:open-settings", handler);
     return () => window.removeEventListener("peek-a-bin:open-settings", handler);
   }, []);
-
-  // AI feature event listeners
-  useEffect(() => {
-    const handleReport = () => aiReport.generateReport();
-    const handleBatchRename = () => batchRename.startBatchRename();
-    const handleAiScan = () => vulnScanner.scanSuspicious();
-    window.addEventListener("peek-a-bin:generate-report", handleReport);
-    window.addEventListener("peek-a-bin:batch-rename", handleBatchRename);
-    window.addEventListener("peek-a-bin:ai-scan", handleAiScan);
-    return () => {
-      window.removeEventListener("peek-a-bin:generate-report", handleReport);
-      window.removeEventListener("peek-a-bin:batch-rename", handleBatchRename);
-      window.removeEventListener("peek-a-bin:ai-scan", handleAiScan);
-    };
-  }, [aiReport.generateReport, batchRename.startBatchRename, vulnScanner.scanSuspicious]);
 
   useEffect(() => {
     const handler = () => setFontSize(loadFontSize());
@@ -738,10 +715,6 @@ export default function App() {
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeGoTo = useCallback(() => setGoToOpen(false), []);
-  // `BatchRenameModal` has no `open`/`onClose` pair — it reads `state.batchRename`
-  // and dispatches this itself. `DialogBoundary` needs the same dismissal from
-  // out here for the case where the dialog is not there to dispatch it.
-  const closeBatchRename = useCallback(() => dispatch({ type: "BATCH_RENAME_DISMISS" }), []);
   const fontStyle = useMemo(
     () => ({ "--mono-font-size": `${fontSize}px` }) as React.CSSProperties,
     [fontSize],
@@ -976,31 +949,6 @@ export default function App() {
         </DialogBoundary>
         <DialogBoundary label="Go to address" open={goToOpen} onClose={closeGoTo}>
           <GoToAddressModal open={goToOpen} onClose={closeGoTo} />
-        </DialogBoundary>
-        {/* The last two have no `open` prop: their open-ness IS a field of
-            `AppState`, which they read for themselves, so it is re-derived here
-            rather than threaded through them. `onClose` is likewise the caller's
-            own dismissal — `BATCH_RENAME_DISMISS` is exactly what the dialog's
-            internal Cancel dispatches, and `dismissReport` is what App already
-            passes to the panel. */}
-        <DialogBoundary
-          label="Batch rename"
-          open={state.batchRename !== null}
-          onClose={closeBatchRename}
-        >
-          <BatchRenameModal />
-        </DialogBoundary>
-        <DialogBoundary
-          label="The AI report"
-          open={state.aiReport !== null}
-          onClose={aiReport.dismissReport}
-        >
-          {state.aiReport && (
-            <AIReportPanel
-              onClose={aiReport.dismissReport}
-              onRegenerate={aiReport.regenerateReport}
-            />
-          )}
         </DialogBoundary>
       </AppDispatchContext.Provider>
     </AppStateContext.Provider>
