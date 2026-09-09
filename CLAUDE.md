@@ -407,6 +407,27 @@ go to the separate metrics worker; inputs under the thresholds in `asyncMetricSt
 for the entropy strip, 1 MiB for file metrics) stay synchronous and spawn no worker, so ordinary
 binaries never show a loading state.
 
+**`hybridDisassemble` returns the typed xref map with the instructions, so the browser posts
+`buildTypedXrefMap` ZERO times on an ordinary load.** The view asked for that map over exactly the
+array `hybridDisassemble` had just returned — one whole `.text` of objects back up to the worker to
+derive something it could have derived while it still held them (45–91 ms of clone across three
+stamped runs on t64.exe's 60 KiB `.text`, and **linear in the section**; the spread between runs is
+wider than the figure, so read `docs/gotchas.md` before quoting a digit). The dispatch arm
+computes it and replies `{ instructions, xrefs }` when the request sets `withXrefs`; the client
+**pre-seeds `xrefCache`** and **no call site changed**. Four rules: `withXrefs` is **opt-in**, set
+by `disasmClient` alone, so MCP and the six `corpus/` harnesses that time this arm keep the bare
+`Instruction[]` they measure — an absent `xrefs` means "not asked for", not "empty"; the seed's
+bounds half goes through **`xrefBoundsKey`**, the one declaration, since a second spelling would
+not fail loudly, it would just **miss**, paying for the upload *and* the fused payload;
+`useDisassemblyRows` must hand `hybridDisassemble` the **same two `pe.optionalHeader` numbers its
+xref effect passes**, which only `DisassemblyPanel.dom.test.tsx` can see; and the plain
+`buildTypedXrefMap` RPC stays, for `disassemble`, MCP and the terminal-phase fallback the fused
+path cannot cover. **Not `peek-a-bin-9a8`'s refused upload cache** — that rule is "the key
+comparison must be cheaper than the work it saves" and this has **no key**, the map being derived
+from the array inside the call that produced it. **Not `peek-a-bin-7mf`'s refused reply packing**
+either: nothing is packed and the receiver re-slices nothing. The test to keep is the **hit** (zero
+sends), not that two maps are equal (`peek-a-bin-w96b`).
+
 **Where a `File` exists it is posted instead of a copy.** A `Blob` is structured-cloneable *by
 reference*, so posting the original `File` is O(1) at any size and the worker reads the bytes
 itself — taking the last main-thread cost in that path (`prepareBinaryArgs`' slice, ~100 ms for a

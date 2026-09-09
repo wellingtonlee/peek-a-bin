@@ -1008,6 +1008,243 @@ describe("DisasmWorkerClient — buildTypedXrefMap sends only the fields it read
     expect(viaClient.get(0x140004000)).toEqual([{ from: 0x14000100c, type: "data" }]);
   });
 });
+/**
+ * peek-a-bin-w96b: the typed xref map is computed in the RPC that produced the
+ * instructions and rides back on its reply, so the browser's round trip is
+ * deleted rather than merely made smaller.
+ *
+ * WHAT THE ROUND TRIP COST. `useDisassemblyRows` posts `buildTypedXrefMap` over
+ * exactly the array `hybridDisassemble` has just returned — its xref effect is
+ * fed by the disassembly effect's result — so a whole `.text` worth of objects
+ * went back UP to the worker to derive something the worker could have derived
+ * while it still held them. Measured with `npm run corpus:replycost` on t64.exe
+ * (60 KiB `.text`, 16844 instructions, at 76608fe): 91.2 ms to clone the
+ * stripped array peek-a-bin-v3uh.3 narrowed that request down to, against
+ * 93.6 ms for the same array carrying its `bytes`. Linear in the section.
+ *
+ * The entries themselves are NOT a new cost: they crossed before as
+ * `buildTypedXrefMap`'s reply and cross now as part of this one, so the saving
+ * is exactly the eliminated upload.
+ *
+ * Not peek-a-bin-9a8's refused section-upload cache — there is **no key**, the
+ * map being derived from the array inside the call that produced it, so nothing
+ * can go stale. Not peek-a-bin-7mf's refused reply packing either — nothing is
+ * packed into a shared buffer and the receiver re-slices nothing. See
+ * `fuseXrefs` in ../dispatch.ts for the whole argument.
+ *
+ * THE ASSERTION THAT MATTERS IS THE **HIT**, not that two maps are equal. The
+ * cache is keyed on the caller's array identity plus a bounds string, and if
+ * the seed is written under a key the view never presents, nothing fails
+ * loudly: the upload simply happens anyway, on top of the fused payload now
+ * riding along. That is a payload added for nothing, and only a zero-send
+ * assertion can see it.
+ */
+describe("DisasmWorkerClient — the typed xref map rides back on hybridDisassemble", () => {
+  const TEXT_BASE = 0x140001000;
+  const AMD64 = 0x8664;
+  /** t64.exe's mapping, so the bounded fallback arm is the real one. */
+  const bounds = { base: 0x140000000, size: 0x1e000 };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A decoder emitting one instruction per classifying arm of
+   * `buildTypedXrefMap`, so the fused map is non-empty for a reason rather than
+   * by accident: a direct call, a `[rip ± 0x..]` displacement (the only arm
+   * that reads `size`), an absolute operand the bounded fallback scan admits,
+   * and — the fourth, which is what makes the BOUNDS observable — an absolute
+   * operand OUTSIDE the image, which the bounded scan drops and an unbounded
+   * one reports.
+   *
+   * The fourth shape is not decoration. Without it every row here reads the
+   * same whether or not the fused map was built under the `imageBounds` the
+   * request carried, and the control for dropping them came back INERT
+   * (peek-a-bin-w96b). Everything past the four is a `nop`, which classifies as
+   * nothing.
+   */
+  function xrefDecoder() {
+    const shapes: [string, string][] = [
+      ["call", "0x140001010"],
+      ["lea", "rax, [rip + 0x100]"],
+      ["mov", "eax, dword ptr [0x140004000]"],
+      ["mov", "ebx, 0x400000"],
+    ];
+    return {
+      calls: 0,
+      disasm(bytes: Uint8Array, options: { address: number; count?: number }) {
+        this.calls++;
+        const out: {
+          address: number;
+          mnemonic: string;
+          opStr: string;
+          size: number;
+          bytes: Uint8Array;
+        }[] = [];
+        const limit = options.count ?? Number.POSITIVE_INFINITY;
+        for (let i = 0; i + 4 <= bytes.length && out.length < limit; i += 4) {
+          const slot = (options.address + i - TEXT_BASE) / 4;
+          const [mnemonic, opStr] = shapes[slot] ?? ["nop", ""];
+          out.push({
+            address: options.address + i,
+            mnemonic,
+            opStr,
+            size: 4,
+            bytes: bytes.subarray(i, i + 4),
+          });
+        }
+        if (out.length === 0) throw new Error("Failed to disassemble");
+        return out;
+      },
+    };
+  }
+
+  function workerState(cs: ReturnType<typeof xrefDecoder>): WorkerState {
+    return Object.assign(createWorkerState(Promise.resolve()), {
+      cs32: cs,
+      cs64: cs,
+      csArm64: cs,
+      arch: "x86" as const,
+    });
+  }
+
+  const section = () => new Uint8Array(0x20);
+
+  /**
+   * One ordinary load: the view's `hybridDisassemble`, posted through the real
+   * client and answered by the real dispatch.
+   *
+   * The bounds passed here are the two numbers `useDisassemblyRows` reads off
+   * `pe.optionalHeader` for BOTH effects — which is the precondition the seed
+   * depends on.
+   */
+  async function load() {
+    const { client, worker } = await loadClient();
+    client.setImage(AMD64);
+    const cs = xrefDecoder();
+    const s = workerState(cs);
+    const pending = client.hybridDisassemble(
+      section(),
+      TEXT_BASE,
+      true,
+      [TEXT_BASE],
+      undefined,
+      bounds,
+    );
+    worker.reply(
+      worker.posted[0].id,
+      await dispatch("hybridDisassemble", worker.received[0].args, s),
+    );
+    const insns = await pending;
+    return { client, worker, s, insns };
+  }
+
+  /** What the client would have posted for a round trip: `XrefInsn`s. */
+  const stripped = (insns: Instruction[]) =>
+    insns.map((i) => ({
+      address: i.address,
+      mnemonic: i.mnemonic,
+      opStr: i.opStr,
+      size: i.size,
+    }));
+
+  it("asks for the map in the same request, under the bounds it will be cached at", async () => {
+    const { client, worker } = await loadClient();
+    client.setImage(AMD64);
+
+    void client.hybridDisassemble(section(), TEXT_BASE, true, [TEXT_BASE], undefined, bounds);
+
+    // `received` is post-structured-clone, i.e. what the worker really sees.
+    expect(worker.received[0].args.withXrefs).toBe(true);
+    expect(worker.received[0].args.imageBounds).toEqual(bounds);
+  });
+
+  it("leaves every other caller of the dispatch on the bare instruction array", async () => {
+    // The flag is opt-in precisely so `src/mcp/` and the six harnesses under
+    // `corpus/` that time this arm keep receiving — and keep measuring — the
+    // reply they always did. An absent `xrefs` is "not asked for", which is a
+    // different fact from an empty map.
+    const s = workerState(xrefDecoder());
+    const plain = await dispatch(
+      "hybridDisassemble",
+      { bytes: section(), baseAddress: TEXT_BASE, is64: true, seeds: [TEXT_BASE] },
+      s,
+    );
+
+    expect(Array.isArray(plain)).toBe(true);
+  });
+
+  it("posts NO buildTypedXrefMap at all — the view's round trip is gone", async () => {
+    // THE ASSERTION THE WHOLE CHANGE RESTS ON. Checked BEFORE the await: a miss
+    // would post, and with nothing answering it the promise would hang rather
+    // than fail, so an `await` first would report a timeout instead of a miss.
+    const { client, worker, insns } = await load();
+
+    const pending = client.buildTypedXrefMap(insns, bounds);
+
+    expect(worker.posted.map((m) => m.method)).toEqual(["hybridDisassemble"]);
+    const map = await pending;
+    // Liveness: an empty map is served from an empty seed just as happily, so
+    // the hit above says nothing without a populated answer under it. One
+    // target per classifying arm.
+    expect(map.get(0x140001010)).toEqual([{ from: TEXT_BASE, type: "call" }]);
+    expect(map.get(TEXT_BASE + 4 + 4 + 0x100)).toEqual([{ from: TEXT_BASE + 4, type: "data" }]);
+    expect(map.get(0x140004000)).toEqual([{ from: TEXT_BASE + 8, type: "data" }]);
+    // And the bound doing its work: 0x400000 is above the constant floor and
+    // outside the image, so the fallback scan must drop it. This is the row
+    // that says the fused map was built under the request's own `imageBounds`
+    // rather than unbounded.
+    expect(map.has(0x400000)).toBe(false);
+  });
+
+  it("answers identically to the round trip it replaces", async () => {
+    // THE EQUIVALENCE DIFFERENTIAL. Both sides are the real `buildTypedXrefMap`
+    // behind the real `dispatch`; the only difference is which RPC computed it,
+    // so an equal answer is what makes the fusion a relocation of the work
+    // rather than a second implementation of it.
+    const { client, s, insns } = await load();
+
+    const fused = await client.buildTypedXrefMap(insns, bounds);
+    const viaRoundTrip = (await dispatch(
+      "buildTypedXrefMap",
+      { instructions: stripped(insns), imageBounds: bounds },
+      s,
+    )) as [number, Xref[]][];
+
+    expect(Array.from(fused.entries())).toEqual(viaRoundTrip);
+    expect(viaRoundTrip).toHaveLength(3);
+  });
+
+  it("falls back to a real send, with an identical map, once the seed is dropped", async () => {
+    // THE CONTROL. Clearing the cache must not merely make the client post — it
+    // must post something that comes back the same, which is what says the
+    // seeded value was the round trip's answer and not a private shortcut.
+    const { client, worker, s, insns } = await load();
+    const fused = await client.buildTypedXrefMap(insns, bounds);
+
+    client.invalidateCache();
+    const pending = client.buildTypedXrefMap(insns, bounds);
+
+    expect(worker.posted.map((m) => m.method)).toEqual(["hybridDisassemble", "buildTypedXrefMap"]);
+    worker.reply(
+      worker.posted[1].id,
+      await dispatch("buildTypedXrefMap", worker.received[1].args, s),
+    );
+    expect(Array.from((await pending).entries())).toEqual(Array.from(fused.entries()));
+  });
+
+  it("does not serve the seeded map to a caller asking under other bounds", async () => {
+    // The bounds half of the key, in the direction the seed could get wrong.
+    // Same instructions bounded differently are different answers, and the
+    // fallback scan is exactly the arm that changes.
+    const { client, worker, insns } = await load();
+
+    void client.buildTypedXrefMap(insns, { base: 0x400000, size: 0x1000 });
+
+    expect(worker.posted.map((m) => m.method)).toEqual(["hybridDisassemble", "buildTypedXrefMap"]);
+  });
+});
 
 /**
  * peek-a-bin-x4o2: which architecture a section is decoded as used to depend on
@@ -1084,9 +1321,14 @@ describe("DisasmWorkerClient — the architecture travels with the decode reques
     // says x86 because its `configure` has not run yet.
     const s = freshWorkerState();
     expect(s.arch).toBe("x86");
-    const insns = (await dispatch("hybridDisassemble", worker.received[0].args, s)) as {
-      mnemonic: string;
-    }[];
+    // `.instructions`: the client asks for the fused reply, so replaying its
+    // own args through the real dispatch returns `{ instructions, xrefs }`
+    // (peek-a-bin-w96b). The architecture question below is unchanged.
+    const { instructions: insns } = (await dispatch(
+      "hybridDisassemble",
+      worker.received[0].args,
+      s,
+    )) as { instructions: { mnemonic: string }[] };
 
     // Before the fix: two "x86-64" instructions, cached, and shown as fact.
     expect(insns.map((i) => i.mnemonic)).toEqual(["arm64", "arm64"]);
@@ -1121,9 +1363,11 @@ describe("DisasmWorkerClient — the architecture travels with the decode reques
     void client.hybridDisassemble(new Uint8Array(8), 0x140001000, true, []);
 
     const s = Object.assign(freshWorkerState(), { arch: "arm64" as const });
-    const insns = (await dispatch("hybridDisassemble", worker.received[0].args, s)) as {
-      mnemonic: string;
-    }[];
+    const { instructions: insns } = (await dispatch(
+      "hybridDisassemble",
+      worker.received[0].args,
+      s,
+    )) as { instructions: { mnemonic: string }[] };
 
     expect(insns.every((i) => i.mnemonic === "x86-64")).toBe(true);
     expect(s.csArm64.seen).toEqual([]);
@@ -1775,14 +2019,18 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
 
     const det = await dispatch("detectFunctions", worker.received[0].args, s);
     const afterDetect = cs.calls;
-    const insns = await dispatch("hybridDisassemble", worker.received[1].args, s);
+    const { instructions: insns } = (await dispatch(
+      "hybridDisassemble",
+      worker.received[1].args,
+      s,
+    )) as { instructions: Instruction[] };
     const afterHybrid = cs.calls;
     // The view's second round trip, posted from `useDisassemblyRows`' xref
     // effect the moment the instructions land. Answered here so `sweeps` below
     // is measured across a load that contains it — it decodes nothing, so it
     // must move neither column, and a change that made it decode would show up
     // as a sweep this helper did not have before.
-    void client.buildTypedXrefMap(insns as Instruction[], {
+    void client.buildTypedXrefMap(insns, {
       base: TEXT_BASE,
       size: 0x1000,
     });
@@ -2114,11 +2362,11 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
     const cs = s.cs64 as unknown as ReturnType<typeof countingX86>;
     await dispatch("detectFunctions", worker.received[0].args, s);
     const sweepDecodes = cs.calls;
-    const insns = (await dispatch(
+    const { instructions: insns } = (await dispatch(
       "hybridDisassemble",
       worker.received[1].args,
       s,
-    )) as Instruction[];
+    )) as { instructions: Instruction[] };
     const hybridDecodes = cs.calls - sweepDecodes;
     // The rest of the load: the view posts this the moment the instructions
     // land. It carries the instruction list rather than the section and decodes

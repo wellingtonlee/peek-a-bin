@@ -208,6 +208,20 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
         pe.is64,
         state.functions.map((f) => f.address),
         pdataRanges,
+        // The image bounds are not needed to DISASSEMBLE. They are here because
+        // the worker fuses the typed xref map into this reply and the client
+        // pre-seeds its `xrefCache` with it, which deletes the whole
+        // `buildTypedXrefMap` round trip below — an upload of a `.text` worth of
+        // objects measured at 91.2 ms on t64.exe's 60 KiB section at 76608fe,
+        // and linear in the section (peek-a-bin-w96b).
+        //
+        // **These must be the same two numbers the effect below passes**, or the
+        // seeded entry is keyed under bounds nobody asks for, the cache misses,
+        // and the upload happens anyway on top of the fused payload. They are
+        // read off the same `pe.optionalHeader` fields; `imageBase`/`sizeOfImage`
+        // below are those fields hoisted out so that effect can depend on the
+        // numbers rather than on the `PEFile` object's identity.
+        { base: pe.optionalHeader.imageBase, size: pe.optionalHeader.sizeOfImage },
       );
     } else if (analysisSettled) {
       disasmPromise = disasmWorker.disassemble(bytesToDisasm, baseAddr, pe.is64);

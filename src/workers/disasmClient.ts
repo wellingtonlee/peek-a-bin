@@ -46,6 +46,24 @@ export function disasmCacheKey(
   return `${prefix}${arch}:${baseAddress}:${is64}`;
 }
 
+/**
+ * The `xrefCache` entry's bounds half — **one declaration, and it has to be**.
+ *
+ * The cache is keyed on the caller's array identity plus the `imageBounds` the
+ * map was built under, because the same instructions bounded and unbounded are
+ * different answers. Two places now write that key: `buildTypedXrefMap`, which
+ * stores what a round trip returned, and `hybridDisassemble`, which pre-seeds
+ * what the worker fused into its own reply. A second spelling of the key would
+ * not fail anything loudly — it would simply MISS, so the browser would post
+ * the upload the fusion exists to delete while still paying to carry the fused
+ * map. That is a payload added for nothing, and nothing static can see it,
+ * which is why the assertion in the suite is on the HIT and not on the two maps
+ * being equal.
+ */
+function xrefBoundsKey(imageBounds: ImageBounds | undefined): string {
+  return imageBounds ? `${imageBounds.base}:${imageBounds.size}` : "";
+}
+
 interface PendingRequest {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
@@ -363,6 +381,7 @@ class DisasmWorkerClient {
     is64: boolean,
     seeds: number[],
     pdataRanges?: { beginAddress: number; endAddress: number }[],
+    imageBounds?: ImageBounds,
   ): Promise<Instruction[]> {
     const key = disasmCacheKey(this.arch, "hybrid:", baseAddress, is64);
     const cached = this.disasmCache.get(key);
@@ -374,7 +393,7 @@ class DisasmWorkerClient {
     // for why the BFS cannot find these on its own. Out-of-section seeds are
     // discarded by `hybridDisassemble` itself, so seeding another section's
     // targets is harmless.
-    const result: Instruction[] = await this.send(
+    const reply: { instructions: Instruction[]; xrefs: [number, Xref[]][] } = await this.send(
       "hybridDisassemble",
       this.decoded({
         bytes,
@@ -386,9 +405,29 @@ class DisasmWorkerClient {
         // `detectFunctions`, and without them phase 2's gap fill decodes each
         // recovered table's case addresses as instructions (peek-a-bin-y1di).
         jumpTableSpans: this.jumpTableSpans,
+        // Ask for the typed xref map in this same reply. Only this client ever
+        // sets it, so every other caller of the dispatch keeps the bare
+        // `Instruction[]` — see `fuseXrefs` in ./dispatch.ts for the whole
+        // argument and the measurement.
+        withXrefs: true,
+        imageBounds,
       }),
     );
+    const result = reply.instructions;
     this.disasmCache.set(key, result);
+    // PRE-SEED, under the identity of the array we are about to hand back.
+    //
+    // `xrefCache` is keyed on the caller's own array identity, and this is that
+    // array: `useDisassemblyRows` puts what this resolves with into `setInstructions`
+    // and its xref effect then calls `buildTypedXrefMap` with the very same
+    // object. So the seeded entry is a hit and the round trip never happens.
+    // The `boundsKey` is built by the same function that method uses, or a
+    // caller passing the bounds it always passes would miss the seed and pay
+    // for the upload anyway — a payload added for nothing.
+    this.xrefCache.set(result, {
+      boundsKey: xrefBoundsKey(imageBounds),
+      map: new Map(reply.xrefs),
+    });
     return result;
   }
 
@@ -574,7 +613,7 @@ class DisasmWorkerClient {
     instructions: Instruction[],
     imageBounds?: ImageBounds,
   ): Promise<Map<number, Xref[]>> {
-    const boundsKey = imageBounds ? `${imageBounds.base}:${imageBounds.size}` : "";
+    const boundsKey = xrefBoundsKey(imageBounds);
     const cached = this.xrefCache.get(instructions);
     if (cached && cached.boundsKey === boundsKey) return cached.map;
     // Annotated, never inferred: the annotation is what makes the strip

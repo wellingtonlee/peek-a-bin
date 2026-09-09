@@ -38,6 +38,7 @@ import {
   buildTypedXrefMap,
   type DetectResult,
   type DisasmContext,
+  type ImageBounds,
 } from "../disasm/functionDetect";
 import { X86SweepCache } from "../disasm/linearSweep";
 import type { FunctionSignature } from "../disasm/signatures";
@@ -238,6 +239,64 @@ function armCtx(state: WorkerState): Arm64Context {
 }
 
 /**
+ * The reply to `hybridDisassemble`, carrying the typed xref map when the
+ * request asked for it.
+ *
+ * WHY THE MAP RIDES ALONG. `buildTypedXrefMap` is the one RPC that sends a
+ * decoded array back *up* to the worker one message after the worker produced
+ * it, and the browser asks for it over exactly the array `hybridDisassemble`
+ * has just returned — `useDisassemblyRows` posts the second call from an effect
+ * fed by the first one's result. So the round trip re-uploads a whole `.text`
+ * worth of objects to derive something the worker could have derived while it
+ * still held them. Measured with `npm run corpus:replycost` on t64.exe
+ * (60 KiB `.text`, 16844 instructions, at 76608fe): cloning the stripped
+ * array — which is what peek-a-bin-v3uh.3 narrowed the request down to — costs
+ * **85.1 ms**, against 115.2 ms for the same array with its `bytes`. That
+ * upload is the whole of what fusing deletes, and it is linear in the section.
+ *
+ * WHAT IT DOES NOT DELETE, so the arithmetic stays honest: the entries
+ * themselves. They cross either way — today as `buildTypedXrefMap`'s reply,
+ * after this as part of this one — so the *added* payload here is zero-sum and
+ * the saving is exactly the eliminated upload.
+ *
+ * NOT peek-a-bin-9a8's REFUSED SECTION-UPLOAD CACHE. That refusal rests on "the
+ * key comparison must be cheaper than the work it saves"; this has **no key at
+ * all**. The map is derived from the array in the very call that produced it,
+ * inside the worker, so there is no content hash, no identity tuple and nothing
+ * that can go stale — the client seeds its cache under the identity of the
+ * array it is about to hand its caller, which is the same identity that caller
+ * will present.
+ *
+ * NOT peek-a-bin-7mf's REFUSED REPLY PACKING either. That refused packing
+ * instruction BYTES into one shared buffer and forcing the receiver to
+ * re-slice. Nothing is packed here: a small derived entries array is added to a
+ * reply that already crosses, in the shape the receiver already consumes
+ * (`new Map(entries)` — the same line `buildTypedXrefMap`'s own reply feeds).
+ *
+ * WHY IT IS OPT-IN RATHER THAN UNCONDITIONAL. `withXrefs` is set by
+ * `disasmClient` and by nothing else, so every other caller of this dispatch —
+ * `src/mcp/`, and the six harnesses under `corpus/` that time this arm — keeps
+ * receiving the bare `Instruction[]` it always received and keeps measuring the
+ * reply it always measured. An absent `xrefs` therefore means "not asked for",
+ * which is a different fact from an empty map, and the two are not spelled the
+ * same.
+ *
+ * THE MAP IS ARCH-BLIND ON PURPOSE. `buildTypedXrefMap`'s own arm has no
+ * architecture branch — the browser calls it for an ARM64 image too — so
+ * computing the same function here for both decoders is what makes the fused
+ * answer identical to the round trip's, which is the property the client's
+ * equivalence differential asserts. `buildAllXrefs` is the arm that *does*
+ * split by architecture, and it is untouched.
+ */
+function fuseXrefs(
+  instructions: Instruction[],
+  args: { withXrefs?: boolean; imageBounds?: ImageBounds },
+): Instruction[] | { instructions: Instruction[]; xrefs: [number, Xref[]][] } {
+  if (!args.withXrefs) return instructions;
+  return { instructions, xrefs: buildTypedXrefMap(instructions, args.imageBounds) };
+}
+
+/**
  * Run one RPC method. Resolves with the value to post back, or rejects — the
  * caller turns a rejection into an `{ id, error }` reply.
  */
@@ -342,13 +401,16 @@ export async function dispatch(
         // below takes it, with a different effect: there it keeps the gap fill
         // off a table, here the sweep has already decoded every word and this
         // is what withholds the table's own from the view (peek-a-bin-gb40).
-        return disassembleArm64(
-          args.bytes,
-          args.baseAddress,
-          armCtx(state),
-          args.pdataRanges,
-          state.arm64Sweep,
-          args.jumpTableSpans,
+        return fuseXrefs(
+          disassembleArm64(
+            args.bytes,
+            args.baseAddress,
+            armCtx(state),
+            args.pdataRanges,
+            state.arm64Sweep,
+            args.jumpTableSpans,
+          ),
+          args,
         );
       }
       // Served from `state.x86Sweep` where it can be, and this is where the x86
@@ -376,21 +438,25 @@ export async function dispatch(
       // non-empty, i.e. after `detectFunctions` has already filled the slot.
       // A hex patch is the live miss: it hands us a *different* byte array, the
       // content key declines it, and the fall-back is the whole of the fix.
-      return _hybridDisassemble(
-        args.bytes,
-        args.baseAddress,
-        args.is64,
-        args.seeds,
-        ctx(state),
-        args.pdataRanges,
-        // Byte ranges detection recovered as jump tables. Data, so the gap fill
-        // leaves them alone rather than decoding case addresses as code.
-        args.jumpTableSpans,
-        // The same handle `detectFunctions` swept under — the memo's third key
-        // part, so a 32-bit reading can never be served to a 64-bit request. No
-        // handle at all cannot match anything, and `_hybridDisassemble` throws
-        // for it on its own first line exactly as it always did.
-        state.x86Sweep.peek(args.bytes, args.baseAddress, args.is64 ? state.cs64 : state.cs32),
+      return fuseXrefs(
+        _hybridDisassemble(
+          args.bytes,
+          args.baseAddress,
+          args.is64,
+          args.seeds,
+          ctx(state),
+          args.pdataRanges,
+          // Byte ranges detection recovered as jump tables. Data, so the gap
+          // fill leaves them alone rather than decoding case addresses as code.
+          args.jumpTableSpans,
+          // The same handle `detectFunctions` swept under — the memo's third
+          // key part, so a 32-bit reading can never be served to a 64-bit
+          // request. No handle at all cannot match anything, and
+          // `_hybridDisassemble` throws for it on its own first line exactly as
+          // it always did.
+          state.x86Sweep.peek(args.bytes, args.baseAddress, args.is64 ? state.cs64 : state.cs32),
+        ),
+        args,
       );
     }
 

@@ -279,8 +279,15 @@ class ScriptedWorker {
     let result: unknown;
     switch (msg.method) {
       case "disassemble":
-      case "hybridDisassemble":
         result = INSNS;
+        break;
+      case "hybridDisassemble":
+        // The FUSED reply (peek-a-bin-w96b). `disassemble` above deliberately
+        // keeps the bare array: only the client's `hybridDisassemble` sets
+        // `withXrefs`, and the two shapes are what the dispatch really answers
+        // with. The client pre-seeds its `xrefCache` from `xrefs`, so the
+        // `buildTypedXrefMap` arm below is now reached only on a fallback.
+        result = { instructions: INSNS, xrefs: XREFS };
         break;
       case "buildTypedXrefMap":
         if (ScriptedWorker.withholdXrefs) return;
@@ -724,9 +731,18 @@ describe("the load's disassembly request", () => {
     // *ordering* half of: `hybridDisassemble` is what fills the sweep slot the
     // xref builds are then served from.
     await mountReady();
-    await waitFor(() => expect(ScriptedWorker.posted).toContain("buildTypedXrefMap"));
     expect(ScriptedWorker.posted).toContain("hybridDisassemble");
     expect(ScriptedWorker.posted).not.toContain("disassemble");
+    // AND THE ROUND TRIP IS GONE — the end-to-end half of peek-a-bin-w96b, and
+    // the only place the HOOK's side of it is visible. The worker fuses the
+    // typed xref map into the reply above and the client seeds its cache with
+    // it, but the seed is keyed on the array identity plus the `imageBounds`
+    // string — so if `useDisassemblyRows` stops handing `hybridDisassemble` the
+    // same two `pe.optionalHeader` numbers its xref effect passes, the seed is
+    // written under a key nobody asks for, this row goes red, and the upload
+    // happens anyway on top of the fused payload. Nothing in the client's own
+    // suite can see that: it is a fact about the two call sites agreeing.
+    expect(ScriptedWorker.posted).not.toContain("buildTypedXrefMap");
   });
 
   it("posts nothing at all while detection is still running, and keeps the spinner", async () => {
@@ -1183,13 +1199,17 @@ describe("renders per cursor move, against the real DisassemblyView", () => {
         <Bystander counts={counts} name="Sidebar" />
       </>,
     );
-    // The typed xref map is a second worker round trip that rebuilds `rows`, so
-    // a baseline taken before it lands would charge the arrow key for it. Waited
-    // for through the RPC rather than through the `×N` affordance it produces:
-    // keying on the affordance couples this measurement to a rendering detail,
-    // and a control that removed the affordance reddened these tests for a
-    // reason that has nothing to do with render counts.
-    await waitFor(() => expect(ScriptedWorker.posted).toContain("buildTypedXrefMap"));
+    // The typed xref map rebuilds `rows`, so a baseline taken before it lands
+    // would charge the arrow key for it. It USED to be a second worker round
+    // trip and this line waited on that RPC; since peek-a-bin-w96b it rides
+    // back on `hybridDisassemble` and is served to the xref effect out of the
+    // client's cache, so the disassembly reply is the thing to wait for and the
+    // settles below carry the cache-served effect. Still keyed on the RPC
+    // rather than on the `×N` affordance it produces: keying on the affordance
+    // couples this measurement to a rendering detail, and a control that
+    // removed the affordance reddened these tests for a reason that has nothing
+    // to do with render counts.
+    await waitFor(() => expect(ScriptedWorker.posted).toContain("hybridDisassemble"));
     await act(async () => {
       await new Promise((res) => setTimeout(res, 0));
     });

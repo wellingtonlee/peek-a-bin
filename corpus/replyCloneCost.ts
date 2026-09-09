@@ -457,23 +457,51 @@ function printImage(r: Row): void {
   );
   console.log(
     `  instead. So D itself — ${r.d.toFixed(1)} ms, ` +
-      `${((r.d / r.a) * 100).toFixed(0)}% of A — is what remains on that RPC and is what ` +
-      `stage 3b`,
+      `${((r.d / r.a) * 100).toFixed(0)}% of A — is what remained on that RPC, and it is what`,
   );
   console.log(
-    "  (compute the map in the dispatch arm that produced the array, pre-seed the client's",
+    "  peek-a-bin-w96b DELETED: hybridDisassemble's dispatch arm now computes the map from the",
   );
   console.log(
-    `  xrefCache) would additionally save. Measured at 0870e14 on t64.exe: A 115.2 ms, ` +
-      `D 85.1 ms,`,
+    "  array it just produced and returns { instructions, xrefs }, and the client pre-seeds its",
   );
   console.log(
-    "  A-D 30.1 ms over 16844 instructions of a 60 KiB .text — so 3b's remaining share is",
+    "  xrefCache, so the view's buildTypedXrefMap resolves with ZERO sends. This row therefore",
   );
   console.log(
-    "  ~2.8x stage 3a's, which is the number that bead has to be decided with. Re-run rather",
+    "  no longer measures a cost the browser pays on an ordinary load — it measures the cost of",
   );
-  console.log("  than quoting these: they are wall clock, and the ratio is the claim.");
+  console.log(
+    "  the upload that WOULD return if the fusion were undone, which is what makes it the",
+  );
+  console.log("  standing regression instrument for it rather than a spent one.");
+  console.log("  THREE STAMPED READINGS OF THE SAME BINARY, and read the SPREAD, not a digit:");
+  console.log(
+    "    0870e14  A 115.2 ms  D 85.1 ms  A-D 30.1 ms  D/A 74%  (w96b was decided on this)",
+  );
+  console.log(
+    "    76608fe  A  93.6 ms  D 91.2 ms  A-D  2.4 ms  D/A 97%  (re-taken, machine loaded)",
+  );
+  console.log("    76608fe  A  92.3 ms  D 45.2 ms  A-D 47.0 ms  D/A 49%  (re-taken again, idle)");
+  console.log(
+    "  Same 16844 instructions of a 60 KiB .text every time. A is stable to ~20%; the A/D SPLIT",
+  );
+  console.log(
+    "  is not stable at all — D/A ranges 49-97% and A-D ranges 2.4-47.0 ms across three runs, so",
+  );
+  console.log(
+    "  ANY claim of the form '3a saved more than 3b' or the reverse is unsupportable from this",
+  );
+  console.log(
+    "  harness. What survives all three: D is TENS OF MILLISECONDS on a 60 KiB section and a",
+  );
+  console.log(
+    "  large fraction of A, and it is linear in the section — which is the whole of what w96b",
+  );
+  console.log(
+    "  needed, since D is deleted outright rather than traded against anything. Re-run rather",
+  );
+  console.log("  than quoting any row; the standing rule here is to read the ORDER of the rows.");
 }
 
 /**
