@@ -34,7 +34,6 @@ export function InsnContextMenu({
   comments,
   funcMap,
   setCtxMenu,
-  scanFunction,
   selectionRange,
   rows,
   pe,
@@ -48,7 +47,6 @@ export function InsnContextMenu({
   comments: Record<number, string>;
   funcMap: Map<number, DisasmFunction>;
   setCtxMenu: (v: ContextMenuState | null) => void;
-  scanFunction: (fn: DisasmFunction) => void;
   selectionRange: { start: number; end: number } | null;
   rows: DisplayRow[];
   pe: PEFile | null;
@@ -96,13 +94,6 @@ export function InsnContextMenu({
       {menuItem("Add/Edit comment", actions.ctxAddComment, ";")}
       {hasComment && menuItem("Copy comment", actions.ctxCopyComment)}
       {isFuncHead && menuItem("Rename function", actions.ctxRenameFunction, "N")}
-      {isFuncHead && sep}
-      {isFuncHead &&
-        menuItem("Scan for vulnerabilities", () => {
-          const fn = funcMap.get(ctxMenu.insn.address);
-          if (fn) scanFunction(fn);
-          setCtxMenu(null);
-        })}
       {selectionRange &&
         (() => {
           const lo = Math.min(selectionRange.start, selectionRange.end);

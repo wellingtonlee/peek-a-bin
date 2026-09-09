@@ -111,12 +111,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     }
 
     // AI Commands
-    const aiCommands = [
-      { label: "AI: Open Chat", action: "peek-a-bin:open-chat" },
-      { label: "AI: Batch Rename Functions", action: "peek-a-bin:batch-rename" },
-      { label: "AI: Generate Analysis Report", action: "peek-a-bin:generate-report" },
-      { label: "AI: Scan Suspicious Functions", action: "peek-a-bin:ai-scan" },
-    ];
+    const aiCommands = [{ label: "AI: Open Chat", action: "peek-a-bin:open-chat" }];
     for (const cmd of aiCommands) {
       if (fuzzyMatch(query, cmd.label) || cmd.label.toLowerCase().includes(query.toLowerCase())) {
         items.push({ category: "AI Commands", label: cmd.label, address: 0, action: cmd.action });

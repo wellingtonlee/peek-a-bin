@@ -241,16 +241,16 @@ describe("CommandPalette activation", () => {
 
   it("fires the window event for an AI command and navigates nowhere", async () => {
     const seen = vi.fn();
-    window.addEventListener("peek-a-bin:batch-rename", seen);
+    window.addEventListener("peek-a-bin:open-chat", seen);
     try {
       const { user, dispatch, onClose } = renderPalette({ functions: [] });
-      await user.type(combobox(), "AI: Batch Rename");
+      await user.type(combobox(), "AI: Open Chat");
       await user.keyboard("{Enter}");
       expect(seen).toHaveBeenCalledTimes(1);
       expect(dispatch).not.toHaveBeenCalled();
       expect(onClose).toHaveBeenCalledTimes(1);
     } finally {
-      window.removeEventListener("peek-a-bin:batch-rename", seen);
+      window.removeEventListener("peek-a-bin:open-chat", seen);
     }
   });
 

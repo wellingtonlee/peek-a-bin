@@ -276,11 +276,22 @@ describe("AddressBar tablist semantics", () => {
   it("walks into the bar once, however many tabs there are", async () => {
     const { user } = renderBar({ activeTab: "exports" });
     const seen: HTMLElement[] = [];
-    // Enough presses to cross the whole toolbar; what is asserted is how many
-    // of the NINE were reached, not where Tab ends up.
-    for (let i = 0; i < 14; i++) {
+    // ONE FULL PASS THROUGH THE TOOLBAR, DETECTED RATHER THAN COUNTED. What is
+    // asserted is how many of the tabs a single walk reaches, not where Tab
+    // ends up — so the walk must stop the moment focus wraps, and a fixed press
+    // count cannot know when that is: it silently encodes how many buttons the
+    // toolbar happens to hold, and the moment one is added or removed the loop
+    // either stops short of the tablist or cycles round and re-enters it,
+    // reporting the same tab twice. Re-entry is the direction that fails on
+    // correct output. The bound is only a runaway guard; `visited` is what ends
+    // the pass, and an empty `seen` fails the assertion, so this cannot pass by
+    // never reaching the bar.
+    const visited = new Set<Element>();
+    for (let i = 0; i < 60; i++) {
       await user.tab();
-      const el = document.activeElement as HTMLElement;
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body || visited.has(el)) break;
+      visited.add(el);
       if (tabs().includes(el as HTMLButtonElement)) seen.push(el);
     }
     expect(seen.map((e) => e.textContent)).toEqual([VIEW_TAB_LABELS.exports]);

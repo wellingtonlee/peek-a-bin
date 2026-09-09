@@ -18,7 +18,6 @@ import { useSetGraphOverview } from "../hooks/useGraphOverview";
 import { useGraphSearch } from "../hooks/useGraphSearch";
 import { type ContextMenuState, useInsnContextMenu } from "../hooks/useInsnContextMenu";
 import { getDisplayName, useAppDispatch, useAppState } from "../hooks/usePEFile";
-import { useVulnScanner } from "../hooks/useVulnScanner";
 import { isAddressOutsideCode } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { type CopyFlash, copyText } from "../utils/clipboard";
@@ -785,9 +784,6 @@ export function DisassemblyView() {
   // AI Chat — use decompile code as context
   const aiChat = useAIChat(pe ?? null, state.fileName, decompile.activeCode || null);
 
-  // Vuln scanner (for context menu "scan" action)
-  const vulnScanner = useVulnScanner(state, dispatch);
-
   const handleDecompileToggle = useCallback(() => {
     if (showDecompile) {
       setShowDecompile(false);
@@ -1339,7 +1335,6 @@ export function DisassemblyView() {
                   comments={state.comments}
                   funcMap={funcMap}
                   setCtxMenu={setCtxMenu}
-                  scanFunction={vulnScanner.scanFunction}
                   selectionRange={selectionRange}
                   rows={rows}
                   pe={pe}
@@ -1393,7 +1388,6 @@ export function DisassemblyView() {
             comments={state.comments}
             funcMap={funcMap}
             setCtxMenu={setCtxMenu}
-            scanFunction={vulnScanner.scanFunction}
             selectionRange={null}
             rows={rows}
             pe={pe}
