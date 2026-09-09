@@ -2222,6 +2222,48 @@ mistake.
   field, so output is byte-identical **by construction**. (`peek-a-bin-j4uk.4`)
 - **A CARET THAT OPENS ONTO NOTHING, A BLOB URL NOBODY REVOKES, AND A COLUMN DRESSED AS A LINK — three independent `ResourcesView.tsx` defects, sharing only a file.** All three are the parser-admission class one level down: the pane's OUTPUT is honest and its CONTROLS lie about what they will do. (a) **The caret.** Every leaf renders an expand control and `ExpandedLeaf` had arms for THREE of the ~20 types the format defines, `return null`ing the rest — so an RT_BITMAP, RT_STRING, RT_DIALOG or RT_RCDATA (most of an ordinary binary) flipped the arrow open onto an empty `<tr><td colSpan={5}>`. The fallback is a hex/ASCII dump **through `resourceBytes`, the one declaration of the bound**, so `peek-a-bin-p0qw`'s `RangeError` on a truncated image cannot come back through a new call site — a hand-rolled bound here would reintroduce it across the whole population rather than one type. Capped at 256 bytes with the cap **admitted on the count line** (`first 256 of 300 bytes`, plainly `256 bytes` at exactly the cap, both sides pinned), plus a third number where the cut lands *inside* a leaf, since `bytes.length` and the declared `size` are two facts. `resourceBytes` now returns `{ bytes } | { bytes: null, reason }` — `unmapped` (RVA in no section) versus `past-end` (truncated file) — because the old bare `null` printed the same blank row an unhandled type did, and the reason is carried out of the GUARD rather than re-derived, a second `rvaToFileOffset` comparison being the copy that drifts back into the `RangeError`; `UNREADABLE_SENTENCE` is a `Record` over the union so a third reason fails the build. The guard sits **above RT_VERSION** (`parseVersionInfo` bounds its own reads, so it answered `{}` and the arm claimed "No version strings found" about an unreachable resource) and **outside RT_GROUP_ICON**, whose `buffer.slice` CLAMPS where `new Uint8Array` throws — the recorded asymmetry, now with a row so "consistency" cannot undo it. (b) **The blob URL.** `URL.createObjectURL` in the middle of RENDER, `revokeObjectURL` nowhere in the file: one pinned blob per render of an expanded group icon, on a pane that re-renders on every collapse, expand and download click — and a render React discards leaks a URL no cleanup can ever see. `GroupIconPreview` memoises the reconstruction, mints in a `useEffect` keyed on the bytes and **revokes in the cleanup**. **jsdom implements neither function, which is why this arm had never been rendered at all**; both are stubbed file-wide and **the instrument is the PAIRING** — one revoke per create across expand → collapse → unmount, twice — since a create count alone passes against the defect. **Nothing paints, and the control confirms it**: a blob carrying a single 0x00 byte leaves every row green (`peek-a-bin-v2u`). (c) **The RVA column** was `text-blue-400` monospace inside a plain `<td>` while every other blue address in the app is clickable; it dispatches `SET_ADDRESS` to `imageBase + rva` then `SET_TAB "hex"`, address first because `HexView` derives its section from `state.currentAddress` alone — the Hex tab and not the disassembly, `.rsrc` being data. **Five controls, four discriminating and one INERT (the paint assertion), and none crossed between sub-changes** — which is what made the three separately landable. **Three rows had pinned two of the defects as the rule** with `expect(rows[1].textContent).toBe("")`. Out of scope and left: no filter box on this tab, and RT_STRING tables undecoded. (`peek-a-bin-v3uh.14`)
 
+- **A `__try` IS EMITTED ONLY WHERE THE SCOPE TABLE HOLDS AN `__except` ENTRY, AND THE THREE THINGS
+  THE OLD WRAPPER SAID WERE ALL UNREAD.** `wrapExceptionRegions` (`decompile/pipeline.ts`) fired on
+  any record `funcExceptionRecord` selected and printed a whole-function `__try` with
+  `__except(EXCEPTION_EXECUTE_HANDLER)`. (1) *A region exists* fired on `EHANDLER | UHANDLER`, but
+  UHANDLER is `__finally` and `__GSHandlerCheck` — **no `__try` in the source at all** — sets
+  EHANDLER; 18 of t64's 50 handler-bearing records are that `/GS` shape and 2 more have unreadable
+  LSD. (2) *The region is the whole function* is wrong in **100% of cases**, measured: not one of
+  t64's 34 entries or w64's 32 covers its record's extent. (3) *The filter is
+  `EXCEPTION_EXECUTE_HANDLER`* was `emit.ts`'s unconditional fallback and **nothing in production
+  has ever built a `filterExpr`**, so it was printed every time. Now: a validated `scopeTable` with
+  an `__except` entry wraps; the extent is **admitted** in the body rather than implied by the
+  braces; the filter is that constant only where `handler === 1` (the format's own spelling, 1 entry
+  per binary) and otherwise `unrecoveredValue`'s `__unrecovered_N` naming the filter *routine*.
+  **`IRTry.filterSource`'s ABSENCE IS THE UNRECOVERED CASE, NEVER THE CONSTANT**, or the fallback is
+  back. **`__finally` is RECORDED AND NOT SPELLED** — it is the dominant kind by an order of
+  magnitude (31 of t64's 34 entries) and the IR has no statement kind for one (`peek-a-bin-fcgu`),
+  so such a record gets a leading `/* .pdata: __finally region … */` and no construct
+  (`peek-a-bin-wo8g`'s move). **A record with NO validated table emits NOTHING, not even an
+  admission** — a withheld table is the *ordinary* answer for a `/GS` or C++ record, so admitting an
+  unreadable region there would be the fabrication again. **DO NOT PUSH ANY OF THIS INTO
+  `funcExceptionRecord` OR "TIDY" ITS `& 0x3`**: that is a *selector*, and `peek-a-bin-qmlz`'s
+  soundness rests on client and worker applying the same idempotent rule. Every pass rebuilds an
+  `IRTry` with `...stmt`, which is what carries `filterSource` through — a pass enumerating the
+  fields drops it silently and reddens 6 tests. **Measured at `4167aa3`: `__try` 50 → 3 (t64) and
+  46 → 3 (w64); t32/w32 BYTE-IDENTICAL (no `.pdata`, so they are the control); `emitted C
+  identical` 229/279 and 229/275, i.e. exactly the handler-bearing records; every gate flat
+  including `guard lines unparsed` 0 and `polarity guards audited` exactly 521/577/445/500** — that
+  last is the `peek-a-bin-vwr5` risk, since `sweep.ts`'s `OPENER` and `guardShape.ts`'s
+  `BODY_IS_OPENER` both name `__try`. The only moving row is `unrecovered values` +2 per x64 binary,
+  which `compare.mjs` flags as a regression and which is the arithmetically predicted **refusal**
+  (3 `__except` records − 1 whose filter the table spelled). **gcc HAS NEVER CHECKED THIS CONSTRUCT
+  AND STILL DOES NOT** — `CC_HEADER` is `#define __try` / `#define __except(x) if (0)`, and the
+  macro *discards its argument*: verified against gcc 15.2.0 that an undeclared identifier and a
+  comment-only argument both compile with no diagnostic even without `-w`. Never cite "all of them
+  compile" here. Seven negative controls, **all seven discriminating**. Two of `peek-a-bin-qmlz`'s
+  liveness halves went vacuous and both are repaired rather than tuned away —
+  `disasmClient.test.ts`'s "there is a `__try` to keep" went red on landing, which is that
+  assertion working. Long-form, including the
+  flags-byte/scope-table agreement (zero disagreements over all 30 and 28 validating records) and
+  the fifth unread claim (the old handler comment named `__C_specific_handler`: 50 records, 2
+  distinct RVAs), in `docs/gotchas.md`. (`peek-a-bin-j4uk.5`)
+
 - **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
 
 - **`RegState.defs` is keyed by literal operand text deliberately; ask `wroteAnyAlias` rather than canonicalising the map.** The map stores the last-written *expression*, which carries the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as eight. But arity is width-blind, and `collectArgs64` probing the literal 64-bit name missed every sub-width setup and broke out of the loop — the write then had no reader and DCE deleted it, giving `ExitProcess()` with the exit code gone, in well-typed C. `wroteAnyAlias` answers the width-blind question over the width-exact map and returns a **boolean**, so the recorded expression can never be substituted at the call site (`peek-a-bin-urs` cannot return through it). The suite had pinned the defect as the rule under a KNOWN BUG comment. And: when you build an oracle to verify a change, land the oracle — the instrument for this one was lost with a scratch worktree (`peek-a-bin-02fa`). (`peek-a-bin-qb2x`)

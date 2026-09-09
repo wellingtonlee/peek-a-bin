@@ -1,4 +1,4 @@
-import type { RuntimeFunction } from "../../pe/types";
+import type { RuntimeFunction, ScopeTableEntry } from "../../pe/types";
 import type { CalleeClobbers } from "../callSummary";
 import { buildCFG, detectLoops } from "../cfg";
 import { funcExceptionRecord } from "../funcInsns";
@@ -287,7 +287,8 @@ export function decompileFunction(
 }
 
 /**
- * Wrap structured statements in __try/__except blocks based on .pdata exception info.
+ * Wrap structured statements in a `__try`/`__except` from `.pdata` — but only
+ * where the image says so, which is far less often than this used to assume.
  *
  * WHICH record applies to this function is {@link funcExceptionRecord}'s rule —
  * the units, the recovered image base and the ambiguous-match discard are all
@@ -295,6 +296,52 @@ export function decompileFunction(
  * send the one surviving row instead of a table linear in the image
  * (peek-a-bin-qmlz). What stays here is what to do with the record once chosen,
  * which is the only part the emitted C depends on.
+ *
+ * **DO NOT MOVE ANY OF THE JUDGEMENT BELOW INTO `funcExceptionRecord`, AND DO
+ * NOT "TIDY" ITS `& 0x3` FILTER TO MATCH.** That filter is a SELECTOR: its
+ * whole soundness argument is that the client and the worker apply the SAME
+ * rule and that the rule is idempotent, so narrowing it re-opens peek-a-bin-qmlz
+ * for no gain. Selecting the record and deciding what may be claimed about it
+ * are two questions, and only the second one belongs here.
+ *
+ * THREE CLAIMS THIS FUNCTION USED TO MAKE AND NEVER READ (peek-a-bin-j4uk.5):
+ *
+ *  1. *"A try region exists."* It fired on any selected record, i.e. on
+ *     `EHANDLER | UHANDLER`. UHANDLER is `__finally`, and `__GSHandlerCheck` —
+ *     a stack-cookie check with NO `__try` IN THE SOURCE AT ALL — sets
+ *     EHANDLER. Measured at 4167aa3: of t64's 50 handler-bearing records, 18
+ *     are that /GS shape and 2 more carry language-specific data no scope table
+ *     could be read out of. All 20 emitted `__try`.
+ *  2. *"The region covers the whole function."* The code's own comment said
+ *     "For now, wrap the entire function body". Measured against the scope
+ *     tables now that they are read: **NOT ONE of t64's 34 entries or w64's 32
+ *     covers its record's extent** — every single one is strictly narrower. The
+ *     whole-body wrap is not merely unproven, it is wrong in 100% of cases, so
+ *     where a wrap survives at all the extent is ADMITTED in the body rather
+ *     than implied by the braces.
+ *  3. *"The filter is EXCEPTION_EXECUTE_HANDLER."* See `emit.ts`'s
+ *     `emitTryFilter` — that was an unconditional fallback, and it is now
+ *     printed only where the table's `handler` field holds the format's literal
+ *     1 (exactly ONE entry per binary).
+ *
+ * A FOURTH the emitter cannot fix here: there is no `__finally` spelling in the
+ * IR at all, so a termination-handler record used to print
+ * `__except(EXCEPTION_EXECUTE_HANDLER)` — a different construct with different
+ * control flow. Adding one is a new `IRStmt` kind and therefore the whole
+ * "Adding new IRExpr / IRStmt kinds" checklist (peek-a-bin-fcgu). Until then a
+ * `__finally` region is RECORDED AND NOT SPELLED: a leading comment states what
+ * the linker wrote down and claims no construct. That is peek-a-bin-wo8g's move
+ * — say what was read without claiming what was not — and it matters because
+ * `__finally` is the dominant kind by an order of magnitude (31 of t64's 34
+ * entries, 29 of w64's 32).
+ *
+ * **A RECORD WITH NO VALIDATED SCOPE TABLE PRODUCES NOTHING, NOT EVEN AN
+ * ADMISSION**, and that asymmetry is deliberate rather than an omission. A
+ * withheld table is the ORDINARY answer for a `__GSHandlerCheck` or
+ * `__CxxFrameHandler3` record (`readScopeTable`'s docstring says so), and those
+ * functions have no guarded region to admit — so a comment saying "a guarded
+ * region here could not be read" would be the fabrication all over again, in
+ * the voice of an admission.
  */
 function wrapExceptionRegions(
   body: IRStmt[],
@@ -304,20 +351,75 @@ function wrapExceptionRegions(
   const rf = funcExceptionRecord(func, runtimeFunctions);
   if (!rf) return body;
 
-  // For now, wrap the entire function body in a try block for the matching
-  // handler. The handler body is represented as a comment referencing the
-  // handler address.
-  //
-  // `handlerAddress` is an RVA like `beginAddress`; report it in the same unit
-  // as every other address in the pane, i.e. as a VA. The difference of the two
-  // is the image base `funcExceptionRecord` recovered to match them at all.
-  const handlerAddr = rf.handlerAddress! + (func.address - rf.beginAddress);
+  // Claim 1. `scopeTable` is `undefined` for a record whose language-specific
+  // data did not pass `readScopeTable`'s structural check, and that means "the
+  // record did not say" rather than "there are no regions" — so the honest
+  // response is to say nothing at all.
+  const table = rf.scopeTable;
+  if (!table || table.length === 0) return body;
+
+  // Every address in a scope table is an RVA, exactly like `beginAddress`;
+  // report them in the same unit as the rest of the pane, i.e. as VAs. The
+  // difference of the two is the image base `funcExceptionRecord` recovered in
+  // order to match the record to the function at all (peek-a-bin-yrh).
+  const imageBase = func.address - rf.beginAddress;
+  const va = (rva: number) => `0x${(rva + imageBase).toString(16).toUpperCase()}`;
+
+  // `jumpTarget === 0` marks the entry a `__finally`, and then `handler` is the
+  // termination funclet's RVA rather than a filter's. See `ScopeTableEntry`.
+  const isFinally = (e: ScopeTableEntry) => e.jumpTarget === 0;
+  const region = (e: ScopeTableEntry): IRStmt => ({
+    kind: "comment",
+    text: isFinally(e)
+      ? `.pdata: __finally region ${va(e.begin)} - ${va(e.end)}` +
+        // `handler` is 0 or 1 for no entry in this corpus, but the format
+        // permits both and neither is a funclet address; naming one would be
+        // the same kind of invention this whole function exists to stop.
+        (e.handler > 1 ? `; termination handler at ${va(e.handler)}` : "")
+      : `.pdata: __except region ${va(e.begin)} - ${va(e.end)}; __except body at ${va(e.jumpTarget)}`,
+  });
+
+  const excepts = table.filter((e) => !isFinally(e));
+  const regions = table.map(region);
+
+  // A record with no `__except` entry is a `__finally`-only record, which is
+  // most of them. There is nothing here the emitter can spell, so the regions
+  // are recorded ahead of the body and the body is returned unwrapped.
+  if (excepts.length === 0) return [...regions, ...body];
+
+  // Claim 2. The wrap is still the whole body, because placing an extent onto
+  // statements is a different piece of work (the region need not be a
+  // contiguous run of top-level statements, and every entry here is strictly
+  // narrower than the function). What changes is that the braces no longer
+  // IMPLY the extent: the regions above name it and the line below says the
+  // braces are not it.
+  const admission: IRStmt = {
+    kind: "comment",
+    text: "extent not placed onto statements: these braces are the whole function, not the region(s) above",
+  };
+
+  // Claim 3. The first `__except` entry supplies the filter; the table is in
+  // address order (`readScopeTable` check 3) and no record in this corpus has
+  // more than one. Where a record did have two, one `__try` cannot represent
+  // both — which is why every entry is named in `regions` above rather than
+  // only the one driving the wrap.
+  const chosen = excepts[0];
   const tryStmt: IRTry = {
     kind: "try",
-    body,
+    body: [...regions, admission, ...body],
     handler: [
-      { kind: "comment", text: `Exception handler at 0x${handlerAddr.toString(16).toUpperCase()}` },
+      {
+        kind: "comment",
+        text: `__except body at ${va(chosen.jumpTarget)}; not placed onto statements`,
+      },
     ],
+    filterSource:
+      chosen.handler === 1
+        ? { spelling: "execute-handler" }
+        : {
+            spelling: "unrecovered",
+            filterAddress: chosen.handler > 1 ? chosen.handler + imageBase : undefined,
+          },
   };
 
   return [tryStmt];

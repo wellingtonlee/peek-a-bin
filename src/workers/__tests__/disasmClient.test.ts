@@ -2632,7 +2632,9 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
  * PE32 has no `.pdata` at all, so this is an x64 saving; the two 32-bit corpus
  * binaries are the untouched control. What has to be pinned here is that the one
  * row sent is the one the whole table would have chosen, in both directions —
- * a `__try` kept where the table had one, and none invented where the table
+ * a `__try` kept where the table had one — which since peek-a-bin-j4uk.5 means
+ * a row whose scope table holds an `__except` entry, not merely a handler flag
+ * — and none invented where the table
  * refused.
  */
 describe("DisasmWorkerClient — a decompile request carries one .pdata row", () => {
@@ -2695,7 +2697,16 @@ describe("DisasmWorkerClient — a decompile request carries one .pdata row", ()
     // then send the right row by luck and the assertions below would not see it.
     rf({ beginAddress: A_RVA + 0x10000, endAddress: A_RVA + 0x10000 + 0x40 }),
     rf({ beginAddress: C - 0x140000000, endAddress: C - 0x140000000 + 8 }),
-    rf({ beginAddress: A_RVA, endAddress: A_RVA + 13 }),
+    // A's row carries a validated scope table with an `__except` entry, and
+    // since peek-a-bin-j4uk.5 that is what it takes to get a `__try` at all:
+    // a handler flag alone is the `/GS` shape and no longer wraps anything.
+    // Without it the non-vacuity assertion below would be unsatisfiable and
+    // this whole census would go quiet — the failure mode it exists to catch.
+    rf({
+      beginAddress: A_RVA,
+      endAddress: A_RVA + 13,
+      scopeTable: [{ begin: A_RVA + 3, end: A_RVA + 8, handler: 0x900, jumpTarget: A_RVA + 8 }],
+    }),
     rf({ beginAddress: 0x3000, handlerAddress: undefined, handlerFlags: 0 }),
   ];
 

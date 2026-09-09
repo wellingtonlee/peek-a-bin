@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RuntimeFunction } from "../../../pe/types";
+import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
@@ -2123,11 +2123,17 @@ describe("decompileFunction — control-flow structuring", () => {
 });
 
 /**
- * `.pdata` exception regions. `DisasmFunction.address` is a VA and
- * `RuntimeFunction.beginAddress` is an RVA; comparing them directly matched
- * nothing on any real image, so `__try` was emitted zero times across 1475
- * functions of three real binaries despite the handlers being present
- * (peek-a-bin-yrh).
+ * `.pdata` exception regions.
+ *
+ * Two defects are pinned here and they are separate. `DisasmFunction.address`
+ * is a VA and `RuntimeFunction.beginAddress` is an RVA; comparing them directly
+ * matched nothing on any real image, so `__try` was emitted zero times across
+ * 1475 functions of three real binaries despite the handlers being present
+ * (peek-a-bin-yrh). Then, once it did fire, it fired on every selected record
+ * and claimed three things it had never read — a region, its extent, and its
+ * filter (peek-a-bin-j4uk.5). The first four tests below are yrh's and
+ * peek-a-bin-qmlz's record and must keep passing; the rest are the second
+ * defect's.
  */
 describe("decompileFunction — .pdata exception regions", () => {
   const body = seq(0x401000, [["mov", "eax, 1"], ["ret"]]);
@@ -2150,27 +2156,62 @@ describe("decompileFunction — .pdata exception regions", () => {
     ).code;
   }
 
-  /** An entry whose RVAs correspond to `func` under a 0x400000 image base. */
-  const entry = (begin: number, size: number, handler?: number): RuntimeFunction => ({
+  /**
+   * An entry whose RVAs correspond to `func` under a 0x400000 image base.
+   *
+   * `scopeTable` is what `pe/pdata.ts`'s `readScopeTable` publishes after its
+   * four-part structural check — so a fixture that omits it is not a defective
+   * fixture, it is the ordinary `__GSHandlerCheck`/`__CxxFrameHandler3` record
+   * that check refuses (20 of t64's 50 handler-bearing records at 4167aa3).
+   */
+  const entry = (
+    begin: number,
+    size: number,
+    handler?: number,
+    scopeTable?: ScopeTableEntry[],
+    handlerFlags?: number,
+  ): RuntimeFunction => ({
     beginAddress: begin,
     endAddress: begin + size,
     unwindInfoAddress: 0x3000,
     handlerAddress: handler,
-    handlerFlags: handler === undefined ? 0 : 1,
+    handlerFlags: handlerFlags ?? (handler === undefined ? 0 : 1),
+    scopeTable,
+  });
+
+  /** One `__except` scope entry: a filter RVA, and a body inside the function. */
+  const exceptEntry = (
+    begin: number,
+    end: number,
+    handler: number,
+    jumpTarget: number,
+  ): ScopeTableEntry => ({ begin, end, handler, jumpTarget });
+
+  /** One `__finally` scope entry — `jumpTarget === 0`, `handler` the funclet. */
+  const finallyEntry = (begin: number, end: number, handler: number): ScopeTableEntry => ({
+    begin,
+    end,
+    handler,
+    jumpTarget: 0,
   });
 
   it("wraps the body when the entry is the same function, expressed as an RVA", () => {
-    const code = decompile([entry(0x1000, 8, 0x2000)]);
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0x2000, 0x1006)]),
+    ]);
     expect(code).toContain("__try {");
     expect(code).toContain("__except(");
-    // The handler is an RVA too; it is reported in the same unit as every
-    // other address in the pane, i.e. rebased to a VA.
+    // Every address in the record and its scope table is an RVA; they are
+    // reported in the same unit as the rest of the pane, i.e. rebased to VAs.
     expect(code).toContain("0x402000");
+    expect(code).toContain("0x401002");
     expect(code).not.toContain("0x2000\n");
   });
 
   it("still matches an array the caller already normalised to VAs", () => {
-    const code = decompile([entry(0x401000, 8, 0x402000)]);
+    const code = decompile([
+      entry(0x401000, 8, 0x402000, [exceptEntry(0x401002, 0x401006, 0x402000, 0x401006)]),
+    ]);
     expect(code).toContain("__try {");
     expect(code).toContain("0x402000");
   });
@@ -2182,9 +2223,135 @@ describe("decompileFunction — .pdata exception regions", () => {
   it("refuses to guess between two entries an image base apart", () => {
     // 0x1000 and 0x11000 are both 64K-congruent with the function's VA and
     // both claim its extent: there is no evidence for either, so neither is
-    // used. A wrongly attributed __try is worse than a missing one.
-    const code = decompile([entry(0x1000, 8, 0x2000), entry(0x11000, 8, 0x12000)]);
+    // used. A wrongly attributed __try is worse than a missing one. Both carry
+    // a valid scope table, so it is the ambiguity that is doing the refusing.
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0x2000, 0x1006)]),
+      entry(0x11000, 8, 0x12000, [exceptEntry(0x11002, 0x11006, 0x12000, 0x11006)]),
+    ]);
     expect(code).not.toContain("__try");
+  });
+
+  /**
+   * *** THE HEADLINE ASSERTION OF peek-a-bin-j4uk.5. ***
+   *
+   * A record with a handler and no readable scope table is the `/GS` shape:
+   * `__GSHandlerCheck` sets UNW_FLAG_EHANDLER and its language-specific data is
+   * a single cookie frame offset, not a scope table — and such a function has
+   * NO `__try` IN ITS SOURCE AT ALL. It is 18 of t64's 50 handler-bearing
+   * records and 16 of w64's 46, every one of which used to be wrapped.
+   */
+  it("emits no __try for a handler-bearing record with no readable scope table", () => {
+    const code = decompile([entry(0x1000, 8, 0x2000)]);
+    expect(code).not.toContain("__try");
+    expect(code).not.toContain("__except");
+    // And it says nothing at all: an absent table is the ORDINARY answer for a
+    // /GS or C++ record, so "a region here could not be read" would be the
+    // fabrication again, in the voice of an admission.
+    expect(code).not.toContain(".pdata");
+  });
+
+  it("emits no __try for a record whose scope table is empty", () => {
+    expect(decompile([entry(0x1000, 8, 0x2000, [])])).not.toContain("__try");
+  });
+
+  /**
+   * `handler === 1` is the FORMAT'S OWN spelling of
+   * `EXCEPTION_EXECUTE_HANDLER`, and the only circumstance in which that
+   * identifier is a reading rather than the assumption it used to be. It is
+   * rare: exactly one entry per binary across the whole corpus.
+   */
+  it("prints EXCEPTION_EXECUTE_HANDLER only where the table spelled it, and says so", () => {
+    const code = decompile([entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 1, 0x1006)])]);
+    expect(code).toContain("__try {");
+    expect(code).toContain("__except(EXCEPTION_EXECUTE_HANDLER");
+    expect(code).toContain("read from the .pdata scope table");
+    // 1 is not an address and must never be resolved as one.
+    expect(code).not.toContain("0x400001");
+  });
+
+  it("admits an unrecovered filter and names the filter routine when the table gives an RVA", () => {
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0x5000, 0x1006)]),
+    ]);
+    expect(code).toContain("__unrecovered_");
+    expect(code).toContain("filter routine at 0x405000");
+    expect(code).not.toContain("EXCEPTION_EXECUTE_HANDLER");
+  });
+
+  it("admits an unrecovered filter with no address where the table names none", () => {
+    // `handler === 0` occurs in the format and is left as read; it is not an
+    // RVA, so nothing may be resolved from it.
+    const code = decompile([entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0, 0x1006)])]);
+    expect(code).toContain("__unrecovered_");
+    expect(code).not.toContain("filter routine at");
+    expect(code).not.toContain("EXCEPTION_EXECUTE_HANDLER");
+  });
+
+  /**
+   * The whole-body wrap is not merely unproven, it is WRONG in every observed
+   * case: not one of t64's 34 scope entries or w64's 32 covers its record's
+   * extent. So where a wrap survives, the braces must not be left to imply the
+   * region.
+   */
+  it("names the guarded region and admits that the braces are not it", () => {
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0x5000, 0x1006)]),
+    ]);
+    expect(code).toContain(".pdata: __except region 0x401002 - 0x401006");
+    expect(code).toContain("__except body at 0x401006");
+    expect(code).toContain("extent not placed onto statements");
+  });
+
+  /**
+   * A `__finally` is a DIFFERENT CONSTRUCT with different control flow, and the
+   * IR has no spelling for one — so it is recorded and not spelled. This is the
+   * dominant kind by an order of magnitude: 31 of t64's 34 entries.
+   */
+  it("records a __finally-only record without claiming a __try", () => {
+    const code = decompile([entry(0x1000, 8, 0x2000, [finallyEntry(0x1002, 0x1006, 0x6000)], 2)]);
+    expect(code).not.toContain("__try");
+    expect(code).not.toContain("__except");
+    expect(code).toContain(".pdata: __finally region 0x401002 - 0x401006");
+    expect(code).toContain("termination handler at 0x406000");
+  });
+
+  it("claims no termination handler where a __finally entry names no funclet", () => {
+    // 0 and 1 are not funclet addresses. Naming one would be the invention the
+    // whole rule exists to stop.
+    const code = decompile([entry(0x1000, 8, 0x2000, [finallyEntry(0x1002, 0x1006, 0)], 2)]);
+    expect(code).toContain(".pdata: __finally region 0x401002 - 0x401006");
+    expect(code).not.toContain("termination handler");
+    expect(code).not.toContain("0x400000");
+  });
+
+  it("names every region of a mixed table, and drives the wrap from the __except", () => {
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [
+        finallyEntry(0x1001, 0x1003, 0x6000),
+        exceptEntry(0x1004, 0x1006, 0x5000, 0x1006),
+      ]),
+    ]);
+    expect(code).toContain("__try {");
+    expect(code).toContain(".pdata: __finally region 0x401001 - 0x401003");
+    expect(code).toContain(".pdata: __except region 0x401004 - 0x401006");
+    expect(code).toContain("filter routine at 0x405000");
+  });
+
+  it("names both regions where a record carries two __except entries", () => {
+    // One `__try` cannot represent two regions, which is why every entry is
+    // named rather than only the one the filter came from.
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [
+        exceptEntry(0x1001, 0x1003, 0x5000, 0x1003),
+        exceptEntry(0x1004, 0x1006, 0x7000, 0x1006),
+      ]),
+    ]);
+    expect(code.match(/__try \{/g)).toHaveLength(1);
+    expect(code).toContain(".pdata: __except region 0x401001 - 0x401003");
+    expect(code).toContain(".pdata: __except region 0x401004 - 0x401006");
+    // The first entry in address order supplies the filter.
+    expect(code).toContain("filter routine at 0x405000");
   });
 });
 

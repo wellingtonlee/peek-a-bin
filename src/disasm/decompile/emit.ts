@@ -1,5 +1,5 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
-import type { BinaryOp, IRExpr, IRFunction, IRStmt } from "./ir";
+import type { BinaryOp, IRExpr, IRFunction, IRStmt, IRTry } from "./ir";
 import { canonReg, isKnownRegister, regSize, rewriteBodies, walkExpr, walkStmts } from "./ir";
 import { isCapturedOperandName } from "./lifter";
 import type { DecompType, TypeContext } from "./typeInfer";
@@ -464,6 +464,46 @@ function unrecoveredValue(text: string): string {
   const name = `__unrecovered_${_unrecovered.length + 1}`;
   _unrecovered.push({ name, note: text });
   return text ? `${name} /* ${commentSafe(text)} */` : name;
+}
+
+/**
+ * The text inside `__except(...)`.
+ *
+ * **`EXCEPTION_EXECUTE_HANDLER` IS NO LONGER A FALLBACK, AND THAT IS THE WHOLE
+ * POINT OF THIS FUNCTION.** It used to be the `else` arm of
+ * `stmt.filterExpr ? emitExpr(...) : "EXCEPTION_EXECUTE_HANDLER"`, and nothing
+ * in production ever built a `filterExpr` — so every `__except` the decompiler
+ * has ever emitted named that constant, on no evidence at all. It is now
+ * printed for exactly one reason: the `.pdata` scope table's `handler` field
+ * held the literal 1, which is the format's own spelling of it. The emitted C
+ * says where it came from, because a reader cannot otherwise tell this
+ * identifier from the assumption it replaced.
+ *
+ * Everything else is `__unrecovered_N`, the emitter's ordinary admission for a
+ * value it could not name (see {@link unrecoveredValue}) — including the case
+ * where the table gave a filter ROUTINE's address, since knowing where the
+ * filter lives is not knowing what it returns; nothing here decompiles the
+ * funclet. That admission is a declared local, so it is greppable, it compiles,
+ * and it lands in the report-only unrecovered-values instrument, which is
+ * exactly the row CLAUDE.md describes as "a rise can be a refusal replacing a
+ * confident wrong answer".
+ *
+ * NOTE FOR ANYONE READING A `cc clean` ROW AS EVIDENCE ABOUT THIS LINE: it is
+ * not. `corpus/emitAudits.ts`'s `CC_HEADER` is `#define __except(x) if (0)`, so
+ * the argument is discarded by the preprocessor and gcc never sees any of it.
+ */
+function emitTryFilter(stmt: IRTry): string {
+  if (stmt.filterExpr) return emitExpr(stmt.filterExpr, 0);
+  const source = stmt.filterSource;
+  if (source?.spelling === "execute-handler") {
+    return "EXCEPTION_EXECUTE_HANDLER /* read from the .pdata scope table */";
+  }
+  const at = source?.filterAddress;
+  return unrecoveredValue(
+    at === undefined
+      ? "__except filter"
+      : `__except filter; filter routine at 0x${at.toString(16).toUpperCase()}`,
+  );
 }
 
 function getExprType(expr: IRExpr): DecompType | undefined {
@@ -1790,7 +1830,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
         lines.push(...r.lines);
         addrs.push(...r.addrs);
       }
-      const filter = stmt.filterExpr ? emitExpr(stmt.filterExpr, 0) : "EXCEPTION_EXECUTE_HANDLER";
+      const filter = emitTryFilter(stmt);
       push(`${pad}} __except(${filter}) {`);
       for (const s of stmt.handler) {
         const r = emitStmt(s, level + 1);

@@ -242,11 +242,53 @@ export interface IRPhi {
   addr?: number;
 }
 
+/**
+ * What the image SAID the `__except` filter is — never what it is assumed to
+ * be.
+ *
+ * `__except(EXCEPTION_EXECUTE_HANDLER)` used to be `emit.ts`'s unconditional
+ * fallback for a `try` with no `filterExpr`, and **nothing in production has
+ * ever constructed a `filterExpr`** (every one of the nine `src/` references is
+ * a pass-through copy or a read; the only constructors are in tests). So that
+ * literal was emitted 100% of the time, on every function the decompiler
+ * wrapped, as a claim about a filter nothing had read. This field is the read
+ * fact that replaces the assumption, and **its absence is deliberately the
+ * UNRECOVERED case, never the constant** — a `try` reaching the emitter with no
+ * filter information must admit that, or the fallback is back.
+ *
+ *  - `"execute-handler"` — the scope table's `handler` field held the literal
+ *    1, which is the FORMAT'S OWN spelling of `EXCEPTION_EXECUTE_HANDLER`
+ *    (a filter that needs no funclet, so the linker writes the constant where a
+ *    filter RVA would go). This is the one case in which that identifier is a
+ *    reading rather than a guess. It is rare: exactly ONE entry per binary
+ *    across the whole corpus.
+ *  - `"unrecovered"` — the table named a filter *routine* (`filterAddress`, a
+ *    VA) or named nothing usable. Either way the filter's VALUE is not
+ *    recovered, because nothing here decompiles the filter funclet, so it is
+ *    spelled with the emitter's ordinary `__unrecovered_N` admission.
+ */
+export type IRTryFilter =
+  | { spelling: "execute-handler" }
+  | { spelling: "unrecovered"; filterAddress?: number };
+
 export interface IRTry {
   kind: "try";
   body: IRStmt[];
   handler: IRStmt[]; // __except or __finally body
-  filterExpr?: IRExpr; // __except(expr) filter
+  filterExpr?: IRExpr; // __except(expr) filter, when one was actually recovered
+  /**
+   * The `.pdata` scope table's account of the filter. Read only when
+   * `filterExpr` is absent, which in production is always — see
+   * {@link IRTryFilter}, and `pipeline.ts`'s `wrapExceptionRegions` for the
+   * rule that decides whether a `try` is emitted at all.
+   *
+   * Every pass that rebuilds an `IRTry` (`fold.ts`, `promote.ts` twice,
+   * `structs.ts`, `ir.ts`'s `rewriteBodies`) does so with `...stmt`, so this
+   * field survives without a per-pass edit. Keep it that way: a pass that
+   * enumerates the fields instead would drop it silently, and the emitter would
+   * degrade to the unrecovered spelling with nothing failing.
+   */
+  filterSource?: IRTryFilter;
 }
 
 /**

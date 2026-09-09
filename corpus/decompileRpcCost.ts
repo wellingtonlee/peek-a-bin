@@ -200,13 +200,15 @@
  * the one-row cost measured and the rest is the cost of cloning `undefined`.
  *
  * **THE CENSUS NEEDED A LIVENESS HALF for this member**, which is the `.pdata`
- * line printed beside it: `runtimeFunctions` is read at one place and its whole
- * observable effect is a `__try`, so an image emitting none would score a change
- * that dropped the array entirely as clean. It is **50 on t64 and 46 on w64,
- * equal under both payloads** — also exactly the handler-bearing row counts, so
- * the emitted C and the table corroborate each other — 2 on the `go` image, and
+ * line printed beside it: `runtimeFunctions` is read at one place, so an image
+ * emitting nothing derived from it would score a change that dropped the array
+ * entirely as clean. It counts functions carrying a `__try` OR a recorded region
+ * comment — **30 on t64 and 28 on w64, equal under both payloads** — and
  * **0 on the PE32 pair, which the row labels vacuous rather than reporting as a
- * pass**.
+ * pass**. It was a bare `__try` count against the 50 and 46 handler-bearing
+ * records until `peek-a-bin-j4uk.5` stopped wrapping a record the image had not
+ * said was a `__try`; that took the `__try` population to 3 per binary, so the
+ * row was re-based on the emitted effect as a whole rather than left thin.
  */
 
 import { readFileSync } from "node:fs";
@@ -282,7 +284,11 @@ interface Row {
   /** `.pdata` rows in the image, and how many the per-function payload sends. */
   pdataRows: number;
   pdataSent: number;
-  /** Functions emitting a `__try`, whole payload and per-function payload. */
+  /**
+   * Functions emitting anything derived from the `.pdata` record — a `__try` or
+   * a recorded region comment — under the whole payload and the per-function
+   * one. See the comment at the assignment for why it is not a `__try` count.
+   */
   wholeTries: number;
   slimTries: number;
   /** Requests it took to decompile every function under the real protocol. */
@@ -491,12 +497,26 @@ async function measure(path: string): Promise<Row | null> {
   for (let i = 0; i < wholeCode.length; i++) if (wholeCode[i] !== slimCode[i]) differing++;
   // THE LIVENESS HALF of the census above, and it is what stops "0 differing"
   // from being a statement about a population of zero. `runtimeFunctions` is
-  // read at exactly one place — `wrapExceptionRegions`, whose whole observable
-  // effect is a `__try` — so if neither run emits one, dropping the array
-  // entirely would also read as 0 differing. PE32 has no `.pdata` at all and
-  // reports 0 here on purpose; on the x64 pair it is the handler-bearing row
-  // count, which is the number the slice has to preserve.
-  const tries = (code: string[]): number => code.filter((c) => /^\s*__try \{/m.test(c)).length;
+  // read at exactly one place — `wrapExceptionRegions` — so if neither run
+  // emits anything derived from it, dropping the array entirely would also read
+  // as 0 differing. PE32 has no `.pdata` at all and reports 0 here on purpose.
+  //
+  // **IT IS NOT A `__try` COUNT ANY MORE, AND THAT IS peek-a-bin-j4uk.5'S DOING
+  // RATHER THAN A WIDENING FOR ITS OWN SAKE.** A `__try` used to be that pass's
+  // whole observable effect because it wrapped every record it was given; now
+  // it wraps only a record whose scope table holds an `__except` entry, which
+  // is **3 functions per x64 binary against the 50 and 46 before**. The
+  // dominant kind by an order of magnitude is `__finally`, which the IR has no
+  // spelling for and which therefore reaches the page as a recorded region
+  // rather than a construct — so the population to preserve is every function
+  // carrying ANY `.pdata`-derived text, which is 30 on t64 and 28 on w64.
+  //
+  // Re-basing it on the handler-bearing ROW COUNT was considered and refused:
+  // that is a property of the IMAGE, and a liveness half for an EMITTED-C
+  // equivalence census has to be a property of the emitted C, or it stays
+  // non-zero while saying nothing about whether the slice preserved anything.
+  const tries = (code: string[]): number =>
+    code.filter((c) => /^\s*__try \{/m.test(c) || /^\s*\/\/ \.pdata: /m.test(c)).length;
   const wholeTries = tries(wholeCode);
   const slimTries = tries(slimCode);
 
@@ -607,8 +627,8 @@ function print(rows: Row[]): void {
     );
     console.log(
       `  .pdata: ${r.pdataRows} rows in the image, ${r.pdataSent} sent per request; ` +
-        `__try emitted in ${r.wholeTries} functions from the whole table and ` +
-        `${r.slimTries} from the per-function row ` +
+        `.pdata-derived text emitted in ${r.wholeTries} functions from the whole ` +
+        `table and ${r.slimTries} from the per-function row ` +
         `(${r.wholeTries === 0 ? "NO POPULATION — the census above is vacuous here" : r.wholeTries === r.slimTries ? "the population the slice must preserve" : "MISMATCH"})`,
     );
     // The two derived quantities the conclusion actually rests on. The first is
