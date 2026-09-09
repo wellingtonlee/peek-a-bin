@@ -554,10 +554,45 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, anomalies: action.anomalies };
     case "SET_ANALYSIS_PHASE":
       return { ...state, analysisPhase: action.phase };
-    case "SET_CURRENT_INSTRUCTION":
-      return { ...state, currentInstruction: action.instruction };
-    case "SET_CURRENT_BLOCK":
-      return { ...state, currentBlock: action.block };
+    // The two cursor fields are re-dispatched by `DisassemblyView`'s cursor
+    // effect whenever `rows` is rebuilt, which a rename, a bookmark, a comment
+    // or a hex patch all do without the cursor having moved — so the common
+    // case is an IDENTICAL payload landing on an unchanged field. A fresh state
+    // object for that re-renders every context consumer for nothing. Same
+    // reasoning, and the same shape, as `SET_OMITTED_PASSES` above.
+    //
+    // This is a RENDER COUNT change and nothing here measures render COST; see
+    // `hooks/__tests__/contextRenderCount.dom.test.tsx`.
+    case "SET_CURRENT_INSTRUCTION": {
+      const prev = state.currentInstruction;
+      const next = action.instruction;
+      // Covers null === null, and an identical object handed back verbatim.
+      if (prev === next) return state;
+      if (
+        prev != null &&
+        next != null &&
+        prev.size === next.size &&
+        prev.bytes.length === next.bytes.length &&
+        prev.bytes.every((b, i) => b === next.bytes[i])
+      ) {
+        return state;
+      }
+      return { ...state, currentInstruction: next };
+    }
+    case "SET_CURRENT_BLOCK": {
+      const prev = state.currentBlock;
+      const next = action.block;
+      if (prev === next) return state;
+      if (
+        prev != null &&
+        next != null &&
+        prev.startAddr === next.startAddr &&
+        prev.endAddr === next.endAddr
+      ) {
+        return state;
+      }
+      return { ...state, currentBlock: next };
+    }
     case "SET_IAT_MAP":
       return { ...state, iatMap: action.iatMap };
     case "SET_DRIVER_INFO":
