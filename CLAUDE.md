@@ -763,9 +763,42 @@ the file is opened once, which adopts it. Migration is one-time, on load, and **
 bare-name key exactly where it is** —
 intentionally orphaned on `:report:`'s precedent above, which also makes it idempotent. **The
 metrics-worker content hash was REFUSED**: it makes annotation load async, so a rename made while
-the digest is in flight is written under the wrong key or lost. `recentFiles.ts`'s IndexedDB
-`keyPath: "name"` is **still name-keyed** and is deliberately a separate bead — the harm there is
-cached bytes, recoverable by re-dropping the file (`peek-a-bin-v3uh.5`).
+the digest is in flight is written under the wrong key or lost (`peek-a-bin-v3uh.5`).
+
+**…AND THE OTHER STORE IS KEYED ON THE SAME STRING. `recentFiles.ts` IS INDEXEDDB, NOT
+localStorage, AND IS DOCUMENTED HERE BECAUSE ITS KEY IS THE PARAGRAPH ABOVE'S.** Its object store
+was `keyPath: "name"`, so opening `v2/setup.exe` **silently evicted** `v1/setup.exe`'s cached bytes
+— a `put` under an occupied key is an overwrite — and `FileLoader`'s recents list joined its two
+halves on the name too. It is keyed on `buildKey(id)` now: **the composite identity split out of
+`annotationKeyFor`, which is now `ANNOTATION_KEY_PREFIX + buildKey(id)`**, so there is exactly one
+composite-key rule and the join from a cached file to its bookmarks is exact rather than a guess.
+The `peek-a-bin:annotations:` prefix is deliberately **not** carried into the IndexedDB key: that
+namespace separates annotation records from the ~18 settings keys above, and a record in a database
+of its own has nothing to be separated from. `name` moved into the value for the same reason
+`AnnotationRecord.fileName` did. Consequences: `RecentFileEntry` carries a `key` and
+`loadRecentFile`/`deleteRecentFile` take it, since two builds are two rows with one name;
+`FileLoader`'s list key, its loading flag and its remove button all route on it (a `key={f.name}`
+would reconcile the two rows as one); and removing a row deletes **that build's** annotation record
+exactly, via `removeAnnotationRecord`, where taking every record sharing the name would delete the
+other build's work. **A build-keyed row with no record of its own shows NOTHING** — the name join
+is reached only by a row with no build identity, and a `??` chain to it was measured handing a
+sibling build's bookmark count to an unannotated row.
+
+**The v1 → v2 upgrade carries records forward under a `name:` key rather than re-deriving a real
+one, and that is a judgement.** Changing a `keyPath` needs a version bump plus an
+`onupgradeneeded` that deletes and recreates the store, so every record must be read out and
+written back — skip it and all five cached files are gone. A v1 record has a name and no build
+identity, and `parsePE` inside a `versionchange` transaction would mean running the parser up to
+five times over up to 50 MB each, synchronously, on the main thread, on records that may no longer
+parse; a throw there aborts the open and leaves the user with no recents at all. Cached bytes are
+recoverable by re-dropping the file — the whole reason this was ranked below the annotation bead —
+so the stale key is the cheaper risk. Such records display, load and are evicted oldest-first like
+any other, so they age out of `MAX_ENTRIES` on their own; a legacy row joins annotations **by
+name**, which is all it has. Deleting a legacy row on a name match when its file is re-opened was
+**refused** — that is precisely the name-keyed eviction this closed. `migrateV1Record` is the pure
+decision and is tested without a DOM; the wiring runs against the in-tree IndexedDB double
+(`src/utils/__tests__/fakeIndexedDB.ts`, extended with versions and a `versionchange` transaction),
+since jsdom has no IndexedDB (`peek-a-bin-mtry`).
 **`hexPatches` IS NOT AUTO-PERSISTED, AND THAT REFUSAL IS THE DESIGN — it is guarded instead.**
 Bookmarks, renames and comments auto-persist per file, so `RESET` and a reload cost nothing; a byte
 patch is a byte of the **file**, held only in memory, and `RESET` returns `initialState` with a

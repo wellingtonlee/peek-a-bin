@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listAnnotationRecords, removeAnnotationsFor } from "../utils/annotationKey";
+import {
+  ANNOTATION_KEY_PREFIX,
+  listAnnotationRecords,
+  removeAnnotationRecord,
+  removeAnnotationsFor,
+} from "../utils/annotationKey";
 import {
   deleteRecentFile,
   getRecentFiles as getRecentFilesFromIDB,
+  isLegacyRecentKey,
   loadRecentFile,
   type RecentFileEntry,
 } from "../utils/recentFiles";
@@ -26,6 +32,17 @@ interface FileLoaderProps {
 }
 
 interface RecentFile {
+  /**
+   * WHAT IDENTIFIES THE ROW, and it is not the name.
+   *
+   * For a row with cached bytes this is `recentFiles.ts`'s store key — the
+   * build identity, or a `name:` key on a record carried over from the v1
+   * store. For an annotation-only row it is the annotation record's own key.
+   * Both are unique, which is what lets two builds of one binary be two rows;
+   * the name is display text and two rows may legitimately share it
+   * (peek-a-bin-mtry).
+   */
+  key: string;
   name: string;
   size: number;
   lastOpened: number;
@@ -43,32 +60,61 @@ interface AnnotationCounts {
 
 const NO_ANNOTATIONS: AnnotationCounts = { bookmarks: 0, renames: 0, comments: 0 };
 
+interface AnnotationIndex {
+  /** Counts by the annotation record's OWN key. An exact join. */
+  byKey: Map<string, AnnotationCounts>;
+  /** Counts by file name, richest record wins. The fallback join. */
+  byName: Map<string, AnnotationCounts>;
+  /** Every record, for the annotation-only rows below. */
+  records: ReturnType<typeof listAnnotationRecords>;
+}
+
 /**
- * Annotation counts per FILE NAME, folded out of the build-keyed records.
+ * The two joins a recents row can make against the annotation store.
  *
- * Annotations are keyed on the build (`utils/annotationKey.ts`), so this map is
- * a *display* fold and not an identity: it reads the name back out of each
- * record's value. Where two builds share one name — the case that keying on the
- * build exists to keep working — the richer record's counts are the ones shown,
- * because this list is still name-keyed on the other side too
- * (`recentFiles.ts` uses `keyPath: "name"`, and changing that is its own bead).
- * Showing the richer of the two is a choice about a summary line; nothing here
- * decides which record a load reads.
+ * **`byKey` IS THE REAL ONE AND IT IS EXACT.** Both stores are keyed on
+ * `buildKey`'s composite identity now, so a cached file finds its own build's
+ * bookmarks and nothing else — the point of `peek-a-bin-mtry`. `byName` is the
+ * fallback for the two rows that have no build identity to join on: a record
+ * carried over from the v1 IndexedDB store, and an annotation-only row. It is a
+ * *display* fold rather than an identity, so where two builds share a name the
+ * richer record's counts are the ones shown; nothing here decides which record
+ * a load reads.
  */
-function annotationCountsByName(): Map<string, AnnotationCounts> {
+function annotationIndex(): AnnotationIndex {
+  const byKey = new Map<string, AnnotationCounts>();
   const byName = new Map<string, AnnotationCounts>();
-  for (const rec of listAnnotationRecords(localStorage)) {
+  const records = listAnnotationRecords(localStorage);
+  for (const rec of records) {
+    const counts = {
+      bookmarks: rec.bookmarks,
+      renames: rec.renames,
+      comments: rec.comments,
+    };
+    byKey.set(rec.key, counts);
     if (rec.fileName === null) continue;
     const total = rec.bookmarks + rec.renames + rec.comments;
     const seen = byName.get(rec.fileName);
     if (seen && seen.bookmarks + seen.renames + seen.comments >= total) continue;
-    byName.set(rec.fileName, {
-      bookmarks: rec.bookmarks,
-      renames: rec.renames,
-      comments: rec.comments,
-    });
+    byName.set(rec.fileName, counts);
   }
-  return byName;
+  return { byKey, byName, records };
+}
+
+/**
+ * PURE. The counts one cached file should show.
+ *
+ * **EXACT-OR-NOTHING WHERE THE ROW NAMES A BUILD, and that is not a detail.**
+ * Falling back to the name join for a build-keyed row with no record of its own
+ * hands it a *sibling build's* bookmark count — measured, when this was first
+ * written with a `??` chain: two builds of `setup.exe`, one annotated, and both
+ * rows advertised the same five bookmarks. The name join is reached only by a
+ * row that has no build identity to join on: a record carried over from the v1
+ * IndexedDB store. A build with nothing saved has nothing to show.
+ */
+export function countsForRecent(index: AnnotationIndex, entry: RecentFileEntry): AnnotationCounts {
+  if (isLegacyRecentKey(entry.key)) return index.byName.get(entry.name) ?? NO_ANNOTATIONS;
+  return index.byKey.get(`${ANNOTATION_KEY_PREFIX}${entry.key}`) ?? NO_ANNOTATIONS;
 }
 
 function formatFileSize(bytes: number): string {
@@ -131,15 +177,26 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
       // live under `peek-a-bin:annotations:` now, so telling them apart from the
       // ~18 settings keys sharing the `peek-a-bin:` namespace is a prefix test
       // rather than four hand-written names (peek-a-bin-v3uh.5).
-      const annotations = annotationCountsByName();
+      const annotations = annotationIndex();
 
-      // Also find annotation-only entries (files with annotations but no buffer)
-      const idbNames = new Set(idbFiles.map((f) => f.name));
+      // Also find annotation-only entries (files with annotations but no buffer).
+      // A record is CLAIMED when a cached file joined to it — by key where both
+      // sides have a build identity, and by name for a row carried over from the
+      // v1 store, which has none.
+      const claimedKeys = new Set(
+        idbFiles
+          .filter((f) => !isLegacyRecentKey(f.key))
+          .map((f) => `${ANNOTATION_KEY_PREFIX}${f.key}`),
+      );
+      const legacyNames = new Set(
+        idbFiles.filter((f) => isLegacyRecentKey(f.key)).map((f) => f.name),
+      );
       const lsOnlyFiles: RecentFileEntry[] = [];
-      for (const [name, ann] of annotations) {
-        if (idbNames.has(name)) continue;
-        if (ann.bookmarks + ann.renames + ann.comments > 0) {
-          lsOnlyFiles.push({ name, size: 0, lastOpened: 0 });
+      for (const rec of annotations.records) {
+        if (rec.fileName === null) continue;
+        if (claimedKeys.has(rec.key) || legacyNames.has(rec.fileName)) continue;
+        if (rec.bookmarks + rec.renames + rec.comments > 0) {
+          lsOnlyFiles.push({ key: rec.key, name: rec.fileName, size: 0, lastOpened: 0 });
         }
       }
 
@@ -148,13 +205,13 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
       const combined: RecentFile[] = idbFiles.map((f) => ({
         ...f,
         hasBuffer: true,
-        ...(annotations.get(f.name) ?? NO_ANNOTATIONS),
+        ...countsForRecent(annotations, f),
       }));
       for (const f of lsOnlyFiles) {
         combined.push({
           ...f,
           hasBuffer: false,
-          ...(annotations.get(f.name) ?? NO_ANNOTATIONS),
+          ...(annotations.byKey.get(f.key) ?? NO_ANNOTATIONS),
         });
       }
       // Sort by lastOpened (most recent first), then by annotation count for ls-only
@@ -184,11 +241,13 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
     }
   }, [onFile]);
 
+  // Keyed on the ROW, not the name: two builds of one binary are two rows with
+  // one name, so a name here would load and spin the wrong one (peek-a-bin-mtry).
   const handleRecentClick = useCallback(
-    async (name: string) => {
-      setLoadingRecent(name);
+    async (key: string, name: string) => {
+      setLoadingRecent(key);
       try {
-        const buffer = await loadRecentFile(name);
+        const buffer = await loadRecentFile(key);
         if (buffer) {
           onFile(buffer, name);
         }
@@ -199,14 +258,22 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
     [onFile],
   );
 
-  const handleRemoveRecent = useCallback(async (e: React.MouseEvent, name: string) => {
+  const handleRemoveRecent = useCallback(async (e: React.MouseEvent, row: RecentFile) => {
     e.stopPropagation();
-    await deleteRecentFile(name);
-    // Every build-keyed record saved under this name, plus the legacy bare-name
-    // key. A user-initiated delete, which is the one place deleting is right —
-    // the LOAD path deliberately never deletes (`loadAnnotations`).
-    removeAnnotationsFor(localStorage, name);
-    setRecentFiles((prev) => prev.filter((f) => f.name !== name));
+    if (row.hasBuffer) await deleteRecentFile(row.key);
+    // A user-initiated delete, which is the one place deleting is right — the
+    // LOAD path deliberately never deletes (`loadAnnotations`). Where the row
+    // names a build, exactly that record goes: taking every record sharing the
+    // name would delete the OTHER build's work, which is the collision this
+    // list stopped having. A row with no build identity has only the name.
+    if (row.hasBuffer && isLegacyRecentKey(row.key)) {
+      removeAnnotationsFor(localStorage, row.name);
+    } else if (row.hasBuffer) {
+      removeAnnotationRecord(localStorage, `${ANNOTATION_KEY_PREFIX}${row.key}`);
+    } else {
+      removeAnnotationRecord(localStorage, row.key);
+    }
+    setRecentFiles((prev) => prev.filter((f) => f.key !== row.key));
   }, []);
 
   const handleFile = useCallback(
@@ -333,13 +400,13 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
                 parts.push(`${f.bookmarks} bookmark${f.bookmarks !== 1 ? "s" : ""}`);
               if (f.renames > 0) parts.push(`${f.renames} rename${f.renames !== 1 ? "s" : ""}`);
               if (f.comments > 0) parts.push(`${f.comments} comment${f.comments !== 1 ? "s" : ""}`);
-              const isLoading = loadingRecent === f.name;
+              const isLoading = loadingRecent === f.key;
               return (
                 // The row is a button and the "remove" × is its sibling — buttons
                 // cannot nest. The button still spans everything but the ×, so the
                 // whole row stays clickable.
                 <div
-                  key={f.name}
+                  key={f.key}
                   className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded group ${
                     f.hasBuffer ? "cursor-pointer hover:bg-gray-800/60 transition-colors" : ""
                   }`}
@@ -348,7 +415,7 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
                     type="button"
                     disabled={!f.hasBuffer || isLoading}
                     className="flex items-center justify-between gap-2 flex-1 min-w-0 text-left"
-                    onClick={() => handleRecentClick(f.name)}
+                    onClick={() => handleRecentClick(f.key, f.name)}
                   >
                     <div className="flex items-center gap-2 min-w-0 flex-1">
                       <span
@@ -378,7 +445,7 @@ export function FileLoader({ onFile, error }: FileLoaderProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={(e) => handleRemoveRecent(e, f.name)}
+                    onClick={(e) => handleRemoveRecent(e, f)}
                     className="shrink-0 text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1"
                     title="Remove from recent"
                   >

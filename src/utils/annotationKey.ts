@@ -110,8 +110,34 @@ export interface AnnotationRecord extends AnnotationPayload {
  * name suggests.
  */
 export function annotationKeyFor(id: BuildIdentity): string {
+  return `${ANNOTATION_KEY_PREFIX}${buildKey(id)}`;
+}
+
+/**
+ * THE COMPOSITE IDENTITY ITSELF, WITHOUT ANY STORE'S PREFIX.
+ *
+ * `<size>-<timeDateStamp, 8 lowercase hex>` and, where the image names a
+ * CodeView GUID, `-<GUID>` appended. Every rule and every refusal recorded on
+ * {@link annotationKeyFor} is a statement about *this* function; that one only
+ * adds a namespace.
+ *
+ * **IT IS SPLIT OUT BECAUSE A SECOND STORE NEEDED IT AND MUST NOT RE-DERIVE
+ * IT.** `utils/recentFiles.ts`'s IndexedDB cache was keyed on the bare file
+ * name, so opening `v2/setup.exe` silently evicted `v1/setup.exe`'s bytes; it
+ * is keyed on this string now (`peek-a-bin-mtry`). Two identity rules that can
+ * disagree would be strictly worse than the collision either one fixes — the
+ * recents list joins to annotation records, so a build the cache calls one
+ * thing and the annotation store calls another is a join that silently misses.
+ * There is exactly one composite-key rule in this repo and this is it.
+ *
+ * The `peek-a-bin:annotations:` prefix is deliberately NOT carried into the
+ * IndexedDB key: that namespace exists to separate annotation records from ~18
+ * settings keys sharing one flat `localStorage`, and a record in a database of
+ * its own has nothing to be separated from.
+ */
+export function buildKey(id: BuildIdentity): string {
   const stamp = (id.timeDateStamp >>> 0).toString(16).padStart(8, "0");
-  const head = `${ANNOTATION_KEY_PREFIX}${id.size}-${stamp}`;
+  const head = `${id.size}-${stamp}`;
   return id.pdbGuid ? `${head}-${id.pdbGuid}` : head;
 }
 
@@ -340,10 +366,14 @@ export function listAnnotationRecords(store: AnnotationStoreIndex): StoredAnnota
  * "remove this recent", so the legacy blob for that name goes too; leaving it
  * would be keeping data they asked to be rid of.
  *
- * It is keyed on the NAME, not on a build, because the recents list itself
- * still is: `recentFiles.ts` uses `keyPath: "name"`. Where two builds share a
- * name, removing the recent removes both records — which is what the row the
- * user clicked claims to be.
+ * It is keyed on the NAME, and after `peek-a-bin-mtry` that is the FALLBACK
+ * rather than the rule: `recentFiles.ts` is keyed on {@link buildKey} now, so a
+ * recents row that came out of IndexedDB can name its own annotation record
+ * exactly and calls {@link removeAnnotationRecord} instead. This is what the
+ * rows that have no build identity use — a record migrated from the v1 store,
+ * and an annotation-only row with no cached bytes at all. Where two builds
+ * share a name it still removes both records, which is what a row that can only
+ * name a name claims to be.
  */
 export function removeAnnotationsFor(store: AnnotationStoreIndex, fileName: string): void {
   const doomed = listAnnotationRecords(store)
@@ -356,5 +386,28 @@ export function removeAnnotationsFor(store: AnnotationStoreIndex, fileName: stri
     } catch {
       /* nothing to do */
     }
+  }
+}
+
+/**
+ * Delete ONE annotation record, named exactly.
+ *
+ * The precise counterpart to {@link removeAnnotationsFor}, and the one a
+ * recents row backed by cached bytes uses: that row knows the build it
+ * describes, so removing it must not take a *different* build that happens to
+ * share the file name — which is the whole collision `peek-a-bin-mtry` closed
+ * on the cache side.
+ *
+ * **The legacy bare-name blob is deliberately left behind here**, where
+ * {@link removeAnnotationsFor} takes it. That blob is not attributable to a
+ * build: deleting it while removing one of two same-named builds would take
+ * data the other one can still adopt. It is orphaned instead, on
+ * {@link loadAnnotations}' precedent.
+ */
+export function removeAnnotationRecord(store: AnnotationStoreIndex, key: string): void {
+  try {
+    store.removeItem(key);
+  } catch {
+    /* nothing to do */
   }
 }

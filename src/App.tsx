@@ -37,7 +37,7 @@ import { parsePE } from "./pe/parser";
 import { dataSectionRanges, findCodeSection } from "./pe/sections";
 import { applyTheme, loadTheme } from "./styles/themes";
 import { annotationKey, loadAnnotations, saveAnnotations } from "./utils/annotationKey";
-import { saveRecentFile } from "./utils/recentFiles";
+import { recentFileKey, saveRecentFile } from "./utils/recentFiles";
 import { disasmWorker } from "./workers/disasmClient";
 import { metricsWorker } from "./workers/metricsClient";
 import { sectionRanges } from "./workers/metricsDispatch";
@@ -678,7 +678,12 @@ export default function App() {
       // Anomaly detection runs in the effect below — it needs two whole-file
       // walks, which is ~910 ms of main-thread work on a 253 MiB image.
       // Save to IndexedDB for recent files
-      void saveRecentFile(fileName, buffer).catch((err) =>
+      // Keyed on the BUILD, not the name: opening `v2/setup.exe` used to evict
+      // `v1/setup.exe`'s cached bytes, because the store's keyPath was "name"
+      // and a `put` under an occupied key is an overwrite (peek-a-bin-mtry).
+      // The key is the same composite string annotations use, so the recents
+      // list joins the two exactly.
+      void saveRecentFile(recentFileKey(pe), fileName, buffer).catch((err) =>
         console.error("[peek-a-bin] failed to save recent file", err),
       );
       // Extract strings off the main thread via worker

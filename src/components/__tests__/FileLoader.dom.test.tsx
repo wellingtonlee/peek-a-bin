@@ -6,14 +6,24 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileLoader } from "../FileLoader";
 
-vi.mock("../../utils/recentFiles", () => ({
+// Only the three IO functions are replaced. `isLegacyRecentKey` and
+// `legacyRecentKey` are the module's PURE key rules and the component reads them
+// to decide which join a row makes — stubbing those would be writing a second
+// copy of the very rule `peek-a-bin-mtry` exists to keep single.
+vi.mock("../../utils/recentFiles", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/recentFiles")>()),
   getRecentFiles: vi.fn(async () => []),
   loadRecentFile: vi.fn(async () => null),
   deleteRecentFile: vi.fn(async () => {}),
 }));
 
-import { annotationKeyFor } from "../../utils/annotationKey";
-import { getRecentFiles, loadRecentFile } from "../../utils/recentFiles";
+import { ANNOTATION_KEY_PREFIX, annotationKeyFor } from "../../utils/annotationKey";
+import {
+  deleteRecentFile,
+  getRecentFiles,
+  legacyRecentKey,
+  loadRecentFile,
+} from "../../utils/recentFiles";
 
 /**
  * The pre-file screen, and the one place `state.error` has a render site.
@@ -122,7 +132,7 @@ describe("FileLoader file hand-off", () => {
 
   it("omits the File on the recents path, which is the copy it keeps paying", async () => {
     vi.mocked(getRecentFiles).mockResolvedValueOnce([
-      { name: "saved.exe", size: 1024, lastOpened: Date.now() },
+      { key: "1024-00000001", name: "saved.exe", size: 1024, lastOpened: Date.now() },
     ]);
     vi.mocked(loadRecentFile).mockResolvedValueOnce(new Uint8Array([0x4d, 0x5a]).buffer);
     const { onFile, user } = renderLoader();
@@ -137,7 +147,7 @@ describe("FileLoader file hand-off", () => {
 describe("FileLoader recent analyses", () => {
   it("lists a saved file with its size", async () => {
     vi.mocked(getRecentFiles).mockResolvedValueOnce([
-      { name: "t64.exe", size: 2048, lastOpened: Date.now() },
+      { key: "2048-00000001", name: "t64.exe", size: 2048, lastOpened: Date.now() },
     ]);
     renderLoader();
     expect(await screen.findByText("t64.exe")).toBeTruthy();
@@ -206,13 +216,144 @@ describe("FileLoader recent analyses", () => {
   });
 });
 
+describe("FileLoader recents — two builds of one binary (peek-a-bin-mtry)", () => {
+  /** An annotation record for one build, with `n` bookmarks. */
+  function annotate(key: string, fileName: string, n: number) {
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        fileName,
+        bookmarks: Array.from({ length: n }, (_, i) => ({ address: i + 1, label: `b${i}` })),
+        renames: {},
+        comments: {},
+      }),
+    );
+  }
+
+  const V1 = "2048-00000001";
+  const V2 = "4096-00000002";
+
+  function twoBuilds() {
+    vi.mocked(getRecentFiles).mockResolvedValue([
+      { key: V2, name: "setup.exe", size: 4096, lastOpened: 2000 },
+      { key: V1, name: "setup.exe", size: 2048, lastOpened: 1000 },
+    ]);
+  }
+
+  it("shows BOTH same-named rows, told apart by size", async () => {
+    // The React list key is `f.key`, not `f.name`: two rows sharing a name would
+    // otherwise share a key and be reconciled as one. A duplicate key is a
+    // console warning rather than a render failure, so the spy is the only
+    // instrument — and it is file-wide (below) because React caches that warning
+    // per owner component, so a spy installed here would see a clean console.
+    twoBuilds();
+    renderLoader();
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(2));
+    expect(screen.getByText("4.0 KB")).toBeTruthy();
+    expect(screen.getByText("2.0 KB")).toBeTruthy();
+  });
+
+  it("joins each row to ITS OWN build's annotations, not to the name's", async () => {
+    // THE POINT. Both records say `fileName: "setup.exe"`; only the key tells
+    // them apart, and both stores are keyed on the same composite string.
+    twoBuilds();
+    annotate(`${ANNOTATION_KEY_PREFIX}${V1}`, "setup.exe", 1);
+    annotate(`${ANNOTATION_KEY_PREFIX}${V2}`, "setup.exe", 7);
+    renderLoader();
+
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(2));
+    expect(screen.getByText("7 bookmarks")).toBeTruthy();
+    expect(screen.getByText("1 bookmark")).toBeTruthy();
+  });
+
+  it("loads the row that was clicked, by key", async () => {
+    twoBuilds();
+    const { user } = renderLoader();
+    const rows = await screen.findAllByText("setup.exe");
+    // The older row is second; clicking it must load V1's bytes, not V2's.
+    await user.click(rows[1]);
+    await waitFor(() => expect(vi.mocked(loadRecentFile)).toHaveBeenCalled());
+    expect(vi.mocked(loadRecentFile).mock.calls[0][0]).toBe(V1);
+  });
+
+  it("removes only the clicked build, leaving the other row and its annotations", async () => {
+    twoBuilds();
+    annotate(`${ANNOTATION_KEY_PREFIX}${V1}`, "setup.exe", 1);
+    annotate(`${ANNOTATION_KEY_PREFIX}${V2}`, "setup.exe", 7);
+    const { user } = renderLoader();
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(2));
+
+    // The × buttons sit in row order beside each name.
+    await user.click(screen.getAllByTitle("Remove from recent")[1]);
+
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(1));
+    expect(vi.mocked(deleteRecentFile).mock.calls[0][0]).toBe(V1);
+    expect(localStorage.getItem(`${ANNOTATION_KEY_PREFIX}${V1}`)).toBeNull();
+    // The OTHER build's work survives — under a name key it would have gone too.
+    expect(localStorage.getItem(`${ANNOTATION_KEY_PREFIX}${V2}`)).not.toBeNull();
+  });
+
+  it("a record migrated from the v1 store joins by name, having no build identity", async () => {
+    // The documented fallback. A `name:` key cannot name an annotation record,
+    // so this row falls back to the name join — which is all a v1 record has.
+    vi.mocked(getRecentFiles).mockResolvedValue([
+      { key: legacyRecentKey("old.exe"), name: "old.exe", size: 512, lastOpened: 10 },
+    ]);
+    annotate(annotationKeyFor({ size: 512, timeDateStamp: 0x99 }), "old.exe", 3);
+    renderLoader();
+
+    expect(await screen.findByText("old.exe")).toBeTruthy();
+    expect(screen.getByText("3 bookmarks")).toBeTruthy();
+  });
+
+  it("does not also list an annotation-only row for a build a cached file claims", async () => {
+    // The claim is by KEY now. Without it the same build would appear twice —
+    // once with its bytes and once as a ghost.
+    vi.mocked(getRecentFiles).mockResolvedValue([
+      { key: V1, name: "setup.exe", size: 2048, lastOpened: 1000 },
+    ]);
+    annotate(`${ANNOTATION_KEY_PREFIX}${V1}`, "setup.exe", 2);
+    renderLoader();
+
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(1));
+    expect(screen.getByText("2 bookmarks")).toBeTruthy();
+  });
+
+  it("still lists a build with annotations and no cached bytes beside a cached sibling", async () => {
+    // Two builds, one cached: the uncached one is an inert annotations-only row
+    // rather than being swallowed by its sibling's name.
+    vi.mocked(getRecentFiles).mockResolvedValue([
+      { key: V2, name: "setup.exe", size: 4096, lastOpened: 2000 },
+    ]);
+    annotate(`${ANNOTATION_KEY_PREFIX}${V1}`, "setup.exe", 5);
+    renderLoader();
+
+    await waitFor(() => expect(screen.getAllByText("setup.exe")).toHaveLength(2));
+    expect(screen.getByText("5 bookmarks")).toBeTruthy();
+  });
+});
+
+/**
+ * React's duplicate-key warning is a `console.error`, and it is cached PER OWNER
+ * COMPONENT — so a spy installed inside one test sees a clean console once any
+ * earlier render has already warned. It has to be file-wide, failing on the
+ * FIRST render that warns.
+ */
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   vi.mocked(getRecentFiles).mockResolvedValue([]);
   vi.mocked(loadRecentFile).mockResolvedValue(null);
   localStorage.clear();
 });
 
 afterEach(() => {
+  const keyWarnings = (consoleErrorSpy.mock.calls as unknown[][]).filter((c) =>
+    String(c[0] ?? "").includes("same key"),
+  );
+  consoleErrorSpy.mockRestore();
+  expect(keyWarnings).toEqual([]);
   localStorage.clear();
   vi.clearAllMocks();
 });
