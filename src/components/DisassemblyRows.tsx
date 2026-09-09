@@ -303,7 +303,6 @@ export function InsnRow({
   addrWidth,
   pe,
   iatMap,
-  functions,
   renames,
   comments,
   currentAddress,
@@ -343,7 +342,6 @@ export function InsnRow({
   addrWidth: number;
   pe: PEFile;
   iatMap: Map<number, { lib: string; func: string }>;
-  functions: DisasmFunction[];
   renames: Record<number, string>;
   comments: Record<number, string>;
   currentAddress: number;
@@ -421,8 +419,15 @@ export function InsnRow({
         tooltipData.set(addr, `"${preview}"`);
         continue;
       }
-      // Check functions
-      const fn = functions.find((f) => f.address === addr);
+      // Check functions. `funcMap` is keyed on `fn.address` and is injective by
+      // construction (both detectors build their function list 1:1 out of a
+      // `Set` of start addresses, and `SET_FUNCTIONS` replaces the array
+      // wholesale), so this cannot disagree with the linear scan it replaces —
+      // `.find` returns the first match and `Map.get` the last insert, and there
+      // is never more than one. It was the last linear scan left in a
+      // virtualized row: run per operand target that missed the IAT map and
+      // `pe.strings`, which is exactly what a branch or call target is.
+      const fn = funcMap.get(addr);
       if (fn) {
         if (!tooltipData) tooltipData = new Map();
         tooltipData.set(addr, `Function: ${getDisplayName(fn, renames)}`);

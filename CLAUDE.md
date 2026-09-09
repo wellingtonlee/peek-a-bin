@@ -412,6 +412,26 @@ so a wire value like `call-targets` cannot reach the screen and a fifth pass fai
 **Rendering**: virtual scrolling via `@tanstack/react-virtual`. `DisplayRow` union:
 `label | insn | separator | data`. `DisassemblyView` + `HexView` are lazy-loaded.
 
+**No virtualized row may carry a LINEAR SCAN, and `InsnRow`'s tooltip lookup was the last one.**
+Its operand tooltip resolves each `parseOperandTargets` result in four ordered attempts — IAT map,
+`pe.strings`, detected functions, containing section — and the third was
+`functions.find((f) => f.address === addr)`. A branch or call target misses the first two *by
+definition*, and a target that is not a function scanned the whole list before falling through, so
+the cost was paid per operand target on every rendered row: `overscan: 50` is ~150 rows, at exactly
+**two** full-tree renders per cursor move, against tens of thousands of functions on a large image.
+It is `funcMap.get(addr)` — the same `Map<number, DisasmFunction>` the component already held for
+two other lookups. **`funcMap` is injective by construction**, so this cannot disagree with the
+scan it replaces: both detectors build their list 1:1 out of a `Set` of start addresses,
+`SET_FUNCTIONS` replaces the array wholesale, and detection mutates `fn.name`/`fn.isThunk` in place
+but never appends — so `.find`'s first match and `Map.get`'s last insert are the same entry. The
+`functions` prop was then **deleted** from `InsnRow` and its one call site, which turns "this prop
+is unused" from a comment into a compile error if anyone re-adds a scan. **The behaviour test
+cannot see any of this** — a scan and a map lookup return the same function — so the instrument is
+an own-property `.find` spy on the array handed to the reducer, asserted never called, with the
+tooltip assertion beside it as the liveness half. **Render COUNT is measured here and render COST
+is not**: this is not a claim that anything got faster, which needs the Profiler on a real binary
+(`peek-a-bin-v2u`). (`peek-a-bin-v3uh.1`)
+
 **There is ONE `ErrorBoundary` PER TAB PANE, and the placement is the whole of what it buys.** A
 single boundary around `renderMainView()` — which is what was there — put every tab behind one
 `hasError`: `App` keeps every visited tab in the tree class-hidden, so a throw in the Hex view

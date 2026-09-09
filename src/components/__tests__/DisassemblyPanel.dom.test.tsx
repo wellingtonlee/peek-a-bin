@@ -436,6 +436,111 @@ describe("the rows", () => {
   });
 });
 
+/**
+ * THE OPERAND TOOLTIP, and the lookup behind it.
+ *
+ * `InsnRow` resolves every {@link parseOperandTargets} result to a tooltip in
+ * four ordered attempts — the IAT map, `pe.strings`, the detected functions,
+ * then the containing section. The third of those was a LINEAR SCAN
+ * (`functions.find((f) => f.address === addr)`) sitting inside a virtualized
+ * row, so it ran once per operand target on every rendered row: a branch or a
+ * call target misses the first two attempts by definition, and a target that is
+ * not a function at all scanned the whole list before falling through to the
+ * section. With `overscan: 50` that is ~150 rows per render, exactly two
+ * full-tree renders per cursor move (the `qvv` measurement below), and tens of
+ * thousands of functions on a large image.
+ *
+ * `funcMap` — a `Map<number, DisasmFunction>` keyed on `fn.address` — was
+ * ALREADY a prop of this component for two other lookups, so the repair is
+ * `funcMap.get(addr)`.
+ *
+ * WHY THE SPY ROW EXISTS. The behaviour row below cannot see this change at
+ * all: a linear scan and a map lookup return the same function, so restoring
+ * `.find` leaves it green. The instrument has to be the absence of the scan
+ * itself, which is why the second row installs an own-property `.find` on the
+ * array handed to the reducer and asserts it is never called — with the tooltip
+ * assertion kept beside it as the liveness half, since "never called" is also
+ * true of a render that never reached the lookup.
+ *
+ * The tooltip is a HOVER POPUP behind a 200ms debounce in `ColoredOperand`, not
+ * a `title` attribute — when a tooltip exists the title is deliberately
+ * `undefined`. So each row advances SHORT of the debounce first: "nothing has
+ * appeared yet" is equally true of a timer nobody ticked.
+ */
+describe("an operand's tooltip", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The operand target button on `row`, which `ColoredOperand` marks. */
+  const opTarget = (c: HTMLElement, address: number) =>
+    rowAt(c, address).querySelector<HTMLElement>(".op-target") as HTMLElement;
+
+  /**
+   * Hover `btn` and let the debounce elapse, asserting on the way through that
+   * it had NOT fired early. Returns the popup's text.
+   */
+  const hover = (btn: HTMLElement, container: HTMLElement) => {
+    vi.useFakeTimers();
+    fireEvent.mouseEnter(btn);
+    act(() => void vi.advanceTimersByTime(150));
+    expect(container.textContent).not.toContain("Function:");
+    act(() => void vi.advanceTimersByTime(60));
+    return container.textContent ?? "";
+  };
+
+  it("names the function an operand targets, and honours a rename", async () => {
+    // The `jmp` row: its operand is `FN_A`'s own address, so the function
+    // attempt is the one that answers. (The `jne` beside it targets an address
+    // mid-function, which falls through to the section attempt.)
+    const plain = await mountReady();
+    expect(hover(opTarget(plain.container, A[4]), plain.container)).toContain(
+      `Function: ${FN_A.name}`,
+    );
+    plain.unmount();
+    vi.useRealTimers();
+
+    const renamed = await mountReady({ renames: { [FN_A.address]: "wound_up" } });
+    const text = hover(opTarget(renamed.container, A[4]), renamed.container);
+    expect(text).toContain("Function: wound_up");
+    expect(text).not.toContain(FN_A.name);
+  });
+
+  it("falls through to the containing section where the target is not a function", async () => {
+    // The liveness half of the control that deletes the function attempt: this
+    // row must keep rendering when that attempt is gone, or "the tooltip
+    // disappeared" would say nothing about WHICH attempt answered.
+    const { container } = await mountReady();
+    vi.useFakeTimers();
+    fireEvent.mouseEnter(opTarget(container, A[2]));
+    act(() => void vi.advanceTimersByTime(260));
+    expect(container.textContent).toContain(".text +0x");
+  });
+
+  it("resolves it WITHOUT scanning the function list", async () => {
+    // The instrument. `Array.prototype.find` is shadowed by an own property on
+    // the very array the reducer holds, so any reader reaching for a linear
+    // scan of `state.functions` during the render is recorded. Nothing else on
+    // this path calls `.find` on it — `useDisassemblyRows` builds `funcMap`
+    // with a `for…of`, and every other reader spreads, maps or sorts.
+    const find = vi.fn(function (
+      this: DisasmFunction[],
+      ...args: Parameters<DisasmFunction[]["find"]>
+    ) {
+      return Array.prototype.find.apply(this, args);
+    });
+    const watched = [...FUNCS];
+    Object.defineProperty(watched, "find", { value: find, configurable: true, writable: true });
+
+    const { container } = await mountReady({ functions: watched });
+    // Liveness: the render really did reach the function attempt and answer
+    // from it. Without this the row passes against a listing that never
+    // rendered a single operand.
+    expect(hover(opTarget(container, A[4]), container)).toContain(`Function: ${FN_A.name}`);
+    expect(find).not.toHaveBeenCalled();
+  });
+});
+
 describe("the toolbar", () => {
   it("states the section, its span and how much was decoded", async () => {
     const { container } = await mountReady();

@@ -1289,7 +1289,6 @@ export function DisassemblyView() {
                     addrWidth={addrWidth}
                     pe={pe}
                     iatMap={iatMap}
-                    functions={state.functions}
                     renames={state.renames}
                     comments={state.comments}
                     currentAddress={state.currentAddress}
