@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { streamChat } from "../llm/client";
 import { SYSTEM_PROMPT_CHAT } from "../llm/prompt";
-import { hasApiKey, loadSettings, NO_API_KEY_MESSAGE } from "../llm/settings";
+import { llmConfigProblem, loadSettings } from "../llm/settings";
 import type { ChatMessage } from "../llm/types";
 import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "../pe/constants";
 import type { PEFile } from "../pe/types";
@@ -110,7 +110,22 @@ export interface UseAIChatResult {
   messages: ChatMessage[];
   streaming: boolean;
   error: string | null;
-  sendMessage: (content: string) => void;
+  /**
+   * Ask for `content` to be sent, and report whether it was ACCEPTED.
+   *
+   * `true` means a user message was added and a stream begun; `false` means the
+   * hook refused and nothing at all happened. There are three refusals — blank
+   * content, a stream already in flight, and the API-key gate — and the caller
+   * is deliberately told only *that* it was refused, never which: the panel
+   * would otherwise have to re-derive the gate's rule, which is the mistake
+   * `peek-a-bin-r2u5` is about. A refused send leaves the reason in `error`
+   * where the caller already renders it.
+   *
+   * This is not `void` because `AIChatPanel` cleared its textarea
+   * unconditionally after calling, so a refused question was DESTROYED as well
+   * as unsent — at the worst moment, the first time a user tries the feature.
+   */
+  sendMessage: (content: string) => boolean;
   clearChat: () => void;
   cancelStream: () => void;
 }
@@ -165,14 +180,18 @@ export function useAIChat(
   }, [fileName, state.messages, state.streaming]);
 
   const sendMessage = useCallback(
-    (content: string) => {
-      if (!content.trim() || state.streaming) return;
-      if (!hasApiKey()) {
+    (content: string): boolean => {
+      // Every refusal below returns false, and the caller keeps what the user
+      // typed. See the docstring on UseAIChatResult.sendMessage.
+      if (!content.trim() || state.streaming) return false;
+      const problem = llmConfigProblem();
+      if (problem) {
         // Opening Settings is the right next step and is kept. What was missing
-        // is the sentence saying why it opened — see NO_API_KEY_MESSAGE.
+        // is the sentence saying why it opened — see llmConfigProblem, which
+        // owns both the check and the wording, so this site composes no text.
         window.dispatchEvent(new CustomEvent("peek-a-bin:open-settings"));
-        dispatch({ type: "SET_ERROR", error: NO_API_KEY_MESSAGE });
-        return;
+        dispatch({ type: "SET_ERROR", error: problem.message });
+        return false;
       }
 
       const userMsg: ChatMessage = { role: "user", content: content.trim() };
@@ -202,6 +221,8 @@ export function useAIChat(
           dispatch({ type: "STREAM_ERROR", error });
         },
       });
+
+      return true;
     },
     [state.messages, state.streaming, pe, fileName, currentCode],
   );

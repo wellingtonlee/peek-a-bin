@@ -83,7 +83,19 @@ export function AIChatPanel({ chat, onClose, onRename }: AIChatPanelProps) {
 
   const handleSend = useCallback(() => {
     if (!input.trim() || chat.streaming) return;
-    chat.sendMessage(input);
+    // Clear the box only if the hook TOOK the message. It used to be cleared
+    // unconditionally, so when the API-key gate refused a send the user lost the
+    // question they had typed as well as the action — for a multi-sentence
+    // question about a binary that is a real cost, and it lands exactly once per
+    // user, the first time they try the feature (`peek-a-bin-r2u5`).
+    //
+    // The panel is deliberately not told WHY it was refused, and does not ask:
+    // `hasApiKey()` is the hook's rule and re-deriving it here is what
+    // `peek-a-bin-6jdg` wrote the one-declaration note about. The two guards
+    // above are this panel's own affordances — they are the same predicates the
+    // Send button's `disabled` and the Stop/Send swap already render — so they
+    // are not a second copy of the gate.
+    if (!chat.sendMessage(input)) return;
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [input, chat]);
