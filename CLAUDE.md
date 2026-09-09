@@ -396,6 +396,29 @@ cheap and sound); it has no key at all and packs nothing.** It is `peek-a-bin-9g
 send only what the consumer reads. The remaining 74% is stage 3b's case and is deliberately left
 to be decided with the number in hand (`peek-a-bin-v3uh.3`).
 
+**A load must not post the whole-section `disassemble` it is about to throw away.**
+`useDisassemblyRows`' effect takes `hybridDisassemble` when `state.functions` is non-empty and a
+plain whole-section `disassemble` otherwise — and on a load `state.functions` is `[]` (RESET),
+`activeTab` defaults to `"disassembly"` and App mounts the tab in the same commit, so the effect
+fired *before detection answered*, posted the fallback, and discarded the answer when
+`SET_FUNCTIONS` re-ran it. That arm is **the one x86 decode path with no memo** — `dispatch.ts`
+routes `disassemble` around `WorkerState.x86Sweep` (and `disassembleArm64` around `arm64Sweep`)
+deliberately, since it may be handed a sub-range and would evict the whole-`.text` entry the other
+three RPCs share — and the worker is serial, so the throwaway request was very likely serviced
+*first*, with detection queued behind it. It also cost an extra `Instruction[]` reply clone, an
+extra `buildTypedXrefMap`, and permanent session retention of a second whole-section array in
+`disasmCache`. Gated now on **`!ANALYSIS_IN_PROGRESS[state.analysisPhase]`** — the record, never a
+hand-written phase chain — computed above the effect and in its dependency array (a boolean flips
+twice per load where `state.analysisPhase` would re-run the effect on every transition). All four
+legitimately-no-functions cases still reach the fallback, being terminal and `false` in the record:
+`"ready"` with an empty list, `"failed"` (including the `disasmFailed` arm), `"no-code"`,
+`"timed-out"` — gating on `phase === "ready"` instead withholds the listing from three of them,
+which is `peek-a-bin-bo3b`/`peek-a-bin-b3jn` exactly. `disassembling` is left **true** across the
+early return so the pane keeps its spinner. Two premises this makes true: `corpus/rpcUploadCost.ts`'
+`SENDS_PER_LOAD = 4` was an **under-count** (the fallback made it 5), and `disasmClient.test.ts`'
+"posts `hybridDisassemble` only … after `detectFunctions` has answered" was **false** and is now
+the invariant its `load()` helpers rest on (`peek-a-bin-v3uh.2`).
+
 **Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive
 + gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs → extract strings.
 All async, phased via `analysisPhase`. The decoder is chosen from `coffHeader.machine`

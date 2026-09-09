@@ -6,8 +6,14 @@ import userEvent from "@testing-library/user-event";
 import { type ReactNode, useCallback, useReducer, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DisasmFunction, Instruction, Xref } from "../../disasm/types";
-import type { AppAction, AppState } from "../../hooks/usePEFile";
-import { appReducer, initialState, useAppState } from "../../hooks/usePEFile";
+import type { AnalysisPhase, AppAction, AppState } from "../../hooks/usePEFile";
+import {
+  ANALYSIS_IN_PROGRESS,
+  appReducer,
+  initialState,
+  useAppDispatch,
+  useAppState,
+} from "../../hooks/usePEFile";
 import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
 import {
   IMAGE_FILE_MACHINE_ARM64,
@@ -603,6 +609,133 @@ describe("a data section", () => {
     // asked of the worker — and, construction being lazy, none is even built.
     expect(ScriptedWorker.posted).toEqual([]);
     expect(ScriptedWorker.built).toBe(0);
+  });
+});
+
+/**
+ * peek-a-bin-v3uh.2 — a load must not post a whole-section `disassemble` it is
+ * about to throw away.
+ *
+ * On a load `state.functions` is `[]` (RESET), `activeTab` defaults to
+ * `"disassembly"` and App mounts the tab in the same commit, so
+ * `useDisassemblyRows`' effect fired with an empty function list, posted
+ * `disassemble` over the whole section, and posted `hybridDisassemble` again the
+ * moment detection landed. The first answer was discarded. It is not free
+ * either: `dispatch.ts` deliberately keeps `disassemble` OUT of
+ * `WorkerState.x86Sweep` (and `disassembleArm64` out of `arm64Sweep`) because it
+ * may be handed a sub-range and would evict the whole-`.text` entry the other
+ * three RPCs share — so the throwaway arm is a full Capstone linear pass with no
+ * memo, plus a whole `Instruction[]` reply clone, plus a second
+ * `buildTypedXrefMap` upload, plus permanent retention of a second
+ * 200k-element array in `disasmCache`. And the worker is serial, so the
+ * throwaway request was very likely serviced FIRST, with detection queued behind
+ * it.
+ *
+ * The gate is `!ANALYSIS_IN_PROGRESS[state.analysisPhase]` — the ONE
+ * declaration, never a hand-written phase chain, which is the defect
+ * peek-a-bin-bo3b and peek-a-bin-b3jn both are. The terminal rows below are
+ * therefore TABLE-DRIVEN over that record rather than over a list of phase
+ * names, so a phase added later that joins on the wrong side fails here as well
+ * as at the build.
+ *
+ * `ScriptedWorker.posted` is the whole instrument: it records every method that
+ * crossed `postMessage`, and `built` records whether a thread was constructed at
+ * all (the client is lazy, so "posted nothing" and "built nothing" are separate
+ * facts and the second is the stronger one).
+ */
+describe("the load's disassembly request", () => {
+  const PHASES = Object.keys(ANALYSIS_IN_PROGRESS) as AnalysisPhase[];
+  const IN_FLIGHT = PHASES.filter((p) => ANALYSIS_IN_PROGRESS[p]);
+  const SETTLED = PHASES.filter((p) => !ANALYSIS_IN_PROGRESS[p]);
+
+  /** Let every already-scheduled reply and effect land, without asserting on one. */
+  const settle = () => act(async () => await new Promise((r) => setTimeout(r, 0)));
+
+  it("posts hybridDisassemble and no `disassemble` once detection has answered", async () => {
+    // The ordinary case, and the one the client's own suite asserts the
+    // *ordering* half of: `hybridDisassemble` is what fills the sweep slot the
+    // xref builds are then served from.
+    await mountReady();
+    await waitFor(() => expect(ScriptedWorker.posted).toContain("buildTypedXrefMap"));
+    expect(ScriptedWorker.posted).toContain("hybridDisassemble");
+    expect(ScriptedWorker.posted).not.toContain("disassemble");
+  });
+
+  it("posts nothing at all while detection is still running, and keeps the spinner", async () => {
+    // The state a real load is actually in at first mount. `disassembling` is
+    // left TRUE across the early return deliberately, so the pane shows its
+    // spinner rather than an empty listing that is about to be replaced.
+    mount({ functions: [], analysisPhase: "detecting-functions" });
+    await waitFor(() => expect(screen.getByText("Disassembling...")).toBeTruthy());
+    await settle();
+
+    expect(ScriptedWorker.posted).not.toContain("disassemble");
+    expect(ScriptedWorker.posted).toEqual([]);
+    // Construction is lazy, so no thread was even built for the discarded pass.
+    expect(ScriptedWorker.built).toBe(0);
+    expect(screen.getByText("Disassembling...")).toBeTruthy();
+  });
+
+  it("holds the request through EVERY in-flight phase", async () => {
+    // Table-driven over the record's `true` side for the same reason the
+    // terminal rows below are driven over its `false` side.
+    for (const phase of IN_FLIGHT) {
+      const r = mount({ functions: [], analysisPhase: phase });
+      await settle();
+      expect(ScriptedWorker.posted, phase).toEqual([]);
+      r.unmount();
+      ScriptedWorker.posted = [];
+    }
+    expect(IN_FLIGHT.length).toBeGreaterThan(0);
+  });
+
+  it("still falls back to `disassemble` on every SETTLED phase with no functions", async () => {
+    // The four legitimately-no-functions cases, and the reason the gate is the
+    // record rather than `phase === "ready"`: a PE32 image detecting nothing and
+    // a `"failed"` / `"no-code"` / `"timed-out"` run all have a complete answer
+    // of "no functions", and each must still get a linear listing. `"idle"` is
+    // on this side too and is included by construction, not by name.
+    //
+    // `mount()` calls `disasmWorker.setImage`, which clears the client's
+    // disassembly cache, so each row posts for itself rather than being served
+    // from the row before it.
+    for (const phase of SETTLED) {
+      const r = mount({ functions: [], analysisPhase: phase });
+      await waitFor(() => expect(ScriptedWorker.posted).toContain("disassemble"));
+      expect(ScriptedWorker.posted, phase).not.toContain("hybridDisassemble");
+      r.unmount();
+      ScriptedWorker.posted = [];
+      ScriptedWorker.built = 0;
+    }
+    expect(SETTLED.length).toBeGreaterThan(0);
+  });
+
+  it("posts exactly one disassembly for a whole load, when detection lands after the mount", async () => {
+    // The sequence end to end, which is the claim: mount while detection is in
+    // flight, then let it answer. The old behaviour posted `disassemble` first
+    // and `hybridDisassemble` second; the whole point is that the first is gone
+    // rather than merely deferred.
+    let fire: ((a: AppAction) => void) | null = null;
+    function Capture() {
+      fire = useAppDispatch();
+      return null;
+    }
+    mount({ functions: [], analysisPhase: "detecting-functions" }, <Capture />);
+    await settle();
+    expect(ScriptedWorker.posted).toEqual([]);
+
+    await act(async () => {
+      fire?.({ type: "SET_FUNCTIONS", functions: FUNCS });
+      fire?.({ type: "SET_ANALYSIS_PHASE", phase: "ready" });
+    });
+    await waitFor(() => expect(ScriptedWorker.posted).toContain("hybridDisassemble"));
+    // Fence rather than a second assertion: let the reply and the xref effect it
+    // triggers land, so a second disassembly request would have been posted by
+    // the time the counts below are read.
+    await settle();
+
+    expect(ScriptedWorker.posted.filter((m) => m === "hybridDisassemble")).toHaveLength(1);
+    expect(ScriptedWorker.posted).not.toContain("disassemble");
   });
 });
 

@@ -1730,9 +1730,20 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
    * One load's worth of x86 RPCs, posted through the real client and answered
    * by the real dispatch in the order a serially-servicing worker sees them.
    *
-   * Four calls, App.tsx's own sequence: detect, the view, the xref build the
-   * detection chain posts, and the rebuild the strings effect posts when
-   * detection got there first.
+   * Four SECTION sends, App.tsx's own sequence: detect, the view, the xref build
+   * the detection chain posts, and the rebuild the strings effect posts when
+   * detection got there first. That is `corpus/rpcUploadCost.ts`'s
+   * `SENDS_PER_LOAD`, and until peek-a-bin-v3uh.2 it was an UNDER-COUNT — the
+   * view also posted an ungated whole-section `disassemble` before detection
+   * answered, and threw the result away. It is gated on
+   * `ANALYSIS_IN_PROGRESS` now, so four is the whole list.
+   *
+   * Plus the view's `buildTypedXrefMap`, which is a fifth message but not a
+   * fifth section send: it ships the instruction list, decodes nothing, and can
+   * only be posted once the disassembly reply has landed — so it is posted from
+   * inside the dispatch sequence rather than up front with the other four. It
+   * was missing entirely, which made this helper model a load with no xref map
+   * in it at all.
    */
   async function load(
     cs: ReturnType<typeof countingX86>,
@@ -1766,6 +1777,17 @@ describe("DisasmWorkerClient — one x86 load sweeps .text once", () => {
     const afterDetect = cs.calls;
     const insns = await dispatch("hybridDisassemble", worker.received[1].args, s);
     const afterHybrid = cs.calls;
+    // The view's second round trip, posted from `useDisassemblyRows`' xref
+    // effect the moment the instructions land. Answered here so `sweeps` below
+    // is measured across a load that contains it — it decodes nothing, so it
+    // must move neither column, and a change that made it decode would show up
+    // as a sweep this helper did not have before.
+    void client.buildTypedXrefMap(insns as Instruction[], {
+      base: TEXT_BASE,
+      size: 0x1000,
+    });
+    expect(worker.received[4].method).toBe("buildTypedXrefMap");
+    await dispatch("buildTypedXrefMap", worker.received[4].args, s);
     const xr1 = (await dispatch("buildAllXrefs", worker.received[2].args, s)) as {
       callGraph: [number, number[]][];
       stringXrefs: [number, number[]][];
@@ -2050,16 +2072,39 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
   const section = (fill = 0x5a) => new Uint8Array(0x40).fill(fill);
 
   /**
-   * Detect then disassemble, in App.tsx's own order and through the real client.
+   * Detect, disassemble, then build the xref map — App.tsx's own order, through
+   * the real client.
    *
    * That order is structural rather than lucky: `useDisassemblyRows.ts` posts
    * `hybridDisassemble` only when `state.functions` is non-empty, i.e. only
    * after `detectFunctions` has answered — which is what fills the slot.
+   *
+   * **That sentence was FALSE when it was written and is true as of
+   * peek-a-bin-v3uh.2.** The view's effect fires on the load's first commit,
+   * when `state.functions` is still `[]` from `RESET`, and its `else` arm posted
+   * a whole-section `disassemble` — un-memoized, since `dispatch.ts` keeps that
+   * method out of `WorkerState.x86Sweep` on purpose — which the serial worker
+   * was very likely to service BEFORE `detectFunctions`. So the slot this
+   * describe block is about was filled by a request nobody kept, and the
+   * ordering claim held only for the second, `hybridDisassemble` request. The
+   * arm is now gated on `!ANALYSIS_IN_PROGRESS[state.analysisPhase]`, which
+   * leaves it for the legitimately-no-functions cases (a terminal phase with an
+   * empty list) and takes it out of the load. Kept rather than corrected,
+   * because it is now a true statement of the invariant this helper relies on.
+   *
+   * `buildTypedXrefMap` is the view's other round trip and was missing here: it
+   * can only be posted once the disassembly reply has landed, so it goes after
+   * the dispatch rather than beside the first two posts.
    */
   async function load(
     s: WorkerState,
     fill = 0x5a,
-  ): Promise<{ insns: Instruction[]; sweepDecodes: number; hybridDecodes: number }> {
+  ): Promise<{
+    insns: Instruction[];
+    xrefs: [number, unknown[]][];
+    sweepDecodes: number;
+    hybridDecodes: number;
+  }> {
     const { client, worker } = await loadClient();
     client.setImage(AMD64);
     void client.detectFunctions(section(fill), TEXT_BASE, true, { entryPoint: TEXT_BASE });
@@ -2074,7 +2119,17 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
       worker.received[1].args,
       s,
     )) as Instruction[];
-    return { insns, sweepDecodes, hybridDecodes: cs.calls - sweepDecodes };
+    const hybridDecodes = cs.calls - sweepDecodes;
+    // The rest of the load: the view posts this the moment the instructions
+    // land. It carries the instruction list rather than the section and decodes
+    // nothing, so `hybridDecodes` is taken above it.
+    void client.buildTypedXrefMap(insns, { base: TEXT_BASE, size: 0x1000 });
+    expect(worker.received[2].method).toBe("buildTypedXrefMap");
+    const xrefs = (await dispatch("buildTypedXrefMap", worker.received[2].args, s)) as [
+      number,
+      unknown[],
+    ][];
+    return { insns, xrefs, sweepDecodes, hybridDecodes };
   }
 
   /**
@@ -2108,6 +2163,10 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
 
     expect(shared.insns).toEqual(without.insns);
     expect(shared.insns.length).toBeGreaterThan(0);
+    // And the map the view builds out of that stream, which is the next thing a
+    // load does with it: identical too, so the equivalence is asserted one step
+    // past the method under test rather than only at its own return value.
+    expect(shared.xrefs).toEqual(without.xrefs);
   });
 
   it("gives every served instruction its own bytes buffer", async () => {

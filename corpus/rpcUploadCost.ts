@@ -79,6 +79,21 @@ const SENDS_PER_LOAD = 4;
  * roughly a third of what it was when residency was first asked about, and the
  * last column is still under a tenth of one percent (0.0547% on the `go` image,
  * 0.0275% on t32).
+ *
+ * AND UNTIL `peek-a-bin-v3uh.2` THE CONSTANT WAS SIMPLY WRONG — 4 was an
+ * UNDER-COUNT, and every load sent the section FIVE times. `useDisassemblyRows`
+ * fires on the load's first commit, when `state.functions` is still `[]` from
+ * `RESET`, and its `else` arm posted a whole-section `disassemble` whose answer
+ * was thrown away the moment detection landed and `hybridDisassemble` replaced
+ * it. {@link checkOneRegion} re-derives the *premise* behind this number — that
+ * the sends are all of one region — but nothing re-derived the COUNT, which is
+ * exactly the kind of read-off-the-call-sites figure that goes stale without
+ * anything going red. The fifth send is gone: that arm is now gated on
+ * `!ANALYSIS_IN_PROGRESS[state.analysisPhase]`, so it fires only for a terminal
+ * phase with no functions (a PE32 image detecting nothing, `"failed"`,
+ * `"no-code"`, `"timed-out"`) — never during a load. 4 is the right number as
+ * of that commit, and the saving an upload-once scheme could claim is therefore
+ * a fifth smaller than the figure this harness printed before it.
  */
 
 /** Median of `n` samples, which is what to read off a loaded machine. */

@@ -6,7 +6,7 @@ import type { DataItem, DisasmFunction, Instruction, Xref } from "../disasm/type
 import { IMAGE_SCN_MEM_EXECUTE } from "../pe/constants";
 import { disasmWorker } from "../workers/disasmClient";
 import { useSectionInfo } from "./useDerivedState";
-import { useAppState } from "./usePEFile";
+import { ANALYSIS_IN_PROGRESS, useAppState } from "./usePEFile";
 
 export type DisplayRow =
   | { kind: "label"; fn: DisasmFunction }
@@ -115,6 +115,18 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     ? (sectionInfo.characteristics & IMAGE_SCN_MEM_EXECUTE) !== 0
     : true;
 
+  // Whether the analysis chain has stopped, read from the one declaration
+  // (`ANALYSIS_IN_PROGRESS`) rather than from a hand-written phase chain — the
+  // shape peek-a-bin-bo3b and peek-a-bin-b3jn are both about, where a phase
+  // added later joins on the wrong side silently.
+  //
+  // Extracted to a boolean ABOVE the effect for the same reason as the
+  // `imageBase`/`sizeOfImage` numbers above the xref effect below: a boolean
+  // flips at most twice per load, whereas `state.analysisPhase` in the
+  // dependency array would re-run the whole disassembly effect on every phase
+  // transition.
+  const analysisSettled = !ANALYSIS_IN_PROGRESS[state.analysisPhase];
+
   // Disassemble the current section (off main thread via worker)
   useEffect(() => {
     if (!pe || !sectionInfo || !state.disasmReady) return;
@@ -151,7 +163,30 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
 
     const baseAddr = pe.optionalHeader.imageBase + sectionInfo.virtualAddress;
 
-    // Use hybrid disassembly when functions are detected (seeds available)
+    // Use hybrid disassembly when functions are detected (seeds available).
+    //
+    // WHY THE FALLBACK IS GATED ON THE ANALYSIS HAVING STOPPED. On a load
+    // `state.functions` is `[]` (RESET), `activeTab` defaults to
+    // `"disassembly"`, and App mounts the tab in the same commit — so this
+    // effect used to fire with an empty function list and post a WHOLE-SECTION
+    // `disassemble`, then fire again with `hybridDisassemble` when detection
+    // landed, and the first answer was thrown away. That arm is a full Capstone
+    // linear pass with NO memo: `dispatch.ts` deliberately routes `disassemble`
+    // around `WorkerState.x86Sweep` (and `disassembleArm64` around
+    // `arm64Sweep`) because it may be handed a sub-range and would evict the
+    // whole-`.text` entry the other three RPCs share. The worker is serial and
+    // App posts `configure().then(detectFunctions)`, so the throwaway request
+    // was very likely serviced FIRST and detection queued behind it.
+    //
+    // The four legitimately-no-functions cases still reach the fallback,
+    // because every one of them is terminal and therefore `false` in
+    // `ANALYSIS_IN_PROGRESS`: `"ready"` with an empty list (PE32 detecting
+    // nothing, or omitted passes), `"failed"` (including the `disasmFailed`
+    // arm), `"no-code"` and `"timed-out"`.
+    //
+    // While the analysis is still in flight we return with `disassembling` left
+    // TRUE, so the pane keeps its spinner rather than rendering an empty
+    // listing (peek-a-bin-v3uh.2).
     let disasmPromise: Promise<Instruction[]>;
     if (state.functions.length > 0) {
       const pdataRanges = pe.runtimeFunctions?.map((rf) => ({
@@ -165,8 +200,10 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
         state.functions.map((f) => f.address),
         pdataRanges,
       );
-    } else {
+    } else if (analysisSettled) {
       disasmPromise = disasmWorker.disassemble(bytesToDisasm, baseAddr, pe.is64);
+    } else {
+      return;
     }
 
     disasmPromise
@@ -192,7 +229,15 @@ export function useDisassemblyRows(currentFunc: DisasmFunction | null): UseDisas
     // state.hexPatches rather than its .size: the reducer replaces the Map on
     // every patch action, so identity tracks content exactly, whereas .size
     // misses a patch that overwrites an already-patched offset.
-  }, [pe, sectionInfo, state.disasmReady, state.hexPatches, state.functions, isExecutable]);
+  }, [
+    pe,
+    sectionInfo,
+    state.disasmReady,
+    state.hexPatches,
+    state.functions,
+    isExecutable,
+    analysisSettled,
+  ]);
 
   // Build funcMap for O(1) lookup
   const funcMap = useMemo(() => {
