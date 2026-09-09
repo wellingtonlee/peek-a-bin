@@ -32,6 +32,7 @@ import {
   type CrossEdgeGuardResult,
   emptyCrossEdgeGuards,
 } from "./crossEdgeGuards";
+import { declaredParams } from "./emitAudits";
 import {
   auditFrameRepurpose,
   emptyFrameRepurpose,
@@ -309,6 +310,17 @@ export interface FuncRec {
   insns: number;
   threw: string | null;
   code: string;
+  /**
+   * `inferSignature(...).paramCount` for this function — what the DISASSEMBLY
+   * PANEL says about its arity — or `null` where that function refused.
+   *
+   * Recorded rather than recomputed because the harness already computes it a
+   * few lines above, to hand to `decompileFunction`; a second call could be
+   * given different arguments and would then be measuring something else.
+   * `signatureAgreement` in `emitAudits.ts` is the only reader
+   * (`peek-a-bin-j4uk.6`).
+   */
+  sigParams: number | null;
 }
 
 export interface BinResult {
@@ -646,12 +658,19 @@ const CALL_KEYWORDS = new Set([
 /** Identifiers the emitted C applies as a function. */
 function emittedCallees(code: string): Set<string> {
   const s = new Set<string>();
+  // The function's own header is not a call to itself. Read through
+  // `declaredParams`, which is the ONE declaration of which emitted line is the
+  // signature — this used to be a second, positional reading (`i < 6` plus a
+  // return-type shape) that a function with enough emitted struct typedefs
+  // above its header walks straight past, at which point the function counts as
+  // a caller of itself and `distinct callees lost` judges a name that is not a
+  // callee (peek-a-bin-j4uk.6).
+  const sigLine = declaredParams(code)?.line ?? null;
   const lines = code.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (l.trim().startsWith("//")) continue;
-    // The function's own signature line: `type name(params)` with no `;`.
-    if (i < 6 && /^\w[\w *]*\(/.test(l) && !/;\s*$/.test(l)) continue;
+    if (sigLine !== null && l === sigLine) continue;
     CALL_RE.lastIndex = 0;
     let m: RegExpExecArray | null = CALL_RE.exec(l);
     while (m !== null) {
@@ -817,6 +836,9 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         insns: 0,
         threw: null,
         code: "",
+        // Not "no parameters": `inferSignature` is never asked, because there
+        // is nothing to ask it about. `signatureAgreement` excludes the row.
+        sigParams: null,
       });
       continue;
     }
@@ -825,7 +847,16 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     let signature = null;
     try {
       stackFrame = analyzeStackFrame(func, af.instructions, af.arch, af.pe.is64, funcInsnMap);
-      signature = inferSignature(func, af.instructions, af.arch, af.pe.is64, funcInsnMap);
+      // The frame is handed over, not recomputed: the measurement has to be of
+      // the same pair the production call sites build (peek-a-bin-j4uk.6).
+      signature = inferSignature(
+        func,
+        af.instructions,
+        af.arch,
+        af.pe.is64,
+        funcInsnMap,
+        stackFrame,
+      );
     } catch (e) {
       res.throws++;
       res.throwDetail.push(`prep 0x${func.address.toString(16)}: ${String(e)}`);
@@ -901,6 +932,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       insns: insns.length,
       threw,
       code,
+      sigParams: signature?.paramCount ?? null,
     });
     if (threw !== null) continue;
 

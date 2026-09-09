@@ -370,7 +370,7 @@ async function measure(path: string): Promise<Row | null> {
   const xrefMap = new Map(xrefEntries);
   const func = functions[Math.floor(functions.length / 2)];
   const stackFrame = analyzeStackFrame(func, instructions, arch, pe.is64);
-  const signature = inferSignature(func, instructions, arch, pe.is64);
+  const signature = inferSignature(func, instructions, arch, pe.is64, undefined, stackFrame);
   const funcMap = new Map(functions.map((f) => [f.address, { name: f.name, address: f.address }]));
   const payload = {
     func,
@@ -425,8 +425,13 @@ async function measure(path: string): Promise<Row | null> {
   const decompileArgs = (f: DisasmFunction, token: number): object => ({
     ...payload,
     func: f,
-    stackFrame: analyzeStackFrame(f, instructions, arch, pe.is64),
-    signature: inferSignature(f, instructions, arch, pe.is64),
+    ...(() => {
+      const sf = analyzeStackFrame(f, instructions, arch, pe.is64);
+      return {
+        stackFrame: sf,
+        signature: inferSignature(f, instructions, arch, pe.is64, undefined, sf),
+      };
+    })(),
     insnsToken: token,
   });
   const t0 = performance.now();

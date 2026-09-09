@@ -235,6 +235,36 @@ The register set is what makes it a defect rather than a shape — the same corp
 `params` and `funcs` are the liveness halves, since a text scan fails by silently matching
 nothing.
 
+**The disassembly panel's parameter count against the decompile panel's**
+(`signatureAgreement` in `emitAudits.ts`). *A failure means `inferSignature` — rendered beside
+essentially every function in the list, by `InstructionDetail` and by `getSigForFunc` — claims more
+parameters than the decompiler is willing to declare for the same function.* **GATED at 0 on x64
+only**; the x86 pair is reported. Nothing compared the two before `peek-a-bin-j4uk.6`, and they
+disagreed: at `97ef927` `t64!sub_140001000` read **262** on the panel and 4 in the decompile pane,
+54 over-claiming functions per x64 binary with a worst case of +258, because the stack-argument
+rule tracked no `sub rsp, N`.
+
+**Its independence is the WEAK kind** — `lostDefs`', a regression gate on a relationship rather
+than a question asked from outside — and what makes OVER gateable anyway is that on x64 the
+relation is one-way by construction: `promote.ts` adds `Math.min(paramCount, 4)` register
+parameters on top of whatever frame recovery declared, so `B >= min(A, 4)`, and the Windows x64
+convention passes at most four in registers so a sound `A` is at most 4.
+
+**UNDER IS NOT A DEFECT AND MUST NOT BE CHASED.** `B > A` is frame recovery naming a stack slot the
+register scan cannot see — the admitted under-count `peek-a-bin-f51x` prefers to an invented
+argument, and exactly what deleting the stack-argument rule bought. **x86 is report-only** for a
+different reason: `promote.ts`'s register arm is `is64`-gated, so `A` never reaches `B` there, and
+since the fix both sides of the x86 comparison read `stack.ts` — which makes its `under` of 0
+structural rather than a finding. The remaining x86 signal is the `ret N` disagreement, 7/6 on
+t32/w32.
+
+`withSignature` is the liveness half **and is the reason the gate is not self-satisfying**: `over`
+reaches 0 just as well by `inferSignature` returning `null` for everything, which is precisely how
+a gate goes green by no longer looking. A control doing exactly that is caught by that floor and by
+nothing else in the run. `located` beside it is the text-scrape half. At `97ef927` +
+`peek-a-bin-j4uk.6`: `over` 7/0/0/6, `agree` 192/271/267/188, `under` 0/8/8/0, `withSignature`
+199/279/275/194 (t32/t64/w64/w32) — and `compare.mjs` flags the PE32 fall in `withSignature` as a regression, correctly: adjudicate it, do not absorb it. There it is the intended withdrawal of 61/64 evidence-free x86 answers, and the x64 pair, where the gate lives, is unmoved.
+
 **A register name the image has no encoding for** (`unencodableNames` in `emitAudits.ts`). *A
 failure means the emitted C names a register no instruction in the file can have written and no
 reader can mean.* `canonReg` maps every alias to the 64-bit parent because that is the register's

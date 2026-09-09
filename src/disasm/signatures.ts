@@ -1,6 +1,12 @@
 import type { ImageArch } from "./arch";
 import { getFuncInsns } from "./funcInsns";
-import type { DisasmFunction, Instruction } from "./types";
+// The x86 32-bit parameter count is READ OFF THE RECOVERED FRAME rather than
+// re-derived from `[ebp + N]` operand text — see `framedParamCount`. The
+// architecture is always the caller's, forwarded, never derived here: this file
+// is one of the two the `archThreading` drift guard exempts from deriving one,
+// and it must stay that way (peek-a-bin-56q).
+import { analyzeStackFrame } from "./stack";
+import type { DisasmFunction, Instruction, StackFrame } from "./types";
 
 export interface FunctionSignature {
   convention: string;
@@ -186,6 +192,58 @@ function analyzeInsn(mnemonic: string, opStr: string): RegEffects {
   return { reads, writes };
 }
 
+/**
+ * The Windows x64 answer: the argument registers this function reads before it
+ * writes them, and NOTHING ABOUT THE STACK.
+ *
+ * THE STACK-ARGUMENT CLAIM WAS DELETED AT `peek-a-bin-j4uk.6`, AND ITS ABSENCE
+ * IS A DECISION. What stood here scanned the same 20-instruction window for
+ * `[rsp + 0xN]` and read `N >= 0x28` as argument `floor((N - 0x28) / 8) + 5`,
+ * **with no tracking of `sub rsp, N` or of a single `push`**. Incoming argument
+ * 5 is at `[rsp + allocation + pushes + 0x28]`, so with the allocation ignored
+ * the rule did not describe the incoming argument area at all — it described
+ * the function's OWN OUTGOING one, which is where MSVC puts
+ * `mov [rsp+0x20], rax` on essentially every non-leaf x64 function. Measured at
+ * `97ef927`: `t64!sub_140001000` does `sub rsp, 0x848` and the rule reported
+ * **262 parameters** where the decompiler emitted 4; over the two x64 binaries
+ * it over-claimed on 54 functions each, worst case +258. Both numbers were on
+ * screen at once, one pane apart.
+ *
+ * SO WHY NOT REPAIR THE ARITHMETIC INSTEAD? Because the evidence it would need
+ * does not exist and building it here would be the wrong place twice over.
+ *
+ *  - **`stack.ts` cannot answer it, by construction rather than by omission.**
+ *    `analyzeStackFrame` records *every* `[rsp + N]` access as a NON-parameter
+ *    — the final `false` argument to its `record` — and `isArgumentSlot` is
+ *    asked only of `bp`-based offsets. That is the same refusal
+ *    `inUnfilledHomeSpace` and `peek-a-bin-g186` are made of: an offset being
+ *    inside an argument area does not make it an argument, and on the stack
+ *    pointer there is not even a fixed area to be inside of.
+ *  - **An entry-SP tracker must not be written here.** It would have to model
+ *    the allocation *and* every push, i.e. a second stack grammar beside
+ *    `stack.ts`'s — the tenth-hand-rolled-copy shape `peek-a-bin-w6f` ended for
+ *    operand parsing and `pe/sections.ts`, `ripRelative.ts` and `stackIdiom.ts`
+ *    each exist to prevent. If it is ever wanted it belongs in `stack.ts`, once.
+ *  - **There is no oracle for the answer it would give.** `corpus/arity.ts`
+ *    measures CALL-SITE arity against `apitypes.ts` and can never see a
+ *    declared parameter list; gcc accepts any list. The one differential that
+ *    exists is `signatureAgreement`, which compares this count against the
+ *    decompiler's — and the decompiler declares a fifth argument only from the
+ *    same frame recovery that refuses `sp`-based slots, so it could not
+ *    adjudicate a fifth parameter either.
+ *
+ * SO THE ANSWER IS NARROWED, AND THE NARROWING IS ADMITTED RATHER THAN HIDDEN:
+ * a genuine fifth argument is now missing from this count. That is the
+ * `peek-a-bin-f51x` direction — "an invented argument is the one error this
+ * codebase will not trade for a recovered one" — and it is the direction the
+ * decompiler already errs in for the same slots.
+ *
+ * REOPENING CONDITION, so this is a bound and not a dead end: an entry-SP
+ * displacement published by `stack.ts` (allocation AND pushes, on the model of
+ * `frameDelta`), plus an instrument that can see a declared parameter count
+ * from outside the tool. Neither exists today. `signatureAgreement`'s `panel
+ * under-claims` row is where the cost of this refusal is reported.
+ */
 function inferSignature64(funcInsns: Instruction[]): FunctionSignature {
   // Windows x64 fastcall: RCX, RDX, R8, R9
   const scanLimit = Math.min(funcInsns.length, 20);
@@ -206,84 +264,159 @@ function inferSignature64(funcInsns: Instruction[]): FunctionSignature {
     for (const w of writes) written.add(w);
   }
 
-  // Check for stack params beyond 4 (shadow space at [rsp+0x28] and beyond)
-  const stackParamPattern = /\[rsp\s*\+\s*0x([0-9a-fA-F]+)\]/i;
-  let extraStackParams = 0;
-  for (let i = 0; i < scanLimit; i++) {
-    const m = funcInsns[i].opStr.match(stackParamPattern);
-    if (m) {
-      const offset = parseInt(m[1], 16);
-      if (offset >= 0x28) {
-        const paramIdx = Math.floor((offset - 0x28) / 8) + 5;
-        extraStackParams = Math.max(extraStackParams, paramIdx);
-      }
-    }
-  }
-
-  const paramCount = Math.max(maxParam, extraStackParams);
-  return { convention: "fastcall", paramCount };
+  // 0..4, which is exactly what `promote.ts` caps its register-parameter arm at
+  // (`Math.min(signature.paramCount, 4)`). The convention is not in doubt on
+  // this architecture — Windows x64 has exactly one — so naming it states
+  // nothing the image could contradict, which is why a count of 0 is still an
+  // answer here and is not one on x86.
+  return { convention: "fastcall", paramCount: maxParam };
 }
 
-function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
+/**
+ * Bytes the callee itself pops on return, or `null` where it pops none.
+ *
+ * The only exact statement about arity an x86 body makes about itself: under
+ * every callee-cleans convention `ret N` is the argument area's size in bytes,
+ * written by the compiler that knew the prototype.
+ */
+function calleeStackCleanup(funcInsns: Instruction[]): number | null {
   const last = funcInsns[funcInsns.length - 1];
-  let convention = "cdecl";
-  let paramCount = 0;
+  if (!last || (last.mnemonic !== "ret" && last.mnemonic !== "retn")) return null;
+  const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
+  const n = m ? Number.parseInt(m[1], 16) : Number.parseInt(last.opStr, 10);
+  if (Number.isNaN(n) || n <= 0) return null;
+  return n;
+}
 
-  // Check for ret N -> stdcall
-  if (last && (last.mnemonic === "ret" || last.mnemonic === "retn")) {
-    const m = last.opStr.match(/^0x([0-9a-fA-F]+)$/);
-    if (!m) {
-      // Also check simple decimal
-      const d = parseInt(last.opStr, 10);
-      if (!Number.isNaN(d) && d > 0) {
-        convention = "stdcall";
-        paramCount = Math.floor(d / 4);
-      }
-    } else {
-      const retBytes = parseInt(m[1], 16);
-      if (retBytes > 0) {
-        convention = "stdcall";
-        paramCount = Math.floor(retBytes / 4);
-      }
-    }
-  }
+/** The two registers an x86 register-passing convention uses, in order. */
+const REGISTER_ARG_REGS_32 = ["rcx", "rdx"] as const;
 
-  // Check ecx usage in first 10 insns -> thiscall
+/**
+ * `"thiscall"` or `"fastcall"` where the body reads an argument register before
+ * writing it, else `null` — AND EDX IS THE HALF THAT WAS MISSING.
+ *
+ * The rule here was "ECX is read before it is written" and it never looked at
+ * EDX at all, so every 32-bit `__fastcall` helper was labelled `thiscall` —
+ * and MSVC's CRT is full of them. The two conventions are distinguished by
+ * exactly one fact: `__thiscall` passes `this` in ECX and everything else on
+ * the stack, `__fastcall` passes the first two integer arguments in ECX and
+ * EDX. A read of EDX before any write of it is therefore the same kind of
+ * evidence `inferSignature64` already acts on for RCX/RDX/R8/R9 — the x86 rule
+ * was simply half-written.
+ *
+ * The scan does NOT stop at the first ECX read the way the old one did: the
+ * answer about ECX is unchanged by continuing (only a read strictly before a
+ * write is recorded), and stopping is what made EDX unaskable.
+ *
+ * ECX is required for both answers. A read of EDX alone is not evidence of a
+ * register convention — `__fastcall` fills ECX first — so it is refused rather
+ * than reported as a one-argument shape.
+ */
+function registerConvention32(funcInsns: Instruction[]): "thiscall" | "fastcall" | null {
   const scanLimit = Math.min(funcInsns.length, 10);
-  let ecxRead = false;
+  const written = new Set<string>();
+  const readFirst = new Set<string>();
+
   for (let i = 0; i < scanLimit; i++) {
     const insn = funcInsns[i];
     const { reads, writes } = analyzeInsn(insn.mnemonic, insn.opStr);
-    if (reads.has("rcx")) {
-      ecxRead = true;
-      break;
+    for (const reg of REGISTER_ARG_REGS_32) {
+      if (!written.has(reg) && reads.has(reg)) readFirst.add(reg);
     }
-    // ECX defined locally before any read: it is not an incoming `this`.
-    if (writes.has("rcx")) break;
-  }
-  if (ecxRead && convention !== "stdcall") {
-    convention = "thiscall";
+    for (const w of writes) written.add(w);
   }
 
-  // Count [ebp+0x8+] stack param accesses if not already determined by ret N
-  if (paramCount === 0) {
-    const ebpParamPattern = /\[ebp\s*\+\s*0x([0-9a-fA-F]+)\]/i;
-    let maxOffset = 0;
-    for (const insn of funcInsns) {
-      const m = insn.opStr.match(ebpParamPattern);
-      if (m) {
-        const offset = parseInt(m[1], 16);
-        if (offset >= 0x8) {
-          maxOffset = Math.max(maxOffset, offset);
-        }
-      }
-    }
-    if (maxOffset >= 0x8) {
-      paramCount = Math.floor((maxOffset - 0x8) / 4) + 1;
-    }
-  }
+  if (!readFirst.has("rcx")) return null;
+  return readFirst.has("rdx") ? "fastcall" : "thiscall";
+}
 
-  return { convention, paramCount };
+/**
+ * The number of argument slots the RECOVERED FRAME accounts for, or `null` when
+ * it accounts for none.
+ *
+ * THIS REPLACES A HAND-ROLLED `[ebp + 0xN]` SCAN, and the scan was
+ * `peek-a-bin-ikd`'s defect verbatim one module over: it counted every
+ * `[ebp + off]` operand with `off >= 8` as an argument **with no
+ * frame-pointer check at all**. Under frame-pointer omission `mov ebp, ecx`
+ * makes EBP an object pointer and `[ebp + 0x10]` is a struct field access, and
+ * `mov ebp, edx` is how an MSVC funclet receives its *parent's* frame — in
+ * neither is the operand an argument of this function under any reading.
+ * `decompile/structs.ts` keys cross-function parameter provenance off
+ * `^arg_(\d+)$` precisely to exclude that population, so the panel was
+ * asserting what the decompiler was carefully refusing.
+ *
+ * Reading `stack.ts`'s own answer inherits, for free and in ONE declaration,
+ * every judgement that file has accumulated: `addressesOwnFrame` (a negative
+ * displacement means the frame belongs to somebody else — `__SEH_prolog4`),
+ * `inlineFrameGeometry` (a shifted frame is still a frame, `peek-a-bin-cvri`),
+ * the helper-framed prologue (`peek-a-bin-emlv`), the sub-slot refusal, and the
+ * FPO refusal itself.
+ *
+ * `max index + 1`, not the number of names: an argument the body never touches
+ * leaves a GAP in the numbering rather than shifting its neighbours down, which
+ * is stated at `stack.ts`'s naming loop and is what makes the index positional.
+ * So this is a lower bound on the arity, and a *trailing* untouched argument is
+ * invisible to it — the same admitted under-count the rest of this file errs in.
+ */
+function framedParamCount(stackFrame: StackFrame | null): number | null {
+  if (!stackFrame) return null;
+  let max = -1;
+  for (const v of stackFrame.vars) {
+    // The positional spelling only. `arg_0x30` is `argSlotName`'s refusal to
+    // derive an index and must never be counted as one (CLAUDE.md's
+    // stack-frame chain; `structs.ts` reads the same distinction).
+    const m = /^arg_(\d+)$/.exec(v.name);
+    if (m) max = Math.max(max, Number.parseInt(m[1], 10));
+  }
+  return max < 0 ? null : max + 1;
+}
+
+/**
+ * The 32-bit answer, or `null` where the body offers no evidence for one.
+ *
+ * `null` IS THE POINT OF THIS FUNCTION'S SHAPE. x86 has four conventions the
+ * tool can name and they are not interchangeable, so printing one is a claim
+ * about the interface — where x64's `fastcall` is a property of the
+ * architecture and states nothing. What stood here answered
+ * `{ convention: "cdecl", paramCount: 0 }` for any function it could not read,
+ * which is a complete-shaped answer over no evidence: exactly the shape the
+ * architecture-refusal essay below exists to prevent, three lines further down
+ * the same file.
+ *
+ * Three sources of evidence, in precedence order, and each names a different
+ * kind of fact:
+ *
+ *  1. **`ret N`** — the callee's own stack cleanup, exact, written by the
+ *     compiler that had the prototype. It outranks everything, which is the
+ *     pre-existing precedence and is kept: it is the only *measurement* here.
+ *  2. **A register convention** — ECX (and EDX) read before written. Evidence
+ *     about the convention; `paramCount` still counts only what the frame
+ *     accounts for, so a `this` in ECX is NOT added. That is a deliberate,
+ *     stated under-count rather than an oversight: adding it would be a new
+ *     arity claim with no oracle anywhere in this repo to check it, and the
+ *     one direction this codebase will not err in is the other one.
+ *  3. **The recovered frame** — `framedParamCount`. With a bare `ret`, the
+ *     caller cleans up, which is what `cdecl` means; naming it is then a
+ *     reading of the evidence rather than a default.
+ *
+ * With none of the three the answer is `null`. For zero recovered arguments
+ * `cdecl` and `stdcall` are ABI-identical so the old answer was not falsifiable
+ * *about behaviour* — but it was still a claim on a screen, made over a
+ * function whose frame was never recovered and whose arguments therefore might
+ * all be sitting in `[esp + N]` slots `stack.ts` deliberately declines to read.
+ */
+function inferSignature32(
+  funcInsns: Instruction[],
+  stackFrame: StackFrame | null,
+): FunctionSignature | null {
+  const cleanup = calleeStackCleanup(funcInsns);
+  if (cleanup !== null) return { convention: "stdcall", paramCount: Math.floor(cleanup / 4) };
+
+  const framed = framedParamCount(stackFrame);
+  const regConvention = registerConvention32(funcInsns);
+  if (regConvention !== null) return { convention: regConvention, paramCount: framed ?? 0 };
+  if (framed !== null) return { convention: "cdecl", paramCount: framed };
+  return null;
 }
 
 /**
@@ -340,6 +473,24 @@ function inferSignature32(funcInsns: Instruction[]): FunctionSignature {
  * callee, and no way to match a function against its x86 twin — so landing it
  * would put an unverifiable count back on the panel this refusal cleared.
  * `peek-a-bin-56q` item 1; `peek-a-bin-hof0` for the frame that WAS recovered.
+ *
+ * **THE SAME REFUSAL NOW APPLIES INSIDE x86, AND IT DID NOT USED TO** — this
+ * file argued the case above and then broke it three lines below, on the one
+ * architecture it does answer for. `peek-a-bin-j4uk.6` closed four sites: the
+ * x64 stack-argument rule that tracked no `sub rsp, N` (deleted — see
+ * `inferSignature64`); the x86 `[ebp + N]` scan with no frame-pointer check
+ * (replaced by `framedParamCount`, which reads `stack.ts`'s own answer); a
+ * `thiscall` asserted from ECX without ever consulting EDX (see
+ * `registerConvention32`); and the empty-instruction arm below, which invented
+ * a convention out of `is64` alone.
+ *
+ * `stackFrame` is OPTIONAL AND THREE-VALUED. `undefined` means "the caller did
+ * not compute one", and this function computes it — the two are already built
+ * adjacently at every production call site, so passing it is free where it
+ * exists and correct where it does not. `null` means the caller computed one
+ * and there is no frame, which must not be re-analysed into the same `null`.
+ * It is consulted on the 32-bit path only; the x64 answer reads no frame at
+ * all.
  */
 export function inferSignature(
   func: DisasmFunction,
@@ -347,6 +498,7 @@ export function inferSignature(
   arch: ImageArch,
   is64: boolean,
   funcInsnMap?: Map<number, Instruction[]>,
+  stackFrame?: StackFrame | null,
 ): FunctionSignature | null {
   // `"unsupported"` takes the same branch on purpose — see the note on
   // `analyzeStackFrame`'s own refusal.
@@ -354,9 +506,29 @@ export function inferSignature(
 
   const funcInsns = getFuncInsns(func, instructions, funcInsnMap);
 
-  if (funcInsns.length === 0) {
-    return { convention: is64 ? "fastcall" : "cdecl", paramCount: 0 };
-  }
+  // NO INSTRUCTIONS IS NO EVIDENCE, AND IT USED TO ANSWER ANYWAY. This returned
+  // `{ convention: is64 ? "fastcall" : "cdecl", paramCount: 0 }` — a
+  // complete-shaped answer invented from the optional header's magic, over a
+  // function not one byte of which was read. It is the same falsehood the
+  // architecture refusal above was written to end, one branch below it
+  // (peek-a-bin-j4uk.6).
+  //
+  // One consequence to keep in view rather than rediscover: the refusal above
+  // is now UNOBSERVABLE at an empty instruction list, because every
+  // architecture answers `null` there. The differential that still
+  // discriminates the ordering is the one over a NON-EMPTY x86 body, and
+  // `signatures.test.ts` says so at the tests concerned.
+  if (funcInsns.length === 0) return null;
 
-  return is64 ? inferSignature64(funcInsns) : inferSignature32(funcInsns);
+  if (is64) return inferSignature64(funcInsns);
+
+  // `undefined` means the caller did not compute one and this is the cheapest
+  // place to; `null` means the caller computed one and there is no frame. The
+  // two must not collapse, or a caller that correctly found no frame would be
+  // charged for a second analysis that finds none either.
+  const frame =
+    stackFrame === undefined
+      ? analyzeStackFrame(func, instructions, arch, is64, funcInsnMap)
+      : stackFrame;
+  return inferSignature32(funcInsns, frame);
 }

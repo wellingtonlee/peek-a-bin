@@ -222,7 +222,18 @@ export function registerTools(server: McpServer, session: FileSession): void {
         );
 
         const stackFrame = analyzeStackFrame(func, af.instructions, af.arch, af.pe.is64);
-        const signature = inferSignature(func, af.instructions, af.arch, af.pe.is64);
+        // The frame is handed over rather than recomputed: on x86-32
+        // `inferSignature` reads its `arg_<N>` slots for the parameter count
+        // (peek-a-bin-j4uk.6), and it would otherwise analyse the same function
+        // twice.
+        const signature = inferSignature(
+          func,
+          af.instructions,
+          af.arch,
+          af.pe.is64,
+          undefined,
+          stackFrame,
+        );
 
         const funcMap = new Map(
           af.functions.map((f) => [

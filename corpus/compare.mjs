@@ -247,6 +247,41 @@ for (const b of bins) {
     note("  arity over-count              NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── The DISASSEMBLY panel's parameter count against the DECOMPILE panel's.
+  //
+  // Two answers the tool gives about the same function, which nothing compared
+  // before peek-a-bin-j4uk.6. `panel over` is GATED at 0 on x64 in the run — a
+  // count the emitted list does not support — so a rise here is a gate failure
+  // and not merely a regression. `panel under` is the OPPOSITE and must not be
+  // chased: it is frame recovery naming a stack slot the register scan cannot
+  // see, the admitted under-count peek-a-bin-f51x prefers to an invented
+  // argument, so a rise in it is flagged for reading and not as a fault.
+  //
+  // `signatures produced` is the LIVENESS half and is the row to read first: a
+  // fall in it takes functions out of the population, at which point every
+  // number above it improves for want of looking.
+  if (B.sigAgree && C.sigAgree) {
+    row(
+      "panel over-claims parameters",
+      (x) => x.sigAgree.over,
+      (a, c) => c > a,
+    );
+    row("  panel under-claims", (x) => x.sigAgree.under);
+    row("  panel agrees", (x) => x.sigAgree.agree);
+    row(
+      "  signatures produced",
+      (x) => x.sigAgree.withSignature,
+      (a, c) => c < a,
+    );
+    row(
+      "  emitted lists located",
+      (x) => x.sigAgree.located,
+      (a, c) => c < a,
+    );
+  } else {
+    note("  panel over-claims parameters  NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── What a call destroys (corpus/sweep.ts `auditClobbered`). ──────────────
   //
   // REPORT-ONLY, both directions, and deliberately. A rise means more reads were

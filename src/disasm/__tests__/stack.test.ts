@@ -980,6 +980,11 @@ describe("analyzeStackFrame — architecture refusal", () => {
   // for a function with no instructions in range on *every* architecture, so
   // both orderings produce the same result at every input. A test of it would
   // pass against either and pin nothing — written, run as a control, and
-  // removed for that reason. `inferSignature`'s sibling test IS discriminating,
-  // because its empty-instruction path invents a convention from `is64` alone.
+  // removed for that reason.
+  //
+  // `inferSignature`'s sibling test USED TO BE discriminating, because its
+  // empty-instruction path invented a convention from `is64` alone. Since
+  // `peek-a-bin-j4uk.6` it answers null there too, so that test is now inert in
+  // the same way and says so at the test; the discriminating differential for
+  // the architecture refusal is over a NON-EMPTY x86 body, in both files.
 });

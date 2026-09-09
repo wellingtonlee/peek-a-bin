@@ -691,11 +691,31 @@ const CALLEE_SAVED = new RegExp(
     ")(?:_\\d+)?$",
 );
 
-/** The emitted signature's parameter names, or null where the line is not one. */
-function declaredParams(code: string): { names: string[]; bodyAt: number } | null {
-  // The emitter writes the signature as one line ending in `) {`, after the
-  // typedefs and struct declarations. Anchored on the brace rather than on a
-  // return type, so a spelling this audit does not know about cannot skip it.
+/**
+ * THE ONE DECLARATION OF "WHICH EMITTED LINE IS THE FUNCTION'S OWN SIGNATURE",
+ * and of the parameter list on it.
+ *
+ * Three audits want it and each wanted it for a different reason —
+ * `paramClobberedAtEntry` needs the names and where the body starts,
+ * `signatureAgreement` needs only how many there are, and `sweep.ts`'s
+ * `emittedCallees` needs to NOT read `f(` on that line as a call to `f`. There
+ * were two hand-rolled readings before this: this one, and a positional
+ * `i < 6 && /^\w[\w *]*\(/` scan in `emittedCallees` that a function with
+ * enough emitted `struct` typedefs above its header walks straight past, at
+ * which point the function counts as a caller of itself. Same family as
+ * `guardShape.ts`: a text-scraping audit fails by matching *nothing*, silently,
+ * so the reading has to be written once and read everywhere.
+ *
+ * The emitter writes the signature as one line ending in `) {`, after the
+ * typedefs and struct declarations (`emit.ts`: `${returnType} ${name}(${params}) {`).
+ * Anchored on the brace rather than on a return type, so a spelling this audit
+ * does not know about cannot skip it, and `[^;{}\n]*` keeps it off a `while (…) {`
+ * inside the body by requiring the line to start at column 0 — the emitter
+ * indents every statement.
+ */
+export function declaredParams(
+  code: string,
+): { names: string[]; bodyAt: number; lineAt: number; line: string } | null {
   const m = /^[A-Za-z_][^;{}\n]*\(([^)]*)\)\s*\{[ \t]*$/m.exec(code);
   if (!m) return null;
   const names: string[] = [];
@@ -704,7 +724,7 @@ function declaredParams(code: string): { names: string[]; bodyAt: number } | nul
     const name = /([A-Za-z_]\w*)\s*$/.exec(part.trim());
     if (name && name[1] !== "void") names.push(name[1]);
   }
-  return { names, bodyAt: m.index + m[0].length };
+  return { names, bodyAt: m.index + m[0].length, lineAt: m.index, line: m[0] };
 }
 
 /**
@@ -782,6 +802,118 @@ export function paramClobberedAtEntry(sets: { funcs: FuncRec[] }[]): ParamClobbe
     }
   }
   out.distinct = seen.size;
+  return out;
+}
+
+export interface SigAgreementResult {
+  /** Functions read. Instrument liveness. */
+  funcs: number;
+  /**
+   * Functions `inferSignature` answered for at all — THE LIVENESS HALF, and the
+   * one that matters. `over` below reaches 0 both when the panel stops
+   * over-claiming and when `inferSignature` starts returning `null` for
+   * everything, and only this number tells the two apart.
+   */
+  withSignature: number;
+  /** Functions whose emitted signature line was located. Instrument liveness. */
+  located: number;
+  /** Functions where both answers exist, i.e. the denominator of the rows below. */
+  compared: number;
+  /** A === B. */
+  agree: number;
+  /**
+   * A > B — the panel claims MORE parameters than the emitted C declares.
+   * GATED at 0 on x64. See the docstring on `signatureAgreement`.
+   */
+  over: number;
+  /** A < B. Reported, never gated: see the docstring. */
+  under: number;
+  /** The largest `A - B` seen, so a single bad function is visible in the row. */
+  worstOver: number;
+  /** `function: panel=A emitted=B` for the failure message, capped. */
+  rows: string[];
+}
+
+/**
+ * THE PANEL'S PARAMETER COUNT AGAINST THE DECOMPILER'S, FOR THE SAME FUNCTION.
+ *
+ * `inferSignature` is rendered by `InstructionDetail` and by `getSigForFunc` in
+ * `DisassemblyRows`, i.e. beside essentially every function in the list, while
+ * the decompile panel one pane over prints a parameter list built by
+ * `promote.ts`. Nothing had ever compared the two, and they disagreed: at
+ * `0870e14` `t64!sub_140001000` does `sub rsp, 0x848` and then
+ * `lea rcx, [rsp + 0x30]`, and `inferSignature64`'s stack-argument rule — which
+ * tracked no allocation at all — read that as `floor((0x30 - 0x28) / 8) + 5 = 6`
+ * parameters while the decompiler emitted four. Two panels, two answers, one
+ * function (`peek-a-bin-j4uk.6`).
+ *
+ * **A is not an oracle for B and B is not an oracle for A.** This is a
+ * differential between two of the tool's own answers, so its independence is
+ * the weak kind — `lostDefs`' kind: a regression gate on a relationship, not a
+ * question asked from outside. What makes the OVER direction gateable anyway is
+ * that on x64 the relationship is one-way by construction. `promote.ts` adds
+ * `Math.min(signature.paramCount, 4)` register parameters to whatever the frame
+ * recovery already declared, so `B >= min(A, 4)`; the Windows x64 convention
+ * passes at most four arguments in registers, so a sound `A` is at most 4 and
+ * therefore at most `B`. An `A > B` row is the panel counting something no
+ * stage downstream of it believes — which, at `0870e14`, it was.
+ *
+ * **UNDER IS NOT A DEFECT AND MUST NOT BE GATED.** `B` legitimately exceeds `A`
+ * whenever frame recovery names a stack slot the register scan cannot see: an
+ * x64 function with a genuine fifth argument declares `arg_0x30` and the panel,
+ * which now refuses the whole stack-argument claim, says 4. That is the
+ * `f51x` direction — an admitted under-count — and driving it to 0 is exactly
+ * the over-claim this change removed.
+ *
+ * **x86 IS REPORTED AND NOT GATED**, for a different reason: `promote.ts`'s
+ * register-parameter arm is `is64`-gated, so nothing on the x86 path carries
+ * `A` into `B` at all, and a `ret N` count legitimately exceeds the number of
+ * argument slots the body happens to touch (an untouched argument leaves a gap
+ * — `stack.ts`'s own note on the numbering). The two answers are independent
+ * there rather than related, so a disagreement is information and not a defect.
+ *
+ * **Nothing else here can see any of it.** `corpus/arity.ts` measures CALL-SITE
+ * arity against `apitypes.ts` and cannot see a declared parameter list at all;
+ * gcc accepts any parameter list; `offsetNamedArgs` counts spellings, not
+ * counts; and `paramClobberedAtEntry` asks whether a declared parameter is
+ * immediately overwritten, which an over-claimed `argN` never is.
+ */
+export function signatureAgreement(sets: { funcs: FuncRec[] }[]): SigAgreementResult {
+  const out: SigAgreementResult = {
+    funcs: 0,
+    withSignature: 0,
+    located: 0,
+    compared: 0,
+    agree: 0,
+    over: 0,
+    under: 0,
+    worstOver: 0,
+    rows: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      out.funcs++;
+      const a = r.sigParams;
+      if (a !== null) out.withSignature++;
+      // A function whose decompilation threw, or that had no instructions, has
+      // no emitted text to read a parameter list off. Those are excluded from
+      // the denominator rather than scored as an agreement at 0 — a row that
+      // silently leaves the population is how a gate reads 0 (`selfAssigns`'
+      // `unresolved`), so `located` beside `funcs` is what makes the loss
+      // visible.
+      const sig = r.code === "" ? null : declaredParams(r.code);
+      if (sig !== null) out.located++;
+      if (a === null || sig === null) continue;
+      const b = sig.names.length;
+      out.compared++;
+      if (a === b) out.agree++;
+      else if (a > b) {
+        out.over++;
+        out.worstOver = Math.max(out.worstOver, a - b);
+        if (out.rows.length < 8) out.rows.push(`${r.name}: panel=${a} emitted=${b}`);
+      } else out.under++;
+    }
+  }
   return out;
 }
 

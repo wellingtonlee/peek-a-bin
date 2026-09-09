@@ -319,8 +319,24 @@ export function DisassemblyView() {
     );
   }, [currentFunc, instructions, pe]);
 
-  // Lazy per-label signature cache (only compute for visible labels)
-  const sigCacheRef = useRef<{ insnsId: Instruction[]; cache: Map<number, FunctionSignature> }>({
+  // Lazy per-label signature cache (only compute for visible labels).
+  //
+  // EVERY ANSWER IS CACHED, INCLUDING THE REFUSALS, and that is not tidiness:
+  // since peek-a-bin-j4uk.6 the 32-bit path reads `stack.ts`'s recovered frame
+  // for its parameter count, so a miss now costs a stack analysis as well as
+  // the register scan — and the two answers this cache used to skip (`null`,
+  // and a count of 0) are the COMMON ones on a 32-bit image, so skipping them
+  // meant recomputing both passes for most visible labels on every render. The
+  // stored value is nullable and membership is tested with `has`, or a cached
+  // refusal is indistinguishable from a miss.
+  //
+  // No stack frame is passed in: the one this component builds is gated on
+  // `showDetail` and is for the current function only, so there is nothing to
+  // hand over here and `inferSignature` computes its own.
+  const sigCacheRef = useRef<{
+    insnsId: Instruction[];
+    cache: Map<number, FunctionSignature | null>;
+  }>({
     insnsId: [],
     cache: new Map(),
   });
@@ -329,12 +345,15 @@ export function DisassemblyView() {
   }
   const getSigForFunc = (fn: DisasmFunction): FunctionSignature | null => {
     if (!pe || instructions.length === 0) return null;
-    const cached = sigCacheRef.current.cache.get(fn.address);
-    if (cached) return cached;
+    const { cache } = sigCacheRef.current;
+    if (cache.has(fn.address)) return cache.get(fn.address) ?? null;
     const sig = inferSignature(fn, instructions, archForMachine(pe.coffHeader.machine), pe.is64);
-    if (sig === null) return null;
-    if (sig.paramCount > 0) sigCacheRef.current.cache.set(fn.address, sig);
-    return sig.paramCount > 0 ? sig : null;
+    // A signature claiming no parameters says nothing this row can render, so
+    // it reads the same way as a refusal here — the DIFFERENCE is preserved in
+    // the cache rather than thrown away, so the recomputation cannot recur.
+    const shown = sig !== null && sig.paramCount > 0 ? sig : null;
+    cache.set(fn.address, shown);
+    return shown;
   };
 
   // Stack frame analysis (lazy, only when detail panel is open)

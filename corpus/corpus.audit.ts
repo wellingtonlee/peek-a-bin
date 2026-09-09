@@ -32,6 +32,7 @@ import {
   offsetNamedArgs,
   offsetofCheck,
   paramClobberedAtEntry,
+  signatureAgreement,
   unencodableNames,
 } from "./emitAudits";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
@@ -301,6 +302,15 @@ if (!pre.haveBins || !pre.haveCc) {
               paramClobber: (() => {
                 const p = paramClobberedAtEntry([{ funcs: r.funcs }]);
                 return { ...p, rows: p.rows.length };
+              })(),
+              // THE DISASSEMBLY PANEL'S PARAMETER COUNT AGAINST THE DECOMPILE
+              // PANEL'S, for the same function. `over` GATES at 0 on x64 and is
+              // report-only on x86; `withSignature` beside it is the liveness
+              // half, and the one that stops the gate going green by
+              // `inferSignature` refusing everything (peek-a-bin-j4uk.6).
+              sigAgree: (() => {
+                const sa = signatureAgreement([{ funcs: r.funcs }]);
+                return { ...sa, rows: sa.rows.length };
               })(),
               // A call the reader cannot follow. Per binary because the two
               // halves have different owners and only the INTERNAL one is an
@@ -1021,6 +1031,61 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * A GATE at 0 ON x64 ONLY, and the only thing in this repo that compares the
+     * DISASSEMBLY panel's answer about a function with the DECOMPILE panel's.
+     *
+     * `corpus/arity.ts` measures CALL-SITE arity against `apitypes.ts` and can
+     * never see a declared parameter list; gcc accepts any list; `offsetof`
+     * checks layouts; `paramClobberedAtEntry` asks whether a declared parameter
+     * is overwritten unread, which an over-claimed `argN` never is. So before
+     * `peek-a-bin-j4uk.6` nothing here could see `inferSignature` claiming six
+     * parameters over a function the decompiler emitted four for — which it did,
+     * on `t64!sub_140001000`, because its stack-argument rule tracked no
+     * `sub rsp, N` and therefore read the function's own OUTGOING argument area
+     * as incoming arguments.
+     *
+     * Gated on x64 because the relationship is one-way there: `promote.ts` adds
+     * `Math.min(paramCount, 4)` register parameters on top of whatever frame
+     * recovery declared, so `B >= min(A, 4)`, and the Windows x64 convention
+     * passes at most four in registers so a sound `A` is at most 4. On x86
+     * `promote.ts`'s register arm is `is64`-gated and the two answers are
+     * unrelated, so a disagreement is information rather than a defect.
+     *
+     * **UNDER IS DELIBERATELY NOT GATED AND MUST NOT BE CHASED.** `B > A` is
+     * frame recovery naming a stack slot the register scan cannot see, i.e. the
+     * admitted under-count `peek-a-bin-f51x` prefers to an invented argument.
+     *
+     * `withSignature` is the liveness half and is the whole reason the gate is
+     * not self-satisfying: `over` reaches 0 just as well by `inferSignature`
+     * returning `null` for every function, which is exactly how a gate goes
+     * green by no longer looking.
+     */
+    it("never claims more parameters on the panel than the decompiler declares (x64)", () => {
+      const x64 = over(auditedKeys(), results).filter((r) => r.is64);
+      const sa = signatureAgreement(x64.map((r) => ({ funcs: r.funcs })));
+      expect(`panel over-claims:\n  ${sa.rows.join("\n  ")}`).toBe("panel over-claims:\n  ");
+      expect(sa.over).toBe(0);
+      // Liveness, in both halves: the panel still answers, and the emitted
+      // parameter lists were still found.
+      expect(sa.withSignature).toBeGreaterThan(100);
+      expect(sa.located).toBeGreaterThan(100);
+      expect(sa.compared).toBeGreaterThan(100);
+    });
+
+    /**
+     * The same differential over the whole corpus, REPORT-ONLY, so the x86 pair
+     * is not silently outside every instrument. Only liveness is asserted.
+     */
+    it("reads both parameter answers on every binary (instrument liveness)", () => {
+      for (const r of over(auditedKeys(), results)) {
+        const sa = signatureAgreement([{ funcs: r.funcs }]);
+        expect(`${r.key}: signatures=${sa.withSignature > 0} lists=${sa.located > 0}`).toBe(
+          `${r.key}: signatures=true lists=true`,
+        );
+      }
+    });
+
+    /**
      * Not a gate: a residue is legitimate (see `offsetNamedArgs`), so what is
      * asserted is only that the scan READ something. A count of 0 for want of
      * observation would otherwise be indistinguishable from a clean tree, and
@@ -1308,6 +1373,28 @@ function renderReport(): string {
       .join(", ");
     if (overBy) L.push(`    over:  ${overBy}`);
     if (underBy) L.push(`    under: ${underBy}`);
+    const pv = signatureAgreement([{ funcs: r.funcs }]);
+    L.push(
+      `  panel arity vs emitted list ${pv.agree}/${pv.compared} agree, ` +
+        `panel over ${pv.over} (worst +${pv.worstOver}), panel under ${pv.under} — ` +
+        `OVER is GATED at 0 on x64` +
+        `  [signatures ${pv.withSignature}/${pv.funcs}, lists located ${pv.located}]`,
+    );
+    if (pv.rows.length > 0) for (const row of pv.rows) L.push(`    ${row}`);
+    L.push("    THE TWO PANELS, ABOUT THE SAME FUNCTION: `inferSignature`'s count, which the");
+    L.push("    disassembly list and the detail pane render, against the parameter list the");
+    L.push("    decompile pane prints. Nothing compared them before peek-a-bin-j4uk.6, and they");
+    L.push("    disagreed: `inferSignature64` read `[rsp + 0x30]` as argument 6 while tracking no");
+    L.push("    `sub rsp, N` at all, so it fired on the function's OWN outgoing argument area.");
+    L.push("    A differential between two of the tool's own answers, so its independence is the");
+    L.push("    weak kind — but on x64 the direction is one-way: `promote.ts` adds min(A,4)");
+    L.push("    register parameters on top of the frame's, so B >= min(A,4), and a sound A is at");
+    L.push("    most 4. UNDER is NOT gated and must not be chased — B exceeding A is frame");
+    L.push("    recovery naming a stack slot the register scan cannot see, which is the admitted");
+    L.push("    under-count peek-a-bin-f51x prefers to an invented argument. x86 is REPORTED");
+    L.push("    ONLY: promote.ts's register arm is is64-gated, so A never reaches B there.");
+    L.push("    `signatures` is the LIVENESS HALF — `over` also reaches 0 if `inferSignature`");
+    L.push("    starts refusing everything, and only that number tells the two apart.");
     const cov = r.lineMapCoverage;
     L.push(
       `  BASELINE line map coverage  ${cov.insnsCovered}/${cov.insnsTotal} instructions ` +
