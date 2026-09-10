@@ -1097,6 +1097,41 @@ re-taken.)
     vertical resize it does not care about, and a primitive comparison gets the bail-out for free
     where the pair needs object identity preserved by hand. The **rule** has one declaration, which is
     what the bead asked for; the *listener* does not.
+- **RENAME REACHES THE HEADER, ONE DECOMPILE CACHE, ADMISSIONS AS DATA, A REAL FAULT STATE — and
+  the corpus is BYTE-IDENTICAL, which is the control (2026-09-10, `peek-a-bin-n9cl.7`).** Measured
+  at `3496c7b` against `s29-base-6299113` with `npm run corpus:compare`: emitted C identical on
+  **260/260 (t32), 279/279 (t64), 258/258 (w32), 275/275 (w64)** functions, guards `CHANGED 0 /
+  only-base 0 / only-change 0` on all four, verdict "no regression"; `cmp` over the four
+  `funcs_*.jsonl` reports IDENTICAL, and `diff -r` over the two artifact trees finds only the label
+  line, the artifact path and the new `pipelineErrors: 0` / `pipeline errors 0` rows. That is the
+  expected result, and why: `corpus/sweep.ts`'s `funcMap` carries raw names, so the header change
+  (`funcMap.get(func.address)?.name ?? func.name`) resolves to the same string; admissions are a
+  side field the sweep does not print; the error arm never fires on this corpus — **`pipeline
+  errors 0` on all four binaries is the first time that number has been measurable at all**, the
+  class having been returned as a `// Decompilation error …` comment in `code` that no scan matched.
+  - **Registry idempotence held first time** (`pipeline.test.ts`: the same function decompiled two
+    and three times against one `StructRegistry` emits identical C, struct definition included, on
+    two fixtures), so C1b was not blocked on a structs fix.
+  - **Negative controls, three discriminating and ONE INERT AND REPORTED.** Reverting the one-line
+    header change reddens 2 of 3 header rows (the raw-name fallback row rightly stays green).
+    Dropping the `__unrecovered_N` declaration exclusion reddens 2 rows. Moving `collectAdmissions`
+    BEFORE `placeGotoLabels` left **every pipeline row green** — `structure.ts` emits its own
+    `label` statements, so that pass splices nothing on any instruction-stream fixture — and the
+    ordering is pinned instead by a hand-built IR row in `emit.test.ts` (a goto to an address with an
+    emitted line but no label), which reddens under the same control. The `\x00`-joined first
+    spelling of `decompileInputsKey` was caught by its own collision row and replaced with JSON.
+  - **What jsdom settled and what it did not.** The admissions line's text, its absence without
+    admissions, and that each button asks the right `data-line` element to `scrollIntoView` — and
+    nothing about scrolling, layout or colour. **Appended to `peek-a-bin-v2u`** (rows listed in the
+    session report; the checklist is a bead, not a file): rename a function with the Low Level panel
+    open and confirm its own header and its callers' call sites both update; open a function with an
+    unlifted instruction and see the amber admissions line, click each clause and confirm the pane
+    scrolls to the first site; force a pipeline error and confirm the red banner over an empty pane
+    with no admissions line; confirm the High Level and AI tabs never show the line.
+  - **Not measured.** No real `postMessage` carried `admissions` or `error` (the client tests reply
+    through the in-process FakeWorker); the MCP fault row provokes the pipeline with a null import
+    map, since a malformed instruction faults in `analyzeStackFrame` first — a real pipeline throw on
+    a real binary has still never been seen.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.
