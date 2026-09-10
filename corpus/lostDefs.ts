@@ -48,7 +48,7 @@
 
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
-import { flagPredecessor } from "../src/disasm/decompile/flagModel";
+import { carryPredecessor, flagPredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
@@ -323,6 +323,8 @@ export function auditLostDefs(
           calleeClobbers,
           flagPredecessor(b, blockById),
           stackSlots,
+          undefined,
+          carryPredecessor(b, blockById),
         ),
       );
     // `pipeline.ts` step 2b (peek-a-bin-6ilz).

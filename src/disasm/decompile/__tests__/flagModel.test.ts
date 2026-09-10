@@ -5,8 +5,17 @@ import type { BasicBlock } from "../../cfg";
 import type { Instruction } from "../../types";
 import {
   blockFlagOwner,
+  CARRY_BORROW_SETTERS,
   CARRY_IN_WRITERS,
+  CARRY_NONZERO_SETTERS,
+  CARRY_PRESERVERS,
+  CARRY_REFUSED_SETTERS,
+  CARRY_ZERO_SETTERS,
   canSpellCondition,
+  carryEffect,
+  carryOwnerBefore,
+  carryPredecessor,
+  carryScanStream,
   clobberedAfter,
   flagEffect,
   flagOwnerBefore,
@@ -187,10 +196,19 @@ describe("flagEffect — the transfer function", () => {
     expect(canSpellCondition(o)).toBe(false);
   });
 
-  it("clears on adc/sbb/xadd, whose result the lifter does not name", () => {
+  it("clears on xadd, whose result the lifter does not name", () => {
+    expect([...CARRY_IN_WRITERS]).toEqual(["xadd"]);
     for (const mn of CARRY_IN_WRITERS) {
       expect(flagEffect(insn(mn, "eax, ecx")), mn).toEqual({ kind: "clobber", why: "carry-in" });
     }
+  });
+
+  it("owns the flags after adc/sbb, which the lifter lifts since peek-a-bin-n9cl.6", () => {
+    // The docstring on CARRY_IN_WRITERS promised this move once the lifter grew
+    // a lift for them. The lifter's side of the bargain — refusing a guard over
+    // a `sbb` it left `raw` — is `resultOwnerLifted`, tested in lifter.test.ts.
+    expect(flagEffect(insn("sbb", "eax, eax"))).toEqual({ kind: "result", destText: "eax" });
+    expect(flagEffect(insn("adc", "edx, 0"))).toEqual({ kind: "result", destText: "edx" });
   });
 
   it("classifies a lock-prefixed form by its BASE mnemonic", () => {
@@ -654,7 +672,9 @@ describe("which instruction a result-derived guard is answered from", () => {
       ["call between", ["dec ecx", "call 0x401500", "jne 0x401800"]],
       ["unrecognised between", ["dec ecx", "xchg eax, edx", "jne 0x401800"]],
       ["shift by register", ["shl eax, cl", "jne 0x401800"]],
-      ["adc", ["adc eax, ecx", "je 0x401800"]],
+      // `adc` stood here until peek-a-bin-n9cl.6 made it a result owner; `xadd`
+      // is the remaining carry-in clobber.
+      ["xadd", ["xadd eax, ecx", "je 0x401800"]],
       ["imul", ["imul eax, ecx", "je 0x401800"]],
       ["rol", ["rol eax, 1", "je 0x401800"]],
       ["nothing sets flags", ["mov eax, 1", "je 0x401800"]],
@@ -753,9 +773,12 @@ describe("nothing re-declares the flag tables", () => {
   const signatures: [string, string[]][] = [
     ["NO_FLAG_WRITE", ["movsxd", "bswap", "cqo"]],
     ["RESULT_OWNERS", ["sal", "neg", "sar"]],
+    // The CF value grammar (peek-a-bin-n9cl.6). `test` with the three logical
+    // ops does not co-occur outside a CF-clearing table.
+    ["CARRY_ZERO_SETTERS", ["test", "and", "or", "xor"]],
   ];
 
-  it("finds no second copy of NO_FLAG_WRITE or RESULT_OWNERS", () => {
+  it("finds no second copy of NO_FLAG_WRITE, RESULT_OWNERS or the CF tables", () => {
     expect(files.length).toBeGreaterThan(10);
     const offenders: string[] = [];
     for (const file of files) {
@@ -790,6 +813,151 @@ describe("nothing re-declares the flag tables", () => {
     const scan = clobberedAfter(block("dec ecx", "mov ecx, edx", "jne 0x401800"), 0x401000);
     expect(scan.regs.has("rcx")).toBe(true);
     expect(scan.opaque).toBe(false);
+  });
+});
+
+/**
+ * CF as a VALUE (peek-a-bin-n9cl.6): the per-flag grammar the whole-flags
+ * owner model deliberately lacks. Read by `lifter.ts`'s `carryFor` for `sbb`/
+ * `adc`, and by nothing that decides a guard. The load-bearing rows are the
+ * preservers — `inc`/`dec` and `sbb d, d` keep CF where the whole-flags model
+ * says the owner moved — and the clear-on-unknown default.
+ */
+describe("carryEffect / carryOwnerBefore — the CF value grammar", () => {
+  it("keeps the CF tables disjoint from each other and from the preservers", () => {
+    const all = [
+      CARRY_BORROW_SETTERS,
+      CARRY_NONZERO_SETTERS,
+      CARRY_ZERO_SETTERS,
+      CARRY_REFUSED_SETTERS,
+      CARRY_PRESERVERS,
+    ];
+    const seen = new Set<string>();
+    for (const set of all) {
+      for (const mn of set) {
+        expect(seen.has(mn), mn).toBe(false);
+        seen.add(mn);
+      }
+    }
+    for (const mn of CARRY_PRESERVERS) expect(RESULT_OWNERS.has(mn), mn).toBe(true);
+    for (const mn of NO_FLAG_WRITE)
+      expect(carryEffect(insn(mn, "eax, ecx")), mn).toEqual({ kind: "none" });
+  });
+
+  it("classifies each setter class by its SDM-documented CF effect", () => {
+    expect(carryEffect(insn("cmp", "eax, ecx"))).toEqual({ kind: "set", spelling: "borrow" });
+    expect(carryEffect(insn("sub", "eax, ecx"))).toEqual({ kind: "set", spelling: "borrow" });
+    expect(carryEffect(insn("neg", "eax"))).toEqual({ kind: "set", spelling: "nonzero" });
+    for (const mn of CARRY_ZERO_SETTERS) {
+      expect(carryEffect(insn(mn, "eax, ecx")), mn).toEqual({ kind: "set", spelling: "zero" });
+    }
+    for (const mn of CARRY_REFUSED_SETTERS) {
+      expect(carryEffect(insn(mn, "eax, ecx")), mn).toEqual({ kind: "set", spelling: "refused" });
+    }
+    expect(carryEffect(insn("bt", "eax, 0x21"))).toEqual({
+      kind: "set",
+      spelling: "bit",
+      bitIndex: 1,
+    });
+  });
+
+  it("makes sbb d, d a nonzero setter over its destination and refuses sbb d, s", () => {
+    // `d = -(CF)`, so CF-out is CF-in and is exactly `d != 0` read after it.
+    expect(carryEffect(insn("sbb", "rax, rax"))).toEqual({ kind: "set", spelling: "nonzero" });
+    // The general borrow needs the pre-instruction `d` AND the carry-in.
+    expect(carryEffect(insn("sbb", "edi, edx"))).toEqual({ kind: "set", spelling: "refused" });
+    expect(carryEffect(insn("sbb", "rax, -1"))).toEqual({ kind: "set", spelling: "refused" });
+  });
+
+  it("PRESERVES CF across inc/dec, where the whole-flags model moves the owner", () => {
+    const b = block("cmp eax, ecx", "inc edx", "sbb ebx, ebx");
+    expect(flagOwnerBefore(b.insns, 2)).toMatchObject({ kind: "result", mnemonic: "inc" });
+    expect(carryOwnerBefore(b.insns, 2)).toMatchObject({
+      kind: "setter",
+      mnemonic: "cmp",
+      spelling: "borrow",
+      spoiled: false,
+    });
+  });
+
+  it("CLEARS on anything not positively recognised — the default that makes it safe", () => {
+    for (const code of [
+      ["cmp eax, ecx", "shl eax, 1"],
+      ["cmp eax, ecx", "rol eax, 1"],
+      ["cmp eax, ecx", "bts eax, 3"],
+      ["cmp eax, ecx", "imul eax, ecx"],
+      ["cmp eax, ecx", "call 0x401500"],
+      ["cmp eax, ecx", "frobnicate eax"],
+      ["cmp eax, ecx", "sete al"],
+    ]) {
+      expect(carryOwnerBefore(block(...code).insns, 2), code[1]).toEqual({
+        kind: "none",
+        reason: "cleared",
+      });
+    }
+    // A shift by an immediate that masks to zero writes no flag at all.
+    expect(carryOwnerBefore(block("cmp eax, ecx", "shl eax, 0x20").insns, 2)).toMatchObject({
+      kind: "setter",
+      mnemonic: "cmp",
+    });
+    expect(carryOwnerBefore(block("mov eax, 1").insns, 1)).toEqual({
+      kind: "none",
+      reason: "no-owner",
+    });
+  });
+
+  it("marks a setter spoiled when a later instruction overwrites an operand it names", () => {
+    expect(carryOwnerBefore(block("cmp eax, ecx", "mov eax, 5").insns, 2)).toMatchObject({
+      mnemonic: "cmp",
+      spoiled: true,
+    });
+    // A preserver's write counts too: `inc eax` keeps the borrow and takes the name.
+    expect(carryOwnerBefore(block("cmp eax, ecx", "inc eax").insns, 2)).toMatchObject({
+      spoiled: true,
+    });
+    // `sbb rax, rax` writes RAX, of which AL is a part — the strncmp tail's shape.
+    expect(carryOwnerBefore(block("cmp al, dl", "sbb rax, rax").insns, 2)).toMatchObject({
+      mnemonic: "sbb",
+      spelling: "nonzero",
+    });
+    // A store spoils a compare over memory and leaves a register compare alone.
+    expect(carryOwnerBefore(block("cmp [eax], ecx", "mov [edx], 1").insns, 2)).toMatchObject({
+      spoiled: true,
+    });
+    expect(carryOwnerBefore(block("cmp eax, ecx", "mov [edx], 1").insns, 2)).toMatchObject({
+      spoiled: false,
+    });
+  });
+
+  it("names the sole predecessor and refuses several or a self-edge", () => {
+    const a = block("cmp eax, ecx", "jne 0x401800");
+    const b = block("sbb eax, eax", "ret");
+    b.id = 1;
+    b.preds = [0];
+    const byId = new Map([
+      [0, a],
+      [1, b],
+    ]);
+    expect(carryPredecessor(b, byId)).toBe(a);
+    b.preds = [0, 1];
+    expect(carryPredecessor(b, byId)).toBeUndefined();
+    b.preds = [1];
+    expect(carryPredecessor(b, byId)).toBeUndefined();
+    b.preds = [7];
+    expect(carryPredecessor(b, byId)).toBeUndefined();
+  });
+
+  it("prepends the predecessor's tail minus its terminator, whether or not the block has a setter", () => {
+    const a = block("cmp eax, ecx", "jne 0x401800");
+    const b = block("sbb eax, eax", "sbb eax, -1", "ret");
+    b.id = 1;
+    const scan = carryScanStream(b, 1, a);
+    expect(scan.prepended).toBe(1);
+    expect(scan.insns.map((i) => i.mnemonic)).toEqual(["cmp", "sbb"]);
+    // …so the chain's first link, in the block, still sees the compare across
+    // the edge — which `flagScanStream`'s no-writer precondition would hide.
+    expect(carryOwnerBefore(scan.insns, 1)).toMatchObject({ mnemonic: "cmp", spoiled: false });
+    expect(carryScanStream(b, 1).insns.map((i) => i.mnemonic)).toEqual(["sbb"]);
   });
 });
 
@@ -869,8 +1037,20 @@ describe("flagScanStream — flags carried across one edge", () => {
   });
 
   it("reports no owner when the predecessor cleared the flags", () => {
-    const [pred, succ] = pair(["sub esi, eax", "sbb edi, edx", "js 0x401800"], ["jg 0x401800"]);
+    // `sbb edi, edx` stood here as the clearer until peek-a-bin-n9cl.6 made it a
+    // result owner (the 64-bit subtract's `js` is now answered `edi < 0`);
+    // `xadd` is the remaining carry-in clobber.
+    const [pred, succ] = pair(["sub esi, eax", "xadd edi, edx", "js 0x401800"], ["jg 0x401800"]);
     expect(blockFlagOwner(succ, pred)?.owner).toMatchObject({ kind: "none", reason: "cleared" });
+  });
+
+  it("owns a lone jcc's flags from a predecessor's sbb, as from any result owner", () => {
+    const [pred, succ] = pair(["sub esi, eax", "sbb edi, edx", "js 0x401800"], ["jg 0x401800"]);
+    expect(blockFlagOwner(succ, pred)?.owner).toMatchObject({
+      kind: "result",
+      mnemonic: "sbb",
+      destText: "edi",
+    });
   });
 
   it("is the pre-existing answer with no predecessor given", () => {

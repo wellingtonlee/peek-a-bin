@@ -7,7 +7,10 @@ import { pushedImmediate, STACK_TRAFFIC } from "../stackIdiom";
 import type { DisasmFunction, Instruction } from "../types";
 import {
   blockFlagOwner,
+  type CarryOwner,
   canSpellCondition,
+  carryOwnerBefore,
+  carryScanStream,
   flagOwnerBefore,
   isFlagTransparent,
   parseBitTest,
@@ -27,7 +30,7 @@ import {
   pushBeforeTerminator,
   regSize,
 } from "./ir";
-import { RegState } from "./regstate";
+import { bitTestValue, RegState } from "./regstate";
 
 // ── Operand Parsing ──
 
@@ -629,7 +632,14 @@ function isSetcc(mn: string): boolean {
  *   with a resolvable direct target (`branchFor` refuses anything else, and the
  *   captures would then be statements with no reader);
  * - each `setcc`/`cmovcc`, whose owner is `flagOwnerBefore` at its own index —
- *   block-local by construction, since the walk reads this block's instructions.
+ *   block-local by construction, since the walk reads this block's instructions;
+ * - each `sbb`/`adc`, whose owner is the CF owner `carryOwnerBefore` reports
+ *   over the same stream `carryFor` will read (peek-a-bin-n9cl.6). A `sub`
+ *   owner always needs its destination held — the `sub` itself destroys the
+ *   value the borrow is a function of — and a spoiled `cmp`/`sub`/`neg` needs
+ *   every non-constant operand, exactly as a compare does. An owner found in
+ *   the predecessor's tail is not this block's to place and is left alone: the
+ *   reader is then refused, since nothing there had a reason to hold it.
  *
  * Two readers of one setter merge their needs, so one statement per operand is
  * emitted however many read it. A `result` or `bittest` owner of a Jcc or
@@ -641,6 +651,7 @@ function operandCaptures(
   block: BasicBlock,
   is64: boolean,
   flagPred?: BasicBlock,
+  carryPred?: BasicBlock,
 ): Map<number, OperandCapture> {
   const needs = new Map<number, CaptureNeed>();
   const need = (insn: Instruction, mnemonic: string, all: boolean, forced: number[] = []) => {
@@ -663,6 +674,16 @@ function operandCaptures(
     if (isSetcc(mn) || CMOV_PATTERN.test(mn)) {
       const owner = flagOwnerBefore(insns, i);
       if (owner.kind === "compare" && owner.spoiled) need(owner.insn, owner.mnemonic, true);
+      continue;
+    }
+    if (mn === "sbb" || mn === "adc") {
+      const scan = carryScanStream(block, i, carryPred);
+      const owner = carryOwnerBefore(scan.insns, scan.prepended + i);
+      if (owner.kind !== "setter" || owner.index < scan.prepended) continue;
+      if (owner.mnemonic === "sub") need(owner.insn, owner.mnemonic, owner.spoiled, [0]);
+      else if (owner.spoiled && CARRY_CAPTURABLE.has(owner.mnemonic)) {
+        need(owner.insn, owner.mnemonic, true);
+      }
     }
   }
   const out = new Map<number, OperandCapture>();
@@ -671,6 +692,167 @@ function operandCaptures(
     if (built) out.set(addr, built);
   }
   return out;
+}
+
+/**
+ * CF setters whose value is spelled over their OPERANDS, so a spoiled one can be
+ * recovered by holding those at the setter: `cmp`/`sub` (the borrow), `neg` (the
+ * operand's non-zeroness). The zero-CF setters need nothing held, a spoiled
+ * `bt`'s base is refused rather than captured (0 corpus occurrences), and the
+ * refused setters (`add`, `adc`, `sbb d, s`) have no spelling to capture for.
+ */
+const CARRY_CAPTURABLE: ReadonlySet<string> = new Set(["cmp", "sub", "neg"]);
+
+/**
+ * The value CF holds when `block.insns[index]` executes, as an expression
+ * readable AT THAT PROGRAM POINT — or null when it cannot be spelled.
+ *
+ * **CF is an expression substituted into the consumer, never a statement and
+ * never a named pseudo-register.** The `eflags = …` proxy this file used to emit
+ * for a compare was actively harmful — a statement GVN could merge with a real
+ * `sub` and DCE could delete (peek-a-bin-c33 stage 2b; `docs/decompiler-ir.md`)
+ * — and a CF pseudo-register would be the same object one flag narrower. What a
+ * `sbb`/`adc` gets instead is exactly what a `setcc` gets from `getCondition`:
+ * an expression built at lift time over the setter's operands, which SSA then
+ * binds like any other read (peek-a-bin-n9cl.6).
+ *
+ * **Which setter, and whether its operands still name the value, is
+ * `flagModel.ts`'s answer** — `carryOwnerBefore` over `carryScanStream`, the CF
+ * grammar's own forward walk. Its ownership differs from the Jcc's in one
+ * documented way (`inc`/`dec` and `sbb d, d` preserve CF) and its spoil rule is
+ * the compare arm of `spoils` applied to every setter. The spelling per setter:
+ *
+ *   cmp a, b / sub a, b   →  a u< b          (the borrow; `sub` through the
+ *                                              capture of `a`, which the `sub`
+ *                                              itself destroys)
+ *   neg a                 →  a != 0          (read after the `neg`: `-a != 0`
+ *                                              is `a != 0`)
+ *   sbb d, d              →  d != 0          (read after it: `d = -(CF)`, so its
+ *                                              carry-out is its carry-in; the
+ *                                              `sbb` must itself have been lifted)
+ *   test / and / or / xor →  0
+ *   bt a, n               →  (a >> n) & 1    (`bitTestValue`, the one spelling)
+ *   add / adc / sbb d, s  →  REFUSED — the carry-out is the wraparound of the
+ *                            operation and this IR does not model wraparound.
+ *
+ * A spoiled `cmp`/`sub`/`neg` is read through the captures `operandCaptures`
+ * placed at it; spoiled with no capture (an owner in the predecessor's tail, a
+ * `bt`) is refused. Refusal is total: the consumer goes to `raw`, which the
+ * unlifted census counts, rather than being spelled over a guessed CF.
+ */
+function carryFor(
+  block: BasicBlock,
+  index: number,
+  is64: boolean,
+  carryPred: BasicBlock | undefined,
+  captures: ReadonlyMap<number, OperandCapture>,
+): IRExpr | null {
+  const scan = carryScanStream(block, index, carryPred);
+  return carryInStream(scan.insns, scan.prepended + index, is64, captures);
+}
+
+/**
+ * `carryFor` over an already-assembled stream. A `sbb d, d` owner is spelled
+ * `d != 0` over the destination read AFTER it, which is right only if the `sbb`
+ * was itself lifted — after a `raw` one, `d` still names the value from before
+ * it — and the `sbb` was lifted exactly when ITS carry-in was spellable, which
+ * is this same question one setter back. So it recurses, over the same stream,
+ * and a chain whose first link was refused refuses the whole chain.
+ */
+function carryInStream(
+  stream: Instruction[],
+  index: number,
+  is64: boolean,
+  captures: ReadonlyMap<number, OperandCapture>,
+): IRExpr | null {
+  const owner = carryOwnerBefore(stream, index);
+  if (owner.kind !== "setter") return null;
+  if (owner.mnemonic === "sbb" && carryInStream(stream, owner.index, is64, captures) === null) {
+    return null;
+  }
+  return spellCarry(owner, is64, captures.get(owner.address));
+}
+
+function spellCarry(
+  owner: CarryOwner,
+  is64: boolean,
+  capture: OperandCapture | undefined,
+): IRExpr | null {
+  switch (owner.spelling) {
+    case "zero":
+      return irConst(0, 4);
+    case "refused":
+      return null;
+    case "bit": {
+      if (owner.spoiled) return null;
+      const bit = parseBitTest(owner.insn);
+      if (!bit || owner.bitIndex === undefined) return null;
+      return bitTestValue(parseOperand(bit.destText, owner.insn, is64), owner.bitIndex);
+    }
+    case "borrow":
+    case "nonzero": {
+      // A capture, where one was placed, holds each operand as the setter read
+      // it; otherwise the operand text is read at the consumer, which is right
+      // only while nothing overwrote it. A `sub` always needs the capture of
+      // its destination — `operandCaptures` places one for every in-block
+      // reader, so its absence here means the reader is not in this block.
+      const parts = owner.insn.opStr.split(",").map((part) => part.trim());
+      if (parts.length < (owner.spelling === "borrow" ? 2 : 1)) return null;
+      const operand = (i: number): IRExpr | null => {
+        if (capture) return capture.operands[i] ?? null;
+        if (owner.spoiled) return null;
+        return parseOperand(parts[i], owner.insn, is64);
+      };
+      if (owner.spelling === "nonzero") {
+        const a = operand(0);
+        return a ? irBinary("!=", a, irConst(0, a.kind === "reg" ? a.size : 4)) : null;
+      }
+      if (owner.mnemonic === "sub" && !(capture && capture.operands[0]?.kind === "var"))
+        return null;
+      const a = operand(0);
+      const b = operand(1);
+      return a && b ? irBinary("u<", a, b) : null;
+    }
+  }
+}
+
+/**
+ * Is a `RESULT_OWNERS` instruction one the lifter actually lifted, so that its
+ * destination read after it names the result? A `raw` is a dataflow hole: the
+ * destination read after an unlifted `sbb` is the value from BEFORE it, so a
+ * guard spelled over it would test the wrong value in C that compiles — the
+ * "lift first" rule of peek-a-bin-3qrl, made checkable here because the two
+ * forms this file refuses are both decidable from the instruction stream:
+ *
+ * - `sbb`/`adc` whose carry-in `carryFor` cannot spell (re-asked over the same
+ *   stream, so the answer is the lift's own; for an owner in the predecessor it
+ *   is asked with none of that block's cross-block context, the conservative
+ *   side);
+ * - a `lock`-prefixed read-modify-write with no value effect
+ *   (`isValueNeutralLockedRmw`), which the arithmetic handler sends to `raw`
+ *   as a memory barrier (peek-a-bin-qbk3).
+ */
+function resultOwnerLifted(
+  ownerInsn: Instruction,
+  ownerIndex: number,
+  ownerBlock: BasicBlock,
+  is64: boolean,
+  carryPred: BasicBlock | undefined,
+  captures: ReadonlyMap<number, OperandCapture>,
+): boolean {
+  const mn = withoutLockPrefix(ownerInsn.mnemonic);
+  const parts = splitOperands(ownerInsn.opStr);
+  if (mn === "sbb" || mn === "adc") {
+    return (
+      parts.length >= 2 && carryFor(ownerBlock, ownerIndex, is64, carryPred, captures) !== null
+    );
+  }
+  if (mn in ARITH_OPS && mn !== ownerInsn.mnemonic.toLowerCase() && parts.length >= 2) {
+    const dest = parseDestOperand(parts[0], ownerInsn, is64);
+    const src = parseOperand(parts[1], ownerInsn, is64);
+    if (dest.kind === "deref" && isValueNeutralLockedRmw(ARITH_OPS[mn], src)) return false;
+  }
+  return true;
 }
 
 /**
@@ -831,6 +1013,7 @@ function branchFor(
   is64: boolean,
   flagPred?: BasicBlock,
   captures: ReadonlyMap<number, OperandCapture> = new Map(),
+  carryPred?: BasicBlock,
 ): IRBranch | null {
   const owned = blockFlagOwner(block, flagPred);
   if (!owned || owned.jcc !== jcc) return null;
@@ -909,6 +1092,21 @@ function branchFor(
   } else {
     if (!canSpellCondition(owned.owner) || owned.owner.kind !== "result") return null;
     if (blockHasCompare(ownerBlock)) return null;
+    // The owner must have been LIFTED, or its destination read after it names
+    // the value from before it (`resultOwnerLifted`). For a predecessor's owner
+    // the question is asked with none of that block's own cross-block context —
+    // the conservative side — and against the captures its own lift placed.
+    const lifted = owned.fromPredecessor
+      ? resultOwnerLifted(
+          owned.owner.insn,
+          owned.owner.index,
+          ownerBlock,
+          is64,
+          undefined,
+          operandCaptures(ownerBlock, is64),
+        )
+      : resultOwnerLifted(owned.owner.insn, owned.owner.index, block, is64, carryPred, captures);
+    if (!lifted) return null;
     // x86 sets the flags from the *result*, so the value tested is the
     // destination read after the instruction ran. `setFlagsFromResult` states
     // that, and `getCondition` answers only the Jcc forms ZF and SF
@@ -991,6 +1189,7 @@ export function liftBlock(
    * fixture) has a function no import can be named after.
    */
   self?: Pick<DisasmFunction, "name" | "isThunk">,
+  carryPred?: BasicBlock,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -1004,7 +1203,7 @@ export function liftBlock(
    * a reader naming a pseudo-register nothing assigns. Empty for every ordinary
    * block (peek-a-bin-xskz, generalised in peek-a-bin-n9cl.6).
    */
-  const captures = operandCaptures(block, is64, flagPred);
+  const captures = operandCaptures(block, is64, flagPred, carryPred);
 
   /**
    * Did the *previous* instruction leave the flags somewhere this class cannot
@@ -1408,6 +1607,48 @@ export function liftBlock(
       continue;
     }
 
+    // ── sbb / adc: CF as a VALUE, substituted into the right-hand side ──
+    //
+    // `sbb d, d` is MSVC's boolean idiom — `d = -(CF)`, all ones or zero — and
+    // the shape behind both w64 witnesses: `neg edi / sbb rax, rax / and rax,
+    // rbp` returns RBP or 0, and strncmp's tail `sbb rax, rax / sbb rax, -1`
+    // returns -1/0/1. Unlifted, a `raw` is a dataflow hole (`fold.ts` reads it
+    // as reading nothing, nothing models its write), so `return rax & rbp` read
+    // the RAX from before the `sbb`. Where the CF cannot be spelled — `add`'s
+    // carry-out, a spoiled setter with no capture, a clobber — the instruction
+    // stays `raw`, which the unlifted census counts (peek-a-bin-n9cl.6).
+    if (mn === "sbb" || mn === "adc") {
+      const carry =
+        parts.length >= 2 ? carryFor(block, insnIndex, is64, carryPred, captures) : null;
+      if (carry === null) {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      const dest = parseDestOperand(parts[0], insn, is64);
+      const destVal = parseOperand(parts[0], insn, is64);
+      const src = parseOperand(parts[1], insn, is64);
+      const sameOperand = parts[0].trim().toLowerCase() === parts[1].trim().toLowerCase();
+      const result: IRExpr =
+        mn === "sbb"
+          ? sameOperand && dest.kind === "reg"
+            ? irUnary("-", carry)
+            : irBinary("-", irBinary("-", destVal, src), carry)
+          : irBinary("+", irBinary("+", destVal, src), carry);
+      if (dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: dest.address,
+          value: result,
+          size: dest.size,
+          addr: insn.address,
+        });
+      } else {
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
+      }
+      continue;
+    }
+
     // ── not / neg ──
     if (mn === "not" || mn === "neg") {
       if (parts.length < 1) {
@@ -1665,7 +1906,7 @@ export function liftBlock(
     // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
       if (insn === block.insns[block.insns.length - 1]) {
-        const branch = branchFor(block, insn, mn, regState, is64, flagPred, captures);
+        const branch = branchFor(block, insn, mn, regState, is64, flagPred, captures, carryPred);
         if (branch) stmts.push(branch);
       }
       continue;

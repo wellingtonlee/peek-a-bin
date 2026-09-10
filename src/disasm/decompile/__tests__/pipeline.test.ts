@@ -481,6 +481,57 @@ describe("decompileFunction — a pipeline fault is a field, not code", () => {
  * peek-a-bin-xe01's signature and no gate can see. The compared value is now
  * held at the compare and the setcc reads the capture.
  */
+/**
+ * CF as a VALUE (peek-a-bin-n9cl.6). Both w64 witnesses, in miniature: the
+ * boolean-return idiom `neg / sbb d, d / and`, and strncmp's tail `sbb rax, rax
+ * / sbb rax, -1` entered from a `cmp / jne` in the predecessor. Before, the
+ * `sbb`s were `raw` and the returns read RAX from before them.
+ */
+describe("decompileFunction — sbb/adc read CF as a value", () => {
+  it("returns -(c) for MSVC's `sbb eax, eax` boolean idiom", () => {
+    const code = run(seq(0x401000, [["cmp", "ecx, eax"], ["sbb", "eax, eax"], ["ret"]]));
+    expect(code).toContain("return -(ecx < eax);");
+  });
+
+  it("returns the pointer or 0 for `neg / sbb rax, rax / and rax, rbp` (w64!sub_140001444)", () => {
+    const code = run(
+      seq(0x401000, [["neg", "edi"], ["sbb", "rax, rax"], ["and", "rax, rbp"], ["ret"]]),
+      true,
+    );
+    // `-x != 0` folds to `x != 0`; the negative control emitted `rax & rbp`.
+    expect(code).toContain("return -(edi != 0) & rbp;");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("returns a -1/0/1 for strncmp's `sbb rax, rax / sbb rax, -1` tail entered across an edge (w64!sub_14000BB30)", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "al, byte ptr [rcx]"],
+        ["mov", "dl, byte ptr [rcx + r9]"],
+        ["cmp", "al, dl"],
+        ["jne", "0x401018"],
+        ["xor", "eax, eax"],
+        ["ret"],
+        ["sbb", "rax, rax"],
+        ["sbb", "rax, -1"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("rax = -(al < dl);");
+    expect(code).toContain("return rax + 1 - (rax != 0);");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("leaves a chain whose first link's CF it cannot spell raw throughout", () => {
+    const code = run(
+      seq(0x401000, [["add", "eax, ecx"], ["sbb", "eax, eax"], ["sbb", "eax, -1"], ["ret"]]),
+    );
+    expect(code).toContain("/* unlifted: sbb eax, eax */");
+    expect(code).toContain("/* unlifted: sbb eax, -1 */");
+  });
+});
+
 describe("decompileFunction — a spoiled compare read by setcc", () => {
   it("reads the value the compare compared, not the register the spoiler wrote", () => {
     const code = run(
@@ -7060,11 +7111,13 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
     expect(guardTexts(code)).toEqual(["eax > 0x53", "<unrecovered>"]);
   });
 
-  // The predecessor has no owner at all: `sbb` is `{clobber, carry-in}`, so
-  // clearing is correct and the `jg` is a signed 64-bit comparison over a
-  // register pair this model has no expression for. 4 of the 19 refusals, all
-  // this one shape — MSVC's 64-bit subtract.
-  it("refuses a lone jcc whose predecessor's flags were clobbered", () => {
+  // MSVC's 64-bit subtract. Until peek-a-bin-n9cl.6 `sbb` was `{clobber,
+  // carry-in}` and both guards were refused — 4 of the 19 refusals, all this
+  // shape. The `sbb` is lifted now (its borrow through the capture of ESI), so
+  // it OWNS the flags: the `js` reads SF of the high half and is answered, and
+  // the `jg` — ZF and SF≠OF, a signed comparison over a register pair the
+  // result arm has no expression for — stays refused.
+  it("answers the js after a lifted sbb and still refuses the lone jg", () => {
     const code = run(
       seq(0x401000, [
         ["sub", "esi, eax"],
@@ -7077,8 +7130,27 @@ describe("decompileFunction — a Jcc alone in its block reads its predecessor's
         ["ret"],
       ]),
     );
+    expect(code).toContain("edi = edi - edx - (flg_401000_0 < eax);");
+    expect(guardTexts(code)).toEqual(["edi >= 0", "<unrecovered>"]);
+  });
 
-    expect(guardTexts(code).filter((g) => g !== "<unrecovered>")).toEqual([]);
+  // The other half of that: a `sbb` the lifter REFUSED must not own a guard,
+  // or the guard reads the destination from before it (a `raw` is a dataflow
+  // hole). `add`'s carry-out is refused, so this `sbb` stays raw.
+  it("refuses a guard over a sbb it left raw", () => {
+    const code = run(
+      seq(0x401000, [
+        ["add", "eax, ecx"],
+        ["sbb", "eax, eax"],
+        ["jne", "0x401014"],
+        ["mov", "eax, 1"],
+        ["ret"],
+        ["mov", "eax, 2"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("/* unlifted: sbb eax, eax */");
+    expect(guardTexts(code)).toEqual(["<unrecovered>"]);
   });
 
   // Control. A flag-transparent write to a register the condition does not name

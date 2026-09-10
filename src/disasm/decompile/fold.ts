@@ -323,6 +323,31 @@ function foldExpr(expr: IRExpr): IRExpr {
       }
     }
 
+    // `-x == 0` / `-x != 0` → `x == 0` / `x != 0`. Exact at every width: a
+    // two's-complement negation is zero exactly when its operand is. This is the
+    // shape `neg edi / sbb rax, rax` lifts to once the `neg`'s definition is
+    // inlined into the borrow (peek-a-bin-n9cl.6).
+    if (
+      (expr.op === "==" || expr.op === "!=") &&
+      right.kind === "const" &&
+      right.value === 0 &&
+      left.kind === "unary" &&
+      left.op === "-"
+    ) {
+      return foldExpr({ kind: "binary", op: expr.op, left: left.operand, right });
+    }
+    // `x - (-c)` → `x + c`. Exact under the same arithmetic `+`/`-` already
+    // claim (no wraparound model either way); `sbb rax, -1` after `sbb rax, rax`
+    // is the shape, and `rax - -1` is not a spelling anyone should read.
+    if (expr.op === "-" && right.kind === "const" && right.value < 0) {
+      return foldExpr({
+        kind: "binary",
+        op: "+",
+        left,
+        right: irConst(-right.value, right.size),
+      });
+    }
+
     // Same-operand patterns (after folding both sides)
     if (exprEq(left, right)) {
       // x - x → 0, x ^ x → 0

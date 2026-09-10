@@ -59,7 +59,7 @@
 
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
-import { flagPredecessor } from "../src/disasm/decompile/flagModel";
+import { carryPredecessor, flagPredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
 import { canonReg } from "../src/disasm/decompile/ir";
@@ -435,6 +435,8 @@ export function auditPopReads(
           calleeClobbers,
           flagPredecessor(b, blockById0),
           stackSlots,
+          undefined,
+          carryPredecessor(b, blockById0),
         ),
       );
     // `pipeline.ts` step 2b, and it must run BEFORE `liftedPops` is collected:

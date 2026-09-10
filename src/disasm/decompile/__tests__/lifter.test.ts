@@ -676,6 +676,277 @@ describe("liftBlock — a spoiled compare read by setcc/cmovcc", () => {
   });
 });
 
+/**
+ * CF as a VALUE (peek-a-bin-n9cl.6). `sbb`/`adc` were `raw`, and a `raw` is a
+ * dataflow hole — nothing models its write — so `neg edi / sbb rax, rax / and
+ * rax, rbp` returned `rax & rbp` over the RAX from before the `sbb`. The carry
+ * is an EXPRESSION substituted into the consumer's right-hand side, built by
+ * `carryFor` from `flagModel.ts`'s CF grammar: never a statement (the `eflags`
+ * proxy's defect, peek-a-bin-c33) and never a pseudo-register. Where it cannot
+ * be spelled the instruction stays `raw`, which the unlifted census counts.
+ */
+describe("liftBlock — sbb/adc read CF as a value", () => {
+  const flg = (addr: number, i: number, size: number) =>
+    irVar(`flg_${addr.toString(16)}_${i}`, size);
+
+  it("lifts `sbb d, d` after neg to -(d != 0), MSVC's boolean idiom", () => {
+    const stmts = lift([
+      ["neg", "edi"],
+      ["sbb", "rax, rax"],
+    ]);
+    expect(stmts[1]).toEqual({
+      kind: "assign",
+      dest: irReg("rax", 8),
+      src: irUnary("-", irBinary("!=", irReg("edi", 4), irConst(0, 4))),
+      addr: START + SIZE,
+    });
+  });
+
+  it("spells a compare's CF as the unsigned borrow", () => {
+    const stmts = lift([
+      ["cmp", "ecx, eax"],
+      ["sbb", "eax, eax"],
+    ]);
+    expect(stmts[0]).toMatchObject({
+      dest: irReg("eax", 4),
+      src: irUnary("-", irBinary("u<", irReg("ecx", 4), irReg("eax", 4))),
+    });
+  });
+
+  it("lifts `sbb d, s` as d - s - CF and `adc d, s` as d + s + CF", () => {
+    const sbb = lift([
+      ["cmp", "ecx, eax"],
+      ["sbb", "edx, 0x0"],
+    ]);
+    const borrow = irBinary("u<", irReg("ecx", 4), irReg("eax", 4));
+    expect(sbb[0]).toMatchObject({
+      dest: irReg("edx", 4),
+      src: irBinary("-", irBinary("-", irReg("edx", 4), irConst(0, 8)), borrow),
+    });
+    const adc = lift([
+      ["neg", "eax"],
+      ["adc", "edx, esi"],
+    ]);
+    expect(adc[1]).toMatchObject({
+      dest: irReg("edx", 4),
+      src: irBinary(
+        "+",
+        irBinary("+", irReg("edx", 4), irReg("esi", 4)),
+        irBinary("!=", irReg("eax", 4), irConst(0, 4)),
+      ),
+    });
+  });
+
+  it("holds a sub's destination before the sub, so the 64-bit borrow reads the value it subtracted from", () => {
+    // MSVC's 64-bit subtract: the `sub` destroys the very operand its borrow is
+    // a function of, so `flg_<sub>_0 = esi` goes in ABOVE `esi = esi - eax`.
+    const stmts = lift([
+      ["sub", "esi, eax"],
+      ["sbb", "edi, edx"],
+    ]);
+    expect(stmts).toEqual([
+      { kind: "assign", dest: flg(START, 0, 4), src: irReg("esi", 4), addr: START },
+      {
+        kind: "assign",
+        dest: irReg("esi", 4),
+        src: irBinary("-", irReg("esi", 4), irReg("eax", 4)),
+        addr: START,
+      },
+      {
+        kind: "assign",
+        dest: irReg("edi", 4),
+        src: irBinary(
+          "-",
+          irBinary("-", irReg("edi", 4), irReg("edx", 4)),
+          irBinary("u<", flg(START, 0, 4), irReg("eax", 4)),
+        ),
+        addr: START + SIZE,
+      },
+    ]);
+  });
+
+  it("reads a compare through its captures when an operand was overwritten in between", () => {
+    const stmts = lift([
+      ["cmp", "eax, ecx"],
+      ["mov", "eax, 0x5"],
+      ["sbb", "edx, edx"],
+    ]);
+    expect(stmts[0]).toMatchObject({ dest: flg(START, 0, 4), src: irReg("eax", 4) });
+    expect(stmts[1]).toMatchObject({ dest: flg(START, 1, 4), src: irReg("ecx", 4) });
+    expect(stmts[3]).toMatchObject({
+      dest: irReg("edx", 4),
+      src: irUnary("-", irBinary("u<", flg(START, 0, 4), flg(START, 1, 4))),
+    });
+  });
+
+  it("preserves CF across inc/dec, where the whole-flags owner moves", () => {
+    const stmts = lift([
+      ["cmp", "eax, ecx"],
+      ["inc", "edx"],
+      ["sbb", "ebx, ebx"],
+    ]);
+    expect(stmts[1]).toMatchObject({
+      dest: irReg("ebx", 4),
+      src: irUnary("-", irBinary("u<", irReg("eax", 4), irReg("ecx", 4))),
+    });
+  });
+
+  it("chains `sbb d, d / sbb d, -1` through the first sbb's destination", () => {
+    // After `sbb rax, rax`, `rax = -(CF)`, so the CF the second reads is exactly
+    // `rax != 0` — nothing has to be held. MSVC's strncmp tail.
+    const stmts = lift([
+      ["cmp", "al, dl"],
+      ["sbb", "rax, rax"],
+      ["sbb", "rax, -1"],
+    ]);
+    expect(stmts[1]).toMatchObject({
+      dest: irReg("rax", 8),
+      src: irBinary(
+        "-",
+        irBinary("-", irReg("rax", 8), irConst(-1, 8)),
+        irBinary("!=", irReg("rax", 8), irConst(0, 8)),
+      ),
+    });
+  });
+
+  it("REFUSES a CF it cannot spell, leaving the instruction raw", () => {
+    // `add`'s carry-out is the wraparound of the addition, which this IR does
+    // not model — a stated refusal, not a gap.
+    expect(
+      lift([
+        ["add", "eax, ecx"],
+        ["sbb", "ecx, ecx"],
+      ])[1],
+    ).toEqual({ kind: "raw", text: "sbb ecx, ecx", addr: START + SIZE });
+    // A chain whose first link was refused is refused throughout: `eax` read
+    // after a raw `sbb eax, eax` names the value from before it.
+    const chain = lift([
+      ["add", "eax, ecx"],
+      ["sbb", "eax, eax"],
+      ["sbb", "eax, -1"],
+    ]);
+    expect(chain[2]).toMatchObject({ kind: "raw", text: "sbb eax, -1" });
+    // Nothing set CF; a clobber in between; a spoiled setter with no reader-side
+    // capture possible (the setter is a `bt`).
+    expect(liftOne("sbb", "eax, eax")).toMatchObject({ kind: "raw" });
+    expect(
+      lift([
+        ["cmp", "eax, ecx"],
+        ["shl", "edx, 1"],
+        ["sbb", "ebx, ebx"],
+      ])[1],
+    ).toMatchObject({ kind: "raw" });
+    expect(
+      lift([
+        ["bt", "eax, 3"],
+        ["mov", "eax, 1"],
+        ["sbb", "ebx, ebx"],
+      ])[1],
+    ).toMatchObject({ kind: "raw" });
+  });
+
+  it("spells a bt's CF as the selected bit and a logical op's as 0", () => {
+    expect(
+      lift([
+        ["bt", "eax, 3"],
+        ["sbb", "ebx, ebx"],
+      ])[0],
+    ).toMatchObject({
+      src: irUnary(
+        "-",
+        irBinary("&", irBinary(">>", irReg("eax", 4), irConst(3, 4)), irConst(1, 4)),
+      ),
+    });
+    expect(
+      lift([
+        ["and", "eax, ecx"],
+        ["adc", "edx, 0x0"],
+      ])[1],
+    ).toMatchObject({
+      src: irBinary("+", irBinary("+", irReg("edx", 4), irConst(0, 8)), irConst(0, 4)),
+    });
+  });
+
+  it("reads CF across the edge from the block's sole predecessor", () => {
+    const pred = blockOf([
+      ["cmp", "al, dl"],
+      ["jne", "0x401010"],
+    ]);
+    const succ: BasicBlock = {
+      id: 1,
+      startAddr: 0x401010,
+      endAddr: 0x401018,
+      insns: [insn("sbb", "rax, rax", 0x401010), insn("ret", "", 0x401014)],
+      succs: [],
+      preds: [0],
+    };
+    const state = new RegState();
+    const withPred = liftBlock(
+      succ,
+      state,
+      true,
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      pred,
+    );
+    expect(withPred[0]).toMatchObject({
+      dest: irReg("rax", 8),
+      src: irUnary("-", irBinary("u<", irReg("al", 1), irReg("dl", 1))),
+    });
+    // Omitting the predecessor is the pre-existing behaviour: refused.
+    const without = liftBlock(succ, new RegState(), true, new Map(), new Map(), new Map());
+    expect(without[0]).toMatchObject({ kind: "raw", text: "sbb rax, rax" });
+    // A predecessor whose tail spoiled the compare is refused too.
+    const spoiled = blockOf([
+      ["cmp", "al, dl"],
+      ["mov", "al, 0x1"],
+      ["jne", "0x401010"],
+    ]);
+    expect(
+      liftBlock(
+        succ,
+        new RegState(),
+        true,
+        new Map(),
+        new Map(),
+        new Map(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        spoiled,
+      )[0],
+    ).toMatchObject({ kind: "raw" });
+  });
+
+  it("does not let a raw sbb OWN a guard — the lift-first rule made checkable", () => {
+    const refused = blockOf([
+      ["add", "eax, ecx"],
+      ["sbb", "eax, eax"],
+      ["jne", "0x401800"],
+    ]);
+    const stmts = liftBlock(refused, new RegState(), true, new Map(), new Map(), new Map());
+    expect(stmts.some((s) => s.kind === "branch")).toBe(false);
+    const lifted = blockOf([
+      ["neg", "ecx"],
+      ["sbb", "eax, eax"],
+      ["jne", "0x401800"],
+    ]);
+    const ok = liftBlock(lifted, new RegState(), true, new Map(), new Map(), new Map());
+    expect(ok[ok.length - 1]).toMatchObject({
+      kind: "branch",
+      condition: irBinary("!=", irReg("eax", 4), irConst(0, 4)),
+    });
+  });
+});
+
 describe("liftBlock — calls and returns", () => {
   const call = (opStr: string, opts: LiftOpts = {}) =>
     liftOne("call", opStr, opts) as IRStmt & {

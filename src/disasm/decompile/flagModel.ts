@@ -139,8 +139,17 @@ export const NO_FLAG_WRITE: ReadonlySet<string> = new Set([
  * *why* it gave up: `imul`/`mul`/`div`/`idiv` leave ZF and SF *undefined*;
  * `rol`/`ror`/`rcl`/`rcr` and `bt`/`bts`/`btr`/`btc` write CF and OF only, so a
  * Jcc after one reads an older test; `not` writes no flag at all and is in
- * `NO_FLAG_WRITE`; `adc`/`sbb`/`xadd` have a perfectly good result that
- * `lifter.ts` does not lift to an assignment, so it could not be named.
+ * `NO_FLAG_WRITE`; `xadd` has a perfectly good result that `lifter.ts` does not
+ * lift to an assignment, so it could not be named.
+ *
+ * `adc`/`sbb` joined when `lifter.ts` learned to lift them (peek-a-bin-n9cl.6),
+ * exactly as the `CARRY_IN_WRITERS` docstring promised — with one condition the
+ * lifter has to honour, because this table has no way to: a `sbb`/`adc` whose
+ * carry-in the lifter could not recover is left `raw`, and a `raw` is a
+ * dataflow hole, so its destination read after it names the value from BEFORE
+ * the instruction. `branchFor` therefore refuses a result owner whose
+ * instruction the lifter refused (`resultOwnerLifted`) — the "lift first" rule
+ * of peek-a-bin-3qrl made checkable.
  */
 export const RESULT_OWNERS: ReadonlySet<string> = new Set([
   "add",
@@ -155,6 +164,8 @@ export const RESULT_OWNERS: ReadonlySet<string> = new Set([
   "sal",
   "shr",
   "sar",
+  "adc",
+  "sbb",
 ]);
 
 export const SHIFTS: ReadonlySet<string> = new Set(["shl", "sal", "shr", "sar"]);
@@ -201,13 +212,223 @@ export const PARTIAL_FLAG_WRITERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * `adc`/`sbb`/`xadd`. Their flags *are* a function of their result, so unlike
- * every other class here the reason they clear is not Intel semantics — it is
- * that `lifter.ts` does not lift them to an assignment, so the result has no
- * name for a condition to be spelled from. If the lifter ever grows one, these
- * move to `RESULT_OWNERS` and this set shrinks.
+ * `xadd`. Its flags *are* a function of its result, so unlike every other class
+ * here the reason it clears is not Intel semantics — it is that `lifter.ts`
+ * does not lift it to an assignment, so the result has no name for a condition
+ * to be spelled from. `adc` and `sbb` were members until peek-a-bin-n9cl.6
+ * lifted them; if the lifter ever grows `xadd`, it moves to `RESULT_OWNERS`
+ * and this set empties.
  */
-export const CARRY_IN_WRITERS: ReadonlySet<string> = new Set(["adc", "sbb", "xadd"]);
+export const CARRY_IN_WRITERS: ReadonlySet<string> = new Set(["xadd"]);
+
+// ── CF as a VALUE ──
+//
+// The whole-flags owner model above answers "which instruction do this Jcc's
+// flags belong to". A `sbb`/`adc` asks a narrower question — what VALUE does CF
+// hold at this program point — and it needs per-flag ownership the model above
+// deliberately does not have: `inc`/`dec` write every arithmetic flag but CF,
+// so after `cmp eax, ecx / inc edx / sbb ebx, ebx` the whole-flags owner is the
+// `inc` and CF is still the compare's borrow. These tables are the CF grammar,
+// declared here beside the whole-flags one so there is still exactly one copy
+// of what x86 does to the flags (peek-a-bin-n9cl.6). They feed the VALUE path
+// only — `carryOwnerBefore`, read by `lifter.ts`'s `carryFor` — and change
+// nothing about `flagEffect`, `blockFlagOwner` or any guard.
+
+/**
+ * Instructions that write the other arithmetic flags and leave CF exactly as
+ * they found it (Intel SDM, INC/DEC: "The CF flag is not affected"). Members of
+ * `RESULT_OWNERS` for the whole-flags model, preservers for the value path.
+ */
+export const CARRY_PRESERVERS: ReadonlySet<string> = new Set(["inc", "dec"]);
+
+/** CF is the borrow of `left - right`: `left u< right`. */
+export const CARRY_BORROW_SETTERS: ReadonlySet<string> = new Set(["cmp", "sub"]);
+
+/** CF is set exactly when the operand was non-zero (SDM, NEG). */
+export const CARRY_NONZERO_SETTERS: ReadonlySet<string> = new Set(["neg"]);
+
+/** CF is cleared to 0 (SDM: AND/OR/XOR/TEST "The OF and CF flags are cleared"). */
+export const CARRY_ZERO_SETTERS: ReadonlySet<string> = new Set(["test", "and", "or", "xor"]);
+
+/**
+ * CF setters this model REFUSES to spell. `add`/`adc`'s carry-out is the
+ * wraparound of the addition and this IR does not model wraparound
+ * (`+` is exact; CLAUDE.md's const-const fold gotcha), so any spelling would be
+ * a guess. They are setters all the same — they displace an older CF — so a
+ * reader after one is answered "unknown" rather than from the older setter.
+ * `sbb d, s` with `d ≠ s` is refused the same way, by an operand test in
+ * `carryEffect` (its borrow needs the pre-instruction `d` AND the carry-in).
+ * `sbb d, d` is NOT refused: `d - d - CF` borrows exactly when CF was set and
+ * leaves `d = -(CF)`, so its carry-out is its carry-in AND is exactly `d != 0`
+ * read after it — the `neg` spelling over the destination, which is what lets
+ * `sbb rax, rax / sbb rax, -1` read one compare twice with nothing held. The
+ * consumer must still check the `sbb` was itself lifted (`carryFor` recurses),
+ * or `d` read after a `raw` one names the value from before it.
+ */
+export const CARRY_REFUSED_SETTERS: ReadonlySet<string> = new Set(["add", "adc"]);
+
+/** How one instruction leaves CF; the transfer function `carryOwnerBefore` applies. */
+export type CarryEffect =
+  | { kind: "none" }
+  | {
+      kind: "set";
+      /** How a consumer spells the value, or `"refused"` when it may not. */
+      spelling: "borrow" | "nonzero" | "zero" | "bit" | "refused";
+      /** For `"bit"`: the selected bit, reduced modulo the operand size. */
+      bitIndex?: number;
+    }
+  | { kind: "clobber" };
+
+/**
+ * What `insn` does to CF. **Anything not positively recognised clobbers**, for
+ * the module docstring's reason; the one widening over the whole-flags model is
+ * `CARRY_PRESERVERS` plus the `sbb d, d` pass-through, each an SDM fact.
+ */
+export function carryEffect(insn: Instruction): CarryEffect {
+  const { prefix, base } = baseMnemonic(insn.mnemonic);
+  if (prefix !== "" && prefix !== "lock") return { kind: "clobber" };
+  if (NO_FLAG_WRITE.has(base) || CARRY_PRESERVERS.has(base)) return { kind: "none" };
+  if (SHIFTS.has(base)) {
+    const count = insn.opStr.split(",")[1] ?? "";
+    // A shift by zero writes no flag; a real shift leaves CF the last bit out,
+    // which nothing here spells.
+    return shiftWritesFlags(firstOperand(insn), count) ? { kind: "clobber" } : { kind: "none" };
+  }
+  if (CARRY_BORROW_SETTERS.has(base)) return { kind: "set", spelling: "borrow" };
+  if (CARRY_NONZERO_SETTERS.has(base)) return { kind: "set", spelling: "nonzero" };
+  if (CARRY_ZERO_SETTERS.has(base)) return { kind: "set", spelling: "zero" };
+  if (CARRY_REFUSED_SETTERS.has(base)) return { kind: "set", spelling: "refused" };
+  if (base === "sbb") {
+    const parts = insn.opStr.split(",").map((p) => p.trim().toLowerCase());
+    if (parts.length === 2 && parts[0] === parts[1] && isKnownRegister(parts[0])) {
+      return { kind: "set", spelling: "nonzero" };
+    }
+    return { kind: "set", spelling: "refused" };
+  }
+  const bit = parseBitTest(insn);
+  if (bit) return { kind: "set", spelling: "bit", bitIndex: bit.bitIndex };
+  return { kind: "clobber" };
+}
+
+/** The instruction whose CF a reader sees, and whether its operands still name it. */
+export interface CarryOwner {
+  kind: "setter";
+  /** Index into the instruction list the setter was found in. */
+  index: number;
+  address: number;
+  insn: Instruction;
+  /** Lowercased base mnemonic. */
+  mnemonic: string;
+  spelling: "borrow" | "nonzero" | "zero" | "bit" | "refused";
+  bitIndex?: number;
+  /**
+   * Whether something since has overwritten a register the setter's operand
+   * text names, or written memory when the setter read memory — the compare
+   * arm of `spoils`, applied to every setter. The value is still the setter's;
+   * the names are no longer its operands. A `sub`'s own write of its
+   * destination is not counted here: it is inherent to the instruction and
+   * `lifter.ts` always holds that operand before the `sub` runs.
+   */
+  spoiled: boolean;
+}
+
+export type CarryOwnerResult = CarryOwner | { kind: "none"; reason: "no-owner" | "cleared" };
+
+/**
+ * Which instruction's CF a reader at `insns[index]` sees, or nothing-known.
+ *
+ * The same forward, last-writer-wins walk as `flagOwnerBefore`, over
+ * `carryEffect` instead of `flagEffect`, with the spoil rule applied to every
+ * instruction that leaves CF standing — preservers included, since `inc eax`
+ * after `cmp eax, ecx` keeps the borrow and takes away the name it is spelled
+ * with. An `index` past the end means "after everything".
+ */
+export function carryOwnerBefore(insns: Instruction[], index: number): CarryOwnerResult {
+  let owner: CarryOwner | null = null;
+  let cleared: CarryOwnerResult = { kind: "none", reason: "no-owner" };
+  const limit = Math.min(index, insns.length);
+  for (let i = 0; i < limit; i++) {
+    const insn = insns[i];
+    const effect = carryEffect(insn);
+    switch (effect.kind) {
+      case "none":
+        if (owner && !owner.spoiled && spoilsOperands(insn, owner.insn)) owner.spoiled = true;
+        break;
+      case "set":
+        owner = {
+          kind: "setter",
+          index: i,
+          address: insn.address,
+          insn,
+          mnemonic: baseMnemonic(insn.mnemonic).base,
+          spelling: effect.spelling,
+          ...(effect.bitIndex === undefined ? {} : { bitIndex: effect.bitIndex }),
+          spoiled: false,
+        };
+        break;
+      case "clobber":
+        owner = null;
+        cleared = { kind: "none", reason: "cleared" };
+        break;
+    }
+  }
+  return owner ?? cleared;
+}
+
+/**
+ * The predecessor whose exit CF a block is entered with, when that is knowable:
+ * its only predecessor, other than itself. Unlike `flagPredecessor` there is no
+ * unanimity arm — a CF value is an expression, and two predecessors setting it
+ * from the same test have 0 corpus occurrences to justify the equality rule —
+ * and no "own instructions write nothing" precondition, because whether the
+ * predecessor is consulted depends on where the READER sits (`carryScanStream`).
+ * All 3/4 cross-block `sbb` readers in the corpus (t64/w64, MSVC's `strncmp`
+ * tail `cmp al, dl / jne L` … `L: sbb rax, rax / sbb rax, -1`) have exactly
+ * one predecessor (peek-a-bin-n9cl.6).
+ */
+export function carryPredecessor(
+  block: BasicBlock,
+  blockById: Map<number, BasicBlock>,
+): BasicBlock | undefined {
+  if (block.preds.length !== 1 || block.preds[0] === block.id) return undefined;
+  const pred = blockById.get(block.preds[0]);
+  return pred && pred.id !== block.id ? pred : undefined;
+}
+
+/** The stream `carryOwnerBefore` reads for a reader, and how much of it is the predecessor's. */
+export interface CarryScan {
+  insns: Instruction[];
+  /** How many leading instructions came from `carryPred`; 0 when none did. */
+  prepended: number;
+}
+
+/**
+ * The instruction stream whose CF walk answers the reader at
+ * `block.insns[readerIndex]`: `carryPred`'s instructions — minus its
+ * terminator, `flagWalkEnd`'s rule — then the block's own before the reader.
+ *
+ * The predecessor is prepended WHENEVER one is known, unlike `flagScanStream`,
+ * which prepends only when the block's own scan finds no writer. The walk is
+ * last-writer-wins, so extra history changes no answer where the block has its
+ * own setter — but a consumer that RECURSES through a `sbb d, d` to its own
+ * carry-in (`carryFor`) must see the compare across the edge, and a stream cut
+ * at the first in-block setter would hide it: `cmp al, dl / jne L` … `L: sbb
+ * rax, rax / sbb rax, -1` is exactly that chain. The walk continues through the
+ * block's own instructions, so a clobber of the setter's operands on EITHER
+ * side of the edge spoils it with no second grammar (peek-a-bin-suql's argument
+ * applied to CF).
+ */
+export function carryScanStream(
+  block: BasicBlock,
+  readerIndex: number,
+  carryPred?: BasicBlock,
+): CarryScan {
+  const own = block.insns.slice(0, Math.max(0, readerIndex));
+  if (!carryPred || carryPred.id === block.id) return { insns: own, prepended: 0 };
+  const tail = carryPred.insns.slice(0, flagWalkEnd(carryPred.insns));
+  if (tail.length === 0) return { insns: own, prepended: 0 };
+  return { insns: [...tail, ...own], prepended: tail.length };
+}
 
 /**
  * String primitives, with or without a `rep`/`repe`/`repne` prefix. `scas` and
@@ -651,10 +872,19 @@ function spoils(
     if (owner.destReg === null) return writesAnyMemory(insn);
     return writesRegister(insn, owner.destReg);
   }
-  for (const reg of registersIn(owner.insn.opStr)) {
+  return spoilsOperands(insn, owner.insn);
+}
+
+/**
+ * Does `insn`, executed after `setter`, overwrite a register the setter's
+ * operand text names, or write memory when the setter read memory? The compare
+ * arm of `spoils`, and the whole spoil rule of the CF value path.
+ */
+function spoilsOperands(insn: Instruction, setter: Instruction): boolean {
+  for (const reg of registersIn(setter.opStr)) {
     if (writesRegister(insn, reg)) return true;
   }
-  return owner.insn.opStr.includes("[") && writesMemory(insn);
+  return setter.opStr.includes("[") && writesMemory(insn);
 }
 
 function claimResult(insn: Instruction, index: number, destText: string): FlagOwnerResult {

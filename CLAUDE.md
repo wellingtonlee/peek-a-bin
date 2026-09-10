@@ -1009,6 +1009,19 @@ refused. **Read the long-form entry before changing the code it describes.**
   same map. `corpus/staleGuards.ts` gates the reader population (`readerNamed`, 0) beside the Jcc
   one, judged from the emitted LINE at the reader's address; an admitted value is a refusal, not a
   row.
+- **CF is a VALUE, spelled as an EXPRESSION substituted into the consumer — never a statement, never
+  a pseudo-register.** `sbb`/`adc` were `raw`, and a `raw` is a dataflow hole, so `neg edi / sbb
+  rax, rax / and rax, rbp` returned `rax & rbp` over the RAX from *before* the `sbb`. `carryFor`
+  (`lifter.ts`) builds the CF from `flagModel.ts`'s CF grammar — `carryOwnerBefore` over
+  `carryScanStream`, the one per-flag walk, with `inc`/`dec` and `sbb d, d` preserving where the
+  whole-flags owner moves — and `sbb d, d` → `-(CF)`, `sbb d, s` → `d - s - CF`, `adc` → `d + s +
+  CF`. Spellings: `cmp`/`sub` → `a u< b` (a `sub`'s destination is CAPTURED before it runs), `neg`
+  and `sbb d, d` → `d != 0` read after, logical ops → 0, `bt` → the bit. **Refused, and `raw` is
+  the whole refusal**: `add`/`adc`/`sbb d, s` carry-out (no wraparound model), a spoiled setter with
+  no capture, a chain whose first link was refused, several predecessors. **`sbb`/`adc` are
+  `RESULT_OWNERS` now, and `branchFor` refuses a result owner the lifter left `raw`**
+  (`resultOwnerLifted`) — the lift-first rule made checkable. The `eflags` proxy's history is why
+  none of this may become a statement (`docs/decompiler-ir.md`).
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

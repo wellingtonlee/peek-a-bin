@@ -170,11 +170,7 @@ export class RegState {
    */
   setFlagsFromBitTest(base: IRExpr, bitIndex: number): void {
     this.flagOp = "bittest";
-    this.flagLeft = irBinary(
-      "&",
-      irBinary(">>", base, irConst(bitIndex, base.kind === "reg" ? base.size : 4)),
-      irConst(1, base.kind === "reg" ? base.size : 4),
-    );
+    this.flagLeft = bitTestValue(base, bitIndex);
     this.flagRight = irConst(0, base.kind === "reg" ? base.size : 4);
   }
 
@@ -397,6 +393,18 @@ export class RegState {
     copy.flagOp = this.flagOp;
     return copy;
   }
+}
+
+/**
+ * Bit `bitIndex` of `base`, as a 0/1 value: `(base >> n) & 1`. The one
+ * declaration of the spelling, read by `setFlagsFromBitTest` for a Jcc/setcc
+ * condition and by `lifter.ts`'s `carryFor` for the CF a `sbb`/`adc` after a
+ * `bt` consumes (peek-a-bin-n9cl.6). See `setFlagsFromBitTest` for why `>>`
+ * and not `>>>`.
+ */
+export function bitTestValue(base: IRExpr, bitIndex: number): IRExpr {
+  const size = base.kind === "reg" ? base.size : 4;
+  return irBinary("&", irBinary(">>", base, irConst(bitIndex, size)), irConst(1, size));
 }
 
 function exprEq(a: IRExpr, b: IRExpr): boolean {

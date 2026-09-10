@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BinaryOp, IRExpr } from "../ir";
 import { irBinary, irConst, irReg, irUnary } from "../ir";
-import { RegState } from "../regstate";
+import { bitTestValue, RegState } from "../regstate";
 
 describe("RegState definitions", () => {
   it("stores and retrieves a definition case-insensitively", () => {
@@ -488,5 +488,16 @@ describe("RegState.clone", () => {
     const copy = st.clone();
     copy.invalidateCallerSaved();
     expect(st.getCondition("je").kind).toBe("binary");
+  });
+});
+
+describe("bitTestValue", () => {
+  it("is the one spelling of bit n of base, and setFlagsFromBitTest reads it", () => {
+    const eax = irReg("eax", 4);
+    const bit = bitTestValue(eax, 3);
+    expect(bit).toEqual(irBinary("&", irBinary(">>", eax, irConst(3, 4)), irConst(1, 4)));
+    const st = new RegState();
+    st.setFlagsFromBitTest(eax, 3);
+    expect(st.getCondition("jb")).toEqual(irBinary("!=", bit, irConst(0, 4)));
   });
 });
