@@ -780,7 +780,12 @@ this bar is `App.tsx`'s `<main className="flex-1 overflow-auto">`: a bar INSIDE 
 into a page-level horizontal scroll, so the header bar's search box was reachable only by scrolling
 the listing sideways and the tab strip's last close button went off the right edge — bad, but not
 the unreachable-by-any-input case that ranks `AddressBar` and `StatusBar` above them. So when
-ranking a new instance, ask which side of `<main>` it is on first;
+ranking a new instance, ask which side of `<main>` it is on first; one consequence neither the bead nor the plan
+anticipated: `DisassemblyToolbar` keeps a `<div className="flex-1" />` spacer, and with
+`flex-wrap` that spacer stays on LINE 1 — so the wrapped search box **left-aligns on line 2**
+instead of staying right-aligned, and the bottom strip's second row of chips takes its height
+out of a `flex-1 overflow-auto` scroller. Both are reachable, which is the point, but both are
+trades rather than free;
 Breadcrumbs' `overflow-x-auto` + `scrollbarWidth: "none"` are copied and its ResizeObserver fade
 machinery deliberately is **not** (four reasons in `docs/gotchas.md`). Nothing is conditionally
 unmounted — **CSS only** — because bare `G` focuses the address input by ref and the hidden Import
