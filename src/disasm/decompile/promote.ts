@@ -604,22 +604,38 @@ function promoteStmt(
   }
 }
 
-// ── Detect whether function writes to return register before ret ──
+// ── Detect whether any `return` in the structured tree carries a value ──
 
+/**
+ * Does any `return` reachable in this structured tree carry a value?
+ *
+ * The traversal is `bodiesOf` — `ir.ts`'s one exhaustive declaration of which
+ * statement kinds hold nested statement lists — and NOT a hand-written list of
+ * kinds. The hand-written version recursed into `if`, `while` and `do_while`
+ * only, so a valued `return` inside a `for`, a `switch` arm or a `__try` body
+ * was invisible: the header said `void` above a body that said `return rax;`.
+ * Every `__try`-wrapped function with a return value took that shape (3 of
+ * t64's 9 void headers and 3 of w64's at 6299113, all of them `__try` bodies),
+ * and the corpus `cc` gate never saw it because `gcc -std=gnu89 -fsyntax-only`
+ * only WARNS on a valued return in a void function (peek-a-bin-n9cl.2).
+ *
+ * `for`'s `init`/`update` are single statements and cannot hold a `return`, so
+ * `bodiesOf` not reaching them costs nothing here. A `label` has no body of its
+ * own — a return "after a label" is a sibling in the same list and was always
+ * found; it is pinned in `promote.test.ts` because the bead named it.
+ *
+ * What the value IS is deliberately not asked here: the answer is `int`, and
+ * `emit.ts`'s `headerReturnType` widens it only where every valued return is an
+ * `API_TYPES` call result and they all agree.
+ */
 function hasReturnValue(body: IRStmt[]): boolean {
   for (const stmt of body) {
-    if (stmt.kind === "return" && stmt.value) {
-      // Check if value is a call result or non-trivial expression
-      if (stmt.value.kind !== "reg") return true;
-      // Even a bare register return counts
-      return true;
+    if (stmt.kind === "return") {
+      if (stmt.value) return true;
+      continue;
     }
-    if (stmt.kind === "if") {
-      if (hasReturnValue(stmt.thenBody)) return true;
-      if (stmt.elseBody && hasReturnValue(stmt.elseBody)) return true;
-    }
-    if (stmt.kind === "while" || stmt.kind === "do_while") {
-      if (hasReturnValue(stmt.body)) return true;
+    for (const nested of bodiesOf(stmt)) {
+      if (hasReturnValue(nested)) return true;
     }
   }
   return false;

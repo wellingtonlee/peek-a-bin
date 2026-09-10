@@ -154,6 +154,7 @@ export function decompileFunction(
         calleeClobbers,
         flagPredecessor(block, blockById),
         stackSlots,
+        func,
       );
       liftedBlocks.set(block.id, stmts);
     }

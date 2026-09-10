@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { isCoveredMnemonic, X64_VOLATILE } from "../src/disasm/callSummary";
 import { buildCFG, detectLoops } from "../src/disasm/cfg";
 import type { IRStmt } from "../src/disasm/decompile/ir";
+import { IMPORT_SLOT_PREFIX } from "../src/disasm/decompile/lifter";
 import { decompileFunction, type StructuringTap } from "../src/disasm/decompile/pipeline";
 import { buildFuncInsnMap } from "../src/disasm/funcInsns";
 import { inferSignature } from "../src/disasm/signatures";
@@ -642,6 +643,15 @@ export interface BinResult {
 // ── Callee loss ────────────────────────────────────────────────────────────
 
 const CALL_RE = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+/**
+ * An import's IAT slot, `__imp_X`, names `X`. An import thunk is emitted as a
+ * transfer THROUGH its slot — `((intptr_t (*)())__imp_X)()` — because the
+ * function is itself named `X` and `return X();` would be a call to itself
+ * (peek-a-bin-n9cl.2). `CALL_RE` cannot see that (the `)` sits between the name
+ * and the `(`), so the slot spelling is credited here as a mention of `X`. The
+ * prefix is `lifter.ts`'s, the one declaration.
+ */
+const IMPORT_SLOT_RE = new RegExp(`\\b${IMPORT_SLOT_PREFIX}([A-Za-z_][A-Za-z0-9_]*)`, "g");
 const CALL_KEYWORDS = new Set([
   "if",
   "while",
@@ -676,6 +686,12 @@ function emittedCallees(code: string): Set<string> {
     while (m !== null) {
       if (!CALL_KEYWORDS.has(m[1])) s.add(m[1]);
       m = CALL_RE.exec(l);
+    }
+    IMPORT_SLOT_RE.lastIndex = 0;
+    let slot: RegExpExecArray | null = IMPORT_SLOT_RE.exec(l);
+    while (slot !== null) {
+      s.add(slot[1]);
+      slot = IMPORT_SLOT_RE.exec(l);
     }
   }
   return s;

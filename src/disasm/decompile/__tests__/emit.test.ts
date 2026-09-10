@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emitFunction } from "../emit";
-import type { IRExpr, IRFunction, IRPhi, IRStmt } from "../ir";
+import type { IRCall, IRExpr, IRFunction, IRPhi, IRStmt } from "../ir";
 import { irBinary, irConst, irReg, irVar } from "../ir";
 import { MAX_FIELD_OFFSET } from "../structs";
 import type { TypeContext } from "../typeInfer";
@@ -650,5 +650,105 @@ describe("a guard whose whole body is one terminator", () => {
     const at = code.split("\n").findIndex((l) => l.includes("if (eax == 0) break;"));
     expect(at).toBeGreaterThanOrEqual(0);
     expect(lineMap.has(at)).toBe(false);
+  });
+});
+
+/**
+ * `promoteVars` says only `int` or `void`. `headerReturnType` widens the `int`
+ * from the one thing the body proves locally — every valued return is the result
+ * of one `API_TYPES` callee, and they agree — and refuses back to `int` on
+ * anything else. Width and pointer-ness are deliberately not inferred
+ * (peek-a-bin-n9cl.2).
+ */
+describe("emitFunction — the header's return type", () => {
+  const call = (target: string, display?: string): IRCall => ({
+    kind: "call",
+    target,
+    args: [],
+    display,
+  });
+  const ret = (value?: IRExpr): IRStmt => ({ kind: "return", value });
+  const header = (code: string) => code.split("\n").find((l) => l.includes(" sub_1000("));
+
+  it("spells the API's declared return type when every valued return is its result", () => {
+    const { code } = emitFunction(fn([ret(call("GetProcessHeap", "KERNEL32.dll!GetProcessHeap"))]));
+    expect(header(code)).toBe("HANDLE sub_1000() {");
+    expect(code).toContain("return GetProcessHeap();");
+  });
+
+  it("is asked of the folded body, which is the shape the lifter produces", () => {
+    // `eax = GetLastError(); return eax;` folds to `return GetLastError();` first.
+    const { code } = emitFunction(
+      fn([
+        { kind: "call_stmt", call: call("GetLastError"), resultDest: irReg("eax", 4) },
+        ret(irReg("eax", 4)),
+      ]),
+    );
+    expect(header(code)).toBe("uint32_t sub_1000() {");
+  });
+
+  it("agrees across two returns of two APIs declaring the same type", () => {
+    const { code } = emitFunction(
+      fn([
+        { kind: "if", condition: irConst(1), thenBody: [ret(call("CloseHandle"))] },
+        ret(call("VirtualFree")),
+      ]),
+    );
+    expect(header(code)).toBe("BOOL sub_1000() {");
+  });
+
+  it("refuses to int when two API callees disagree", () => {
+    const { code } = emitFunction(
+      fn([
+        { kind: "if", condition: irConst(1), thenBody: [ret(call("GetLastError"))] },
+        ret(call("VirtualAlloc")),
+      ]),
+    );
+    expect(header(code)).toBe("int sub_1000() {");
+  });
+
+  it("refuses to int when any valued return is not an API result", () => {
+    const withRegister = emitFunction(
+      fn([
+        { kind: "if", condition: irConst(1), thenBody: [ret(call("GetLastError"))] },
+        ret(irReg("eax", 4)),
+      ]),
+    ).code;
+    expect(header(withRegister)).toBe("int sub_1000() {");
+    const internalCallee = emitFunction(fn([ret(call("sub_2000"))])).code;
+    expect(header(internalCallee)).toBe("int sub_1000() {");
+  });
+
+  it("refuses an API whose declared return type is void", () => {
+    // `void sub_1000() { return free(p); }` is the header/body disagreement this
+    // exists to end, one level up.
+    const { code } = emitFunction(fn([ret(call("free"))]));
+    expect(header(code)).toBe("int sub_1000() {");
+  });
+
+  it("finds the returns inside a __try, a switch arm and a for body", () => {
+    const forStmt: IRStmt = {
+      kind: "for",
+      init: { kind: "assign", dest: irReg("ecx", 4), src: irConst(0) },
+      condition: irConst(1),
+      update: { kind: "assign", dest: irReg("ecx", 4), src: irConst(1) },
+      body: [ret(call("GetProcessHeap"))],
+    };
+    const { code } = emitFunction(
+      fn([
+        { kind: "try", body: [forStmt], handler: [] },
+        {
+          kind: "switch",
+          expr: irReg("eax", 4),
+          cases: [{ values: [1], body: [ret(call("GetProcessHeap"))] }],
+        },
+      ]),
+    );
+    expect(header(code)).toBe("HANDLE sub_1000() {");
+  });
+
+  it("leaves a void header alone and never widens it", () => {
+    const { code } = emitFunction(fn([ret()], { returnType: "void" }));
+    expect(header(code)).toBe("void sub_1000() {");
   });
 });

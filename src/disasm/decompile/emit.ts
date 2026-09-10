@@ -1,6 +1,15 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
+import { API_TYPES } from "./apitypes";
 import type { BinaryOp, IRExpr, IRFunction, IRStmt, IRTry } from "./ir";
-import { canonReg, isKnownRegister, regSize, rewriteBodies, walkExpr, walkStmts } from "./ir";
+import {
+  bodiesOf,
+  canonReg,
+  isKnownRegister,
+  regSize,
+  rewriteBodies,
+  walkExpr,
+  walkStmts,
+} from "./ir";
 import { isCapturedOperandName } from "./lifter";
 import type { DecompType, TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
@@ -924,6 +933,67 @@ function foldReturnedCallResults(body: readonly IRStmt[]): IRStmt[] {
     out.push(rewriteBodies(stmt, foldReturnedCallResults));
   }
   return out;
+}
+
+/**
+ * The type the function header spells for a function `promoteVars` judged to
+ * return a value.
+ *
+ * `promoteVars` answers only "is there a valued return" — `int` or `void` — and
+ * this widens that answer from the one source of evidence the structured body
+ * carries LOCALLY: when EVERY valued `return` returns the result of a call whose
+ * callee is in `API_TYPES`, and every one of those signatures names the same
+ * return type, the header spells that type (`HANDLE sub_…`, `BOOL sub_…`).
+ * Anything else — a returned register, a returned `sub_…()` result, two API
+ * callees disagreeing — refuses back to `int`, which is the answer the header
+ * gave before and is never worse than it.
+ *
+ * Asked of the FOLDED body, i.e. after `foldReturnedCallResults` has turned
+ * `eax = GetLastError(); return eax;` into `return GetLastError();` — that is
+ * the shape the corpus produces, so asking the unfolded body would find a
+ * returned register at every one of them and widen nothing.
+ *
+ * Two refusals that look like they could be answers:
+ *
+ * - An API whose declared return type is `void` (`free`, `EnterCriticalSection`)
+ *   is refused, not spelled. `return free(p);` under a `void` header is exactly
+ *   the header/body disagreement this exists to end, one level up: C forbids a
+ *   valued return in a void function, and the value here is the machine's RAX,
+ *   which the API promises nothing about.
+ * - Width (`int` vs `int64_t`) and pointer-ness from the callers are NOT
+ *   inferred. The lifter names the returned accumulator at the image's width, so
+ *   on x64 every returned register reads 8 bytes regardless of what the function
+ *   returns, and pointer-ness from call sites is interprocedural. Both are
+ *   recorded as follow-ons (peek-a-bin-n9cl.2), not attempted here.
+ */
+function headerReturnType(declared: string, body: readonly IRStmt[]): string {
+  if (declared === "void") return declared;
+  let agreed: string | null = null;
+  let refused = false;
+  const visit = (stmts: readonly IRStmt[]): void => {
+    for (const stmt of stmts) {
+      if (refused) return;
+      if (stmt.kind === "return") {
+        if (!stmt.value) continue;
+        const call = stmt.value.kind === "call" ? stmt.value : null;
+        const api = call ? API_TYPES[call.display?.split("!").pop() ?? call.target] : undefined;
+        if (!api || api.returnType.kind === "void") {
+          refused = true;
+          return;
+        }
+        const spelled = typeToString(api.returnType);
+        if (agreed === null) agreed = spelled;
+        else if (agreed !== spelled) {
+          refused = true;
+          return;
+        }
+        continue;
+      }
+      for (const nested of bodiesOf(stmt)) visit(nested);
+    }
+  };
+  visit(body);
+  return refused || agreed === null ? declared : agreed;
 }
 
 /** Canonical registers an expression reads. */
@@ -2358,7 +2428,13 @@ export function emitFunction(
 ): EmitFunctionResult {
   // Before anything reads the body: every analysis below has to be asked about
   // the statements the reader will see — see `foldReturnedCallResults`.
-  const func: IRFunction = { ...original, body: foldReturnedCallResults(original.body) };
+  const folded = foldReturnedCallResults(original.body);
+  const func: IRFunction = {
+    ...original,
+    body: folded,
+    // Also asked of the folded body — see `headerReturnType`.
+    returnType: headerReturnType(original.returnType, folded),
+  };
   // emitStmt/emitExpr are mutually recursive and unbounded, so deeply nested IR
   // can throw (e.g. RangeError) part-way through, and pipeline.ts swallows the
   // exception. The unwind used to skip the reset at the bottom of this function

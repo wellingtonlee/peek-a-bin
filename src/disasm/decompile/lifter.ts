@@ -3,7 +3,7 @@ import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import { pushedImmediate, STACK_TRAFFIC } from "../stackIdiom";
-import type { Instruction } from "../types";
+import type { DisasmFunction, Instruction } from "../types";
 import {
   blockFlagOwner,
   canSpellCondition,
@@ -887,6 +887,14 @@ export function liftBlock(
   calleeClobbers?: CalleeClobbers,
   flagPred?: BasicBlock,
   stackSlots?: StackSlotPairs,
+  /**
+   * The function this block belongs to — its name and whether detection marked
+   * it an import thunk. Read at exactly one place, the tail-jmp path, to tell a
+   * jmp through an IAT slot from a call to the function itself. See
+   * `importThunkTransfer`. Optional because every other caller (and every test
+   * fixture) has a function no import can be named after.
+   */
+  self?: Pick<DisasmFunction, "name" | "isThunk">,
 ): IRStmt[] {
   const stmts: IRStmt[] = [];
 
@@ -1471,11 +1479,17 @@ export function liftBlock(
         const args = is64
           ? collectArgs64(regState)
           : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
+        // An import thunk is NAMED after the import it jumps to (functionDetect's
+        // thunk renaming), so the resolved name here is the function's own name
+        // and `return RtlVirtualUnwind();` would be a call to itself. The
+        // transfer is spelled through the slot instead — see `importThunkTransfer`.
+        const slot = importThunkTransfer(tail, self);
+        if (slot) stmts.push({ kind: "comment", text: slot.comment });
         const call: IRCall = {
           kind: "call",
-          target: tail.name,
+          target: slot ? slot.target : tail.name,
           args,
-          display: tail.display,
+          display: slot ? undefined : tail.display,
           clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
         };
         const retReg = is64 ? "rax" : "eax";
@@ -1789,7 +1803,7 @@ function resolveNamedTarget(
   insn: Instruction,
   iatMap: Map<number, { lib: string; func: string }>,
   funcMap: Map<number, { name: string; address: number }>,
-): { name: string; display?: string } | null {
+): NamedTarget | null {
   const opStr = insn.opStr.trim();
 
   // Direct: `call 0xNNNN`
@@ -1805,7 +1819,7 @@ function resolveNamedTarget(
   const target = resolveRipTarget(insn);
   if (target !== null) {
     const iat = iatMap.get(target);
-    if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}` };
+    if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}`, imported: iat };
     const fn = funcMap.get(target);
     if (fn) return { name: fn.name };
     return { name: `sub_${target.toString(16).toUpperCase()}` };
@@ -1816,11 +1830,77 @@ function resolveNamedTarget(
   if (addrM) {
     const abs = parseInt(addrM[1], 16);
     const iat = iatMap.get(abs);
-    if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}` };
+    if (iat) return { name: iat.func, display: `${iat.lib}!${iat.func}`, imported: iat };
     return { name: `sub_${abs.toString(16).toUpperCase()}` };
   }
 
   return null;
+}
+
+/**
+ * What `resolveNamedTarget` recovered: the callee's name, the `lib!func` display
+ * for an import, and — only when the target IS an IAT slot — the import itself,
+ * so a caller can tell "named after an import" from "resolved to an import".
+ */
+interface NamedTarget {
+  name: string;
+  display?: string;
+  imported?: { lib: string; func: string };
+}
+
+/**
+ * The C spelling of an import's IAT slot: `__imp_<name>`, which is also what
+ * MSVC's linker calls the same slot.
+ *
+ * THE ONE DECLARATION of that spelling. Today its only reader is
+ * `importThunkTransfer` below; epic peek-a-bin-n9cl's B2 (globals and imports)
+ * adopts it for every IAT-slot LOAD — `mov rax, [rip + X]` with `X` in `iatMap`
+ * becomes `__imp_X` rather than a `*(int64_t*)(0x…)` deref — and must spell it
+ * through this function, not a second template. `corpus/sweep.ts`'s
+ * `emittedCallees` reads `IMPORT_SLOT_PREFIX` back to credit `__imp_X` as a
+ * mention of `X`, so a respelling here changes that gate's population.
+ */
+export const IMPORT_SLOT_PREFIX = "__imp_";
+export function importSlotName(func: string): string {
+  return `${IMPORT_SLOT_PREFIX}${func}`;
+}
+
+/**
+ * How a tail `jmp` is spelled when the function IS the import thunk.
+ *
+ * `functionDetect.ts` renames a ≤16-byte function whose single meaningful
+ * instruction is `jmp [IAT slot]` to the import's name and sets `isThunk`. The
+ * tail-jmp path above resolves the same slot through the same `iatMap` to the
+ * same name. Both readings are right in isolation; together they print
+ * `RtlVirtualUnwind() { return RtlVirtualUnwind(); }` — a self-recursive body
+ * for a function that recurses nowhere (3 per x64 corpus binary at 6299113:
+ * RtlVirtualUnwind, RtlLookupFunctionEntry, RtlUnwindEx). Not an ordering
+ * defect in `resolveCallTarget`: the collision is naming the function after its
+ * callee (peek-a-bin-n9cl.2).
+ *
+ * The fix spells what the instruction does. `jmp [slot]` is an indirect
+ * transfer through the slot's contents, and `calleeText` already has the
+ * spelling for a call through a named value: `(*__imp_X)` becomes
+ * `((intptr_t (*)())__imp_X)(…)`. The comment above it names `lib!func` so the
+ * reader is told what the slot holds. Callers of the thunk still print
+ * `RtlVirtualUnwind(...)`, so `corpus/arity.ts`'s population is unchanged.
+ *
+ * Two admissions, either sufficient, and both require the target to BE an IAT
+ * slot (`imported` set): detection said thunk (`isThunk`), or the resolved
+ * name is the function's own. A direct `jmp` to a same-named `sub_…` is not a
+ * slot and is left as the call it already was — there is no slot to spell.
+ */
+function importThunkTransfer(
+  tail: NamedTarget,
+  self: Pick<DisasmFunction, "name" | "isThunk"> | undefined,
+): { target: string; comment: string } | null {
+  if (!tail.imported || !self) return null;
+  if (!(self.isThunk === true || tail.name === self.name)) return null;
+  const { lib, func } = tail.imported;
+  return {
+    target: `(*${importSlotName(func)})`,
+    comment: `import thunk: jmp through the IAT slot for ${lib}!${func}`,
+  };
 }
 
 /**

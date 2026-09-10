@@ -1095,11 +1095,15 @@ describe("promoteVars — return type", () => {
     ).toBe("int");
   });
 
-  // KNOWN BUG (reported, not fixed): hasReturnValue only recurses into if /
-  // while / do_while. A function whose only value-returning statement sits in
-  // a for loop, a switch case or a try block is declared `void` and then emits
-  // `return <value>;`, which does not compile.
-  it("misses a value return inside a for loop, switch or try", () => {
+  /**
+   * The traversal is `bodiesOf`, not a hand-written list of kinds. The old list
+   * named `if`/`while`/`do_while` only, so a valued return inside a `for`, a
+   * `switch` arm or a `__try` body left the header `void` above `return rax;` —
+   * every `__try`-wrapped function with a return value in the x64 corpus
+   * (peek-a-bin-n9cl.2). Negative control: reverting `hasReturnValue` to the
+   * three-kind recursion reddens exactly these three rows.
+   */
+  it("finds a value return inside a for loop, switch or try", () => {
     const forStmt: IRStmt = {
       kind: "for",
       init: assign(irReg("ecx", 4), irConst(0)),
@@ -1114,8 +1118,50 @@ describe("promoteVars — return type", () => {
     };
     const tryStmt: IRStmt = { kind: "try", body: [ret(irConst(0))], handler: [] };
 
-    expect(promote([forStmt]).returnType).toBe("void"); // should be int
-    expect(promote([switchStmt]).returnType).toBe("void"); // should be int
-    expect(promote([tryStmt]).returnType).toBe("void"); // should be int
+    expect(promote([forStmt]).returnType).toBe("int");
+    expect(promote([switchStmt]).returnType).toBe("int");
+    expect(promote([tryStmt]).returnType).toBe("int");
+  });
+
+  it("finds a value return in a switch default arm and in a try handler", () => {
+    const switchStmt: IRStmt = {
+      kind: "switch",
+      expr: irReg("eax", 4),
+      cases: [{ values: [1], body: [] }],
+      defaultBody: [ret(irConst(0))],
+    };
+    const tryStmt: IRStmt = { kind: "try", body: [], handler: [ret(irConst(0))] };
+
+    expect(promote([switchStmt]).returnType).toBe("int");
+    expect(promote([tryStmt]).returnType).toBe("int");
+  });
+
+  it("finds a value return after a label, and one nested three constructs deep", () => {
+    expect(promote([{ kind: "label", name: "loc_1" }, ret(irConst(0))]).returnType).toBe("int");
+    const nested: IRStmt = {
+      kind: "try",
+      body: [
+        {
+          kind: "for",
+          init: assign(irReg("ecx", 4), irConst(0)),
+          condition: irConst(1),
+          update: assign(irReg("ecx", 4), irConst(1)),
+          body: [{ kind: "if", condition: irConst(1), thenBody: [ret(irReg("eax", 4))] }],
+        },
+      ],
+      handler: [],
+    };
+    expect(promote([nested]).returnType).toBe("int");
+  });
+
+  it("stays void when the only returns inside those constructs are bare", () => {
+    const tryStmt: IRStmt = { kind: "try", body: [ret()], handler: [ret()] };
+    const switchStmt: IRStmt = {
+      kind: "switch",
+      expr: irReg("eax", 4),
+      cases: [{ values: [1], body: [ret()] }],
+      defaultBody: [ret()],
+    };
+    expect(promote([tryStmt, switchStmt]).returnType).toBe("void");
   });
 });

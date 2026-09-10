@@ -1563,6 +1563,102 @@ describe("decompileFunction — a tail call is a call", () => {
     expect(code).not.toContain("rip + 0x100");
   });
 
+  /**
+   * As `run64WithIat`, naming the function — the shape `functionDetect.ts`'s
+   * thunk renaming produces, where the function carries its import's name.
+   */
+  function runAs(
+    self: { name: string; isThunk?: boolean },
+    instructions: Instruction[],
+    iatMap: Map<number, { lib: string; func: string }>,
+    is64 = true,
+    funcMap = new Map<number, { name: string; address: number }>(),
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      ...self,
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      is64,
+      new Map(),
+      iatMap,
+      new Map(),
+      funcMap,
+    ).code;
+  }
+
+  // `jmp qword ptr [rip + 0x100]` at 0x401000, size 4 → slot at 0x401104.
+  const thunkBody = [ins(0x401000, "jmp", "qword ptr [rip + 0x100]")];
+  const ntdll = (func: string) => new Map([[0x401104, { lib: "ntdll.dll", func }]]);
+
+  /**
+   * An import thunk is NAMED after the import it jumps to, and the tail-jmp
+   * path resolves the same IAT slot to the same name, so the body read
+   * `return RtlVirtualUnwind();` under a header `RtlVirtualUnwind` — 3 such
+   * functions per x64 corpus binary at 6299113, none of which recurses. The
+   * transfer is spelled through the slot instead (peek-a-bin-n9cl.2). Negative
+   * control: dropping the `isThunk`/name-equality admission in
+   * `importThunkTransfer` brings the self-call back in the first two rows.
+   */
+  it("spells a thunk named after its import as a jmp through the IAT slot, not a self-call", () => {
+    const code = runAs({ name: "RtlVirtualUnwind" }, thunkBody, ntdll("RtlVirtualUnwind"));
+
+    expect(code).toContain(
+      "// import thunk: jmp through the IAT slot for ntdll.dll!RtlVirtualUnwind",
+    );
+    expect(code).toContain("return ((intptr_t (*)())__imp_RtlVirtualUnwind)();");
+    expect(code).not.toMatch(/return RtlVirtualUnwind\(/);
+  });
+
+  it("takes detection's isThunk as the other sufficient admission", () => {
+    const code = runAs({ name: "sub_401000", isThunk: true }, thunkBody, ntdll("RtlUnwindEx"));
+
+    expect(code).toContain("__imp_RtlUnwindEx");
+    expect(code).toContain("for ntdll.dll!RtlUnwindEx");
+    expect(code).not.toMatch(/\bRtlUnwindEx\(/);
+  });
+
+  it("leaves a differently named, unmarked function's tail jmp as the call it is", () => {
+    const code = runAs({ name: "sub_401000" }, thunkBody, ntdll("RtlUnwindEx"));
+
+    expect(code).toContain("RtlUnwindEx(");
+    expect(code).not.toContain("__imp_");
+    expect(code).not.toContain("import thunk");
+  });
+
+  it("spells the 32-bit form, `jmp dword ptr [slot]`, the same way", () => {
+    const code = runAs(
+      { name: "RtlLookupFunctionEntry" },
+      [ins(0x401000, "jmp", "dword ptr [0x402000]")],
+      new Map([[0x402000, { lib: "ntdll.dll", func: "RtlLookupFunctionEntry" }]]),
+      false,
+    );
+
+    expect(code).toContain("return ((intptr_t (*)())__imp_RtlLookupFunctionEntry)();");
+    expect(code).not.toMatch(/return RtlLookupFunctionEntry\(/);
+  });
+
+  it("does not invent a slot for a same-named direct jmp — there is no IAT slot to spell", () => {
+    const code = runAs(
+      { name: "helper" },
+      seq(0x401000, [["jmp", "0x401100"]]),
+      new Map(),
+      true,
+      new Map([[0x401100, { name: "helper", address: 0x401100 }]]),
+    );
+
+    expect(code).toContain("helper(");
+    expect(code).not.toContain("__imp_");
+  });
+
   it("emits the tail call on the taken side of a branch, whose body looked dropped", () => {
     // t64!sub_14000270C: the `jge` arm is `lea rcx,[rdx+0x30]; jmp
     // EnterCriticalSection`, an unlifted tail call, so that arm emitted nothing.
@@ -1684,6 +1780,50 @@ describe("decompileFunction — a tail call is a call", () => {
 
     expect(code).toContain("sub_401100(");
     expect(code).not.toContain("indirect jmp through");
+  });
+});
+
+/**
+ * The header spells an API's declared return type only where the body proves it
+ * locally — see `headerReturnType` in emit.ts (peek-a-bin-n9cl.2).
+ */
+describe("decompileFunction — the header's return type follows a returned API result", () => {
+  it("spells the API's type when the function returns its result", () => {
+    const code = runWithStructs(
+      seq(0x401000, [["call", "dword ptr [0x402000]"], ["ret"]]),
+      imports("GetProcessHeap"),
+    );
+    expect(code).toMatch(/^HANDLE sub_401000\(/m);
+    expect(code).toContain("return GetProcessHeap();");
+  });
+
+  it("refuses to int when two paths return two APIs of different types", () => {
+    const iat = new Map([
+      [0x402000, { lib: "kernel32.dll", func: "GetLastError" }],
+      [0x402004, { lib: "kernel32.dll", func: "GetProcessHeap" }],
+    ]);
+    const code = runWithStructs(
+      seq(0x401000, [
+        ["cmp", "ecx, 0"], // 0x401000
+        ["je", "0x401010"], // 0x401004
+        ["call", "dword ptr [0x402000]"], // 0x401008
+        ["ret"], // 0x40100c
+        ["call", "dword ptr [0x402004]"], // 0x401010
+        ["ret"], // 0x401014
+      ]),
+      iat,
+    );
+    expect(code).toMatch(/^int sub_401000\(/m);
+    expect(code).toContain("GetLastError()");
+    expect(code).toContain("GetProcessHeap()");
+  });
+
+  it("refuses to int when a returned value is not an API result", () => {
+    const code = runWithStructs(
+      seq(0x401000, [["mov", "eax, 1"], ["ret"]]),
+      imports("GetLastError"),
+    );
+    expect(code).toMatch(/^int sub_401000\(/m);
   });
 });
 
@@ -2206,6 +2346,24 @@ describe("decompileFunction — .pdata exception regions", () => {
     expect(code).toContain("0x402000");
     expect(code).toContain("0x401002");
     expect(code).not.toContain("0x2000\n");
+  });
+
+  /**
+   * The header's return type is decided over the structured tree, and a `__try`
+   * is a statement with a body: before `hasReturnValue` walked `bodiesOf`, the
+   * valued return inside the region was invisible and the header said `void`
+   * above `return 1;` — every `__try`-wrapped function with a return value in
+   * the x64 corpus, 3/3 on t64/w64 at 6299113 (peek-a-bin-n9cl.2). Negative
+   * control: the three-kind recursion reddens this row.
+   */
+  it("declares a return type when the valued return sits inside the __try", () => {
+    const code = decompile([
+      entry(0x1000, 8, 0x2000, [exceptEntry(0x1002, 0x1006, 0x2000, 0x1006)]),
+    ]);
+    expect(code).toContain("__try {");
+    expect(code).toMatch(/return (eax|1);/);
+    expect(code).toMatch(/^int sub_401000\(/m);
+    expect(code).not.toMatch(/^void sub_401000\(/m);
   });
 
   it("still matches an array the caller already normalised to VAs", () => {

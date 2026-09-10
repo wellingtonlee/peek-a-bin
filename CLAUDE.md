@@ -1082,6 +1082,24 @@ refused. **Read the long-form entry before changing the code it describes.**
   `selfAssigns.ts`'s `FOR_HEADER` was the second hand-rolled copy and the drift guard could not see
   it (it names one keyword, not two); **widening the guard to single-keyword patterns was measured
   and refused**.
+- **A function's return type is decided over the WHOLE structured tree, through `bodiesOf`.**
+  `promote.ts`'s `hasReturnValue` hand-listed `if`/`while`/`do_while`, so a valued `return` inside a
+  `for`, a `switch` arm or a `__try` body left a `void` header above `return rax;` — every
+  `__try`-wrapped function with a value in the x64 corpus (3/3 on t64/w64 at 6299113 → 0/0), and
+  gcc only *warns*. `emit.ts`'s `headerReturnType` then widens the `int` **only** when every valued
+  return is one `API_TYPES` call result and they all agree, asked of the **folded** body; a
+  void-returning API, a returned register, a `sub_…()` result or a disagreement refuse to `int`.
+  **Width (`int` vs `int64_t`) and pointer-ness from callers are deliberately NOT inferred.**
+- **An import thunk is NAMED after its callee, so its tail `jmp` must not be spelled as a call to
+  itself.** `functionDetect.ts` renames a `jmp [IAT slot]` function to the import and sets
+  `isThunk`; the lifter resolved the same slot to the same name and emitted
+  `RtlVirtualUnwind() { return RtlVirtualUnwind(); }` (3 per x64 binary). `importThunkTransfer`
+  (`lifter.ts`) spells the transfer through the slot — `((intptr_t (*)())__imp_X)()` under a
+  `// import thunk: … <dll>!<func>` comment — when `isThunk` **or** the resolved name equals the
+  function's, and only when the target *is* an IAT slot. **`importSlotName` / `IMPORT_SLOT_PREFIX`
+  (`lifter.ts`) are the one declaration of the `__imp_` spelling**; epic n9cl's IAT-slot loads must
+  reuse it, and `corpus/sweep.ts`'s `emittedCallees` reads the prefix back so `distinct callees
+  lost` stays 0.
 
 ### UI, build and deployment
 
