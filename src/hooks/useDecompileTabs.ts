@@ -9,13 +9,21 @@ import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
 import { llmConfigProblem, loadDecompileServer, loadSettings } from "../llm/settings";
 import type { PEFile } from "../pe/types";
 import { disasmWorker } from "../workers/disasmClient";
-import type { DecompileTab, DecompileTabsState, HighCacheEntry } from "./decompileTabsState";
+import type {
+  DecompileTab,
+  DecompileTabsState,
+  HighCacheEntry,
+  LowCacheEntry,
+} from "./decompileTabsState";
 import {
+  decompileInputsKey,
   decompileServerKey,
   initialTabsState,
   readHighCache,
+  readLowCache,
   tabsReducer,
   writeHighCache,
+  writeLowCache,
 } from "./decompileTabsState";
 import { getDisplayName } from "./usePEFile";
 
@@ -58,8 +66,11 @@ export function useDecompileTabs({
 }: UseDecompileTabsArgs): UseDecompileTabsResult {
   const [tabsState, dispatch] = useReducer(tabsReducer, undefined, initialTabsState);
 
-  // Per-tab, per-function caches: Map<funcAddr, {code, lineMap}>
-  const lowCache = useRef(new Map<number, { code: string; lineMap: Map<number, number> }>());
+  // Per-tab, per-function caches: Map<funcAddr, entry>. The Low Level one is
+  // THE decompile cache — `disasmClient` keeps none (peek-a-bin-n9cl.7) — and
+  // its entries are valid only under the inputs they were produced with; see
+  // `decompileInputsKey`.
+  const lowCache = useRef(new Map<number, LowCacheEntry>());
   const highCache = useRef(new Map<number, HighCacheEntry>());
   const aiCache = useRef(new Map<number, { code: string; lineMap: Map<number, number> }>());
 
@@ -85,7 +96,10 @@ export function useDecompileTabs({
     if (!currentFunc || !pe || instructions.length === 0) return;
     const addr = currentFunc.address;
 
-    const cached = lowCache.current.get(addr);
+    // Computed before the lookup: the renames are part of the key, so a result
+    // is only reused while the names it was emitted with are still the names.
+    const inputsKey = decompileInputsKey(renames);
+    const cached = readLowCache(lowCache.current, addr, inputsKey);
     if (cached) {
       dispatch({ type: "LOAD_OK", tab: "low", code: cached.code, lineMap: cached.lineMap });
       return;
@@ -120,7 +134,7 @@ export function useDecompileTabs({
         // instruction array (peek-a-bin-s2ws).
         functions,
       );
-      lowCache.current.set(addr, result);
+      writeLowCache(lowCache.current, addr, { ...result, inputsKey });
       dispatch({ type: "LOAD_OK", tab: "low", code: result.code, lineMap: result.lineMap });
     } catch (err: any) {
       dispatch({ type: "LOAD_ERR", tab: "low", error: err?.message ?? String(err) });

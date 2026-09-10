@@ -154,15 +154,16 @@ describe("DisasmWorkerClient — the worker is built on first use", () => {
     expect(FakeWorker.built).toBe(1);
   });
 
-  it("builds none for the four methods that only touch client-side state", async () => {
+  it("builds none for the three methods that only touch client-side state", async () => {
     // `App` calls `registerSourceBlob` and `setImage` on every parse. If either
     // constructed, the thread would be back at load time by another door.
+    // (There were four until peek-a-bin-n9cl.7 deleted the client's decompile
+    // cache and, with it, `invalidateDecompileCache`.)
     const { client } = await loadClient();
     const buffer = new ArrayBuffer(8);
     client.registerSourceBlob(buffer, new Blob([new Uint8Array(8)]));
     client.setImage(0x8664);
     client.invalidateCache();
-    client.invalidateDecompileCache();
     expect(FakeWorker.built).toBe(0);
   });
 

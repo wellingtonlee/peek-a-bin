@@ -25,7 +25,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { unsupportedOnArch } from "../../disasm/arch";
-import type { Xref } from "../../disasm/types";
+import { StructRegistry } from "../../disasm/decompile/structs";
+import type { Instruction, Xref } from "../../disasm/types";
 import { buildMinimalPE32 } from "../../pe/__tests__/fixtures";
 import { parsePE } from "../../pe/parser";
 import type { AnalyzedFile } from "../session";
@@ -409,6 +410,58 @@ describe("decompile_function — architecture refusal (peek-a-bin-9b1)", () => {
 
     expect(result.isError).toBeUndefined();
     expect(textOf(result)).toMatch(/stp\s+x19, x20, \[sp, #-0x30\]!/);
+  });
+});
+
+/**
+ * A rename reaches the decompiled function's OWN header (peek-a-bin-n9cl.7).
+ *
+ * `decompile_function` returned `functionName: <renamed>` beside a `code` whose
+ * header still read `sub_401000(` — the callee names came from the renames
+ * (`funcMap`) and the header from the detector. The pipeline now reads the same
+ * map for both, so this is asserted end to end through the real handler on a
+ * hand-written x86 function.
+ */
+describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)", () => {
+  const insn = (address: number, mnemonic: string, opStr: string): Instruction => ({
+    address,
+    mnemonic,
+    opStr,
+    size: 4,
+    bytes: new Uint8Array(4),
+  });
+
+  /** `mov eax, 1 / ret` at 0x401000, in a stub with everything the tool reads. */
+  function x86Session(renames: Record<string, string>) {
+    return stubSession({
+      pe: { is64: false, sections: [], runtimeFunctions: undefined },
+      functions: [{ name: "sub_401000", address: 0x401000, size: 8 }],
+      instructions: [insn(0x401000, "mov", "eax, 1"), insn(0x401004, "ret", "")],
+      jumpTables: new Map(),
+      structRegistry: new StructRegistry(),
+      renames,
+    } as unknown as Partial<AnalyzedFile>);
+  }
+
+  it("spells the header with the renamed name, agreeing with functionName", async () => {
+    const { session } = x86Session({ [String(0x401000)]: "main" });
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const out = JSON.parse(textOf(await decompile({ fileId: "sample", address: "0x401000" })));
+
+    expect(out.functionName).toBe("main");
+    expect(out.code).toMatch(/^\w+ main\(/m);
+    expect(out.code).not.toContain("sub_401000");
+  });
+
+  it("keeps the detector's name when nothing is renamed", async () => {
+    const { session } = x86Session({});
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const out = JSON.parse(textOf(await decompile({ fileId: "sample", address: "0x401000" })));
+
+    expect(out.functionName).toBe("sub_401000");
+    expect(out.code).toMatch(/^\w+ sub_401000\(/m);
   });
 });
 

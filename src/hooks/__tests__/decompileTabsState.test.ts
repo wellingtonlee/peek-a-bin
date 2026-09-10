@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   type DecompileServerConfig,
+  decompileInputsKey,
   decompileServerKey,
   type HighCacheEntry,
   initialTabsState,
+  type LowCacheEntry,
   readHighCache,
+  readLowCache,
   tabsReducer,
   writeHighCache,
+  writeLowCache,
 } from "../decompileTabsState";
 
 const DISABLED: DecompileServerConfig = {
@@ -29,6 +33,99 @@ function entry(
 }
 
 const PLACEHOLDER = "// Client-side decompiler not yet available.";
+
+/**
+ * The Low Level cache's key (peek-a-bin-n9cl.7). `disasmClient` used to hold a
+ * second decompile cache keyed on the bare address, with an invalidation method
+ * nothing called, so a rename reached the listing and never the C. That cache
+ * is gone; this key is the one rule that replaces it, and — as with
+ * `decompileServerKey` — it is derived at read time so there is nothing to
+ * remember to invalidate.
+ */
+describe("decompileInputsKey", () => {
+  it("differs when a rename is added", () => {
+    expect(decompileInputsKey({ 0x401000: "main" })).not.toBe(decompileInputsKey({}));
+  });
+
+  it("differs when a rename is changed", () => {
+    expect(decompileInputsKey({ 0x401000: "main" })).not.toBe(
+      decompileInputsKey({ 0x401000: "entry" }),
+    );
+  });
+
+  it("returns to the original key when a rename is cleared", () => {
+    const before = decompileInputsKey({});
+    const during = decompileInputsKey({ 0x401000: "main" });
+    expect(during).not.toBe(before);
+    expect(decompileInputsKey({})).toBe(before);
+  });
+
+  it("does not depend on insertion order", () => {
+    const a: Record<number, string> = {};
+    a[0x402000] = "second";
+    a[0x401000] = "first";
+    const b: Record<number, string> = {};
+    b[0x401000] = "first";
+    b[0x402000] = "second";
+    expect(decompileInputsKey(a)).toBe(decompileInputsKey(b));
+  });
+
+  it("covers a rename of ANOTHER function, deliberately", () => {
+    // A rename of `sub_402000` changes the C of every function that calls it,
+    // and the callers are not known here (`callGraph` is null before xrefs
+    // finish and after a timeout). So the key is over all renames, not the
+    // function's own: coarse, and never silently stale.
+    expect(decompileInputsKey({ 0x402000: "helper" })).not.toBe(decompileInputsKey({}));
+  });
+
+  it("keeps two renames apart from one whose name happens to contain the other", () => {
+    expect(decompileInputsKey({ 0x1: "a", 0x2: "b" })).not.toBe(
+      decompileInputsKey({ 0x1: "a\x002=b" }),
+    );
+  });
+});
+
+describe("low-level cache: results are scoped to the renames they were emitted under", () => {
+  const low = (code: string, inputsKey: string): LowCacheEntry => ({
+    code,
+    lineMap: new Map(),
+    inputsKey,
+  });
+
+  it("hits under the key it was written with", () => {
+    const cache = new Map<number, LowCacheEntry>();
+    const key = decompileInputsKey({});
+    writeLowCache(cache, 0x401000, low("int sub_401000() {}", key));
+    expect(readLowCache(cache, 0x401000, key)?.code).toBe("int sub_401000() {}");
+  });
+
+  it("misses on a stale key — a rename after the entry was written", () => {
+    const cache = new Map<number, LowCacheEntry>();
+    writeLowCache(cache, 0x401000, low("int sub_401000() {}", decompileInputsKey({})));
+    expect(readLowCache(cache, 0x401000, decompileInputsKey({ 0x401000: "main" }))).toBeNull();
+  });
+
+  it("hits again when the rename is reverted", () => {
+    const cache = new Map<number, LowCacheEntry>();
+    const plain = decompileInputsKey({});
+    writeLowCache(cache, 0x401000, low("int sub_401000() {}", plain));
+    expect(readLowCache(cache, 0x401000, decompileInputsKey({ 0x401000: "main" }))).toBeNull();
+    expect(readLowCache(cache, 0x401000, plain)?.code).toBe("int sub_401000() {}");
+  });
+
+  it("misses for an address never written", () => {
+    const cache = new Map<number, LowCacheEntry>();
+    expect(readLowCache(cache, 0x401000, decompileInputsKey({}))).toBeNull();
+  });
+
+  it("replaces the entry rather than keeping both", () => {
+    const cache = new Map<number, LowCacheEntry>();
+    writeLowCache(cache, 0x401000, low("old", decompileInputsKey({})));
+    writeLowCache(cache, 0x401000, low("new", decompileInputsKey({ 0x401000: "main" })));
+    expect(cache.size).toBe(1);
+    expect(readLowCache(cache, 0x401000, decompileInputsKey({}))).toBeNull();
+  });
+});
 
 describe("decompileServerKey", () => {
   it("collapses every disabled configuration to one key", () => {

@@ -110,6 +110,148 @@ function declaredType(code: string, fieldName: string): string | undefined {
 /** An import table with one entry, at the address the tests below call through. */
 const imports = (func: string) => new Map([[0x402000, { lib: "kernel32.dll", func }]]);
 
+/**
+ * WHOSE NAME THE HEADER CARRIES (peek-a-bin-n9cl.7).
+ *
+ * Callee names have always come from `funcMap` — the map both consumers build
+ * from the user's renames — while the function's own header took `func.name`,
+ * the detector's raw `sub_<addr>`. So renaming `sub_401000` to `main` changed
+ * every `sub_401000()` call site in OTHER functions and left `int sub_401000(…)`
+ * at the top of the function itself; a recursive call spelled a name its own
+ * header did not. The header now reads the same map the call sites do.
+ */
+describe("decompileFunction — the header carries the display name", () => {
+  function runNamed(
+    instructions: Instruction[],
+    funcMap: Map<number, { name: string; address: number }>,
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      funcMap,
+    ).code;
+  }
+
+  const leaf = (): Instruction[] => seq(0x401000, [["mov", "eax, 1"], ["ret"]]);
+
+  it("spells the header with the name funcMap gives this address", () => {
+    const code = runNamed(leaf(), new Map([[0x401000, { name: "main", address: 0x401000 }]]));
+
+    expect(code).toMatch(/^\w+ main\(/m);
+    expect(code).not.toContain("sub_401000");
+  });
+
+  it("falls back to the detector's name when funcMap does not list the function", () => {
+    // `corpus/sweep.ts` and any caller with raw names: byte-identical output.
+    const code = runNamed(leaf(), new Map());
+
+    expect(code).toMatch(/^\w+ sub_401000\(/m);
+  });
+
+  it("gives a recursive call the same name as the header", () => {
+    const code = runNamed(
+      seq(0x401000, [
+        ["push", "ebp"],
+        ["mov", "ebp, esp"],
+        ["call", "0x401000"],
+        ["pop", "ebp"],
+        ["ret"],
+      ]),
+      new Map([[0x401000, { name: "main", address: 0x401000 }]]),
+    );
+
+    expect(code).toMatch(/^\w+ main\(/m);
+    expect(code).toContain("main(");
+    expect(code).not.toContain("sub_401000");
+  });
+});
+
+/**
+ * THE STRUCT REGISTRY IS IDEMPOTENT OVER ONE FUNCTION, and the Low Level cache
+ * now depends on that (peek-a-bin-n9cl.7). `disasmClient`'s address-keyed
+ * decompile cache is deleted, so a function is re-decompiled whenever a rename
+ * lands, against the worker's one session-long `StructRegistry`. If a second
+ * pass over the same instructions could change the registry — and so the C —
+ * the cache's miss would be a visible mutation rather than a refresh. It cannot:
+ * the second pass reproduces the same `offset:size` fingerprint, which is an
+ * exact hit, and `mergeFields` over identical fields is a no-op. Pinned here
+ * because nothing else in the suite decompiles twice against one registry.
+ */
+describe("decompileFunction — decompiling twice against one registry is idempotent", () => {
+  function runReg(
+    instructions: Instruction[],
+    registry: StructRegistry,
+    iatMap: Map<number, { lib: string; func: string }> = new Map(),
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      iatMap,
+      new Map(),
+      new Map(),
+      registry,
+    ).code;
+  }
+
+  it("emits identical C, struct definition included, on the second and third pass", () => {
+    const registry = new StructRegistry();
+    const body = (): Instruction[] =>
+      seq(0x401000, [
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["push", "dword ptr [ebx + 8]"],
+        ["call", "dword ptr [0x402000]"],
+        ["ret"],
+      ]);
+
+    const first = runReg(body(), registry, imports("Sleep"));
+    expect(first).toContain("struct struct_");
+    expect(runReg(body(), registry, imports("Sleep"))).toBe(first);
+    expect(runReg(body(), registry, imports("Sleep"))).toBe(first);
+  });
+
+  it("holds for two bases in one function", () => {
+    const registry = new StructRegistry();
+    const body = (): Instruction[] =>
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [esi + 4]"],
+        ["mov", "dword ptr [ebx + 8], eax"],
+        ["mov", "dword ptr [ebx + 0x10], 1"],
+        ["mov", "dword ptr [esi + 0xC], 2"],
+        ["ret"],
+      ]);
+
+    const first = runReg(body(), registry);
+    expect(first).toContain("struct struct_");
+    expect(runReg(body(), registry)).toBe(first);
+  });
+});
+
 describe("decompileFunction — conditionals reach the output with the right sense", () => {
   // The regression test for peek-a-bin-h9v, written at the level the bug was
   // actually visible at. `je` jumps when ecx == 0, and the jump target is the

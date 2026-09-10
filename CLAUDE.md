@@ -218,9 +218,16 @@ gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs �
 async, phased via `analysisPhase`. The decoder comes from `coffHeader.machine` (`disasm/arch.ts`):
 x86/x64 take recursive descent + gap fill, ARM64 the fixed-width sweep.
 
-**Worker**: RPC-style, `src/workers/disasmClient.ts`. The client caches results (disasm, xref,
-decompile) and mints the instruction-array tokens the worker's derived caches key on
-(`insnsTokens`; **the counter never resets, so a token cannot be reused across files**). Whole-file
+**Worker**: RPC-style, `src/workers/disasmClient.ts`. The client caches results (disasm, xref —
+**not decompile**) and mints the instruction-array tokens the worker's derived caches key on
+(`insnsTokens`; **the counter never resets, so a token cannot be reused across files**). **The one
+decompile cache is `useDecompileTabs`' `lowCache`, content-keyed by `decompileInputsKey` (all
+renames) in `decompileTabsState.ts` — derived at read time like `decompileServerKey`, so there is no
+invalidation call to remember.** The client's address-keyed copy, with an `invalidateDecompileCache()`
+nothing called, was deleted: a rename changed the request and not the address, so it served
+pre-rename C for the session. The `resetStructRegistry` RPC stays. The pipeline's own header name
+comes from `funcMap` — the same map the callee names come from — so a rename reaches the header and
+every call site by construction (`pipeline.ts` step 7). Whole-file
 checksum and entropy go to the metrics worker; inputs under the thresholds in `asyncMetricState.ts`
 (256 KiB entropy strip, 1 MiB file metrics) stay synchronous, so ordinary binaries never show a
 loading state.

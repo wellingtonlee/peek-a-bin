@@ -86,7 +86,6 @@ class DisasmWorkerClient {
    * reverse, depending only on who asked first.
    */
   private xrefCache = new WeakMap<Instruction[], { boundsKey: string; map: Map<number, Xref[]> }>();
-  private decompileCache = new Map<number, { code: string; lineMap: Map<number, number> }>();
   /**
    * Serial numbers standing for whole instruction arrays, so the worker can
    * cache what it derives from one across the many requests that name it.
@@ -268,14 +267,15 @@ class DisasmWorkerClient {
    * await — a barrier would order the messages but still leave the answer
    * depending on worker state that some other message can change.
    *
-   * Also drops every cached answer, because all four caches are per-image: the
+   * Also drops every cached answer, because all three caches are per-image: the
    * disassembly and xref caches key on addresses that mean nothing across
-   * files, the decompile cache keys on a bare function address, and the jump
-   * tables would otherwise be seeded into the *next* file's recursive descent.
+   * files, and the jump tables would otherwise be seeded into the *next* file's
+   * recursive descent. (There is deliberately no decompile cache here — see
+   * {@link decompileFunction}.)
    *
    * Posts nothing, and so **builds no worker** — as do
-   * {@link registerSourceBlob}, {@link invalidateCache} and
-   * {@link invalidateDecompileCache}. All four are client-side bookkeeping, and
+   * {@link registerSourceBlob} and {@link invalidateCache}. All three are
+   * client-side bookkeeping, and
    * `App` calls the first two on every parse; making any of them construct
    * would put the thread back at load time by another door and undo
    * {@link ensureWorker}.
@@ -284,7 +284,6 @@ class DisasmWorkerClient {
     this.imageMachine = machine;
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
-    this.decompileCache.clear();
     this.jumpTables = new Map();
     this.jumpTableSpans = [];
   }
@@ -360,7 +359,6 @@ class DisasmWorkerClient {
   invalidateCache(): void {
     this.disasmCache.clear();
     this.xrefCache = new WeakMap();
-    this.decompileCache.clear();
   }
 
   async disassemble(bytes: Uint8Array, baseAddress: number, is64: boolean): Promise<Instruction[]> {
@@ -656,8 +654,18 @@ class DisasmWorkerClient {
     runtimeFunctions?: import("../pe/types").RuntimeFunction[],
     functions?: readonly FuncExtent[],
   ): Promise<{ code: string; lineMap: Map<number, number> }> {
-    const cached = this.decompileCache.get(func.address);
-    if (cached) return cached;
+    // NO CACHE HERE, AND THAT IS A DELETION. This method used to memoise its
+    // reply on the bare function address, with a single caller —
+    // `useDecompileTabs.decompileLow` — that keeps a cache of its own, and an
+    // `invalidateDecompileCache()` that nothing called. A rename changes the
+    // request (`funcMap` carries display names) but not the address, so the
+    // second cache served the pre-rename C for the rest of the session while
+    // the first had already been told. Two caches with one invalidation rule
+    // between them is a stale-data generator; the fix is to keep one, and the
+    // one kept is the hook's, keyed on the inputs that decide the answer
+    // (`decompileInputsKey` in `hooks/decompileTabsState.ts`) rather than on
+    // the address alone. See `readLowCache` there for the rule.
+    //
     // THE PAYLOAD IS PER-FUNCTION, and that is 94-99% of what a decompile
     // request used to cost (peek-a-bin-9gc9). The pipeline reads the instruction
     // array only through `getFuncInsns` and the xref map only at the addresses
@@ -718,9 +726,7 @@ class DisasmWorkerClient {
       // worst sending the section twice.
       result = await this.send("decompileFunction", { ...args, instructions });
     }
-    const parsed = { code: result.code, lineMap: new Map(result.lineMap) };
-    this.decompileCache.set(func.address, parsed);
-    return parsed;
+    return { code: result.code, lineMap: new Map(result.lineMap) };
   }
 
   /** The stable token for this instruction array, minting one on first sight. */
@@ -732,12 +738,7 @@ class DisasmWorkerClient {
     return token;
   }
 
-  invalidateDecompileCache(): void {
-    this.decompileCache.clear();
-  }
-
   async resetStructRegistry(): Promise<void> {
-    this.decompileCache.clear();
     await this.send("resetStructRegistry");
   }
 }

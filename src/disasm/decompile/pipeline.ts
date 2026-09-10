@@ -258,8 +258,20 @@ export function decompileFunction(
     const typeCtx = inferTypes(cleaned, iatMap);
 
     // 7. Wrap in IRFunction with variable promotion
+    //
+    // THE HEADER'S NAME COMES FROM `funcMap`, THE SAME MAP EVERY CALLEE NAME
+    // ALREADY COMES FROM (`resolveCallTarget`/`resolveNamedTarget` in
+    // lifter.ts). Both consumers build that map from the user's renames — the
+    // browser with `getDisplayName`, the MCP server from `af.renames` — while
+    // `func.name` is the detector's raw `sub_<addr>`, so passing it here meant a
+    // rename reached every CALLER's body and never the function's own header,
+    // and a recursive call spelled a name the header did not (peek-a-bin-n9cl.7).
+    // Reading the map makes header and call sites agree by construction, for
+    // both consumers and for `corpus/sweep.ts`, whose map carries raw names and
+    // is therefore byte-identical before and after. The fallback is the raw
+    // name, for a caller whose map does not list this function at all.
     let irFunc = promoteVars(
-      func.name,
+      funcMap.get(func.address)?.name ?? func.name,
       func.address,
       cleaned,
       stackFrame,

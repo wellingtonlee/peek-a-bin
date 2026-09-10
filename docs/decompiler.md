@@ -193,8 +193,9 @@ computing its own, so the measurement is of the same code the tool runs. On the 
 worker's `decompileFunction` RPC builds it, because that request already carries the whole section's
 `Instruction[]` — `useDecompileTabs` passes the array `hybridDisassemble` returned, not one
 function's slice — plus every detected function's extents. Deriving it from the same message that
-consumes it is what avoids an out-of-band sender racing the first decompile and the client's
-address-keyed decompile cache. `CallSummaryCache` holds one image's answer against a token the
+consumes it is what avoids an out-of-band sender racing the first decompile (and, until
+peek-a-bin-n9cl.7 deleted it, the client's address-keyed decompile cache serving the summary-less
+answer for the session). `CallSummaryCache` holds one image's answer against a token the
 client mints from instruction-array identity, since the summary is a whole-image property while a
 request is about one function. Both gates — no extents, or a 32-bit image — mean exactly the
 pre-summary behaviour.

@@ -114,8 +114,10 @@
  * to build a transfer list out of per-instruction `bytes` views. `xrefEntries`
  * is the second member and was not in the bead's list at all.
  *
- * It is bounded by the client's `decompileCache`, which is keyed on the
- * function's address, so the RPC fires once per function per file — a user
+ * It is bounded by the hook's Low Level cache (`useDecompileTabs`, keyed on the
+ * function's address and the renames in force — the client itself keeps no
+ * decompile cache since peek-a-bin-n9cl.7), so the RPC fires once per function
+ * per file while nothing is renamed — a user
  * clicking through fifty functions of the `go` image pays ~28 s of clone. The
  * fix for that is worker-side *instruction* residency, which is the bead's own
  * option (b) and a much larger change than either option (a) or the PE32
@@ -664,9 +666,10 @@ function print(rows: Row[]): void {
   console.log("percent either side of WHOLE PAYLOAD is that noise, not a missing member: the");
   console.log("two big components are medianed over fewer repetitions than the small ones.");
   console.log("");
-  console.log("The RPC fires once per function per file — disasmClient's decompileCache is");
-  console.log("keyed on the function address — so multiply a request by the functions a user");
-  console.log("opens, not by anything the loader does.");
+  console.log("The RPC fires once per function per file while nothing is renamed — the");
+  console.log("hook's Low Level cache is keyed on the function address plus the renames in");
+  console.log("force — so multiply a request by the functions a user opens, not by anything");
+  console.log("the loader does.");
 }
 
 async function main(): Promise<void> {

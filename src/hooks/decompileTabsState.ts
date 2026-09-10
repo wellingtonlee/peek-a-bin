@@ -51,6 +51,76 @@ export function initialTabsState(): DecompileTabsState {
   };
 }
 
+// ── Low Level result cache ──
+
+/**
+ * One cached Low Level decompilation, keyed on the function's address by the
+ * map that holds it and on {@link LowCacheEntry.inputsKey} for whether it is
+ * still the answer.
+ */
+export interface LowCacheEntry {
+  code: string;
+  lineMap: Map<number, number>;
+  /** The user inputs this entry was decompiled under — see `decompileInputsKey()`. */
+  inputsKey: string;
+}
+
+/**
+ * Identity of every user-supplied input a Low Level decompilation reads, so a
+ * cached result is reused exactly while those inputs are what they were.
+ *
+ * The same rule as {@link decompileServerKey} for the High Level tab, and for
+ * the same reason: derived at read time, so there is no invalidation call to
+ * remember. `disasmClient` used to keep a second decompile cache keyed on the
+ * bare address with an `invalidateDecompileCache()` that nothing called, and a
+ * rename therefore reached the disassembly listing and never the C — that cache
+ * is deleted (peek-a-bin-n9cl.7), and this key is what replaces its rule.
+ *
+ * DELIBERATELY OVER ALL RENAMES, NOT THIS FUNCTION'S. A rename of function B
+ * changes the emitted C of every function that calls B — the callee name comes
+ * from the same `funcMap` the header does — and the set of callers is not
+ * known here: `state.callGraph` would give it, but it is null before
+ * `buildAllXrefs` finishes and stays null forever after a timeout, so an
+ * invalidation derived from it would silently be a no-op exactly then. The
+ * price of the coarse key is one re-decompile (~6 ms, peek-a-bin-9gc9's figure)
+ * per revisited function per rename, against a stale header or call site for
+ * the session. It is O(R log R) in the number of user renames — tens — never in
+ * the number of functions.
+ *
+ * Sorted by numeric address so the key does not depend on insertion order, and
+ * JSON-encoded so no name — whatever characters it holds — can read as a
+ * separator (a `join` on a delimiter was tried first and its own test found the
+ * collision).
+ */
+export function decompileInputsKey(renames: Readonly<Record<number, string>>): string {
+  const pairs: [number, string][] = Object.entries(renames).map(([addr, name]) => [
+    Number(addr),
+    name,
+  ]);
+  pairs.sort((a, b) => a[0] - b[0]);
+  return JSON.stringify(pairs);
+}
+
+/** Cache hit only if the entry was produced under the current inputs. */
+export function readLowCache(
+  cache: Map<number, LowCacheEntry>,
+  addr: number,
+  inputsKey: string,
+): LowCacheEntry | null {
+  const hit = cache.get(addr);
+  if (!hit || hit.inputsKey !== inputsKey) return null;
+  return hit;
+}
+
+/** Store a Low Level result under the inputs that produced it. */
+export function writeLowCache(
+  cache: Map<number, LowCacheEntry>,
+  addr: number,
+  entry: LowCacheEntry,
+): void {
+  cache.set(addr, entry);
+}
+
 // ── High Level result cache ──
 
 /**
