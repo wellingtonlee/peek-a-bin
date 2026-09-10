@@ -558,6 +558,39 @@ describe("decompileFunction — movabs", () => {
   });
 });
 
+describe("decompileFunction — rep stos/movs reach the page as intrinsics with their side effects", () => {
+  it("emits __stosd and the registers it leaves behind", () => {
+    const code = run(
+      seq(0x401000, [
+        ["mov", "ecx, 0x10"],
+        ["rep stosd", "dword ptr es:[edi], eax"],
+        ["mov", "eax, edi"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("__stosd(edi, eax, 0x10);");
+    expect(code).toContain("return edi + 0x40;");
+    expect(code).not.toContain("unlifted");
+    expect(code).not.toContain("memset");
+  });
+
+  it("refuses a primitive under std and lifts the one after cld", () => {
+    const code = run(
+      seq(0x401000, [
+        ["std"],
+        ["rep movsd", "dword ptr es:[edi], dword ptr [esi]"],
+        ["cld"],
+        ["rep movsd", "dword ptr es:[edi], dword ptr [esi]"],
+        ["ret"],
+      ]),
+    );
+    // `std` has no operands; the raw text keeps the instruction's own spelling.
+    expect(code).toMatch(/\/\* unlifted: std\s*\*\//);
+    expect(code).toContain("/* unlifted: rep movsd dword ptr es:[edi], dword ptr [esi] */");
+    expect(code).toContain("__movsd(edi, esi, ecx);");
+  });
+});
+
 describe("decompileFunction — a spoiled compare read by setcc", () => {
   it("reads the value the compare compared, not the register the spoiler wrote", () => {
     const code = run(
@@ -1363,11 +1396,11 @@ describe("decompileFunction — what the emitter says when recovery failed", () 
   });
 
   it("keeps the operands of an unlifted instruction verbatim", () => {
-    const code = run(
-      seq(0x401000, [["rep movsd", "dword ptr es:[edi], dword ptr [esi]"], ["ret"]]),
-    );
+    // `rep movsd` stood here until peek-a-bin-n9cl.6 lifted it; `repne scasw`
+    // is refused by design (a search position and a flag, no destination).
+    const code = run(seq(0x401000, [["repne scasw", "ax, word ptr [rdi]"], ["ret"]]), true);
 
-    expect(code).toContain("/* unlifted: rep movsd dword ptr es:[edi], dword ptr [esi] */;");
+    expect(code).toContain("/* unlifted: repne scasw ax, word ptr [rdi] */;");
   });
 
   it("still gives a trailing label the empty statement it needs", () => {

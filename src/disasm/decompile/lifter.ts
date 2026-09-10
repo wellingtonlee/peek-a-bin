@@ -236,6 +236,46 @@ function exactImmediate(op: string): boolean {
   return false;
 }
 
+/** A `movs`/`stos` string primitive read off the raw mnemonic's tokens, or null. */
+interface StringOp {
+  op: "movs" | "stos";
+  suffix: "b" | "w" | "d" | "q";
+  size: 1 | 2 | 4 | 8;
+  /** The accumulator a `stos` of this width stores. */
+  acc: "al" | "ax" | "eax" | "rax";
+  /** `rep`/`repe`/`repz` collapse to `rep`; `repne`/`repnz` to `repne`; none is null. */
+  prefix: "rep" | "repne" | null;
+}
+
+const STRING_WIDTHS = {
+  b: { size: 1, acc: "al" },
+  w: { size: 2, acc: "ax" },
+  d: { size: 4, acc: "eax" },
+  q: { size: 8, acc: "rax" },
+} as const;
+
+/**
+ * Which `movs`/`stos` primitive, if any, this instruction is. Capstone spells
+ * the prefix INTO the mnemonic (`rep movsd`), so the tokens are read rather than
+ * the operands. `movsd` is also the SSE scalar move; that one names an XMM
+ * register, which no string primitive can, and is left to `SSE_SCALAR`.
+ */
+function parseStringOp(rawMn: string, opStr: string): StringOp | null {
+  const tokens = rawMn.split(/\s+/).filter(Boolean);
+  const last = tokens[tokens.length - 1] ?? "";
+  const m = last.match(/^(movs|stos)([bwdq])$/);
+  if (!m) return null;
+  if (/\bxmm\d+\b/i.test(opStr)) return null;
+  let prefix: StringOp["prefix"] = null;
+  for (const t of tokens.slice(0, -1)) {
+    if (t === "rep" || t === "repe" || t === "repz") prefix = "rep";
+    else if (t === "repne" || t === "repnz") prefix = "repne";
+    else return null;
+  }
+  const suffix = m[2] as StringOp["suffix"];
+  return { op: m[1] as StringOp["op"], suffix, prefix, ...STRING_WIDTHS[suffix] };
+}
+
 function splitOperands(opStr: string): string[] {
   // Split on comma, respecting brackets
   const parts: string[] = [];
@@ -1283,6 +1323,16 @@ export function liftBlock(
    */
   let flagsStale = false;
 
+  /**
+   * Whether a `std` in this block has set the direction flag without a `cld`
+   * since. The string primitives run BACKWARDS under DF=1, and the intrinsic
+   * spelling below assumes forwards, so a primitive inside a `std` region is
+   * refused. Block-local: all 8 corpus `std` sites are `std / rep movs / cld`
+   * in one block, and DF is assumed clear on entry, which the ABI guarantees at
+   * every call boundary (peek-a-bin-n9cl.6).
+   */
+  let directionDown = false;
+
   // Indexed rather than `for…of` so the `push <imm>` / `pop <reg>` rule below
   // can look backwards from the instruction being lifted. Every `continue` in
   // this loop is unconditional about the index, so it is bound at the top.
@@ -2169,27 +2219,81 @@ export function liftBlock(
       continue;
     }
 
-    // ── String ops: rep movsb → memcpy, rep stosb → memset ──
-    if (mn === "rep" || insn.opStr.toLowerCase().startsWith("rep ")) {
-      const innerMn =
-        mn === "rep" ? insn.opStr.toLowerCase().replace(/^rep\s+/, "") : insn.opStr.toLowerCase();
+    // ── std / cld → raw, but tracked ──
+    if (mn === "std" || mn === "cld") {
+      directionDown = mn === "std";
+      stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+      continue;
+    }
 
-      if (innerMn.startsWith("movs")) {
-        const rdi = irReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
-        const rsi = irReg(is64 ? "rsi" : "esi", is64 ? 8 : 4);
-        const rcx = irReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
-        const call: IRCall = { kind: "call", target: "memcpy", args: [rdi, rsi, rcx] };
-        stmts.push({ kind: "call_stmt", call, addr: insn.address });
+    // ── String primitives: rep movs*/stos* → MSVC intrinsics, plain → one store ──
+    //
+    // Capstone's shape is mnemonic `rep movsd` with the operands in `opStr`
+    // (`dword ptr es:[edi], dword ptr [esi]`), or an empty `opStr` in older
+    // builds and the fixtures. This handler used to test `mn === "rep"` or
+    // `opStr.startsWith("rep ")` — neither shape — so it was DEAD against real
+    // disassembly and all 32 `rep` + 12 `stos` corpus sites were `raw` (pinned
+    // as a KNOWN BUG in lifter.test.ts until peek-a-bin-n9cl.6). Dispatch is on
+    // the TOKENS of the raw mnemonic and the operands are implicit, as the
+    // machine's are.
+    //
+    // The spelling is the MSVC intrinsic with the machine's exact semantics —
+    // `__movsd(rdi, rsi, rcx)`, `__stosd(rdi, eax, rcx)` — not `memcpy`/`memset`,
+    // which would need a size multiplication and misstate `stosd` (a dword fill
+    // is not a byte fill). The side effects are MODELLED, or the registers the
+    // primitive leaves behind would be read as their old values: `rdi += rcx*S;
+    // rsi += rcx*S; rcx = 0`, increments BEFORE the zeroing. The intrinsics are
+    // deliberately NOT in `apitypes.ts` — the arity oracle must not measure its
+    // own input. `repne`/`repnz` forms (`scas`, `cmps`) stay `raw`: their result
+    // is a search position and a flag, with no single destination to name.
+    const stringOp = parseStringOp(rawMn, insn.opStr);
+    if (stringOp) {
+      if (directionDown || stringOp.prefix === "repne") {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
-      if (innerMn.startsWith("stos")) {
-        const rdi = irReg(is64 ? "rdi" : "edi", is64 ? 8 : 4);
-        const al = irReg("al", 1);
-        const rcx = irReg(is64 ? "rcx" : "ecx", is64 ? 8 : 4);
-        const call: IRCall = { kind: "call", target: "memset", args: [rdi, al, rcx] };
+      const ptr = is64 ? 8 : 4;
+      const rdi = irReg(is64 ? "rdi" : "edi", ptr);
+      const rsi = irReg(is64 ? "rsi" : "esi", ptr);
+      const rcx = irReg(is64 ? "rcx" : "ecx", ptr);
+      const acc = irReg(stringOp.acc, stringOp.size);
+      const width = irConst(stringOp.size, ptr);
+      const advance = (reg: IRExpr, by: IRExpr): IRStmt => ({
+        kind: "assign",
+        dest: reg,
+        src: irBinary("+", reg, by),
+        addr: insn.address,
+      });
+      if (stringOp.prefix === "rep") {
+        const args = stringOp.op === "movs" ? [rdi, rsi, rcx] : [rdi, acc, rcx];
+        const call: IRCall = { kind: "call", target: `__${stringOp.op}${stringOp.suffix}`, args };
         stmts.push({ kind: "call_stmt", call, addr: insn.address });
-        continue;
+        const bytes = irBinary("*", rcx, width);
+        stmts.push(advance(rdi, bytes));
+        if (stringOp.op === "movs") stmts.push(advance(rsi, bytes));
+        stmts.push({ kind: "assign", dest: rcx, src: irConst(0, ptr), addr: insn.address });
+      } else {
+        stmts.push({
+          kind: "store",
+          address: rdi,
+          value: stringOp.op === "movs" ? irDeref(rsi, stringOp.size) : acc,
+          size: stringOp.size,
+          addr: insn.address,
+        });
+        stmts.push(advance(rdi, width));
+        if (stringOp.op === "movs") stmts.push(advance(rsi, width));
       }
+      // The primitive SPENT its registers. `regState` learns the writes so a
+      // later read binds to them, and RCX is then marked consumed so
+      // `collectArgs64` does not hand the zeroed counter to the next call as
+      // an argument — an arity OVER-count, which is a gate at 0.
+      regState.set(rdi.name, rdi);
+      if (stringOp.op === "movs") regState.set(rsi.name, rsi);
+      if (stringOp.prefix === "rep") {
+        regState.set(rcx.name, irConst(0, ptr));
+        regState.noteRead(rcx.name);
+      }
+      continue;
     }
 
     // ── Basic FPU: fld/fst/fstp/fadd/fsub/fmul/fdiv ──

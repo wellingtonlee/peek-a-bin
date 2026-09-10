@@ -1035,6 +1035,16 @@ refused. **Read the long-form entry before changing the code it describes.**
   not −16. 36 of 42 corpus sites are refused this way — a measured cost left standing, since the
   refusal keeps a `raw` hole (strncmp's masks stay unassigned) and the alternative is epic 2's
   unknown-assignment.
+- **`rep movs*`/`stos*` are the MSVC intrinsics WITH their side effects modelled, dispatched on the
+  tokens of the raw mnemonic.** Capstone spells the prefix into the mnemonic (`rep movsd`, operands
+  present or empty), so the old `mn === "rep"` path was dead against real disassembly. `parseStringOp`
+  (`lifter.ts`) is the one declaration; the spelling is `__movsd(rdi, rsi, rcx)` / `__stosd(rdi, eax,
+  rcx)` — exact semantics, never `memcpy`/`memset` — followed by `rdi += rcx*S; rsi += rcx*S; rcx =
+  0` (increments before the zeroing), with RCX then marked SPENT so `collectArgs64` cannot hand the
+  zeroed counter to the next call (arity OVER is a gate at 0). An unprefixed `stos`/`movs` is one
+  store plus the advance. **Refused**: anything inside a block-local `std` region (the primitive runs
+  backwards; `std`/`cld` themselves stay `raw`), and every `repne`/`repnz` form. **The intrinsics are
+  NOT in `apitypes.ts`** — the arity oracle must not measure its own input.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

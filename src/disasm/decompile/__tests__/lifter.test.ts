@@ -1457,35 +1457,112 @@ describe("liftBlock — calls and returns", () => {
 });
 
 describe("liftBlock — string, FPU and SSE", () => {
-  it("lifts `rep movs` to memcpy", () => {
-    expect(liftOne("rep", "movsb")).toMatchObject({
+  /**
+   * The `rep` path was DEAD against real disassembly until peek-a-bin-n9cl.6:
+   * Capstone spells the prefix into the mnemonic (`rep movsd`, operands in
+   * `opStr` or empty) and the handler tested `mn === "rep"`. The row that
+   * pinned that as a KNOWN BUG is now the first positive row. The spelling is
+   * the MSVC intrinsic with the machine's exact semantics and its SIDE EFFECTS
+   * — never `memcpy`/`memset`, which misstate a dword fill.
+   */
+  it("lifts `rep movsb` (prefix in the mnemonic, empty operands) to __movsb with its side effects", () => {
+    const rdi = irReg("rdi", 8);
+    const rsi = irReg("rsi", 8);
+    const rcx = irReg("rcx", 8);
+    expect(lift([["rep movsb", ""]])).toEqual([
+      {
+        kind: "call_stmt",
+        call: { kind: "call", target: "__movsb", args: [rdi, rsi, rcx] },
+        addr: START,
+      },
+      {
+        kind: "assign",
+        dest: rdi,
+        src: irBinary("+", rdi, irBinary("*", rcx, irConst(1, 8))),
+        addr: START,
+      },
+      {
+        kind: "assign",
+        dest: rsi,
+        src: irBinary("+", rsi, irBinary("*", rcx, irConst(1, 8))),
+        addr: START,
+      },
+      { kind: "assign", dest: rcx, src: irConst(0, 8), addr: START },
+    ]);
+  });
+
+  it("lifts Capstone's real x86 shape, `rep stosd dword ptr es:[edi], eax`, to __stosd", () => {
+    const edi = irReg("edi", 4);
+    const ecx = irReg("ecx", 4);
+    const stmts = lift([["rep stosd", "dword ptr es:[edi], eax"]], { is64: false });
+    expect(stmts[0]).toEqual({
       kind: "call_stmt",
-      call: { target: "memcpy", args: [irReg("rdi", 8), irReg("rsi", 8), irReg("rcx", 8)] },
-    });
-  });
-
-  it("lifts `rep stos` to memset", () => {
-    expect(liftOne("rep", "stosb")).toMatchObject({
-      kind: "call_stmt",
-      call: { target: "memset", args: [irReg("rdi", 8), irReg("al", 1), irReg("rcx", 8)] },
-    });
-  });
-
-  it("uses the 32-bit registers for string ops in x86 mode", () => {
-    expect(liftOne("rep", "movsd", { is64: false })).toMatchObject({
-      call: { args: [irReg("edi", 4), irReg("esi", 4), irReg("ecx", 4)] },
-    });
-  });
-
-  // KNOWN BUG (reported, not fixed): Capstone emits the prefix as part of the
-  // mnemonic ("rep movsb" with an empty operand string). Neither branch of the
-  // rep check matches that shape, so the memcpy/memset idiom never fires on
-  // real disassembly and the instruction is emitted as inline asm.
-  it("does not recognise the prefix when it is part of the mnemonic", () => {
-    expect(liftOne("rep movsb", "")).toEqual({
-      kind: "raw",
-      text: "__asm { rep movsb  }",
+      call: { kind: "call", target: "__stosd", args: [edi, irReg("eax", 4), ecx] },
       addr: START,
+    });
+    expect(stmts[1]).toMatchObject({
+      dest: edi,
+      src: irBinary("+", edi, irBinary("*", ecx, irConst(4, 4))),
+    });
+    expect(stmts[2]).toMatchObject({ dest: ecx, src: irConst(0, 4) });
+    expect(stmts).toHaveLength(3);
+  });
+
+  it("picks the accumulator by width and accepts repe/repz as rep", () => {
+    expect(lift([["rep stosw", "word ptr [rdi], ax"]])[0]).toMatchObject({
+      call: { target: "__stosw", args: [irReg("rdi", 8), irReg("ax", 2), irReg("rcx", 8)] },
+    });
+    expect(lift([["repe movsq", "qword ptr [rdi], qword ptr [rsi]"]])[0]).toMatchObject({
+      call: { target: "__movsq" },
+    });
+  });
+
+  it("lifts an unprefixed stosd/movsd to one store and the pointer advance", () => {
+    const edi = irReg("edi", 4);
+    expect(lift([["stosd", "dword ptr es:[edi], eax"]], { is64: false })).toEqual([
+      { kind: "store", address: edi, value: irReg("eax", 4), size: 4, addr: START },
+      { kind: "assign", dest: edi, src: irBinary("+", edi, irConst(4, 4)), addr: START },
+    ]);
+    const stmts = lift([["movsd", "dword ptr es:[edi], dword ptr [esi]"]], { is64: false });
+    expect(stmts[0]).toMatchObject({ kind: "store", value: irDeref(irReg("esi", 4), 4) });
+    expect(stmts).toHaveLength(3);
+  });
+
+  it("marks RCX as spent so the zeroed counter is not handed to the next call", () => {
+    const stmts = lift([
+      ["mov", "ecx, 0x10"],
+      ["rep stosd", "dword ptr [rdi], eax"],
+      ["call", "0x402000"],
+    ]);
+    const call = stmts.find((s) => s.kind === "call_stmt" && s.call.target !== "__stosd");
+    expect(call).toMatchObject({ call: { args: [] } });
+  });
+
+  it("REFUSES a primitive inside a std region, and repne forms", () => {
+    const stmts = lift(
+      [
+        ["std", ""],
+        ["rep movsd", "dword ptr es:[edi], dword ptr [esi]"],
+        ["cld", ""],
+        ["rep movsd", "dword ptr es:[edi], dword ptr [esi]"],
+      ],
+      { is64: false },
+    );
+    expect(stmts[0]).toMatchObject({ kind: "raw", text: "std " });
+    expect(stmts[1]).toMatchObject({
+      kind: "raw",
+      text: "rep movsd dword ptr es:[edi], dword ptr [esi]",
+    });
+    expect(stmts[2]).toMatchObject({ kind: "raw", text: "cld " });
+    expect(stmts[3]).toMatchObject({ kind: "call_stmt", call: { target: "__movsd" } });
+    expect(liftOne("repne scasw", "ax, word ptr [rdi]")).toMatchObject({ kind: "raw" });
+    expect(liftOne("repne scasb", "")).toMatchObject({ kind: "raw" });
+  });
+
+  it("leaves the SSE scalar movsd to the SSE path", () => {
+    expect(liftOne("movsd", "xmm0, qword ptr [rax]")).toMatchObject({
+      kind: "assign",
+      dest: irReg("xmm0", 16),
     });
   });
 
