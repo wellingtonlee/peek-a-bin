@@ -1,7 +1,7 @@
 {
   "name": "peek-a-bin",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browser-based PE disassembler and decompiler. All analysis client-side via WebAssembly.",
   "license": "MIT",
   "repository": {
