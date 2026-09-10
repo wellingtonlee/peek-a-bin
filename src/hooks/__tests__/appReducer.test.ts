@@ -40,19 +40,15 @@ function run(actions: AppAction[], from: AppState = initialState): AppState {
 }
 
 describe("appReducer — loading and file lifecycle", () => {
-  it("SET_LOADING sets loading and clears a previous error", () => {
-    const errored = appReducer(initialState, { type: "SET_ERROR", error: "bad magic" });
-    const next = appReducer(errored, { type: "SET_LOADING" });
-    expect(next.loading).toBe(true);
-    expect(next.error).toBeNull();
-  });
-
-  it("SET_ERROR clears loading so the UI cannot spin forever", () => {
-    const loading = appReducer(initialState, { type: "SET_LOADING" });
-    const next = appReducer(loading, { type: "SET_ERROR", error: "truncated" });
-    expect(next.error).toBe("truncated");
-    expect(next.loading).toBe(false);
-  });
+  // TWO TESTS WERE DELETED HERE WITH THEIR SUBJECT (peek-a-bin-576b): "SET_LOADING sets
+  // loading and clears a previous error" and "SET_ERROR clears loading so the UI cannot
+  // spin forever". `AppState.loading` had exactly one consumer in the tree — a prop on
+  // `FileLoader`'s progress panel — and peek-a-bin-v3uh.13 deleted that panel as
+  // unreachable, leaving the field WRITE-ONLY: dispatched, reduced, and read by nothing.
+  // `SET_LOADING`'s other half, clearing `error`, was redundant: its sole dispatcher fired
+  // it immediately after `RESET`, which returns `...initialState`. What the second test
+  // guarded — that a failure cannot leave the UI spinning — is now `analysisPhase`'s job
+  // and is covered by the terminal-phase rows below and by `ANALYSIS_IN_PROGRESS`.
 
   it("SET_PE_FILE seeds address, history and index together from the entry point", () => {
     const next = appReducer(initialState, {
@@ -64,7 +60,6 @@ describe("appReducer — loading and file lifecycle", () => {
     expect(next.addressHistory).toEqual([0x401000]);
     expect(next.historyIndex).toBe(0);
     expect(next.fileName).toBe("a.exe");
-    expect(next.loading).toBe(false);
     expect(next.error).toBeNull();
   });
 
@@ -768,7 +763,6 @@ describe("appReducer — no branch mutates its input", () => {
   ]);
 
   const actions: AppAction[] = [
-    { type: "SET_LOADING" },
     { type: "SET_ERROR", error: "e" },
     { type: "SET_TAB", tab: "hex" },
     { type: "SET_ADDRESS", address: 0x403000 },

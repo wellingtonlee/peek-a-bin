@@ -122,7 +122,6 @@ export const ANALYSIS_IN_PROGRESS: Record<AnalysisPhase, boolean> = {
 export interface AppState {
   peFile: PEFile | null;
   fileName: string | null;
-  loading: boolean;
   error: string | null;
   activeTab: ViewTab;
   currentAddress: number;
@@ -178,7 +177,6 @@ export interface AppState {
 }
 
 export type AppAction =
-  | { type: "SET_LOADING" }
   | { type: "SET_PE_FILE"; peFile: PEFile; fileName?: string }
   | { type: "SET_ERROR"; error: string }
   | { type: "SET_TAB"; tab: ViewTab }
@@ -265,7 +263,6 @@ export type AppAction =
 export const initialState: AppState = {
   peFile: null,
   fileName: null,
-  loading: false,
   error: null,
   activeTab: "disassembly",
   currentAddress: 0,
@@ -329,8 +326,6 @@ function pushHistory(
 
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
-    case "SET_LOADING":
-      return { ...state, loading: true, error: null };
     case "SET_PE_FILE": {
       const addr =
         action.peFile.optionalHeader.addressOfEntryPoint + action.peFile.optionalHeader.imageBase;
@@ -338,7 +333,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         peFile: action.peFile,
         fileName: action.fileName ?? null,
-        loading: false,
         error: null,
         currentAddress: addr,
         addressHistory: [addr],
@@ -346,7 +340,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
     case "SET_ERROR":
-      return { ...state, error: action.error, loading: false };
+      return { ...state, error: action.error };
     case "SET_TAB":
       return { ...state, activeTab: action.tab };
     case "SET_ADDRESS": {

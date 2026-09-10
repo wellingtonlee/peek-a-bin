@@ -643,7 +643,6 @@ export default function App() {
     stringsConfiguredRef.current = false;
     setDriverBannerDismissed(false);
     setNoticeDismissed(false);
-    dispatch({ type: "SET_LOADING" });
     dispatch({ type: "SET_ANALYSIS_PHASE", phase: "parsing" });
     try {
       const pe = parsePE(buffer);

@@ -258,8 +258,10 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (30 top-level
-fields) and an `AppAction` discriminated union (39 action types), both counted at `263bd5d` —
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (29 top-level
+fields) and an `AppAction` discriminated union (38 action types), both re-counted at `89fb315` —
+they were 30 / 39 at `263bd5d` until `peek-a-bin-576b` removed `loading` and `SET_LOADING`, which
+had become write-only state once `peek-a-bin-v3uh.13` deleted their one reader —
 counts drift, so re-measure rather than trusting them. (They were 34 / 55 at `1c3de72` and stayed
 there until `peek-a-bin-1xc5` removed the three AI features' state. **Count the union by unique
 `type: "…"` string, not by `| {` lines** — six members span several lines, which is how a

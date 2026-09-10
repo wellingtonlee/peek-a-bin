@@ -142,13 +142,17 @@ function formatRelativeTime(timestamp: number): string {
  * THERE IS DELIBERATELY NO PROGRESS PANEL HERE, AND RE-ADDING ONE WOULD BE DEAD
  * CODE — the reason is in `App.tsx` and not visible from this file. `App`
  * renders this component only when `!state.peFile`, and its `handleFile`
- * dispatches RESET, SET_LOADING, SET_ANALYSIS_PHASE "parsing" and SET_PE_FILE
- * from ONE synchronous callback. React cannot commit a render in the middle of
- * that, so by the first paint after a drop either `peFile` is set — and this
- * component is unmounted — or the parse threw, and the catch dispatches "idle",
- * NOT a terminal phase. `loading` cannot rescue it either: SET_PE_FILE and
- * SET_ERROR both clear it inside the same batch. So no in-flight phase and no
- * truthy `loading` is ever observable while this component is mounted.
+ * dispatches RESET, SET_ANALYSIS_PHASE "parsing" and SET_PE_FILE from ONE
+ * synchronous callback. React cannot commit a render in the middle of that, so
+ * by the first paint after a drop either `peFile` is set — and this component
+ * is unmounted — or the parse threw, and the catch dispatches "idle", NOT a
+ * terminal phase. So no in-flight phase is ever observable while this component
+ * is mounted.
+ *
+ * There used to be a second half to this argument, about `AppState.loading`
+ * being cleared by SET_PE_FILE and SET_ERROR inside the same batch. That field
+ * is GONE (peek-a-bin-576b): deleting the panel left it with no reader at all,
+ * so it was write-only state and `SET_LOADING` went with it.
  *
  * It used to carry a four-step panel keyed off a second phase-to-label table
  * (`ANALYSIS_STEPS`) plus a fourth hand-written `phase !== "idle" && !== "ready"`
