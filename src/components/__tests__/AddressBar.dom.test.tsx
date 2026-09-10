@@ -745,3 +745,172 @@ describe("AddressBar guards byte patches against the tab closing", () => {
     expect(unloadPrevented()).toBe(true);
   });
 });
+
+/**
+ * The responsive class contract (peek-a-bin-cgu1).
+ *
+ * EVERY ASSERTION IN THIS BLOCK IS A CLASS-STRING ASSERTION AND NOTHING MORE.
+ * It reads `element.className` and checks React wrote a token. Tailwind is not
+ * loaded under vitest (`vitest.config.ts`) and jsdom performs no layout
+ * (`src/test/domSetup.ts` says so in its own comment, and
+ * `src/test/browserApiStubs.ts` says the stubs buy nothing about layout and
+ * cannot), so no row here is evidence that the bar wraps, that anything is
+ * hidden, that the address field shrinks, or that any control is on screen or
+ * reachable. Only peek-a-bin-v2u — a human at a real browser, sweeping the
+ * width — settles that. This is the per-block restatement of the SCOPE
+ * paragraph in this file's own header, narrowed to the class assertions; it
+ * does not replace it.
+ *
+ * The bar was ONE nowrap flex row of ~20 unshrinkable items with an intrinsic
+ * width around 1629px, inside a column whose body is `overflow: hidden`. So
+ * below that width the tail — Export, Import, Chat and the Settings cog — was
+ * not crowded, it was CLIPPED AWAY and unreachable by any input, on both of the
+ * commonest laptop widths. Four mechanisms fix it and each has a row here:
+ * `flex-wrap` (A1) turns a clip into a wrap at every width, `basis-full` +
+ * `min-w-0` (A2) give the tabs their own line without reproducing the same
+ * defect one level down, `hidden lg:block` (A7) removes the dividers when
+ * narrow, and the flexible address field (A6) is the single item whose
+ * min-width is low enough to absorb the remaining deficit — which is what makes
+ * the 1536–1629px band degrade continuously instead of falling off a cliff.
+ *
+ * A5 is the row with no counterpart anywhere else in the tree. The tablist is
+ * the container's FIRST element child because visual order must equal focus
+ * order in both tiers: the obvious implementation leaves it in place and pushes
+ * it down with `order-last`, and CSS `order` moves the box while every engine
+ * walks sequential focus in DOM order — so a keyboard user below 1536px would
+ * tab down to row 2 and back up to row 1. That is a WCAG 2.4.3 defect the
+ * pre-existing suite cannot see: the one-Tab-walk row asserts only that the
+ * tablist receives exactly one tab stop, never where that stop falls, so
+ * `order-last` lands green. A5 is the only thing that would redden.
+ */
+describe("AddressBar responsive class contract", () => {
+  /** The tablist's parent IS the toolbar row — which is A4 in one expression. */
+  const toolbarRoot = () => screen.getByRole("tablist").parentElement as HTMLElement;
+
+  it("lets the toolbar row wrap rather than clip its tail (A1)", () => {
+    renderBar();
+    expect(toolbarRoot().className).toContain("flex-wrap");
+  });
+
+  it("gives the tablist its own line, floored at zero so it scrolls rather than overflowing (A2)", () => {
+    renderBar();
+    const cls = screen.getByRole("tablist").className;
+    // `min-w-0` is the load-bearing one: `basis-full` gives the strip a line,
+    // but free space on that line is exactly zero, so nothing shrinks and
+    // `min-width: auto` would floor the element at its own min-content and
+    // overflow the container — the toolbar's defect reproduced one level down.
+    for (const token of [
+      "basis-full",
+      "min-w-0",
+      "overflow-x-auto",
+      "2xl:basis-auto",
+      "2xl:min-w-auto",
+      "2xl:overflow-visible",
+    ]) {
+      expect(cls).toContain(token);
+    }
+  });
+
+  it("keeps every tab at its own width, over a non-empty population (A3)", () => {
+    renderBar();
+    const tabs = screen.getAllByRole("tab");
+    // The liveness half: without it the loop below passes over an empty list,
+    // which is how an audit reaches zero by no longer looking.
+    expect(tabs).toHaveLength(VIEW_TABS.length);
+    for (const tab of tabs) expect(tab.className).toContain("shrink-0");
+  });
+
+  it("keeps the tablist a direct child of the toolbar row (A4)", () => {
+    renderBar();
+    // The guard against a future agent answering the focus-order question by
+    // splitting the bar into two real row containers — which needs two
+    // tablists and breaks the all-or-nothing `role="tablist"` contract.
+    expect(toolbarRoot().className).toContain("toolbar-bg");
+  });
+
+  it("puts the tablist FIRST in the DOM, so focus order equals visual order (A5)", () => {
+    renderBar();
+    expect(toolbarRoot().firstElementChild).toBe(screen.getByRole("tablist"));
+  });
+
+  it("makes the address field the one item that can absorb the deficit (A6)", () => {
+    renderBar();
+    const input = addressInput();
+    expect(input.className).toContain("w-full");
+    expect(input.className).not.toContain("w-48");
+    const wrapper = input.parentElement as HTMLElement;
+    // `min-w-24` is simultaneously the 96px floor and the thing that overrides
+    // `min-width: auto`, which is what permits the shrink at all; `max-w-48`
+    // caps growth so the wide tier renders at today's width.
+    for (const token of ["flex-1", "min-w-24", "max-w-48"]) {
+      expect(wrapper.className).toContain(token);
+    }
+  });
+
+  it("hides all six dividers when narrow, and there are exactly six (A7)", () => {
+    renderBar();
+    const dividers = Array.from(toolbarRoot().querySelectorAll<HTMLElement>("div.w-px"));
+    // The count half is what keeps this epic's arithmetic honest: the width
+    // budget was computed over six dividers at 9px of box each, so a seventh
+    // added later must fail here rather than silently move the tiers.
+    expect(dividers).toHaveLength(6);
+    // Five separate the row-1 controls and go at `lg`; the sixth travelled with
+    // the tablist and separates the tabs from Open, so it goes at `2xl` — it
+    // would otherwise appear as a stray rule at the start of row 2.
+    const rules = dividers.map((d) => (d.className.includes("2xl:block") ? "2xl" : "lg"));
+    expect(rules.filter((r) => r === "lg")).toHaveLength(5);
+    expect(rules.filter((r) => r === "2xl")).toHaveLength(1);
+    for (const d of dividers) {
+      expect(d.className).toContain("hidden");
+      expect(d.className).toMatch(/\b(?:lg|2xl):block\b/);
+    }
+  });
+
+  it("renders every control on a default render — the mechanism is CSS, not JS (A8)", () => {
+    renderBar();
+    // THE ROW THAT PINS THE MECHANISM. Nothing in this bar may become
+    // conditionally rendered: `hidden lg:block` leaves the element in the tree,
+    // where a `{width >= 1024 && …}` conditional — what an agent reaching for
+    // measurement would write — does not. The address input is the case that
+    // bites, because bare G focuses it by ref and would silently become a
+    // no-op; the hidden Import file input is named by hand in
+    // `modalScaffold.ts` as the reason `focusableWithin()` filters on
+    // `offsetParent`, so it must stay permanently present too.
+    expect(screen.getByText("Open")).toBeTruthy();
+    expect(screen.getByTitle("Back (Alt+Left)")).toBeTruthy();
+    expect(screen.getByTitle("Forward (Alt+Right)")).toBeTruthy();
+    expect(screen.getByTitle("Undo annotation (Ctrl+Z)")).toBeTruthy();
+    expect(screen.getByTitle("Redo annotation (Ctrl+Shift+Z)")).toBeTruthy();
+    expect(screen.getByText(/VA: 0x/)).toBeTruthy();
+    expect(screen.getByTitle("Recent addresses (Alt+H)")).toBeTruthy();
+    expect(addressInput()).toBeTruthy();
+    expect(screen.getByText("Go")).toBeTruthy();
+    expect(screen.getByTitle(/^Export annotations/)).toBeTruthy();
+    expect(screen.getByTitle(/^Import annotations/)).toBeTruthy();
+    expect(screen.getByTitle("AI Chat (Ctrl+Shift+A)")).toBeTruthy();
+    expect(screen.getByTitle("Settings")).toBeTruthy();
+    expect(screen.getAllByRole("tab")).toHaveLength(VIEW_TABS.length);
+  });
+
+  it("carries the VA twice — bare hex when narrow, labelled and padded when wide (A9)", () => {
+    const address = IMAGE_BASE + 0x1000;
+    renderBar({ currentAddress: address });
+    // Derived from the fixture's own address and its own `is64`, so the row
+    // cannot agree with a wrong padStart width.
+    const digits = address.toString(16).toUpperCase();
+    const padded = digits.padStart(harnessPE().is64 ? 16 : 8, "0");
+
+    // The narrow span must NOT carry the "VA: " prefix. `getByText` throws on
+    // multiple matches and testing-library reads only an element's DIRECT
+    // text-node children, so adding the prefix here gives /VA: 0x/ a second
+    // match and reddens the pre-existing padding assertion above.
+    const narrow = screen.getByText(`0x${digits}`);
+    expect(narrow.className).toContain("2xl:hidden");
+
+    const wide = screen.getByText(/VA: 0x/);
+    expect(wide.textContent).toBe(`VA: 0x${padded}`);
+    expect(wide.className).toContain("hidden");
+    expect(wide.className).toContain("2xl:inline");
+    expect(narrow).not.toBe(wide);
+  });
+});

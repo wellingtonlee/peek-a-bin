@@ -533,73 +533,36 @@ export function AddressBar() {
     return () => window.removeEventListener("keydown", handler);
   }, [dispatch]);
 
+  const vaDigits = state.currentAddress.toString(16).toUpperCase();
   const canGoBack = state.historyIndex > 0;
   const canGoForward = state.historyIndex < state.addressHistory.length - 1;
 
   return (
-    <div className="flex items-center gap-1 px-3 py-1.5 toolbar-bg border-b border-theme text-sm">
-      <button
-        type="button"
-        onClick={handleReset}
-        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
-        title="Load new file"
-      >
-        Open
-      </button>
-
-      <div className="w-px h-5 bg-gray-700 mx-1" />
-
-      {/* Back / Forward */}
-      <button
-        type="button"
-        onClick={() => dispatch({ type: "NAV_BACK" })}
-        disabled={!canGoBack}
-        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
-        title="Back (Alt+Left)"
-      >
-        ◀
-      </button>
-      <button
-        type="button"
-        onClick={() => dispatch({ type: "NAV_FORWARD" })}
-        disabled={!canGoForward}
-        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
-        title="Forward (Alt+Right)"
-      >
-        ▶
-      </button>
-
-      <div className="w-px h-5 bg-gray-700 mx-1" />
-
-      {/* Undo / Redo */}
-      <button
-        type="button"
-        onClick={() => dispatch({ type: "UNDO_ANNOTATION" })}
-        disabled={state.annotationUndoStack.length === 0}
-        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
-        title="Undo annotation (Ctrl+Z)"
-      >
-        Undo
-      </button>
-      <button
-        type="button"
-        onClick={() => dispatch({ type: "REDO_ANNOTATION" })}
-        disabled={state.annotationRedoStack.length === 0}
-        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
-        title="Redo annotation (Ctrl+Shift+Z)"
-      >
-        Redo
-      </button>
-
-      <div className="w-px h-5 bg-gray-700 mx-1" />
-
+    <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 toolbar-bg border-b border-theme text-sm shrink-0">
       {/* THE TABLIST, and it wraps only the eight tabs.
           The toolbar around it holds Open, Back/Forward, Undo/Redo, the address
           box and the AI chat button, none of which are tabs — `role="tablist"` on the
           toolbar itself would tell a screen reader there are twenty-odd tabs and
-          make the arrows step through controls that switch nothing. The wrapper
-          repeats the toolbar's own flex classes so it lays out identically; jsdom
-          performs no layout, so that is read rather than measured.
+          make the arrows step through controls that switch nothing.
+
+          IT IS THE CONTAINER'S FIRST CHILD DELIBERATELY, AND `order-last` IS THE
+          WRONG WAY TO DO THIS. Below `2xl` the wrapper takes a line of its own
+          (`basis-full`) and the rest of the bar wraps beneath it, so the tabs
+          are visually first — and CSS `order` would have moved the box while
+          leaving sequential focus in DOM order, making a keyboard user tab down
+          to row 2 and back up to row 1 (WCAG 2.4.3). Putting it first in the DOM
+          instead makes visual order equal focus order in BOTH tiers with no
+          `order` class anywhere; the accepted price is that in the wide one-row
+          tier the tabs sit leftmost rather than after Undo/Redo.
+          `min-w-0` is the load-bearing token: `basis-full` alone leaves zero
+          free space on the line, so nothing shrinks and `min-width: auto` would
+          floor the strip at its own min-content and overflow the container —
+          this bar's own defect one level down. With the floor at zero,
+          `overflow-x-auto` makes it a scroller instead. Above `2xl` all three
+          are restored so the squeeze goes into the address field and never into
+          a tab label. jsdom performs no layout and Tailwind is not loaded under
+          vitest, so every one of those is read rather than measured
+          (peek-a-bin-cgu1).
 
           NO TAB CARRIES A BADGE ANY MORE, and with it goes peek-a-bin-w50c's
           accessible-name fix. That fix spelled a count into an `aria-label`
@@ -614,7 +577,8 @@ export function AddressBar() {
       <div
         role="tablist"
         aria-label="Views"
-        className="flex items-center gap-1"
+        className="flex items-center gap-1 basis-full min-w-0 overflow-x-auto 2xl:basis-auto 2xl:min-w-auto 2xl:overflow-visible"
+        style={{ scrollbarWidth: "none" }}
         onKeyDown={handleTablistKeyDown}
         onBlur={handleTablistBlur}
       >
@@ -637,7 +601,7 @@ export function AddressBar() {
               }}
               onFocus={() => setFocusedTab(tab.id)}
               onClick={() => dispatch({ type: "SET_TAB", tab: tab.id })}
-              className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 ${
+              className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 shrink-0 ${
                 isActive
                   ? "bg-blue-600 text-white"
                   : "text-gray-400 hover:text-white hover:bg-gray-700"
@@ -649,6 +613,61 @@ export function AddressBar() {
           );
         })}
       </div>
+
+      <div className="hidden 2xl:block w-px h-5 bg-gray-700 mx-1" />
+
+      <button
+        type="button"
+        onClick={handleReset}
+        className="px-2 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+        title="Load new file"
+      >
+        Open
+      </button>
+
+      <div className="hidden lg:block w-px h-5 bg-gray-700 mx-1" />
+
+      {/* Back / Forward */}
+      <button
+        type="button"
+        onClick={() => dispatch({ type: "NAV_BACK" })}
+        disabled={!canGoBack}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
+        title="Back (Alt+Left)"
+      >
+        ◀
+      </button>
+      <button
+        type="button"
+        onClick={() => dispatch({ type: "NAV_FORWARD" })}
+        disabled={!canGoForward}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default"
+        title="Forward (Alt+Right)"
+      >
+        ▶
+      </button>
+
+      <div className="hidden lg:block w-px h-5 bg-gray-700 mx-1" />
+
+      {/* Undo / Redo */}
+      <button
+        type="button"
+        onClick={() => dispatch({ type: "UNDO_ANNOTATION" })}
+        disabled={state.annotationUndoStack.length === 0}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
+        title="Undo annotation (Ctrl+Z)"
+      >
+        Undo
+      </button>
+      <button
+        type="button"
+        onClick={() => dispatch({ type: "REDO_ANNOTATION" })}
+        disabled={state.annotationRedoStack.length === 0}
+        className="px-1.5 py-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors disabled:opacity-30 disabled:cursor-default text-xs"
+        title="Redo annotation (Ctrl+Shift+Z)"
+      >
+        Redo
+      </button>
 
       <div className="flex-1" />
 
@@ -694,12 +713,20 @@ export function AddressBar() {
         </span>
       )}
 
-      <span className="text-gray-500 text-xs mr-2">
+      {/* TWO SIBLING SPANS, and the narrow one MUST NOT carry the "VA: "
+          prefix. The padding is computed here in JS, so no media query can
+          reach it — hence two spans rather than one with a hidden label. And
+          `getByText` throws on multiple matches while testing-library reads only
+          an element's DIRECT text-node children, so the narrow span's own text
+          ("0x140001000") must not match /VA: 0x/ or the pre-existing assertion
+          in `AddressBar.dom.test.tsx` acquires a second match and dies. Folding
+          these back into one span with the label in a child breaks it for a
+          less obvious reason: the query then retargets onto the inner span.
+          (peek-a-bin-cgu1.4) */}
+      <span className="text-gray-500 text-xs mr-2 2xl:hidden">0x{vaDigits}</span>
+      <span className="hidden text-gray-500 text-xs mr-2 2xl:inline">
         VA: 0x
-        {state.currentAddress
-          .toString(16)
-          .toUpperCase()
-          .padStart(state.peFile?.is64 ? 16 : 8, "0")}
+        {vaDigits.padStart(state.peFile?.is64 ? 16 : 8, "0")}
       </span>
 
       {/* Recent addresses dropdown */}
@@ -789,7 +816,7 @@ export function AddressBar() {
       </div>
 
       {/* Address input with autocomplete */}
-      <div ref={containerRef} className="relative">
+      <div ref={containerRef} className="relative flex-1 min-w-24 max-w-48">
         <input
           ref={addressInputRef}
           type="text"
@@ -800,7 +827,7 @@ export function AddressBar() {
             if (suggestions.length > 0) setShowSuggestions(true);
           }}
           placeholder="Go to address (G)"
-          className={`w-48 px-2 py-1 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 text-xs focus:outline-none focus:border-blue-500 transition-colors ${
+          className={`w-full px-2 py-1 bg-gray-800 border rounded text-gray-200 placeholder-gray-500 text-xs focus:outline-none focus:border-blue-500 transition-colors ${
             invalid ? "border-red-500" : "border-gray-600"
           }`}
         />
@@ -839,7 +866,7 @@ export function AddressBar() {
         Go
       </button>
 
-      <div className="w-px h-5 bg-gray-700 mx-1" />
+      <div className="hidden lg:block w-px h-5 bg-gray-700 mx-1" />
 
       <button
         type="button"
@@ -865,7 +892,7 @@ export function AddressBar() {
         onChange={handleImport}
       />
 
-      <div className="w-px h-5 bg-gray-700 mx-1" />
+      <div className="hidden lg:block w-px h-5 bg-gray-700 mx-1" />
 
       {/* AI toolbar button */}
       <button
@@ -877,7 +904,7 @@ export function AddressBar() {
         Chat
       </button>
 
-      <div className="w-px h-5 bg-gray-700 mx-1" />
+      <div className="hidden lg:block w-px h-5 bg-gray-700 mx-1" />
 
       <button
         type="button"

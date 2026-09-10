@@ -841,6 +841,97 @@ re-taken.)
     and `InstructionDetail.dom.test.tsx` is the component's first dedicated suite but renders only
     the "Xrefs To" column — the rest of the panel remains covered only by
     `DisassemblyPanel.dom.test.tsx` mounting it through the real `DisassemblyView`.
+- **THE TOP TOOLBAR'S RESPONSIVE CONTRACT: EVERY FIGURE IS COMPUTED, EVERY ASSERTION IS A CLASS
+  STRING, AND THE ONLY THING ACTUALLY MEASURED IS THE SUITE (2026-09-10, base `d54d60e`,
+  `peek-a-bin-cgu1`).** `AddressBar` was one nowrap flex row of ~20 unshrinkable items plus six
+  dividers, outside `<main>` in a column whose `body` is `overflow: hidden`, so its tail — Export,
+  Import, Chat and the Settings cog — was clipped away rather than crowded and was unreachable by
+  any input. The repair is `flex-wrap`, the tablist on its own line below `2xl`, the five row-1
+  dividers hidden below `lg`, and a flexible address field as the single deficit-absorbing item.
+  Read the rule and the refusals in `docs/gotchas.md`; this entry is the ledger.
+  - **THE TIER ARITHMETIC IS COMPUTED, NEVER MEASURED, AND IT IS THE WHOLE REASON THE `flex-wrap`
+    SAFETY NET STAYS ON AT EVERY WIDTH.** A 0.6em advance (JetBrains Mono is exactly 600/1000
+    units) applied at the two font sizes the bar mixes — the container is `text-sm` (14px →
+    8.4px/char), while Undo/Redo/Go/Export/Import/Chat carry their own `text-xs` (12px →
+    7.2px/char) — plus the Tailwind spacing scale: the single row as it stood **~1629px**; row 1
+    alone with the tabs removed **~941px**, or **845px** at the address floor; the tablist alone
+    (59 characters of label) **684px**; row 1 with the dividers hidden **~863px**, or **767px** at
+    the floor. From those: 1366px clipped by **263px** and 1440px by **189px** — the two commonest
+    laptop widths, and the 244px tail from the divider before Export to the cog is what accounts
+    for exactly the four controls the user named. **1629 > 1536**, so no default breakpoint is
+    above the single row's intrinsic width and `2xl:` alone leaves a ~93px band still clipping;
+    the flexible address field closes it by yielding up to 96px (192 → its 96px floor), leaving
+    the row needing at most ~1533px. A different fallback font moves every one of these numbers,
+    and a wider one moves the tablist ~8% per 0.05em. **TWO EARLIER FIGURES ARE STALE AND MUST NOT
+    BE RESTORED**: seven dividers at 15px each (15 double-counted the flex gap, which the gap term
+    already counts once — it is **six at 9px**), and ~1584px for the single row.
+  - **WHAT WAS MEASURED, all at base `d54d60e` with the four code stages applied.** `npx vitest run
+    --dir src` **144 files / 5135 → 5144 tests** (+9, exactly A1–A9, no new file);
+    `npx vitest run --dir build` **14 / 289, unchanged**; `npm run check` unpiped exit **0**, 339
+    files, 67 warnings, 3 infos. `npm run corpus` is **not applicable** — nothing here touches
+    `src/disasm/`, detection or the emitter, so no stage can move emitted C.
+  - **THE REGRESSION EVIDENCE IS STRUCTURAL RATHER THAN A COUNT.** The diff to
+    `AddressBar.dom.test.tsx` is **169 insertions and 0 deletions**, and the file's baseline prefix
+    hashes identically — so all **45** pre-existing tests are byte-for-byte untouched. The four
+    stages were applied and the suite read **144 / 5135 green before any new test was added**,
+    which is the prediction the epic wrote down in advance: Tailwind is not loaded under vitest, so
+    `flex-wrap`, `basis-full`, `min-w-0`, `hidden` and `overflow-x-auto` have no computed effect and
+    every `getByRole`/`getByText`/`getByTitle` behaves bit-for-bit as before, DOM reordering
+    included. There are no snapshot tests anywhere in `src/`, so the relocation had nothing else to
+    disturb.
+  - **A5 IS THE HEADLINE MEASUREMENT: THE PRE-EXISTING SUITE PROVABLY COULD NOT SEE THE FOCUS-ORDER
+    PROPERTY.** Moving the tablist back to its old position reddens **exactly one row, A5, and
+    nothing else** — so `order-last` would have landed green, the one-Tab-walk row asserting only
+    that the tablist receives exactly one tab stop and never where that stop falls. Confirmed a
+    second time with a *different* perturbation, a stray element inserted before the tablist:
+    **1 failed, 53 passed**.
+  - **CONTROLS: 22 run, 21 discriminating, ONE INERT.** The discriminating 21, by group: A1's
+    `flex-wrap` deletion (1); A2's six tablist tokens, one per token (6); A3's `shrink-0` removal
+    from the tab template and breaking the tab count (2); A4's wrapping the tablist in any new
+    `<div>` (1); A5's move back to the old DOM position (1); A6's restoring `w-48` and dropping
+    each of `min-w-24` and `max-w-48` (3); A7's dropping `hidden` from a divider, dropping
+    `lg:block` from one, and adding a seventh (3); A8's replacing a `hidden lg:block` with a
+    `{width >= 1024 && …}` conditional — the perturbation an agent reaching for measurement would
+    write (1); A9's dropping `2xl:hidden` from the narrow VA span, plus giving that span the
+    `"VA: "` prefix (2); and the independent stray-element perturbation above (1). **A9's prefix
+    control is the best kind: the PRE-EXISTING padding assertion does the work**, because
+    `getByText` throws on multiple matches and `getNodeText` reads only an element's direct
+    text-node children, so the prefix gives `/VA: 0x/` a second match.
+  - **THE ONE INERT CONTROL IS `shrink-0` ON THE BAR'S ROOT, AND IT IS REPORTED RATHER THAN DRESSED
+    UP.** Deleting it moves **zero rows**, and neither a test nor an argument shows it changing
+    anything: `main` is `flex-1` so App's column is never over-constrained and the bar is never
+    asked to shrink, and even if it were, `min-height: auto` on a **wrapped** flex container
+    already resolves to the height of all its lines. It was added only for symmetry — `AddressBar`
+    was the one row in App's flex column without it, against both banners and `StatusBar.tsx:179` —
+    so the asymmetry the user spotted is real as a convention violation and **was not part of the
+    bug**. Deliberately **no assertion was written for it**, since any row would read as evidence
+    that it matters.
+  - **`2xl:overflow-visible` IS ALSO INERT, BY A DIFFERENT MECHANISM, AND THE SPLIT IS EASY TO
+    OVER-READ.** It compiles to the *shorthand* `overflow: visible`, so it does win over the
+    `overflow-x-auto` beneath it; it is inert because above the breakpoint the strip is
+    content-sized and never overflows, so `auto` would never have painted a scrollbar either.
+    **The class-string assertion for it is LIVE; the class is inert.** Kept for symmetry with the
+    other two `2xl:` restorations. Two further tokens are inert in the same way and were left in
+    place: removing `overflow-x-auto` moves no row, and removing `hidden 2xl:block` from the
+    relocated divider moves no row. `scrollbarWidth: "none"` is a Firefox and Windows-Blink
+    affordance only.
+  - **WHAT A GREEN SUITE STILL DOES NOT ESTABLISH.** Tailwind is not loaded under vitest
+    (`vitest.config.ts`) and jsdom performs no layout — `src/test/domSetup.ts:57-61` says so in its
+    own comment, `src/test/browserApiStubs.ts:24-44` says the stubs buy nothing about layout and
+    cannot and deliberately refuses to fabricate a width, and `domSetup.ts`'s `ResizeObserver`
+    never fires. So nothing here is evidence that the bar wraps at 1535px, that the tab strip
+    scrolls, that a divider is hidden below 1024px, that the address field shrinks to 96px or caps
+    at 192px, or that any control is on screen, visible or clickable at any width. `min-w-auto`'s
+    existence and both breakpoint media values were checked against the installed Tailwind dist,
+    which is a fact about generated CSS and not about a rendered page. The focus-order property the
+    DOM move buys — visual order equal to focus order in both tiers — is **encoded as a DOM-order
+    assertion and not observed**, jsdom having no visual order; nothing has met a screen reader or
+    a browser focus algorithm. **No human has opened a browser at any width.** The width sweep
+    (1700 / 1600 / 1536 / 1440 / 1366 / 1024 / 900 / 700px, checking every control visible and
+    clickable, the rows splitting at 1536, the dividers vanishing below 1024, and Tab walking
+    left-to-right then top-to-bottom **with no jump between rows** — the property no test here can
+    check) is appended to `peek-a-bin-v2u`, which stays open. This is the app's first responsive
+    code, so there is also no prior breakpoint behaviour to compare against.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.

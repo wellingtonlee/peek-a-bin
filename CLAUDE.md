@@ -749,6 +749,39 @@ measured here — nothing has timed a render** (`peek-a-bin-v3uh.4`).
 **Styling**: Tailwind utilities; runtime font size via a `--mono-font-size` CSS variable on the
 app root.
 
+**THE TOP BAR IS THE APP'S FIRST RESPONSIVE CODE, AND WHAT MADE IT CLIP RATHER THAN CROWD IS THAT
+NOTHING IN IT CAN SHRINK.** `AddressBar` was one nowrap flex row of ~20 items plus six dividers,
+and every item is a single word, a fixed-size SVG or an `<input>` with a definite width — so
+`min-width: auto` resolves to min-content == preferred width for all of them and the row cannot
+absorb one pixel of deficit. It sits **outside `<main>`**, in a column whose `body` is
+`overflow: hidden`, so the overflow was not scrolled to but **clipped away**: Export, Import, Chat
+and the Settings cog were unreachable by any input on both of the commonest laptop widths.
+**`shrink-0` on the tail would have changed nothing** — what fixes it is `flex-wrap` plus exactly
+ONE item whose `min-width` is low enough to absorb the deficit, the address field
+(`flex-1 min-w-24 max-w-48`, its input `w-full`), which is what makes the squeeze continuous
+instead of a cliff. Two breakpoints, both Tailwind 4 defaults with no config change
+(`src/styles/index.css` is a bare `@import "tailwindcss"` — no `@theme`, no `tailwind.config.*`):
+**`2xl` (1536px) governs ONE thing**, tabs inline versus on their own row, and **`lg` (1024px) ONE
+thing**, dividers shown versus hidden. Keep the two concerns separate. **The tablist is the
+container's FIRST element child, and that is a FOCUS-ORDER decision rather than a layout one**:
+`order-last` moves the box while every engine walks sequential focus in DOM order, so a keyboard
+user below 1536px would tab down to row 2 and back up to row 1 (WCAG 2.4.3) — and
+`AddressBar.dom.test.tsx`'s one-Tab-walk row asserts only that the tablist receives *exactly one*
+tab stop, never where that stop falls, so that defect would have landed green. Do not "simplify"
+the DOM position back and push it down with `order`. **`min-w-0` on the tablist is the load-bearing
+token**: `basis-full` leaves exactly zero free space on its line, so nothing shrinks and
+`min-width: auto` would floor the strip at its own min-content and overflow the container — this
+bar's own defect one level down; with the floor at zero, `overflow-x-auto` makes it a scroller
+instead. `flex-wrap` is the **third** crowded toolbar here to answer overflow the same way
+(`HexView.tsx:855`, `XrefPanel.tsx:287`), so it is the house pattern rather than a new idea;
+Breadcrumbs' `overflow-x-auto` + `scrollbarWidth: "none"` are copied and its ResizeObserver fade
+machinery deliberately is **not** (four reasons in `docs/gotchas.md`). Nothing is conditionally
+unmounted — **CSS only** — because bare `G` focuses the address input by ref and the hidden Import
+`<input type="file">` is named by hand in `modalScaffold.ts` as the reason `focusableWithin()`
+filters on `offsetParent`. Accepted cost: in the wide one-row tier the tabs sit leftmost rather
+than after Undo/Redo. Every figure behind both breakpoints is **computed, never measured**
+(`peek-a-bin-cgu1`).
+
 **AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
 sub-tab (`useDecompileTabs`) — both using `streamChat()` from `src/llm/client.ts`. **Neither keeps
 state in `AppState`**: the chat panel is local state in `DisassemblyView` and the enhance/explain
@@ -1566,6 +1599,34 @@ read "all of them compile" as "all of them are right".
   are **inert and reported**: deleting the list's `min-h-[120px]` floor and the annotations
   wrapper's `overflow-hidden`. The hover-revealed delete glyph and the context menu's
   placement are unseen for the same reason. Added to `peek-a-bin-v2u`.
+- **THE TOOLBAR'S RESPONSIVE BEHAVIOUR IS A CLASS-STRING CONTRACT AND NOTHING MORE, AND THE
+  ARITHMETIC BEHIND BOTH BREAKPOINTS HAS NEVER BEEN MEASURED.** Tailwind is not loaded under vitest
+  (`vitest.config.ts`) and jsdom performs no layout (`src/test/domSetup.ts:57-61` says so in its own
+  comment; `src/test/browserApiStubs.ts:24-44` refuses to fabricate a width on purpose and
+  `domSetup.ts`'s `ResizeObserver` never fires), so `hidden`, `flex-wrap`, `basis-full`, `min-w-0`
+  and `overflow-x-auto` have **no computed effect in any test in this tree**. Every one of the nine
+  assertions in "AddressBar responsive class contract" reads `element.className` and checks that
+  React wrote a token. **Nothing here is evidence** that the bar wraps at 1535px, that the tab strip
+  scrolls, that a divider is hidden below 1024px, that the address field shrinks to 96px or caps at
+  192px, or that any control is on screen, visible or clickable at any width. The tier numbers —
+  ~1629px for the single row, ~941px for row 1, ~863px with the dividers gone, a ~767px single-line
+  floor — are **COMPUTED**: a 0.6em monospace advance (JetBrains Mono is exactly 600/1000 units)
+  applied at the two font sizes the bar mixes, plus the Tailwind spacing scale. A different fallback
+  font moves every one of them. `min-w-auto`'s existence and the two breakpoint media values were
+  checked against the installed Tailwind dist, which is a fact about generated CSS and not about a
+  rendered page. **One control is INERT and reported rather than removed**: `shrink-0` on the bar's
+  root, added to match `StatusBar.tsx:179` and the two banners, moves zero rows and neither a test
+  nor an argument shows it changing anything — `main` is `flex-1` so App's column is never
+  over-constrained, and `min-height: auto` on a wrapped flex container already floors the bar at its
+  own lines. So that asymmetry was a convention violation and **was not part of the bug**;
+  deliberately no assertion was written for it. `2xl:overflow-visible` is inert too, for a different
+  reason — it compiles to the shorthand and so does win, but above the breakpoint the strip is
+  content-sized and never overflows; the class-string assertion for it is live, the class is not.
+  The focus-order property the DOM move buys — visual order equal to focus order in both tiers — is
+  **encoded as a DOM-order assertion and not observed**, jsdom having no visual order. Nothing here
+  has met a screen reader or a browser focus algorithm, and this is the app's first responsive code,
+  so there is no prior breakpoint behaviour to compare against. The width sweep is appended to
+  `peek-a-bin-v2u` (`peek-a-bin-cgu1`).
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
 - **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**
