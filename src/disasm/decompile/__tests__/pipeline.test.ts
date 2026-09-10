@@ -532,6 +532,15 @@ describe("decompileFunction — sbb/adc read CF as a value", () => {
   });
 });
 
+describe("decompileFunction — bts/btr/btc reach the page as bit writes", () => {
+  it("emits the flag-word update the machine performs, and the read after it sees it", () => {
+    const code = run(seq(0x401000, [["bts", "eax, 0xf"], ["btr", "eax, 3"], ["ret"]]));
+    expect(code).not.toContain("unlifted");
+    // `&` binds tighter than `|` in C; the emitter parenthesises the `bts` result.
+    expect(code).toContain("return (eax | 0x8000) & -9;");
+  });
+});
+
 describe("decompileFunction — a spoiled compare read by setcc", () => {
   it("reads the value the compare compared, not the register the spoiler wrote", () => {
     const code = run(
@@ -7994,23 +8003,27 @@ describe("decompileFunction — a bt names the bit its jcc tests", () => {
     expect(guardTexts(code)).toEqual(["<unrecovered>"]);
   });
 
-  it("keeps bts/btr/btc refused — their CF is the bit BEFORE the write", () => {
+  it("lifts bts/btr/btc as bit writes and still refuses the Jcc after them — their CF is the bit BEFORE the write", () => {
     // `bts` sets the bit and leaves CF holding its previous value, so nothing
-    // readable after the instruction names what the Jcc tested. 54 `bts` and 10
-    // `btr` sites on t64 stay unlifted, deliberately.
-    for (const mn of ["bts", "btr", "btc"]) {
+    // readable after the instruction names what the Jcc tested: the guard stays
+    // refused (`flagModel.ts` keeps all three clobbers). The STATEMENT is lifted
+    // since peek-a-bin-n9cl.6 — 54 `bts` and 10 `btr` sites on t64 were `raw`,
+    // and a `raw` is a dataflow hole the flag word was read through.
+    const spelled = { bts: "r13d |= 0x8000;", btr: "r13d &= -0x8001;", btc: "r13d ^= 0x8000;" };
+    for (const mn of ["bts", "btr", "btc"] as const) {
       const code = run(
         seq(0x401000, [
           [mn, "r13d, 0xf"],
-          ["jb", "0x401018"],
-          ["mov", "eax, 1"],
+          ["jb", "0x401010"],
+          ["mov", "eax, r13d"],
           ["ret"],
-          ["mov", "eax, 2"],
+          ["mov", "eax, 1"],
           ["ret"],
         ]),
         true,
       );
-      expect(code, mn).toContain(`unlifted: ${mn} r13d, 0xf`);
+      expect(code, mn).not.toContain("unlifted");
+      expect(code, mn).toContain(spelled[mn]);
       expect(guardTexts(code), mn).toEqual(["<unrecovered>"]);
     }
   });

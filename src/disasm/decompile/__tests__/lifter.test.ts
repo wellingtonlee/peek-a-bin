@@ -947,6 +947,93 @@ describe("liftBlock — sbb/adc read CF as a value", () => {
   });
 });
 
+/**
+ * `bts`/`btr`/`btc` as statements (peek-a-bin-n9cl.6). 94 + 18 corpus sites,
+ * MSVC's `_bittestandset`/`_bittestandreset` on flag words, all `raw` before —
+ * and a `raw` is a dataflow hole, so the word read after one named the value
+ * from before it. CF is deliberately NOT recorded: it is the bit's value before
+ * the write (`flagModel.ts` keeps them clobbers; `parseBitTest` stays bt-only).
+ */
+describe("liftBlock — bts/btr/btc write the bit", () => {
+  const bit = (n: number, size: number) => irBinary("<<", irConst(1, size), irConst(n, size));
+
+  it("lifts the three ops over a register base with an immediate index", () => {
+    expect(liftOne("bts", "r12d, 0xf")).toEqual({
+      kind: "assign",
+      dest: irReg("r12d", 4),
+      src: irBinary("|", irReg("r12d", 4), bit(15, 4)),
+      addr: START,
+    });
+    expect(liftOne("btr", "esi, 0xe")).toMatchObject({
+      src: irBinary("&", irReg("esi", 4), irUnary("~", bit(14, 4))),
+    });
+    expect(liftOne("btc", "rax, 3")).toMatchObject({
+      src: irBinary("^", irReg("rax", 8), bit(3, 8)),
+    });
+  });
+
+  it("reduces a register base's immediate modulo the operand size, as the SDM does", () => {
+    expect(liftOne("bts", "eax, 0x21")).toMatchObject({
+      src: irBinary("|", irReg("eax", 4), bit(1, 4)),
+    });
+    expect(liftOne("bts", "rax, 0x41")).toMatchObject({
+      src: irBinary("|", irReg("rax", 8), bit(1, 8)),
+    });
+    expect(liftOne("bts", "ax, 0x11")).toMatchObject({
+      src: irBinary("|", irReg("ax", 2), bit(1, 2)),
+    });
+  });
+
+  it("masks a register index over a register base with W-1", () => {
+    expect(liftOne("bts", "eax, ecx")).toMatchObject({
+      src: irBinary(
+        "|",
+        irReg("eax", 4),
+        irBinary("<<", irConst(1, 4), irBinary("&", irReg("ecx", 4), irConst(31, 4))),
+      ),
+    });
+  });
+
+  it("stores through a memory base with an in-range immediate", () => {
+    expect(liftOne("bts", "dword ptr [rbx + 0x18], 0xf")).toEqual({
+      kind: "store",
+      address: irBinary("+", irReg("rbx", 8), irConst(0x18, 8)),
+      value: irBinary(
+        "|",
+        irDeref(irBinary("+", irReg("rbx", 8), irConst(0x18, 8)), 4),
+        bit(15, 4),
+      ),
+      size: 4,
+      addr: START,
+    });
+    // A `lock` prefix dispatches to the same statement; atomicity is not modelled.
+    expect(liftOne("lock bts", "dword ptr [rdi + 0x18], 0xd")).toMatchObject({ kind: "store" });
+  });
+
+  it("REFUSES a memory base with a register index, an out-of-range immediate, or an 8-bit base", () => {
+    // A memory base addresses a bit STRING, so `eax` may select a bit outside
+    // the dword the operand names — the shape on both PE32 binaries.
+    expect(liftOne("bts", "dword ptr [esp], eax")).toEqual({
+      kind: "raw",
+      text: "bts dword ptr [esp], eax",
+      addr: START,
+    });
+    expect(liftOne("btr", "dword ptr [rcx + 0x18], 0x20")).toMatchObject({ kind: "raw" });
+    expect(liftOne("bts", "[rcx], 3")).toMatchObject({ kind: "raw" });
+    expect(liftOne("bts", "al, 3")).toMatchObject({ kind: "raw" });
+    expect(liftOne("bts", "eax")).toMatchObject({ kind: "raw" });
+  });
+
+  it("records no CF for them — a following sbb stays raw", () => {
+    expect(
+      lift([
+        ["bts", "eax, 3"],
+        ["sbb", "ecx, ecx"],
+      ])[1],
+    ).toMatchObject({ kind: "raw", text: "sbb ecx, ecx" });
+  });
+});
+
 describe("liftBlock — calls and returns", () => {
   const call = (opStr: string, opts: LiftOpts = {}) =>
     liftOne("call", opStr, opts) as IRStmt & {

@@ -817,6 +817,51 @@ function spellCarry(
 }
 
 /**
+ * The destination and new value of a `bts`/`btr`/`btc`, or null for a form the
+ * lifter refuses. See the handler in `liftBlock` for the two SDM rules — modulo
+ * for a register base, bit-string addressing for a memory one — that decide
+ * what is admitted.
+ */
+function bitWrite(
+  mn: "bts" | "btr" | "btc",
+  parts: string[],
+  insn: Instruction,
+  is64: boolean,
+): { dest: IRExpr; result: IRExpr } | null {
+  const dest = parseDestOperand(parts[0], insn, is64);
+  const destVal = parseOperand(parts[0], insn, is64);
+  let size: number;
+  if (dest.kind === "reg") size = regSize(dest.name);
+  else if (dest.kind === "deref" && memPrefixSize(parts[0]) > 0) size = dest.size;
+  else return null;
+  // 16/32/64 are the only bit-base widths the instructions encode.
+  if (size !== 2 && size !== 4 && size !== 8) return null;
+  const width = size * 8;
+
+  const idxText = parts[1].trim().toLowerCase();
+  let index: IRExpr;
+  const imm = parseImm(idxText);
+  if (imm !== null) {
+    if (imm < 0) return null;
+    if (dest.kind === "reg") index = irConst(imm % width, size);
+    else if (imm < width) index = irConst(imm, size);
+    else return null;
+  } else if (isKnownRegister(idxText) && dest.kind === "reg") {
+    index = irBinary("&", irReg(idxText, regSize(idxText)), irConst(width - 1, size));
+  } else {
+    return null;
+  }
+  const mask = irBinary("<<", irConst(1, size), index);
+  const result =
+    mn === "bts"
+      ? irBinary("|", destVal, mask)
+      : mn === "btr"
+        ? irBinary("&", destVal, irUnary("~", mask))
+        : irBinary("^", destVal, mask);
+  return { dest, result };
+}
+
+/**
  * Is a `RESULT_OWNERS` instruction one the lifter actually lifted, so that its
  * destination read after it names the result? A `raw` is a dataflow hole: the
  * destination read after an unlifted `sbb` is the value from BEFORE it, so a
@@ -1669,6 +1714,48 @@ export function liftBlock(
       } else {
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
+      }
+      continue;
+    }
+
+    // ── bts / btr / btc → a statement over the bit base ──
+    //
+    // The three read-modify-write bit ops: `d = d | (1 << i)`, `d & ~(1 << i)`,
+    // `d ^ (1 << i)`. They fell to `raw` — 94 + 18 sites across the corpus,
+    // every one MSVC's `_bittestandset`/`_bittestandreset` on a flags word —
+    // and a `raw` is a dataflow hole, so the flag word read after one named the
+    // value from before it (peek-a-bin-n9cl.6). CF is NOT recorded for them:
+    // it is the bit's value BEFORE the write, so a later reader would see the
+    // post-write register, which is why `flagModel.ts` keeps them clobbers for
+    // both flag models and `parseBitTest` stays `bt`-only. Atomicity of a
+    // `lock`-prefixed form is not modelled (peek-a-bin-3qrl's trade).
+    //
+    // The index is the SDM's own rule, applied so the spelling cannot
+    // contradict the width: a REGISTER base reduces the offset modulo the
+    // operand size, so an immediate is reduced here and a register index is
+    // spelled `(idx & (W-1))`. A MEMORY base addresses a bit STRING — the offset
+    // may select a bit outside the operand the text names — so a register index
+    // over memory is refused outright (`bts dword ptr [esp], eax`, 2 per PE32
+    // binary, `parseBitTest`'s refusal for the same reason) and an immediate is
+    // admitted only below the operand width, where the string and the operand
+    // are the same bits.
+    if (mn === "bts" || mn === "btr" || mn === "btc") {
+      const lifted = parts.length === 2 ? bitWrite(mn, parts, insn, is64) : null;
+      if (!lifted) {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      if (lifted.dest.kind === "deref") {
+        stmts.push({
+          kind: "store",
+          address: lifted.dest.address,
+          value: lifted.result,
+          size: lifted.dest.size,
+          addr: insn.address,
+        });
+      } else {
+        stmts.push({ kind: "assign", dest: lifted.dest, src: lifted.result, addr: insn.address });
+        if (lifted.dest.kind === "reg") regState.set(lifted.dest.name, lifted.result);
       }
       continue;
     }

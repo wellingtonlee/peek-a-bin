@@ -1022,6 +1022,12 @@ refused. **Read the long-form entry before changing the code it describes.**
   `RESULT_OWNERS` now, and `branchFor` refuses a result owner the lifter left `raw`**
   (`resultOwnerLifted`) — the lift-first rule made checkable. The `eflags` proxy's history is why
   none of this may become a statement (`docs/decompiler-ir.md`).
+- **`bts`/`btr`/`btc` are STATEMENTS over the bit base** (`d | (1 << i)`, `d & ~(1 << i)`, `d ^ (1
+  << i)`; memory destination → store), and their CF is deliberately NOT recorded — it is the bit
+  BEFORE the write, so they stay clobbers in both flag models and `parseBitTest` stays `bt`-only.
+  The index is the SDM's rule: a register base reduces modulo the width (`(idx & (W-1))` for a
+  register index); a memory base addresses a bit STRING, so a register index over memory is refused
+  and an immediate is admitted only below the width. `bitWrite` (`lifter.ts`) is the one declaration.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*
