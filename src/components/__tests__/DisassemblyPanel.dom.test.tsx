@@ -1557,6 +1557,25 @@ describe("graph mode: one CFG, one layout, one font size", () => {
   for (const fontSize of [12, 16]) {
     it(`publishes the geometry the graph actually draws (font size ${fontSize})`, async () => {
       const { container } = await mountGraph(fontSize);
+
+      // THE BLOCKS AND THE PUBLISH ARE TWO DIFFERENT SIGNALS. `mountGraph`
+      // waits for a `.cfg-block` to exist; the overview publish is an effect
+      // that can still be a frame behind it, and under load it was — this row
+      // failed `expected 2 to be 1`-style at fd35678 with three sibling agents
+      // running, and passed alone (peek-a-bin-dps4). So wait on the thing being
+      // asserted rather than on a proxy for it.
+      //
+      // Waiting on the COUNTS deliberately, not on the boxes: the box equality
+      // below is the actual claim and must not be pre-waited into a tautology,
+      // and neither liveness assertion is weakened — `> 1` still says the
+      // fixture drew a real graph, and the BLOCK_WIDTH set still says the
+      // layout was sized at the font size under test.
+      await waitFor(() => {
+        expect(overviewPublished.length).toBeGreaterThan(0);
+        expect(lastOverview().blocks.length).toBe(
+          container.querySelectorAll(".cfg-block").length,
+        );
+      });
       const published = lastOverview();
 
       // Liveness, twice over. A green comparison between two empty lists would
