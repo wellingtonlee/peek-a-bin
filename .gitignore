@@ -4,6 +4,12 @@ node_modules/
 # Production build
 dist/
 
+# Agent worktree scratch. CLAUDE.md's "Working in parallel" prescribes <worktree>/.scratch/
+# for scratch files, and Tailwind's Vite plugin scans the whole worktree — so a class
+# name left in a scratch file leaks a real rule into dist/assets/*.css (measured), and a
+# careless `git add` can sweep one into a commit.
+.scratch/
+
 # Vite
 .vite/
 vite.config.js.timestamp-*
