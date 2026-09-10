@@ -2,22 +2,23 @@
 
 Browser-based PE disassembler/analyzer. Fully client-side (no server). PWA with offline support.
 
-**Tech**: React 19, TypeScript 5.7 (strict), Vite 6, Tailwind CSS 4, capstone-wasm (WASM disassembly engine), @tanstack/react-virtual, @dagrejs/dagre
+**Tech**: React 19, TypeScript 5.7 (strict), Vite 6, Tailwind CSS 4, capstone-wasm, @tanstack/react-virtual, @dagrejs/dagre
 
-**Requires Node 20+** (`engines.node`). On Node 18 the build dies at the end of bundling with
-`ReferenceError: crypto is not defined` — `serialize-javascript`, via `@rollup/plugin-terser` on
-the PWA/Workbox path, calls the global `crypto`, which Node only exposes unflagged from 20.
-Workaround: `node --experimental-global-webcrypto ./node_modules/vite/bin/vite.js build`.
+**Requires Node 20+**. On Node 18 the build dies at the end of bundling with `ReferenceError: crypto
+is not defined` (`serialize-javascript` via the PWA/Workbox terser path). Workaround:
+`node --experimental-global-webcrypto ./node_modules/vite/bin/vite.js build`.
 
 **This file is the index; the evidence lives in `docs/`.** Three companion documents carry the
-long-form record — the measurements, the negative controls, the alternatives tried and refused —
-that used to be inline here: [`docs/gotchas.md`](docs/gotchas.md),
-[`docs/verification.md`](docs/verification.md) and
+long-form record — the measurements, the negative controls, the alternatives built and rejected:
+[`docs/gotchas.md`](docs/gotchas.md), [`docs/verification.md`](docs/verification.md),
 [`docs/decompiler-ir.md`](docs/decompiler-ir.md). Each keeps the same entries in the same order as
-the summary sections below, so an entry here lines up with its full record there. **Read the
-long-form entry before changing the code it describes** — most of these rules are load-bearing in
-a way the summary can state but not justify, and several record an approach that was built,
-measured and rejected.
+the matching section here. **Read the long-form entry before changing the code it describes** —
+most of these rules are load-bearing in a way a summary can state but not justify.
+
+Two habits the record exists to support: **a measured refusal is a result** (several entries
+record an approach that was built, measured and rejected — re-attempting one costs a session), and
+**a control that does not discriminate is a test that is not testing**, this repo's most frequently
+recurring mistake.
 
 ## Commands
 
@@ -27,22 +28,21 @@ npm run build          # tsc -b && vite build
 npm test               # vitest run
 npm run typecheck      # tsc --noEmit (faster than the full build)
 npm run lint           # biome lint src — the fast, src/-only signal
-npm run check          # biome check — THE CI GATE; see the reading trap below
+npm run check          # biome check — THE CI GATE
 npm run format         # biome format --write
 npm run test:coverage  # RED — @vitest/coverage-v8 is not installed
 ```
 
-Corpus harnesses need real MSVC binaries that are not in the repo, and **skip cleanly (exit 0)
-when they are missing** — see `corpus/README.md`, and the Verification section for what each
-proves:
+Corpus harnesses need real MSVC binaries that are not in the repo and **skip cleanly (exit 0) when
+they are missing** — see `corpus/README.md`:
 
 ```sh
 npm run corpus                        # the four x86 binaries: every detection/decompiler gate
 npm run corpus:arm64                  # A64 sweep, .pdata, xrefs, jump tables, sweep-cache differential
 npm run corpus:comments               # ARM64 comment audit + x86 comment digest
 npm run corpus:parserdiff             # PE parser vs an independent from-spec reader, all six binaries
-npm run corpus:compare -- <base> <change>   # diff two runs guard-by-guard; takes PATHS (corpus/artifacts/<label>)
-npm run corpus:jumptables    -- <pe>  # indirect-dispatch census: was each reader even reached
+npm run corpus:compare -- <base> <change>   # diff two runs; takes PATHS (corpus/artifacts/<label>)
+npm run corpus:jumptables    -- <pe>  # indirect-dispatch census
 npm run corpus:gridserve     -- <pe>  # hybridDisassemble grid coincidence + served-vs-decoded diff
 npm run corpus:uploadcost    -- <pe>  # what re-sending .text costs
 npm run corpus:decompilecost -- <pe>  # one decompile request, per payload member
@@ -50,234 +50,94 @@ npm run corpus:detectcost    -- <pe>  # where detectFunctions spends its time, p
 npm run corpus:replycost     -- <pe>  # what the worker's reply costs
 ```
 
-**`npm run check` is the gate, not `lint`.** It is a superset: same rules, plus the formatter and
-`assist/source/organizeImports`, over the whole repo rather than just `src/`. So an unsorted
-import or an unformatted root config file fails CI. Current state: **0 errors**, ~70 warnings, 3
-infos. Warnings and infos never fail it. Two infos are `useNodejsImportProtocol` on
-`vite.config.ts` — Biome classes those fixes *unsafe*, so `--write` skips them and they are
-deliberately left; the third is a `biome.json` deprecation notice.
+### Three traps in running the gates
 
-**Reading a Biome result is itself a trap, and it will tell you a red tree is green.** The default
-`--max-diagnostics` truncates *before* the `Found N errors.` summary, so `npm run check | tail`
-routinely ends on the warning count with the error count scrolled away — and piping makes it
-worse, because `npm run check 2>&1 | tail; echo $?` reports **`tail`'s** status, printing 0 for a
-failing run. Use one of:
-
-```sh
-npm run check > /tmp/check.txt 2>&1; echo "exit=$?"              # no pipe, so $? is Biome's
-npx biome check --diagnostic-level=error --max-diagnostics=300   # errors only, untruncated
-```
-
-**A worktree inside the repo makes a root test run lie.** Tool-created subagent worktrees land at
-`<repo>/.claude/worktrees/agent-<id>`, *inside* the working tree, so a bare `npm test` walks into
-them and reports someone else's in-progress results — a green run that says nothing about your
-change, or a red one that is not your fault. Scope it: `npx vitest run --dir src`, then
-`npx vitest run --dir build` as a second command (`--dir` takes exactly one directory, and bare
-path filters are regex-matched against full paths and still hit the worktrees). `git worktree
-list` is the check when a gate count looks unfamiliar. Such a worktree also arrives with **no
-`node_modules`**, so Node resolves from the nearest ancestor that has one and the gate runs
-against another tree's dependency versions. Create worktrees yourself — see **Working in
-parallel** for the recipe and what the shared `node_modules` forbids. The corpus config is not at
-risk; its `include` is anchored at `corpus/**`.
+- **`npm run check` is the gate, not `lint`** — same rules plus the formatter and
+  `organizeImports`, over the whole repo. Current state: **0 errors**, ~70 warnings, 3 infos;
+  warnings never fail it. Two infos are `useNodejsImportProtocol` on `vite.config.ts` (Biome classes
+  the fix *unsafe*, so it is deliberately left); the third is a `biome.json` deprecation notice.
+- **Reading a Biome result will tell you a red tree is green.** `--max-diagnostics` truncates
+  *before* the `Found N errors.` summary, and piping makes `$?` report `tail`'s status. Use:
+  ```sh
+  npm run check > /tmp/check.txt 2>&1; echo "exit=$?"              # no pipe, so $? is Biome's
+  npx biome check --diagnostic-level=error --max-diagnostics=300   # errors only, untruncated
+  ```
+- **A worktree inside the repo makes a root test run lie.** Tool-created subagent worktrees land at
+  `<repo>/.claude/worktrees/`, *inside* the working tree, so a bare `npm test` reports someone
+  else's results — and such a worktree has no `node_modules`, so it resolves another tree's
+  dependency versions. Scope it: `npx vitest run --dir src`, then `npx vitest run --dir build` as a
+  second command. Create worktrees yourself (see **Working in parallel**). The corpus config is
+  anchored at `corpus/**` and is not at risk.
 
 **Biome severities are ratcheted and must stay there** (`biome.json`): all seven configured `a11y`
-rules, `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` are at
-**`error`**. The last matters most — it sat at `warn`, and since `lint` exits 0 on warnings the
-entire stale-closure class **could not fail CI**, with no renderer to catch one at runtime. The
-remaining warnings are only `noArrayIndexKey`, `noExplicitAny` and `noAssignInExpressions`.
+rules, `correctness/useHookAtTopLevel` and `correctness/useExhaustiveDependencies` at **`error`**.
+The last matters most — at `warn` the entire stale-closure class could not fail CI.
 `build/lintConfig.test.ts` guards that severity and the strict-JSON landmine below. CI runs
-`check`, `typecheck`, `test` and `build` on every PR, plus `npm audit --audit-level=high`.
+`check`, `typecheck`, `test`, `build` and `npm audit --audit-level=high` on every PR.
 
 ## Source Layout (`src/`)
 
-Many entries below name a module as **the one declaration** of some rule. That phrasing is load-
-bearing: each of those exists because the same predicate had been hand-written at several sites
-and the copies drifted. Reuse them rather than re-rolling the logic.
+Many entries name a module as **the one declaration** of some rule. That phrasing is load-bearing:
+each exists because the same predicate was hand-written at several sites and the copies drifted.
+Reuse them rather than re-rolling the logic.
 
-- **`pe/`** — PE parser (headers, imports, exports, resources, authenticode). `truncation.ts` owns
-  the **one declaration of `TRUNCATION_MARKER`** and `isTruncatedValue` — the admission spelled
-  *into a value* where the narrowed thing is a string; it was three copies in three files, and it
-  is read back in two places (`ImportEntry.truncated`, `utils/exportSchema.ts`), so a drifted copy
-  would make a reader stop recognising the admission rather than merely look different.
-  `dataDirectories.ts` owns the derived facts about what the parser refused to read —
-  `dataDirectoryClamp`, `directoryDeclared`, `certificateUnreadable`, `resourcesUnreadable` — and
-  `admissions.ts` turns those five facts into the SENTENCES the two session-outliving surfaces
-  print (`parseAdmissions`, read by the MCP resources, `load_pe` and the markdown report).
-  `ordinalTables.ts`
-  is generated from pefile's `ordlookup` — do not hand-edit; imphash must agree with pefile or it
-  matches nothing. It also owns the **one declaration of the `Ordinal_<n>` spelling** —
-  `ORDINAL_IMPORT_PREFIX`, `formatOrdinalImport`, `parseOrdinalImport`, `resolveOrdinal` — because
-  that string is a *wire format* the parser writes and `computeImphash` reads back, not a label. `sections.ts` owns `findCodeSection`/`isCodeSection`/`dataSectionRanges` (the
-  `.text`-or-executable predicate, previously written at seven sites). `buildSectionIndex()` +
-  `rvaToFileOffsetIndexed()` in `parser.ts` are the batch form of `rvaToFileOffset`.
-  `arm64Unwind.ts` decodes both ARM64 unwind encodings. `pdata.ts`'s `readScopeTable` is the
-  **one declaration of the `__C_specific_handler` scope-table reading** and of the structural
-  check that decides whether the language-specific data is one at all — see the gotcha; nothing
-  consumes `RuntimeFunction.scopeTable` yet.
+- **`pe/`** — PE parser (headers, imports, exports, resources, authenticode).
+  - `truncation.ts` — `TRUNCATION_MARKER` / `isTruncatedValue`, the admission spelled *into a value*.
+  - `dataDirectories.ts` — `dataDirectoryClamp`, `directoryDeclared`, `certificateUnreadable`,
+    `resourcesUnreadable`; `admissions.ts` turns those facts into the SENTENCES the two
+    session-outliving surfaces print (`parseAdmissions`, read by MCP resources and the report).
+  - `ordinalTables.ts` — generated from pefile's `ordlookup`, **do not hand-edit**; also owns the
+    `Ordinal_<n>` spelling (`ORDINAL_IMPORT_PREFIX`, `formatOrdinalImport`, `parseOrdinalImport`,
+    `resolveOrdinal`), which is a **wire format** the parser writes and `computeImphash` reads back.
+  - `sections.ts` — `findCodeSection`/`isCodeSection`/`dataSectionRanges`; `parser.ts`'s
+    `buildSectionIndex()` + `rvaToFileOffsetIndexed()` are the batch form of `rvaToFileOffset`.
+  - `arm64Unwind.ts` (both ARM64 unwind encodings); `pdata.ts`'s `readScopeTable` (the
+    `__C_specific_handler` scope table — nothing consumes `RuntimeFunction.scopeTable` yet).
 - **`disasm/`** — engine, types, CFG, operand parsing, stack analysis, signatures.
-  - `capstoneWindow.ts` owns **every** call into the Capstone decoder; nothing else may call
-    `cs.disasm`. `capstoneReader.ts` is the decoder underneath — a hand-written `cs_insn`
-    marshaller (~3x faster than capstone-wasm's) and the only place allowed to call
-    `loadCapstone`.
-  - `arch.ts` maps `coffHeader.machine` to an `ImageArch` and holds `unsupportedOnArch()`.
-    **Never select a decoder with `is64`** — that is the PE32+ magic and true for ARM64 too.
-  - `funcInsns.ts` — "what does one function's decompilation need out of a whole-image
-    collection": `collectFuncInsns`, `funcXrefEntries`, `funcExceptionRecord`. Imports nothing but
-    types, which is what lets `disasmClient.ts` and `decompile/pipeline.ts` share it.
+  - `capstoneWindow.ts` owns **every** call into the decoder; nothing else may call `cs.disasm`.
+    `capstoneReader.ts` is the hand-written `cs_insn` marshaller under it (~3x faster) and the only
+    place allowed to call `loadCapstone`.
+  - `arch.ts` maps `coffHeader.machine` to `ImageArch`; holds `unsupportedOnArch()`. **Never select
+    a decoder with `is64`** — that is the PE32+ magic and true for ARM64 too.
+  - `funcInsns.ts` — one function's slice of a whole-image collection (`collectFuncInsns`,
+    `funcXrefEntries`, `funcExceptionRecord`); imports only types, which is what lets
+    `disasmClient.ts` and `decompile/pipeline.ts` share it.
   - `ripRelative.ts` — all `[rip ± 0x..]` parsing (was hand-rolled nine times).
-  - `linearSweep.ts` — the one x86 linear sweep (`sweepX86`), its session memo (`X86SweepCache`),
-    and `gridScan`, which serves `hybridDisassemble` from that held sweep.
-    `sectionMemo.ts` holds the memo key rule (bytes, load address, decoder identity).
-  - `stackIdiom.ts` — the `push <imm>`/`pop <reg>` pairing rule; **a leaf that imports nothing**,
-    so `decompile/lifter.ts` can share it with `functionDetect.ts` without inheriting a Capstone
-    edge.
-  - `callSummary.ts` (what a callee modifies), `seeds.ts` (jump tables → descent seeds),
-    `dataWindows.ts` (`.rdata` spans for x64 jump tables), `seh32.ts` (MSVC 32-bit SEH scope table
-    as a funclet-of-parent relation).
-- **`disasm/arm64*.ts`** — `arm64.ts` (fixed-width sweep + `Arm64SweepCache` + jump-table reader),
-  `arm64Operands.ts` (**the single A64 branch/address grammar** — do not hand-roll a second),
-  `arm64Frame.ts` (the A64 stack frame from `.pdata` — a *second grammar*, not a relaxation of
-  `stack.ts`'s; `stackFrame.ts` dispatches between the two), `arm64Xref.ts`. Everything x86-shaped
-  — the decompiler, x86 xrefs, IRP dispatch, signatures — **declines on ARM64 rather than
-  guessing**. Gated by `npm run corpus:arm64`.
-  `arm64.ts` also owns `arm64ThunkSlot`, the **one declaration of "which IAT slot does this
-  thunk-shaped function branch through"** — it re-rolls neither grammar, taking the branch half
-  from `classifyArm64Branch` and the address half from `classifyArm64Br`'s `runtime-pointer` arm,
-  and returns the **completed** address rather than the `adrp` page base (peek-a-bin-vg3: both
-  corpus binaries put the IAT at a 4 KiB boundary, so the page base is itself an import entry).
-  It returns a SLOT, not a name — whether a slot is an import is the IAT's business, which is what
-  lets `corpus/arm64.ts` re-derive the slot independently and judge the name against the linker's
-  table (`peek-a-bin-j4uk.3`).
+  - `linearSweep.ts` — `sweepX86`, its session memo `X86SweepCache`, and `gridScan` (serves
+    `hybridDisassemble` from the held sweep). `sectionMemo.ts` holds the memo key rule (bytes, load
+    address, decoder identity).
+  - `stackIdiom.ts` — the `push <imm>`/`pop <reg>` rule; **a leaf that imports nothing**.
+  - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`, `seh32.ts`.
+- **`disasm/arm64*.ts`** — `arm64.ts` (fixed-width sweep, `Arm64SweepCache`, jump-table reader,
+  `arm64ThunkSlot`), `arm64Operands.ts` (**the single A64 branch/address grammar** — do not
+  hand-roll a second), `arm64Frame.ts` (A64 frame from `.pdata`, a *second grammar* rather than a
+  relaxation of `stack.ts`'s; `stackFrame.ts` dispatches), `arm64Xref.ts`. Everything x86-shaped —
+  decompiler, x86 xrefs, IRP dispatch, signatures — **declines on ARM64 rather than guessing**.
 - **`disasm/decompile/`** — IR lifting → SSA → folding → structuring → cleanup → type inference →
   promotion → struct synthesis → emission.
-- **`components/`** — the disassembly view is split across `DisassemblyView.tsx` (orchestration),
-  `DisassemblyRows.tsx` (virtualized rows), `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`.
-  `XrefPanel.tsx`'s `scopeAvailable()` is the one declaration of "has the caller given this panel
-  the address this scope needs", read by the filter chain *and* by the scope buttons, with
-  `effectiveScope` the thing everything on screen reads — `scopeMode` is the user's preference and
-  may outlive its address. `floatingClamp.ts`'s
-  `clampFloatingPosition` is the one declaration of where a floating bottom panel may be —
-  read by the header drag, `handlePopOut`'s mint and the render-time derivation in
-  `BottomPanelContainer.tsx`, and deliberately taking **no height**, since a whole-panel-inside
-  rule pins a panel taller than the window. The clamped position is **derived, never written
-  back** — a callback spreading that derived object into `poppedOut` replaces the user's stored
-  position with the picture of it, which is how the corner resize lost one.
-  **`persistedSizeClamp.ts`'s `clampPersistedSize` is the one declaration of the
-  NEIGHBOURING question — how large may a persisted, user-chosen SIZE be, given the
-  viewport — and it is a different function for a stated reason**: `floatingClamp`
-  anchors on a constant slice of a drag handle and therefore takes no size at all,
-  where this is *about* the size. Two sites read it, `Sidebar.tsx`'s width and
-  `BottomPanelContainer.tsx`'s docked height, each restored from localStorage against
-  a pair of compile-time constants alone until `peek-a-bin-0tt6`. Three rules, all
-  load-bearing. The answer is **derived for rendering and never written back**, which
-  is the paragraph above's fix repeated one question over — the state and the drag
-  carry the preference, so a large window restores the large sidebar. **When the floor
-  and the viewport cannot both be satisfied the FLOOR WINS** (`Math.max(min, …)`
-  outermost, a named and tested case): they genuinely cannot — a 180px minimum sidebar
-  beside a 306px reserve does not fit in a 375px viewport — and yielding drives the
-  size through zero to negative, leaving an element of no extent that cannot be dragged
-  back, where a floor that overflows still has a collapse rail and a close button.
-  And **a DRAG is not clamped**, deliberately unlike `floatingClamp`'s, whose write
-  *is*: a size drag is already bounded by the site's own `MAX`, and clamping the write
-  would let one drag in a narrow window discard a wide preference permanently. The two
-  reserves are **sums of measured element extents, not invented numbers** — 306px of
-  width from `.disasm-grid.hide-bytes`' 28.5ch of fixed columns at the 16px maximum
-  mono size plus `--row-px` both sides, and 166px of height from `AddressBar` at two
-  rows (73) + section-header bar (31) + breadcrumbs (21) + status bar (21) + one
-  `--row-height` listing row (20). **The height's one-row listing floor is a BLOCKED
-  ALTERNATIVE rather than a preference**: four or five rows is the size that makes the
-  pane worth looking at, and measured, any reserve above 168 reddens
-  `BottomPanels.dom.test.tsx`'s "clamps to the minimum and the maximum", which asserts
-  the constants-only clamp this module exists to widen — so raising it is a decision
-  about that test. Nothing here is verified as LAYOUT (`peek-a-bin-v2u`).
-  **`Sidebar.tsx` is a flex column with ONE `flex-1` child, the function list, and
-  nothing whose height follows the CURSOR may sit above it** — the Call Graph
-  (Callers/Callees) block did, unbounded, so every caret move dragged the Functions
-  header, the filter box and every row vertically. It is below the list, bounded at
-  160px with `maxHeight: 40%` and its own scroller, and resizable. Two things there
-  are not copies of `BottomPanelContainer`'s and must not be "corrected" into them:
-  the wrapper takes **no `shrink-0`** (it competes with four content-sized siblings,
-  where the bottom band competes only with the disassembly view), and the list
-  carries a **`min-h-[120px]` floor**, because a `flex-1` scroll container's
-  automatic minimum is 0 by CSS Flexbox 4.5 so all negative free space landed on it
-  and a short window clipped the footer away. Its height persists through
-  `ResizeHandle`'s `onResizeEnd` reading state in the obvious way, which is correct
-  **only because that component now guarantees it** — see the `ResizeHandle` entry
-  below.
-  **The ANNOTATIONS block (comments + renames) sits ABOVE the list and is BOUNDED, and
-  those are two separate judgements.** The rule forbids a block whose height follows the
-  CURSOR above the list; this one follows USER EDITS, exactly like the Bookmarks block one
-  row up, so its placement is permitted. Unbounded growth is not: a session produces far
-  more comments than bookmarks and every one would push the Functions header down — the
-  same defect by a slower route. It carries `maxHeight: min(180px, 30%)` and its own
-  scroller, a **CEILING rather than a height** (unlike the Call Graph's, which is
-  user-resizable and persisted) so two comments reserve two rows; **no `shrink-0`**, for
-  the reason above; and a body that is `overflow-auto` but deliberately **NOT `flex-1`**,
-  which needs no grow term over a content-sized wrapper and is what keeps
-  `[data-panel="functions"]` the FIRST `.flex-1.overflow-auto` in the document as a
-  property rather than a coincidence of ordering — the probe-ambiguity guard in
-  `Sidebar.dom.test.tsx` covers it. **`sortedAnnotations` is not decoration**:
-  `Object.entries` returns integer-like keys in numeric order only for array indices, and
-  an x64 image base puts every address in these maps past 2^32 - 1, so unsorted they come
-  back in the order the user annotated in. **THE BOOKMARKS BLOCK IS STILL UNBOUNDED and
-  that is a known, deliberate asymmetry rather than an oversight** — flagged at
-  `peek-a-bin-v3uh.11` and left for the user to decide, since bounding it changes an
-  existing affordance and its population is much smaller. **Nothing here is verified as
-  layout**: jsdom performs no layout, so every assertion on the bound is a string, and
-  deleting the list's `min-h-[120px]` or the annotations wrapper's `overflow-hidden` is
-  measurably inert (`peek-a-bin-llrq.6`). All
-  four dialogs go through one `Modal.tsx`; its class composition, focus arithmetic and
-  `accidentalDismissAllowed` rule are pure functions in `modalScaffold.ts`.
-- **`ResizeHandle.tsx` guarantees `onResizeEnd` runs AFTER the resize it describes has
-  committed, and that guarantee is the reason its four callers may read their own state
-  in it.** The mouse path always could — `mouseup` is a separate event, after the last
-  `mousemove` committed. The keyboard path could not: it called `onResize` and
-  `onResizeEnd` inline in one handler, so React had not re-rendered between them and the
-  caller was handed the PRE-press value however the callbacks were routed. **Three of the
-  four callers were wrong because of it** — the bottom panel's height and the decompile
-  and chat widths all persisted a step behind on every arrow press, so the first press
-  saved nothing. The keyboard step is deferred by one microtask (measured: React flushes a
-  discrete event's updates before yielding); the mouse path is deliberately untouched, so
-  only keyboard-persistence tests pay an `await`. **Do not "simplify" that back to an
-  inline call, and do not re-add a per-caller ref** — the rule has one declaration here
-  and the contract is asserted once, in `panelUtilities.dom.test.tsx`, with a harness that
-  is deliberately the naive state-reading caller. A `vi.fn()` cannot see this class: it
-  says `onResizeEnd` was *called*, never what a real caller would have stored, which is
-  how three callers stayed broken under a green suite (`peek-a-bin-a2ze`,
-  `peek-a-bin-ob8e`). Its duplicate in `Sidebar.tsx` (the width grip) is **deliberately
-  not consolidated**: the two arithmetic forms differ at the clamps — drag past the
-  minimum and return the pointer to its start, and absolute-offset recovers to the
-  starting width while accumulated-delta flies to the maximum (`peek-a-bin-smcf`).
+- **`components/`** — the disassembly view is `DisassemblyView.tsx` (orchestration),
+  `DisassemblyRows.tsx`, `DisassemblyToolbar.tsx`, `InsnContextMenu.tsx`. All four dialogs go
+  through one `Modal.tsx`; its class composition, focus arithmetic and `accidentalDismissAllowed`
+  are pure functions in `modalScaffold.ts`.
 - **`hooks/`** — state (`usePEFile`), derived state, rows, search. `useDisassemblyKeyboard.ts` and
   `useGraphSearch.ts` are seams extracted from `DisassemblyView`. Pure leaf modules
   (`asyncMetricState.ts`, `decompileTabsState.ts`, `modalScaffold.ts`, `listboxIds.ts`) exist so
-  hook logic can be tested without a DOM or a worker — still the cheapest way, though no longer
-  the only one.
+  hook logic can be tested without a DOM or a worker.
 - **`workers/`** — **two** workers, and the split is not tidiness: the disasm worker services
   messages **serially**, so a checksum posted to it queues behind a multi-minute disassembly.
-  - Disasm: `disasm.worker.ts` (setup), `dispatch.ts` (the RPC switch, extracted so it is
-    importable under vitest), `disasmClient.ts` (caller side).
-  - Metrics: `metrics.worker.ts` / `metricsDispatch.ts` / `metricsClient.ts`, stateless.
-  - `transfer.ts` (`prepareBinaryArgs`, which every RPC's args go through), `blobSource.ts` (the
-    `WeakMap<ArrayBuffer, Blob>` registry shared by both clients and dispatches),
-    `requestTimeout.ts` (`REQUEST_TIMEOUT_MS` and `WorkerTimeoutError`, a leaf because both have
-    readers outside the client).
-  - Both clients build their `Worker` on first use via a private `ensureWorker()`; `send` builds
-    inside its own `try`, so with no `Worker` at all the *request* rejects instead of the caller
-    throwing — which is what makes `DisassemblyView` mountable under jsdom. The four
-    client-side-state methods deliberately do not go through it.
+  Disasm: `disasm.worker.ts` / `dispatch.ts` (the RPC switch, extracted so it is importable under
+  vitest) / `disasmClient.ts`. Metrics: `metrics.worker.ts` / `metricsDispatch.ts` /
+  `metricsClient.ts`, stateless. Shared: `transfer.ts` (`prepareBinaryArgs`), `blobSource.ts`
+  (`WeakMap<ArrayBuffer, Blob>`), `requestTimeout.ts` (`REQUEST_TIMEOUT_MS`, `WorkerTimeoutError`).
+  Both clients build their `Worker` in a private `ensureWorker()` called inside `send`'s own `try`,
+  so with no `Worker` the *request* rejects instead of the caller throwing — which is what makes
+  `DisassemblyView` mountable under jsdom.
 - **`analysis/`** — driver detection, anomalies, IOCTL decoding. `isPlausibleIOCTL` is a *shape*
   test most 32-bit values pass, so decoding also requires the call site (`ioctlCodeArgIndex`);
   without that gate the emitter produced 1475 confident wrong IOCTL comments.
 - **`llm/`** — `models.ts` is the single source of model IDs and token budgets — **never write a
-  model ID anywhere else**; `client.ts` is `streamChat`, `prompt.ts` the system prompts,
-  `settings.ts` the profile store and `hasApiKey()` gate, `retry.ts` the backoff policy and the
-  shared `RequestLimiter`. **`apiLists.ts`, `decompileForLLM.ts` and `responseSchema.ts` were
-  deleted at `peek-a-bin-1xc5`** with the three AI features that used them, so
-  `DANGEROUS_APIS`/`NOTABLE_APIS`, `matchesApi`, the decompile-for-context routine and the zod
-  response validation are gone; no surviving feature expects JSON back. `LLMTask` is `chat |
-  enhance` and both budgets are 16384 — read `TASK_MAX_TOKENS`' docstring before inlining it, and
-  `docs/verification.md` for the runtime pin that coincidence cost.
+  model ID anywhere else**; `client.ts` (`streamChat`), `prompt.ts`, `settings.ts` (profile store,
+  `hasApiKey()`), `retry.ts` (backoff, `RequestLimiter`). `LLMTask` is `chat | enhance`.
 - **`ghidra/`** — REST client for the optional server in `ghidra-server/`; powers the decompile
   panel's **High Level** tab. Not a decompiler.
 - **`mcp/`** — MCP server (tools, resources, session, Capstone wrapper), `cli.ts`, `clients.ts`,
@@ -286,2483 +146,1020 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
 
 ## Architecture
 
-**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` (29 top-level
-fields) and an `AppAction` discriminated union (38 action types), both re-counted at `89fb315` —
-they were 30 / 39 at `263bd5d` until `peek-a-bin-576b` removed `loading` and `SET_LOADING`, which
-had become write-only state once `peek-a-bin-v3uh.13` deleted their one reader —
-counts drift, so re-measure rather than trusting them. (They were 34 / 55 at `1c3de72` and stayed
-there until `peek-a-bin-1xc5` removed the three AI features' state. **Count the union by unique
-`type: "…"` string, not by `| {` lines** — six members span several lines, which is how a
-re-measurement during that epic came back 6 short in both directions.) Access via `useAppState()` /
-`useAppDispatch()`. New state = add an action to the union, handle it in the `appReducer` switch.
+**State**: `useReducer` + React Context in `src/hooks/usePEFile.ts`. `AppState` and an `AppAction`
+discriminated union; access via `useAppState()` / `useAppDispatch()`. New state = add an action to
+the union, handle it in the `appReducer` switch. **Counts drift — re-measure rather than trusting a
+number, and count the union by unique `type: "…"` string, not by `| {` lines** (six members span
+several lines, which has produced a 6-short re-measurement twice).
 
 `appReducer` is covered branch-by-branch in `src/hooks/__tests__/appReducer.test.ts`. **Two
-invariants that suite pins and you must preserve**: a no-op branch returns the **same object
-reference** (a new equal object causes pointless re-renders), and every mutating action
-**replaces** rather than mutates — the annotation undo/redo snapshots hold direct references to
-annotation objects, so an in-place mutation would corrupt history retroactively.
+invariants that suite pins**: a no-op branch returns the **same object reference**, and every
+mutating action **replaces** rather than mutates (annotation undo/redo snapshots hold direct
+references, so an in-place mutation corrupts history retroactively).
 
 **`VIEW_TABS` (in `usePEFile.ts`) is the single declaration of the eight view tabs and their
-order.** `AddressBar`'s tab bar and its 1-8 `TAB_KEYS` shortcut map are both derived from it, with
-labels from `VIEW_TAB_LABELS` in `components/analysisNotice.ts` — previously written out three
-times, so a tab could be called one thing on its button and another in the notice telling you to
-open it. `VIEW_TAB_LABELS` is a `Record<ViewTab, string>` and fails the build on a missing tab
-where an array would silently drop it. `parseViewTab()` narrows the `#tab=` URL parameter; do not
-cast that string to `ViewTab`.
+order**, with labels from `VIEW_TAB_LABELS` (`components/analysisNotice.ts`) — a `Record<ViewTab,
+string>`, so a missing tab fails the build. `AddressBar`'s tab bar and its 1-8 `TAB_KEYS` map are
+derived from it. `parseViewTab()` narrows the `#tab=` URL parameter; do not cast to `ViewTab`.
 
 ### Analysis phases and the notice
 
 **`AnalysisPhase` has THREE terminal values besides `"ready"`, and telling them apart is the
-point.** The class of defect behind all of them is a terminal state that is never entered, leaving
-a spinner that can never resolve.
+point.** The defect class behind all of them is a terminal state that is never entered, leaving a
+spinner that can never resolve.
 
-- **`"failed"`** — the analysis chain rejected. Without it a failed parse left the UI spinning.
-- **`"no-code"` — not a failure.** A PE with no executable section (a resource-only DLL, i.e. an
-  ordinary satellite/MUI file) makes `findCodeSection` return undefined and App's effect returns
-  *above* the first `SET_ANALYSIS_PHASE` it dispatches. The parse succeeded, nothing went wrong,
-  and every parser-derived tab is populated — **do not relabel it `"failed"`**.
-- **`"timed-out"` — a fault, but not about the file.** `REQUEST_TIMEOUT_MS` is one budget for
-  every RPC (correctly, since the worker is serial), and every rejection used to reach the user as
-  `"failed"` — exactly what a truncated file produces, so a user whose large image merely needed
-  longer was told the same thing as a user who dropped a corrupt one. It is a **phase, not a flag
-  beside `"failed"`**: a phase is single-valued and `RESET` returns it to `"idle"`, so the fact
-  cannot outlive the run it describes, where a parallel boolean needs clearing at load *and*
-  wherever a re-analysis starts and a stale one reports the next file's genuine parse failure as a
-  timeout. Distinguishable because the watchdog **mints a class**, `WorkerTimeoutError`
-  (`workers/requestTimeout.ts`); `analysisRejection` (`analysisNotice.ts`) is the pure function
-  App's `catch` reads, pure because nothing here renders a component so an inline `catch` body is
-  unreachable by any test. Note the asymmetry: only a *client-side* rejection can be an instance,
-  since an error thrown inside the worker is flattened to a string before it crosses
-  `postMessage`. The timeout's message is recorded **verbatim**, without the `"Analysis failed: "`
-  prefix, or the notice interpolates those words into the sentence saying the analysis did not
-  fail. (`peek-a-bin-meai`)
+- **`"failed"`** — the analysis chain rejected.
+- **`"no-code"` — not a failure.** A PE with no executable section (a resource-only DLL) makes
+  `findCodeSection` return undefined; the parse succeeded and every parser-derived tab is
+  populated. **Do not relabel it `"failed"`.**
+- **`"timed-out"` — a fault, but not about the file.** A **phase, not a flag beside `"failed"`**,
+  so `RESET` clears it and the fact cannot outlive its run. The watchdog mints `WorkerTimeoutError`
+  (`workers/requestTimeout.ts`) and `analysisRejection` (`analysisNotice.ts`) is the pure function
+  App's `catch` reads. Only a *client-side* rejection can be an instance — an error thrown inside
+  the worker is flattened to a string by `postMessage`. Its message is recorded **verbatim**,
+  without the `"Analysis failed: "` prefix.
 
 **Whether a phase means "still working" is `ANALYSIS_IN_PROGRESS`**, a `Record<AnalysisPhase,
-boolean>` in `usePEFile.ts` that `StatusBar` and `Sidebar` both read. It replaced a hand-written
-`phase !== "idle" && !== "ready" && !== "failed"` chain written at three sites — a shape that
-defaults any phase added later to "still analysing", i.e. a spinner that can never resolve. A new
-phase must fail the build here instead (`peek-a-bin-bo3b`).
+boolean>` read by `StatusBar` and `Sidebar`. It replaced a hand-written phase chain at three sites
+— a shape that defaults any new phase to "still analysing". A new phase must fail the build here.
+(A fourth such chain in `FileLoader` gated a progress panel that provably could not render; the
+panel was deleted, leaving `FileLoader`'s props as `onFile` and `error` alone. Consequence:
+`AppState.loading` now has **no reader** and `SET_LOADING` is write-only state, left deliberately.)
 
-**There was a FOURTH such chain, in `FileLoader`, and it was DELETED rather than converted —
-along with the whole progress panel it gated, because none of it could render.** The component
-spelled `analysisPhase !== "idle" && analysisPhase !== "ready"`, one term shorter than the three
-sites above (it was missing `"failed"` as well as `"no-code"` and `"timed-out"`), and used it to
-show a four-step panel, disable the drop zone and hide the recents list. **`App` renders
-`FileLoader` only when `!state.peFile`, and `handleFile` dispatches RESET, SET_LOADING,
-SET_ANALYSIS_PHASE `"parsing"` and SET_PE_FILE from ONE synchronous callback** — React commits
-nothing mid-callback, so by the first paint either `peFile` is set and the component is unmounted,
-or the parse threw and the catch dispatched `"idle"`, **not** a terminal phase. `loading` could not
-rescue it either: SET_PE_FILE and SET_ERROR both clear it inside that same batch. **Measured, not
-reasoned** — a probe recording `useAppState()` from FileLoader's own mount point across a real load
-saw exactly two commits, both `{loading: false, phase: "idle"}`, and went red under a one-line
-`await` splitting the batch after SET_LOADING. So the panel, the disabled drop zone, the `fileName`
-"Analyzing …" line and `getStepStatus`'s (separately measured-redundant) `"failed"` arm were all
-unreachable. Deletion beat relocation because `ANALYSIS_STEPS` was **a second phase→label table
-grouping the same union differently**, so moving the panel would have meant keeping two tables for
-one fact; the steps a user actually waits on (detect functions, build xrefs) all run *after* this
-screen is gone, and what they see is the sidebar skeleton and the status-bar spinner, both of which
-already read `ANALYSIS_IN_PROGRESS`. `FileLoader`'s props are now `onFile` and `error` alone.
-**Consequence worth knowing: `AppState.loading` now has NO reader** — `SET_LOADING` is write-only
-state, left in place deliberately rather than swept up inside a component bead
-(`peek-a-bin-v3uh.13`).
+**`analysisNotice()` has six kinds, RANKED**: `"unsupported-arch"` → `"no-code-section"` →
+`"engine-unavailable"` → `"analysis-timed-out"` → `"analysis-failed"` → `"partial-detection"`. Each
+carries **`isFault`**, and **all five render sites read that** rather than testing the kind — each
+had spelled `kind === "analysis-failed"` by hand, and the fifth was missed, putting one notice on
+screen in two colours at once.
 
-**`analysisNotice()` (`components/analysisNotice.ts`) has six kinds, and they are RANKED**:
-`"unsupported-arch"` → `"no-code-section"` → `"engine-unavailable"` → `"analysis-timed-out"` →
-`"analysis-failed"` → `"partial-detection"`. Each carries **`isFault`**, and **all five render
-sites — three in `App.tsx`, one in `DisassemblyView.tsx` and one in `StatusBar.tsx` — read
-that** rather than testing the kind;
-each had spelled `kind === "analysis-failed"` by hand to pick red over amber, which is a predicate
-a new kind joins on the wrong side of silently. That is not hypothetical: the fifth site was
-missed, and two `isFault: true` kinds rendered amber in the status bar while the same notice
-rendered red in App's banner — one notice, two colours, on screen at once (`peek-a-bin-n7q1`).
+Rank reasoning, the part to preserve: the two **properties of the file** come first (each survives
+the engine being fixed); `"engine-unavailable"` next, since its remedy is a reload and `init()` is
+watchdogged by the same timer; then the timeout, because a run the watchdog stopped did not fail.
+`"partial-detection"` (from `DetectResult.omitted`) is not reported on top of an unsupported
+architecture and is *appended* to a failure rather than substituted. `"no-code-section"` lists
+populated tabs from `PARSER_DERIVED_TABS` so the prose cannot disagree with the buttons.
 
-**THE SAME HAND-WRITTEN-PREDICATE CLASS WAS FOUND TWICE MORE, IN `AnomaliesView.tsx`, AND BOTH ARE
-NOW CLOSED.** Its AI-findings palette was a ternary chain over `AIScanFinding["severity"]`
-(`=== "critical" || === "high" ? red : === "medium" ? amber : blue`), and both anomaly tables were
-keyed `Record<string, …>` so a fourth severity compiled, sorted last behind `info` and rendered in
-`info`'s blue — a new severity silently painted as the mildest one. Both are now keyed on the
-union, so a sixth member fails the build the way `DETECT_PASS_LABELS` and `VIEW_TAB_LABELS` do
-(`peek-a-bin-p0qw`). The **third** site was `AddressBar.tsx`, which answers a *different* question
-of the same union — the maximum severity across anomalies and findings — with its own
-`=== "critical" || === "high"` chain and a third palette; it was closed at `1591289` by
-`components/severity.ts`, and the paragraph on that module below is the current statement of the
-rule. **Read that one for the identifiers**, which are `BADGE_RANK` and `ANOMALY_BADGE`.
-**`AnomaliesView.tsx` and `AddressBar.tsx`'s badge no longer exist** — the Anomalies view tab went
-at `peek-a-bin-1xc5` — so both defects above are history rather than live sites. **The narrative
-is kept deliberately**: they were two of the nine defects the renderer found, they are the reason
-this class is written down at all, and the current holder of the rule is the severity paragraph
-below, whose reader is now `HeaderView`'s `AnomalyBanners`.
+**`"analysis-timed-out"` is the one fault kind whose `unavailableTabs` is EMPTY** — `buildAllXrefs`
+is the last stage, so a timeout there leaves a complete listing with only xrefs missing. For the
+same reason `DisassemblyView` deliberately does not take that kind into its replacement arm.
 
-Rank reasoning, which is the part to preserve: the two **properties of the file** come first
-because each survives the engine being fixed (an ARM32 resource-only DLL has no disassembly on a
-healthy engine either); `"engine-unavailable"` next because its remedy is a page reload rather
-than a retry, and `init()` is watchdogged by the same timer so an engine that never answers *is*
-itself a timeout — reporting the chain's timeout there would report the symptom; then the timeout,
-because a run the watchdog stopped did not fail and `"analysis-failed"` would print the watchdog's
-message as a diagnosis of the file. `"partial-detection"` (fed by `AppState.omittedPasses` from
-`DetectResult.omitted`) is deliberately **not** reported on top of an unsupported architecture,
-which already implies every decoder-fed pass; on a failure its sentence is *appended* rather than
-substituted, since which stage threw and how much survived are different facts.
-`"no-code-section"` lists the populated tabs from `PARSER_DERIVED_TABS` rather than spelling them,
-so the prose cannot disagree with the buttons.
-
-**`"analysis-timed-out"` is the one fault kind whose `unavailableTabs` is EMPTY**, and that is
-deliberate: the three withholding kinds can never populate the disassembly, but a timeout
-routinely can — `buildAllXrefs` is the *last* stage, so a timeout there leaves a complete function
-list and disassembly with only the xrefs missing. Naming `DECODER_DERIVED_TABS` would print "Still
-available: everything else" over a fully populated panel. For the same reason `DisassemblyView`
-deliberately does **not** take that kind into its replacement arm — replacing the panel would
-delete a real disassembly in order to explain its absence.
-
-**`AppState.disasmFailed` is the engine's own session-level fact** (`SET_DISASM_FAILED`, which
-sets `error` too). `disasmWorker.init()` rejecting used to dispatch a bare `SET_ERROR`, and
-`state.error` renders only in `FileLoader`, which is unmounted whenever a PE is open — so an
-engine that died under a loaded file said *nothing*, while three surfaces spun "Loading engine..."
-off `!state.disasmReady`, which a rejection never clears. `RESET` carries it across a load exactly
-as it carries `disasmReady`: Capstone is initialised once per tab, so a dead engine is still dead
-for the next file (contrast the phases above, which must not outlive their run). App's detection
-effect must dispatch a **terminal phase** for it, above `analyzedBufferRef`, and for **both**
-orders — a file opened after the engine died, and an engine that dies with one open, which is why
+**`AppState.disasmFailed` is the engine's own session-level fact** (`SET_DISASM_FAILED`, which sets
+`error` too). `RESET` carries it across a load exactly as it carries `disasmReady` — Capstone is
+initialised once per tab, so a dead engine stays dead (contrast the phases, which must not outlive
+their run). App's detection effect must dispatch a **terminal phase** for it, above
+`analyzedBufferRef`, for **both** orders (file after death, death under an open file), which is why
 `state.disasmFailed` is in that effect's dependency array. The two surfaces that cannot reach the
-notice (the tab bar renders beside it; the panel's arm is an early return) are told directly, or
-they keep claiming the engine is loading while the banner says it failed (`peek-a-bin-b3jn`).
+notice (the tab bar, the panel's early return) are told directly.
 
 ### Worker and pipeline
 
-**Worker**: RPC-style, `src/workers/disasmClient.ts`. Heavy work (disassembly, detection, xref
-building, decompilation) runs off-thread. The client caches results (disasm, xref, decompile) and
-mints the instruction-array tokens the worker's derived caches key on (`insnsTokens`; **the
-counter never resets, so a token cannot be reused across files**). Whole-file checksum and entropy
-go to the separate metrics worker; inputs under the thresholds in `asyncMetricState.ts` (256 KiB
-for the entropy strip, 1 MiB for file metrics) stay synchronous and spawn no worker, so ordinary
-binaries never show a loading state.
+**Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive +
+gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs → extract strings. All
+async, phased via `analysisPhase`. The decoder comes from `coffHeader.machine` (`disasm/arch.ts`):
+x86/x64 take recursive descent + gap fill, ARM64 the fixed-width sweep.
 
-**`hybridDisassemble` returns the typed xref map with the instructions, so the browser posts
-`buildTypedXrefMap` ZERO times on an ordinary load.** The view asked for that map over exactly the
-array `hybridDisassemble` had just returned — one whole `.text` of objects back up to the worker to
-derive something it could have derived while it still held them (45–91 ms of clone across three
-stamped runs on t64.exe's 60 KiB `.text`, and **linear in the section**; the spread between runs is
-wider than the figure, so read `docs/gotchas.md` before quoting a digit). The dispatch arm
-computes it and replies `{ instructions, xrefs }` when the request sets `withXrefs`; the client
-**pre-seeds `xrefCache`** and **no call site changed**. Four rules: `withXrefs` is **opt-in**, set
-by `disasmClient` alone, so MCP and the six `corpus/` harnesses that time this arm keep the bare
-`Instruction[]` they measure — an absent `xrefs` means "not asked for", not "empty"; the seed's
-bounds half goes through **`xrefBoundsKey`**, the one declaration, since a second spelling would
-not fail loudly, it would just **miss**, paying for the upload *and* the fused payload;
-`useDisassemblyRows` must hand `hybridDisassemble` the **same two `pe.optionalHeader` numbers its
-xref effect passes**, which only `DisassemblyPanel.dom.test.tsx` can see; and the plain
-`buildTypedXrefMap` RPC stays, for `disassemble`, MCP and the terminal-phase fallback the fused
-path cannot cover. **Not `peek-a-bin-9a8`'s refused upload cache** — that rule is "the key
-comparison must be cheaper than the work it saves" and this has **no key**, the map being derived
-from the array inside the call that produced it. **Not `peek-a-bin-7mf`'s refused reply packing**
-either: nothing is packed and the receiver re-slices nothing. The test to keep is the **hit** (zero
-sends), not that two maps are equal (`peek-a-bin-w96b`).
+**Worker**: RPC-style, `src/workers/disasmClient.ts`. The client caches results (disasm, xref,
+decompile) and mints the instruction-array tokens the worker's derived caches key on
+(`insnsTokens`; **the counter never resets, so a token cannot be reused across files**). Whole-file
+checksum and entropy go to the metrics worker; inputs under the thresholds in `asyncMetricState.ts`
+(256 KiB entropy strip, 1 MiB file metrics) stay synchronous, so ordinary binaries never show a
+loading state.
 
-**Where a `File` exists it is posted instead of a copy.** A `Blob` is structured-cloneable *by
-reference*, so posting the original `File` is O(1) at any size and the worker reads the bytes
-itself — taking the last main-thread cost in that path (`prepareBinaryArgs`' slice, ~100 ms for a
-253 MiB file) to zero. **But only the drop/browse path HAS a `File`**: `loadRecentFile()` returns
-an `ArrayBuffer` from IndexedDB and the demo binary arrives via `fetch().arrayBuffer()`, so two of
-three load paths still copy. `App.tsx` calls `registerSourceBlob(buffer, file)` on **both** clients
-beside the `bufferRef` assignment, only after a successful parse; the registry is a
-`WeakMap<ArrayBuffer, Blob>` so nothing needs tearing down, and with no registration the buffer is
-posted exactly as before. Three things not to undo: the result cache stays keyed on the
-`ArrayBuffer`, not on what is posted, so the Headers and Sections tabs still share one request; a
-Blob must pass through `prepareBinaryArgs` untouched, being neither a buffer nor a view with no
-synchronous way to copy one; and the size check in `sourceFor` is a **wiring** check catching a
-mis-paired handle, not an on-disk change. `extractStrings` takes the same handle — it is the only
-disasm RPC whose binary argument is the whole image, since the scan addresses every section by
-absolute `pointerToRawData`. **It moves work off the main thread; it does not make the work
-smaller.** The rule is declared once, in `workers/blobSource.ts`, shared by both clients and both
-dispatches; the **registries stay per-client** deliberately, since whether a client has been told
-is a fact about that client's wiring. `extractStrings` must be **no more gated than the buffer
-arm** — it is the one parser-derived answer coming back over this RPC, and an arch gate added
-there by symmetry would empty the tab the notice has just told the user to open
-(`peek-a-bin-ex2`, `peek-a-bin-736`).
-
-**`buildTypedXrefMap` is the one RPC that sends a decoded array back UP to the worker, and it
-sends `XrefInsn` rather than `Instruction`.** `prepareBinaryArgs` walks top level only, so an
-array argument has every element's `bytes` structured-cloned as its own `ArrayBuffer` — that
-per-buffer overhead is the whole cost of the array (`corpus/replyCloneCost.ts` rows A and D at
-`0870e14` on t64: 115.2 → 85.1 ms, so **26% of the clone is the field nobody reads**). The
-consumer reads `address`, `mnemonic`, `opStr` and — via `resolveRipTarget`, so invisible to a grep
-for `insn.` — `size`. **The deliverable is the TYPE, not the client's `.map()`**: `XrefInsn`
-(`functionDetect.ts`, beside `ImageBounds`, on `ripRelative.ts`'s `RipInsn` model) is the
-consumer's own parameter type, `Instruction` satisfies it structurally so every direct caller is
-unchanged, and the client's strip is **annotated `XrefInsn[]`, never inferred** — so a `bytes`
-read added to the consumer fails to compile instead of reading `undefined` on the worker side,
-and a field added to `XrefInsn` fails to compile at the strip instead of being posted short.
-Dropping `size` fails to typecheck *inside* `functionDetect.ts` against `RipInsn`, which is what
-makes the narrowing provably exact rather than lucky. **This is neither `peek-a-bin-7mf`'s refused
-reply packing (the DOWN direction, refused because a shared buffer forces the receiver to
-re-slice) nor `peek-a-bin-9a8`'s refused section-upload cache (refused because no key is both
-cheap and sound); it has no key at all and packs nothing.** It is `peek-a-bin-9gc9`'s own rule —
-send only what the consumer reads. The remaining 74% is stage 3b's case and is deliberately left
-to be decided with the number in hand (`peek-a-bin-v3uh.3`).
-
-**A load must not post the whole-section `disassemble` it is about to throw away.**
-`useDisassemblyRows`' effect takes `hybridDisassemble` when `state.functions` is non-empty and a
-plain whole-section `disassemble` otherwise — and on a load `state.functions` is `[]` (RESET),
-`activeTab` defaults to `"disassembly"` and App mounts the tab in the same commit, so the effect
-fired *before detection answered*, posted the fallback, and discarded the answer when
-`SET_FUNCTIONS` re-ran it. That arm is **the one x86 decode path with no memo** — `dispatch.ts`
-routes `disassemble` around `WorkerState.x86Sweep` (and `disassembleArm64` around `arm64Sweep`)
-deliberately, since it may be handed a sub-range and would evict the whole-`.text` entry the other
-three RPCs share — and the worker is serial, so the throwaway request was very likely serviced
-*first*, with detection queued behind it. It also cost an extra `Instruction[]` reply clone, an
-extra `buildTypedXrefMap`, and permanent session retention of a second whole-section array in
-`disasmCache`. Gated now on **`!ANALYSIS_IN_PROGRESS[state.analysisPhase]`** — the record, never a
-hand-written phase chain — computed above the effect and in its dependency array (a boolean flips
-twice per load where `state.analysisPhase` would re-run the effect on every transition). All four
-legitimately-no-functions cases still reach the fallback, being terminal and `false` in the record:
-`"ready"` with an empty list, `"failed"` (including the `disasmFailed` arm), `"no-code"`,
-`"timed-out"` — gating on `phase === "ready"` instead withholds the listing from three of them,
-which is `peek-a-bin-bo3b`/`peek-a-bin-b3jn` exactly. `disassembling` is left **true** across the
-early return so the pane keeps its spinner. Two premises this makes true: `corpus/rpcUploadCost.ts`'
-`SENDS_PER_LOAD = 4` was an **under-count** (the fallback made it 5), and `disasmClient.test.ts`'
-"posts `hybridDisassemble` only … after `detectFunctions` has answered" was **false** and is now
-the invariant its `load()` helpers rest on (`peek-a-bin-v3uh.2`).
-
-**Pipeline**: File drop → `parsePE()` → detect functions (worker) → hybrid disassemble (recursive
-+ gap-fill, seeded with jump-table case targets from `seeds.ts`) → build xrefs → extract strings.
-All async, phased via `analysisPhase`. The decoder is chosen from `coffHeader.machine`
-(`disasm/arch.ts`): x86/x64 take recursive descent + gap fill, ARM64 the fixed-width sweep.
+- **`hybridDisassemble` returns the typed xref map with the instructions, so the browser posts
+  `buildTypedXrefMap` ZERO times on an ordinary load.** `withXrefs` is **opt-in**, set by
+  `disasmClient` alone, so MCP and the `corpus/` harnesses keep the bare `Instruction[]` they
+  measure — an absent `xrefs` means "not asked for", not "empty". The seed's bounds half goes
+  through **`xrefBoundsKey`**, the one declaration, since a second spelling would silently *miss*.
+  `useDisassemblyRows` must hand `hybridDisassemble` the **same two `pe.optionalHeader` numbers its
+  xref effect passes**. The plain RPC stays for `disassemble`, MCP and the terminal-phase fallback.
+  The test to keep is the **hit** (zero sends), not that two maps are equal.
+- **Where a `File` exists it is posted instead of a copy.** A `Blob` is structured-cloneable by
+  reference, so posting the original `File` is O(1) at any size. **Only the drop/browse path HAS
+  one** — recents return an `ArrayBuffer` and the demo arrives via `fetch()`. `App.tsx` calls
+  `registerSourceBlob(buffer, file)` on **both** clients after a successful parse; with no
+  registration the buffer is posted as before. Three things not to undo: the result cache stays
+  keyed on the `ArrayBuffer`; a Blob passes through `prepareBinaryArgs` untouched; the size check in
+  `sourceFor` is a **wiring** check. `extractStrings` takes the same handle and must be **no more
+  gated than the buffer arm** — an arch gate added there by symmetry empties the tab the notice has
+  just told the user to open.
+- **`buildTypedXrefMap` sends `XrefInsn`, not `Instruction`.** `prepareBinaryArgs` walks top level
+  only, so every element's `bytes` is cloned as its own `ArrayBuffer` — 26% of the clone is the
+  field nobody reads. **The deliverable is the TYPE, not a `.map()`**: `XrefInsn`
+  (`functionDetect.ts`) is the consumer's own parameter type, `Instruction` satisfies it
+  structurally, and the client's strip is **annotated `XrefInsn[]`, never inferred**, so a new read
+  fails to compile instead of reading `undefined` worker-side.
+- **A load must not post the whole-section `disassemble` it is about to throw away.** Gated on
+  **`!ANALYSIS_IN_PROGRESS[state.analysisPhase]`** — the record, never a hand-written chain —
+  computed above the effect and in its dependency array. All four legitimately-no-functions cases
+  still reach the fallback (`"ready"` with an empty list, `"failed"`, `"no-code"`, `"timed-out"`);
+  gating on `phase === "ready"` withholds the listing from three of them. `disassembling` stays
+  **true** across the early return so the pane keeps its spinner.
 
 ### Architectures, and refusing one
 
 `archForMachine()` returns `ImageArch = TargetArch | "unsupported"`. `"arm64"` for 0xAA64; `"x86"`
-for I386/AMD64 **and for `undefined`**, which means "the caller never told us" and keeps every
-un-threaded call site at its pre-ARM64 behaviour; `"unsupported"` for everything else (ARM32/Thumb,
-IA-64, RISC-V, MIPS). `ImageArch` is a *widening* of `TargetArch` rather than a replacement, so a
-stage that has only ever run after a supported architecture was confirmed keeps the narrow type
-and fails to compile rather than falling through.
+for I386/AMD64 **and for `undefined`** ("the caller never told us", keeping un-threaded call sites
+at pre-ARM64 behaviour); `"unsupported"` for everything else. `ImageArch` is a *widening* of
+`TargetArch`, so a stage that has only ever run after a supported architecture was confirmed keeps
+the narrow type and fails to compile rather than falling through.
 
-**The refusal is deliberately ASYMMETRIC — a judgement, not an oversight. Do not collapse it into
-one behaviour:**
+**The refusal is deliberately ASYMMETRIC. Do not collapse it into one behaviour:**
 
-- **Throw** from stages whose entire output is instructions — `disassemble`,
-  `hybridDisassemble`, `buildAllXrefs`, `decompileFunction` (`workers/dispatch.ts`,
-  `mcp/disasm.ts`). An empty instruction list is indistinguishable from a correct answer.
+- **Throw** from stages whose entire output is instructions — `disassemble`, `hybridDisassemble`,
+  `buildAllXrefs`, `decompileFunction`. An empty instruction list looks like a correct answer.
 - **Return empty, with `DetectResult.omitted` populated**, from function detection. An ARM32 file
-  still yields the headers, sections, imports, exports, resources and strings the PE parser gets
-  right — those are format-level facts and a user should get every one. `mcp/session.ts` guards
-  its two throwing calls behind a `decodable` flag for exactly this reason: an unguarded throw in
-  `loadFile` discarded all of it.
+  still yields headers, sections, imports, exports, resources and strings. `mcp/session.ts` guards
+  its two throwing calls behind a `decodable` flag for exactly this reason.
 
-**`DetectResult.omitted: DetectPass[]`** names the decoder-fed passes that did not run —
-`"call-targets" | "jump-tables" | "thunk-names" | "tail-calls"` — and is **empty when the answer
-is whole**. It covers both the unsupported architecture and a null Capstone handle, where
-detection keeps answering from `.pdata`, exports, the entry point and unwind handlers. It exists
-because a narrower answer used to be the same shape as a complete one. Only passes the
-architecture actually has are ever listed. `DETECT_PASS_LABELS` is a `Record<DetectPass, string>`,
-so a wire value like `call-targets` cannot reach the screen and a fifth pass fails the build.
+**`DetectResult.omitted: DetectPass[]`** names the decoder-fed passes that did not run
+(`"call-targets" | "jump-tables" | "thunk-names" | "tail-calls"`) and is **empty when the answer is
+whole**. It covers both an unsupported architecture and a null Capstone handle. `DETECT_PASS_LABELS`
+is a `Record<DetectPass, string>`, so a wire value cannot reach the screen and a fifth pass fails
+the build.
+
+**In every arch dispatch the `"unsupported"` arm must be checked *before* the `"arm64"` arm** —
+`dispatch.ts` and `mcp/disasm.ts` end their chain at x86, so testing ARM64 first drops an
+unsupported image into x86 and produces a full screen of plausible instructions the file does not
+contain.
 
 ### Rendering and the rest
 
-**Rendering**: virtual scrolling via `@tanstack/react-virtual`. `DisplayRow` union:
-`label | insn | separator | data`. `DisassemblyView` + `HexView` are lazy-loaded.
+**Rendering**: virtual scrolling via `@tanstack/react-virtual`; `DisplayRow` union
+(`label | insn | separator | data`) has **exactly one declaration**, the export in
+`useDisassemblyRows.ts` — a narrowed structural clone still accepts the canonical rows at the call
+site, so a local copy drifts silently instead of failing the build. `DisassemblyView` and `HexView`
+are lazy-loaded. **Styling**: Tailwind utilities; runtime font size via a `--mono-font-size` CSS
+variable on the app root.
 
-**No virtualized row may carry a LINEAR SCAN, and `InsnRow`'s tooltip lookup was the last one.**
-Its operand tooltip resolves each `parseOperandTargets` result in four ordered attempts — IAT map,
-`pe.strings`, detected functions, containing section — and the third was
-`functions.find((f) => f.address === addr)`. A branch or call target misses the first two *by
-definition*, and a target that is not a function scanned the whole list before falling through, so
-the cost was paid per operand target on every rendered row: `overscan: 50` is ~150 rows, at exactly
-**two** full-tree renders per cursor move, against tens of thousands of functions on a large image.
-It is `funcMap.get(addr)` — the same `Map<number, DisasmFunction>` the component already held for
-two other lookups. **`funcMap` is injective by construction**, so this cannot disagree with the
-scan it replaces: both detectors build their list 1:1 out of a `Set` of start addresses,
-`SET_FUNCTIONS` replaces the array wholesale, and detection mutates `fn.name`/`fn.isThunk` in place
-but never appends — so `.find`'s first match and `Map.get`'s last insert are the same entry. The
-`functions` prop was then **deleted** from `InsnRow` and its one call site, which turns "this prop
-is unused" from a comment into a compile error if anyone re-adds a scan. **The behaviour test
-cannot see any of this** — a scan and a map lookup return the same function — so the instrument is
-an own-property `.find` spy on the array handed to the reducer, asserted never called, with the
-tooltip assertion beside it as the liveness half. **Render COUNT is measured here and render COST
-is not**: this is not a claim that anything got faster, which needs the Profiler on a real binary
-(`peek-a-bin-v2u`). (`peek-a-bin-v3uh.1`)
-
-**There is ONE `ErrorBoundary` PER TAB PANE, and the placement is the whole of what it buys.** A
-single boundary around `renderMainView()` — which is what was there — put every tab behind one
-`hasError`: `App` keeps every visited tab in the tree class-hidden, so a throw in the Hex view
-replaced headers, sections, disassembly, imports, exports, strings and resources as
-well, and because `hasError` is never cleared on a re-render and the boundary sat *above* the tab
-switch, changing tabs could not recover it either. The only exit was a page reload, which discards
-the parsed image and the worker's disassembly to recover from what may have been one bad render.
-The boundary takes a **`label`** (`VIEW_TAB_LABELS[key]`, so the fallback cannot call a tab
-something the tab bar does not) and offers **Try again** beside Reload — cheapest exit first.
-**Not clearing on a re-render is a decision, not a leftover**: an automatic reset would retry a
-deterministic fault on every parent render and flicker the fallback in and out with no way to read
-it, so recovery is explicit. Blast radius is asserted in `src/__tests__/App.dom.test.tsx` by
-`vi.mock`ing one tab's component to throw on a flag; nothing static can see any of this, since
-`typecheck` accepts a boundary with neither `getDerivedStateFromError` nor `componentDidCatch` and
-`componentDidCatch` has no signature to inspect (`peek-a-bin-p0qw`).
-
-**…and FOUR CHROME REGIONS now have one too, on a criterion that is stated once, in
-`ErrorBoundary`'s own docstring: guard a region exactly when the app is still worth using without
-it.** The `variant` prop (`"pane" | "chrome"`) is the mount site saying how much room it has, the
-way `label` says what it is guarding — the pane's centred card overflows a 224px sidebar column and
-dwarfs a 20px status strip, so `"chrome"` is one line sized to its own text, and it deliberately
-offers **no Reload**: a chrome boundary is only ever placed where the session is otherwise intact,
-so discarding the parsed image and the worker's disassembly is the wrong trade to put one click
-away. Guarded: **`Sidebar`** and **`StatusBar`** (in `App`), **`AIChatPanel`** and
-**`BottomPanelContainer`** (in `DisassemblyView`). **Loudness is not a second criterion competing
-with the first** — `componentDidCatch` logs the stack either way and the fallback additionally
-*names* the region, which a blank page does not.
-
-**`AddressBar` is deliberately LEFT LOUD, and the argument is a measurement rather than a
-preference**: it owns the global `window` keydown handler carrying the 1-8 `TAB_KEYS` map, so a
-boundary would remove **both** routes to another tab, not just the buttons, leaving an app pinned
-to whichever tab was showing. No partial function is bought, so the boundary would only convert an
-unmistakable blank page into a half-working app that gets worked around instead of reported. The
-suggested middle in `peek-a-bin-t23y` grouped `StatusBar` with it; **measured, that is wrong** —
-the status bar's only navigation affordance is a jump to the containing function, duplicated by the
-sidebar and by the listing.
-
-**Two measured corrections to that bead's premise, worth keeping**: `AIChatPanel` and
-`BottomPanelContainer` mount inside `DisassemblyView` and were therefore never a blank page — they
-sat inside the *pane's* boundary, and what a throw cost was the listing, toolbar, graph and
-decompile panel, which is `p0qw`'s own argument one level down. **`DecompileView` and `CFGView` get
-no boundary on purpose**: they *are* the pane in the mode that shows them, so the pane's boundary is
-already the right radius.
-
-**The four dialogs are guarded by a DIFFERENT class, `DialogBoundary.tsx`, and the split is the
-mechanism rather than the criterion.** They pass the criterion trivially — they are overlays — but
-could not use `ErrorBoundary`'s fallback for two reasons, and both are now measured rather than
-argued. (1) A dialog's subtree carries its own backdrop, focus trap, scroll lock and Escape, all of
-them `Modal`'s, so the ordinary card renders where that chrome would have been: floating in `App`'s
-root, undimmed, with no way out, over a dialog still `open` in state. The fallback here is itself a
-`Modal`, and Escape, the backdrop and its one **Close** button all call the caller's own `onClose`.
-(2) `hasError` never clearing would mean one throw in the palette makes **Ctrl+P silently do nothing
-for the rest of the session**; the reset is keyed on the dialog's own **closed → open transition**,
-which is a NAMED trigger and leaves the rule below untouched — it is a different class in a
-different file, and `"pane"`/`"chrome"` cannot reach it. Three things not to undo: the boundary is
-**outside** the dialog, not inside `Modal` around its children, because every one of these dialogs
-runs hooks and memos above its own `if (!open) return null`, so the common throw happens before
-`Modal` renders at all; a caught-and-then-closed boundary renders **nothing**, never the children,
-or that same pre-`open` code throws again with the boundary spent; and the reset is in
-`getDerivedStateFromProps`, not `componentDidUpdate`, so re-opening produces one commit instead of
-painting the fallback first. `dialogBoundaryRender` and `dialogBoundaryReset` are the rules, pure,
-in `modalScaffold.ts`. **The wrong version was built first and measured**: wrapping each dialog in
-the existing `ErrorBoundary` passes a naive blast-radius assertion and fails both halves that matter
-(`peek-a-bin-pikv`). Six became four at `peek-a-bin-1xc5` (`BatchRenameModal` and `AIReportPanel`
-went with their features); the four are `CommandPalette`, `KeyboardShortcuts`, `SettingsModal` and
-`GoToAddressModal`. Two consequences recorded in `docs/verification.md` rather than argued away:
-`accidentalDismissAllowed` now has **three of four rows no caller can produce**, and the component
-suite's **derived-`open` test does not cover a distinct branch** — `children` is read at one line
-and neither pure rule takes it, so no perturbation reddens that case alone. The test is kept and
-its docstring corrected; do not restore the "only coverage of that branch" claim.
-
-**The command palette is a COMMAND surface, and what a row does is a discriminated union
-(`ResultTarget`: `navigate | event | action`) closed by a `never` assert.** It replaced an
-`action?: string` read by one `if`, under which "no action" and "an action nobody handles" were the
-same shape — a malformed entry navigated to address 0 rather than failing. `PALETTE_COMMANDS`
-(`CommandPalette.tsx`, module level) is the table: two events, three annotation actions, and
-**one `SET_TAB` entry per `VIEW_TABS` member labelled `Go to ${VIEW_TAB_LABELS[tab]}`, DERIVED** —
-that map is the one declaration of a tab's name, so no tab name is spelled here. **An event a
-command fires must be one something ALREADY listens for**, and the closed `PaletteEventName` union
-does not establish that (measured: a member for an unlistened event type-checks clean), so it is
-derived from `PALETTE_EVENTS` and `components/__tests__/paletteEvents.test.ts` reads that array
-back against the tree's `addEventListener` calls — a node test, since `import.meta.url` is not a
-`file:` URL under jsdom. Three refusals are load-bearing: `peek-a-bin:show-xrefs` is **out** though
-it is listened for (it needs a `detail.address` and its listener is inside `DisassemblyView`, so
-from another tab it is the silent no-op this union exists to prevent); `RESET` and `CLEAR_PATCHES`
-are **out** because each discards the user's work and already has an entry point where a
-confirmation belongs; and **no new event was invented**, which is why Toggle graph view, Go to
-entry point and Show in hex are simply absent. The **15-per-category cap now admits itself** with a
-dimmed count line (`showing the first 15 matches`) after the last row of each cut-short
-category — `role="presentation"`, no `tabIndex`, deliberately NOT a `role="option"`, or the arrow
-keys would land on it. It says "the first 15" rather than "N more" because an exact remainder means
-matching every candidate on every keystroke over categories holding millions of entries; `collect()`
-stops at the first match past the cap. Long-form, including what is still unverified, in
-`docs/gotchas.md` (`peek-a-bin-v3uh.10`).
-
-**`main.tsx` still puts no boundary above `<App/>`**, deliberately: that is a whole-page fallback
-whose argument is crash reporting rather than partial function, and it is a separate question
-(`peek-a-bin-t23y`).
-
-**The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `AddressBar`
-renders `role="tablist"` around exactly the eight tabs (not the toolbar, which also holds
-Open/Back/Forward/Undo/Redo and the address field), each `role="tab"` with `aria-selected`, `id`,
-`aria-controls` and a **roving tabindex that follows FOCUS, not selection** — cleared when focus
-leaves, so tabbing back in lands on the tab that is showing. **Activation is MANUAL**: arrows move
-focus, Enter/Space selects, and *nothing in the component handles either key*, because a real
-`<button>` already fires `onClick` for both and a second path would dispatch `SET_TAB` twice. That
-is a cost decision, not a style one — `App`'s `tabComponents` marks `DisassemblyView` and `HexView`
-lazy and `mountedTabs` never unmounts, so automatic activation would import *and permanently mount*
-both chunks for one sweep across the bar. `App.renderMainView` renders a **wrapper for every tab**
-and mounts the component inside only once visited, so `aria-controls` can never dangle while
-mounting behaviour is unchanged; omitting the attribute instead would have put App's mounting rule
-in AddressBar as a second declaration. Ids come from `components/tabIds.ts`, on `listboxIds.ts`'s
-model, because both ends of every reference are written in different files. `tabIndex={0}` on the
-**shown** panel only: most panes are static tables with no focusable content, so without a stop a
-keyboard user cannot reach the region they just switched to. The arrows are documented in
-`docs/keyboard.md` and **deliberately absent from the `?` panel** — every other entry there is a
-*global* binding, and bare arrows belong to the disassembly view everywhere outside the bar
-(`peek-a-bin-w50c`).
-
-**A severity's ORDER is declared once, in `components/severity.ts`, and the module now has ONE
-reader.** It exports exactly `BadgeLevel`, `BADGE_RANK` (the order) and `ANOMALY_BADGE` (the fold
-from `Anomaly["severity"]` onto that level). `HeaderView`'s `AnomalyBanners` is the reader: it
-derives display order from `BADGE_RANK` by rank, filters through `ANOMALY_BADGE` with a `?? "info"`
-fallback, and keeps its own `severityConfig` `Record<BadgeLevel, …>` of class names — the palette
-is deliberately still the caller's, since a banner and a table row legitimately differ.
-`FINDING_BADGE` and `maxBadgeLevel` were deleted at `peek-a-bin-1xc5` along with `AIScanFinding`
-and `AddressBar`'s badge, **and with them the "unknown sorts last vs. reads as mildest"
-asymmetry** that the previous version of this paragraph explained — there is only one reader now,
-so there is only one fallback and nothing to hold apart (`peek-a-bin-rl95` is the record of why it
-was split when there were two).
-
-**A fourth severity fails the build, but as a TWO-STEP CHAIN rather than one failure, and the
-mechanism is worth stating precisely** (`peek-a-bin-1xc5` stage 7 — the bead's single-failure
-description was wrong and was corrected by measurement). Step 1: adding a member to
-`Anomaly["severity"]` reddens **`ANOMALY_BADGE`** alone; `severityConfig` does *not* fail here,
-because `BadgeLevel` is its own union, independent of `Anomaly["severity"]`. Step 2: the author's
-forced next move — widening `BadgeLevel` to satisfy step 1 — reddens **`BADGE_RANK`** *and*
-**`severityConfig`**. So either the new severity is deliberately mapped onto an existing level, in
-which case it renders, or two more tables fail the build; it cannot reach the page silently. **The
-counterfactual is confirmed and is the whole justification for keeping the module**: with
-`AnomalyBanners` unrewired, a fourth severity produced **zero** typecheck errors in `HeaderView` —
-the only error was in `severity.ts`, the module the alternative plan would have deleted.
-
-**`XrefType` (`disasm/types.ts`) and `StatusBar`'s `phaseLabels` JOINED THAT FAMILY, and the xref
-half had to NAME the union before anything could be keyed on it.** The four kinds were spelled
-inline in `Xref` — plus a second private copy in `XrefPanel.tsx` — so the four tables folding them
-onto a colour or a letter were `Record<string, …>` of necessity: `XrefPanel`'s `typeColors` and
-its chip palette (a ternary chain whose last arm was "everything that is not the three above", the
-`AnomaliesView` shape again), and `InstructionDetail`'s `TYPE_COLORS`/`TYPE_LABELS`. All four are
-`Record<XrefType, …>` now, and `XREF_TYPES` — the chip list and the initial filter set, previously
-a literal array written twice — is **derived from the chip table**, because an array is the one
-shape in this family that cannot fail the build on a new member. `phaseLabels` is
-`Record<AnalysisPhase, string | null>` with an explicit `null` for the five terminal phases; the
-comment explaining why there is no `"failed"` label (its render site is behind
-`ANALYSIS_IN_PROGRESS`, so the failure states are `analysisNotice`'s) is **kept as the reason those
-entries are null**, since a `Record<string, …>` cannot tell "deliberately has no sentence" from
-"nobody thought about it".
-**THREE THINGS NOT TO UNDO.** (1) **The three palettes are deliberately NOT merged.** `XrefPanel`'s
-row column, its chips and `InstructionDetail`'s letter badges hold overlapping class strings by
-*coincidence*, and `severity.ts`'s own paragraph above is explicit that a palette is legitimately
-the caller's — one shared table would be a second declaration of a decision two components are
-allowed to make differently. **The union is the thing with one declaration.** (2) **The
-`?? fallback`s at the five use sites STAY** (`?? "text-gray-400"`, `?? "?"`): these values cross a
-`postMessage`, so no type makes an unexpected one impossible at runtime, and what the `Record` buys
-is that a fifth member cannot be *added* silently. (3) **The evidence is a typecheck counterfactual
-and the change is runtime-inert by construction** — measured at **0 → 4** errors for a fifth xref
-kind and **1 → 2** for a twelfth phase, while widening all four `Record`s back to
-`Record<string, …>` leaves all 76 tests across the three suites green. A second, narrower inert is
-recorded rather than papered over: `phaseLabels`' five `null`s are **unreachable at runtime**, so
-no row can cover them and none was invented (`docs/verification.md`, `peek-a-bin-v3uh.8`).
-
-**CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
-Space.
-
-**THE BROWSER BUILDS ONE CFG AND LAYS IT OUT ONCE, and both declarations are named.**
-`useDisassemblyRows`' **`cfg` memo is the only `buildCFG` call site in the browser** and
-`DisassemblyView`'s **`graphLayout` memo the only `layoutCFG`**; `CFGView` takes `layout` and
-`funcAddress` as props rather than the four inputs it used to rebuild from. There were four
-`buildCFG` calls with identical arguments — the loop memo, the minimap memo, `CFGView`'s own, and
-`buildCFGForNav`, which is a `useCallback` built inside the arrow/Tab handler and therefore ran
-**once per keypress in graph mode**, the site a mount-only instrument cannot see. Three things not
-to undo. **The shared memo must NOT inherit the `loops` memo's `typedXrefMap.size === 0` guard**:
-that guard is real behaviour for the linear view's loop markers and stays there, but on the shared
-build it would make graph mode render **nothing** in the window between the disassembly arriving
-and `buildAllXrefs` finishing, now that `CFGView` is handed a layout instead of building its own.
-The shared guard is `!currentFunc || instructions.length === 0` and nothing more. **`fontSize` is
-read during render in both `DisassemblyView` and `CFGView`, and neither subscribes** — App holds it
-in state and a change re-renders the tree, so the two calls in one pass agree; that agreement is
-what makes `CFGView`'s `cfgLayout` describe the blocks the parent positioned. And `graphLayout` is
-gated on `viewMode === "graph"`, so linear mode runs no dagre at all. **Render COUNT is what is
-measured here — nothing has timed a render** (`peek-a-bin-v3uh.4`).
-
-**Styling**: Tailwind utilities; runtime font size via a `--mono-font-size` CSS variable on the
-app root.
-
-**THE TOP BAR IS THE APP'S FIRST RESPONSIVE CODE, AND WHAT MADE IT CLIP RATHER THAN CROWD IS THAT
-NOTHING IN IT CAN SHRINK.** `AddressBar` was one nowrap flex row of ~20 items plus six dividers,
-and every item is a single word, a fixed-size SVG or an `<input>` with a definite width — so
-`min-width: auto` resolves to min-content == preferred width for all of them and the row cannot
-absorb one pixel of deficit. It sits **outside `<main>`**, in a column whose `body` is
-`overflow: hidden`, so the overflow was not scrolled to but **clipped away**: Export, Import, Chat
-and the Settings cog were unreachable by any input on both of the commonest laptop widths.
-**`shrink-0` on the tail would have changed nothing** — what fixes it is `flex-wrap` plus exactly
-ONE item whose `min-width` is low enough to absorb the deficit, the address field
-(`flex-1 min-w-24 max-w-48`, its input `w-full`), which is what makes the squeeze continuous
-instead of a cliff. Two breakpoints, both Tailwind 4 defaults with no config change
-(`src/styles/index.css` is a bare `@import "tailwindcss"` — no `@theme`, no `tailwind.config.*`):
-**`2xl` (1536px) governs ONE thing**, tabs inline versus on their own row, and **`lg` (1024px) ONE
-thing**, dividers shown versus hidden. Keep the two concerns separate. **The tablist is the
-container's FIRST element child, and that is a FOCUS-ORDER decision rather than a layout one**:
-`order-last` moves the box while every engine walks sequential focus in DOM order, so a keyboard
-user below 1536px would tab down to row 2 and back up to row 1 (WCAG 2.4.3) — and
-`AddressBar.dom.test.tsx`'s one-Tab-walk row asserts only that the tablist receives *exactly one*
-tab stop, never where that stop falls, so that defect would have landed green. Do not "simplify"
-the DOM position back and push it down with `order`. **`min-w-0` on the tablist is the load-bearing
-token**: `basis-full` leaves exactly zero free space on its line, so nothing shrinks and
-`min-width: auto` would floor the strip at its own min-content and overflow the container — this
-bar's own defect one level down; with the floor at zero, `overflow-x-auto` makes it a scroller
-instead. `flex-wrap` is the house answer to a crowded toolbar and **five** rows now carry it —
-`HexView.tsx`, `XrefPanel.tsx`, this bar, `DisassemblyToolbar`'s section-header bar and
-`BottomPanelContainer`'s tab strip (the last two at `peek-a-bin-7v1a`), whose whole fix was the one
-token because **the unshrinkable-items reasoning above is theirs too**. What separates them from
-this bar is `App.tsx`'s `<main className="flex-1 overflow-auto">`: a bar INSIDE it turns overflow
-into a page-level horizontal scroll, so the header bar's search box was reachable only by scrolling
-the listing sideways and the tab strip's last close button went off the right edge — bad, but not
-the unreachable-by-any-input case that ranks `AddressBar` and `StatusBar` above them. So when
-ranking a new instance, ask which side of `<main>` it is on first; one consequence neither the bead nor the plan
-anticipated: `DisassemblyToolbar` keeps a `<div className="flex-1" />` spacer, and with
-`flex-wrap` that spacer stays on LINE 1 — so the wrapped search box **left-aligns on line 2**
-instead of staying right-aligned, and the bottom strip's second row of chips takes its height
-out of a `flex-1 overflow-auto` scroller. Both are reachable, which is the point, but both are
-trades rather than free;
-Breadcrumbs' `overflow-x-auto` + `scrollbarWidth: "none"` are copied and its ResizeObserver fade
-machinery deliberately is **not** (four reasons in `docs/gotchas.md`). Nothing is conditionally
-unmounted — **CSS only** — because bare `G` focuses the address input by ref and the hidden Import
-`<input type="file">` is named by hand in `modalScaffold.ts` as the reason `focusableWithin()`
-filters on `offsetParent`. Accepted cost: in the wide one-row tier the tabs sit leftmost rather
-than after Undo/Redo. Every figure behind both breakpoints is **computed, never measured**
-(`peek-a-bin-cgu1`).
-
-**THE STATUS BAR IS THE OTHER BAR OUTSIDE `<main>`, AND WHAT IT CROWDED OFF ITS RIGHT EDGE IS THE
-ANALYSIS NOTICE.** Same containment fact as the top bar — `AddressBar` and `StatusBar` are the only
-two bars outside `<main>`, in a column whose `body` is `overflow: hidden` — and the notice is
-`StatusBar`'s **last child**, so an over-wide row loses exactly the red/amber label that is the one
-place the strip says the analysis failed, timed out or is partial. Up to eleven `mr-4`-spaced fields
-give the row a **~1650px** preferred width (computed at `text-[10px]`, a 0.6em advance, so 6px per
-character). **`hidden 2xl:inline` on the two largest, `insnBytesStr` (294px — `"15B: "` plus fifteen
-`XX ` groups, and 15 IS x86's maximum instruction length) and `blockStr` (192px), recovers 518px**
-and leaves ~1132px, which fits unshrunk from 1132px up to the breakpoint. Both are the only fields
-whose fact is on screen somewhere else — the bytes are a disassembly column, the block extent is
-drawn in the graph. **`2xl` AND NOT `lg`, WHICH IS MEASURABLY INERT AND IS WHAT THE BEAD ASKED FOR**:
-`hidden lg:inline` shows both fields at every width from 1024px up, i.e. across the entire clipping
-band with 1366 and 1440 inside it, and below 1024px the reduced bar still wants 1132px — so it buys
-a clean layout at **no width at all**. **AND THE MECHANISM DIFFERS FROM THE TOP BAR'S IN THE ONE WAY
-THAT MATTERS: these fields CAN shrink.** Every one is wrappable text with no `whitespace-nowrap`
-anywhere, so `min-width: auto` resolves to min-content (the longest word) rather than to the
-preferred width — the opposite of `AddressBar`, whose items are single words, SVGs and a fixed-width
-`<input>`. So the old bar did not clip at 1366px, it **shrink-wrapped**: the notice kept its box
-while its text wrapped inside a 48px column, and the 294px byte field crushed toward 24px and
-wrapped to ~15 lines of 12px inside a 20px `items-center` box with visible overflow, ~80px of it
-painting over `<main>`. Hard horizontal clipping of the notice begins below **840px** (718px with
-the two fields hidden). **`h-5` IS DELIBERATELY UNTOUCHED** — `h-auto min-h-5` + `flex-wrap` is the
-direct analogue of the top bar's repair and was refused for changing the app's vertical budget on
-every narrow window; reordering the notice was refused because its placement beside the count is a
-recorded decision; `shrink-0` was refused for the top bar's own reason. **A `VA:` field was added
-ahead of `RVA:` and `File:`** — the bar had the RVA and the file offset and never the virtual
-address, which is exactly why `peek-a-bin-cgu1.4` could only shorten the toolbar's VA readout and
-not hide it; with the value here too, dropping the toolbar's copy is zero-loss at every width. Every
-figure is **computed, never measured** (`peek-a-bin-al07`).
-
-**AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
-sub-tab (`useDecompileTabs`) — both using `streamChat()` from `src/llm/client.ts`. **Neither keeps
-state in `AppState`**: the chat panel is local state in `DisassemblyView` and the enhance/explain
-results are the decompile-tab hook's. The only AI custom event left is `peek-a-bin:open-chat`.
-Markdown via `marked` in `MarkdownRenderer.tsx`. Batch Rename, the AI Report and the Vulnerability
-Scanner were removed at `peek-a-bin-1xc5`, taking `:batch-rename`, `:generate-report` and
-`:ai-scan` with them. Both survivors are still gated by `hasApiKey()`, which bounces to Settings
-with no message when no key is configured — that gate was **not** changed.
+- **No virtualized row may carry a LINEAR SCAN.** `InsnRow`'s tooltip resolves through
+  `funcMap.get(addr)`, not `functions.find(...)`; the `functions` prop was deleted from `InsnRow`
+  so re-adding a scan is a compile error. `funcMap` is injective by construction, so it cannot
+  disagree with the scan it replaced.
+- **ONE `ErrorBoundary` PER TAB PANE**, taking a **`label`** (`VIEW_TAB_LABELS[key]`) and offering
+  **Try again** beside Reload. A single boundary around `renderMainView()` put every tab behind one
+  `hasError` with no recovery but a page reload. **Not clearing on re-render is a decision** — an
+  automatic reset retries a deterministic fault every parent render.
+- **FOUR CHROME REGIONS have one too**, on a criterion stated once in `ErrorBoundary`'s docstring:
+  guard a region exactly when the app is still worth using without it. The `variant` prop
+  (`"pane" | "chrome"`) is the mount site saying how much room it has; `"chrome"` is one line and
+  offers **no Reload**. Guarded: `Sidebar`, `StatusBar`, `AIChatPanel`, `BottomPanelContainer`.
+  **`AddressBar` is deliberately LEFT LOUD** — it owns the global keydown handler carrying
+  `TAB_KEYS`, so a boundary removes *both* routes to another tab. `DecompileView` and `CFGView` get
+  none: they *are* the pane in the mode that shows them. `main.tsx` still puts none above `<App/>`.
+- **The four dialogs use `DialogBoundary.tsx`**, a different class for a mechanism reason: a
+  dialog's subtree carries `Modal`'s backdrop, focus trap, scroll lock and Escape, so the ordinary
+  card renders undimmed with no way out; and a never-clearing `hasError` would make Ctrl+P silently
+  dead for the session. Its fallback is itself a `Modal`; the reset is keyed on the dialog's own
+  **closed → open transition**, in `getDerivedStateFromProps`. The boundary is **outside** the
+  dialog, not inside `Modal`, because these dialogs run hooks above their own `if (!open) return
+  null`. A caught-and-then-closed boundary renders **nothing**. `dialogBoundaryRender` and
+  `dialogBoundaryReset` are the pure rules in `modalScaffold.ts`.
+- **The command palette is a COMMAND surface, and what a row does is a discriminated union**
+  (`ResultTarget`: `navigate | event | action`) closed by a `never` assert. `PALETTE_COMMANDS` is
+  the table, with **one `SET_TAB` entry per `VIEW_TABS` member, DERIVED** so no tab name is spelled
+  here. **An event a command fires must be one something ALREADY listens for**: the union is derived
+  from `PALETTE_EVENTS` and `components/__tests__/paletteEvents.test.ts` reads it back against the
+  tree's `addEventListener` calls. Three refusals are load-bearing: `:show-xrefs` is out (it needs a
+  `detail.address` and its listener is inside `DisassemblyView`); `RESET` and `CLEAR_PATCHES` are
+  out (each discards the user's work and already has an entry point where a confirmation belongs);
+  and **no new event was invented**. The 15-per-category cap admits itself with a dimmed
+  `role="presentation"` count line — deliberately not a `role="option"`, or arrows would land on it.
+- **The view switcher is a WAI-ARIA tablist, and the pattern is all-or-nothing.** `role="tablist"`
+  around exactly the eight tabs, each `role="tab"` with `aria-selected`, `id`, `aria-controls` and a
+  **roving tabindex that follows FOCUS, not selection**. **Activation is MANUAL**, and *nothing
+  handles Enter/Space* — a real `<button>` already fires `onClick` for both. That is a cost
+  decision: automatic activation would import and permanently mount both lazy chunks for one sweep.
+  `App.renderMainView` renders a **wrapper for every tab** so `aria-controls` can never dangle. Ids
+  come from `components/tabIds.ts`. `tabIndex={0}` on the **shown** panel only. The arrows are in
+  `docs/keyboard.md` and **deliberately absent from the `?` panel** — every other entry there is a
+  *global* binding.
+- **A severity's ORDER is declared once, in `components/severity.ts`** — `BadgeLevel`, `BADGE_RANK`,
+  `ANOMALY_BADGE`. Its one reader is `HeaderView`'s `AnomalyBanners`, which keeps its own
+  `severityConfig` palette (a banner and a table row legitimately differ). A fourth severity fails
+  the build as a **two-step chain**: adding to `Anomaly["severity"]` reddens `ANOMALY_BADGE` alone;
+  widening `BadgeLevel` to satisfy that reddens `BADGE_RANK` *and* `severityConfig`.
+- **`XrefType` (`disasm/types.ts`) and `StatusBar`'s `phaseLabels` are keyed on their unions**, and
+  the xref half had to NAME the union first. `XREF_TYPES` is **derived from the chip table**,
+  because an array is the one shape that cannot fail the build on a new member. `phaseLabels` is
+  `Record<AnalysisPhase, string | null>` with explicit `null` for the terminal phases. Three things
+  not to undo: **the three palettes are deliberately NOT merged** (the union is the thing with one
+  declaration); the **`?? fallback`s at the five use sites STAY**, since these values cross a
+  `postMessage`; and the change is runtime-inert by construction.
+- **`floatingClamp.ts`'s `clampFloatingPosition` is the one declaration of where a floating bottom
+  panel may be**, and takes **no height** deliberately, since a whole-panel-inside rule pins a panel
+  taller than the window. The clamped position is **derived, never written back** — spreading it
+  into `poppedOut` replaces the user's stored position with a picture of it.
+- **`persistedSizeClamp.ts`'s `clampPersistedSize` is the NEIGHBOURING question** — how large may a
+  persisted, user-chosen SIZE be, given the viewport — and is a different function because
+  `floatingClamp` anchors on a constant slice of a drag handle where this is *about* the size. Two
+  readers: `Sidebar`'s width and `BottomPanelContainer`'s docked height. Three rules: the answer is
+  **derived for rendering and never written back**; **when the floor and the viewport cannot both be
+  satisfied the FLOOR WINS** (`Math.max(min, …)` outermost — yielding drives the size through zero
+  and leaves an element that cannot be dragged back); and **a DRAG is not clamped**, unlike
+  `floatingClamp`'s write, or one drag in a narrow window discards a wide preference permanently.
+  The two reserves (306px width, 166px height) are **sums of measured element extents**. The
+  height's one-row listing floor is a **blocked alternative**: any reserve above 168 reddens
+  `BottomPanels.dom.test.tsx`.
+- **`Sidebar.tsx` is a flex column with ONE `flex-1` child, the function list, and nothing whose
+  height follows the CURSOR may sit above it.** The Call Graph block is below the list, bounded at
+  160px with `maxHeight: 40%`, its own scroller and a resize handle. Two things there are **not**
+  copies of `BottomPanelContainer`'s: the wrapper takes **no `shrink-0`** (it competes with four
+  content-sized siblings), and the list carries a **`min-h-[120px]` floor** (a `flex-1` scroll
+  container's automatic minimum is 0, so all negative free space landed on it).
+- **The ANNOTATIONS block sits ABOVE the list and is BOUNDED — two separate judgements.** Its height
+  follows USER EDITS, not the cursor, so its placement is permitted; unbounded growth is not. It
+  carries `maxHeight: min(180px, 30%)`, a **CEILING rather than a height** (unlike the Call Graph's,
+  which is resizable and persisted), **no `shrink-0`**, and a body that is `overflow-auto` but
+  deliberately **NOT `flex-1`** — which is what keeps `[data-panel="functions"]` the FIRST
+  `.flex-1.overflow-auto` in the document as a property rather than a coincidence.
+  **`sortedAnnotations` is not decoration**: `Object.entries` returns integer-like keys in numeric
+  order only for array indices, and an x64 image base puts every address past 2^32 - 1. **The
+  BOOKMARKS BLOCK IS STILL UNBOUNDED**, a known deliberate asymmetry left for the user to decide.
+- **`ResizeHandle.tsx` guarantees `onResizeEnd` runs AFTER the resize it describes has committed**,
+  and that is why its four callers may read their own state in it. The mouse path always could; the
+  keyboard path called both callbacks inline, so **three of the four callers persisted a step behind
+  on every arrow press**. The keyboard step is deferred by one microtask; the mouse path is
+  deliberately untouched. **Do not "simplify" that back to an inline call, and do not re-add a
+  per-caller ref** — the contract is asserted once, in `panelUtilities.dom.test.tsx`, with a harness
+  that is deliberately the naive state-reading caller. A `vi.fn()` cannot see this class. Its
+  duplicate in `Sidebar.tsx` (the width grip) is **deliberately not consolidated**: the two
+  arithmetic forms differ at the clamps (absolute-offset recovers, accumulated-delta flies to max).
+- **A cursor-following filter must fall back VISIBLY** — the opposite direction from the `omitted`
+  rule. `XrefPanel`'s `scopeAvailable()` is the one declaration of "has the caller given this panel
+  the address this scope needs", read by the filter chain *and* the scope buttons, with
+  `effectiveScope` what everything on screen reads (`scopeMode` is the preference and may outlive
+  its address). The fallback is **derived, not written back**.
+- **`AddressBar` is the app's first responsive code, and what made it CLIP is that nothing in it can
+  shrink** — ~20 single-word items, fixed SVGs and a definite-width `<input>`, so `min-width: auto`
+  is min-content == preferred width. It sits **outside `<main>`**, in a column whose `body` is
+  `overflow: hidden`, so overflow was clipped away rather than scrolled to. The fix is `flex-wrap`
+  plus exactly ONE shrinkable item, the address field (`flex-1 min-w-24 max-w-48`). Two breakpoints,
+  both Tailwind 4 defaults: **`2xl` governs tabs inline vs. their own row**, **`lg` governs dividers
+  shown vs. hidden**. Keep the two concerns separate. **The tablist is the container's FIRST element
+  child, a FOCUS-ORDER decision** — `order-last` moves the box while focus walks DOM order.
+  **`min-w-0` on the tablist is load-bearing**: `basis-full` leaves zero free space, so
+  `min-width: auto` would floor the strip at min-content and overflow. Nothing is conditionally
+  unmounted — **CSS only** — because bare `G` focuses the address input by ref and the hidden Import
+  `<input type="file">` is why `focusableWithin()` filters on `offsetParent`.
+- **`StatusBar` is the other bar outside `<main>`, and what it crowded off its right edge was the
+  ANALYSIS NOTICE** — its last child, i.e. the one place the strip says the analysis failed. `hidden
+  2xl:inline` on the two largest fields (`insnBytesStr`, `blockStr`) recovers ~518px; both are the
+  only fields whose fact is on screen elsewhere. **`2xl` and NOT `lg`**, which buys a clean layout at
+  no width at all. Its fields **can** shrink (wrappable text), so the old bar shrink-wrapped rather
+  than clipping. `h-5` is deliberately untouched. A **`VA:` field** was added ahead of `RVA:`/`File:`.
+- **`flex-wrap` is the house answer to a crowded toolbar** and five rows carry it — `HexView`,
+  `XrefPanel`, `AddressBar`, `DisassemblyToolbar`'s section-header bar and `BottomPanelContainer`'s
+  tab strip. When ranking a new instance, ask which side of `<main>` it is on first: inside it,
+  overflow becomes a page-level horizontal scroll (bad); outside it, controls are unreachable by any
+  input (worse). Accepted trades: `DisassemblyToolbar`'s `flex-1` spacer stays on line 1, so a
+  wrapped search box left-aligns on line 2.
+- **CFG**: `buildCFG()` + `layoutCFG()` (dagre) in `src/disasm/cfg.ts`; inline graph toggled with
+  Space. **THE BROWSER BUILDS ONE CFG AND LAYS IT OUT ONCE**: `useDisassemblyRows`' `cfg` memo is
+  the only `buildCFG` call site and `DisassemblyView`'s `graphLayout` memo the only `layoutCFG`;
+  `CFGView` takes `layout` and `funcAddress` as props. Three things not to undo. The shared memo must
+  **NOT** inherit the `loops` memo's `typedXrefMap.size === 0` guard — real behaviour for the linear
+  view's loop markers, but on the shared build it renders **nothing** between the disassembly
+  arriving and `buildAllXrefs` finishing. `fontSize` is read during render in both components and
+  neither subscribes, which is what makes the two calls in one pass agree. `graphLayout` is gated on
+  `viewMode === "graph"`, so linear mode runs no dagre.
+- **AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
+  sub-tab (`useDecompileTabs`) — both via `streamChat()`. **Neither keeps state in `AppState`.** The
+  only AI custom event left is `peek-a-bin:open-chat`. Markdown via `marked` in
+  `MarkdownRenderer.tsx`. Both are gated by `hasApiKey()`, which bounces to Settings with no message.
 
 ## Conventions
 
 **File naming**: components = PascalCase.tsx, hooks = useCamelCase.ts, modules = camelCase.ts.
 
-**localStorage**: `peek-a-bin:<feature>` namespace (`peek-a-bin:llm-profiles`, `:font-size`,
-`:view-mode`, `:chat:${fileName}`, `:chat-width`, `:callgraph-height`). Legacy
-`peek-a-bin:llm-settings` auto-migrates to `:llm-profiles` on first load. **`:report:${fileName}`
-is orphaned and deliberately unmigrated** — the AI report wrote it, the feature went at
-`peek-a-bin-1xc5`, and a prefix-scanning deleter on the load path is a foot-gun (nothing enforces
-that `peek-a-bin:report:` stays a prefix of nothing else) to reclaim a few KB the user can clear
-from devtools.
+**localStorage**: `peek-a-bin:<feature>` namespace (`:llm-profiles`, `:font-size`, `:view-mode`,
+`:chat:${fileName}`, `:chat-width`, `:callgraph-height`). Legacy `:llm-settings` auto-migrates.
+`:report:${fileName}` is orphaned and **deliberately unmigrated** — a prefix-scanning deleter on the
+load path is a foot-gun to reclaim a few KB.
 
-**ANNOTATIONS ARE KEYED ON THE BUILD, NOT ON THE FILE NAME, AND `utils/annotationKey.ts` IS THE ONE
-DECLARATION OF BOTH THAT KEY AND ITS MIGRATION.** `peek-a-bin:annotations:<size>-<timeDateStamp, 8
-hex>[-<CodeView PDB GUID>]`, derived by `annotationKey(pe)`. It fixed **the only place in this app
-where a user silently lost work**: the key had been `peek-a-bin:${fileName}` with nothing else in
-it, so two builds of one binary under one name shared a record — v1's renames landed on v2's
-*addresses*, and v2's first save destroyed v1's permanently — while the same build renamed on disk
-lost every annotation. It was also a flat namespace shared with ~18 settings keys, so a file
-*named* `font-size` wrote over a setting. `fileName` moved **into the stored value**
-(`AnnotationRecord`) because the recents list is a list of names and now reads them back out of a
-prefix scan; `FileLoader`'s four-name `KNOWN_LS_KEYS` deny-list is deleted, and it was **inert**
-(the annotation-count test after it was the real filter), so that is a simplification rather than a
-fix — its one visible cost is that a legacy record is no longer *listed* on the loader screen until
-the file is opened once, which adopts it. Migration is one-time, on load, and **leaves the legacy
-bare-name key exactly where it is** —
-intentionally orphaned on `:report:`'s precedent above, which also makes it idempotent. **The
-metrics-worker content hash was REFUSED**: it makes annotation load async, so a rename made while
-the digest is in flight is written under the wrong key or lost (`peek-a-bin-v3uh.5`).
+**ANNOTATIONS ARE KEYED ON THE BUILD, NOT ON THE FILE NAME**, and `utils/annotationKey.ts` is the
+one declaration of both that key and its migration:
+`peek-a-bin:annotations:<size>-<timeDateStamp, 8 hex>[-<CodeView PDB GUID>]`. It fixed **the only
+place in this app where a user silently lost work** — the key had been `peek-a-bin:${fileName}`, so
+two builds under one name shared a record and the same build renamed on disk lost everything; it was
+also a flat namespace shared with ~18 settings keys. `fileName` moved **into the stored value**.
+Migration is one-time, on load, and **leaves the legacy key where it is** (idempotent, on
+`:report:`'s precedent). The metrics-worker content hash was **REFUSED**: it makes annotation load
+async, so a rename made while the digest is in flight is written under the wrong key or lost.
 
-**…AND THE OTHER STORE IS KEYED ON THE SAME STRING. `recentFiles.ts` IS INDEXEDDB, NOT
-localStorage, AND IS DOCUMENTED HERE BECAUSE ITS KEY IS THE PARAGRAPH ABOVE'S.** Its object store
-was `keyPath: "name"`, so opening `v2/setup.exe` **silently evicted** `v1/setup.exe`'s cached bytes
-— a `put` under an occupied key is an overwrite — and `FileLoader`'s recents list joined its two
-halves on the name too. It is keyed on `buildKey(id)` now: **the composite identity split out of
-`annotationKeyFor`, which is now `ANNOTATION_KEY_PREFIX + buildKey(id)`**, so there is exactly one
-composite-key rule and the join from a cached file to its bookmarks is exact rather than a guess.
-The `peek-a-bin:annotations:` prefix is deliberately **not** carried into the IndexedDB key: that
-namespace separates annotation records from the ~18 settings keys above, and a record in a database
-of its own has nothing to be separated from. `name` moved into the value for the same reason
-`AnnotationRecord.fileName` did. Consequences: `RecentFileEntry` carries a `key` and
-`loadRecentFile`/`deleteRecentFile` take it, since two builds are two rows with one name;
-`FileLoader`'s list key, its loading flag and its remove button all route on it (a `key={f.name}`
-would reconcile the two rows as one); and removing a row deletes **that build's** annotation record
-exactly, via `removeAnnotationRecord`, where taking every record sharing the name would delete the
-other build's work. **A build-keyed row with no record of its own shows NOTHING** — the name join
-is reached only by a row with no build identity, and a `??` chain to it was measured handing a
-sibling build's bookmark count to an unannotated row.
+**`recentFiles.ts` (IndexedDB) is keyed on the SAME composite string.** Its store was
+`keyPath: "name"`, so opening `v2/setup.exe` **silently evicted** `v1/setup.exe`. It uses
+`buildKey(id)` now — the identity split out of `annotationKeyFor`, which is
+`ANNOTATION_KEY_PREFIX + buildKey(id)` — so there is one composite-key rule and the join from a
+cached file to its bookmarks is exact. The prefix is deliberately **not** carried into the IndexedDB
+key. `RecentFileEntry` carries a `key`; `FileLoader`'s list key, loading flag and remove button all
+route on it (a `key={f.name}` reconciles two builds as one row), and removing a row deletes **that
+build's** annotation record via `removeAnnotationRecord`. **A build-keyed row with no record of its
+own shows NOTHING** — a `??` chain to the name join hands a sibling build's bookmark count to an
+unannotated row. **The v1 → v2 upgrade carries records forward under a `name:` key rather than
+re-deriving a real one**, deliberately: re-deriving means running `parsePE` up to five times inside
+a `versionchange` transaction, and a throw there leaves the user with no recents at all. Such rows
+age out of `MAX_ENTRIES` on their own. `migrateV1Record` is the pure decision; wiring is tested
+against `src/utils/__tests__/fakeIndexedDB.ts`, since jsdom has no IndexedDB.
 
-**The v1 → v2 upgrade carries records forward under a `name:` key rather than re-deriving a real
-one, and that is a judgement.** Changing a `keyPath` needs a version bump plus an
-`onupgradeneeded` that deletes and recreates the store, so every record must be read out and
-written back — skip it and all five cached files are gone. A v1 record has a name and no build
-identity, and `parsePE` inside a `versionchange` transaction would mean running the parser up to
-five times over up to 50 MB each, synchronously, on the main thread, on records that may no longer
-parse; a throw there aborts the open and leaves the user with no recents at all. Cached bytes are
-recoverable by re-dropping the file — the whole reason this was ranked below the annotation bead —
-so the stale key is the cheaper risk. Such records display, load and are evicted oldest-first like
-any other, so they age out of `MAX_ENTRIES` on their own; a legacy row joins annotations **by
-name**, which is all it has. Deleting a legacy row on a name match when its file is re-opened was
-**refused** — that is precisely the name-keyed eviction this closed. `migrateV1Record` is the pure
-decision and is tested without a DOM; the wiring runs against the in-tree IndexedDB double
-(`src/utils/__tests__/fakeIndexedDB.ts`, extended with versions and a `versionchange` transaction),
-since jsdom has no IndexedDB (`peek-a-bin-mtry`).
-**`hexPatches` IS NOT AUTO-PERSISTED, AND THAT REFUSAL IS THE DESIGN — it is guarded instead.**
-Bookmarks, renames and comments auto-persist per file, so `RESET` and a reload cost nothing; a byte
-patch is a byte of the **file**, held only in memory, and `RESET` returns `initialState` with a
-fresh Map. **It is not unpersistable**: `utils/exportSchema.ts` serialises it and `AddressBar`'s
-Import button restores it, which is a *deliberate* channel — a framing that called it "never
-persisted" is wrong and argues for the wrong change. Auto-persisting into the annotation blob is
-refused four ways: patches are file bytes rather than annotations; the blob is per-file and
-quota-bounded (its persist effect already swallows a quota throw in silence); the export channel
-already exists in the same toolbar; and a patch restored automatically would make a file **silently
-disassemble differently on reopen** with no affordance saying why. So `AddressBar.tsx` carries two
-guards over one predicate (`state.hexPatches.size > 0`): a `confirm` on the Open button naming the
-count and pointing at Export, and a `beforeunload` listener registered **only while a patch
-exists** — the tab-close route, which is the one route with no other affordance at all, and there
-was no `beforeunload` handler anywhere in `src/` before it. No toast was invented for either
-(`peek-a-bin-p0tz`'s rule); the unload handler supplies **no wording**, every current engine
-substituting its own. Any new "Close file"/`RESET` command — a command-palette entry, a shortcut —
-must route **through** `handleReset`, not around it. `confirm` is spied **file-wide** in
-`AddressBar.dom.test.tsx`: jsdom's unstubbed `window.confirm` returns `undefined`, which is falsy,
-so an unspied row that clicks Open with a patch present would silently stop dispatching `RESET`
-(`peek-a-bin-v3uh.6`).
+**`hexPatches` IS NOT AUTO-PERSISTED, AND THAT REFUSAL IS THE DESIGN — it is guarded instead.** A
+byte patch is a byte of the **file**, held only in memory. **It is not unpersistable**:
+`utils/exportSchema.ts` serialises it and Import restores it — a *deliberate* channel.
+Auto-persisting is refused four ways, the last being that a restored patch makes a file **silently
+disassemble differently on reopen**. So `AddressBar.tsx` carries two guards over
+`state.hexPatches.size > 0`: a `confirm` on Open naming the count and pointing at Export, and a
+`beforeunload` registered **only while a patch exists**. Any new "Close file"/`RESET` command must
+route **through** `handleReset`. `confirm` is spied **file-wide** in `AddressBar.dom.test.tsx` —
+jsdom's unstubbed `window.confirm` returns `undefined`, so an unspied row silently stops dispatching.
 
-**Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))` for
-cross-component communication. **Dispatching one nothing listens for is silent** — it fires and
-returns `true` — so the command palette may only name events from `PALETTE_EVENTS`, which
-`components/__tests__/paletteEvents.test.ts` checks against the tree's `addEventListener` calls.
+**Custom events**: `window.dispatchEvent(new CustomEvent("peek-a-bin:<action>"))`. **Dispatching one
+nothing listens for is silent**, so the command palette may only name events from `PALETTE_EVENTS`.
 Adding a palette entry is not a reason to add an event.
-
-**`DisplayRow` has exactly one declaration** — the exported union in `useDisassemblyRows.ts`.
-JumpArrows and DisassemblyMinimap used to keep private narrowed copies that had to be hand-synced;
-they now `import type` the canonical one. Do not reintroduce a local copy: a narrowed structural
-clone still accepts the canonical rows at the call site, so it drifts silently instead of failing
-the build.
 
 **Annotations**: bookmarks, renames and comments auto-persist to localStorage per file; undo/redo
 via a snapshot stack.
 
 ### Tests
 
-Suites sit beside what they cover: `src/pe/__tests__/` (including `malformed.test.ts` for
-adversarial input and `metadata.test.ts`, which pins the hand-rolled MD5 against the RFC 1321
-vectors *and* differentially against Node's `crypto` — a wrong digest is invisible at runtime
-because nothing cross-checks a hash), `src/disasm/__tests__/`,
-`src/disasm/decompile/__tests__/`, `src/hooks/__tests__/`, `src/mcp/__tests__/`,
-`src/utils/__tests__/`, `src/workers/__tests__/`, `src/llm/__tests__/`,
-`src/components/__tests__/`. Use `buildMinimalPE32()` / `buildMinimalPE64()` from
-`src/pe/__tests__/fixtures.ts` — **no binary files**. **Don't hard-code a test count anywhere; it
-goes stale within a session.** Run `npm test`.
+Suites sit beside what they cover (`src/pe/__tests__/`, `src/disasm/__tests__/`, etc.). Use
+`buildMinimalPE32()` / `buildMinimalPE64()` from `src/pe/__tests__/fixtures.ts` — **no binary
+files**. **Don't hard-code a test count anywhere; it goes stale within a session.**
 
 `src/disasm/decompile/__tests__/pipeline.test.ts` is the **end-to-end** one: instructions in,
-emitted C out. `decompileFunction` takes `Instruction[]` rather than bytes, so it needs neither
-Capstone nor a worker, and hand-writing the instruction stream makes the intended semantics
-explicit instead of trusting a disassembler to agree. **Reach for it whenever a change could alter
-emitted output** — a whole class of defect (see the condition-polarity gotcha) is invisible to
-stage-level tests, because they assert on the IR the buggy code produced.
+emitted C out. `decompileFunction` takes `Instruction[]`, so it needs neither Capstone nor a worker.
+**Reach for it whenever a change could alter emitted output** — a whole class of defect is invisible
+to stage-level tests, which assert on the IR the buggy code produced.
 
-**Component tests are the `*.dom.test.tsx` files and the ONLY ones that render React.** Each opts
-in with two things, since the default environment is node and stays that way: the
-`@vitest-environment jsdom` marker in a `//` comment on the **first line**, and `import
-"…/test/domSetup";`. `build/domTestNaming.test.ts` fails the ordinary suite if either is missing,
-or if a DOM-rendering test hides under an ordinary name. Three things to know before adding one,
-all measured (`vitest.config.ts` and `src/test/domSetup.ts` carry the numbers):
+**Component tests are the `*.dom.test.tsx` files and the ONLY ones that render React.** Each opts in
+with the `@vitest-environment jsdom` marker in a `//` comment on the **first line** and
+`import "…/test/domSetup";`. `build/domTestNaming.test.ts` fails the ordinary suite if either is
+missing. Three things to know, all measured:
 
-- **`test.projects` — the documented Vitest 4 replacement for the removed `environmentMatchGlobs`
-  — BREAKS `--dir`.** The CLI flag is not propagated into project configs, so a two-project config
-  runs every file instead of the directory you named. `--dir` is how the gates are invoked and how
-  a root run is kept out of sibling worktrees, so it was implemented and reverted.
-- **A global `setupFiles` entry costs ~3s**, because vitest loads a setup module once per test
-  file and most want nothing from it — even with the whole body behind a `typeof document` check.
-  Hence the per-file import.
-- **`@vitejs/plugin-react` is NOT used and is not needed.** Vite transforms `.tsx` with esbuild,
-  reading `jsx: "react-jsx"` from `tsconfig.json`; the plugin's value is Fast Refresh and a Babel
-  pipeline, and a test run uses neither. So the node suites pay nothing for the DOM opt-in.
+- **`test.projects` — the documented Vitest 4 replacement for `environmentMatchGlobs` — BREAKS
+  `--dir`.** The CLI flag is not propagated into project configs. It was implemented and reverted.
+- **A global `setupFiles` entry costs ~3s**, because vitest loads it once per test file. Hence the
+  per-file import.
+- **`@vitejs/plugin-react` is NOT used and is not needed** — Vite transforms `.tsx` with esbuild
+  reading `jsx: "react-jsx"`; the plugin only buys Fast Refresh and Babel.
+
+**Writing a component test has four traps, all measured:** (1) **`waitFor` and `userEvent` both
+deadlock under `vi.useFakeTimers()`** — drive a debounced control with `fireEvent.change` and
+advance the clock inside `act()`. (2) **Advance SHORT of a debounce first**, or a single advance past
+the boundary cannot tell a 250 ms debounce from no debounce. (3) **React caches its key warning PER
+OWNER COMPONENT**, so the guard must be a file-wide `beforeEach`/`afterEach`. (4) **`target: "window"`
+cannot be discriminated behaviourally in jsdom** — assert on which global receives which listener.
 
 ### Drift guards
 
-Several suites **scrape source text** rather than call it — the `.disasm(` scan in
-`capstoneWindow.test.ts`, the import-graph check in `mcp/__tests__/importGraph.test.ts`, the
-`dispatch.ts` purity check, `keyboardShortcuts.test.ts` against `docs/keyboard.md`. They are cheap
-and catch a whole class of silent regression, but **they encode formatting by accident: write the
-pattern so a reformat cannot break it.** `build/guardShape.test.ts` is the same family used
-against itself — it pins the one grammar `corpus/sweep.ts` reads a guard line with, and fails if
-any other file under `corpus/` alternates two guard keywords in a regex. It **cannot see a
-single-keyword copy**, which is how `selfAssigns.ts`'s `FOR_HEADER` survived; that reader was
-brought under the grammar rather than the guard widened, and the reason widening was refused is in
-the guard's own docstring.
+Several suites **scrape source text** rather than call it (the `.disasm(` scan, the MCP import
+graph, the `dispatch.ts` purity check, `keyboardShortcuts.test.ts` against `docs/keyboard.md`).
+Cheap, and they catch a whole class of silent regression, but **they encode formatting by accident:
+write the pattern so a reformat cannot break it.** `build/guardShape.test.ts` is the same family
+used against itself. Sturdier variants read *structure*: `analysisNotice.test.ts` asserts the
+**order** of two regex matches; `hooks/__tests__/disasmHandlerDeps.test.ts` walks the TypeScript AST
+and fails if `handleKeyDown` grows a read without a dependency entry or an entry without a read;
+`build/lintConfig.test.ts` parses `biome.json`.
 
-Sturdier variants read *structure* rather than text: `analysisNotice.test.ts` asserts the **order**
-of two regex matches (the notice's branch must precede the spinner and error branches in
-`DisassemblyView` and `StatusBar`); `hooks/__tests__/disasmHandlerDeps.test.ts` walks the
-TypeScript AST and fails if `useDisassemblySearch` stops returning a `useMemo`, or if
-`handleKeyDown` grows a read without a dependency entry or an entry without a read;
-`build/lintConfig.test.ts` parses `biome.json` and fails if it stops being strict JSON or if
-`useExhaustiveDependencies` drops below `error`.
-
-**`DOC_ONLY_KEYS` needs a liveness half, and the hole was found by a control coming back inert.**
-`keyboardShortcuts.test.ts` compares `SHORTCUT_GROUPS` against `docs/keyboard.md` as key-token
-sets, with `DOC_ONLY_KEYS` exempting keys the `?` panel deliberately omits. An exemption only ever
-*skips* a doc→panel check, so **a key could leave the documentation entirely while the entry
-excusing it stayed behind**, reading as if it were still documented — deleting the doc rows and
-keeping the exemptions left the suite green. It now asserts the other direction too: every
-`DOC_ONLY_KEYS` entry must name a key the doc still documents. Same family as
-`build/guardShape.test.ts` — an instrument judging the audit, because a guard whose population has
-emptied passes by no longer looking (`peek-a-bin-w50c`).
-
-**…AND THE LIVENESS HALF WAS ONLY HALF THE HOLE: `DOC_ONLY_KEYS` NOW HAS A THIRD DIRECTION —
-*no entry may name a token `SHORTCUT_GROUPS` binds*.** Liveness asks whether the DOC still
-documents an exempted key. It cannot ask the thing that actually goes stale, which is whether the
-key is still **panel-less**: an exemption only *skips* a doc→panel check, so the moment a key
-acquires a panel binding its entry starts excusing an absence that is no longer an absence, and
-nothing anywhere fails. **Measured, not reasoned** — binding Home/End for the disassembly listing
-(`peek-a-bin-v3uh.12`) left the pre-existing guard **135/135 green** with both exemptions still
-claiming the keys "live only while the tab bar has focus", which by then was false prose no test
-could see. `"home"` and `"end"` are gone from the map; re-adding either reddens the new assertion
-**and nothing else**, which is the measurement. **`"left"`/`"right"` stay exactly as they are** —
-bare arrows are deliberately absent from the `?` panel because every other row there is a *global*
-binding (`peek-a-bin-w50c`), and Home/End left that population by acquiring a global spelling of
-their own, not by the rule changing.
+**An audit needs a liveness half — a rule that reaches 0 by no longer looking is this repo's
+recurring failure mode.** `DOC_ONLY_KEYS` (`keyboardShortcuts.test.ts`) now has **three
+directions**: doc→panel, every exemption must name a key the doc still documents, and **no entry may
+name a token `SHORTCUT_GROUPS` binds**. The third was measured: binding Home/End left the guard
+135/135 green with both exemptions claiming keys that by then had bindings. `"left"`/`"right"` stay
+exactly as they are.
 
 **Two AST guards pin the threshold-and-worker pattern and fail in OPPOSITE directions** —
-`analysis/__tests__/anomalyOffThread.test.ts` and `hooks/__tests__/fileMetricsOffThread.test.ts`.
-Dropping the anomaly threshold puts multi-second walks on the main thread for a large file;
-dropping the metrics one puts a worker round trip on every *small* file, i.e. a loading state on
-every ordinary binary, which is the thing the sync path exists to prevent. Both assert which
-**side** of the size comparison each callback sits on, so an *inverted* guard fails and not only a
-deleted one, and the metrics one is table-driven over both thresholds so a swap between the two
-hooks fails. Their helpers are deliberately duplicated: `useFileMetrics.ts` has no `if` statement,
-so the anomaly guard's `ts.IfStatement` reader does not transfer. Neither executes a hook
-(`peek-a-bin-yvr1`).
+`analysis/__tests__/anomalyOffThread.test.ts` (dropping the anomaly threshold puts multi-second
+walks on the main thread) and `hooks/__tests__/fileMetricsOffThread.test.ts` (dropping the metrics
+one puts a worker round trip on every *small* file). Both assert which **side** of the size
+comparison each callback sits on, so an *inverted* guard fails too. Their helpers are deliberately
+duplicated: `useFileMetrics.ts` has no `if` statement.
 
-**Hook logic is otherwise tested by extracting the decision into an exported pure function** —
-`parseAnnotationMessage` (`useMcpSync.ts`), `modalScaffold.ts`, `listboxIds.ts`,
-`asyncMetricState.ts`, `decompileTabsState.ts` — or by checking a dependency array against the
-function body over the AST. Prefer that where it works: a pure test is cheaper and needs no DOM,
-where a jsdom test costs ~2s of environment setup per file.
+**Hook logic is otherwise tested by extracting the decision into an exported pure function**
+(`parseAnnotationMessage`, `modalScaffold.ts`, `listboxIds.ts`, `asyncMetricState.ts`,
+`decompileTabsState.ts`) or by checking a dependency array against the body over the AST. Prefer
+that: a jsdom test costs ~2s of environment setup per file.
 
-**MCP setup CLI**: `npx tsx src/mcp/index.ts setup <client>` configures AI clients (claude-code,
-opencode, continue). Registry in `src/mcp/clients.ts` — add a client by inserting a map entry.
-`.mcp.json` at the project root enables Claude Code auto-discovery.
+**MCP setup CLI**: `npx tsx src/mcp/index.ts setup <client>` (claude-code, opencode, continue).
+Registry in `src/mcp/clients.ts`. `.mcp.json` enables Claude Code auto-discovery.
 
-## Verification status — what is measured and what is not
+## Verification status
 
 **Full record: [`docs/verification.md`](docs/verification.md)** — every per-binary figure, every
-per-change delta narrative, every negative-control enumeration. This is the working summary; go
-there for a number.
-
-Every suite in `src/` is synthetic. Real binaries were first driven through the tool on
-2026-08-11: real MSVC output covering PE32, PE32+ and ARM64 (pip `distlib`'s `t64.exe` /
-`t32.exe` / `w64.exe` plus the two ARM64 launchers), headlessly, no browser. **Keep this section
-honest — the distinction between *measured* and *reasoned* is the point of it.**
+per-change delta, every negative-control enumeration. This is the working summary; go there for a
+number. Every suite in `src/` is synthetic; real binaries (PE32, PE32+, ARM64 MSVC output) are
+driven only by the `corpus/` harnesses.
 
 ### Standing rules for reading anything here
 
 - **Treat the ratio as the claim and the absolute as a date-stamp.** Every denominator moves
-  whenever function detection changes, which is often and usually because a defect was fixed.
-  A number going stale is normal; a ratio falling below 1, or a gate leaving 0, is not.
-- **Anyone quoting a bare historical figure is probably quoting a fixed defect or a stale
-  count.** This file has had to retire several. Do not argue from a number without its commit.
-- **Pin BOTH sides of a comparison to one commit.** A base sweep taken against a moving HEAD
-  silently compares your change against someone else's. `npm run corpus:compare -- <base>
-  <change>` takes artifact *paths* (`corpus/artifacts/<label>`), not labels.
-- **Stamp every count recorded in a bead with the commit it was taken at.** An unstamped count
-  becomes a trap the moment detection moves: the next agent re-measures, gets something else,
-  and spends its budget deciding whether it broke something.
-- **A missing corpus directory SKIPS and still exits 0.** A green run is not always a run —
-  confirm the report header names **four** binaries. That default-path-becomes-skip-path failure
-  is why there is no absolute default (`peek-a-bin-alx1`).
-- **Every gate is negative-controlled** — perturb the code and confirm the row goes red, and
-  confirm the row is also asked over well-formed input (a test checking only the red direction
-  passes against an audit that has stopped looking). **An INERT control must be reported, not
-  tuned away.** Several have been; they are recorded in the tests themselves.
-- **A green row over an empty population says nothing.** Where an audit's zero is vacuous it is
-  marked below. A rule that reaches 0 *by no longer looking* is the recurring failure mode here,
-  which is why most audits carry a liveness half (a denominator that must be non-zero).
+  whenever function detection changes. A number going stale is normal; a ratio falling below 1, or a
+  gate leaving 0, is not.
+- **Anyone quoting a bare historical figure is probably quoting a fixed defect or a stale count.**
+  Do not argue from a number without its commit.
+- **Pin BOTH sides of a comparison to one commit.** `npm run corpus:compare` takes artifact *paths*.
+- **Stamp every count recorded in a bead with the commit it was taken at.**
+- **A missing corpus directory SKIPS and still exits 0** — confirm the report header names **four**
+  binaries. That is why there is no absolute default corpus path; `preflight.ts` searches
+  `PEEK_CORPUS_DIR`, a gitignored `.env`, `$XDG_DATA_HOME/peek-a-bin-corpus`,
+  `~/.peek-a-bin-corpus`, `<repo>/corpus/binaries`, and `build/corpusPreflight.test.ts` guards it.
+- **Every gate is negative-controlled** — perturb the code, confirm the row goes red, and confirm
+  the row is also asked over well-formed input. **An INERT control must be reported, not tuned
+  away.**
+- **A green row over an empty population says nothing.** Most audits carry a liveness half.
+- **ARM64 and the Go binary are separate runs deliberately**: the audits iterate over whatever
+  binaries they find, so an extra one changes every gate's population and every summed denominator.
+  **Never put a Go binary in the corpus directory** — Go's ABI and prologues are not MSVC's.
 
-### The harnesses
+### What the harnesses establish
 
-They live in `corpus/`; `corpus/README.md` says what each audit proves and what a failure means.
-Deliberately outside `npm test` — they need real MSVC binaries not in the repo, and a C compiler.
-Nothing here is re-checked unless someone re-runs it.
+The gated runs are `npm run corpus` (four x86 binaries), `npm run corpus:arm64` (**55 gate
+assertions, all 0**) and `npm run corpus:parserdiff` (**98 green, 0 red, 20 vacuous**); the
+`corpus:*cost` censuses take a path and gate nothing. `corpus/README.md` says what each audit proves
+and what a failure means; `docs/verification.md` carries what each is structurally *blind* to,
+which is the half worth reading before quoting a green run.
 
-- **`npm run corpus`** — the four x86 binaries, and nothing else.
-- **`npm run corpus:arm64`** (`corpus/arm64.ts`) — `t64-arm.exe` / `w64-arm.exe`, **55 gate
-  assertions, all 0**.
-- **`npm run corpus:comments`** — the ARM64 comment audit plus an x86 comment digest.
-- **Path-taking censuses, outside the gated run**: `corpus:jumptables`, `corpus:gridserve`,
-  `corpus:uploadcost`, `corpus:decompilecost`, `corpus:detectcost`, `corpus:replycost`. Each takes
-  a `<path>` to any PE.
+Gates at 0: condition polarity (anchor A only — A2 and B are reported and must not gate), loop
+exits, call arity **over**, stale guards, cross-edge guards, stale reads, pop reads, lost defs, arm
+exits, unencodable names, wild branches, self-assign `wrong`/`unresolved`, frame repurposing,
+`signatureAgreement` **over on x64**, member-name agreement, `offsetof` struct layouts (ratio
+1.00 — it proves a declaration self-consistent and can **never** see a wrong identity), `distinct callees lost`, emitter
+`throws`, and `guard lines unparsed`. Report-only and **not** targets: unrecovered values (a rise
+can be a *refusal* replacing a confident wrong answer), dropped statements, `offsetNamedArgs`
+(reaching 0 is the wrong target — two opposite changes both reach it), struct overlaps, undefined
+callees (watch `internalUnlabelled`, not `internal`), empty case bodies, loop shape, field accesses
+reaching the page (it rises with correct recovery *and* with fabrication).
 
-**ARM64 and the Go binary are separate runs deliberately, and the reason is the same for both:
-the audits iterate over whatever binaries they find, so an extra one changes the population of
-every gate and the denominator of every summed figure** (`gcc`, `offsetof`, `polarity` are sums).
-Folding ARM64 in would also buy only vacuous zeros — the decompiler refuses any non-x86 image
-above address resolution (`mcp/tools.ts`), so ~15 audits would draw from an empty population.
-**Never put a Go binary in the corpus directory**; Go's ABI and prologues are not MSVC's.
+**"Clean" is not "recovered".** A large minority of emitted functions contain an *admitted* gap —
+`__unrecovered_N` or `/* unlifted: … */` — and compile precisely because the emitter names what it
+failed to recover. Do not read "all of them compile" as "all of them are right"; gcc is
+structurally blind to wrong register names, call arity, undeclared identifiers and undefined
+callees, because `preludeFor` completes them.
 
-**No default corpus directory, deliberately.** `preflight.ts` searches `PEEK_CORPUS_DIR`
-(environment), then `PEEK_CORPUS_DIR` in a gitignored `.env` at the repo root, then
-`$XDG_DATA_HOME/peek-a-bin-corpus`, `~/.peek-a-bin-corpus`, `<repo>/corpus/binaries` — every
-candidate derived from `$XDG_DATA_HOME`, `$HOME` or the repo. An explicit setting is the *whole*
-search, so a wrong override is reported about the directory you named. On this machine the
-binaries are in `~/.local/share/peek-a-bin-corpus`, found with nothing set.
-**Do not reintroduce an absolute default.** `build/corpusPreflight.test.ts` guards it.
+### Not verified. Say so rather than implying otherwise
 
-### The audits — what each catches, and what is blind to it
-
-Each of these has an oracle outside the code under test.
-
-- **The PE parser holds, differentially against an independently written from-spec reader —
-  and THE ORACLE IS NOW IN THE TREE**, as `corpus/parserDifferential.ts`
-  (`npm run corpus:parserdiff`). Until 2026-08-26 that sentence was a record of a past measurement
-  whose instrument had been lost with a scratch directory: five of the six `corpus/` files calling
-  `parsePE` were cost censuses, and only `corpus/arm64.ts` compared the parser with anything (the
-  ARM64 `.pdata` rows). Six of the seven named subjects had **no standing differential at all** —
-  the `peek-a-bin-02fa` failure mode, *land the oracle*, for the third time. A run now
-  re-establishes, over **all six** binaries: headers and data directories, sections, imports
-  (names, order and IAT slot VAs), the checksum, imphash end to end, resources (leaves *and*
-  tree shape), x64 `.pdata`, and relocations — **98 gates green, 0 red**, each with a liveness
-  half beside it. pefile is not installed here, so imphash is a second reading of the ALGORITHM,
-  hashed with `node:crypto`, not a comparison against pefile's output.
-  - **Independence is the whole value and nothing in the language holds it.** The reference region
-    uses nothing from `src/`; `build/parserIndependence.test.ts` splits the file on two banner
-    comments and fails if a name imported from `src/` appears in it, with a liveness half. Without
-    that guard, adding `rvaToFileOffset` to the reference turns the harness into a differential
-    test between one implementation and itself and **every row stays green**.
-  - **20 of the 118 gates are VACUOUS and print as such**, excluded from the green count. All six
-    binaries are EXEs — **0 exports, 0 forwarders, 0 ordinal imports**, and no DLL exists on this
-    machine — so the export reader and the `Ordinal_<n>` wire-format check have never run on a
-    real image. They are controlled in `build/parserIndependence.test.ts` over a hand-built image
-    instead. Pass a DLL as an argument and those rows stop being vacuous.
-  - **Ten controls red, one INERT and recorded.** Accepting `UNWIND_INFO` version 0 — undoing
-    `peek-a-bin-eu8` — moves no row, because on t64 and w64 every record resolves and every one
-    carries version 1. Two report rows now print that population, so the blind spot is visible
-    rather than inferred. The x64 `.pdata` half of the parser is asked **here and nowhere else**;
-    ARM64 stays with `npm run corpus:arm64`, which judges it against the sweep.
-  - **What a green run still does not establish**: TLS, load config, debug directory, rich header,
-    Authenticode and string extraction are not compared; nothing malformed is (both readers see
-    well-formed MSVC output, so every clamp and lenient continue in the parser is unreached);
-    and the RVA→offset *rule* is necessarily the same in both readers, so only the parser's
-    `SectionIndex` fast path is independently checked.
-- **Function boundaries** are cross-checked against `.pdata` on x64 (which is authoritative), and
-  on ARM64 against the sweep's alignment invariants. PE32 has no `.pdata` and still over-produces.
-- **gcc / the emitted C compiles.** `gcc -std=gnu89 -fsyntax-only` over every emitted function:
-  **all of them compile clean**. "All of them" is the claim. **Structurally blind to four
-  classes**, all worth knowing: a wrong *register name* (`preludeFor` in `corpus/emitAudits.ts`
-  declares every undeclared identifier as its own `long`, so `rcx` and `ecx` compile as two
-  unrelated variables); *call arity* (an implicit declaration is accepted at any arity); an
-  identifier the emitted C **does not declare at all**, at any width (`preludeFor` completes it);
-  and an **undefined callee** — gcc 15.2.0 emits no diagnostic for an implicitly declared
-  function at all, with or without `-w`, so there is not even a prelude declaration invented.
-  Do not read "all of them compile" as evidence about naming, arity or declarations.
-- **`offsetof` — struct layouts are verified by a compiled and *run* program**, not by reading
-  the declaration: every definition and field lays out at the offsets its field names record,
-  **ratio 1.00**. **It proves a declaration self-consistent and can NEVER see a wrong identity** —
-  a fabricated struct lays out fine. The instrument for *recovery* is a different one (below),
-  and adjudicating an identity means reading the emitted C against `objdump -d -M intel`.
-- **`memberNameAgreement` (`corpus/emitAudits.ts`) — GATE at 0.** A struct member whose NAME and
-  whose BRACKETS disagree (`uint64_t field_0x8[];` — identifier says scalar, extent says array).
-  The naming half of what `offsetof` claims about layout. **Both nearest gates are blind**: gcc
-  compiles a flexible array member without comment, and `offsetofCheck` reads the *same* member
-  list and passes at 1.00, because the layout is right and the member's *kind* is what is
-  misstated. `members`/`defs` are the liveness halves.
-- **Condition polarity (`corpus/sweep.ts`) — GATE at 0 inverted**, per guard against the
-  originating jcc, over all four emitted shapes (`if`, `while`, `for`, `do/while`), resolving
-  candidates through `jmp`-only blocks. **Three anchoring tiers and only the strict one gates**:
-  anchor **A** (the body's first line carries a block start address by itself) gates; **A2** (the
-  line had to be normalised to its CFG block) and **B** (the statement after a loop) are reported
-  and do not. "0 inverted" in this file has always meant anchor A. **A2 must not gate** — LICM
-  hoists into a loop preheader carrying an inner block's address, so a hoisted first line with no
-  rival claimant is mis-anchored silently and A2 has no oracle over the output. It judges the
-  *operator*; the *operands* belong to one edge, which is `crossEdgeGuards`' business.
-- **Loop exits (`auditLoopExits`) — GATE at 0 short of the machine.** Whether a loop is told about
-  every way the machine can leave it; a separate audit from polarity and it found what polarity
-  cannot. The defect it was built to catch is **retired** — do not go looking for it. Its
-  standing blind spot: a block whose real successor `buildCFG` never drew reads as unconditional.
-- **Statements `structureCFG` loses, counted by object identity — REPORT-ONLY, 0 dropped.**
-  Not inferred from line-map coverage; folding and relocation cannot register in it, so it counts
-  only the case that is a defect. Observed through `decompileFunction`'s optional `tap`, whose
-  only caller is `corpus/sweep.ts`; emitted C is byte-identical with the audit running. Not gated
-  because the short-circuit fold legitimately consumes blocks; a **rise** is a regression in
-  `compare.mjs`.
-- **Unrecovered values (`__unrecovered_N`) — REPORT-ONLY, and NEITHER DIRECTION IS READABLE ON
-  ITS OWN.** A rise can be a *refusal* replacing a confident wrong answer (which is the repair);
-  a fall can be real recovery. Only `compare.mjs` beside the polarity and stale-guard gates tells
-  you which. It exists at all because `sweep.ts` used to skip any guard with no top-level
-  operator, so an unrecovered guard was not a failing row — it was **not a row at all**, and
-  polarity's ratio stayed 1.00 as guards fell out of the denominator. ~64% of branch conditions
-  are unanchorable by construction (the emitted `if (…)` line carries no line-map entry).
-- **`corpus/arity.ts` — the OVER count is a GATE at 0; exact and under are report-only.** Emitted
-  call arity against `apitypes.ts`'s declared signatures — **the only oracle in the repo that can
-  see arity at all**. No entry in that table is variadic, so an over-count is provably an argument
-  the machine never passed. Under is not zero and no threshold on it is justified; part of it
-  sits at the ABI evidence's ceiling (four fastcall registers cannot reach a five-parameter API).
-  It only sees calls the table declares — a bogus argument to a `sub_` callee is invisible to it.
-- **`corpus/staleGuards.ts` — GATE at 0 `named`.** A guard stating a test the machine does not
-  make. **The class every other gate is structurally blind to**: the emitted comparison matches
-  its jcc's taken sense so *polarity passes it*, it is not `__unrecovered_N` so the recovery
-  baseline does not count it, and gcc compiles it. Two counts: `shapes` is a property of the
-  *machine code* and does not move with a decompiler fix (the liveness number); `named` is the
-  reading that reached the page and gates. **`named` is a LOWER bound** — it counts only guards
-  the polarity pass could anchor. `emittedAtShape` beside it is report-only and is the
-  *recovery*; a fall in it is what a regression looks like.
-- **`corpus/crossEdgeGuards.ts` — GATE at 0 (`admitted` and `named`).** A guard wrong on ONE
-  INCOMING EDGE. **Until this existed the whole corpus suite was blind to it, demonstrated by
-  executing the wrong version**: answer a lone-Jcc block from its first predecessor and all 19
-  pre-existing gates pass, `compare.mjs` says "no regression", and the recovery baseline scores
-  it as an *improvement*. `admitted` is a differential (the disagreement rule written twice) and
-  is address-exact; `named` is the oracle over the output and is the half with holes.
-- **`corpus/staleReads.ts` — GATE at 0** wrong and 0 spoiled repairs. A register read naming a
-  value it does not hold. Two things it must keep doing: attribute a phi's definition to each
-  *predecessor* as well as the phi block (that is where `destroySSA` lands the copy), and compare
-  the **name** rather than the canonical register (a correct live-range split emits two names for
-  one register — which is also why a canonical name reaching the page passes here). It must run
-  `foldBlock`, or it counts dominating writes that fold into their single use.
-- **`corpus/popReads.ts` — GATE at 0** wrong and 0 `ret`-wrong. A register a `pop` wrote, read
-  under its previous value. **A PAIRED pop leaves the population, so read `popsLifted/pops`
-  beside the gate** — a rule claiming every pop would drive it to 0 by no longer looking. The
-  write test must be the **machine's**, not the IR's, or it attributes other passes' defects here.
-- **`corpus/lostDefs.ts` — GATE at 0.** A definition `foldBlock` deleted while a later block still
-  read it. **gcc is structurally blind** (`preludeFor` again). **The discriminator is a
-  before-and-after, not a scan** — a read no definition reaches is *usually correct output* (a
-  function's entry value, i.e. a register parameter), so the audit brackets the fold and counts
-  only reads that had a reaching definition before and none after; `entryReads` reports the
-  legitimate population beside it. Its independence is weaker than the audits above: it is a
-  regression gate on one pass, not an oracle outside the question.
-- **`corpus/armExits.ts` — GATE at 0.** A switch arm claiming the switch is over while its block
-  goes on (`break` is a *claim* about control flow, not an appendable terminator). **VACUOUS ON
-  BOTH x64 BINARIES**, which recover no jump table, so `structureSwitch` never runs and a green
-  row there says nothing whatever; liveness is tied to the recovered-table count. Hangs off
-  `pipeline.ts`'s `StructuringTap` — the question cannot be asked of the emitted C, since a
-  `break` looks identical either way. Scoped to `armExit`'s decision and `buildCFG`'s successor
-  list; an arm that under-emits its *body* while spelling its exit correctly passes.
-- **`emptyCaseBodies` (`corpus/emitAudits.ts`) — REPORT-ONLY, 0.** A case label whose whole body
-  is `break;`. Not gated, for `armExits`' own reason: where the short-circuit fold consumed the
-  target block there is no label for a `goto` and `break` is all that is left. **The nearest gate
-  is measurably blind** — under the negative control this row goes 0 → 29 per PE32 binary while
-  `armExits`' `falseBreaks` stays at 0 and `npm run corpus` exits 0. Read it beside `a lone goto`
-  (a rule spelling every arm as a `goto` would drive `bare` to 0 by saying nothing).
-- **`unencodableNames` (`corpus/emitAudits.ts`) — GATE at 0.** A register name the image has no
-  encoding for (`rcx` in a PE32 function). **Asked of PE32 ONLY, and that restriction is what
-  makes it an oracle** — on x64 `rcx` is a correct spelling, so the **x64 pair contributes a
-  structural 0 and a green row there says nothing**; `funcs` is the liveness half. **Both nearest
-  gates are blind**: gcc (preludeFor), and `staleReads` compares the *name* deliberately, so a
-  canonical name reads to it as a legitimate second live range.
-- **`paramClobberedAtEntry` (`corpus/emitAudits.ts`) — GATE at 0.** A declared parameter a
-  callee-saved register overwrites at entry. It exists because **`offsetNamedArgs` beside it
-  cannot tell a right change from a wrong one, and that is measured**: two opposite changes both
-  drive that row to 0 and move nothing else in the report, one by withdrawing the parameter and
-  one by *naming* all 35 home slots. So `offsetNamedArgs` is a **target** and this is the
-  **gate**. First appearance, not any appearance (a callee may reuse a consumed slot as scratch);
-  the volatile/callee-saved register set is what makes it a defect rather than a shape. Nothing
-  else sees it — gcc compiles an unread parameter, `offsetof` only checks layouts it was given.
-- **`offsetNamedArgs` — REPORT-ONLY in both directions and not gateable at 0.** How much of the
-  argument area frame recovery still spells by offset. Currently 0 everywhere, i.e. a **dead**
-  instrument until frame recovery regresses. **Reaching 0 is the wrong target** — see above.
-- **`corpus/wildBranches.ts` — GATE at 0.** A direct branch whose target the image does not
-  contain, decided against `[imageBase, imageBase + sizeOfImage)` alone. Deliberately not the
-  weaker question ("leaves its function" is ordinary; "outside the code section" is arguable).
-  Phrased without mentioning jump tables, so it is independent of what it caught. **A LOWER
-  bound, and a loose one** — data read as code registers only where it happens to decode as a
-  direct branch aiming outside the image; it saw one of two sites per binary. A green reading is
-  weak evidence; a red one is proof. Every other standing instrument is blind to invented code.
-- **`corpus/selfAssigns.ts` — `wrong` and `unresolved` are GATES at 0; `openOperand` is
-  REPORT-ONLY.** A self-assignment in the emitted C resolved back to its instruction. What gates
-  is the **instrument's integrity** (`wrong` = broken attribution; `unresolved` = a row that could
-  not be judged, gated because a row silently leaving the population is how a gate reads 0). The
-  interesting column cannot gate: a legitimate zero-propagation and a lost operand are the *same
-  shape* from the emitted text. **This is the one visible trace a LOST OPERAND leaves, which is
-  why a self-assignment must never be suppressed** — `peek-a-bin-3axd`'s 97 wrong reads were
-  found through two such lines. **A faint trace**: 95 of those 97 left none, so green is weak
-  evidence and red is proof. Every other gate is blind — gcc compiles `eax = eax`; a
-  self-assignment *is* a reaching definition, so `staleReads`/`lostDefs` pass the reads below it.
-  **The x64 population is empty, so 0 there is as vacuous as `armExits`'.** The whitelist is
-  tested against the instruction's **operands**, never its mnemonic alone. Gating
-  "uncorroborated" was taken up and **REFUSED** — do not re-attempt it; an uncorroborated row is
-  a statement about the scan, not about the machine.
-- **`corpus/undefinedCallees.ts` — REPORT-ONLY in both directions, split internal/external.** A
-  call whose callee the emitted C defines nowhere. Internal = the body is in the output, in that
-  same function, under a `loc_` label — call and body not connected (MSVC `__finally` funclets
-  the detector folded into their parents). External = a tail `jmp` to a function detection never
-  produced, or an indirect call through a data pointer with no IAT entry. Not a falsehood but an
-  *incompleteness*, hence not gateable. **Watch `internalUnlabelled`, not `internal`** — the
-  labelled half is reachable by a reader who searches the identifier's own hex, and `internal`
-  rises whenever a funclet is correctly folded. `compare.mjs` flags both separately. **gcc is
-  structurally blind** for its own reason (silent implicit function declarations, above);
-  `distinct callees lost` asks only whether the name is on the page; `wildBranches` judges
-  targets outside the *image* and these are inside it. The repair was measured and **refused
-  twice**: a comment naming the label is available at only ~45% of sites and would state
-  something false at the rest.
-- **`corpus/structOverlaps.ts` — REPORT-ONLY, no column is a gate, currently 0 on all four.**
-  Which of two overlapping readings of a struct base became a field. Neither answer is provably
-  wrong, hence no gate. **Its zero is a LOWER BOUND on fabrication and NOT a clean bill of
-  health** — a fabricated base was found that produced no overlap row at all, which is why
-  adjudication goes through `objdump`. `groups`/`candidates`/`extents` are the liveness halves.
-- **`corpus/comments.ts` — 0 coincidences on both ARM64 binaries (gate character, reported).** An
-  ARM64 inline comment naming an address the instruction does not reference. **The only audit that
-  reads `Instruction.comment` at all**; a comment reaches neither the emitted C nor the IR, so
-  gcc, polarity, `offsetof`, arity and the stale-read gates are all structurally blind. Reported
-  rather than gated only because it is not wired into `npm run corpus`. Its **x86 half is a
-  DIGEST, not a judgement** — four md5s that must not move unless the change is meant to touch
-  the shared `mapInsn` comment path; if it is, restamp them and say why.
-- **`corpus/guardShape.ts` — GATE at 0 `unparsed`, and it is the only gate that judges the AUDIT
-  rather than the output.** A guard-shaped line the polarity walk does not understand. It exists
-  because the polarity denominator *is* whatever the line walk recognised, so a formatting change
-  can take rows out of a gate silently. `braced`/`doTail`/`inline` are the liveness halves — a
-  text-scraping audit fails by matching nothing. `corpus/selfAssigns.ts` reads the same grammar
-  and adds a second gate at 0, **`for headers unsplittable`** (a header recognised whose clauses
-  the splitter refused, i.e. a site that left a scan gating at 0).
-- **`corpus/frameRepurpose.ts` — GATE at 0.** A frame-relative operand after the frame register
-  has been repurposed mid-body. The oracle is the instruction stream and the operand text, never
-  `stack.ts`'s answer about survival — which does not exist, and whose absence is the defect. The
-  write is **classified**, not merely found: `pop <fp>`/`leave`/`popa` are epilogue restores and
-  open no window. **The x64 pair's zero is structural** (no repurposing there at all), so only the
-  PE32 pair demonstrates anything.
-- **`signatureAgreement` (`corpus/emitAudits.ts`) — GATE at 0 `over` ON x64, report-only on x86.** The
-  DISASSEMBLY panel's parameter count (`inferSignature`) against the DECOMPILE panel's (the emitted
-  signature line), for the same function — the only thing here that compares two of the tool's own
-  answers about one function, and nothing compared them before `peek-a-bin-j4uk.6`, when they
-  disagreed 262 to 4. **Its independence is the weak kind** (`lostDefs`' kind: a regression gate on a
-  relationship, not a question from outside), and what makes OVER gateable anyway is that on x64 the
-  relation is one-way — `promote.ts` adds `Math.min(paramCount, 4)` register parameters on top of the
-  frame's, so `B >= min(A, 4)`, and a sound `A` is at most 4. **UNDER is not a defect and must not be
-  chased**: `B > A` is frame recovery naming a stack slot the register scan cannot see, the admitted
-  under-count `peek-a-bin-f51x` prefers to an invented argument. **x86 is reported only** —
-  `promote.ts`'s register arm is `is64`-gated, so `A` never reaches `B` there, and since the fix both
-  sides of the x86 comparison read `stack.ts`, which makes its `under` at 0 structural rather than a
-  finding; the remaining x86 signal is the `ret N` disagreement (7/6 on t32/w32). `withSignature` is
-  the liveness half and the reason the gate is not self-satisfying — `over` reaches 0 just as well by
-  `inferSignature` refusing everything, and a control doing exactly that is caught by that floor and
-  by nothing else.
-- **Other gates at 0 in the run**: `distinct callees lost`, `throws` (an `emit.ts` throw on an
-  IR shape it cannot emit, counted rather than swallowed).
-- **Report-only rows worth naming.** *Loop shape* (`if`, top-tested `while`, `do/while`, `for`) —
-  **no gate models it**, a `for` becoming a `while` is a fidelity loss not a falsehood, and the
-  point of reporting it is that a shape change between two pinned runs is a *row* rather than
-  something the next agent must think to count. `clobbered_<reg>_<n>` reads — **not a target in
-  either direction**; a call that really destroys a register should say so, and the narrow model
-  reaches zero by saying nothing; judge it beside the `if`/`while`/`for` counts, which is where a
-  harm of that shape shows up. *Field accesses reaching the page* (`->field_0x` occurrences) —
-  the instrument that actually measures **struct recovery**, since `offsetof` sums fields over
-  *distinct definitions* and therefore moves with merging; **it is not a gate and must not become
-  one, because it rises with correct recovery AND with fabrication.** *Invented prelude
-  declarations* (the `long <name>;` lines under `artifacts/<label>/cc/<bin>/`) — the only
-  instrument for an identifier the emitted C never declares; not a gate, has to be read on
-  purpose. *The crude read-but-never-assigned name scan* — an **upper bound, never a defect
-  count**; a name with no wider assigned alias is an incoming value and its own name is honest.
-- **The practical file-size ceiling is disassembly, not parsing** — envelope in
-  `docs/architecture.md`.
-
-### The ARM64 gated run (`npm run corpus:arm64`, `corpus/arm64.ts`)
-
-**55 gate assertions, all 0** (51 before `peek-a-bin-j4uk.3` added two rows per binary). Every row
-has an oracle outside the code under test plus a liveness half, because a population-based audit
-fails by silently matching nothing:
-
-- **The sweep against the A64 encoding** — four bytes, four-byte boundary, strictly increasing,
-  inside the section. The ISA, not a heuristic, so every row is provably not an instruction the
-  file contains.
-- **The decode-rate floor, gated in BOTH directions** over all six binaries — `coffHeader.machine`
-  is the oracle, so an accepted 0xAA64 image must be above the floor and every 0x014C/0x8664 image
-  must be below it. Moving the floor either way turns a row red. This is the one place the ARM64
-  and x86 halves meet.
-- **`.pdata`, the linker's own record** — a begin with no instruction at it, an unaligned begin or
-  end, an empty extent. This is the *sweep* agreeing with the same table the parser is checked
-  against.
-- **A direct branch inside a `.pdata` extent aiming outside the image.** The extent restriction is
-  what makes it an oracle: A64 has **no gap fill**, so outside every extent the sweep reads
-  literal pools and padding as code *by design* and a wild target there is expected — reported,
-  not gated. Same restriction pattern as `unencodableNames`' PE32-only population.
-- **The `adrp`/`adr` grammar against the ISA's own reach** — `adrp`'s 4 KiB page, `adr`'s ±1 MiB,
-  and a reference attributed to an address the sweep produced no instruction for. Nothing else
-  could see this class: `corpus/comments.ts` asks whether a comment is justified *by this reader*,
-  so it would agree with a wrong reading.
-- **A64 switch dispatch** — 0 case targets that are not an instruction; 0 words of a recovered
-  table presented as instructions; 0 published tables the walk could not re-derive (that last is
-  the liveness half — the walk re-derives each dispatch itself, so anything making the stream
-  unreadable would drive the first gate to 0 by no longer looking). It judges the extent **READ**,
-  never the extent the dispatch *claimed*, because gating on an unread tail would be red on
-  correct output.
-- **`.pdata` unwind CODES**, both encodings, against an independently written reading of the
-  prologue: 0 disagreements in either direction. **Epilogue scopes are NOT audited.**
-- **Literal pools — a WIRING gate, not an oracle.** It asks whether every datum the production
-  grammar names was actually withheld from the stream the view renders. Measured rather than
-  argued: silence the grammar and this row goes **vacuously green** while the unreachability row
-  goes red. `words of pool` beside it is what makes a vacuous green visible.
-- **Import thunk names, against the linker's own IAT — TWO GATES at 0, failing in OPPOSITE
-  directions.** A thunk NAMED against a slot the import table does not hold, and a thunk-SHAPED
-  function left `sub_` whose slot *does* resolve. The second is what makes the first non-vacuous:
-  a rule reaches zero wrong names by naming nothing, and gate 2 is gateable precisely because a
-  resolving slot IS the proof the name was available. `independentThunkSlot` in the harness re-reads
-  the chain FORWARDS with its own regexes where production walks backwards from the `br`, so the
-  row is a differential and not a restatement — replace it with an import of `arm64ThunkSlot` and
-  both gates go green for ever. Three report rows are the liveness halves (thunk-shaped found /
-  named / chains resolved): 2 / 1 / 1 on each binary. The **red direction of both gates has no real
-  population** — both binaries name their one thunk correctly — so it is controlled in
-  `build/arm64Audit.test.ts` instead (`peek-a-bin-j4uk.3`).
-
-- **An unreachable decoded word inside a `.pdata` extent — GATE at 0**, and the row to read,
-  because its rule (reachability) shares nothing with either production rule and is therefore the
-  independent oracle over both. Deliberately the *strict* reading, hence a **lower bound**.
-- **`Arm64SweepCache`, differentially through the real `dispatch`** — the three RPCs of one load
-  driven twice, sharing and clearing: answers must be identical and the shared run must save
-  Capstone calls. The handle is *wrapped* by the audit rather than counted inside
-  `capstoneWindow.ts` — an instrument belongs outside the code it judges.
-- **The one report-only gap left in the census is `.pdata` words that do not decode**, ~30 per
-  binary explained by a literal pool and the rest unattributed. **That row RISES whenever a
-  marking pass lands and that is the honest counterpart, not a regression** — a word calling
-  itself data stops decoding by definition.
-- **Rows that cannot be made red from this repo** (instruction width, monotonicity, section
-  bounds, `.pdata` alignment, `adrp` page alignment) are properties of Capstone's output, of the
-  linker's table or of the section's size, and are controlled in `build/arm64Audit.test.ts`
-  instead, over exported judging functions taking plain data.
-
-### "Clean" is not "recovered"
-
-A large minority of emitted functions contain an *admitted* gap — a `__unrecovered_N` or a
-`/* unlifted: … */` — and compile precisely because the emitter names what it failed to recover
-instead of printing something plausible. That is intended behaviour, not a defect count. Do not
-read "all of them compile" as "all of them are right".
-
-### Not verified. Say so rather than implying otherwise:
-
-> **DATE-STAMP FOR EVERY RENDER FIGURE BELOW (2026-09-09, `peek-a-bin-1xc5`).** Batch Rename, the
-> AI Report, the Vulnerability Scanner and the Anomalies view tab were removed, taking
-> `AnomaliesView.tsx`, `AIDialogs.dom.test.tsx` and `AnomaliesView.dom.test.tsx` with them. **The
-> narratives below are amended, never renumbered: "nine defects" stays nine.** Two of the nine were
-> in `AnomaliesView` and a third was a tab-button name that no longer exists; they were found, they
-> were real, and that evidence is the case for having closed the render gap in the first place.
-> What is now stale is the arithmetic: at `263bd5d` the tree holds **30** `*.dom.test.tsx` suites,
-> **38** files under `src/components/`, **four** dialogs and **eight** view tabs, and the
-> per-component and per-dialog censuses have **not** been re-taken. (**31** dom suites on the
-> integrated tree: `peek-a-bin-r8tt` landed alongside with `InsnContextMenu.dom.test.tsx`, which is
-> not part of this removal.) The three reductions this
-> removal *causes* are enumerated in `docs/verification.md`, as their own entries rather than as
-> edits to these.
-
-- **THE RENDER GAP IS CLOSED: every component under `src/components/` plus `App` itself is now
-  rendered by a suite that asserts on it.** Measured, not recalled — 31 `*.dom.test.tsx` suites, and
-  a per-component scan names 40 of the 41 files; the one it does not is `ModalBackdrop`, which
-  `Modal`'s suite renders by way of it. Four sessions ago this list opened "Nothing has rendered a
-  component". **What that does NOT mean is that the components are verified**, and the rest of this
-  section is the list of what a green suite here still says nothing about. Two words are worth
-  keeping straight: a component *mounting* as somebody's child is not coverage, and after `App` was
-  rendered a transitive-reachability census over the import graph reads **41 of 41** while asserting
-  nothing — the measured refusal of a drift guard built on it. "Rendered" here means an assertion
-  about that component's own output.
-- **The renderer has now found NINE real defects, and that is the argument for using it.** Two in
-  earlier sessions: `peek-a-bin-n7q1` (a fifth `kind === "analysis-failed"` site in `StatusBar.tsx`
-  rendering amber where App's banner rendered red — one notice, two colours, on screen at once) and
-  `peek-a-bin-a5sw` (the arrow keys **permanently wedged** on a separator row, so everything below
-  the first function tail was unreachable by keyboard). Five in the pass that closed the gap, all
-  under `peek-a-bin-p0qw`:
-  - **`HeaderView` printed a truncated `ImageBase` on essentially every 64-bit binary.**
-    `CopyableHex` spelled its value `(value >>> 0)`, so `0x140000000` rendered as
-    `0x0000000040000000` two rows under an `Entry Point` of `0x140001000` it had spelled correctly.
-  - **`DecompileView` opened one comment editor per line sharing the edited address.** `lineMap` is
-    many-to-one, so the `;` shortcut mounted N identical `<textarea>`s, each running `focusOnMount`.
-  - **`AnomaliesView` picked its AI-findings colour with a hand-written chain over the severity
-    string** — the `n7q1` shape again — and keyed both anomaly tables `Record<string, …>`, so a
-    fourth severity would have compiled, sorted last and rendered in `info`'s blue. (That component
-    was removed at `peek-a-bin-1xc5`; the current holder of the rule is the severity paragraph
-    above, read by `HeaderView`'s `AnomalyBanners`.)
-  - **`ResourcesView` returned a keyless shorthand fragment as the element of a `.map`**, so every
-    render of a populated tab logged React's key warning and reconciled rows by index.
-  - **`App`'s tab bar gave the Anomalies tab the accessible name `"Anomalies3"`** — the count badge
-    sat inside the button with no separator. Fixed at `6f99fdf` with `peek-a-bin-w50c`: the badge
-    is `aria-hidden` and the count is spelled into an `aria-label` instead. (That tab and its badge
-    were removed at `peek-a-bin-1xc5`, so the fix is now MOOT rather than wrong — kept on the
-    record because it is one of the nine.)
-  Two more from *closing* two of the named holes above — found not by a render failing but by
-  having to state, for the first time, what the block being rendered was supposed to print:
-  - **`parseDebugDirectory` printed the CodeView PDB GUID in file byte order.** `CV_INFO_PDB70`'s
-    `Signature` is a `GUID` struct, so `Data1`/`Data2`/`Data3` are little-endian integers and only
-    `Data4` is a byte string; hex-joining all sixteen bytes byte-swaps the first three groups. The
-    GUID is the symbol-server key for the PDB, i.e. a value only ever read *out* of the tool, so a
-    wrong spelling is well-formed and simply matches nothing — the `Ordinal_<n>` class, not the
-    `>>> 0` class. The **oracle is real MSVC output**: `CoCreateGuid` mints version-4 UUIDs and the
-    version nibble sits in the third group, which reads 4 on **all six** corpus binaries under the
-    corrected reading against E / 4 / 7 / B / 1 / 7 before it — one accidental match in six. `pe/__tests__/metadata.test.ts` had **pinned
-    the defect as the rule**, under the comment "Bytes 01..10 in file order".
-  - **`parseRichHeader` reported a use count with the top bit set as negative.** `^` is an int32
-    operator, so a stored `0xFFFFFFFF` reached the Rich Header table as `-1`. Unfalsifiable on real
-    output — all 36 Rich entries across the four x86 corpus binaries are under 150 (maxima 121, 118, 118, 115) — so the
-    population is packed and corrupted headers, where a negative count reads as a parse failure.
-  **None of the nine is visible to any static instrument here**: every one compiles, type-checks
-  and lints clean, and nothing under `corpus/` renders React.
-- **Writing a component test has four traps, all of them measured rather than reasoned.** They cost
-  four separate agents a round trip each. (1) **`waitFor` and `userEvent` both deadlock under
-  `vi.useFakeTimers()`** — `waitFor` polls on a timer of its own and `userEvent`'s inter-keystroke
-  awaits never resolve even with `advanceTimers` wired up; drive a debounced control with
-  `fireEvent.change` and advance the clock inside `act()`. (2) **Advance SHORT of a debounce first**:
-  "nothing has happened yet" is equally true of a 0 ms timer nobody ticked, so a single advance past
-  the boundary cannot tell a 250 ms debounce from no debounce — that control came back inert twice.
-  (3) **React caches its key warning PER OWNER COMPONENT**, so a dedicated `console.error` spy placed
-  after any other render sees a clean console with a keyless list in place; the guard has to be a
-  file-wide `beforeEach`/`afterEach`, so the *first* render that warns fails. (4) **`target:
-  "window"` cannot be discriminated behaviourally in jsdom** — `e.target` is then `window` and
-  jsdom's `Node.contains` throws a TypeError on a non-Node before `onDismiss` runs, so the popup
-  stays open for the wrong reason; assert on which global receives which listener instead.
-- **Every drag in this repo is verified as arithmetic, never as motion.** `ResizeHandle` (mouse
-  events, not pointer events) and `FloatingPanel`'s header drag and corner resize are asserted
-  through `mousedown`/`mousemove`/`mouseup` on `document`, checking the deltas the handlers compute
-  and the inline styles they write. jsdom has no layout, so **nothing has ever been observed to move
-  or resize.** The off-screen clamp is the same: the four bounds, the reopen-after-shrink case and
-  the resize case are pinned as numbers, and **nothing has seen a panel be reachable or not** — that
-  a 48px sliver or a 24px header band is enough to grab needs `peek-a-bin-v2u`. `handlePopOut`'s own
-  call to the clamp is **provably inert** (centring can violate only the viewport-independent top
-  bound), reported rather than removed. What *is* covered end to end is `ResizeHandle`'s
-  **post-commit guarantee**, on both paths and from the caller's side: that a mouseup handler
-  captured at mousedown would store the PRE-drag height (the ref indirection), and that an
-  inline keyboard `onResizeEnd` stores the PRE-press one — the latter asserted with a harness
-  that is deliberately the naive state-reading caller, since a `vi.fn()` can only see that the
-  callback fired. Reverting the deferral reddens four tests across all three callers.
-- **THE TWO PERSISTED-SIZE CLAMPS ARE VERIFIED AS ARITHMETIC AND AS WIRING, AND AS LAYOUT NOT AT
-  ALL.** `persistedSizeClamp.test.ts` is the rule (11 rows: the ordinary case, both ceilings, both
-  floor-wins arms, both boundaries, the axis check, idempotence) and
-  `PersistedSizeClamp.dom.test.tsx` the wiring (14 rows: each site mounts a fitting size unchanged,
-  mounts an unaffordable one clamped, re-derives on a `resize`, holds its floor, keeps the stored
-  preference through a lapse, and persists what a drag asked for rather than what the window
-  granted — plus one row computing both sites' expected numbers from the rule itself, at four
-  viewports each, which is what makes "one rule, two sites" an assertion). **Eleven negative
-  controls, NONE INERT** — reverting either render to the raw stored value reddens 6 each; writing
-  the clamped value back reddens exactly the 3 derive-don't-store rows; inverting the floor/viewport
-  ordering reddens 4; removing the sidebar's resize listener reddens 2; transposing the two reserves
-  reddens 12 *including a pre-existing row*; ±1px on the height reserve reddens 6; dropping the
-  site-ceiling term reddens 1 and fails typecheck; flooring the answer reddens 1; and raising the
-  width reserve to 700 reddens 11. **One row is reddened by no perturbation of the function alone
-  and is recorded rather than tuned**: idempotence over a `min`/`max` composition cannot be broken
-  without breaking a bound, exactly as in `floatingClamp.test.ts`. **What NONE of it establishes**:
-  jsdom performs no layout, so nothing has seen a sidebar be too wide, a listing be squeezed to
-  nothing, a docked panel overflow its column, or any of it come back when the window grows — and
-  `innerWidth`/`innerHeight` are two numbers nothing lays anything out against, with the `resize`
-  event fired by hand. The two reserves are sums of Tailwind-class arithmetic **read, never
-  measured**; the 0.6em monospace advance behind the 306 is a property of `--font-mono` that nothing
-  here can check. Added to `peek-a-bin-v2u`. **A measured constraint worth carrying**: the height
-  reserve has 2px of headroom before `BottomPanels.dom.test.tsx` reddens (boundary 168/169) where
-  the width reserve has 318px (boundary 624/625), so only the height was ever constrained by an
-  existing test.
-- **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
-  and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint — the preview's
-  *reconstruction* has unit coverage, but no test and no human has seen an icon; and every popup's
-  *placement* is unasserted, `getBoundingClientRect` being all-zero. **The group-icon arm's OBJECT
-  URL is no longer part of that hole and the paint half is now MEASURED rather than reasoned**
-  (`peek-a-bin-v3uh.14`): jsdom implements neither `URL.createObjectURL` nor `revokeObjectURL`, and
-  with both stubbed the create/revoke pairing is asserted exactly, while the control that would
-  need a painted image — putting a single 0x00 byte in the blob, an icon by no reading — leaves
-  every row in that suite green.
-- **THE RESOURCE-DIRECTORY HOLE IS CLOSED, AND CLOSING IT FOUND A DEFECT.** `DirectorySpec` gained
-  an **opt-in** `resources` tree (`ResourceTypeDef` → `ResourceNameDef` → `ResourceLangDef`) that
-  emits a real three-level `IMAGE_RESOURCE_DIRECTORY`: high-bit subdirectory flags, named entries
-  as length-prefixed **UTF-16** strings beside ID entries, named entries sorted ahead of ID ones
-  as `rc.exe` writes them, two languages under one id, per-leaf code pages, and data entries whose
-  `OffsetToData` is an **RVA** while every offset around it is resource-base-relative. All 20
-  existing builds are byte-identical. **The sixteen bytes of 0xCC in front of the root are the
-  load-bearing part**: a real `.rsrc` puts the root at offset 0, so resource base and section base
-  coincide and a walk that confused them is *structurally* undetectable — measured, not argued.
-  Reading the section base instead of the resource base reddens **17** rows across the two suites
-  with the pad in place, and with it removed reddens **one** — the row asserting the pad exists. The defect: **`ExpandedLeaf`'s manifest arm and `downloadResource`
-  threw `RangeError` on a TRUNCATED image.** `rvaToFileOffset` answers against the section table
-  and never sees the buffer, so where the headers describe more than the file holds it returns an
-  offset past the end; `Math.min(size, byteLength - fileOff)` goes negative and `new Uint8Array`
-  throws — taking the pane into its `ErrorBoundary` on a click, while the tree itself walks fine
-  (`parseResourceDirectory` bounds every read on the buffer) so every row is on screen.
-  `resourceBytes` is the one declaration of the guard; the `RT_GROUP_ICON` arm deliberately keeps
-  `buffer.slice`, which **clamps** rather than throwing. Nothing static could see it and nothing
-  under `corpus/` renders.
-- **A NAME-IDENTIFIED LANGUAGE LEVEL IS CARRIED, NOT FLATTENED TO ZERO, and `ResourceTree.lang` is
-  `number | string` like the two levels above it.** All three levels of the directory are
-  identified by the same high bit, but the flatten step read `typeof currentPath[2] === "number" ?
-  … : 0` — so a named language became `lang: 0`, and 0 is a **real LANGID** (neutral): the narrower
-  answer wearing a complete one's shape, with two named localisations of one resource rendering as
-  two rows both claiming language 0 and separable only by RVA. `rc.exe` never writes one, so the
-  population is a hand-rolled or non-Microsoft resource compiler's output — and a hostile sample
-  reaching for exactly the shape tools mishandle. No file on this machine has one; the evidence is
-  the fixture (`ResourceLangDef.lang` widened to `number | string`), which had to land first or
-  there was nothing to fail against. **`ordinalLabel` in `ResourcesView` is the one declaration of
-  the `#` marker** the Name column always used, now read by the Language column too, because a
-  language *named* `"1033"` and LANGID 1033 are otherwise one string on the page. **`keyPart` is a
-  DIFFERENT question and deliberately not the same function** — it decides which rows are the same
-  row, so it tags the kind (`i3` vs `s3`); at the **type** level, where `String(entry.type)` merged
-  a named type and the ordinal spelling the same digits into one heading with one collapse state,
-  that is a real fix, and at the **leaf** level it is belt only, since `leafKey` still ends in the
-  row index — which must stay, two identical entries in one crafted directory being two rows whose
-  key would otherwise collide. **That control is measured INERT and reported.** Beside it,
-  `truncated` was read off `remaining > 0`, so a directory holding **exactly** `MAX_TOTAL_ENTRIES`
-  claimed to be short over a complete answer; the flag is set at the `break` now, and both sides of
-  the boundary are pinned (`peek-a-bin-6qx9`).
-- **`HeaderView`'s four named holes are CLOSED, and closing them found a defect.** The fixture
-  builders now emit an **`IMAGE_DEBUG_DIRECTORY` with an RSDS CodeView record**, a **`Rich`
-  header** (which moves `e_lfanew` past 0x80, so the whole layout is re-derived) and a
-  **`WIN_CERTIFICATE`** carrying a hand-built PKCS#7 blob past the last section — all three
-  **opt-in**, so no existing caller's bytes change. The **async arms of the Checksum Validation
-  row** are reached by a fixture genuinely over `MAX_SYNC_FILE_METRIC_BYTES` rather than by
-  mocking the threshold, with the sub-threshold case as the control that the size is what routes
-  it; the failure arm is additionally reached through the **real** `MetricsWorkerClient`, since
-  jsdom has no `Worker` and `send` rejects inside its own `try`. **What is still not reached**: the
-  PKCS#7 blob carries no digest and no signature value, because nothing in this tool verifies
-  either — the assertions are about the DER walk's output reaching the page; nothing has watched a
-  real `postMessage`; the **other** consumer of that same `useFileMetrics` state, `SectionTable`'s
-  entropy column, still renders neither async arm; and `useEntropyStrip`'s (a different threshold,
-  `MAX_SYNC_ENTROPY_BLOCK_BYTES`, in `HexView`) are untouched by any of this. Two controls came
-  back **INERT and are recorded rather than tuned away**: misaligning the certificate by one byte
-  (`parseSecurityDirectory` reads the directory's offset verbatim and is indifferent to the 8-byte
-  alignment a real image has) and zeroing a debug entry's `SizeOfData` (`parseDebugDirectory`
-  never reads it — see the unbounded PDB-path scan noted below) (`peek-a-bin-p0qw`).
-- **Virtualization is a STAND-IN and a green suite must not be read as covering it.** `virtual-core`
-  reads the scroll element's `offsetHeight` (not `getBoundingClientRect`), so in jsdom a
-  virtualized list renders **zero** rows, not a short list. `domSetup.ts`'s `stubLayoutRect()` is
-  opt-in per file; with it every element reports the same size, `scrollTop` is permanently 0 and
-  the stub `ResizeObserver` never fires, so which rows are windowed in, whether `overscan` is
-  right, whether `scrollToIndex` works and whether anything is *visible* all stay unanswered.
-  **A row in the document is not a row on screen.** The sidebar's function rows and the hex grid
-  are out of reach; the entropy strip additionally gates on a width jsdom reports as 0.
-  **How blind, measured rather than argued**: under `stubLayoutRect` two real behaviour changes to
-  `ExportsView` — `estimateSize` 28 → 280 and `overscan` 20 → 0 — leave its whole suite green,
-  because every element reports one 600px rect and `scrollTop` is pinned at 0, so the computed range
-  covers the entire fixture whatever those numbers are. Those two controls are **left inert on
-  purpose** and recorded as the statement of the gap; making them discriminate would mean fabricating
-  a scroll position no browser produced. The stub itself is controlled in both directions — remove it
-  and 15 of `ExportsView`'s 18 row assertions fail, and `StringsView`'s twelve strings render **zero**
-  rows while its toolbar still counts all twelve — so the row assertions are not vacuous.
-- **jsdom is NOT a browser.** No layout, so nothing about geometry, overflow or visibility;
-  `offsetParent` is a constant `null` and is supplied by a stand-in the focus trap depends on; no
-  browser focus algorithm, no service worker, no screen reader. A green focus-trap test says the
-  component's own logic moves focus where it says; it does not say a browser agrees.
-- **The browser's callee-clobber summary is wired and guarded end to end, but no human has seen a
-  `clobbered_` name on screen.** The client→worker hop, the two-message `needInstructions` retry
-  and the `.pdata` single-row slice are all asserted through the real `disasmClient` answered by
-  the real `dispatch` — **and nothing has watched any of it cross a real `postMessage`**. The
-  build cost is measured only on ~108 KB binaries; a large image is extrapolation. The emitted-C
-  effect is measured on the **MCP path** (`FileSession`), not the browser path.
-- **The request watchdog's terminal state HAS now fired, end to end — but never on a real file,
-  and that distinction is the whole of what is still unverified.** The claim here used to be that
-  it "cannot be made to fire here", on the evidence that provoking it needs ~200 MiB of *code* and
-  `find / -xdev` finds no PE over 2 MB on this machine. **That is true of the FILE route and only
-  of it**: `REQUEST_TIMEOUT_MS` is a module constant, so `src/__tests__/App.dom.test.tsx` mocks the
-  budget down to 500 ms — `importActual` and a spread, never a hand-written stub, because
-  `analysisRejection` decides on `err instanceof WorkerTimeoutError` and a lost class identity
-  would make the test prove the opposite of what it claims — leaves `detectFunctions` unanswered,
-  and drives the real `App`, the real client watchdog and the real notice. Three cases: the banner
-  is **red** and spells the budget from the constant rather than hardcoding it; it withholds **no**
-  tab (the `"Still available:"` sentence is absent, which is what `unavailableTabs: []` is for
-  where `buildAllXrefs` is the last stage); and it does **not** say the analysis failed. Three
-  controls, all discriminating — report a timeout as `"failed"` (which reproduces
-  `peek-a-bin-meai`'s defect verbatim: `ANALYSIS FAILED / Analysis failed: … timed out`), give the
-  kind a non-empty `unavailableTabs`, hardcode the budget words. **`App.tsx`'s own catch says
-  "nothing here can be reached by a test, which is why the decision is a pure function elsewhere"
-  — the pure function was the right call and the comment's premise is now false.** What remains
-  unverified is the thing the old sentence was really about: **no real image has ever taken this
-  path**, so the budget's calibration against a genuinely slow stage is still extrapolation, and
-  the status-bar label and empty-panel case remain verified by typecheck, pure tests and reading.
-- **Render COUNT is measured; render COST is not.** Exactly two full-tree renders per cursor
-  *move*, for every context consumer, measured against the real `DisassemblyView` and
-  negative-controlled. Whether two renders of a virtualized list and a dagre-laid-out graph is
-  *slow* still needs the React DevTools Profiler on a real binary in a real browser.
-- **SIX NEW ADMISSION SURFACES ARE UNSEEN IN A BROWSER, all landed this session and all fixture-
-  verified only.** The amber **Unreadable** pill and its sentence in the signature block; the
-  Resources pane's "could not be read" arm; the Debug Info heading's *Incomplete* marker; the
-  Strings toolbar's *N bytes unscanned* marker; the signature block's full **Distinguished Name**
-  row, which is now longer than the CN it replaced and sits in a two-column table nobody has
-  watched wrap; and its **Certificates** row. Each is a short string in a strip or table with a
-  fixed height, which is exactly the class jsdom cannot judge — it performs no layout. Added to
-  `peek-a-bin-v2u`.
-- **The sidebar's Annotations block is BOUNDED IN SOURCE AND UNMEASURED AS LAYOUT.** Its cap,
-  its scroller and its refusal of `shrink-0` are asserted as the strings React wrote; jsdom
-  performs no layout, so "the Functions header holds still as annotations accumulate" has no
-  instrument here — the `peek-a-bin-llrq.6` position, one block over. Two of eleven controls
-  are **inert and reported**: deleting the list's `min-h-[120px]` floor and the annotations
-  wrapper's `overflow-hidden`. The hover-revealed delete glyph and the context menu's
-  placement are unseen for the same reason. Added to `peek-a-bin-v2u`.
-- **THE TOOLBAR'S RESPONSIVE BEHAVIOUR IS A CLASS-STRING CONTRACT AND NOTHING MORE, AND THE
-  ARITHMETIC BEHIND BOTH BREAKPOINTS HAS NEVER BEEN MEASURED.** Tailwind is not loaded under vitest
-  (`vitest.config.ts`) and jsdom performs no layout (`src/test/domSetup.ts:57-61` says so in its own
-  comment; `src/test/browserApiStubs.ts:24-44` refuses to fabricate a width on purpose and
-  `domSetup.ts`'s `ResizeObserver` never fires), so `hidden`, `flex-wrap`, `basis-full`, `min-w-0`
-  and `overflow-x-auto` have **no computed effect in any test in this tree**. Every one of the nine
-  assertions in "AddressBar responsive class contract" reads `element.className` and checks that
-  React wrote a token. **Nothing here is evidence** that the bar wraps at 1535px, that the tab strip
-  scrolls, that a divider is hidden below 1024px, that the address field shrinks to 96px or caps at
-  192px, or that any control is on screen, visible or clickable at any width. The tier numbers —
-  ~1629px for the single row, ~941px for row 1, ~863px with the dividers gone, a ~767px single-line
-  floor — are **COMPUTED**: a 0.6em monospace advance (JetBrains Mono is exactly 600/1000 units)
-  applied at the two font sizes the bar mixes, plus the Tailwind spacing scale. A different fallback
-  font moves every one of them. `min-w-auto`'s existence and the two breakpoint media values were
-  checked against the installed Tailwind dist, which is a fact about generated CSS and not about a
-  rendered page. **One control is INERT and reported rather than removed**: `shrink-0` on the bar's
-  root, added to match `StatusBar.tsx:179` and the two banners, moves zero rows and neither a test
-  nor an argument shows it changing anything — `main` is `flex-1` so App's column is never
-  over-constrained, and `min-height: auto` on a wrapped flex container already floors the bar at its
-  own lines. So that asymmetry was a convention violation and **was not part of the bug**;
-  deliberately no assertion was written for it. `2xl:overflow-visible` is inert too, for a different
-  reason — it compiles to the shorthand and so does win, but above the breakpoint the strip is
-  content-sized and never overflows; the class-string assertion for it is live, the class is not.
-  The focus-order property the DOM move buys — visual order equal to focus order in both tiers — is
-  **encoded as a DOM-order assertion and not observed**, jsdom having no visual order. Nothing here
-  has met a screen reader or a browser focus algorithm, and this is the app's first responsive code,
-  so there is no prior breakpoint behaviour to compare against. The width sweep is appended to
-  `peek-a-bin-v2u` (`peek-a-bin-cgu1`). **The two `flex-wrap` rows added at `peek-a-bin-7v1a` are
-  the same contract in two more suites** — `DisassemblyPanel.dom.test.tsx` for
-  `DisassemblyToolbar`'s section-header bar, `BottomPanels.dom.test.tsx` for
-  `BottomPanelContainer`'s tab strip — and carry the same caveat verbatim: both read
-  `className`, both controls discriminate, and neither is evidence that either row wraps, that
-  the header bar's search box is on screen, or that a fifth panel's close button is clickable.
-  Their width figures are computed the same way and were never measured.
-- **THE STATUS BAR'S WIDTH CONTRACT IS FOUR CLASS-STRING AND TEXT ASSERTIONS AND NOTHING MORE, AND
-  ITS BREAKPOINT REASONING HAS NEVER BEEN MEASURED.** Same blindness as the toolbar's, one bar down:
-  Tailwind is not loaded under vitest and jsdom performs no layout, so `hidden` and `2xl:inline` have
-  no computed effect in any test in this tree — nothing has seen the instruction-bytes field hide at
-  1535px, nothing has seen the analysis notice be on screen at any width, and nothing has seen the
-  wrap-and-vertical-spill the pre-fix bar produced between 840px and 1650px. `~1650px` preferred,
-  `~1132px` with the two fields hidden, `840px`/`718px` for the onset of true horizontal clipping and
-  the `518px` recovered are all **COMPUTED** from a 0.6em advance at 10px plus the Tailwind spacing
-  scale; a different fallback font moves every one. The `2xl`-not-`lg` argument is arithmetic over
-  those same figures, so it inherits their standing. **What IS measured is the suite**: eight negative
-  controls, **all eight discriminating, none inert**, each reddening exactly one row — dropping
-  `hidden` from either field, respelling either `2xl:inline` as `lg:inline` (the control that pins the
-  deviation from the bead's own proposal), deleting the VA field, printing the RVA in its place,
-  appending a sibling after the notice, and hiding the notice itself. The VA field's **value** is real
-  behaviour and is asserted as such, derived from the fixture's own image base. Added to
-  `peek-a-bin-v2u` (`peek-a-bin-al07`).
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
-- **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**
-  That a `Blob` and an `ArrayBuffer` source produce identical results is measured and
-  negative-controlled. That posting one is O(1) is a spec property plus an earlier measurement of
-  the copy it replaces. Nothing has watched a real `File` cross a real `postMessage`, and the drop
-  path is the only one that would. Same for `extractStrings`. The *browser* side of the trade is
-  unmeasured: a `File` is backed by disk, so `Blob.arrayBuffer()` there is I/O, not the memcpy
-  Node times.
-- **The architecture refusal IS now rendered — all three surfaces, on one screen — and what is
-  left unverified is narrower and different.** The old bullet said "no test has seen the banner,
-  the panel or the status bar"; by the time it was checked that was **a third stale**, since
-  `DisassemblyView.dom.test.tsx` had been rendering the replacement panel for an ARMNT image for
-  two sessions. `App.dom.test.tsx`'s "an image no decoder here reads" suite now drives a real
-  ARM32 fixture (`buildMinimalPE32({ machine: 0x01c4 })`, with genuine import and export
-  directories) through the real `App`, answered by the **real `dispatch`** rather than a stub — so
-  the empty `omitted`-bearing `detectFunctions` result and `buildAllXrefs`' throw are production
-  code. It asserts the banner is **amber while `analysisPhase` is `"failed"` and `state.error`
-  holds the refusal**, which is the property this kind alone discriminates; that the status bar
-  reads the same notice in the same colour *at the same time* (`peek-a-bin-n7q1`'s shape, for the
-  one kind `StatusBar.dom.test.tsx`'s agreement loop had never covered); that `"partial-detection"`
-  is outranked though all four passes are in the state; that `unavailableTabs` withholds exactly
-  the tab the panel withholds; and that all eight named tabs mount with content and none falls to
-  its error boundary. **Still not verified**: no human has seen it in a browser
-  (`peek-a-bin-v2u`), nothing has crossed a real `postMessage`, and jsdom shows no layout — so
-  every virtualized pane among those eight is asserted only through its heading, and a row in the
-  document is still not a row on screen. **Two controls came back INERT and neither was tuned
-  away**: spelling either the banner's or the status bar's predicate as `kind ===
-  "analysis-failed"` — the `n7q1` defect verbatim — leaves every row green, because for an
-  `isFault: false` kind the hand-written predicate and `isFault` *agree*. The discriminating
-  perturbation for this kind is a site reading the **phase**, and both go red under it.
-- **There is no ARM32, ARM64EC or ARM64X binary on this machine**, so every one of those paths is
-  verified against synthetic fixtures and nothing else. The decode-rate floor is calibrated
-  against real ARM64 and real x64 only and is **not** a claim about ARM64X, a good share of which
-  is genuine A64 and may sit above the floor. `chpeMetadataPointer` is non-zero for no file here,
-  so the "declares CHPE metadata" branch is fixture-and-control only. **The machine-type claims
-  are settled from DOCUMENTATION, not from a file** — ARM64EC is marked 0x8664 and ARM64X 0xAA64
-  — so the ARM64EC-as-x64 misclassification has never been observed. Likewise the
-  two-exception-tables finding: which format each of a hybrid image's two function tables carries,
-  and the ARM64X relocation that swaps them, are read out of lld, Wine and Microsoft's ABI page
-  and out of no file. No `ExtraRFETable` value has ever been read here.
-- **ARM64 is measured only as far as instructions, boundaries, references and tables**, and a
-  green `corpus:arm64` run is easy to over-read:
-  - **Nothing about ARM64 *semantics* is checked at all.** No ARM64 decompilation, so no IR, no
-    emitted C, no guard, no type, no struct and no call arity has ever been judged. The dozen
-    decompiler gates would each be a vacuous zero.
-  - **Stack frames now have an ARM64 path (out of `.pdata`); signatures deliberately do not.**
-    `inferSignature` returns null rather than the x86 answer it used to give — it had labelled
-    every A64 function `fastcall` with 0 parameters, on screen. `analyzeStackFrame`'s own refusal
-    is **unfalsifiable on this corpus** (it already answered null for every A64 function), so it
-    is a bound pinned by unit test, not something a green run says anything about. `.pdata`
-    carries no arity information, so an A64 signature has no oracle at all.
-  - **There is no GENERAL ARM64 data-marking pass.** Two populations are marked and gated
-    (recovered dispatch tables, `LDR (literal)` pools) and both share the property that *an
-    instruction names the data*. Everything left is data nothing names — alignment padding inside
-    a `.pdata` extent, pools reached other than by an `ldr`-literal — and no instrument here can
-    say which a residual word is.
-  - **The ARM64 *signature refusal* has been rendered; nothing else about an ARM64 view has.**
-    `DisassemblyPanel.dom.test.tsx` mounts the real panel under an ARM64 machine word and asserts
-    that no calling convention reaches the screen — `peek-a-bin-56q`'s render step, landed at
-    `b70fb72`. But that fixture's instruction stream is scripted **x86** bytes with only the
-    machine word flipped, so no human and no test has seen an A64 disassembly on screen: `source`
-    dimming, the `db`/`dd` rendering, jump arrows, the CFG and the minimap are verified by
-    typecheck and reading. It bites harder here because the remaining report row is a
-    *view* defect, and because the jump-table fix's last step — `buildDataItems` rendering the
-    withheld words as `db`/`dd` — **has never been executed**. What is measured is that the words
-    leave the stream.
-  - **Epilogue unwind scopes are unaudited** — the walk stops at `end` and the per-epilog code
-    lists after it are read past and never judged.
-  - **Import thunk naming is gated, but on a POPULATION OF ONE PER IMAGE.** Both binaries contain
-    exactly one thunk-shaped function whose slot resolves, and it is `GetStringTypeW` in both —
-    so the gate is exercised, not vacuous, but it is two data points. **A64 MSVC does not route
-    imports through thunks the way x86 does**: 31 and 39 import call sites are `adrp`/`ldr`/`blr`
-    INLINE inside ordinary functions (median containing size 504 bytes), which is a call and not a
-    thunk. The **two-instruction `adrp`/`ldr`/`br` form occurs in neither binary**, so that arm of
-    `classifyArm64Br` is fixture-only, and the `sub_` guard has no corpus control either — no
-    binary here exports anything.
-  - **The `bl` call graph is counted, not verified.** No oracle checks an edge.
-  - **ARM64 performance is measured only in Capstone call counts.** The wall-clock figures in
-    `Arm64SweepCache`'s docstring are not re-derived and no ARM64 timing has been taken on this
-    tree.
-- **`REQUEST_TIMEOUT_MS` has measurements behind it, all extrapolated.** `go` cross-compiles real
-  Windows PEs here, and `detectFunctions` is the **sole** budget setter, linear in code size to
-  within a small spread over a 37–38× range — the shape finding, not the digits. Re-derived four
-  times; the last (the hand-written `cs_insn` reader) roughly thirds the rate. **Read the ratios,
-  never the digits** — runs were taken on a shared machine under background load. Extrapolation in
-  three respects: Go's code density is not MSVC's, this was Node rather than the browser's WASM,
-  and one machine. **The population is still zero on this machine** — nothing here can provoke the
-  watchdog, so the notice is fixture-verified and has never been rendered.
-- **A real x64 PE with jump tables can be built here, the tool recovers NONE of them, and this is
-  SHAPE rather than defect.** `go` emits dense `jmp [reg + reg*8]` dispatches behind a
-  rip-relative `lea` table base; **the harm is measured at exactly ZERO** — every table base is in
-  `.rdata` so the gap fill never reaches it, no byte is decoded as code, and every case target is
-  already an instruction start inside the dispatching function's range. The residue is CFG edges.
-  **The dense two-table reader has never run on a real image** — instrumented call counts are 0 on
-  all five binaries — so `peek-a-bin-6rge` remains verified by synthetic fixtures only, and no
-  binary obtainable on this machine can change that. The register-base reader is adjudicated out
-  of scope; **reopening needs new evidence (a real MSVC or clang-cl PE using that spelling), not a
-  re-reading of these facts.** `npm run corpus:jumptables -- <path>` is the landed census.
-- **The nginx headers and the CSP have never been exercised in a browser** — both are researched
-  from code and build output.
-- **The clipboard's absence has never been produced by a browser.** `copyText`'s branches, the four
-  red-flash sites and two of the fourteen silent ones are covered, but the absence is **manufactured
-  by replacing `navigator`** — a stand-in exactly like `domSetup.ts`'s `offsetParent` shim. Nine
-  unaffordanced sites and `CFGView`'s red/green branch have no test at all: reverting `HexView`'s
-  copy to the unguarded call moves no row, which was reported as an inert control rather than
-  papered over. Belongs in the `peek-a-bin-v2u` pass, over plain `http:` to a non-localhost host.
-- **The a11y work has never met a screen reader.** The tablist's *mechanics* are checked in jsdom —
-  roles, `aria-selected`, the roving tabindex, arrow/Home/End focus movement, and `aria-controls`
-  resolved against the document in both directions — and `XrefPanel`'s two "To" buttons now carry
-  `aria-label`s that tell them apart, asserted through testing-library's name computation. **None of
-  that is evidence about a screen reader or a browser focus algorithm**, neither of which exists
-  here: nothing says a reader announces "Sections, tab 3 of 8", reads the panel on activation, or
-  honours `aria-labelledby`. Two further reasoned-not-observed points: a hidden panel is out of the
-  a11y tree only because `hidden` carries `display: none` in a browser, which it does not here; and
-  the extra tab stop on panes that *do* contain focusable content costs one Tab, which nobody has
-  judged. `peek-a-bin-v2u` is unchanged. `XrefPanel` now carries `aria-label`s separating
-  its direction toggle from its "To" sort header — the two shared one accessible name — and states
-  sort direction in words rather than as a bare "▲" glyph, asserted through testing-library's name
-  computation, which is jsdom and not an assistive technology.
-- **MCP → browser WebSocket annotation sync has never been exercised end to end**, in particular
-  since the 127.0.0.1 bind change.
-- **THREE THINGS THE AI-FEATURE REMOVAL STOPPED PINNING (2026-09-09, `263bd5d`,
-  `peek-a-bin-1xc5`).** Full records, with the measurements and controls, in
-  `docs/verification.md`; this is the index entry.
-  1. **The token-budget table has no discriminating runtime test.** `LLMTask` is `chat | enhance`
-     and both budgets are 16384, so no call to `streamChat` can distinguish the
-     `Record<LLMTask, number>` from a constant. `client.test.ts`'s "varies the budget by task" was
-     **deleted with an in-file comment**, not repaired with an invented third value, and the two
-     budgets were deliberately *not* held apart to keep it alive. Typecheck and the
-     `?? TASK_MAX_TOKENS.chat` fallback are what remain.
-  2. **`modalScaffold.test.ts` passes over branches no code path can reach — THREE of four rows,
-     measured.** `accidentalDismissAllowed` lost two of its three non-constant callers; only
-     `(false, false)` is still reached, via `DialogBoundary.tsx`. Gutting the function to
-     `return true` failed 4 tests before the removal and passes the whole suite after it. The rows
-     are kept and the docstrings say so; a green row there is evidence about the rule, not the app.
-  3. **63 rendering tests and 43 negative controls went unreplaced.** `AIDialogs.dom.test.tsx`
-     (27 tests) and `AnomaliesView.dom.test.tsx` (36 tests, 43 controls) were deleted with their
-     subjects; only 3 migrated, into `HeaderView.dom.test.tsx`. Suite counts for the removal
-     **alone**, at `263bd5d`: `--dir src` 142 files / 4895 tests → 136 / 4735, `--dir build`
-     14/273 → 14/269. The integrated tree reads 137 / 4793 and 14 / 271 — the difference is
-     `peek-a-bin-r8tt`'s `InsnContextMenu.dom.test.tsx` (58 tests), landed alongside and not part
-     of this removal.
-- **`@vitest/coverage-v8` is not installed**, so `npm run test:coverage` fails.
+- **jsdom is NOT a browser.** No layout, so nothing about geometry, overflow or visibility;
+  `offsetParent` is a constant `null` supplied by a stand-in the focus trap depends on; no browser
+  focus algorithm, no screen reader, no service worker. **A row in the document is not a row on
+  screen.** Every responsive rule above (`hidden`, `flex-wrap`, `basis-full`, `min-w-0`,
+  `overflow-x-auto`) is a **class-string contract** — Tailwind is not loaded under vitest — and
+  every breakpoint figure is **computed from a 0.6em monospace advance, never measured**.
+- **Virtualization is a STAND-IN.** `virtual-core` reads `offsetHeight`, so a virtualized list
+  renders **zero** rows in jsdom; `domSetup.ts`'s `stubLayoutRect()` makes every element report one
+  600px rect with `scrollTop` pinned at 0. Which rows are windowed, whether `overscan` is right and
+  whether anything is visible all stay unanswered — measured: `estimateSize` 28 → 280 and `overscan`
+  20 → 0 both leave `ExportsView`'s suite green.
+- **Every drag is verified as arithmetic, never as motion.** Both persisted-size clamps are verified
+  as arithmetic and as wiring, and **as layout not at all**. What *is* covered end to end is
+  `ResizeHandle`'s post-commit guarantee, on both paths, from the caller's side.
+- **Render COUNT is measured; render COST is not.** Exactly two full-tree renders per cursor move,
+  negative-controlled. Whether that is *slow* needs the Profiler on a real binary in a real browser.
+- **Nothing has crossed a real `postMessage`** — `structuredClone` in one process stands in, so
+  every payload figure is an upper bound; the Blob hand-off is verified for **equivalence**, not
+  speed. The request watchdog has fired end to end but **never on a real file**, so the budget's
+  calibration is extrapolation.
+- **The a11y work has never met a screen reader**, and the clipboard's absence has never been
+  produced by a browser (it is manufactured by replacing `navigator`).
+- **ARM64 is measured only as far as instructions, boundaries, references and tables.** No ARM64
+  semantics: no decompilation, IR, emitted C, guard, type, struct or call arity has ever been
+  judged. There is no general ARM64 data-marking pass; import thunk naming is gated on a population
+  of **one per image**; epilogue unwind scopes are unaudited; the `bl` call graph is counted, not
+  verified; and no A64 disassembly has been seen on screen.
+- **There is no ARM32, ARM64EC or ARM64X binary on this machine.** Those paths are fixture-only and
+  the machine-type claims are settled from **documentation**, not from a file.
+- **A real x64 PE with jump tables can be built here and the tool recovers NONE of them** — measured
+  harm exactly zero (every base is in `.rdata`, so the gap fill never reaches it). The dense
+  two-table reader has never run on a real image. Reopening the register-base reader needs **new
+  evidence**, not a re-reading of these facts.
+- **MCP → browser WebSocket annotation sync has never been exercised end to end**; the nginx headers
+  and the CSP have never been exercised in a browser; `@vitest/coverage-v8` is not installed.
+- **The token-budget table has no discriminating runtime test** (both budgets are 16384), and
+  `modalScaffold.test.ts` passes over branches no code path can reach — three of four rows,
+  measured. Both are recorded rather than repaired with invented values.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.
 
 ## Decompiler Architecture (`src/disasm/decompile/`)
 
-**Full record: [`docs/decompiler-ir.md`](docs/decompiler-ir.md)** — the complete dispatch census, the
-struct-grouping history and the measurements behind every rule below.
+**Full record: [`docs/decompiler-ir.md`](docs/decompiler-ir.md)** — the complete dispatch census,
+the struct-grouping history, and the measurements behind every rule below.
 
-**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → liftCrossBlockPops → buildSSA → ssaOptimize → destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes → promoteVars → synthesizeStructs → emitFunction`
+**Pipeline** (`pipeline.ts`): `buildCFG → liftBlock → liftCrossBlockPops → buildSSA → ssaOptimize →
+destroySSA → foldBlock → structureCFG → cleanupStructured → wrapExceptionRegions → inferTypes →
+promoteVars → synthesizeStructs → emitFunction`. (`wrapExceptionRegions` is local to `pipeline.ts`
+and only runs with `.pdata` exception info. **The docstring at the top of `pipeline.ts` lists a
+shorter, outdated order — trust the code.**)
 
-(`wrapExceptionRegions` is local to `pipeline.ts` and only runs when `.pdata` exception info is present. **The docstring at the top of `pipeline.ts` lists a shorter, outdated order — trust the code, not that comment.**)
+**IR** (`ir.ts`): `IRExpr` (12 kinds) + `IRStmt` (18 kinds including `branch`).
 
-**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (18 kinds including if/while/do_while/for/switch/break/continue/phi/try/**branch**).
-
-**`branch` is confined to `liftedBlocks` and never appears in a structured tree — but its *condition* does, and `structureCFG` takes it as a sixth argument.** `liftBlock` turns a block's trailing conditional jump into an `IRBranch` so its condition is a real IR reader — an SSA version, a reaching definition, a place in every use count — and `pipeline.ts` step 4b lifts every one out of `liftedBlocks` into a `Map<blockId, IRBranch>` *before* `structureCFG`, which `extractCondition` prefers over re-parsing `insn.opStr`. Two orderings are load-bearing and neither is obvious:
-
-- The extraction runs **before the tap snapshot**, or the statement-drop audit reports every branch as a dropped statement in each block ending in a conditional jump.
-- The branches must not survive into the tree: `detectForLoop` skips any body block whose last statement is not an `assign`, so one left in place takes **for-loop recognition to zero corpus-wide**, silently and with no failing test.
-
-`structureCFG` has a **seventh** parameter, a different kind of thing: an optional observer told how `structureSwitch` closed each switch arm, wired only when `pipeline.ts` has a tap of its own. It is an instrument reading the structurer, must never change what the other six decide, and `corpus/armExits.ts` gates its reports at 0.
-
-`emit.ts` therefore *throws* on a branch rather than ignoring it — `decompileFunction`'s catch turns that into a counted `throws` that `compare.mjs` gates on, where a silent arm would make a structural failure invisible. **Anything appending to the end of another block's statement list must go through `pushBeforeTerminator`** (`ir.ts`): `destroySSA` lowering a phi into a predecessor and `loopInvariantCodeMotion` hoisting into a preheader both did a plain `push`, correct only while no terminator existed in the IR.
-
-**Three things about the flag flip are judgements, not details, and reversing any silently breaks something no gate reports** (`peek-a-bin-c33`):
-
-- **`foldBlock` counts a guard's reads but never inlines into a branch**, and separately never inlines a definition that escapes its block at all (see the `blockLiveOut` gotcha). Counting stops a definition two statements read from being folded into one and leaving the other naming nothing. Inlining *into* the guard deletes the assignment and rewrites the condition, and both halves do damage — the register is frequently live out (a loop counter always is), and `structureCFG` matches loop shapes on the statement a body block ends with, so `inc eax / cmp eax, 5 / jl` became `while (eax + 1 < 5)` with the increment gone.
-- **`extractCondition`'s two refusals are asked of the condition read off the *instructions*, never of the IR one.** Both are questions about the machine. Asking `conditionSpoiled` of the IR condition defeats it outright: `cmp eax, 5 / mov eax, edx / je` has its guard rebound to EDX by copy propagation, so the overwritten register is no longer in the expression and the scan finds nothing to object to, while the emitted test is still one the machine does not make (`peek-a-bin-xe01`).
-- **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer, and `lifter.ts`'s `branchFor` is the only place that asks.** It calls `blockFlagOwner` at the trailing jump and refuses four ways, each a case where an answer would be a guess: (1) a jump reading no flags (`jmp`, `jecxz`/`jrcxz`/`jcxz`); (2) an indirect or unresolved target; (3) a **result** or **bittest** owner in a block that also contains a `cmp`/`test`; (4) a result whose **destination** no longer holds it (`canSpellCondition`). The third is a policy rather than a fact — `cmp eax, 5 / sub ecx, edx / jne` really does branch on `ecx != 0`, but `corpus/staleGuards.ts` reads **any** condition emitted at such a jcc as the superseded one, so recovering it is a decision to take *with* the audit. A **compare** owner is deliberately *not* filtered on `spoiled` — the guard's reads hold the compared values alive through DCE, and the same veto is applied against the machine text in `structure.ts`, the only place it can be asked.
-
-`liftBlock` also clears `RegState`'s flag state on any instruction that is neither `isFlagTransparent` nor a modelled setter, keeping `setcc`/`cmovcc` reading their own instruction's state. That is a *different* question from ownership and the two are deliberately not merged: the SSE `comis*` forms set flags `setcc` reads and `flagModel` classes them a clobber, so a `comis` leaves `setcc` working and produces no branch.
-
-**A compare emits no statement at all.** The old `eflags = …` proxy was actively harmful: `eflags = ecx - edx` is an ordinary IR expression, so GVN gave it and a real `sub eax, edx` the same value number, copy propagation rewrote EAX's readers to name `eflags`, and the post-fixpoint strip deleted the only assignment. `ssaopt.ts` holds no flag definition live by hand and `flagResult.ts` is gone; its survivors `isFlagTransparent` and `clobberedAfter` live at the bottom of `flagModel.ts` so there is **one** copy of the x86 flag grammar, with a drift guard failing on a second declaration under `src/disasm/decompile` or `corpus`. `ssadestroy.ts`'s `mapReads` has a `branch` arm so `splitStaleReads` sees and repairs a guard's registers; it must land *with* the `extractCondition` flip, not before it.
+**`branch` is confined to `liftedBlocks` and never appears in a structured tree — but its
+*condition* does, and `structureCFG` takes it as a sixth argument.** Two orderings are load-bearing:
+the extraction runs **before the tap snapshot** (or the statement-drop audit reports every branch as
+a dropped statement), and the branches must not survive into the tree (`detectForLoop` skips any
+body block whose last statement is not an `assign`, so one left in place takes for-loop recognition
+to **zero corpus-wide**, silently). `structureCFG`'s **seventh** parameter is an observer of how
+`structureSwitch` closed each arm — an instrument, which must never change what the other six
+decide. `emit.ts` therefore *throws* on a branch rather than ignoring it. **Anything appending to
+another block's statement list must go through `pushBeforeTerminator`.**
 
 ### Adding new IRExpr / IRStmt kinds
 
-Adding a kind means updating every switch dispatching on `expr.kind` / `stmt.kind` — dozens of them — and **a missed one silently drops data rather than failing. Only NINE are compiler-caught.** The tables below are accurate about every site they name but do **not** name them all, so **grep as well as read**.
+Adding a kind means updating every switch dispatching on `expr.kind` / `stmt.kind` — dozens — and
+**a missed one silently drops data rather than failing. Only NINE are compiler-caught.** Get the
+current number by measurement: add a throwaway kind, run `npm run typecheck`, count the
+`not assignable to type 'never'` errors. **The tables in `docs/decompiler-ir.md` are accurate about
+every site they name but do not name them all — grep as well as read.** The dangerous tier is the
+switches with neither `default:` nor a `never` assert (`ir.ts`'s `walkExpr`/`walkStmts`,
+`ssaopt.ts`'s `canonicalizeExpr` and two walkers, `structs.ts`'s `walkExprs` and one walker), plus
+two if-chains that are not switches at all (`foldExpr`, `countExprUses`) — grep the function name,
+not `case`. Two sites are not dispatches: `detectForLoop` and `cleanup.ts`'s `endsWithTerminator`
+read a block's **final statement's kind**, so a new terminator-shaped kind changes loop shape rather
+than dropping data.
 
-**Get the current compiler-caught number by measurement, never from a stale count**: add a throwaway `IRStmt` kind to the union, run `npm run typecheck`, count the `not assignable to type 'never'` errors.
+**Type system** (`typeInfer.ts`): a `DecompType` lattice of 12 kinds; `meetTypes()` merges, specific
+over unknown and handle/ntstatus/hresult over int/ptr. `enum` carries a name and members,
+synthesized from switches with 3+ cases.
 
-Two sites are not dispatches at all and no table lists them: `cfgpatterns.ts`'s `detectForLoop` reads `stmts[len-1].kind !== "assign"` and `cleanup.ts`'s `endsWithTerminator` reads the last statement's kind — *predicates over a block's final statement*, so a new terminator-shaped kind changes loop shape rather than dropping data, the defect class no audit models.
+**API signatures** (`apitypes.ts`): **209** Win32/NT signatures, **none variadic — which is what
+makes the table usable as `corpus/arity.ts`'s arity oracle.**
 
-**Compiler-caught** (exhaustive `never` assert — `npm run typecheck` finds these):
+**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker;
+**don't clear it between functions in the same session.** `decomposeAddress()` breaks
+`base + idx*scale + offset`. 2+ distinct offsets on one base → struct candidate.
 
-| File | Functions |
-|------|-----------|
-| `ir.ts` | `bodiesOf`, `rewriteBodies` — the **only** declaration of the structured-tree body traversal |
-| `ssa.ts` | `renameExpr`, `renameStmt` |
-| `ssadestroy.ts` | `mapRegs`, `stripVersionsExpr`, `stripVersionsStmt` |
-| `emit.ts` | `emitExpr`, `emitStmt`, `liveInStmt`, `collectAssignedRegs`, `collectCapturedOperands` (four are `IRStmt`; `emitExpr` is `IRExpr`) |
-| `fold.ts` | `hasSideEffects` — one exported definition, imported by `ssaopt.ts` |
-| `workers/dispatch.ts` | RPC method dispatch (guards `WorkerMethod`, not IR) |
+- **Escaping struct defs are snapshots; registry-internal ones are live.** `synthesizeStructs`
+  clones into `IRFunction.typedefs`, so a returned declaration cannot change later. Inside the
+  registry the objects stay shared and inference mutates `field.type` in place — that **is** the
+  cross-function refinement mechanism, so do **not** clone in `findOrCreate` or `get`.
+- **Merging is shape-based but guarded.** An exact `offset:size` fingerprint merges unconditionally;
+  the subset path needs 3+ fields and no boundary conflict. Failing to merge is the benign
+  direction. **Provenance beats shape**: `findOrCreateLinked` merges two bases occupying one
+  parameter slot and ignores the field minimum, but cannot override `hasBoundaryConflict`.
+  `paramLinks` and `paramViews` are kept apart on purpose.
+- **A field's NAME is the other half of its array claim, and `fieldNameFor` is the only declaration
+  of the rule** — `emit.ts` reads *only* the `isArray` flag when it spells `[...]`, so anything else
+  setting that flag must go through `fieldNameFor` or emit a declaration contradicting itself.
+- **One register is not one object: a base is keyed on the VALUE it holds, not on its name.**
+  `accessKey` is `canonBase(expr) + "#" + generation`; `canonBase` stays register-level for
+  `stackDerivedBases`, `paramIndexByBase` and `collectCallArgSlots` (which register is a frame
+  pointer is a fact about the *name*), and every access-side pass takes `accessKey`. **DO NOT DELETE
+  THE LABEL RESET** — it scores higher on field counts and **fabricates**, the exact defect the
+  generation key exists to fix, and `structOverlaps` is blind to it in both runs. A stride walk must
+  keep grouping, or nothing is recovered from any array-of-struct walk.
+- **Emitted struct definitions are `#pragma pack(1)` with explicit `_pad_0xNN` members**, and the
+  two are inseparable — padding alone cannot express an unaligned recovered offset. A field no
+  padding can place is reported in the struct body rather than declared somewhere convenient.
 
-**You must find the rest by hand. The typechecker stays silent on all of them.**
+**A call takes an assignment only when its result is live out of the call**, from a backward pass
+over the **structured** body. Where the only reader is the very next `return`, the two lines print
+as one — `foldReturnedCallResults` is `emitFunction`'s **FIRST** act, and that ordering is its
+safety: both `collectCapturedCalls` and `collectAssignedRegs` are asked about the *folded* body. The
+folded line keeps the **CALL's** address.
 
-*Switches ending in `default:`* — the new kind takes the fallback branch:
-
-| File | Functions |
-|------|-----------|
-| `fold.ts` | `foldStmt`, `countReads`, `countReadsInStmt`, `substituteReg`, `substituteRegInStmt` |
-| `ssaopt.ts` | `replaceRegInExpr`, `replaceRegInStmt` |
-| `structs.ts` | `exprKey`, `rewriteExpr`, `rewriteStmt` |
-| `promote.ts` | `renameVarsInExpr`, `renameVarsInStmt`, `promoteExpr`, `promoteStmt` |
-
-*Neither `default:` nor a `never` assert* — control falls off the end and the kind is dropped **with no trace at all. These are the dangerous ones:**
-
-| File | Functions |
-|------|-----------|
-| `ir.ts` | `walkExpr`, `walkStmts` — only these two |
-| `ssaopt.ts` | `canonicalizeExpr`, the stmt walker in `deadCodeElimination`, the LICM expr walker |
-| `structs.ts` | `walkExprs`, the stmt walker in `collectAccessPatterns` (both nested) |
-
-*Not switches at all* — `foldExpr` (`fold.ts`) and `countExprUses` (nested in `ssaopt.ts`'s `deadCodeElimination`) are if-chains on `expr.kind`. **Grep the function name, not `case`.**
-
-`typeInfer.ts`'s `parseCastType` keys off type *strings*, not kinds — only relevant if the new kind gets a cast spelling.
-
-**Type system** (`typeInfer.ts`): `DecompType` lattice with 12 kinds (unknown, int, float, ptr, bool, void, struct, array, handle, ntstatus, hresult, enum). `meetTypes()` merges — specific wins over unknown, handle/ntstatus/hresult win over int/ptr. `enum` carries a name and a `Map<number, string>` of members, synthesized from switches with 3+ cases.
-
-**API signatures** (`apitypes.ts`): **209** Win32/NT signatures, **none variadic — which is what makes the table usable as `corpus/arity.ts`'s arity oracle.** Use type shorthands (PVOID, HANDLE_T, NTSTATUS_T); return `HANDLE_T` for handle-returning APIs, `NTSTATUS_T` for Nt/Zw, `HRESULT_T` for COM.
-
-**Struct synthesis** (`structs.ts`): `StructRegistry` is cross-function state shared in the worker. `decomposeAddress()` breaks `base + idx*scale + offset`, including a top-level `base - const` (folded to a negative offset; subtracting a *register* is not an offset and returns null). 2+ distinct offsets on the same base → struct candidate. Scale ∈ {1,2,4,8} → `IRArrayAccess`, whether or not the function has a candidate; a function with no candidate but an indexed access takes a rewrite-only path, one with neither is returned by identity.
-
-**Escaping struct defs are snapshots; registry-internal ones are live.** `synthesizeStructs` clones into `IRFunction.typedefs` (`cloneStructDef`), so an already-returned declaration cannot change when an unrelated function is decompiled later. Inside the registry the objects stay shared and the inference passes mutate `field.type` in place — that **is** the cross-function type-refinement mechanism. So do **not** clone in `findOrCreate` or `get`: it disables refinement silently, with no test failing. Field *types* are replaced wholesale, so a shallow field copy suffices.
-
-**Merging is shape-based but guarded.** An exact `offset:size` fingerprint match merges unconditionally. The subset path additionally requires the smaller shape to have **3+ fields** (`MIN_SUBSET_MERGE_FIELDS`) and the merged layout to be free of overlapping extents (`hasBoundaryConflict`). Two distinct offsets is the *minimum* a candidate can have, so two-field shapes are the most common and the weakest evidence. Failing to merge is the benign direction — two `struct_N` declarations instead of one wrongly shared. Both merge directions scan `fingerprintIndex` in insertion order and take the first match, so *which* struct absorbs which is order-dependent.
-
-**Provenance beats shape, and recovers that cost.** Two bases occupying the same parameter slot are the same object by construction, so `findOrCreateLinked` merges on that evidence and deliberately ignores `MIN_SUBSET_MERGE_FIELDS`. It still cannot override `hasBoundaryConflict`: contradictory layouts mean one reading is wrong. Two maps are kept apart on purpose — `paramLinks` (what a *caller* passed in) and `paramViews` (the *callee's* own reading) — so a merge always has the callee's corroboration and a passthrough `void*` helper never links its unrelated callers. Identity is published in both directions.
-
-**A field's NAME is the other half of its array claim, and `fieldNameFor` is the only declaration of the rule.** `candidateFields` decides `isArray` and the identifier together, and `emit.ts`'s `declareField` reads *only* the flag when it spells `[...]` — so a second place that changes `isArray` without re-deriving the name emits `uint64_t field_0x8[];`, a declaration contradicting itself. **Anything else that sets `isArray` must go through `fieldNameFor`.** The reverse move is refused: renaming on every merge rather than on the promotion reaches the gate's 0 by spelling every member `array_`. A field name is consequently not stable across a merge; the snapshot rule bounds that to two functions disagreeing about a member's *name* where they previously disagreed about its *type*.
-
-**A base's OVERLAPPING readings are settled by discarding a directly observed access, twice, and neither discard leaves a trace in the emitted C.** `candidateFields` first collapses two accesses at one offset into one field of the **wider** width (the width is a direct measurement of one instruction), then drops any surviving extent overlapping one already kept at a **lower offset**. `corpus/structOverlaps.ts` is the only instrument that can see it — `offsetof` proves a layout *self-consistent* and can never see a wrong identity.
-
-**One register is not one object: a base is keyed on the VALUE it holds, not on its name.** `exprKey` answering `reg:${canonReg(name)}` was version-blind and program-point-blind, so every access through any value a register held anywhere in the function grouped as one object — fabricating structs out of two unrelated objects. `baseGenerations` mints a generation per `reg`/`var` node standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is `canonBase(expr) + "#" + generation`. The rules:
-
-- **It cannot invent an object**: the scoped key determines the unscoped one, so the grouping is a partition *refinement*. It can split a group below the two-field minimum; the registry re-unifies honest shapes by fingerprint.
-- **`canonBase` stays register-level** for `stackDerivedBases`, `paramIndexByBase` and `collectCallArgSlots` — which register is a frame pointer or a parameter is a fact about the *name*. Every access-side pass (`rewriteStmts`, `inferFieldTypesFromUsage`, `linkNestedStructFields`, `fieldAtAddress`) takes `accessKey`.
-- **Generations are tracked per NAME and handed over per OBJECT**: a folded copy (`rcx_0` onto `reg:rcx`) hands its source's generation over rather than minting one, or every read of the repair variable takes the register's newest generation.
-- **A merge point mints a fresh generation for every key an arm CHANGED** (a dynamic diff, not the syntactic assigned-set), **an `if`'s arms are visited in isolation** with save/restore, **a `call_stmt`'s `resultDest` mints**, a `try`'s handler enters from the *body's merge* (the unwinder enters mid-body), and a **loop header** mints over the body's definitions plus what a `label` in the body would re-value — one pass, no nested fixpoint.
-- **A `label` is resolved from the states its own `goto`s carry, plus the fall-through, at a fixpoint** — the iteration starts *optimistic*, and generations are **tokens naming the tree node** (`a<n>`/`j<n>.<k>`/`L<n>`) rather than counters, or "did both edges carry the same value" has no answer. **A label NO `goto` names still resets every key unconditionally**: `pruneLabels` means such a label is a leftover region's head with no CFG predecessor, entered by the unwinder.
-- **DO NOT DELETE THE LABEL RESET.** It scores higher on field-access counts and **fabricates** — at `t32!sub_4041D0` it merges a read through `arg_1` with a read through `[arg_1+0xC]`, the exact defect class the generation key exists to fix, and `structOverlaps` is blind to it in both runs.
-- **`raw` does not reset**, and that is the one stated hole: an unlifted instruction's register writes are not modelled anywhere in this IR.
-- **A stride walk must keep grouping** — `eax += 0x40` through an array of structs reads the loop-header phi, one generation per element. A key sharp enough to separate iterations recovers nothing from any array-of-struct walk, which is most of what this pass is for.
-
-**`stackDerivedBases`' copy chain sees only `assign` with a register or variable destination, so what `promoteVars` promotes decides how far stack-derivation propagates.** A stack address spilled to a frame slot and reloaded is a `store` plus a `deref`, neither a copy, so the chain stopped at the spill; promoting the slot closes it and a base that provably holds a stack address on some path is refused a struct it previously got. That is the rule working — one write of a stack address into a register is enough to make every access through it suspect — and refusing is the benign direction.
-
-**Emitted struct definitions are `#pragma pack(1)` with explicit `_pad_0xNN` members**, and the two are inseparable — padding alone cannot express an unaligned recovered offset and C would re-align on top of it. The field *names* record the offsets the recovery found (`field_0x18`), so a declaration C would not lay out that way states something false. A field no padding can place — overlapping one already placed, negative, past 0x8000, or of a width with no spelling — is reported in the struct body and its accesses spelled as the bytes they touch, rather than declared somewhere convenient.
-
-**A call takes an assignment only when its result is live out of the call.** `liftBlock` gives every `call_stmt` a `resultDest` of RAX/EAX; emit printing the call and dropping the assignment left `GetProcAddress(...)` followed by `if (rax == 0)` with nothing assigning `rax`. Liveness is a backward pass over the **structured** body (the tree emission walks, so the statement the reader sees after a call is the one the analysis asked about), loop headers to a fixpoint, `break`/`continue` carrying the live set of the construct they leave, a handler live throughout the body it guards, and a `goto` — the one shape the tree does not model — falling back to every register the body names. An assignment nobody reads is noise. `_assignedRegs` follows the same rule, so `registerText` cannot respell `al` as `(uint8_t)rax` in a function whose only write of RAX went unprinted.
-
-**…and where that assignment's only reader is the very next `return` of it, the two lines print as one**: `rax = f(); return rax;` → `return f();`. **`foldReturnedCallResults` (`emit.ts`) is `emitFunction`'s FIRST act, before `collectCapturedCalls` and `collectAssignedRegs`, and that ordering is the whole of its safety rather than tidiness** — both sets are asked about the *folded* body, so a read is respelled exactly when a wider alias really is assigned in the text the reader sees, and removing an assigned name can only withdraw a respelling, never add one. It cannot change which *other* calls print a result (the accumulator is dead immediately above the pair either way). Three rules: the folded line keeps the **CALL's** address, not the `return`'s, so a guard whose body begins there anchors to the same jcc; adjacency in the statement list is required, so an `/* unlifted: … */` between the two refuses the fold; and it is restricted to a `call_stmt`.
-
-**emit.ts module-level `_typeCtx`**: set before emission, cleared after. Enables cast suppression and type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
+**emit.ts module-level `_typeCtx`**: set before emission, cleared after. Enables cast suppression and
+type-aware idioms (INVALID_HANDLE_VALUE, NT_SUCCESS, SUCCEEDED/FAILED).
 
 ## Gotchas
 
 **Full record: [`docs/gotchas.md`](docs/gotchas.md)**, same entries in the same order — how each
 defect was found, what it emitted, the measurements, the negative controls, and the alternatives
-tried and refused. Read the long-form entry before changing the code it describes. Two habits it
-exists to support: **a measured refusal is a result** (several entries record an approach that was
-built, measured and rejected — re-attempting one costs a session), and **a control that does not
-discriminate is a test that is not testing**, which is this repo's most frequently recurring
-mistake.
-
-- **Nothing may call `cs.disasm` directly; every decode goes through `disasm/capstoneWindow.ts`.** capstone-wasm's linear memory is a fixed 16 MiB that cannot grow, the input is copied onto a ~65.6 KiB WASM stack, and `cs_disasm` allocates one contiguous `cs_insn[]` for the whole window — a window much over 64 KiB throws and leaves the module **permanently dead**, and every scan loop reads that throw as "this byte is not code, skip one", so exhaustion is silent. `createScan` clamps to `CS_WINDOW_BYTES` (0x2000) and `CS_MAX_INSNS_PER_CALL` (2048) and probes the engine after a run of failed decodes, surfacing `CapstoneUnavailableError`; smaller windows are also faster. **Lifting the ceiling for speed was measured and refused**: the fixed cost of a `cs_disasm` call is sub-microsecond, so collapsing a section into one call is worth 0.035% (`peek-a-bin-ktp`). A drift guard in `__tests__/capstoneWindow.test.ts` fails on `.disasm(`, `cs_disasm` or `loadCapstone(` anywhere under `src/` outside the two owning files, checking each exemption in both directions.
-  - **The decoder *under* that bound is ours: `disasm/capstoneReader.ts` marshals each `cs_insn` by hand, for ~3x** — capstone-wasm's per-instruction cost was 83-86% JS marshalling, dominated by `readStruct`'s spread accumulator. The **`cs_insn` ABI is hard-coded and a version bump can change it silently**: a wrong offset does not throw, it yields a plausible mnemonic and operand string for every instruction in the tool, and `__tests__/capstoneReader.test.ts` — both readers over the same bytes, negative-controlled per field — is the whole mitigation. A *runtime* self-check was **refused**: a new way for startup to fail, on the decoder everything is downstream of, to catch a change that only ever arrives with a `package.json` edit. It sits below `createScan` and must not window. `loadCapstone` is a singleton, so a second bootstrap site wins the race, leaves the Module unpopulated and silently drops the tool back onto the dependency's reader — retention is optional by construction and `capstoneHandle` falls back. MCP is threaded too, or `npm run corpus` would verify a decoder the app does not use. Two deltas: `bytes` is a slice of exactly `size` (**do not test that buffer length in either direction**), and a window that decodes nothing returns `[]` where capstone-wasm throws. (`peek-a-bin-fdi8`)
-
-- **The ARM64 sweep is shared across one load's RPCs via `WorkerState.arm64Sweep` (`Arm64SweepCache`), and the key is the section's bytes.** A64 has no recursive descent — the sweep *is* the disassembly — so `detectFunctions`, `hybridDisassemble` and `buildAllXrefs` each wanted the same decode and each did it. Handing one RPC's `Instruction[]` to the next is **not** the fix: every element carries a `bytes` view, the case `workers/transfer.ts` exists to keep out of a message. Three things, none optional: the key is the **bytes** compared byte-for-byte, not the address (both real ARM64 binaries base `.text` at 0x140001000) and not the length, and a content key needs no assumption about message order, since a decode can be serviced before the `configure` announcing its file; **only the decode is cached**, with `comment` and `source` reapplied per caller by `decorateArm64Sweep`; and **a refused section is never stored**, so the `Arm64DecodeRateError` refusal cannot decay into a cached empty answer. The plain `disassemble` RPC is deliberately out — it may be handed a sub-range, and a one-function decode would evict the `.text` the other three share. Call counts are gated by `npm run corpus:arm64` driving the three RPCs shared and cleared. (`peek-a-bin-kis`)
-
-- **`mapInsn`'s comment resolution is an x86 operand grammar, so ARM64 passes it the empty string/IAT maps.** It scans the operand string for any `0x…` literal matching a known string or IAT address — sound on x86, where an operand really can carry an absolute address; unsound on A64, where the only literals are a branch target and an `adrp` **page base**, so an instruction was annotated exactly when a page base *coincided* with a data address, and nearly every comment on both ARM64 binaries named the same wrong import. `decorateArm64Sweep` annotates from `findArm64AddressRefs` instead, attributed to the instruction that **completes** the pair — `buildArm64Xrefs`' rule, so one grammar answers both. The empty maps are the mechanism, not a tidy-up: `mapInsn` is *declined* rather than filtered afterwards, which is what makes the x86 path structurally unmovable; passing the real maps back is the defect returning. `driverMode` is still passed, so IOCTL annotation (a shape test over immediates) is unchanged; the recomputation belongs on the **decoration** side, never inside `Arm64SweepCache`. **The suite had pinned the defect as the rule** in two places, asserting that a lone `adrp` whose page base is in the string map gets that string; `corpus/comments.ts` is what catches it now, and nothing in `npm run corpus` can, because a comment reaches neither the emitted C nor the IR. (`peek-a-bin-vg3`)
-
-- **A call clobbers what the callee writes, and that answer is only ever ADDED to the narrow one.** `clobberedByCall` (`decompile/ssa.ts`) unions the argument registers the call site was read as passing with `IRCall.clobbers` — the volatile registers `disasm/callSummary.ts` says the *callee* modifies, closed over the call graph — and must never substitute one for the other. Modelling a call as destroying the whole Windows x64 volatile set was tried and is **worse**: `__chkstk` preserves all but RAX/R10/R11 by contract, MSVC parks live values in R10, and clobbering renamed reads of a function's own parameters and **deleted a guard outright** (`peek-a-bin-hj1`). The summary is built to **under-approximate** — unrecognised mnemonic writes nothing, a matched `push`/`pop` is a save/restore, an import or indirect call contributes nothing — because a missed write costs a clobber and an invented one is the harm. Recursion needs no special case (the worklist reaches its least fixpoint; collapsing an SCC to the ABI set would report writes no member performs). It is x64 only, gated at `calleeClobbersFor` in `lifter.ts`. **`RegState.invalidateCallerSaved` must NOT be narrowed with it**: it deletes the *expression* recorded for a register and needs an over-approximation, where this is an under-approximation by construction (`peek-a-bin-lh6`). The browser builds it inside the `decompileFunction` RPC, from the same message that consumes it, so there is no sender and no ordering race; the cache key is a token minted from array identity, never a content hash, and the counter never resets, so `CallSummaryCache.clear()` is hygiene rather than correctness. (`peek-a-bin-s2ws`)
-
-- **ARM64 publishes its recovered switch tables' byte extents, and the masking is on the decoration side.** `findArm64JumpTables` (`arm64.ts`) recovers the `adr`/scaled-load/`add`/`br` chain; `detectArm64Functions` returned `jumpTableSpans: []` one screen below it, so table words rendered as instructions, one of them a `cbz` aiming outside the image. The cost is the **view**, not the decode — A64 has no gap fill, so nothing was invented or eaten; the spans *withhold* words, which is why the fix has two halves (publishing and consuming) and each is separately controlled. Four rules: the span is the extent `readArm64Table` actually **read** (`targets.length`), never the count the bounds check claimed, since marking an unread tail as data would delete real instructions; marking is by **byte range with an intersection test**, not containment, because an entry width of 1 leaves a word owning a single table byte; spans are deduped by byte range, since two dispatches legitimately share one table; and the filter lives in `decorateArm64Sweep`, never in `sweepArm64` or the cache, or two callers with different spans would share one entry. (`peek-a-bin-gb40`)
-
-- **A PC-relative `LDR (literal)` is the ISA marking its own data — on A64 the only data-marking rule here needing no inference.** The instruction carries a signed 19-bit word offset and states the datum's width in its destination register (4/8/16 bytes for `w`,`s`/`x`,`d`/`q`), so the pool is read off one instruction; it matters because the fixed-width sweep decodes every word whatever it holds, and a pool word that happens to be a valid encoding renders as a plausible instruction *inside a `.pdata` extent*, i.e. presented as linker-vouched code. `findArm64LiteralPools` (`arm64Operands.ts`) is the grammar, `literalPoolTest` (`arm64.ts`) applies it. Five things: the pools are **not** a caller's fact and are derived inside `decorateArm64Sweep` from `raw` itself, because a forwarding step is exactly what `gb40` found falling out of step, and it reaches callers a `DetectResult` field would miss; `sweepArm64` and `Arm64SweepCache` stay untouched, only what is *presented* differs; a load sitting inside another load's pool is not honoured (one pass, not a fixpoint — re-admitting could only mark more, and short is the direction to err); a misaligned target and `prfm <prfop>, <label>` are both refused; and **`source` was judged separately and deliberately not changed** — the `.pdata` extent really is the linker's record, so downgrading on suspicion would dim 25k words to make one honest, and the answer where a word is *provably* data is to withhold it. (`peek-a-bin-qiws`)
-
-- **The ARM64 stack frame comes out of `.pdata`, and the packed `FrameSize` field means the frame DELTA, not the total allocation.** `analyzeStackFrame` is an x86 operand grammar that refuses A64; `disasm/arm64Frame.ts` is the **second grammar**, reading what the linker already wrote down, and `disasm/stackFrame.ts` is the one place that dispatches between them. `pe/arm64Unwind.ts` decodes both encodings — the packed `.pdata` word and the `.xdata` unwind codes. Six things: `FrameSize` states `E - x29` exactly, so a crude total-allocation reader is measuring the wrong thing; an area allocated *below* the frame pointer is outside every unwind record in both encodings, by design, so `frameSize` is a lower bound for a chained function; **`frameSize` is the record's total and `frameDelta` the delta, and conflating them was a live defect no gate saw** (the corpus was 51/51 green with it in place) — `arm64Unwind.test.ts` is the whole instrument; a **negative** delta is refused, being x86's `addressesOwnFrame` rule reached from the A64 side (`peek-a-bin-s7hl`); the unwind codes run **backwards through the prologue** and carry more bytes after `end` that must not be counted, and two table errors there were caught by the corpus rather than by reading; and the var list has **no oracle** and is reported, not gated, with pre-index writeback, register offsets and the two-slot `ldp`/`stp` each excluded for its own reason. **The SIGNATURE was refused on evidence**: `.pdata` carries no arity information, AAPCS64 has no home space so any positional rule would gate on an empty population, and `inferSignature` returns null rather than a count nothing can check. **Only one call site was converted** — `mcp/tools.ts` and `useDecompileTabs.ts` build a `StackFrame` only for `decompileFunction`, which refuses A64 above them, so routing them through the dispatcher would be inert at best and would hand an x86 lifter another architecture's frame at worst. (A third, `decompileForLLM.ts`, made the same choice for the same reason and went at `peek-a-bin-1xc5`; the judgement is unchanged, the population is one smaller.) (`peek-a-bin-hof0`)
-
-- **In every arch dispatch, the `"unsupported"` arm must be checked *before* the `"arm64"` arm.** `dispatch.ts` and `mcp/disasm.ts` branch on `state.arch` in a chain whose tail is the x86 path, so testing ARM64 first drops an unsupported image straight into x86 — a full screen of plausible instructions the file does not contain, with no coverage signal to notice it by, since an x86 linear sweep decodes essentially any byte string. `WorkerState.arch`'s docstring says this too; keep both true.
-
-- **`if (c) { continue; } break;` at the bottom of a loop body is emitted as `if (!c) { break; }`, and every restriction on it marks a position where the fallthrough means something else.** `collapseLoopTailContinue` (`cleanup.ts`) is the pass; it is cosmetic, and identical in every loop construct because `continue` and falling off the end both reach the back edge. The pair must be the last two statements of a **loop's own** body — hence an explicit walk rather than `rewriteBodies`, since in a `switch` arm `break` leaves the switch and inside a nested `if` the fallthrough is the rest of the body. The negation must be a **flipped comparison, never a `!`-wrapping**, or `if (!!x)` becomes `if (!!!x)`; `&&`/`||` are refused (De Morgan is correct and harder to read). The exit arm keeps its own spelling, and the pass runs **after `breakForwardGotos`** or a quarter of the population is still spelled `goto` and missed. The braces stay: `corpus/sweep.ts`'s guard scan then matched an `if` only when the line ended in `{`, so one-lining would have taken every single-terminator-body guard out of that scan. These guards were never in the polarity audit's population, so nothing in the corpus suite would catch a wrong negation — the oracle is `cleanup.test.ts` plus hand-reading. (`peek-a-bin-252`)
-
-- **A block with no predecessor is not necessarily dead code, and "lifts to no statements" stopped identifying padding once step 4b hoisted branches out.** `structureCFG`'s leftover pass required reachability from the entry, on the reasoning that everything else is alignment padding; that excluded ~1160 blocks of real code, since an MSVC `__except`/`__finally` continuation or a 32-bit SEH scope handler is entered *by the unwinder*, has no predecessor at all, and sits past a `ret` while being ordinary code inside the function's bounds (`peek-a-bin-d3z`). Padding is still excluded by the test already doing the work — a block that lifts to no statements is not resurrected. But a `cmp`/`jg` block lifts to exactly one statement, the branch, and `pipeline.ts` step 4b takes it, so an emptied list read as alignment and a **test the machine makes** was dropped wherever this pass was the only route to the block. The test is now `… === 0 && !branches.has(b.id)`, because `branches.has` *is* "step 4b took a statement out of this block" — asked of the block, not its instructions, so a jcc the lifter deliberately refused to model still counts as contributing nothing. **No gate could see it**: the statement-drop audit snapshots after 4b so both sides are empty, polarity only judges guards that exist, `staleGuards` counts wrong readings not absent ones, and gcc compiles a shorter function happily; the instrument is the count of blocks left unvisited split by whether `branches` holds an entry. (`peek-a-bin-3zji`)
-
-- **A switch arm that ends in a test must say so: `break` is a claim about control flow, not a terminator you can always append.** `armBody` claimed one block and closed it with `break` however that block ended, which for a block ending in a conditional jump is false twice — the switch does not end there, and **the condition goes with it**, since step 4b has already hoisted the `IRBranch` out and nothing else asks the block what it tested, leaving both successors as regions the emitted C can never reach. `armExit` (`structure.ts`) spells the block's own exit: `if (cond) goto <taken>;` then `goto <fallthrough>;` for a conditional jump, `goto <succ>` for an unconditional one, `break` only for a block with no successors. Two decisions: the transfer is **spelled, not followed** (`armFrom`'s doctrine — a `goto` to the target's label is faithful whatever the target is), which keeps it out of the switch's convergence scan so the guard ledger is provably flat; and a `goto` where `break` was already right is noise rather than a claim, so it is emitted uniformly rather than guessing at the join. **The bead's suggested fix — giving `armBody` `structureFrom`'s treatment — was measured and refused**: naively it empties every arm (the arm's own block is in `switchStopAt`, and *every gate stayed green*), and with `enterStart` it still appends an unconditional `break` wherever its walk stops. The instrument is `armExit`'s own answer, gateable at 0. (`peek-a-bin-pqs5`)
-
-- **Register names follow the image's width, and the phi cannot tell you what that is — ask the live range, not the function.** `canonReg` maps every alias to the 64-bit parent because that is the register's *identity* and SSA keys on identity, so `phi.dest.size` is 8 for every phi even in 32-bit code and a width-based inverse has nothing to invert; lowering a phi to a copy with the canonical name emitted `rdi = rax` inside a function whose every other line said `edi`. `destroySSA` takes the width from the function's own statements (`registerSpeller`), falling back to `regAtSize(canon, 4)` (`peek-a-bin-1k4`).
-  - **One name per *function* is still wrong** where a register carries two live ranges of different widths at once — ordinary MSVC output — giving a 64-bit entry-value pointer and a 32-bit clobber both the name `r9`: a write through the wrong pointer and a read of an unassigned name, in C that compiles because gcc declares `r9` and `r9d` as two unrelated `long`s. Naming is per **phi web** (the versions a phi ties together transitively, restricted to one canonical register), taking the widest mention of its *own* members; the function-wide answer is the fallback for a web left with no mention. `nameClobberedReads` and the phi copy's `clobber` branch build the same name, so both pass the version or neither may (`peek-a-bin-pzws`).
-  - **The phi's fake *width* is inert and its canonical *name* leaked through one line of `splitStaleReads`; giving the phi a truthful width in `ssa.ts` was measured and is not worth a session.** Only 11 sites read an `IRReg`'s `.size` at all and just two are genuinely downstream (both in `fold.ts`), neither sees a phi-derived register on this corpus, and both already fail conservatively — a truthful width would make folding more aggressive rather than repair anything. What reached the page was `spellings` treating a **phi operand** as a read when it is the canonical identity; the fix is one `continue`, admitting such a row only when a later pass substituted a real value into it. (`peek-a-bin-0s6e`)
-
-- **A register name the image has no encoding for is a gate, and the only oracle here that can see a wrong register name.** `unencodableNames` (`corpus/emitAudits.ts`) is asked of **PE32 only**, and that restriction is what makes it an oracle: a 32-bit image has no RCX, so every occurrence is provably a name no instruction wrote. On x64 `rcx` is a correct spelling and separating a canonical name from a real 64-bit read needs the live range's width, which the emitted text does not record, so the x64 pair contributes a structural 0 and `funcs` beside it is the liveness half. **gcc and `corpus/staleReads.ts` are both blind**: `preludeFor` declares every undeclared identifier as its own `long`, and `staleReads` compares the *name* a read uses (deliberately, since a correct live-range split emits two names for one register). (`peek-a-bin-0s6e`)
-
-- **How much of the argument area frame recovery is still missing is REPORTED, never gated.** `offsetNamedArgs` (`corpus/emitAudits.ts`) counts an `arg_0x<N>` at a slot `stack.ts` would have indexed had it recognised the frame; the sub-slot half is reported apart, being correctly offset-named at any level of recovery. **Reaching 0 is the wrong target and that is measured, not argued**: a variant naming all 35 x64 slots takes the row to 0/0/0/0 and moves no other number in the report, while declaring four parameters that the callee-saved registers immediately overwrite — and `peek-a-bin-g186` reaches the same 0 by declaring *no* parameter there, so the row cannot tell the two apart. The instrument that can is the emitted parameter list read against `objdump`. Nothing else sees the class: an offset-named argument is well-typed C, states nothing false, is not an admission, and never reaches struct synthesis as a parameter. (`peek-a-bin-emlv`)
-
-- **ARM64X carries machine 0xAA64 and is refused by decode rate; ARM64EC does NOT — it is marked x64 (0x8664).** Settled from Microsoft's documentation and lld, since no such binary exists here; **0xA641/0xA64E never appear in a linked image's machine field** (they are object/lib markers). Consequences: the refusal's real population is an ARM64X image marked 0xAA64 plus an image whose machine word does not describe its bytes, never an ARM64EC one; and **an ARM64EC image, and an ARM64X marked 0x8664, take the `"x86"` arm and are disassembled as x64 with nothing said** — a real misclassification, knowingly left alone, because routing on CHPE would be a decision taken on a field never once read non-zero on any file here. The evidence actually used is the bytes: an A64 handle decodes ~97% of the real ARM64 binaries against ~22-28% of x86/x64 ones — **a quarter of arbitrary x86 bytes decode as *something* in A64**, which is why the failure was silent and why the floor is 50%. `disassembleArm64` throws `Arm64DecodeRateError` below it on sections of 256+ words and `detectArm64Functions` degrades via `DetectResult.omitted`, since `.pdata`, exports and unwind handlers stay true. The calibration is now gated in **both** directions by `npm run corpus:arm64`, with `coffHeader.machine` as the oracle. Stated limitation, not narrowed by the gate: an ARM64X image is largely genuine A64 and may pass the floor, and there is none on this machine. (`peek-a-bin-2t1`)
-
-- **A hybrid image has TWO exception tables, `pe/pdata.ts` reads one, and the one it reads is the one the machine word describes.** The exception directory always holds the table of the architecture the image *presents itself as* — x64 12-byte entries for ARM64EC (marked 0x8664), ARM64 8-byte entries for ARM64X (marked 0xAA64) — and CHPE's `ExtraRFETable` (at 0x40 of `IMAGE_ARM64EC_METADATA`, size at 0x44, both RVAs) always holds the other; for ARM64X the dynamic-value relocations swap both at load, so a *static* reader sees the ARM64 view. So `parsePdata` is **right for every hybrid case and incomplete for all of them**, and machine-keying is right here and could never be right for the other table. Reading the second table was deliberately not attempted — `chpeMetadataPointer` has never been observed non-zero on any file here, so a consumer would be unverifiable in both directions. **The two hybrid machine constants are gone and one was WRONG rather than merely unreachable**: `isArm64Machine` sent 0xA641 down the ARM64 path, which would have read 12-byte entries at an 8-byte stride — `peek-a-bin-kwc`'s desynchronisation from the other direction. **Do not re-add either.** Rests entirely on documentation: no such binary exists here, no `ExtraRFETable` value has ever been read. (`peek-a-bin-c71x`)
-  - **Where the image declares CHPE metadata the refusal message says so, instead of inferring hybrid-ness from the rate.** `PEFile.loadConfig.chpeMetadataPointer` reaches `Arm64DecodeRateError` through `configure` → `WorkerState` → `Arm64Context`, and is **consumed for prose only** — the throw condition and every caller's behaviour are untouched, which is what makes it safe where `peek-a-bin-7p5t` refused a consumer. It is optional, not a dependency: only a **non-zero** value is evidence (`0` says *not* hybrid, `undefined` says unreadable, and collapsing the two makes the field useless). It is session state keyed on **`machine` being declared** rather than on its own presence, or one file's CHPE pointer stays attached to the next file's refusal; and it is **not in any cache key**, or one file's prose costs another file's sweep. `mcp/disasm.ts` is deliberately not threaded. The non-zero branch is fixture-only. (`peek-a-bin-3ucw`)
-
-- **`.pdata` is authoritative for x64 function boundaries and beats prologue scanning.** Where a `.pdata` range exists, a prologue-byte or padding-heuristic candidate strictly inside it is a re-detection of a function already known exactly, not a new function. Evidence about an *entry point* — call target, jump-table target, export, entry point, unwind handler, `.pdata` begin — still wins inside a range. PE32 has no `.pdata` to arbitrate and still over-produces. (`peek-a-bin-abv`)
-
-- **An MSVC x86 `__finally` funclet is not a function, and the SEH scope table must not be used to PROTECT one.** The funclet is emitted *inside* its parent, reached by a `call`, ends in `ret`, and the parent resumes on the next byte — so it is a call target and hence a function start by every other rule, and since sizes are distance-to-next-start it cuts its parent in half and the parent loses every `jcc` aiming past the new end. `interiorBranchedOverStarts` (`functionDetect.ts`) withdraws such a start. The trap: the file *does* name some of them in `_EH4_SCOPETABLE` records in `.rdata`, so `strong` means "named by a table the parser reads", not "named by the file" — feeding those handlers into `strong` re-introduces 9 withdrawn starts on t32 and 7 on w32, each cutting its parent in half again (measured, not reasoned). The table's real content is *funclet-of-parent*, which belongs in a relation, not in a set that protects a start. (`peek-a-bin-sysf`)
-
-- **`interiorBranchedOverStarts` has FIVE admissions, and each names a different kind of evidence.** (1) The original: nothing outside the previous function calls the start *and* a conditional jump that function can execute crosses it. (2) An unconditional `jmp` over a start **nothing reaches at all** — no `call`, `jmp`, `jcc` or jump-table case — since the tail-call/shared-epilogue ambiguity is entirely about the far side of the jump and both alternatives are *reached*; `reached` must be a union over every transfer kind, and `reachableCrossings` decodes forward rather than reading the sweep's grid. (3) `[ebp + N]` in the **first** instruction at an address is a read of a frame some other function established, because nothing has run there to set one up and no x86 convention passes EBP; **at least one caller is required**, or there is no evidence the address is even an instruction boundary, and the first instruction is decoded from the boundary (`firstInstructionOperands` uses `decodeOne`), not read off the misalignable linear grid. (4) The funclet has **two entries** — MSVC emits unwinder-only register reloads and the parent's `call` names the body *past* them — so the same test asked one instruction earlier: the instruction ending *at* the boundary reads memory through the frame register and falls into a body all of whose callers are inside the same function. (5) The previous function's own SEH scope table names the boundary: `src/disasm/seh32.ts` reads `_EH4_SCOPETABLE` (16-byte header, 12-byte `{EnclosingLevel, FilterFunc, HandlerFunc}` records, no count field, NULL filter meaning `__finally`), `seh32FuncletRelation` turns it into `funclet → parents`, and the admission is **`parents.has(prev)`** — a relation, never a `strong` membership. Three things to keep:
-  - **The frame test in (4) is the whole restriction and only the emitted C can see it.** Relaxed to "the predecessor is not a terminator" it also takes a boundary whose predecessor is a `noreturn` call, appending statements that claim control flows out of it — and `npm run corpus` reports the relaxed version **clean, exit 0**.
-  - **Dropping the pre-existing "no caller outside the previous function" test swallows `__SEH_epilog4`**, which reads its caller's frame by design and has 30-odd call sites; its body ends up as a `loc_` inside `__SEH_prolog4` while every call site still names a function that no longer exists — and the function count moves *toward* the target while `distinct callees lost` stays 0.
-  - **The rest of the family is refused on evidence, and the count-chasing rule is invisible to every gate.** Withdrawing the whole family on body shape (`push X; call; pop ecx; ret`) moves the count much further "toward" the target with `npm run corpus` at exit 0 and `compare.mjs` flagging the same rows as the correct change — so no instrument here distinguishes a right withdrawal from a wrong one, and the oracle is reading the parent's emitted C at the join. Specifically refused: `push <imm>` with a `ret` predecessor (byte-for-byte a legitimate one-line helper); `push <callee-saved reg>` (the tree already reads that as a register **save** — `peek-a-bin-6lmh` — and two contradictory readings of one instruction is worse than the miss); "the predecessor is unreached" with no test of what it does (it takes a real function with a full hot-patch prologue and two callers); and moving a start *backwards* onto the unwinder entry (those entries are admitted by nothing and reached by nothing). (`peek-a-bin-qe8z`, `peek-a-bin-d827`)
-
-- **A folded funclet leaves its parent calling an identifier the output never defines — measured, adjudicated, and deliberately NOT repaired.** The parent still contains `call <funclet>` while the funclet's body sits below it under a `loc_` label in the same function; both halves are faithful in isolation and not connected. `goto` is wrong (the machine calls and the funclet returns, so control comes back) and re-emitting the funclet restores `qe8z`'s defect. A **comment naming the label is available at under half the sites** and would state something false at the rest, since the block leader there is the unwinder's own entry a few bytes earlier — and its coverage is perfectly anti-correlated with need, because a labelled site's `sub_<HEX>` and `loc_<HEX>` carry the same hex string, so the repair exists exactly where the call can already be followed. Forcing a label at the target is a **CFG change, not a spelling one** (a `call` is not an edge here, so the entry is mid-block by construction, and no emitted statement carries the target's address to hang a label on). The outcome is the instrument: `corpus/undefinedCallees.ts`, report-only, splitting internal from external with `internalLabelled`/`internalThreaded`/`internalUnlabelled` beside them — **read `internalUnlabelled`, not `internal`**, since folding more funclets raises the latter without costing the reader anything. Gating becomes worth re-arguing only if `internalUnlabelled` reaches 0. (`peek-a-bin-pf5g`)
-
-- **"A call target immediately after a `ret`/`jmp` is a function start" is subsumed, and reviving it as *strong* evidence is worse than inert — the heuristic is deleted.** `detectFunctions`' `prevWasUnconditional` had one reader whose add can never be new (`callTargets ⊆ addrSet` by construction). **The tempting reading is exactly backwards**: an MSVC `__finally` funclet is a call target emitted at its parent's **tail**, past the parent's last `ret`, so "call target after a `ret`" *describes the withdrawn population* — the retired guard names roughly half the starts `interiorBranchedOverStarts` withdraws, including the very addresses the `strongStarts` docstring already names as its counterexample. The `jmp` half is ambiguous on a population where its one disambiguator (an *unreached* boundary) is false by construction, since every address it fires on is a call target and hence reached; on x64 it is doubly vacuous. Control does not fall through a `ret` or `jmp`, so what the guard read was *layout* adjacency, which is a tail funclet precisely. **No gate can see either choice** — the corpus is byte-identical whichever way it goes — so the census is the only instrument and it lives in the `callTargets` and `strongStarts` docstrings. (`peek-a-bin-7lue`)
-
-- **A TLS callback is a FILE-DECLARED entry point and belongs in `strongStarts`, and the two units at that call site run in OPPOSITE directions.** The loader calls every entry of the TLS directory's `AddressOfCallBacks` *before* the image's entry point. Nothing inside the image calls one, so recursive descent never reaches it and the gap fill finds it, if at all, with no boundary — which makes it the member of `strongStarts` that most *needs* the protection rather than `addrSet` alone: unreached-by-construction plus a `jcc` from the previous function crossing it is exactly `interiorBranchedOverStarts`' first admission, so in `addrSet` alone it is withdrawn. Before this it was parsed and read by **one** consumer, `analysis/anomalies.ts`, which told the analyst "2 TLS callback(s) found … anti-debug or pre-entry execution" while the function list held nothing at that address. `tlsCallbacks?: number[]` is threaded into **both** detectors — the two option bags are hand-synced and the TLS directory is machine-independent, so an A64 image registers callbacks exactly as an x64 one does; the A64 half seeds `addrSet`/`nameMap` only, there being no `strongStarts` and no withdrawal pass there. `dispatch.ts` needs **no edit**: it forwards `args.options` wholesale, and these are plain numbers so nothing in `prepareBinaryArgs` is involved. **THE UNIT IS THE WHOLE RISK AND NOTHING IN THE TYPE SYSTEM HOLDS IT** — every address in the bag is a VA because `baseAddress` is, `parseTLSDirectory` already keeps the callback array image-based, and so the two agree by two separate readings of the format rather than by construction. Both are `number`; a caller "converting to an RVA like everything else" compiles and every callback then falls outside `[baseAddress, endAddress)` and is dropped with `omitted` byte-for-byte unchanged. That is `peek-a-bin-yrh`'s class one field over, so it is written at the option's own declaration and one negative control passes an RVA. **The mirror defect was live at the same call site**: `ExportEntry.address` really *is* an RVA and `mcp/session.ts` passed it raw, so on the MCP path **and on `npm run corpus`, which loads through the same `FileSession`**, every export seed fell outside the code section and was dropped — no seed and no name — while `App.tsx` converted correctly. **The harness and the browser had been detecting functions from different seed sets.** Structurally invisible: all six corpus binaries are EXEs with **zero exports** and no DLL exists on this machine, so no gate here could have caught it and none can catch its return — hence the static guard in `mcp/__tests__/detectSeedUnits.test.ts`. The 256-callback cap now sets `TLSDirectory.callbacksTruncated` **at the drop site and decided exactly** (`dhcx`'s rule — control reaches the flag only having read a further non-zero pointer, so an array of exactly `MAX_TLS_CALLBACKS` plus its terminator is not marked); it renders nothing, and `parseAdmissions`' sixth subject stays `peek-a-bin-ul9m`. Before this a clip only understated a sentence; now it **under-seeds detection**, which is worse in kind. **Fixture-verified only, and no binary on this machine can falsify either half**: measured at `0870e14`, all six corpus binaries have **no TLS directory at all** and zero exports, so the corpus is byte-identical with `functions` unmoved on all four and that is the expected result rather than a weak one. (`peek-a-bin-j4uk.2`)
-
-- **A jump-table case target is not a function start.** `detectFunctions` added every case target to the function-entry set, and sizes are the gap to the next entry — so the function holding the `jmp [table]` ended at its first case and each case body became a bogus function; `buildCFG`'s range guard then rejected every target as a block leader, the indirect-jmp block got zero successors, and `structureSwitch` was dead code on real input (**no `switch` had ever been emitted for a real binary**). Case targets go to a separate set, outrank a byte-pattern guess at the same address (case bodies routinely follow alignment padding), and are fed to `hybridDisassemble` as seeds via `seeds.ts` — without them, gap fill starts *on the table* and eats the head of case 0.
-
-- **A recovered jump table's bytes are data, and only `DetectResult.jumpTableSpans` says so.** Seeding the case bodies is not enough: nothing walks *into* a table, so the gap fill reaches it as an uncovered range and decodes the case addresses as instructions — the corpus's last lost CFG edges. `detectFunctions` reports the extent it actually read, `hybridDisassemble` takes it as a last optional argument and marks it covered before computing gaps, and the client and `mcp/session.ts` carry it beside the seeds; **omitting the argument keeps the old behaviour deliberately**, since "nobody said where the tables are" is not "there are none". A bound compared against a *register* (`push 7 / pop ecx / cmp eax, ecx`) is followed back to the constant, because a table that cannot be sized is one whose bytes nothing knows to be data (`peek-a-bin-mk42`). Three follow-ups, each a separate question:
-  - **A table with no bounds check has bytes but no cases.** `unboundedTableExtent` (`functionDetect.ts`) answers the byte question alone and reports `TableRead.dataOnly` — an extent with **no targets**, because reporting entries whose case order is unknown is what `peek-a-bin-div` refused; so `jumpTableSpans` is no longer a subset of `jumpTables`' extents. The extent is the maximal run of pointer-width words on the base's own grid holding code-section addresses, scanned in **both directions** (MSVC's reverse `memmove` names the table's *last* slot, and a forward-only read finds one entry); the fallback keys on "no cases recovered", not "no bound found", or the descending shape stays decoded as code; and it errs **short** — the run must contain the base, it stops at one non-resolving word, `MIN_UNBOUNDED_TABLE_ENTRIES` is 4 rather than the bounded path's 2 because the run *is* the whole evidence, it is confined to the code section, and it is restricted to the *indexed* operand form since `jmp dword ptr [0x…]` is an import thunk.
-  - **A base that is not an address at all can still be a table base**: MSVC overlaps an unbounded table's entry 0 with the instruction in front of it, where that entry is provably unreachable. **A byte belonging to a decoded instruction cannot be a table entry**, so `overlappedTableExtent` starts the table at the first grid slot past that instruction and reports `[base + ptrSize, hi)` — marking the overlapped slot as data would delete the `jmp` in front of the dispatch. The evidence arrives by **deferral** (`TableRead.deferredBase`), settled when the address-monotone sweep walks onto an instruction containing the base and dropped the moment `insn.address >= base`, rather than by an instruction-extents array or a forward probe that could disagree with the sweep. The instruction must end **inside** the base slot; the run is counted from the base, not the span. **Shape 2 — a dispatch through a negative index, reading words *below* the base — is not a defect and must not be "fixed"**; it is refused three ways over, the caller's refusal of any `deferredBase` a recovered table already dispatches to being what makes that a property. The `and <index>, 3` beside these sites is corroboration from outside the rule and is deliberately **not** read here: the span question is not the index question. (`peek-a-bin-xqxy`)
-  - **What bounds a table is one rule about one register, and it took two disagreeing declarations to notice.** `readAbsoluteTable` walked back to the first `cmp` it met without asking which register was compared, while `boundedCaseCount` tracked the index register but could not read a bound carried in a register — each wrong where the other was right. `boundedCaseCount` is now the one declaration. `and <index>, imm` is admitted as a bound of `imm + 1` and is the **stronger** form, stating the range exactly where a `cmp` states it only with the sense of the branch below it. A **write of the index between the bound and the dispatch ends the search** (`conditionSpoiled`'s rule for a guard), with `cmp`/`test`/`push` as the read-only forms and the string primitives refused explicitly because they write RCX/RSI/RDI while naming none. **A register check alone is refuted by measurement** — it halves the recovered tables, because these tails are reached by `jmp` so the preceding linear instructions are not the ones that ran — so `readAbsoluteTable` consults the sweep's `tablesByBase`, reusing the *entries* but **never a longer run than the first reading took**; first reading wins, being the one whose own evidence bounded the table. Not verified on x64: this corpus recovers 0 tables there, so the arms `recoverX64RvaChain` and `recoverDenseByteTable` gained are synthetic-fixture only. (`peek-a-bin-padl`)
-
-- **There is exactly one notion of "loop": dominance.** `cfg.ts`'s `detectLoops` delegates to `decompile/ssa.ts`'s `detectNaturalLoops` — an edge `u → v` is a back edge only when v dominates u. The BFS-layer approximation it replaced called the merge block of every `if`-without-`else` a loop header, and the mis-structuring **deleted guards**, turning conditional stores into unconditional ones; a diamond is immune to that mistake and a triangle is not, so hand-written fixtures never caught it and `cfg.test.ts` plus `pipeline.test.ts` now pin both shapes. `detectLoops` also draws the loop markers in `useDisassemblyRows.ts`, so its semantics are shared with the UI.
-
-- **`structureCFG` closes an `if` at the immediate post-dominator**, from `computePostDominators` (`structure.ts`) — `computeDominators` over the reversed CFG rooted at a virtual exit. The two "one arm ends in `ret`" shortcuts must not fire when that arm *is* the convergence point: in a triangle the branch target is the shared tail, so structuring it as the `then` body yields an empty body and drops the guard. A nearest-common-successor heuristic is not a substitute — for a switch it picks the default block, which is not on every path, and the code after the switch is lost.
-
-- **`extractCondition` returns the condition under which the jump is TAKEN.** Every entry in `regstate.ts`'s `condMap` is taken-polarity (`jg`→`>`, `jbe`→`u<=`, `js`→`< 0`) and `identifyBranches` returns the block the jcc jumps to, so the branch target is the `then` body under the *un-negated* condition and `RegState.negate` is for the fallthrough. Backwards, this inverted every `if` and `while` the decompiler emitted while leaving the bodies in place — valid C stating the opposite of the machine, invisible to every stage-level test; `pipeline.test.ts` guards it end to end.
-
-- **A guard is answered from the flags the Jcc *actually* reads, and only while the compare still describes them.** Two refusals in `extractCondition`, one defect class — the right operator over the wrong operands, which polarity cannot see (it checks the operator), gcc compiles, and which is not an admitted `__unrecovered_N`. (a) The forward walk clears the flags on anything not `isFlagTransparent`; it used to clear on *nothing*, so `cmp eax, 5 / … / sub ecx, edx / jne` emitted `eax != 5` (`peek-a-bin-jitf`). (b) A compare whose operand was overwritten before the Jcc is refused, because the block's statements are emitted **above** the `if` — `cmp eax, 5 / mov eax, edx / je` printed `eax = edx;` then `if (eax != 5)` (`peek-a-bin-xe01`). Both read `flagModel.ts`'s own tables (`isFlagTransparent`, `clobberedAfter`), never a copy; refusal *is* the repair, so the cost shows up as unrecovered values rather than as changed guard text. Gated by `corpus/staleGuards.ts`.
-
-- **`push` and `pop` write no flags and are already in `NO_FLAG_WRITE`; a guard behind an epilogue restore is refused by `spoils`, not by the flag model.** Membership and `spoils` are two questions about one instruction and a `pop` answers them oppositely: it writes no flag, so the compare owner stands, *and* it writes its operand register, so the name the guard would use is gone — `test edi, edi / pop edi / pop esi / pop ebx / jne` would emit `edi != 0` over a restored callee-saved value. `baseMnemonic`'s exact match is what keeps `popf`/`pushf`/`pusha`/`popa` clobbering; a `startsWith("pop")` test would silently admit `popf`. Do not try to fix this class by moving the `IRBranch` earlier in the statement list — `structureCFG` emits a block's statements above the `if`, so the restore still runs before the guard (`peek-a-bin-thsj`).
-
-- **A spoiled compare is recovered by MATERIALISING its operands at the compare, not by refusing the guard — and the cross-block case needs no new placement.** `spoiledCompareCapture` (`lifter.ts`) emits `flg_<compare addr>_<operand index> = <parsed operand>` per non-constant operand at the compare's own program point and builds the `IRBranch` over those, so the clobber runs between capture and guard and reaches neither. Four rules: the destination is an **`IRVar`**, not a deletable pseudo-register — a register-destination copy is folded away by `copyPropagation`, which leaves the recovered and the defective spelling textually identical and the class ungateable; the signal to `structure.ts` is `IRBranch.capturedAt`, an **address**, and `extractCondition` bypasses `conditionSpoiled` only when it equals the setter its own forward walk found, since asking `conditionSpoiled` of the IR condition defeats it outright (copy propagation has rebound the register out of the expression); the scope is a block-local **compare** owner, never a `result` or `bittest` one, whose value the instruction has not yet written; and the emitter must **declare** the capture, at `IRVar.size`'s width via `sizeToType`, preferring type inference only where it names the same width — `corpus/emitAudits.ts`' `preludeFor` manufactures `long flg_…;` for an undeclared one, so gcc reads clean over C the harness completed and the instrument is the count of invented prelude declarations. For a **predecessor**-owned spoiled compare, `reusablePredecessorCapture` (`lifter.ts`) *looks up* the capture the predecessor's own lift already emitted rather than placing one; it requires exactly one predecessor and that the capture be at the compare this jump reads. The corpus cannot separate this from simply reading the raw operands — only `pipeline.test.ts`, whose fixture stores over the compared slot itself, can (`peek-a-bin-xskz`, `peek-a-bin-x54q`, `peek-a-bin-zylv`).
-
-- **`test` clears OF and CF; it does NOT clear SF — which is why `getCondition`'s `test` arm answers strictly more Jcc forms than its `result` arm.** For a **result** owner (`dec ecx`, `sub eax, ecx`) only ZF and SF are functions of the result, so only `je`/`jne`/`js`/`jns` are answerable. For a **`test`** owner every flag a Jcc reads is a function of `a & b` or a known constant, so `jle` collapses to `(a & b) <= 0` and `jg`/`jl`/`jge`/`ja`/`jbe` follow. **The suite had asserted the defect as the rule** (`it("returns unknown for a jcc with no meaning after test")`, commented "jle depends on SF/OF, which `test` clears") while its own neighbour answered `js`. Two things not to re-try: `jb`/`jae` and `jo`/`jno` read *only* a flag `test` clears, so they are constants, and emitting `if (1)` is a control-flow claim `structureCFG` may act on and no gate models; `jp`/`jnp` read PF, a real function of the result with no cheap spelling (`peek-a-bin-92yy`, `peek-a-bin-x72e`).
-
-- **A Jcc alone in its block is answered from its predecessors, and only when every way in leaves the flags saying the same thing.** `flagScanStream` (`flagModel.ts`) prepends the predecessor's instructions when, and only when, the block's own scan finds no flag writer at all; `flagPredecessor` supplies the edge, answering with any predecessor when all of them are **unanimous** via `unanimousCompare`, and both consumers — `lifter.ts`'s `branchFor` and `structure.ts`'s `extractCondition` — read that one stream so they cannot drift about which edge. Four rules: the predecessor's **terminator must be skipped explicitly**, since `jmp`/`ret`/every Jcc are absent from `NO_FLAG_WRITE` and a walk that reads one clears the owner it came for (without the skip the whole change recovers 0); **either edge counts**, because a Jcc writes no flags and the predecessor's condition being true on a path is a fact about values; the walk continues *through* the block so `spoils` covers both sides with one grammar; and the condition is re-read from the owning instruction via `setFlagsFromCompare`, never from the reading block's `RegState`, which never executed the compare. Unanimity is a **text-equality test over Capstone's operands and never a merge** — no `rip` (resolved against the instruction's own address, so equal text at two addresses is two expressions), no stack pointer, and no `result`/`bittest` owner, whose condition depends on the destination too. **Nothing in the corpus protects the disagreeing sites**: answering from the first predecessor instead recovers 12 more guards and `npm run corpus` exits 0 with "no regression", because polarity judges the operator (right) and not the operands (wrong on one path), and `staleGuards`' population is block-local. Materialising a per-edge value would need a new `pipeline.ts` step, and duplicating the block per predecessor changes the CFG at a merge point where loop shape is decided — both refused (`peek-a-bin-suql`, `peek-a-bin-xdxt`, `peek-a-bin-0xe2`).
-
-- **A memory destination is spellable; refusing it was a spelling limit that read as a dataflow fact.** `dec dword ptr [ebp + 0x10] / je` owns its flags like any `RESULT_OWNERS` form and the tested value is the destination read *after* the instruction ran. `flagModel.ts` publishes `destForm: "reg" | "mem" | "none"` for spellability while `destReg` stays for `spoils` — they answer different questions, and conflating them refused every row; `branchFor`'s old `irReg(destText, regSize(destText))` was worse than a refusal, since `regSize` falls back to 4 for any unrecognised name. Soundness is the **ordering**: `structureCFG` emits a block's statements above the `if`, so the guard reads the location after the store — asserted directly in `pipeline.test.ts`, since no unit test of `flagModel` or `branchFor` can see it. Refusal is on **any** intervening store with no aliasing attempt, and across a `push` (which writes `[rsp - N]`) although `writesMemory` exempts it for the compare case (`peek-a-bin-ie0j`).
-
-- **A `lock` prefix changes atomicity, not values or flags — so it must not change any classification; but a locked read-modify-write with no value effect is a fence and must stay unlifted.** `withoutLockPrefix` (`flagModel.ts`) is the one declaration stripping it for the dispatch key, read by both `flagEffect` and `liftBlock` so they cannot disagree about the base mnemonic; `rep` must survive stripping (Capstone puts the string primitives in either the mnemonic or `opStr`) and the `raw` fallback keeps the verbatim mnemonic so an atomic exchange still says so. Lift before classifying: with the flag model fixed but `liftBlock` still dispatching on `"lock dec"`, the guard tests a location the block never stores to — one release early, in compiling C. Forms the lifter has no handler for (`cmpxchg`, `xadd`) reach `raw` by themselves; no whitelist of "safe locked forms" is wanted. `isValueNeutralLockedRmw` (`lifter.ts`) sends `lock or byte ptr [rsp], 0` back to `raw`, or `foldExpr` folds `x | 0` and `promoteVars` names the slot, leaving `var_0 = var_0;` and the fence gone. That test requires the **`lock` prefix as well as** the nil value effect — an unlocked `or [mem], 0` is a dead store, a different judgement — and refuses `and <mem>, <all ones>`, whose identity element is width-dependent and whose text-level reading misfires on real truncations. Atomicity is lost from the page deliberately; nothing in this IR expresses it (`peek-a-bin-3qrl`, `peek-a-bin-qbk3`).
-
-- **`bt` is a compare over one bit and is neither a compare nor a result — it needs its own owner kind.** `bt` **writes nothing**, so unlike a result owner it needs no lift first; and **`bt` leaves ZF unaffected** (SDM: CF gets the selected bit, ZF is unaffected), so a `je` after one really branches on an older instruction's ZF and answering it from the bit would be a *wrong test*. `defines: "cf"` keeps it apart from `"zf-sf"`; `getCondition`'s `bittest` arm answers `jb`/`jc`/`jnae` and `jae`/`jnb`/`jnc` and nothing else. `parseBitTest` admits only a register bit base with an immediate offset: with a **memory** base the offset indexes a bit string and can select a bit outside the operand's own dword, so the reading would be unsound rather than merely unmeasured; `bts`/`btr`/`btc` stay clobbers permanently, their CF being the bit's value *before* the write. One predicate, two callers (`flagEffect` to claim ownership, `liftBlock` to record the same reading). Spell it `(x >> n & 1) != 0` with `>>`, not `>>>`, which `emitLogicalShiftRight` turns into an `__unrecovered_N` when it cannot determine the width. `corpus/sweep.ts` gained `BIT_TAKEN` in the same commit, keyed on the *immediately preceding* instruction being a `bt`; contorting the emitted C to satisfy the old table was refused as gaming the oracle (`peek-a-bin-frt8`).
-
-- **The polarity audit's population was one trailing brace wide, and the loss would have been silent.** `corpus/sweep.ts`'s guard scan required a header line ending in `{`, so an `if` whose body moved onto its own line stopped being a guard **at all** — not judged, not skipped, not a row. `corpus/guardShape.ts` is now the one declaration of what a guard line is, read by the polarity scan, `auditLoopExits`' header detection and (through `statementOnLine`) the two terminator scrapes; `unparsed` counts every line starting with a guard keyword and an open paren that was not understood, and **gates at 0**. The condition is **depth-counted, not anchored** — widening the old regex in place gives `/\((.*)\)\s*(.*)$/`, greedy to the last `)`, so `if (a == 0) x = f(b);` reads its condition as `a == 0) x = f(b`, and a wrong condition is worse than silence. One-lining breaks three scrapes in three directions: polarity goes silent, `auditLoopExits` goes **red on correct output**, and `emitAudits.ts`'s `gotoCheck` reports `dangling` 0 out of a population it can no longer see — a gate at 0 passing because it stopped looking (`peek-a-bin-vwr5`).
-
-- **The second hand-rolled guard-header pattern is gone, and the drift guard could not see it.** `corpus/selfAssigns.ts`'s `FOR_HEADER` encoded single-space formatting and a trailing brace, in a file whose `wrong` and `unresolved` columns **gate at 0**, and `build/guardShape.test.ts` missed it because that guard's tell is a regex *alternating* two guard keywords and this one named `for` alone. It now asks `forHeaderCond` and `splitForHeader` (`corpus/guardShape.ts`) and reads its assignment through `statementOnLine`; the grammar answers what the *line* is and what a caller wants out of it stays the caller's. `forHeadersUnsplit` — a header recognised and then refused by the splitter — is a **gate at 0** beside `forHeaders` as the liveness half, since a text-scraping audit fails by matching nothing. **Widening the drift guard to single-keyword patterns was measured and refused**: the three `corpus/` patterns it would trip (`sweep.ts`'s `OPENER`, its descriptive `siteOf` buckets, `clobbered.whiles`/`fors`) gate nothing and none reads a guard header as a whole line (`peek-a-bin-hfsq`).
-
-- **A guard whose whole body is one terminator is emitted on one line, and `oneLinedGuard` (`emit.ts`) exists so the line cannot carry the wrong address.** It is handed the body's own `EmitResult` with the guard out of scope, because attaching the guard's block would anchor the arm to the jcc one decision earlier — the `peek-a-bin-8r0`/`peek-a-bin-lbz` class of false INVERTED — and `bodyAddrAt`'s `inlineBodyAddr` reads exactly that entry. Only the four **terminators** (`goto`, `break`, `return`, `continue`) are admitted: a one-lined *assignment* would hand `corpus/selfAssigns.ts`'s `ASSIGN_LINE` the guard as its destination, a row leaving a scan that gates at 0. `compare.mjs` flags `braced + inline`, not `braced`, or a guard changing spelling reads as a guard lost. The precondition was `guardShape.ts`; the benefit is density and nothing else (`peek-a-bin-0qib`).
-
-- **A `for`'s init need not be the statement immediately before the loop; `initHoistable` (`structure.ts`) answers the general case.** The header repeats the init `structureFrom` already emitted, so one copy must go and only the emitted one may; hoisting moves the init **later**, so it is not enough that nothing in between touches the induction variable — the value must be the same after the move. Four refusals: a **whitelist** of what may intervene (`assign`, `store`, `comment`), never a blacklist, since a `label` in between is a jump target a `goto` skips today and would run after the move, and a `raw`'s effects are unknown by definition; a side-effecting init (`hasSideEffects`); any mention in between of the induction variable or of anything the init reads, scanned with `walkStmts` so nested bodies count (refusing on a read costs a `for` and claims nothing false); and a memory write in between when the init reads memory, with no aliasing attempt. `initAt >= 0` is **not** redundant with the equality test — `detectForLoop` can name a statement in a region this walk never emitted, and for an empty `result` both `indexOf` and `length - 1` are `-1`, so an equality-only test copies an init into the header that was never emitted (`peek-a-bin-9q2`).
-
-- **`detectForLoop` must try every increment-shaped candidate, not the first, and a predecessor inside the loop body is not a source of inits.** A loop body routinely increments more than one thing (`for (p…) if (*p=='\n') n++;`), and the search picked `n`, failed the init test and returned null. Candidates are tried in block-id order and the first with an init wins — additive by construction, since a first candidate with an init behaves exactly as before. `p < header.id` stood in for "before the loop" and the latch is routinely numbered *below* its header, so the search found in-loop writes; `!bodyBlocks.includes(p)` plus the header named explicitly is what gets asked. **The suite pinned the proxy as the rule** — `it("ignores predecessors whose id is above the header (assumed back-edges)")`, justified with "real initialisers precede the header in address order", which the corpus refutes. **The rest of the funnel is refused on evidence: the update-position guard is not strict but exact** — every trailing `if` in every candidate loop contains a `continue`, `goto` or `label`, and a `continue` reaches a `for`'s update while the machine's back edge does not. Do not re-attempt it (`peek-a-bin-9q2`).
-
-- **`mov <r32>, <same r32>` on x64 is a zero-extension, and the pass that lost it was `copyPropagation`, not the lift.** A 32-bit write clears bits 63:32, so `mov r8d, r8d` asks for exactly that; `isCopyStmt` admitted the plain `assign`, rewrote every reader to the **pre**-truncation version and dropped it — correctly by its own rule, since nothing in `r8d = r8d` says the high half was cleared. The truncation must therefore be **in the expression**, spelled `x & 0xFFFFFFFF` over the 64-bit parent, which `foldExpr`'s `narrowEnoughForMask32` already refuses to strip. Three bounds: `is64` only (PE32 `mov edi, edi` is the hot-patch pad and a real no-op), **32-bit width only** (`mov al, al`/`ax, ax` leave the parent alone, `mov rax, rax` writes what it read), and `canonReg !== "rsp"`. Scoped to the lift: `firstCalleeSavedWrites`' own self-move test answers a different question and must keep reading `mov X, X` as a non-definition, or real `Sleep(esi)` calls lose their argument (`peek-a-bin-tez6`).
-
-- **A branch condition goes through the lifter's real `parseOperand`.** `extractCondition` used to re-parse `cmp`/`test` operands with a private `parseSimpleOperand` that hardcoded `size: 4` and never called `ripRelative.ts` — the tenth hand-rolled copy of parsing this repo has centralised nine times, and the one that decides what every guard says. `cmp byte ptr [rcx], dl` read as a 32-bit load and rip-relative operands kept the literal `rip + 0x…`; the width alone then recovered frame slots, `INVALID_HANDLE_VALUE` and dozens of structs. `structureCFG` takes `is64` for it and `pipeline.ts` passes it (`peek-a-bin-w6f`).
-
-- **SSA version 0 means a register's *entry* value; the definition counter starts at 1.** `renameExpr` and the phi-operand fill map a read with an empty version stack to version 0, so a `newVersion()` also handing out 0 makes the incoming value and the first definition one `(name, version)` pair — which `ssaopt`'s `sameReg`/`regKey` key on, so copy propagation, constant propagation, GVN and DCE all treat them as one value and a `return` on a path that never assigns the accumulator returns the other path's value (`peek-a-bin-swi`).
-
-- **Version 0's repair is taken at the function's entry and nowhere else.** No statement defines version 0, so `splitStaleReads`' usual copy-at-the-definition has no site; taking it at the top of the *reading* block fails when a strictly dominating block has already written the register — the read binds to a name holding something else, or the copy is taken past the damage and preserves the wrong value under a name that looks recovered. The entry is the one point where the register provably holds version 0, so one copy per register per function serves every stale read of it. The `wcslen`-loop objection needs a block the *unwinder* enters, which has no `idom` entry, so `dominates` declines it structurally. Gated by `corpus/staleReads.ts` (`peek-a-bin-dqpk`).
-
-- **`liftBlock` emits plain register reads; it does not substitute `RegState`'s symbolic value at each read.** It used to, while still emitting the assignment that produced the value, so one machine `call` became three calls in the IR and `sub/sar/dec` emitted RCX subtracted three times. Propagation belongs to SSA, `ssaopt` and `foldBlock`, which have the version information that makes it sound; `RegState`'s symbolic values are still needed for `getCondition` and flag tracking (`peek-a-bin-urs`).
-
-- **No read of RSP may be moved to another program point.** `push`, `pop` and the return address a `call` pushes are not lifted, so RSP changes with nothing in the IR recording it and there is no definition chain to reason over; inlining `mov ebp, esp` across an unmodelled `push` printed `*(int32_t*)(esp + 8)` for `[ebp + 8]` — a base register the instruction never named, one push off the value it did. **Both** `ssaopt.ts`'s copy propagation and `fold.ts`'s single-use inlining guard it, and both are needed: the second reintroduced the defect the moment an unrelated fix made the frame-pointer copy single-use (`peek-a-bin-rt4`).
-
-- **Three stack idioms ARE lifted, because an unlifted `pop` is not an SSA definition and every later read of that register binds to the value it held before.** (a) **`push <imm>` / `pop <reg>`** is a `mov` in stack clothing and MSVC spells it pervasively; unlifted it emitted `*_errno() = 0` for `push 0x16 / pop esi / mov [eax], esi`, an inverted success/failure return. The pairing has one declaration, `disasm/stackIdiom.ts` — a leaf importing nothing, so `decompile/lifter.ts` does not gain `functionDetect.ts`'s Capstone edge — because the same idiom sizes a jump table there and the two could otherwise disagree; `pop esp`/`pop rsp` is refused explicitly, ESP being the one register no stage models; and `loneImmediate` must accept Capstone's `push -2` spelling of a sign-extended `imm8` (`peek-a-bin-3axd`). (b) **The same idiom split across a branch is a phi of immediates**, so the definition must land in *each predecessor* — every real site selects a *different* constant per arm — which is why it cannot live in `liftBlock` at all and is `pipeline.ts` step 2b (`crossBlockPopImmediates` + `liftCrossBlockPops`), appending through **`pushBeforeTerminator`** or the definition lands after the `IRBranch` that reads it. Four refusals make it sound: every predecessor must pair or none do; a pushing predecessor's only successor must be the pop's block; its tail must not be a conditional jump; and the `pop` must be its block's **first** instruction, which makes the interval provably empty and is why no second register-liveness grammar was written. The statement carries the **pop's** address, so `corpus/popReads.ts`' `popsLifted` covers it with no second notion of "handled" (`peek-a-bin-6ilz`). (c) **A matched `push <reg>` / `pop <reg>`** becomes `stk_<pushaddr> = <reg>` and `<reg> = stk_<pushaddr>`, from `matchedStackSlots` (`lifter.ts`) — a whole-CFG depth analysis, since a save and its restore are routinely blocks apart. The slot is identified by the **pairing**, never by an address, so no RSP-relative expression is built; it is a pseudo-**register**, not an `IRVar`, so `copyPropagation` and DCE erase it wherever it recovers nothing and a correctly-read save/restore stays byte-identical. The lattice needs a **TOP** element — seeding an unreached block with the empty stack meets a concrete depth 0 against the real shape and takes the whole region to BOTTOM. It refuses across a `call` (whether the callee or the caller pops is not a fact about the instruction), across a store *through* ESP, and on `pop esp`/`leave`/`enter`/narrow pushes; an immediate or memory push keeps its **depth** and claims no value. `regState` is deliberately not told about a slot pop, or `collectArgs64` would read a stack restore as an invented argument and the arity over-count gates at 0 (`peek-a-bin-6f3v`). **Every replica of the lift loop must carry all three calls** — `popReads.ts`, `staleReads.ts` and `lostDefs.ts` replicate `pipeline.ts` stages 1–3, and a replica missing one keeps reporting rows a landed fix removed, so a green tree reads as red; `stackIdiom.test.ts` fails if any file calling `liftBlock(` does not also call `liftCrossBlockPops(` and `matchedStackSlots(`.
-
-- **A trivial phi's operand is the register's identity, not a spelling.** `insertPhis` mints every phi as `irReg(canonReg(...))`, so an operand is `rsi` at eight bytes even in 32-bit code; `destroySSA` corrects that for a *lowered* phi copy through `registerSpeller`, but `simplifyPhis` substitutes the operand into every reader with no lowering step left to correct it, putting a name the image has no encoding for on the page. It now spells the operand the way the value's own mentions spell it (`registerSpeller`'s `perVersion` rule), with the width following the name; a version with no mention keeps the operand as it was. `corpus/emitAudits.ts`' `unencodableNames` is the only oracle that sees it — gcc declares `rsi` and `esi` as two unrelated `long`s and `staleReads` compares the name a read uses, deliberately (`peek-a-bin-pzws`).
-
-- **`foldBlock` counts uses inside ONE block, so a definition that escapes the block is not single-use.** Inlining moves the right-hand side into its one reader and **deletes the assignment**, which is correct only while that reader is the last thing wanting the value; handed one block's statements, a definition read once locally and again two blocks later looked single-use and every successor read named a register the emitted C never assigns. `blockLiveOut` (`fold.ts`) is ordinary backward may-liveness over the CFG, computed once on the unfolded program in `pipeline.ts` step 4, and `foldBlock` refuses any candidate in its block's live-out set. Three rules: the refusal is `killedInBlock`-guarded, since a later definition of the same register ends this value's live range and the live-out set then describes the *other* definition; a **`raw` reads nothing** (an unlifted instruction reaches the page as a comment, so its register names are not reads) while a **`branch` very much is**, its condition being extracted after this stage; and liveness is taken **before** any folding, erring safe. `blockLiveOut`'s block parameter is structural, not `BasicBlock`, so `fold.ts` still imports only `ir.ts`. Gated by `corpus/lostDefs.ts` (`peek-a-bin-7eyn`).
-
-- **`analyzeStackFrame` and `inferSignature` take `arch: ImageArch` ahead of `is64`, because `is64` is the PE32+ magic and true for ARM64.** Both are x86 instruction grammars; the parameter is required and positional so an unthreaded call site fails to compile. Both **return empty rather than throwing** — the throw arm is for stages whose whole output is instructions, and these are per-function analyses feeding a view whose caller must still render; `unsupportedOnArch` is not called, there being no channel through `StackFrame | null`. The two refusals have different standing: `analyzeStackFrame` already answered null for every A64 function, so it is unfalsifiable on this corpus and pinned by `stack.test.ts` alone, while `inferSignature` was answering `{ convention: "fastcall", paramCount: 0 }` and that reached the panel — hence `FunctionSignature | null`, since the type could not say "unknown". Answering `"aapcs64"` instead was refused: the count is the false half. The refusal must precede `inferSignature`'s empty-instruction early return, the one path that answers from `is64` without looking at an instruction. `src/disasm/__tests__/archThreading.test.ts` guards what the type cannot see — a caller writing a literal `"x86"` instead of deriving the arch from the machine word (`peek-a-bin-56q`).
-  - **…AND THE SAME FILE THEN INVENTED, ON x86, EVERYTHING ITS ESSAY FORBIDS ON A64. FOUR SITES, ALL CLOSED, AND THE FIRST IS A DELETION.** (1) **The x64 stack-argument claim is GONE.** `inferSignature64` read `[rsp + 0xN]` with `N >= 0x28` as argument `floor((N - 0x28) / 8) + 5` **while tracking no `sub rsp, N` and no `push`** — so it described the function's own OUTGOING argument area, where MSVC parks `mov [rsp+0x20], rax` on every non-leaf x64 function. At `97ef927` `t64!sub_140001000` (`sub rsp, 0x848`) reported **262** parameters against the decompiler's 4; 54 over-claiming functions per x64 binary, worst +258. **Repairing the arithmetic here was REFUSED on evidence, and the refusal is the deliverable**: `analyzeStackFrame` records every `[rsp + N]` as a NON-parameter by construction (`isArgumentSlot` is asked only of `bp` offsets) — the same judgement `inUnfilledHomeSpace` and `peek-a-bin-g186` are made of; an entry-SP tracker would be a **second stack grammar inside `signatures.ts`**, which is `peek-a-bin-w6f`'s shape and belongs in `stack.ts` if anywhere; and no instrument here can see a declared parameter count from outside the tool. `paramCount` is now the register scan alone, 0..4, which is exactly `promote.ts`'s `Math.min(paramCount, 4)`. **Reopening condition, named so this is a bound and not a dead end**: an entry-SP displacement published by `stack.ts` (allocation AND pushes, on `frameDelta`'s model) plus such an oracle. (2) **The x86 count reads `stack.ts`'s recovered frame** (`framedParamCount`, `max arg_<N> index + 1`) instead of scanning `[ebp + N]` operand text with **no frame-pointer check** — `peek-a-bin-ikd`'s defect verbatim, on exactly the population `structs.ts` keys `^arg_(\d+)$` to exclude. (3) **`thiscall` required ECX and never consulted EDX**, so every 32-bit `__fastcall` helper was mislabelled; `registerConvention32` reports `fastcall` when EDX is read-before-written too, and refuses EDX alone. (4) **No instructions in range returned `{ convention: is64 ? "fastcall" : "cdecl", paramCount: 0 }`** and now returns `null` — on x86 so does "no `ret N`, no register convention, no recovered argument slot", because x86 has four conventions and naming one is a claim, where x64's `fastcall` is a property of the architecture. `stackFrame` is an optional SIXTH parameter and is **three-valued**: `undefined` = compute it, `null` = the caller found none. **Consequences to keep in view**: `paramCount` on x86 counts stack slots only, so a `this` in ECX is a stated under-count (`peek-a-bin-f51x`'s direction, refused deliberately for want of an oracle); the architecture refusal is now **unobservable at an empty instruction list**, every arch answering `null` there, so that pair of assertions is inert and both `signatures.test.ts` and `stack.test.ts` say so; and t32/w32 emitted C is **byte-identical** because `signature` is read at exactly one place, `promote.ts:806`, gated on `is64`. Gated by `signatureAgreement` (`peek-a-bin-j4uk.6`).
-
-- **`arg_N` in a stack frame means argument *position*; the frame register's displacement from the entry stack pointer is the published quantity, `StackFrame.frameDelta`.** `stack.ts` numbers a slot positionally only from a recovered displacement; otherwise the name is offset-based (`arg_0x10`). The name is the only channel to `structs.ts`, which keys parameter provenance off `^arg_(\d+)$` precisely to exclude frame-pointer-omitted RBP — where `[rbp+0x10]` is a struct field access, not an argument — so do not loosen it. `promote.ts`'s `frameRegisterAliases` follows a `splitStaleReads` copy of the frame register (`ebp_1`) **only when `frameDelta !== null`**: a frame pointer is invariant so every version denotes the same frame, and under FPO two versions are two objects. The stack pointer gets none of this — it moves. The old boolean `StackFrame.framed` answered two questions with one bit ("is it a frame pointer" and "is the geometry canonical") and is gone; each consumer asks its own question of `D`. **The FPO refusal is unfalsifiable on this corpus** — removing it leaves emitted C byte-identical — but the *mechanism* is worth 1147 sites, so do not remove it because nothing moved. **Refused and not to be re-attempted:** asking `inlineFrameGeometry` whether the frame register survives to the returns — `stack.ts` has no CFG and can only ask in address order, while MSVC lays a mid-function epilogue before code that executes earlier, so it refuses the frame of every function with an epilogue. The two real mid-body repurposings (`longjmp` reloading EBP out of a `jmp_buf`) are now a gated row, `corpus/frameRepurpose.ts`, whose oracle is the instruction stream and which **classifies** the write — `pop <fp>`/`leave`/`popa` are epilogue restores and open no window. (`peek-a-bin-5zpo`, `peek-a-bin-cvri`, `peek-a-bin-633s`, `peek-a-bin-nhw0`)
-
-- **…and the copy is only recognisable while the tie-back survives: DCE deletes `ebp = ebp_1`, leaving `ebp_1 = esp` alone, which must be refused** (no read of RSP may be reinterpreted at another program point). Shape 3 is `StackFrame.frameEstablishedAt` — the address of the instruction that set `D` — with `frameRegisterAliases` seeding its fixpoint from any `assign` at that address whose destination is a variable. It keys on the **address**, never the variable's name (`ebp_1` is a spelling, not dataflow) and never the source, which is what makes the shifted `lea rbp, [rax - 0x488]` form work. Undo it and declared slots go unpromoted, spelled `*(int32_t*)(ebp_1 - N)` beside a `var_4` nothing reads. No corpus gate can see any of it — the base output was true, merely less readable. (`peek-a-bin-xb2f`)
-
-- **…and `isParam` is decided by that displacement, not by whether the prologue was canonical.** `inlineFrameDisplacement` computes `D = E - V`; argument 0 is at `[E + slot]`, so `[<fp> + off]` below `D + slot` is below the return address, hence a local. A refusal is **total** — nothing recorded, the deref left alone — since renaming it to a local claims a stack slot as falsely as calling it an argument. Gating on the old `framed` instead was measured and **refused**: it demotes genuine `push*; mov rbp, rsp` arguments. `promote.ts` no longer re-derives the threshold either (it had a hard-coded `is64 ? 0x10 : 0x8`): a positive `bp:` key resolves in `paramLookup`, a negative or `sp:` one in `varLookup`, so the argument-area judgement lives in one file; `StackAccess.aboveFrame` asks that structural question, and it must not consult both maps or route on the name. `addressesOwnFrame` refuses `D < 0` outright — the frame register pointing above entry `sp` means the function is establishing somebody else's frame (`__SEH_prolog4`), where the threshold would record the caller's return address as `arg_2`. (`peek-a-bin-ikd`, `peek-a-bin-s7hl`)
-
-- **…and the prologue may be in another function: MSVC delegates it to `__SEH_prolog4`.** `push <framesize> / push <scopetable> / call __SEH_prolog4` gives a perfectly ordinary EBP frame; `hasFramePointerPrologue` looked only at the function's own first two instructions, so 296 genuine argument accesses were named `arg_0x8` and were invisible to `findOrCreateLinked`. The rule is stack **arithmetic**, not a byte pattern: `lea <fp>, [<sp> + N]` establishes the *caller's* frame precisely when `N + delta === -slot`. Three refusals carry it — the caller may only `push` immediates before the `call`; the helper may not `push <fp>` (a callee-saved save satisfies the arithmetic); `<fp>` must survive to the helper's `ret`. Residue is PE32 detection over-production, whose prologue is outside the detected range. (`peek-a-bin-emlv`)
-
-- **…and on x64 an index is not enough to name a slot: the home space is four slots the caller reserves and the callee may spend on anything.** `[E + slot]`…`[E + 4*slot]` holds argument N only if the callee spilled that register there itself; `ARG_AREA.homeRegs` is the geometry and is **empty on x86**, where the caller pushes everything. The discriminator is `inlineFrameGeometry`'s `homed` — a spill of the argument's *own* register while `argsPristine` holds (no instruction has yet written any register but `sp` and `<fp>`), so no liveness analysis is needed. An unfilled home slot is **withdrawn entirely** by `inUnfilledHomeSpace` (`stack.ts`), not re-labelled: it is not a local either, the caller owns the storage. Getting this wrong is not cosmetic — `paramIndexByBase` lets a home slot's `arg_<N>` displace the argument register's provenance claim, so a saved register named `arg_0` links to whatever callers pass. **Do not chase `offsetNamedArgs` to 0**: a variant naming all 35 slots also reaches 0 and moves nothing else in the report while printing four declared parameters that a callee-saved save overwrites at entry; `offsetof` at ratio 1.00 sees a self-consistent declaration, never a wrong parameter identity, and the only instrument that separates the variants is the declared parameter list read against `objdump`. (`peek-a-bin-sx57`, `peek-a-bin-g186`)
-
-- **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf` / `rewriteBodies`, one declaration each.** `rewriteBodies` was a verbatim copy in `structure.ts` and `cleanup.ts` plus two specialisations under other names — four hand-synced `IRStmt` switches all ending in `default:`, so a new body-carrying kind would be returned unrecursed in every one, silently. Both now end in an exhaustive `never`. `for`'s `init` and `update` are single statements, not lists, so neither reaches inside them; a caller needing that wants `foldStmt`'s shape. (`peek-a-bin-svwt`)
-
-- **`+`, `-` and `*` do not model wraparound, and the const-const fold site has no width evidence to key one on.** `knownWidth` returns null for an `IRConst` deliberately — `IRConst.size` is the CPU *mode*, 8 for every immediate in a 64-bit binary, not the operand's width. Wrapping them with `| 0` / `Math.imul` the way the bitwise arms do **introduces** a defect: those go through `fold64`, these do not, so a correct 64-bit `add rax, 1` over the boundary becomes a negative constant. The class does not occur in this corpus and no gate can see either direction; `is64` is the only sound evidence and `fold.ts` deliberately imports only `ir.ts`. `fold.test.ts` carries `does not wrap an arithmetic fold to int32`. (`peek-a-bin-ivj5`)
-
-- **`navigator.clipboard` is a SECURE-CONTEXT API and this app has an HTTP deployment, so every
-  copy goes through `utils/clipboard.ts`'s `copyText`.** Over plain `http:` on anything but
-  localhost the whole `clipboard` object is absent from `navigator`, so
-  `navigator.clipboard.writeText(…)` is not a call that fails — it is a **TypeError at the property
-  access**, on click. At `09a160e` there were **18 unguarded sites across 9 files** and zero guards,
-  so on the nginx HTTP deployment every Copy affordance in the app was dead. One declaration, for
-  the `pe/sections.ts` reason. Four rules: the feature test names **`writeText`**, not `clipboard`,
-  since the object can be present with a partial surface; `writeText` is called **before the first
-  suspension**, so it stays inside the user gesture — an `await` above it fails in a browser while
-  every ordinary test still passes, and `clipboard.test.ts` asserts the ordering directly; it is
-  called **on** the clipboard object, never through a detached reference, which a native method
-  rejects with `Illegal invocation`; and it returns a **boolean**, never throws. The four sites with
-  a "Copied" tick flash **red** on `false` (`CopyFlash` carries the outcome, which is why
-  `copiedAddr` is not a bare address — the type change is what forces `DisassemblyRows` *and*
-  `CFGView` to be revisited together). **The other fourteen fail silently: the app has no toast
-  mechanism and one was not invented for a bug fix.** A `document.execCommand` fallback was **costed
-  and REFUSED** — deprecated, ~30 lines of selection choreography, a return value that has lied on
-  Safari, unreachable from the two Ctrl+C handlers, and untestable in jsdom, which has neither
-  `execCommand` nor a real `Selection`. **Two controls came back inert and both are recorded in the
-  tests**: removing only the feature test is subsumed by the catch, and — the transferable one —
-  `expect(…).not.toThrow()` around a click is **inert at any site that changes no state after the
-  copy**, because React does not rethrow out of `dispatchEvent`; the unguarded call left
-  `DecompileView` 87/87 green and the instrument had to become a `window` `error` listener.
-  (`peek-a-bin-p0tz`)
-
-- **A cursor-following filter must fall back VISIBLY, and that is the OPPOSITE direction from the
-  `omitted` rule.** `XrefPanel`'s scope chain tested `scopeMode === "function" && currentFuncAddr !=
-  null` per arm, so a scope whose address lapsed fell through: the full list returned, the "Func"
-  button vanished, and "All" was not highlighted either — an unfiltered list with no control
-  claiming it. The house rule this *looks* like a case of (`DetectResult.omitted`,
-  `analysisNotice`) forbids a **narrower** answer wearing a complete one's shape; here the answer
-  was already complete and the **controls** had gone quiet, so widening and *saying so* is the
-  repair. Holding an empty scope and explaining it was refused because these scopes follow the
-  **cursor** rather than being values the user entered — a cursor crossing padding between detected
-  functions would blank and refill the panel for a lapse the user never caused, and PE32 detection
-  is known to under-produce so those gaps are ordinary. The fallback is **derived, not written
-  back**, so the preference survives the lapse and clicking "All" during one makes the widening
-  stick. `scopeAvailable()` is the one declaration of "has the caller given this panel the address
-  this scope needs", read by the filter chain *and* by the buttons, so a scope can never be applied
-  without a button claiming it nor offered without an address. (`peek-a-bin-jvvi`)
-
-- **`Ordinal_<n>` is a WIRE FORMAT, not a label: `parsePE` writes it and `computeImphash` parses it
-  back out.** Nothing in the type system connects the two — they are in different files and neither
-  points at the other — so respelling the parser's output used to change every affected imphash
-  **silently**: an ordinal import falls through imphash's ordinal branch into its by-name branch and
-  hashes the literal display text. A hash has no runtime symptom, because it is only ever compared
-  with another tool's answer, so the failure mode is a corpus match that quietly stops matching.
-  `ORDINAL_IMPORT_PREFIX` and its two functions in `pe/ordinalTables.ts` are the one declaration
-  now, and `pe/__tests__/ordinalImports.test.ts` states the property directly — move the prefix and
-  the digests must not move. `parseOrdinalImport` returns **null**, never `NaN`, for a malformed
-  tail, since callers read null as "this is a name". **The view resolves through the SAME
-  `resolveOrdinal` imphash uses**, so the Imports tab can show `WSAStartup` for `ws2_32!115` without
-  a second table to drift: it resolves in the memo *above* the filter, so the name a reader sees is
-  the name they can search for, and marks the row `#115` because the name is inferred from a table
-  rather than read out of the file. An ordinal the tables do not cover keeps its honest
-  `Ordinal_<n>` spelling. (`peek-a-bin-p0qw`)
-
-- **A CodeView PDB GUID is a `GUID` STRUCT, not sixteen bytes: the first three fields are
-  little-endian integers and only `Data4` reads straight through.** `CV_INFO_PDB70.Signature` is
-  `{ DWORD Data1; WORD Data2; WORD Data3; BYTE Data4[8] }` in native order, and the canonical text
-  form prints the first three as integers — so hex-joining all sixteen bytes in file order
-  byte-swaps the first three groups. `parseDebugDirectory` did exactly that. Same class as
-  `Ordinal_<n>` above and **not** the `>>> 0` class: the GUID is the symbol-server key for the PDB
-  (`foo.pdb/<GUID><Age>/foo.pdb`), a value nothing inside the tool ever compares with anything, so
-  a wrong spelling is well-formed and simply matches nothing. **The oracle is real MSVC output, not
-  a fixture**: `CoCreateGuid` mints version-4 UUIDs and the version nibble is the first digit of the
-  THIRD group — precisely the group this swap moves — reading 4 on all six corpus binaries under
-  the corrected reading against E / 4 / 7 / B under the old one, with the RFC 4122 variant bits
-  sitting in `Data4` and reading `10` either way. `pe/__tests__/metadata.test.ts` had **pinned the
-  defect as the rule**, asserting `01020304-0506-0708-…` under the comment "Bytes 01..10 in file
-  order, formatted as a GUID string" — a restatement of the implementation rather than of the
-  format. **Nothing static could see it and no corpus gate can**: both spellings are `string`, and
-  a comment reaches neither the emitted C nor the IR. The instrument is `HeaderView.dom.test.tsx`,
-  which derives the expected text from the fixture's own bytes with an independent swap and pins
-  the literal beside it. A neighbouring one-character fix in the same file: `parseRichHeader`'s
-  `useCount` was `getUint32(…) ^ xorKey`, and `^` is an int32 operator, so a stored `0xFFFFFFFF`
-  reached the Rich Header table as `-1`; `toolId`/`buildId` are masked back to 16 bits and were
-  never affected. **Two things left alone, deliberately**: `parseDebugDirectory` never reads
-  `SizeOfData`, so the PDB path scan runs to the next NUL *anywhere in the file* — a control
-  zeroing that field is **inert** and the bound to choose is a judgement, not an obvious fix; and
-  the Data Directories table heads the Certificate Table's first column "RVA" when the format says
-  it is a **file offset**, which is what `dumpbin` prints too. (`peek-a-bin-p0qw`)
-
-- **`>>> 0` on a value that can exceed 2^32 is a TRUNCATION, not a respelling, and the Headers tab
-  is where that bit.** ToUint32 is the right way to print a value read as a signed int32 unsigned —
-  which is why `SectionTable` uses it on `characteristics` — but `HeaderView`'s `CopyableHex` is
-  handed 64-bit quantities: a PE32+ `ImageBase` is 0x140000000 for an MSVC x64 EXE and 0x180000000
-  for a DLL, and every TLS field is an image-based VA. Applied unconditionally it printed
-  `Image Base 0x0000000040000000` two rows under an `Entry Point` of `0x140001000` the same panel
-  spelled correctly — self-contradictory on essentially every 64-bit binary the tool opens, and
-  reachable with no gate in front of it. Reinterpret only what is actually **negative**. **No static
-  instrument can see this class**: `value` is `number` either way, `>>> 0` beside a `padStart(16)`
-  reads as deliberate, and the corpus never renders. The instrument is `HeaderView.dom.test.tsx`,
-  which asserts printed text against the fixture's own bytes rather than that a table appeared.
-  (`peek-a-bin-p0qw`)
-
-- **A number the parser CLAMPED and the raw number it clamped are two true facts that mislead as a
-  pair, and the clamp is DERIVED rather than published.** `numberOfRvaAndSizes` is
-  attacker-controlled, so `parseDataDirectories` reads `Math.min(count, 16, fits)` entries while
-  `optionalHeader.numberOfRvaAndSizes` keeps the raw value — and `HeaderView` printed
-  `Number of RVA and Sizes: 40` directly above a table of SIXTEEN rows. Same class as the
-  Certificate Table's mislabelled offset, in the **adversarial-input** direction: a declared 40 is a
-  crafted-PE tell the parser noticed on purpose, and the one surface a human reads was the one place
-  it disappeared. **`dataDirectoryClamp` (`pe/dataDirectories.ts`) is the one declaration**, read by
-  the panel's row *and* by `analysis/anomalies.ts`, which is where "this file claims something
-  implausible" belongs and is the surface an analyst opens rather than one they must notice.
-  **The `importsTruncated` precedent was considered and deliberately not followed**: that flag
-  exists because a walk cut short at a bound is *shaped exactly like* a complete short list, so
-  nothing downstream can recover it — whereas `dataDirectories.length < numberOfRvaAndSizes` **is**
-  the clamp exactly, over two fields already on `PEFile`. A parser field there would be a second
-  declaration that can disagree with the array it describes. The clamp carries a `reason`, because
-  "the count exceeds the format maximum" and "the file ends mid-table" are different findings and
-  only the second says bytes are missing. Nothing static sees any of it — both numbers are `number`
-  and the corpus never renders. (`peek-a-bin-dd94`)
-
+refused. **Read the long-form entry before changing the code it describes.**
+
+### Decoder and workers
+
+- **Nothing may call `cs.disasm` directly.** capstone-wasm's linear memory is a fixed 16 MiB, the
+  input is copied onto a ~65.6 KiB stack, and a window much over 64 KiB throws and leaves the module
+  **permanently dead** — silently, because every scan loop reads a throw as "not code, skip one".
+  `createScan` clamps to `CS_WINDOW_BYTES` (0x2000) and `CS_MAX_INSNS_PER_CALL` (2048) and probes
+  the engine after a run of failures. **Lifting the ceiling for speed was measured and refused**
+  (0.035%). The `cs_insn` ABI in `capstoneReader.ts` is **hard-coded and a version bump can change
+  it silently** — a wrong offset yields plausible output for every instruction; the both-readers
+  differential test is the whole mitigation, and a *runtime* self-check was refused.
+- **Don't put a cheap request on the disasm worker** — it services messages serially. That is what
+  the metrics worker is for. A `useMemo` is not an option either: it cannot yield.
+- **Never put a caller-owned buffer in a worker transfer list, and never walk below the top level.**
+  Structured clone of an `ArrayBufferView` serialises its whole backing buffer, so a 4 KiB
+  `disassemble` used to copy 253 MiB. `prepareBinaryArgs` replaces each **top-level** binary argument
+  with a private `slice()` and transfers **only buffers it allocated itself** — the invariant that
+  makes the detach hazard impossible. The walk stays top-level because transferring an
+  `Instruction[]`'s per-element buffers is **strongly superlinear**. Slicing wins even when the copy
+  is the same size, so there is no threshold below which it is skipped.
+- **Uploading the section once under a handle was MEASURED AND REFUSED** — the saving is under a
+  tenth of one percent, and no key is both cheap and sound (a content key costs the pass it saves;
+  an identity key rests on an invariant nothing enforces). **The general rule: the key comparison
+  must be cheaper than the work it saves.** `Arm64SweepCache` and `CallSummaryCache` pass it.
+- **Where a payload IS worth cutting, send only what the consumer reads — never worker-side
+  residency.** `decompileFunction` sends this function's slice (16-68x cheaper, retention still
+  zero); on a miss the **worker asks** (`{ needInstructions: true }`) rather than the client
+  predicting. `funcExceptionRecord` applies one **idempotent** rule on both sides, so no protocol is
+  needed — its predicate is a **begin-address equality**, not an extent intersection, and it
+  recovers the image base from the RVA/VA pair rather than slicing naively.
+- **One x86 load swept `.text` three times**; `linearSweep.ts` is the one declaration. `SectionMemo`
+  has **three** parts: bytes, load address, and **decoder handle by identity** — x86-32 and x86-64
+  disagree about what a byte string means. `hybridDisassemble` shares it via `gridScan`: **peek,
+  never `sweep`** (a `get` evicts the section the other RPCs share), a served `bytes` must be a
+  private `.slice()`, a miss delegates, and a run stops where the grid stops being **contiguous**.
+- **`detectFunctions` being "13x the next RPC" is arithmetic, not a diagnosis** — it is the RPC that
+  fills the cache. Nothing is superlinear. **Almost nothing in detection is worth changing**; the one
+  thing taken was the SEH32 prologue head, because the work was provably unread.
+
+### PE parser
+
+- **The attacker-controlled-bound class**: every reader must state what bounds it, whether the
+  *work* is bounded or only the reads, whether two file-supplied counts **multiply**, whether
+  anything allocates a file-chosen size, and whether it runs on the main thread. Sites swept and
+  bounded: PDB path scan, imports (descriptors × thunks — the budget is **global**, since every
+  descriptor may name one array), ARM64 unwind codes, debug directory, export tables, relocation
+  blocks, `extractStrings`, `readDERChildren`, and `readScopeTable`. `sectionRawLimitForRva` is the
+  **one declaration** of the section bound, and it is the bound that improves the *answer*.
+- **How a narrowing is admitted depends on its shape.** A **string** carries `TRUNCATION_MARKER`
+  in the value. A **list** cannot — an invented entry would be a lie inside data feeding a digest —
+  so the admission is a flag plus the rendered **count**, and `computeImphash` **returns `null`**
+  rather than hashing a short list (its parameter is the **`PEFile`**, so forgetting to ask is a
+  compile error). A **globally-budgeted walk** puts the admission on the count line, not a row,
+  because no single entry is "the incomplete one". Every flag is decided **exactly** — control must
+  have read past the bound — so a value of exactly the cap is not marked.
+- **`Budget.incomplete` means "an entry the file declares was not walked", whatever stopped the
+  walk.** Its old name (`stopped`) read as a fact about the budget, so three other abandonment
+  points never set it. `depth >= MAX_DEPTH` and a repeat visit deliberately still do not.
+- **A directory the file declares and the reader gave up on is NOT a directory the file lacks.**
+  `directoryDeclared` / `certificateUnreadable` / `resourcesUnreadable` are derived from what is
+  already public rather than being new flags, and `parser.ts`'s resource gate is the **same call** —
+  a premise that drifts from the gate claims a read failed on a directory nothing attempted.
+- **An admission that stops at the browser UI is no admission at all on the two surfaces that
+  outlive the session.** `pe/admissions.ts`'s `parseAdmissions(pe)` is the one declaration for MCP
+  resources and the markdown report; **the value is PROSE, not a flag**, because the consumers are
+  an LLM and a human reading a file months later. Empty means the parse was whole. The MCP list
+  resources moved their arrays **under a key**, unconditionally, since a shape that varies with the
+  file is worse to consume than one extra key.
+- **A green "Signed" pill is a verified answer's shape, and the parse established only that a
+  `WIN_CERTIFICATE` header read.** Nothing here computes a digest, checks a signature or builds a
+  chain, so the pill reads `Signed (unverified)` in a **neutral** chip with a grey scope sentence.
+  **Expiry is a fact about the CERTIFICATE, never about the signature** (signatures are routinely
+  countersigned and this tool reads no timestamp), so it is an amber row that does not move the
+  pill. `certificateValidityState` has **three** states — folding an unreadable date in with
+  `current` is the green pill's own defect one level down. The view must not re-parse the display
+  string: `parseUTCTime`/`parseGeneralizedTime` return `{ text, ms }` from one reading.
+- **A Distinguished Name is not its CN, and a PKCS#7 `certificates` SET is not one certificate.**
+  `subject`/`issuer` hold the rendered DN in **encoding order**; an attribute with no short name is
+  spelled as a dotted OID rather than skipped. `certificateCount` is a **count, not a validated
+  chain**. `BMPString`/`T61String` are decoded by hand (`TextDecoder` labels may be absent).
+- **`Ordinal_<n>` is a WIRE FORMAT**: `parsePE` writes it and `computeImphash` parses it back, with
+  nothing in the type system connecting them, so respelling it silently changes hashes. The view
+  resolves through the **same** `resolveOrdinal` and marks the row `#115` because the name is
+  inferred rather than read out of the file. `parseOrdinalImport` returns **null**, never `NaN`.
+- **A CodeView PDB GUID is a `GUID` STRUCT** — the first three fields are little-endian integers, so
+  hex-joining sixteen bytes byte-swaps them. Same class as `Ordinal_<n>`: a value only read *out* of
+  the tool, so a wrong spelling matches nothing while looking well-formed. The oracle is real MSVC
+  output (the version-4 nibble sits in the swapped group). Beside it, `parseRichHeader`'s `^` is an
+  int32 operator, so a stored `0xFFFFFFFF` use count reached the table as `-1`.
+- **`>>> 0` on a value that can exceed 2^32 is a TRUNCATION.** Right for `characteristics`, wrong for
+  `HeaderView`'s `CopyableHex`, which is handed 64-bit quantities — it printed
+  `Image Base 0x0000000040000000` under a correct `Entry Point 0x140001000`. Reinterpret only what
+  is actually **negative**.
+- **A number the parser CLAMPED and the raw number it clamped mislead as a pair.**
+  `dataDirectoryClamp` is derived rather than published, because `dataDirectories.length <
+  numberOfRvaAndSizes` **is** the clamp exactly; a parser field would be a second declaration that
+  can disagree with the array it describes. It carries a `reason` — "count exceeds the maximum" and
+  "the file ends mid-table" are different findings.
 - **A derived LABEL must come from the value it labels, and a flag row must admit the bits its table
-  does not name.** Two more of the same class in `HeaderView`, both found by reading rather than by
-  a failing test. `Magic` spelled its parenthetical `pe.is64 ? "PE32+" : "PE32"`, and `is64` **is**
-  `magic === 0x020B` — so every third value, e.g. 0x0107 (ROM), would have printed `(PE32)`, where
-  the Machine and Subsystem rows beside it both admit an unmapped value with `(Unknown)`. It is
-  **unreachable through `parsePE` today** (which throws on any other magic), so that half is a guard
-  against a widening there, not a repair — stated rather than implied. `COFF_CHARACTERISTICS` was
-  separately missing all three deprecated bits (0x0010, 0x0080, 0x8000), and neither flag row said
-  anything about a set bit it could not name, so `0x0042` rendered exactly as `0x0002` would.
-  `decodeFlags` now returns the leftover mask and `FlagChips` prints `(unknown bits: 0x…)` — the
-  admission cannot be closed by completing the table instead, since 0x0040 is reserved by the format
-  and has no name to give it. The admission is deliberately **not** a chip: a chip means "the format
-  names this bit", which is the opposite of what it says, and the suite's `chips()` helper reads
-  `span.rounded`. (`peek-a-bin-dd94`)
+  does not name.** `decodeFlags` returns the leftover mask and `FlagChips` prints
+  `(unknown bits: 0x…)` — deliberately **not** a chip, since a chip means "the format names this".
+- **`.pdata` is authoritative for x64 function boundaries and beats prologue scanning.** Evidence
+  about an *entry point* still wins inside a range. **The x64 language-specific data is not
+  self-describing**, so `readScopeTable` admits a table only behind a four-part structural check;
+  `handler == 1` is the format's own spelling of `EXCEPTION_EXECUTE_HANDLER` and must never be
+  resolved as an address; a failure yields **nothing rather than a short table**; and `undefined`
+  means "the record did not say", never "there are no regions".
+- **A hybrid image has TWO exception tables and `pe/pdata.ts` reads the one the machine word
+  describes** — right for every hybrid case and incomplete for all of them. **ARM64X carries 0xAA64
+  and is refused by decode rate; ARM64EC does NOT — it is marked 0x8664** and is disassembled as x64
+  with nothing said, knowingly. 0xA641/0xA64E never appear in a linked image; **do not re-add
+  either**. Rests entirely on documentation.
+- **A resource LANGUAGE level can be name-identified and must not be flattened to 0** — 0 is a real
+  LANGID. `ordinalLabel` is the one declaration of the `#` marker; `keyPart` is a **different
+  question** (which rows are the same row) and deliberately not the same function.
 
-- **`lineMap` is MANY-TO-ONE, so anything keying a rendered element off an address alone renders one
-  per sharing line.** Several emitted C lines routinely carry one instruction address —
-  `DisassemblyView` builds an address → `line[]` map for exactly that reason, and `emit.ts`'s
-  `placeGotoLabels` says in as many words that "if an address somehow appears twice the earlier copy
-  is the one the jump was structured around". `DecompileView`'s comment editor decided `isEditing`
-  from `editingComment.address` alone and mounted N identical `<textarea>`s for one comment, each
-  running `focusOnMount`, so focus landed on the last. The rule: resolve the address to **one**
-  anchor line and take the **lowest** — `placeGotoLabels`' own tiebreak, and the line the auto-scroll
-  effect reaches with `Math.min`, so the editor opens where the panel just scrolled to.
-  `syncDisabled` must be re-tested at the anchor rather than inherited, since on the AI tab the map
-  numbers a different body. (`peek-a-bin-p0qw`)
+### Detection and disassembly
 
-- **A NUL-terminated string read out of a PE must be bounded, and `SizeOfData` alone is not the
-  bound.** `parseDebugDirectory` (`pe/metadata.ts`) scanned for the CodeView PDB path's NUL from
-  `pointerToRawData + 24` forward through the **whole buffer** and decoded everything it passed —
-  inside `HeaderView`'s `useMemo`, i.e. during a render on the main thread, on images this tool
-  opens at a couple of hundred MiB. Measured on a 1 MiB NUL-free fixture: 1,049,036 characters
-  returned against 4,109 after. The scan is now `min(declared size, MAX_PDB_PATH_BYTES = 4096, end
-  of buffer)`, and **all three are needed**: `SizeOfData` is as attacker-controlled as the bytes it
-  describes and is the only bound that can be too *small*, so honouring it alone silently shortens
-  a valid path — the `Ordinal_<n>`/imphash trap again, since the path is read *out* of the tool for
-  a symbol server and a short one matches nothing while looking well-formed; a cap alone still lets
-  a hostile record spend the whole cap. A declared size at or under the 24-byte fixed part is
-  **not credible** and drops to the cap rather than being honoured. **When the scan is cut short
-  the VALUE says so, not just the type**: `pdbPath` carries `TRUNCATION_MARKER`
-  (`… <truncated>`) beside the `pdbPathTruncated` flag, because a narrower answer must not wear a
-  complete one's shape and the one render site prints `pdbPath` verbatim with no knowledge of the
-  flag — there is no toast mechanism and one must not be invented for a bug fix. **The control that
-  exposed this was inert** (zeroing `SizeOfData` moved no row, because nothing read the field), and
-  the zero row **remains** inert as a before/after control; the row that proves the field is read
-  is the understating one. Cases and six discriminating controls in
-  `pe/__tests__/malformed.test.ts`; corpus byte-identical over four binaries. (`peek-a-bin-nygv`)
+- **A jump-table case target is not a function start.** Adding one to the entry set ended the
+  dispatching function at its first case; `buildCFG` then rejected every target as a block leader and
+  `structureSwitch` was dead code on real input. Case targets go to a separate set, outrank a
+  byte-pattern guess, and are fed to `hybridDisassemble` as seeds.
+- **A recovered jump table's bytes are data, and only `DetectResult.jumpTableSpans` says so** —
+  nothing walks *into* a table, so gap fill decodes it. The reported extent is the one actually
+  **read**, never the count the bounds check claimed; **omitting the argument keeps the old
+  behaviour deliberately**. `unboundedTableExtent` reports an extent with **no targets** (case order
+  unknown), scans in **both directions**, and errs short. `overlappedTableExtent` starts past the
+  instruction that overlaps entry 0 — a byte belonging to a decoded instruction cannot be a table
+  entry — and takes its evidence by **deferral** rather than a forward probe. **Shape 2 (a negative
+  index) is not a defect and must not be "fixed".** `boundedCaseCount` is the one declaration of what
+  bounds a table; `and <index>, imm` is the **stronger** form; a register check alone is refuted by
+  measurement, so `readAbsoluteTable` consults `tablesByBase` but **never takes a longer run than
+  the first reading**.
+- **An MSVC x86 `__finally` funclet is not a function, and the SEH scope table must not PROTECT
+  one.** `interiorBranchedOverStarts` has **five admissions**, each naming a different kind of
+  evidence, and the fifth uses `seh32FuncletRelation` as a **relation**, never a `strong` membership
+  — feeding those handlers into `strong` re-introduces withdrawn starts, each cutting its parent in
+  half. The frame test in admission (4) is the whole restriction and only the emitted C can see it;
+  dropping the "no caller outside the previous function" test swallows `__SEH_epilog4`. **The rest
+  of the family is refused on evidence, and the count-chasing rule is invisible to every gate.**
+- **A folded funclet leaves its parent calling an identifier the output never defines** — measured,
+  adjudicated and deliberately **NOT repaired**. `goto` is wrong, re-emitting restores the defect,
+  and a comment is available at under half the sites and would state something false at the rest.
+  Watch `internalUnlabelled`, not `internal`.
+- **"A call target immediately after a `ret`/`jmp` is a function start" is deleted, and reviving it
+  as *strong* evidence is worse than inert** — it describes the withdrawn funclet population exactly.
+- **A TLS callback is a FILE-DECLARED entry point and belongs in `strongStarts`.** **THE UNIT IS THE
+  WHOLE RISK AND NOTHING IN THE TYPE SYSTEM HOLDS IT** — every address in the bag is a VA, by two
+  separate readings of the format rather than by construction; a caller "converting to an RVA like
+  everything else" compiles and every callback is silently dropped. The mirror defect was live:
+  `ExportEntry.address` really *is* an RVA and `mcp/session.ts` passed it raw, so **the harness and
+  the browser had been detecting functions from different seed sets**, structurally invisible (all
+  six binaries have zero exports). Hence `mcp/__tests__/detectSeedUnits.test.ts`.
+- **The ARM64 sweep is shared via `WorkerState.arm64Sweep`, keyed on the section's BYTES** — both
+  real ARM64 binaries base `.text` at 0x140001000, and a content key needs no assumption about
+  message order. **Only the decode is cached**, with `comment`/`source` reapplied per caller; **a
+  refused section is never stored**, so `sweepArm64`'s `Arm64DecodeRateError` refusal cannot decay into a cached empty
+  answer. The plain `disassemble` RPC is deliberately out.
+- **`mapInsn`'s comment resolution is an x86 operand grammar, so ARM64 passes it the empty maps.**
+  On A64 the only literals are a branch target and an `adrp` **page base**, so an instruction was
+  annotated exactly when a page base *coincided* with a data address. `decorateArm64Sweep` annotates
+  from `findArm64AddressRefs` instead, attributed to the instruction that **completes** the pair.
+  The empty maps are the mechanism, not a tidy-up — passing the real maps back is the defect
+  returning. `corpus/comments.ts` is what catches it; nothing in `npm run corpus` can.
+- **ARM64 publishes its recovered switch tables' byte extents, and the masking is on the decoration
+  side** — the span is the extent actually **read**, marking is by **byte range with an intersection
+  test**, spans are deduped, and the filter lives in `decorateArm64Sweep`, never in the sweep or the
+  cache, or two callers with different spans would share one entry.
+- **A PC-relative `LDR (literal)` is the ISA marking its own data** — the only A64 data-marking rule
+  needing no inference. Pools are derived inside `decorateArm64Sweep` from `raw` itself; a load
+  inside another load's pool is not honoured (one pass, not a fixpoint); and **`source` was
+  deliberately not changed**, since the `.pdata` extent really is the linker's record.
+- **The ARM64 stack frame comes out of `.pdata`, and the packed `FrameSize` means the frame DELTA,
+  not the total allocation.** `frameSize` is the record's total and `frameDelta` the delta —
+  conflating them was a live defect no gate saw. A **negative** delta is refused. The unwind codes
+  run **backwards** through the prologue and carry more bytes after `end`. **The SIGNATURE was
+  refused on evidence**: `.pdata` carries no arity information, so `inferSignature` returns null.
+- **A64 mnemonic matching is by *exact* mnemonic, never by prefix** — `brk` is not a `br` and `bfi`
+  is not a branch. `arm64Operands.ts` is the one place that knows the grammar.
+- **`analyzeStackFrame` and `inferSignature` take `arch: ImageArch` ahead of `is64`.** Both **return
+  empty rather than throwing** — the throw arm is for stages whose whole output is instructions.
+  `archThreading.test.ts` guards what the type cannot see: a caller writing a literal `"x86"`.
+- **…and the same file then invented on x86 everything its essay forbids on A64. Four sites, and the
+  first is a DELETION**: the x64 stack-argument claim is **gone** (it described the function's own
+  *outgoing* argument area — 262 parameters against the decompiler's 4), and **repairing the
+  arithmetic was refused on evidence** — it would be a second stack grammar inside `signatures.ts`.
+  `paramCount` on x64 is the register scan alone, 0..4. x86 reads `stack.ts`'s recovered frame;
+  `thiscall` now consults EDX; and "no instructions in range" returns `null` rather than naming one
+  of x86's four conventions. **Reopening needs an entry-SP displacement published by `stack.ts` plus
+  an oracle.**
+- **`arg_N` means argument *position*; the frame register's displacement from entry SP is
+  `StackFrame.frameDelta`.** The name is the only channel to `structs.ts`, which keys `^arg_(\d+)$`
+  to exclude frame-pointer-omitted RBP — **do not loosen it**. `frameRegisterAliases` follows a
+  `splitStaleReads` copy **only when `frameDelta !== null`**; under FPO two versions are two objects.
+  The stack pointer gets none of this — it moves. **`isParam` is decided by that displacement, not by
+  whether the prologue was canonical**, and a refusal is **total**. `addressesOwnFrame` refuses
+  `D < 0` (establishing somebody else's frame). **The prologue may be in another function**
+  (`__SEH_prolog4`): the rule is stack **arithmetic**, not a byte pattern, carried by three refusals.
+  **On x64 an index is not enough to name a slot** — an unfilled home slot is **withdrawn entirely**
+  by `inUnfilledHomeSpace`, not re-labelled, since the caller owns the storage.
+- **`regSize()` is not a membership test** — it falls back to 4 for any unrecognised name. Use
+  `isKnownRegister()`.
+- **`sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`.**
+- Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`).
 
-- **…and where the truncated thing is a LIST, the admission goes on the COUNT and the digest
-  REFUSES.** `parseImports` (`pe/parser.ts`) had two attacker-controlled walks: the thunk walk was
-  bounded **only by the end of the file**, so an unterminated array pushed one entry per
-  pointer-width slot to EOF inside `parsePE`, on the main thread; the descriptor walk was bounded
-  by the directory's declared size, a uint32 the file supplies. Measured at `5baec33` on a 1 MiB
-  fixture: 262,080 functions in one library (now `MAX_IMPORT_FUNCTIONS` = 65,536) and 52,416
-  libraries (now `MAX_IMPORT_DESCRIPTORS` = 4,096). **The cost that matters is the PRODUCT** — every
-  descriptor may name the same array — so the function budget is **global, not per-library**: with
-  both, the pre-fix parser did not hang, node died with `Ineffective mark-compacts near heap limit`,
-  ~4 GB out of a one-megabyte file. Bounds are `min(containing section, declared size, count cap,
-  buffer)`; the **section** bound (`sectionRawLimitForRva`) is the one that improves the *answer* —
-  without it a missing terminator at the end of `.rdata` reads the next section as thunks (192 →
-  4,288 measured) — and section selection is now **one declaration** (`scanSectionForRva` /
-  `sectionForRva` / `offsetInSection`) that `rvaToFileOffset` and `rvaToFileOffsetIndexed` both
-  answer from. **A list cannot carry `nygv`'s marker**: an invented `<truncated>` entry would be a
-  lie inside a list feeding `computeImphash`, the Imports tab, the IAT map and MCP. So the admission
-  is `ImportEntry.truncated` / `PEFile.importsTruncated` (on `ResourceTree.truncated`'s model), the
-  Imports tab's own **counts**, and **`computeImphash` returning `null`** — a digest over a short
-  list is well-formed, wrong, and only ever compared with another tool's answer, so it fails by
-  matching nothing. Its parameter is the **`PEFile`, not `PEFile["imports"]`**, deliberately:
-  whether the list is whole is a fact about the parse, so taking the file makes forgetting to ask a
-  compile error. `""` still means "imports nothing" and `HeaderView` prints a different sentence for
-  each. `readCString`'s 1024-byte cap now appends `TRUNCATION_MARKER` (measured: 1024 silent
-  characters before), **but the marker alone would be wrong here** — unlike a PDB path these names
-  reach a digest, so a truncated name also marks the entry, which makes the hash refuse; truncation
-  is decided exactly ("stopped at the bound *and* no NUL sits at it") so a name of exactly 1024
-  bytes plus its terminator is not marked. Nine discriminating controls, none inert; corpus
-  byte-identical over four binaries. (`peek-a-bin-tmo9`)
+### Decompiler passes
 
-- **…and the resource tree's half of that admission is now built, plus the three places the flag
-  was not being set. `Budget.incomplete`'s OLD NAME COST ALL THREE.** `parseResourceDirectory`
-  (`pe/resources.ts`) had set `ResourceTree.truncated` since long before this and **no view rendered
-  it**, so a tree cut short by `MAX_TOTAL_ENTRIES` read on screen exactly like a complete one. The
-  admission goes **on the count line and not on a row** — the opposite half of the choice
-  `ImportsView` makes — because the budget is *global to the walk*: one `Budget` is threaded by
-  reference through every `walkDirectory` frame, so when it runs out the walk breaks out of whatever
-  directory it reached and every ancestor is equally short, leaving no row that is "the incomplete
-  one". `ImportEntry.truncated` is per-library precisely because each descriptor has its own thunk
-  walk. **The `entries.length === 0` arm is the worse half and is separate**: it took the same exit
-  as a PE with no resource directory and printed "No resources found in this PE file.", a positive
-  claim about the *file* rather than a narrow answer — `HeaderView`'s `""`-versus-`null` imphash
-  distinction in view form. It is reachable with no leaf at all, the allowance being spent on
-  *directory* entries. **And the flag's field was called `stopped`, which reads as a fact about the
-  budget, so three other abandonment points never touched it**: a directory whose declared entry
-  array runs past the buffer, a declared subdirectory whose own header is past the buffer, and a
-  resource directory whose RVA resolves nowhere (that last returned a bare empty tree — byte-for-byte
-  the answer a PE with no resources gets, and a **pre-existing test had pinned that as the rule**).
-  It is `incomplete` now and means exactly "an entry the file declares was not walked", whatever
-  stopped the walk. `depth >= MAX_DEPTH` and a repeat visit deliberately still do **not** set it and
-  say so at their sites — both are judgements about a malformed *shape* rather than an unread entry.
-  **The two resource STRING clips now carry `nygv`'s marker too**
-  (`TRUNCATION_MARKER`): a resource name clipped at
-  `MAX_RESOURCE_STRING`, and a version-info key or value the walk stopped collecting. Both are
-  rendered verbatim (`ordinalLabel`, `ExpandedLeaf`'s table) and **neither feeds a digest**, which is
-  the stated asymmetry with `readCString` — there a marker had to additionally mark the entry so it
-  could never reach `computeImphash`; here the marker alone is the whole fix. Both are decided
-  **exactly**, never on "we reached the bound": `readResourceString` compares what it collected
-  against the count the string's own uint16 header declares (covering the cap *and* the buffer
-  ending mid-string with one test) and `readWString` records the drop at the drop site, so a string
-  of exactly the cap's length is not marked. **Two pre-existing tests had pinned both silences as
-  the rule** (`length <= 4096`, and `toMatch(/^A+$/)` — the `tmo9` forwarder row's exact shape).
-  Eleven discriminating controls, none inert; `npm run corpus:parserdiff` reports all six real
-  binaries unflagged, which is the case rather than a formality. The full census of which parser
-  admissions reach a screen is `peek-a-bin-ul9m`, summarised in `docs/verification.md`.
-  (`peek-a-bin-dhcx`)
-- **THE ATTACKER-CONTROLLED-BOUND CLASS WAS SWEPT DELIBERATELY, AND SEVEN MORE SITES WERE OPEN —
-  including one that produced a WRONG NAME on real instructions.** `nygv` and `tmo9` were both
-  found incidentally, so nobody had ever asked every reader in `src/pe/` the five questions the
-  class turns on: what bounds it; whether the *work* is bounded or only the reads; whether two
-  file-supplied counts **multiply**; whether anything allocates a size the file chose; and whether
-  it runs on the main thread. Ranked, with the figure that was measured at `d8d8a6d` against an
-  identical fixture: **ARM64 `.pdata` unwind codes** (a real product — 1020 bytes per record x a
-  `buffer / 8` entry count, all naming one record: 37.7 s on a 266 KB file, growing linearly, so
-  hours at 253 MiB, in `parsePE`); **the debug directory's entry count** (`nygv`'s own defect with
-  a new multiplier — 153,877,941 characters of PDB path from a 1 MiB file, *inside a render*);
-  **the export tables** (524,093 entries / 104,696,157 characters of name); **`parseImports`'
-  parallel `functions`/`iatAddresses`** (desynchronised by one unresolvable name RVA, so
-  `buildIATLookup` labelled every later call site in that library with **another import's name** —
-  a wrong value no flag repairs); two more `tmo9` bypasses in `parseImports` (a vanished library
-  and a `KERNEL32.dll (0)`, each yielding a confident imphash); **relocation blocks** (an
-  eight-byte directory producing 524,284 entries, where the pre-existing test asserted only
-  `< buf.byteLength`, which that satisfies); **`extractStrings`** (sections x 1 MiB: 13.3M strings
-  in 87.7 s, the largest amplification and the only one off the main thread); and
-  **`readDERChildren`** (41.6 MB of heap from a 1 MiB file, an OOM no `try/catch` can catch).
-  `sectionRawLimitForRva` is now exported as the **one declaration** of the section bound, because
-  five walks wanted it and every one had the end of the file instead. `MAX_EXPORT_ENTRIES` is the
-  *format's* `uint16` ordinal ceiling rather than an invented number, which matters because no
-  binary here exports anything and `corpus:parserdiff`'s export gates are **vacuous**; the ARM64
-  unwind budget is calibrated against the real tables (1220 code bytes in total on `t64-arm`, 28
-  in the largest record). **Fifteen controls, one INERT and recorded rather than repaired** — the
-  export section bound's fixture was too small to distinguish a section from the buffer, so removal
-  left the row green. Deliberately **not** bounded: the relocation entry *total* (legitimately
-  O(image), and the section extent is the file's own statement). Deliberately **refused and handed
-  back**: the two `catch {}` blocks in `parsePE` that render "Unsigned" and "No resources found"
-  for a file that has both — the render site is the whole of the fix and those files are owned
-  elsewhere. **Both were taken up next and are the entry below.** `corpus:parserdiff`
-  byte-identical (98/118, 20 vacuous), `corpus` byte-identical over four binaries, `corpus:arm64`
-  51/51.
+- **There is exactly one notion of "loop": dominance.** `detectLoops` delegates to
+  `detectNaturalLoops`. The BFS-layer approximation it replaced called an `if`-without-`else` merge
+  block a loop header and **deleted guards**; a diamond is immune to that mistake and a triangle is
+  not, so hand-written fixtures never caught it.
+- **`structureCFG` closes an `if` at the immediate post-dominator.** The two "one arm ends in `ret`"
+  shortcuts must not fire when that arm *is* the convergence point. A nearest-common-successor
+  heuristic is not a substitute — for a switch it picks the default block.
+- **`extractCondition` returns the condition under which the jump is TAKEN.** Backwards, this
+  inverted every `if` and `while` while leaving the bodies in place — valid C stating the opposite of
+  the machine, invisible to every stage-level test.
+- **A guard is answered from the flags the Jcc *actually* reads, and only while the compare still
+  describes them.** Two refusals in `extractCondition`, both reading `flagModel.ts`'s own tables:
+  the forward walk clears flags on anything not `isFlagTransparent`, and a compare whose operand was
+  overwritten before the Jcc is refused. **Refusal *is* the repair**, so the cost appears as
+  unrecovered values rather than changed guard text. **Both are asked of the condition read off the
+  *instructions*, never of the IR one** — copy propagation has rebound the register out of the
+  expression, so asking the IR defeats the check outright.
+- **A spoiled compare is recovered by MATERIALISING its operands at the compare**
+  (`spoiledCompareCapture`, `lifter.ts`), not by refusing the guard. The destination is an **`IRVar`**, not a
+  deletable pseudo-register; the signal is `IRBranch.capturedAt`, an **address**; the scope is a
+  block-local **compare** owner; and the emitter must **declare** the capture, or `preludeFor`
+  manufactures it and gcc reads clean over C the harness completed.
+- **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
+  only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
+  (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*
+  `corpus/staleGuards.ts`. A **compare** owner is deliberately not filtered on `spoiled`.
+- **A compare emits no statement at all.** The old `eflags = …` proxy was actively harmful — GVN gave
+  it and a real `sub` the same value number and the post-fixpoint strip deleted the only assignment.
+  `isFlagTransparent`/`clobberedAfter` live at the bottom of `flagModel.ts` so there is **one** copy
+  of the x86 flag grammar, with a drift guard failing on a second declaration.
+- **`push`/`pop` write no flags; a guard behind an epilogue restore is refused by `spoils`, not by
+  the flag model.** `baseMnemonic`'s exact match is what keeps `popf`/`pusha` clobbering — a
+  `startsWith("pop")` test silently admits `popf`. Do not try to fix this by moving the `IRBranch`
+  earlier: `structureCFG` emits a block's statements above the `if`.
+- **`test` clears OF and CF; it does NOT clear SF**, which is why the `test` arm answers strictly
+  more Jcc forms than the `result` arm. Not to be re-tried: `jb`/`jae`/`jo`/`jno` are constants after
+  `test`, and emitting `if (1)` is a control-flow claim; `jp`/`jnp` read PF with no cheap spelling.
+- **`bt` is a compare over one bit and needs its own owner kind** — it writes nothing and **leaves ZF
+  unaffected**, so a following `je` branches on an older instruction's ZF. `parseBitTest` admits only
+  a register bit base with an immediate offset; `bts`/`btr`/`btc` stay clobbers permanently. Spell it
+  with `>>`, not `>>>`.
+- **A Jcc alone in its block is answered from its predecessors, and only when every way in leaves the
+  flags saying the same thing.** The predecessor's **terminator must be skipped explicitly** (without
+  it the change recovers 0); **either edge counts**; and unanimity is a **text-equality test over
+  Capstone's operands, never a merge**. **Nothing in the corpus protects the disagreeing sites** —
+  answering from the first predecessor recovers 12 more guards with `npm run corpus` at exit 0.
+- **A memory destination is spellable**; refusing it was a spelling limit reading as a dataflow fact.
+  `destForm` is for spellability while `destReg` stays for `spoils` — conflating them refused every
+  row. Soundness is the **ordering** (statements above the `if`), assertable only in
+  `pipeline.test.ts`.
+- **A `lock` prefix changes atomicity, not values or flags**, so it must not change any
+  classification — but **a locked read-modify-write with no value effect is a fence and must stay
+  unlifted**. `withoutLockPrefix` is the one declaration; `rep` must survive stripping. Lift before
+  classifying. `isValueNeutralLockedRmw` requires the **prefix as well as** the nil value effect.
+- **A switch arm that ends in a test must say so: `break` is a claim about control flow.** `armExit`
+  (`structure.ts`) spells the block's own exit; the transfer is **spelled, not followed**, and a `goto` where `break`
+  was already right is noise rather than a claim. The bead's suggested fix was measured and refused —
+  naively it empties every arm and **every gate stayed green**.
+- **A block with no predecessor is not necessarily dead code** — an MSVC `__except`/`__finally`
+  continuation is entered by the unwinder. Padding is still excluded by "lifts to no statements",
+  but step 4b hoists branches out, so the test is `… === 0 && !branches.has(b.id)`. **No gate could
+  see it.**
+- **`if (c) { continue; } break;` at a loop tail is emitted as `if (!c) { break; }`**
+  (`collapseLoopTailContinue`), cosmetic, restricted to a **loop's own** body. The negation must be a
+  **flipped comparison, never a `!`-wrapping**; `&&`/`||` are refused; it runs **after
+  `breakForwardGotos`**; and the braces stay, or the corpus guard scan loses every
+  single-terminator-body guard.
+- **A guard whose whole body is one terminator is one-lined by `oneLinedGuard`**, handed the body's
+  own `EmitResult` with the guard out of scope, or the arm anchors to the jcc one decision earlier.
+  Only the four **terminators** are admitted — a one-lined assignment would hand `selfAssigns.ts` the
+  guard as its destination.
+- **A `for`'s init need not be the statement immediately before the loop** (`initHoistable`), and
+  hoisting moves the init **later**, so four refusals carry it, including a **whitelist** of what may
+  intervene rather than a blacklist. `initAt >= 0` is **not** redundant with the equality test.
+  **`detectForLoop` must try every increment-shaped candidate, not the first**, and a predecessor
+  inside the loop body is not a source of inits (`p < header.id` stood in for "before the loop"; the
+  latch is routinely numbered below its header). The update-position guard is **exact, not strict**.
+- **`mov <r32>, <same r32>` on x64 is a zero-extension**, and the pass that lost it was
+  `copyPropagation`. The truncation must be **in the expression** (`x & 0xFFFFFFFF` over the 64-bit
+  parent). `is64` only, 32-bit width only, not RSP. `firstCalleeSavedWrites`' own self-move test
+  answers a different question and must keep reading `mov X, X` as a non-definition.
+- **A branch condition goes through the lifter's real `parseOperand`** — the private
+  `parseSimpleOperand` hardcoded `size: 4` and never called `ripRelative.ts`, and the width alone
+  recovered frame slots, `INVALID_HANDLE_VALUE` and dozens of structs.
+- **SSA version 0 means a register's *entry* value; the definition counter starts at 1.** Its repair
+  is taken **at the function's entry and nowhere else** — no statement defines version 0, and a copy
+  in the reading block binds to a name holding something else.
+- **`liftBlock` emits plain register reads; it does not substitute `RegState`'s symbolic value.**
+  Propagation belongs to SSA, which has the version information that makes it sound.
+- **No read of RSP may be moved to another program point.** Both `copyPropagation` and `fold.ts`'s
+  single-use inlining guard it, and **both are needed** — the second reintroduced the defect the
+  moment an unrelated fix made the frame-pointer copy single-use.
+- **Three stack idioms ARE lifted, because an unlifted `pop` is not an SSA definition.**
+  (a) `push <imm>`/`pop <reg>`, one declaration in `disasm/stackIdiom.ts`, `pop esp` refused.
+  (b) The same idiom split across a branch is a **phi of immediates**, so the definition lands in
+  *each predecessor* — `pipeline.ts` step 2b, appending through `pushBeforeTerminator`, with four
+  refusals making it sound. (c) A matched `push <reg>`/`pop <reg>` becomes a pseudo-**register**
+  slot identified by the **pairing**, never an address; the lattice needs a **TOP** element.
+  `regState` is deliberately not told about a slot pop, or arity over-counts. **Every replica of the
+  lift loop must carry all three calls** — `stackIdiom.test.ts` enforces it.
+- **`foldBlock` counts uses inside ONE block, so a definition that escapes the block is not
+  single-use.** `blockLiveOut` is computed once on the unfolded program; the refusal is
+  `killedInBlock`-guarded; a **`raw` reads nothing** while a **`branch` very much is** a read.
+- **Register names follow the image's width, and the phi cannot tell you what that is — ask the live
+  range, not the function.** Naming is per **phi web**, taking the widest mention of its own members.
+  **One name per function is still wrong** where a register carries two live ranges of different
+  widths. A trivial phi's operand is the register's **identity**, not a spelling, so `simplifyPhis`
+  must spell it the way the value's own mentions do. Giving the phi a truthful width was measured and
+  is **not worth a session**.
+- **A call clobbers what the callee writes, and that answer is only ever ADDED to the narrow one.**
+  Modelling a call as destroying the whole volatile set was tried and is **worse** — it deleted a
+  guard outright. The summary **under-approximates** by construction; recursion needs no special
+  case; it is x64 only. **`RegState.invalidateCallerSaved` must NOT be narrowed with it** — that
+  needs an over-approximation.
+- **`RegState.defs` is keyed by literal operand text deliberately** (the recorded expression carries
+  the operand's width). Ask `wroteAnyAlias` for the width-blind question; it returns a **boolean**,
+  so the recorded expression can never be substituted at the call site.
+- **A written fastcall register is not an argument if the block already SPENT it as an address
+  index** — but an address **base** proves nothing. Four rules are refuted by this corpus and must
+  not be re-tried: distance, dominance, any read spending it, and any read from inside a memory
+  operand. **Never answer this from `apitypes.ts`** — that blinds the only arity oracle here.
+- **`collectArgs32`'s backwards push-walk stops at a call whose result feeds a following call**, and
+  the marker is `push eax` **after** the call. Deliberately an **admitted under-count**.
+- **A `push` of a callee-saved register the function has not yet written is a register SAVE** — and
+  that, not the register and not the position, is the discriminator. Two rules refuted by this
+  corpus: "a push of ebx/esi/edi is a save", and "a save has a matching `pop` before the `ret`".
+  Scope is **function-wide**; `mov X, X` is not a definition but `xor X, X` is; restricted to the
+  four callee-saved registers.
+- **A `__try` is emitted only where the scope table holds an `__except` entry.** The old wrapper's
+  three claims were all unread — 100% of regions are narrower than their function, and `/GS` sets
+  EHANDLER with no `__try` in the source at all. `__finally` is **recorded as a comment and not
+  spelled** (the IR has no statement kind for one); a record with **no validated table emits
+  nothing, not even an admission**. **`IRTry.filterSource`'s ABSENCE is the unrecovered case, never
+  the constant.** **Do not push any of this into `funcExceptionRecord`** — that is a *selector*, and
+  its soundness rests on client and worker applying the same idempotent rule. **gcc has never
+  checked this construct** (`#define __except(x) if (0)` discards its argument).
+- **Recursing into a statement's nested bodies is `ir.ts`'s `bodiesOf`/`rewriteBodies`, one
+  declaration each**, both ending in an exhaustive `never`. `for`'s `init`/`update` are single
+  statements, so neither reaches inside them.
+- **`+`, `-` and `*` do not model wraparound, and the const-const fold site has no width evidence.**
+  `knownWidth` returns null for an `IRConst` deliberately — `IRConst.size` is the CPU *mode*.
+  Wrapping them the way the bitwise arms do **introduces** a defect.
+- **`fold.ts` has a `castTypeSize` helper** for double-cast removal. **`cleanup.ts`** runs after
+  `structureCFG`, before `inferTypes`; guard-clause flattening is single-level, not recursive.
+- **The polarity audit's population was one trailing brace wide.** `corpus/guardShape.ts` is the one
+  declaration of what a guard line is, and the condition is **depth-counted, not anchored** — a
+  greedy widening reads `if (a == 0) x = f(b);` as the condition `a == 0) x = f(b`. One-lining breaks
+  three scrapes in three directions, including one that goes **red on correct output**.
+  `selfAssigns.ts`'s `FOR_HEADER` was the second hand-rolled copy and the drift guard could not see
+  it (it names one keyword, not two); **widening the guard to single-keyword patterns was measured
+  and refused**.
 
-- **A DISTINGUISHED NAME IS NOT ITS CN, AND A PKCS#7 `certificates` SET IS NOT ONE CERTIFICATE.**
-  `pe/authenticode.ts`'s `extractCN` walked the RDNSequence for the commonName and dropped O, OU, L,
-  ST and C, while the panel's row says **"Subject"** — which in X.509 is the whole DN. So two
-  publishers sharing a CN and differing in O were one string on screen, and the least
-  distinguishing half of the DN was the half kept. `subject`/`issuer` now hold the rendered DN
-  (`CN=…, O=…`, **encoding order**, not RFC 2253's reversed order, so the string can be compared
-  with the file and with another tool's output) and `subjectCN`/`issuerCN` the CN alone. An
-  attribute type with no short name is spelled as a **dotted OID rather than skipped** — skipping
-  is what made a DN read as its CN — and `decodeOID` refuses a truncated or unterminated encoding,
-  because a partial OID names a different attribute. `BMPString` and `T61String` are decoded **by
-  hand** (`TextDecoder("utf-16be")`/`"t61"` are label lookups a runtime without full ICU may lack,
-  and Microsoft's own timestamp certificates use BMPStrings); `UniversalString` is deliberately not
-  decoded and its attribute is skipped; `readDERString`'s `tag` argument is optional and only ever
-  widens. Separately, `CertificateInfo.certificateCount` is the size of the `certificates` SET —
-  every other field describes `certs[0]`, and a real signature carries the leaf plus intermediates.
-  It is a **count, not a validated chain** (the SET is unordered and may hold unrelated
-  certificates); `undefined`/`0`/`1` are three facts, and the panel shows the row only above 1.
-  **Both fixture builders had to gain `subjectAttrs` and `certificateCount` first** — each emitted
-  one certificate with a CN-only DN, so there was nothing to fail against. Nine controls, all
-  discriminating. **No binary here is signed**, so the evidence is fixtures alone and
-  `corpus:parserdiff` says nothing. (`peek-a-bin-4q8w`)
+### UI, build and deployment
 
-- **…AND THE ONE PARSER NARROWING ORDINARY INPUT REACHES HAD NO CHANNEL AT ALL: THE STRING
-  SCAN'S.** `SECTION_SCAN_LIMIT` is 1 MiB *per section* (`MAX_STRING_SCAN_BYTES` is 64 MiB for the
-  whole call), and `extractStrings` returned `{ strings, stringTypes }` — so the Strings tab's
-  count, `pe://{id}/strings` and the report's `| Strings | N |` row all stated a clipped list's
-  length as a fact about the file, with no crafted input required. **`PEFile.stringScan`**
-  (`StringScanCoverage`: the sections a bound cut short and the bytes no pass looked at) is the
-  channel, absent when the scan was whole, and it travels `extractStrings` → the RPC reply →
-  `disasmClient`'s unpacker → `SET_STRINGS` → `PEFile`, with `mcp/session.ts` assigning it onto its
-  own `pe`. Four rules: the fact is collected in **`scanEndFor`**, the one place both bounds apply;
-  `ScanBudget.reach` is keyed on the `SectionHeader` **object**, since two sections may share a
-  name; the recorded reach is the **maximum across the four passes**, because by the time the third
-  pass reaches an early section the global budget may be spent and *the last pass's* answer would
-  report a section the first read whole (measured: 97 of 400 overlapping sections under `max`,
-  ~400 under `last`); and **bytes the file does not hold are excluded** — a section header
-  describing more than the buffer contains is a truncated image, a different fact. A list cannot
-  carry `TRUNCATION_MARKER` (an invented entry would be a falsehood inside a Map that feeds the
-  xref maps), so it is a flag plus the counts plus `parseAdmissions`' sixth subject. Ten controls,
-  all discriminating. **The population here is a fixture and that is stated at the field**: the
-  largest raw section across the six corpus binaries is 112,640 bytes, so all six report nothing;
-  the "a real image reaches this" claim is quoted from `MAX_STRING_SCAN_BYTES`' docstring, not
-  re-measured. (`peek-a-bin-2py5`)
-
-- **AN ADMISSION THAT STOPS AT THE BROWSER UI IS NO ADMISSION AT ALL ON THE TWO SURFACES THAT
-  OUTLIVE THE SESSION.** No module under `src/mcp/` read any truncation flag, so
-  `pe://{id}/imports` handed a client a short list as a complete one; `utils/exportSchema.ts`
-  reproduced the same list in a report **and** introduced a truncation of its own
-  (`slice(0, 60) + "..."`) spelled differently from every other truncation in the tool. An MCP
-  answer is consumed by something that **cannot ask a follow-up question** and a report is a file
-  the user keeps, so an unmarked narrowing there is durable in a way a screen is not.
-  **`pe/admissions.ts`'s `parseAdmissions(pe)` is the one declaration**, returning
-  `{ subject, sentence }` rows for the five facts on `PEFile` (imports, exports, resources — the
-  cut-short tree and the unreadable directory being *different* sentences — certificate, and the
-  data-directory clamp). **The value is PROSE, not a flag, and that is the design**: the consumers
-  are an LLM and a human reading a file months later, neither of whom can be relied on to know
-  what `truncated: true` means, so the sentence carries the fact on `TRUNCATION_MARKER`'s model
-  while `subject` is what a consumer that does know keys off. **Empty means the parse was whole.**
-  It is deliberately *not* `analysis/anomalies.ts` — that pass answers "what should an analyst look
-  at", carries a severity and includes findings unrelated to the parse; the overlap is two
-  sentences, not a predicate. Two shape rules: the MCP list resources moved their array **under a
-  key** (`{ incomplete?, libraries }`, `{ incomplete?, exports }`) because a bare array has nowhere
-  to say it is short, and the wrapper is **unconditional** since a shape that varies with the file
-  is worse to consume than one extra key; `ImportEntry.truncated` is carried **per library** beside
-  the whole-table fact, each descriptor having its own thunk walk. The report says it twice — under
-  the Summary table and on the `## Imports`/`## Exports`/`### <library>` headings — and those two
-  assertions are **split across two `it()`s** because within one the first failure hides the
-  second. Eight controls, all discriminating; `generateMarkdownReport` had **no test at all**
-  before this. Still not carried: `extractStrings`' scan budget (no channel anywhere),
-  `DebugDirectory.truncated`/`pdbPathTruncated` (that reader reaches neither consumer), the TLS
-  callback cap, and every `authenticode.ts` narrowing. (`peek-a-bin-8pod`)
-
-- **A DIRECTORY THE FILE DECLARES AND THE READER GAVE UP ON IS NOT A DIRECTORY THE FILE LACKS, AND
-  THE CHANNEL IS DERIVED RATHER THAN A NEW `PEFile` FLAG.** `parsePE` reads the certificate table
-  and the resource directory inside a `catch {}`, and each leaves its field `undefined` — which is
-  byte-for-byte what a file that genuinely has neither produces. So `HeaderView` rendered the grey
-  **"Unsigned"** pill plus "No digital signature found in this binary." over an image whose
-  optional header declares an attribute certificate, and `ResourcesView` rendered "No resources
-  found in this PE file." over a declared resource directory: positive claims about the FILE
-  resting on the tool's own failure to read it. **`peek-a-bin-dd94`'s criterion decides the
-  channel** — *does the output already carry the fact?* — and here it does, because `parsePE`
-  opens each reader behind exactly "the directory is declared", so **"declared, and absent from the
-  parse" IS the failure**, over two already-public fields. `directoryDeclared`,
-  `certificateUnreadable` and `resourcesUnreadable` (`pe/dataDirectories.ts`, beside
-  `dataDirectoryClamp`) are the one declaration, and `parser.ts`'s resource gate is now the *same
-  call* — the load-bearing part, since a premise that drifts from the gate claims a read failed on
-  a directory nothing attempted. Three things to keep: the certificate half is **fixture-reachable
-  through the real parser** without any throw (`parseSecurityDirectory` returns null when the
-  `WIN_CERTIFICATE` header does not fit in the file, and reports `signed: true` with null fields
-  for every *other* malformation, which the panel already renders honestly); the resource half's
-  **population is empty and says so at three sites** (`parseResourceDirectory` bounds every read,
-  recurses to a fixed depth, and flags an unresolvable RVA rather than throwing, so it is a guard
-  on an unreachable `catch`, tested from directly-built state); and a **`truncated` tree must not
-  be reported unreadable**, since `dhcx`'s sentence is strictly more informative and a predicate
-  reading `entries.length` instead of `resources === undefined` would make it unreachable — the
-  arms are disjoint, so their order is inert and not claimed otherwise. `parseDebugDirectory` now
-  returns **`DebugDirectory`** (`{ entries, truncated }`) for the same reason at smaller stakes:
-  the format has no count field, so `numEntries < floor(size / 28)` is exact, a list cannot carry
-  `nygv`'s marker, and the block renders on `truncated` as well as on a non-empty list — a declared
-  directory whose RVA resolves nowhere read zero entries and made the whole block vanish. Both
-  facts also reach `analysis/anomalies.ts` at `warning`, on the clamp's argument. Seven controls,
-  all discriminating (two of them redden four and two *pre-existing* rows); all six real binaries
-  report neither claim and read exactly the debug entries they declare (1 on x86, 3 on ARM64);
-  `corpus` byte-identical, `corpus:parserdiff` 98/118, `corpus:arm64` 51/51. Carried into MCP
-  output and the export file by the entry above. (`peek-a-bin-wo8g`)
-
-- **A GREEN "Signed" PILL IS A VERIFIED ANSWER'S SHAPE, AND THE PARSE ESTABLISHED ONLY THAT A
-  `WIN_CERTIFICATE` HEADER READ.** The same class as the four entries above — a positive claim
-  resting on the tool's own not-having-looked — on the surface a user reads rather than on a
-  narrowing. Nothing here computes an Authenticode digest, checks a signature value, builds a
-  chain or consults a trust store, and `notAfter` was printed and compared against nothing, so a
-  file modified after signing, an arbitrary PKCS#7 blob claiming `CN=Microsoft Corporation` and an
-  expired certificate all rendered identically to an intact Microsoft binary. `CLAUDE.md` said all
-  of this internally and **the honesty stopped at `docs/`**. Three parts. **The pill** reads
-  `Signed (unverified)` in a NEUTRAL chip — none of the three colours already in that block, since
-  it is not a fault (amber `Unreadable`) and not an absence (grey `Unsigned`) — with a grey scope
-  sentence under the table naming each hole, on the `Unreadable` sentence's precedent but grey
-  because it states the *scope of the answer*, not a problem with the file; it renders whenever the
-  pill says Signed, **including** for a certificate type the walk could not parse, the arm where
-  the pill is nearly the only thing on screen. **Expiry is a fact about the CERTIFICATE, never
-  about the signature, and the pill does not move on it**: Authenticode signatures are routinely
-  countersigned, a signature made while the certificate was live stays valid afterwards, and this
-  tool reads no countersignature timestamp at all — so it is an amber ROW beside Valid Until,
-  saying in words which of the two it is a fact about. **The view must not re-parse the display
-  string**: `notAfter` is already formatted, so a component scanning it back apart would be a
-  SECOND DECLARATION OF THE DER TIME FORMAT (pivot at 50 included) in a file that has never seen a
-  DER byte, and a wrong epoch renders as a *confident* expiry claim with nothing cross-checking it.
-  So `parseUTCTime`/`parseGeneralizedTime` return `{ text, ms }` from one reading and
-  `CertificateInfo.notAfterMs` carries it, the pivot applied once with both halves reading the same
-  `fullYear`; `notBefore` gets no epoch, nothing reading one. **`certificateValidityState(cert,
-  nowMs)` has THREE states** — `expired | current | unknown` — because folding an unreadable date
-  in with `current` asserts a validity there is no evidence for, which is the green pill's own
-  defect one level down; `nowMs` is a parameter so every arm is reachable **without touching the
-  clock** (`vi.useFakeTimers()` deadlocks `waitFor` and `userEvent` here), and the comparison is
-  `>` since `notAfter` names the last valid second. **A null epoch beside a non-null `notAfter` is
-  the interesting pairing**: `isDigits` promises digits and nothing more, `Date.UTC` *rolls over* a
-  thirteenth month rather than rejecting it, so `epochFor` reads the instant back component by
-  component — February 30th and a leap second refused by the same test, February 29th the control
-  that it does not over-refuse. **`buildPKCS7`'s default `notAfter` (`260115085959Z`) is now
-  HISTORICAL, so every caller inheriting it is in the expired arm**; it is deliberately not moved
-  and every expiry assertion passes an explicit date. Three controls, all discriminating: delete
-  the sentence → 4 red, all new, no pre-existing row; return `current` for a null epoch → 4 red; hardcode
-  the epoch → 8 red including the DOM differential against the fixture's own bytes — where the
-  happy path's exhaustive `toEqual` is measurably NOT the row that catches it, so the rows deriving
-  an instant from bytes the parser was not handed are the ones doing the work. **FIXTURE-
-  VERIFIED ONLY — no binary on this machine is signed**, so `corpus:parserdiff` says nothing, no
-  real `SignedData` has reached this code, and jsdom does no layout so the chip and both rows are
-  asserted as text (`peek-a-bin-v2u`). **Computing the Authenticode PE hash and comparing it
-  against `SpcIndirectDataContent` is a SEPARATE BEAD** — that is the tier that would let the pill
-  claim anything positive; the neutral pill is the honest one until it lands.
-  (`peek-a-bin-v3uh.9`)
-- **…AND THE ONE PLACE THE WHOLE CLASS HAD NEVER BEEN APPLIED IS A VIEW-SIDE SCAN: the hex
-  tab's byte search.** `findBytePatternMatches` (`components/HexView.tsx`) broke at a bare literal
-  `1000` and returned a `number[]`, and the toolbar printed `{matchCount} matches` — so a search
-  for a common byte over an ordinary section reported **"1000 matches" as a fact about the
-  section**, indistinguishable from a complete count. It needs no crafted file, which puts it
-  beside `2py5` rather than the crafted-input entries above. It returns `{ offsets, truncated }`
-  against a named `MAX_BYTE_PATTERN_MATCHES` now, and **`truncated` is decided EXACTLY: the break
-  is taken on the match that would EXCEED the cap, never on the one that fills it**, so a result of
-  exactly the cap is a whole answer and is not marked — `truncated: offsets.length >= MAX` is
-  precisely `dhcx`'s off-by-one, is the first negative control, and reddens *only* the
-  exactly-at-the-cap row. It costs at most one further walk over bytes the loop already covered;
-  the cap bounds the RESULT (the offsets and the highlight `Set`), never the scan's asymptotics.
-  **The admission goes on the COUNT LINE, not on a row** — `ResourceTree.incomplete`'s half of that
-  choice, the bound being global to the scan so no single match is "the incomplete one" — and
-  `matchSummary` is the one declaration of the sentence, so the `+` marking the value as a floor
-  and the `(search stopped at N)` naming what happened cannot come apart. **The second half is the
-  SCOPE**: the scan covers `sectionBytes`, ONE section, so an unscoped count reads as a claim about
-  the FILE and `No matches` is the stronger falsehood; both sentences name the section from
-  `searchScope` (`sectionInfo?.name`, the same value the `<select>` shows) and the input carries a
-  matching `title`/`aria-label`. **The affordance alone would not do** — a `title` is invisible
-  until hovered and the count line is where the claim is made. Both sides of the boundary are
-  pinned in `HexView.dom.test.tsx` against a section that is exactly N copies of one byte, which is
-  sound only because `buildMinimalPE64` writes `sizeOfRawData` as the section's own `data.length`,
-  so `sectionBytes` is exactly that array with no padding in the window. **Held out deliberately
-  and claiming nothing**: the scan is still main-thread on every keystroke, the cap was not raised,
-  and the debounce plus next/prev navigation are their own bead — the debounce brings the two
-  measured jsdom traps (fake timers deadlock `waitFor`/`userEvent`; advance SHORT of the boundary
-  first or the control is inert, as it came back twice). (`peek-a-bin-v3uh.7`)
-- **…AND DEBOUNCING THAT SCAN CREATES THE SAME CLASS IN REVERSE — A SENTENCE ABOUT A SCAN THAT HAS
-  NOT HAPPENED — SO THE SCANNED QUERY IS CARRIED WITH ITS RESULT.** The hex byte search now waits
-  `BYTE_SEARCH_DEBOUNCE_MS` (150, `DisassemblyToolbar`'s figure, not a second number) before
-  walking the section, and keeps the offsets it used to throw away, for next/prev. **The debounce
-  is not a free performance change**: the moment the typed input and the scanned query are two
-  pieces of state there is a window where the toolbar describes the OLD scan under the NEW query,
-  and one of the things it says there is `No matches in .rdata`, **which is a positive claim about
-  the section** — so typing over a query that found nothing left that sentence standing for 150 ms
-  beside a pattern nothing had looked for yet. `ByteSearchResult` carries `{ query, data, offsets,
-  truncated, highlighted }` and **`searchSettled` compares BOTH against what is on screen —
-  `result.query === byteSearch` (the BOX, never `activeSearch`, which by construction still equals
-  the result's own query throughout the wait) and `result.data === sectionBytes`**; every sentence
-  and every control is gated on it, and a parseable-but-unsettled query prints a neutral
-  `Searching…`, which claims nothing. The highlight set is deliberately NOT gated, a stale
-  highlight being invisible where blinking every match off and on again is not. **Three inert
-  controls, reported not tuned away**: cancelling the pending timer moves no row (the settled gate
-  makes a stale scan's result unsayable, so only the wasted walk is left and nothing here can count
-  walks), the `data` half cannot be reddened at all (its window is one frame and testing-library
-  flushes effects inside the same `act`), and an emptied box waiting out the debounce moves nothing
-  (every sentence is already gone; only the highlights would linger, and jsdom renders no grid
-  rows). **Both sides of the boundary are pinned**, since one side cannot tell 150 ms from 0. The
-  navigator asserts the `scrollToIndex` REQUEST — via a `vi.mock` wrapping the virtualizer instance,
-  `scrollToIndex` being a constructor-assigned property and so unspyable on the prototype —
-  **nothing has been seen to scroll**, and `matchIdx === -1` is a third state (forward is the first
-  match, backward the last). **Whole-file scope and an ASCII mode were left out**; had scope
-  landed, the scan would have to move to the METRICS worker. (`peek-a-bin-f4gz`)
-- **THE x64 `.pdata` LANGUAGE-SPECIFIC DATA IS NOT SELF-DESCRIBING, SO THE SCOPE TABLE IS
-  PUBLISHED ONLY BEHIND A FOUR-PART STRUCTURAL CHECK.** `UNWIND_INFO` says only *that* a handler
-  exists and gives its RVA; the bytes after it are whatever **that handler's** convention says, and
-  the handler has no symbol in a stripped image. Three conventions share the slot in ordinary MSVC
-  output — `__C_specific_handler` (`uint32 Count` + `Count` x `{Begin, End, Handler, JumpTarget}`,
-  all RVAs), `__GSHandlerCheck` (one `uint32` cookie frame offset) and `__CxxFrameHandler3` (one
-  `uint32` `FuncInfo` RVA) — so reading the first word as a `Count` reports a cookie offset of 0x30
-  as "48 guarded regions". `readScopeTable` (`pe/pdata.ts`) admits a table only when: (1) `Count >=
-  1`, at or under `MAX_SCOPE_TABLE_ENTRIES`, and `4 + Count * 16` fits inside the containing
-  section's raw extent and the buffer; (2) every region has `begin < end` and lies inside
-  `[rf.beginAddress, rf.endAddress)`; (3) `begin` is non-decreasing; (4) `handler` is 0, 1 or a
-  resolvable RVA and `jumpTarget` is 0 or inside the function. Check (2) is what makes a wrong
-  reading almost unpassable — a `__try` region is lexically inside its function by construction.
-  **Semantics the consumer depends on**: `handler == 1` is the FORMAT'S OWN spelling of
-  `EXCEPTION_EXECUTE_HANDLER` and must never be resolved as an address; `jumpTarget == 0` marks the
-  entry a `__finally` whose funclet is `handler`; otherwise `handler` is the **filter function's**
-  RVA and `jumpTarget` the `__except` body's. **`undefined` means "the record did not say", NEVER
-  "there are no regions"** (`arm64Frame`'s rule), and a failure yields **nothing rather than a
-  short table** — `peek-a-bin-tmo9` pointed the other way, since a caller cannot tell a two-region
-  table from the first two regions of a five-region one and would draw the `__try` around the wrong
-  span. The bound is that same product class in the file already bitten by it: `records x Count x
-  16`, so the **section** is the primary bound (`sectionRawLimitForRva` over `unwindInfoAddress` —
-  *not* `parseX64Pdata`'s `limit`, which bounds `.pdata` while the record is in `.xdata`) with
-  `MAX_SCOPE_TABLE_ENTRIES` the backstop. **THE CENSUS IS THE OTHER HALF OF THIS COMMIT AND IS IN
-  `docs/gotchas.md`**, stamped `0870e14`: of t64's 50 handler-bearing records 30 validate, 2 are
-  UHANDLER-only and **18 are the `/GS` population** (w64: 46 / 28 / 2 / 16), the tables carry 34 and
-  32 entries with a maximum of 2, and **31 of t64's 34 entries are `__finally`** — the shape any
-  consumer has to be built around. Two independent corroborations: the 50 and 46 are exactly the
-  functions that emit `__try`, and the 18 are exactly the 18 t64 functions found carrying a `/GS`
-  cookie xor. **The two corpus-level controls are INERT and reported**: the four checks are
-  mutually redundant on well-formed output (t64's 20 refusals split 12 by check (1), 6 by (2), 2 by
-  (3), and removing (2) sends its 6 to (4)), so the discriminating form is the unit tests, where all
-  twelve controls redden — publishing `[]` instead of `undefined` reddens 11. Nothing consumes the
-  field, so output is byte-identical **by construction**. (`peek-a-bin-j4uk.4`)
-- **A CARET THAT OPENS ONTO NOTHING, A BLOB URL NOBODY REVOKES, AND A COLUMN DRESSED AS A LINK — three independent `ResourcesView.tsx` defects, sharing only a file.** All three are the parser-admission class one level down: the pane's OUTPUT is honest and its CONTROLS lie about what they will do. (a) **The caret.** Every leaf renders an expand control and `ExpandedLeaf` had arms for THREE of the ~20 types the format defines, `return null`ing the rest — so an RT_BITMAP, RT_STRING, RT_DIALOG or RT_RCDATA (most of an ordinary binary) flipped the arrow open onto an empty `<tr><td colSpan={5}>`. The fallback is a hex/ASCII dump **through `resourceBytes`, the one declaration of the bound**, so `peek-a-bin-p0qw`'s `RangeError` on a truncated image cannot come back through a new call site — a hand-rolled bound here would reintroduce it across the whole population rather than one type. Capped at 256 bytes with the cap **admitted on the count line** (`first 256 of 300 bytes`, plainly `256 bytes` at exactly the cap, both sides pinned), plus a third number where the cut lands *inside* a leaf, since `bytes.length` and the declared `size` are two facts. `resourceBytes` now returns `{ bytes } | { bytes: null, reason }` — `unmapped` (RVA in no section) versus `past-end` (truncated file) — because the old bare `null` printed the same blank row an unhandled type did, and the reason is carried out of the GUARD rather than re-derived, a second `rvaToFileOffset` comparison being the copy that drifts back into the `RangeError`; `UNREADABLE_SENTENCE` is a `Record` over the union so a third reason fails the build. The guard sits **above RT_VERSION** (`parseVersionInfo` bounds its own reads, so it answered `{}` and the arm claimed "No version strings found" about an unreachable resource) and **outside RT_GROUP_ICON**, whose `buffer.slice` CLAMPS where `new Uint8Array` throws — the recorded asymmetry, now with a row so "consistency" cannot undo it. (b) **The blob URL.** `URL.createObjectURL` in the middle of RENDER, `revokeObjectURL` nowhere in the file: one pinned blob per render of an expanded group icon, on a pane that re-renders on every collapse, expand and download click — and a render React discards leaks a URL no cleanup can ever see. `GroupIconPreview` memoises the reconstruction, mints in a `useEffect` keyed on the bytes and **revokes in the cleanup**. **jsdom implements neither function, which is why this arm had never been rendered at all**; both are stubbed file-wide and **the instrument is the PAIRING** — one revoke per create across expand → collapse → unmount, twice — since a create count alone passes against the defect. **Nothing paints, and the control confirms it**: a blob carrying a single 0x00 byte leaves every row green (`peek-a-bin-v2u`). (c) **The RVA column** was `text-blue-400` monospace inside a plain `<td>` while every other blue address in the app is clickable; it dispatches `SET_ADDRESS` to `imageBase + rva` then `SET_TAB "hex"`, address first because `HexView` derives its section from `state.currentAddress` alone — the Hex tab and not the disassembly, `.rsrc` being data. **Five controls, four discriminating and one INERT (the paint assertion), and none crossed between sub-changes** — which is what made the three separately landable. **Three rows had pinned two of the defects as the rule** with `expect(rows[1].textContent).toBe("")`. Out of scope and left: no filter box on this tab, and RT_STRING tables undecoded. (`peek-a-bin-v3uh.14`)
-
-- **A `__try` IS EMITTED ONLY WHERE THE SCOPE TABLE HOLDS AN `__except` ENTRY, AND THE THREE THINGS
-  THE OLD WRAPPER SAID WERE ALL UNREAD.** `wrapExceptionRegions` (`decompile/pipeline.ts`) fired on
-  any record `funcExceptionRecord` selected and printed a whole-function `__try` with
-  `__except(EXCEPTION_EXECUTE_HANDLER)`. (1) *A region exists* fired on `EHANDLER | UHANDLER`, but
-  UHANDLER is `__finally` and `__GSHandlerCheck` — **no `__try` in the source at all** — sets
-  EHANDLER; 18 of t64's 50 handler-bearing records are that `/GS` shape and 2 more have unreadable
-  LSD. (2) *The region is the whole function* is wrong in **100% of cases**, measured: not one of
-  t64's 34 entries or w64's 32 covers its record's extent. (3) *The filter is
-  `EXCEPTION_EXECUTE_HANDLER`* was `emit.ts`'s unconditional fallback and **nothing in production
-  has ever built a `filterExpr`**, so it was printed every time. Now: a validated `scopeTable` with
-  an `__except` entry wraps; the extent is **admitted** in the body rather than implied by the
-  braces; the filter is that constant only where `handler === 1` (the format's own spelling, 1 entry
-  per binary) and otherwise `unrecoveredValue`'s `__unrecovered_N` naming the filter *routine*.
-  **`IRTry.filterSource`'s ABSENCE IS THE UNRECOVERED CASE, NEVER THE CONSTANT**, or the fallback is
-  back. **`__finally` is RECORDED AND NOT SPELLED** — it is the dominant kind by an order of
-  magnitude (31 of t64's 34 entries) and the IR has no statement kind for one (`peek-a-bin-fcgu`),
-  so such a record gets a leading `/* .pdata: __finally region … */` and no construct
-  (`peek-a-bin-wo8g`'s move). **A record with NO validated table emits NOTHING, not even an
-  admission** — a withheld table is the *ordinary* answer for a `/GS` or C++ record, so admitting an
-  unreadable region there would be the fabrication again. **DO NOT PUSH ANY OF THIS INTO
-  `funcExceptionRecord` OR "TIDY" ITS `& 0x3`**: that is a *selector*, and `peek-a-bin-qmlz`'s
-  soundness rests on client and worker applying the same idempotent rule. Every pass rebuilds an
-  `IRTry` with `...stmt`, which is what carries `filterSource` through — a pass enumerating the
-  fields drops it silently and reddens 6 tests. **Measured at `4167aa3`: `__try` 50 → 3 (t64) and
-  46 → 3 (w64); t32/w32 BYTE-IDENTICAL (no `.pdata`, so they are the control); `emitted C
-  identical` 229/279 and 229/275, i.e. exactly the handler-bearing records; every gate flat
-  including `guard lines unparsed` 0 and `polarity guards audited` exactly 521/577/445/500** — that
-  last is the `peek-a-bin-vwr5` risk, since `sweep.ts`'s `OPENER` and `guardShape.ts`'s
-  `BODY_IS_OPENER` both name `__try`. The only moving row is `unrecovered values` +2 per x64 binary,
-  which `compare.mjs` flags as a regression and which is the arithmetically predicted **refusal**
-  (3 `__except` records − 1 whose filter the table spelled). **gcc HAS NEVER CHECKED THIS CONSTRUCT
-  AND STILL DOES NOT** — `CC_HEADER` is `#define __try` / `#define __except(x) if (0)`, and the
-  macro *discards its argument*: verified against gcc 15.2.0 that an undeclared identifier and a
-  comment-only argument both compile with no diagnostic even without `-w`. Never cite "all of them
-  compile" here. Seven negative controls, **all seven discriminating**. Two of `peek-a-bin-qmlz`'s
-  liveness halves went vacuous and both are repaired rather than tuned away —
-  `disasmClient.test.ts`'s "there is a `__try` to keep" went red on landing, which is that
-  assertion working. Long-form, including the
-  flags-byte/scope-table agreement (zero disagreements over all 30 and 28 validating records) and
-  the fifth unread claim (the old handler comment named `__C_specific_handler`: 50 records, 2
-  distinct RVAs), in `docs/gotchas.md`. (`peek-a-bin-j4uk.5`)
-
-- **`regSize()` is not a membership test.** It falls back to `4` for any unrecognised name, so `regSize(x) > 0` is true for every string. Use `isKnownRegister()` (`decompile/ir.ts`) — this mistake made `lifter.ts`'s `isRegister()` a no-op that lifted immediates as registers.
-
-- **`RegState.defs` is keyed by literal operand text deliberately; ask `wroteAnyAlias` rather than canonicalising the map.** The map stores the last-written *expression*, which carries the operand's width, so a key of `rcx` would record `mov cl, 2`'s one byte as eight. But arity is width-blind, and `collectArgs64` probing the literal 64-bit name missed every sub-width setup and broke out of the loop — the write then had no reader and DCE deleted it, giving `ExitProcess()` with the exit code gone, in well-typed C. `wroteAnyAlias` answers the width-blind question over the width-exact map and returns a **boolean**, so the recorded expression can never be substituted at the call site (`peek-a-bin-urs` cannot return through it). The suite had pinned the defect as the rule under a KNOWN BUG comment. And: when you build an oracle to verify a change, land the oracle — the instrument for this one was lost with a scratch worktree (`peek-a-bin-02fa`). (`peek-a-bin-qb2x`)
-
-- **A written fastcall register is not an argument if the block already SPENT it as an address index — and base and index are different evidence.** `collectArgs64` asked only *whether* the block wrote RCX/RDX/R8/R9, which is equally true of a register computed for its own addressing. The discriminator is a subscript scaled by an element size whose access has already been emitted; an address **base** proves nothing (`lea rdx, [rcx+0x10]` / `f(rcx, rdx)` is a pointer that *is* the argument). `liftBlock` calls `noteIndexReads` before dispatching so a read-modify-write clears its own mark; `RegState.consumed` holds them and `invalidateCallerSaved` drops the volatile ones. One exemption, from the prefix property: an index read does not spend the register when the destination is a fastcall register *later* in the argument order. **Four rules refuted by this corpus and not to be re-tried:** distance from the write to the call, dominance (`RegState` is per-block, so the write always dominates), any read spending it (a spill to the outgoing stack-argument area happens *because* it is the register argument), and any read from inside a memory operand (`lea edx, [r9+0x8]` is arithmetic wearing an address's clothes). **Never answer this from `apitypes.ts`** — that blinds the only arity oracle here. (`peek-a-bin-7r1l`)
-
-- **`collectArgs32`'s backwards push-walk stops at a call whose result feeds a following call, and the marker is `push eax` AFTER the call, not before it.** `call inner / push eax / call outer` makes the inner call an argument expression of the outer, so the pushes above it are the outer's; there is no call *between* the pushes and the inner call, which is why "stop at an intervening call boundary" would never fire. Deliberately an **admitted under-count, not a re-attribution** — handing the pushes to the outer call is a guess in the over-count direction, and an invented argument is the one error this codebase will not trade for a recovered one. (`peek-a-bin-f51x`)
-
-- **A `push` of a callee-saved register the function has not yet written is a register SAVE — and that, not the register and not the position, is the discriminator.** Without it the walk ran into the prologue and emitted `GetCommandLineW(edi, esi, ebx)` for an API declaring none. **Two rules refuted by this corpus:** "a push of ebx/esi/edi is a save" (t32 0x402c3f is a genuine argument), and "a save has a matching `pop` before the `ret`" (`push imm8 / pop reg` is a pervasive MSVC size idiom, and saves are often sunk to a mid-function block leader). `firstCalleeSavedWrites` (`lifter.ts`) precomputes the lowest address writing each of ebx/esi/edi/ebp; a push below its register's first write ends the walk. Three load-bearing constraints: the scope is **function-wide**; `mov X, X` is not a definition but `xor X, X` is (generalising the self-move test past `mov` turned four real `Sleep(esi)` calls per binary into `Sleep()`); and it is **restricted to the four callee-saved registers**, since under cdecl/stdcall every argument arrives on the stack so their entry values are opaque. The address-order approximation is one-directional: it drops an argument, never invents one. **Never answer this from `apitypes.ts`.** (`peek-a-bin-6lmh`)
-
-- **A default parameter is a place two callers can disagree, and `layoutCFG(blocks, fontSize = 12)` is where they did.** `CFGView` passed the real `loadFontSize()`; `DisassemblyView`'s sidebar-minimap memo, one screen away, **passed nothing**. Every node's box comes from `getCfgLayout(fontSize)` — `BLOCK_WIDTH` is `round(320 * fontSize / 12)` and a block's height is `max(BLOCK_MIN_HEIGHT, insns * INSN_HEIGHT + BLOCK_HEADER + 4)` — so at any non-default `--mono-font-size` the geometry published to the sidebar overview context described **a different graph from the one the panel drew**, and the pan/viewport arithmetic computed against it was arithmetic over the wrong boxes. Sharing one `graphLayout` fixes it, and **changes minimap output at non-default sizes**: that is a behaviour change, not a refactor, and it is filed under `### Fixed` separately from the sharing. Two things about the instrument. **The row must be parameterised over both a default and a non-default size**: `layoutCFG(cfg)` and `layoutCFG(cfg, 12)` are the same call, so restoring the defect leaves a 12-only row green and reddens only the 16 row — measured, and it is why both are in the table. And **what is assertable is the numbers handed to `setGraphOverview`, never that the minimap looks like the graph**: jsdom performs no layout, `DisassemblyPanel.dom.test.tsx` stubs `getContext` to null outright, and CLAUDE.md already names `DisassemblyMinimap` as a component that mounts and never paints — so the human check belongs in `peek-a-bin-v2u`. Nothing static could see any of it: both spellings typecheck, and no corpus harness renders React. (`peek-a-bin-v3uh.4`)
-
-- **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or `index.html` directly — `build/csp.test.ts` fails on drift. A meta CSP cannot go in `index.html` because it is also the dev entry point and Vite injects an inline React Refresh preamble there. The shipped `connect-src` omits non-localhost plain `http:`, so a LAN Ghidra server is blocked on the HTTP nginx deployment.
-
-- **Do not re-add a plugin that copies `capstone.wasm`.** Rollup already rewrites `new URL("capstone.wasm", import.meta.url)` to its hashed asset; a manual copy is pure duplication and was 1.7 MiB of the PWA precache. `capstone-wasm-guard` in `vite.config.ts` fails the build if more than one WASM asset is emitted.
-
-- **`tools.ts` and `resources.ts` must only *type*-import `./session`.** A value import pulls in `./disasm`, which loads Capstone WASM at module scope, and both MCP suites become slow and fragile. `src/mcp/__tests__/importGraph.test.ts` enforces it.
-
-- **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and Biome falls back to defaults — which looks like your rule settings randomly stopped applying. `build/lintConfig.test.ts` fails on a comment and on `useExhaustiveDependencies` dropping below `error`; the seven a11y rules are at `error` too, so keep all of it there.
-
-- **Vitest's environment marker is matched against the WHOLE FILE, not the leading docblock, so writing it out in prose moves that file into jsdom.** `detectCodeBlock` (vitest 4) runs `content.match(/@(?:vitest|jest)-environment\s+([\w-]+)\b/)` over the entire source, so a node-only file that quotes the marker — in a string constant, in a comment explaining the convention — is silently switched. It bit `build/domTestNaming.test.ts`, whose whole job is to check that marker: it ran under jsdom and died at import on `fileURLToPath`, because `import.meta.url` there is not a `file:` URL, naming a line that is obviously fine. Both the constant and the prose in that file are written with the two halves apart; keep them apart.
-
-- **A multi-line `biome-ignore` needs `//` on every line.** Biome only honours the directive on the line immediately preceding the offence, so put prose in a normal comment block above a single-line directive; getting it wrong leaves bare text inside JSX and breaks the parse.
-
-- **`DisassemblyView.tsx` is ~1620 lines even after the split — read it in chunks.** The two extracted seams are `hooks/useDisassemblyKeyboard.ts` (`handleKeyDown`, with a **38-entry** dependency array that *is* the behaviour — copy it verbatim if you move it, and keep the `//` comments explaining why a stable value is listed or a value omitted) and `hooks/useGraphSearch.ts`. That array only began doing anything when `useDisassemblySearch`'s return was memoised; before that `search` had a fresh identity every render and the `useCallback` memoised nothing. `hooks/__tests__/disasmHandlerDeps.test.ts` fails the build if it drifts in either direction. `CFGView` takes 23 props. Neither extraction has ever been rendered.
-
-- **A callback declared later in a component cannot go in an earlier hook's dependency array** — it is a `const`, so the array hits its temporal dead zone at hook-call time. Not hypothetical: `handleKeyDown` closed over `handleDecompileToggle` (declared ~340 lines later) without it in the deps, so D opened the decompile panel but could not close it. The fix is a ref assigned *during render*; an effect is too late, because a keypress can be handled before effects flush.
-
-- **`parseBranchTarget` lives only in `components/shared.tsx`** and resolves `call` immediates as well as jumps. JumpArrows draws jump arrows only, so it guards with `mnemonic.startsWith("j")` *before* calling — dropping that guard makes recursive/intra-function calls sprout arrows. Covered by `src/components/__tests__/parseBranchTarget.test.ts`.
-
-- `sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`. Used to distinguish code vs data sections.
-
-- **A64 mnemonic matching is by *exact* mnemonic, never by prefix.** `brk` is not a `br` and `bfi` is not a branch, so `startsWith("b")` — the habit x86 encourages — mis-classifies real instructions. `arm64Operands.ts` is the one place that knows the grammar (`b`, `b.<cc>`, `bl`, `br`/`blr` with the PAuth forms, `cbz`/`cbnz`, `tbz`/`tbnz`, `ret`, and the `adrp`+`add`/`ldr` idiom); `buildCFG`, `layoutCFG`, `parseBranchTarget`, the `JumpArrows` guard and `buildTypedXrefMap` all read it rather than re-deriving it. The x86 path is untouched by any of it — keep it that way.
-
-- **Don't put a cheap request on the disasm worker.** It services messages serially, so a checksum or entropy call posted behind a whole-image disassembly waits minutes; that is what `metrics.worker.ts` exists for. A `useMemo` is not an option either — it cannot yield, and on a 253 MiB PE the entropy strip froze the UI for ~6.5 s on every Hex tab open whether or not the strip was shown.
-
-- **Never put a caller-owned buffer in a worker transfer list, and never walk below the top level.** Structured clone of an `ArrayBufferView` serialises its whole backing `ArrayBuffer`, not the view's window, and every large byte argument here is a view onto the entire loaded file — so a 4 KiB single-function `disassemble` used to copy all 253 MiB. `disasmClient.send()` routes args through `prepareBinaryArgs` (`workers/transfer.ts`), which replaces each **top-level** binary argument with a private `slice()` of exactly that window and transfers **only buffers it allocated itself**; that invariant is what makes the detach hazard structurally impossible, since the main thread keeps reading the file through `bufferRef`, `pe.buffer`, HexView and entropy. The walk stays top-level because an `Instruction[]` carries a tiny `bytes` buffer per element, and transferring them is **strongly superlinear** (exponent ~1.7) — so a large transfer list is a tax that grows with the image, not a fixed one. Anything that must cross flattened (`packDataWindows`) does so for the same reason, and slicing wins even when the copy is the same size, so there is no threshold below which it is skipped. **The REPLY path was measured and packing refused** — most of a reply is object and string overhead rather than bytes, and an unpacked shared buffer forces the receiver to re-slice — but the instrument is now landed as `corpus/replyCloneCost.ts` (`npm run corpus:replycost -- <path>`) rather than a lost scratchpad. One correction to `linearSweep.ts`'s comment: `StructuredSerializeInternal` carries a memory map, so a shared `ArrayBuffer` is serialised **once per message**, not once per instruction; `.slice()` is still right, because a whole-section tax on every reply is real. (`peek-a-bin-7mf`, `peek-a-bin-rjt`)
-
-- **…and uploading the section once under a handle was MEASURED AND REFUSED — do not rebuild it without new evidence.** One load ships `.text` four times and each pays its own slice; the saving is **under a tenth of one percent** of the work done on those same bytes, and the fraction does not improve with size or after the work was cut roughly threefold twice over — both terms are linear in the section, so the ratio is a property of the tool. The refusal is that a stale hit cannot be made impossible cheaply: a **content** key costs a full linear pass, which is the very thing being saved, and an **identity** key `(ArrayBuffer, byteOffset, byteLength)` is sound only while the file buffer is never written in place — an invariant nothing enforces, and whose obvious breaker (making hex editing cheap by patching the buffer in place) would silently serve pre-patch bytes for the rest of the session with no corpus gate able to see it. **The general rule this settles: the key comparison must be cheaper than the work it saves.** `Arm64SweepCache` and `CallSummaryCache` both pass it; this fails it. `npm run corpus:uploadcost -- <path>` is the instrument. (`peek-a-bin-9a8`)
-
-- **…and where a payload IS worth cutting, the fix is to send only what the consumer reads — never worker-side residency.** `decompileFunction` shipped the whole section's `Instruction[]` and typed xref map on every request (92-99% of it), but `buildCFG` narrows the array with `getFuncInsns` on its first line and reads the map only at those instructions' addresses. The client sends this function's slice of each — `collectFuncInsns` and `funcXrefEntries` in `funcInsns.ts` — for a request **16-68x cheaper**, with **retention unchanged at zero**. The one consumer of the whole section is the callee-clobber summary, and **the worker asks; the client does not predict**: on a miss `dispatch` returns `{ needInstructions: true }` above the work and the client resends once. Mirroring `CallSummaryCache` client-side would put an eviction rule in two files and a stale belief yields well-formed C that the address-keyed decompile cache then serves all session. Likewise `runtimeFunctions`: `wrapExceptionRegions` picks **at most one row**, so `funcExceptionRecord` (`funcInsns.ts`) applies the same rule on both sides — no protocol, no key, no cache, because the rule is **idempotent**. Two traps there: the predicate is a **begin-address equality**, not an extent intersection (a row covering the function without beginning at it describes another function's frame); and `.pdata` holds RVAs while `DisasmFunction.address` is a VA, so a naive window slice matches nothing on any real x64 image — the rule recovers the image base from the pair and **discards an ambiguous match**. The rule had to move to a leaf: `disasmClient` cannot import the decompile pipeline. `npm run corpus:decompilecost -- <path>` censuses equivalence and prints a `__try` count as the liveness half, since `0 differing` is a statement about a population that can be empty. Several negative controls here came back **inert** and the fixtures were sharpened rather than the controls kept — a control that does not discriminate is a test that is not testing. **Not verified:** nothing spawns a real `Worker`, so `structuredClone` in one process stands in for a `postMessage` across two and every figure is an upper bound. (`peek-a-bin-9gc9`, `peek-a-bin-qmlz`)
-
-- **One x86 load swept `.text` three times and two of those loops were the same loop; `linearSweep.ts` is now the one declaration.** `sweepX86` plus a session memo (`X86SweepCache` in `WorkerState.x86Sweep`), the x86 counterpart of `Arm64SweepCache`. The key rule has one declaration, `SectionMemo` in `sectionMemo.ts`, and has **three** parts: the bytes byte-for-byte, the load address, and **the decoder handle by identity** — a part ARM64 does not need, because x86-32 and x86-64 disagree about what a byte string means. The memo caches only the **sweep**, never the xref *result*: the second `buildAllXrefs` exists to re-resolve over a new string set. `disassemble` stays out, since it may be handed a sub-range and the memo holds one section. Retention is ~135 B/instruction; interning the strings was measured and refused. No harness drove the worker RPC path at all before this — `npm run corpus` goes through `FileSession`, which has no worker — so `disasmClient.test.ts` now posts a whole load through the real client answered by the real `dispatch`. (`peek-a-bin-x40u`)
-
-- **…and `hybridDisassemble` shares that sweep one level down, as a decoder rather than an array.** Recursive descent plus gap fill produces a different, annotated, smaller stream at addresses a *caller* named, so it takes `gridScan` (`linearSweep.ts`): a `CapstoneScan` answering from the held grid where the grid has an instruction at that address and delegating to Capstone where it does not, with all three phases keeping their loops verbatim. The coincidence rate is ~100% because a sweep walking into data comes out misaligned and *adds* entries, making the grid a superset — but **a rate is not a correctness argument**; the differential is, and the returned `Instruction[]` is identical field for field including `bytes`, `source` and `comment`. Four rules: **peek, never `sweep`** (the memo holds one slot, so a `get` would evict the section the other RPCs share; a hex patch is the live miss and the fall-back is the whole fix); **a served `bytes` must be a private `.slice()`**, never a `subarray` of the section, or the reply's clone drags the whole `.text` — note the property is *not aliasing*, not "exactly `size` long", since capstone-wasm backs its own records with a fixed 24-byte slice; a miss delegates; a run stops where the grid stops being **contiguous**, and the caller's window still bounds it. Unsorted input degrades safely — a missed binary search delegates. Lesson from the test stub: a decoder stub must key on the **absolute address**, never an offset within the window it was handed, or a serve and the decode it replaces disagree about the stub. `npm run corpus:gridserve -- <path>` is the instrument, driving the real `dispatch` with a *wrapped* handle. (`peek-a-bin-iqzu`)
-
-- **`detectFunctions` is dominated by the one shared Capstone sweep, and the "13x the next RPC" reading of that is arithmetic rather than a diagnosis.** Detection is the load's first RPC, so it is the one that fills `X86SweepCache` and the others are cheap because it already paid; read end to end (the harness's `warm` column), its own work is *smaller* than either successor's. `npm run corpus:detectcost -- <path>` (`corpus/detectPhaseCost.ts`, fed by an optional `phaseTap`) regenerates the per-phase split. Nothing is superlinear — `interiorBranchedOverStarts`' binary-search prefilter holds up at scale — so the ms/MiB figure is a rate and `REQUEST_TIMEOUT_MS`' headroom is a rate calculation, not a shape problem. **The measured refusal: almost nothing in detection is worth changing.** `tail-calls` served from the grid would decode under the *sweep's* alignment instead of from `end - 15`, changing which instruction is judged last and therefore `fn.tailCallTarget` — not a pure-performance change; `sweep-scan`'s `recentInsns` window feeds `readAbsoluteTable`/`boundedCaseCount`/`overlappedTableExtent` for 3-4%. The one thing taken was the SEH32 prologue head, because the work was provably **unread**: `headInstructions` eagerly decoded 8 instructions where the rule consumes 1-2, and it is a pull now (`HeadReader` in `seh32.ts`), output-neutral by construction — which matters because it feeds function boundaries. One of the harness's three self-controls is **inert**: moving the `sweep`/`sweep-scan` boundary past the scan loop fools both the unattributed check and the cold-minus-warm cross-check, so that boundary rests on reading the code. (`peek-a-bin-6dv3`)
-
-- Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`). First load fetches, subsequent loads read from cache.
-
-- **A persisted pixel SIZE must be validated against the viewport, not only against a compile-time
-  constant — and the clamped value must never be written back.** Two sites, one rule, in
-  `components/persistedSizeClamp.ts`: the sidebar's width and the docked bottom panel's height.
-  **The rule and its three load-bearing halves are stated in full in the `floatingClamp.ts`
-  paragraph's neighbourhood under "Rendering and the rest"** — that is where the sibling question
-  lives and this entry exists so the order here matches `docs/gotchas.md`. Long-form, including the
-  reserves' derivation, the eleven negative controls and the one alternative an existing test
-  blocks, in [`docs/gotchas.md`](docs/gotchas.md) and
-  [`docs/verification.md`](docs/verification.md) (`peek-a-bin-0tt6`).
-- **`fold.ts` has a `castTypeSize` helper** for double-cast removal; it regexes the bit width out of type strings like `int32_t`.
-
-- **`cleanup.ts`** runs after `structureCFG`, before `inferTypes`. Guard clause flattening is single-level only, not recursive inversion.
-
-- **`StructRegistry`** persists across decompilation calls in the worker — don't clear it between functions in the same session.
+- **`navigator.clipboard` is a SECURE-CONTEXT API and this app has an HTTP deployment**, so every
+  copy goes through `utils/clipboard.ts`'s `copyText`. Over plain `http:` off localhost the whole
+  object is absent, so it is a **TypeError at the property access**, on click — 18 unguarded sites,
+  zero guards. Four rules: the feature test names **`writeText`**; it is called **before the first
+  suspension**, so it stays inside the user gesture; it is called **on** the clipboard object; and it
+  returns a **boolean**, never throws. Four sites flash **red** on `false`; **the other fourteen fail
+  silently — the app has no toast mechanism and one was not invented for a bug fix.** A
+  `document.execCommand` fallback was costed and **REFUSED**.
+- **A caret that opens onto nothing, a blob URL nobody revokes, and a column dressed as a link** —
+  the pane's OUTPUT is honest and its CONTROLS lie about what they will do. The unknown-type fallback
+  is a hex dump **through `resourceBytes`, the one declaration of the bound** (a hand-rolled bound
+  reintroduces the `RangeError` across the whole population); `resourceBytes` returns a **reason**
+  carried out of the guard rather than re-derived; the guard sits **above** RT_VERSION and **outside**
+  RT_GROUP_ICON, whose `buffer.slice` clamps where `new Uint8Array` throws. `GroupIconPreview` mints
+  in a `useEffect` and **revokes in the cleanup** — the instrument is the **pairing**, since a create
+  count alone passes against the defect.
+- **The hex tab's byte search reported its cap as a fact.** `findBytePatternMatches` returns
+  `{ offsets, truncated }`, and **`truncated` is decided EXACTLY** — the break is taken on the match
+  that would *exceed* the cap. The admission goes on the **count line**, and `matchSummary` is the
+  one declaration of the sentence so the `+` and the `(search stopped at N)` cannot come apart. The
+  second half is the **SCOPE**: the scan covers ONE section, so an unscoped `No matches` is the
+  stronger falsehood.
+- **…and debouncing that scan creates the same class in reverse — a sentence about a scan that has
+  not happened — so the scanned query is carried with its result.** `searchSettled` compares **both**
+  `result.query === byteSearch` (the BOX, never `activeSearch`) and `result.data === sectionBytes`;
+  an unsettled query prints a neutral `Searching…`. The highlight set is deliberately **not** gated.
+- **`lineMap` is MANY-TO-ONE**, so anything keying a rendered element off an address alone renders one
+  per sharing line. Resolve to **one** anchor line and take the **lowest** — `placeGotoLabels`' own
+  tiebreak, and the line the auto-scroll effect reaches. `syncDisabled` must be re-tested at the
+  anchor rather than inherited.
+- **A default parameter is a place two callers can disagree**, and `layoutCFG(blocks, fontSize = 12)`
+  is where they did — the minimap passed nothing, so at any non-default font size the geometry
+  published to the sidebar described a different graph from the one drawn. What is assertable is the
+  numbers handed to `setGraphOverview`, never that the minimap looks like the graph.
+- **A callback declared later in a component cannot go in an earlier hook's dependency array** — it
+  is a `const` in its temporal dead zone. The fix is a ref assigned *during render*; an effect is too
+  late, because a keypress can be handled before effects flush.
+- **`DisassemblyView.tsx` is ~1620 lines even after the split — read it in chunks.** The extracted
+  seams are `useDisassemblyKeyboard.ts` (a **38-entry** dependency array that *is* the behaviour —
+  copy it verbatim if you move it, comments included) and `useGraphSearch.ts`. That array only began
+  doing anything when `useDisassemblySearch`'s return was memoised. `CFGView` takes 23 props.
+- **`parseBranchTarget` lives only in `components/shared.tsx`** and resolves `call` immediates as well
+  as jumps, so JumpArrows guards with `mnemonic.startsWith("j")` *before* calling.
+- **The CSP is generated, not hand-written.** Edit `build/csp.ts`, never `nginx.conf`'s header or
+  `index.html`; `build/csp.test.ts` fails on drift. A meta CSP cannot go in `index.html` because it
+  is also the dev entry point. The shipped `connect-src` omits non-localhost plain `http:`, so a LAN
+  Ghidra server is blocked on the HTTP deployment.
+- **Do not re-add a plugin that copies `capstone.wasm`** — Rollup already rewrites the `new URL(...)`
+  to its hashed asset. `capstone-wasm-guard` fails the build if more than one WASM asset is emitted.
+- **`tools.ts` and `resources.ts` must only *type*-import `./session`** — a value import pulls in
+  `./disasm`, which loads Capstone WASM at module scope.
+- **`biome.json` must be strict JSON.** A single `//` comment silently voids the whole config and
+  Biome falls back to defaults.
+- **Vitest's environment marker is matched against the WHOLE FILE, not the leading docblock**, so a
+  node-only file that quotes the marker in a string or a comment is silently switched to jsdom. It
+  bit `build/domTestNaming.test.ts`, whose whole job is to check that marker. Keep the two halves of
+  the token apart.
+- **A multi-line `biome-ignore` needs `//` on every line** — Biome only honours the directive on the
+  line immediately preceding the offence.
 
 ## Working in parallel — use subagents, and how
 
 **Default to farming independent work out to subagents.** Changes here are mostly self-contained —
-one bead, one measurement, one audit — and each carries a large reading cost (this file, plus the
-bead's notes, plus the module) that does not need to land in the integrator's context. Sessions
-have run three or four agents in parallel and cleanly.
+one bead, one measurement, one audit — and each carries a large reading cost that does not need to
+land in the integrator's context. Sessions have run three or four agents in parallel and cleanly.
 
-**Reach for one when** the task is a whole bead; a measurement with a stated method; a read-heavy
-audit whose answer is a paragraph and whose *inputs* are hundreds of files; or anything you would
-otherwise do by reading a module you do not already have in context. **Do it yourself when** it is
-a single fact you know where to find, when the work needs the integrated tree (integration itself
-is not delegable), or when briefing would cost more than doing — a good brief for this repo runs
-to a page, because the traps have to be named.
+**Reach for one when** the task is a whole bead, a measurement with a stated method, or a read-heavy
+audit whose answer is a paragraph and whose *inputs* are hundreds of files. **Do it yourself when**
+it is a single fact you know where to find, when the work needs the integrated tree (integration
+itself is not delegable), or when briefing would cost more than doing.
 
 ### Give each agent its own worktree, and make it its own
 
-Tool-created worktrees land *inside* the working tree and arrive with no `node_modules` — see
-**Commands** for what that breaks. Create them yourself:
+Tool-created worktrees land *inside* the working tree and arrive with no `node_modules`. Create them
+yourself:
 
 ```sh
 git worktree add /tmp/pab-wt/NAME -b sNN-NAME <HEAD_SHA>
@@ -2770,47 +1167,36 @@ ln -sfn /home/taylor/dev/peek-a-bin/node_modules /tmp/pab-wt/NAME/node_modules
 mkdir -p /tmp/pab-wt/NAME/.scratch
 ```
 
-- **The symlink means every such worktree SHARES one `node_modules` with the main tree.** Fine for
-  reading; **not** fine for a task that changes `package.json` — an `npm install` there rewrites
-  the shared tree under every sibling agent and can invalidate a timing measurement one of them is
-  taking. For dependency-changing work give that agent a real `npm ci` in its own worktree (~90 s)
-  and tell the others the shared tree is read-only.
-- **Scratch goes in `<worktree>/.scratch/`, never a bare `/tmp/<name>`** — one agent's control
-  backup was once clobbered mid-run by a sibling using the same filename.
+- **The symlink means every such worktree SHARES one `node_modules`.** Fine for reading; **not** fine
+  for a task that changes `package.json` — an `npm install` there rewrites the tree under every
+  sibling and can invalidate a timing measurement one of them is taking. Give such an agent a real
+  `npm ci` in its own worktree (~90 s) and tell the others the shared tree is read-only.
+- **Scratch goes in `<worktree>/.scratch/`, never a bare `/tmp/<name>`** — one agent's control backup
+  was once clobbered mid-run by a sibling using the same filename.
 - **Tell each agent to print `git rev-parse --short HEAD` first and stop if it is wrong.**
 - Remove the worktrees at session close; keep the branches as provenance.
 
 ### What every brief needs
 
 - **The gate commands, including the traps** — `npm run check` must not be piped, and `npm run
-  corpus` **skips cleanly and still exits 0** with no corpus directory, so say "confirm the header
-  names FOUR binaries".
-- **What byte-identical output would mean.** For a pure-performance change it is the whole case,
-  and saying so up front stops an agent accepting a diff it should have chased.
-- **Negative controls, asked for explicitly.** This repo has repeatedly found *inert* controls —
-  four in three different agents in one session. Say to **report** an inert one rather than
-  quietly tuning it away.
-- **"A measured refusal is a fine outcome."** Say it. Some of the best results have been an agent
-  declining to land a change and explaining why.
+  corpus` skips cleanly and still exits 0, so say "confirm the header names FOUR binaries".
+- **What byte-identical output would mean.** For a pure-performance change it is the whole case.
+- **Negative controls, asked for explicitly**, and say to **report** an inert one rather than quietly
+  tuning it away. This repo has repeatedly found inert controls — four in three agents in one session.
+- **"A measured refusal is a fine outcome."** Say it.
 - **Read-only means read-only.** An audit agent running beside editors must be told not to edit,
   commit or touch the tracker, and to hand back a report.
 
 ### Integrating
 
-- **Do not take an agent's results at face value.** Re-derive the load-bearing ones; they are
-  cheap next to the work of producing them.
-- **Several agents will all touch `CLAUDE.md` and `CHANGELOG.md`.** Cherry-pick in order;
-  `CLAUDE.md` normally auto-merges if each agent stayed in its own sections, and the
-  `CHANGELOG.md` conflict is two additions under one heading — **keep both, newest timestamp
-  first**.
-- **Run the full gate set on the INTEGRATED tree**, not just per branch. Each agent's run was
-  against its own base; only the combination is what ships.
-- **Pin a baseline before the agents start.** One `npm run corpus` on the session's base commit,
-  kept under its own label, is what every later comparison is made against.
+- **Do not take an agent's results at face value.** Re-derive the load-bearing ones.
+- **Several agents will all touch `CLAUDE.md` and `CHANGELOG.md`.** Cherry-pick in order; the
+  `CHANGELOG.md` conflict is two additions under one heading — **keep both, newest timestamp first**.
+- **Run the full gate set on the INTEGRATED tree**, not just per branch.
+- **Pin a baseline before the agents start** — one `npm run corpus` on the session's base commit,
+  under its own label.
 
 ## Gates
-
-Always run after changes:
 
 ```sh
 npm run typecheck && npm run build
@@ -2825,61 +1211,41 @@ exercised it.
 ## Committing
 
 **This repository opts in to agents committing.** Commit a coherent unit of work yourself once the
-gates are green — do not finish a piece of work and then ask permission to record it. This is the
-repository-level opt-in that the **Team-maintainer** profile below refers to, and it overrides the
-Conservative default's "do not commit unless explicitly asked". A current instruction not to
-commit still wins.
+gates are green — do not finish a piece of work and then ask permission to record it. This overrides
+the Conservative default below. A current instruction not to commit still wins.
 
-**Pushing is NOT included, and the distinction is deliberate.** Ask before `git push`, before
-`git pull --rebase`, and before any Dolt remote sync. **Do not assume `main` is ahead of
-`origin/main` — CHECK.** That claim stood here for several sessions and was stale by v0.1.2: the
-last two releases each ended level with origin, because the user authorised the push as part of the
-release. Either state is normal; `git rev-list --count origin/main..main` is the only answer worth
-acting on. One consequence that still bites **when** main is ahead: **tool-created subagent
-worktrees are cut from `origin/main`, not your local `main`**, so every such worktree silently lacks
-your unpushed work — which is one reason the **Working in parallel** recipe creates worktrees from
-an explicit local SHA instead.
+**Pushing is NOT included.** Ask before `git push`, before `git pull --rebase`, and before any Dolt
+remote sync. **Do not assume `main` is ahead of `origin/main` — CHECK** with
+`git rev-list --count origin/main..main`; either state is normal. One consequence when main *is*
+ahead: **tool-created subagent worktrees are cut from `origin/main`**, so they silently lack your
+unpushed work — which is one reason the recipe above uses an explicit local SHA.
 
 ### Before you commit
 
 ```sh
 npm run typecheck && npm test && npm run build
 npm run check        # the CI gate
-npm run corpus       # ONLY if the change could move emitted C — see below
+npm run corpus       # ONLY if the change could move emitted C
 ```
 
-`npm run corpus` is the one that is easy to skip and expensive to have skipped. Run it whenever the
-change touches `src/disasm/`, the decompiler pipeline, function detection or the emitter, and
-**confirm the report header names four binaries** — a missing corpus directory *skips* and still
-exits 0, so a green run is not always a run. Diff against a base run pinned to one commit
-(`npm run corpus:compare -- <base> <change>`); **byte-identical output is itself a result worth
-stating**, since it proves a change was confined to the path you meant.
+Run the corpus whenever the change touches `src/disasm/`, the decompiler pipeline, function
+detection or the emitter, and **confirm the report header names four binaries**. Diff against a base
+run pinned to one commit; **byte-identical output is itself a result worth stating**.
 
 ### What a commit here looks like
 
-- **One logical change.** The documentation and `CHANGELOG.md` updates for that change belong in
-  the same commit, not a follow-up.
-- **Straight to `main`.** That is this project's history and there are no other branches; do not
-  invent a feature branch for a change you are about to commit anyway. Use a worktree when a
-  subagent needs isolation, not to stage a commit.
-- **The message carries the measurements**, in the style already in `git log`: an imperative
-  subject, then what changed, *why*, the numbers before and after with the commit they were taken
-  at, and the bead id. A defect fixed says what the defect was and what would have caught it.
-  Prefer a long message to a short one — the log is the only place some of this is written down.
-- **Stage only your own files.** `.beads/dolt-backup.json` is tracked but is not yours — leave it;
-  it was once swept into a commit that did not mean to take it. `.beads/interactions.jsonl` moves
-  as a side effect of using `bd`, and history records it in its own commit rather than smuggling
-  it into a code change.
+- **One logical change**, with its documentation and `CHANGELOG.md` updates in the same commit.
+- **Straight to `main`.** Use a worktree when a subagent needs isolation, not to stage a commit.
+- **The message carries the measurements**, in the style already in `git log`: imperative subject,
+  then what changed, *why*, the numbers before and after with the commit they were taken at, and the
+  bead id. Prefer a long message to a short one — the log is the only place some of this is written.
+- **Stage only your own files.** `.beads/dolt-backup.json` is tracked but is not yours;
+  `.beads/interactions.jsonl` moves as a side effect of `bd` and goes in its own commit.
 - **End the message with** `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
-- **Never pass unescaped backticks to a `bd` text flag — the SHELL executes them and silently
-  drops the fragment**, so the bead is written with a hole in it and nothing reports an error.
-  Almost every bead body here contains `` `code` ``, which makes this the default failure rather
-  than an edge case. Use a quoted heredoc (`--body-file -  <<'EOF'`) or `--append-notes "$(cat
-  file)"`, and **read it back with `bd show`** — that is the only confirmation. Two more things
-  `bd show` will mislead you about: its markdown renderer bolds `__tests__` into `**tests**` and
-  eats `<angle-bracket>` placeholders in prose, so a path or a placeholder copied out of a
-  rendered bead can be wrong even though the stored text is right. Indented code blocks survive
-  both; check with `bd show <id> --json` when it matters.
+- **Never pass unescaped backticks to a `bd` text flag — the SHELL executes them and silently drops
+  the fragment.** Use a quoted heredoc (`--body-file - <<'EOF'`) or `--append-notes "$(cat file)"`,
+  and **read it back with `bd show`**. Two more things `bd show` misleads about: its renderer bolds
+  `__tests__` and eats `<angle-bracket>` placeholders, so use `--json` when it matters.
 
 ### Author identity
 
@@ -2890,33 +1256,31 @@ GIT_AUTHOR_NAME=welly GIT_AUTHOR_EMAIL=wklee@m2.local \
 GIT_COMMITTER_NAME=welly GIT_COMMITTER_EMAIL=wklee@m2.local git commit -m "…"
 ```
 
-That matches every existing commit. The user's own address is `mantis2406@wellingtonlee.io`; if
-they say to use it, amending is cheap while these commits are unpushed. Do not write either one
-into `git config` without being asked.
+That matches every existing commit. The user's own address is `mantis2406@wellingtonlee.io`; if they
+say to use it, amending is cheap while these commits are unpushed. Do not write either into
+`git config` without being asked.
 
 ## Documentation
 
-Documentation lives in `docs/`. **`docs/README.md` is the canonical index and holds the "which doc
-do I update when I change X" mapping table** — consult it there rather than keeping a second copy
-here or in `CONTRIBUTING.md`.
+Documentation lives in `docs/`. **`docs/README.md` is the canonical index and holds the "which doc do
+I update when I change X" mapping table** — consult it there rather than keeping a second copy.
 
 Three of those files are the long-form record split out of this one, and a change to a rule
 summarised here usually belongs in its detail file too: [`docs/gotchas.md`](docs/gotchas.md),
 [`docs/verification.md`](docs/verification.md), [`docs/decompiler-ir.md`](docs/decompiler-ir.md).
 
-When making architectural changes, adding major features or changing conventions, update this file
-(`CLAUDE.md`) so future agents have accurate context: new source directories, new pipeline stages,
-new conventions, new gotchas, changes to the build/test commands. **Keep it a summary** — the
-evidence, the measurements and the negative controls go in the `docs/` file, not here.
-
-Update `README.md` only when changes affect the top-level project description.
+Update this file for architectural changes, new source directories, new pipeline stages, new
+conventions, new gotchas and changes to the build/test commands. **Keep it a summary** — the
+evidence, the measurements and the negative controls go in the `docs/` file, not here. Update
+`README.md` only when changes affect the top-level project description.
 
 ## CHANGELOG Convention
 
 Maintain `CHANGELOG.md` under `## [Unreleased]` with `### Added`, `### Changed`, `### Fixed`,
-`### Removed`. Each entry: `- **Feature name** — concise description`, with a timestamp appended
-in the format `(YYYY-MM-DD HH:MM)` using the current date and time. Example:
+`### Removed`. Each entry: `- **Feature name** — concise description`, with a timestamp appended in
+the format `(YYYY-MM-DD HH:MM)`. Example:
 `- **Feature name** — concise description (2026-03-06 15:30)`
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
