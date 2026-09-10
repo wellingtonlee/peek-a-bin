@@ -1034,6 +1034,56 @@ describe("liftBlock — bts/btr/btc write the bit", () => {
   });
 });
 
+/**
+ * `movabs` (peek-a-bin-n9cl.6). Capstone spells the 64-bit-immediate `mov` as
+ * `movabs`, and the `mov` handler tested `mn === "mov"`, so all 42 corpus sites
+ * were `raw`. `IRConst.value` is a JS number: a 64-bit magic constant beyond
+ * 2^53 would be silently ROUNDED, so those are refused (raw, counted) rather
+ * than lifted wrong — the strncmp masks 0x8101010101010100 / 0x7efefefefefefeff
+ * are exactly this case.
+ */
+describe("liftBlock — movabs", () => {
+  it("lifts a movabs whose immediate is a safe integer", () => {
+    expect(liftOne("movabs", "rax, 0x2b992ddfa233")).toEqual({
+      kind: "assign",
+      dest: irReg("rax", 8),
+      src: irConst(0x2b992ddfa233, 8),
+      addr: START,
+    });
+    // Sign-reinterpreted: sixteen digits with the top bit set is a small negative number.
+    expect(liftOne("movabs", "r8, 0xfffffffffffffff0")).toMatchObject({ src: irConst(-16, 8) });
+    expect(liftOne("movabs", "rax, 0xffffffffffff")).toMatchObject({
+      src: irConst(0xffffffffffff, 8),
+    });
+  });
+
+  it("REFUSES an immediate that is not a safe integer, leaving the instruction raw", () => {
+    // The last is the corpus's `0xffffffffffffff0`: FIFTEEN digits, i.e.
+    // 0x0FFFFFFFFFFFFFF0 = 2^60 - 16, positive and beyond 2^53 — not -16.
+    for (const imm of [
+      "0x8101010101010100",
+      "0x7efefefefefefeff",
+      "0x1fffffffffffffff",
+      "0x101010101010101",
+      "0xffffffffffffff0",
+    ]) {
+      expect(liftOne("movabs", `r11, ${imm}`), imm).toEqual({
+        kind: "raw",
+        text: `movabs r11, ${imm}`,
+        addr: START,
+      });
+    }
+    // The same guard on a plain `mov`, which cannot carry such an immediate today.
+    expect(liftOne("mov", "rax, 0x7efefefefefefeff")).toMatchObject({ kind: "raw" });
+  });
+
+  it("does not record a refused movabs's destination as written", () => {
+    const st = new RegState();
+    lift([["movabs", "rcx, 0x7efefefefefefeff"]], { state: st });
+    expect(st.wroteAnyAlias("rcx")).toBe(false);
+  });
+});
+
 describe("liftBlock — calls and returns", () => {
   const call = (opStr: string, opts: LiftOpts = {}) =>
     liftOne("call", opStr, opts) as IRStmt & {

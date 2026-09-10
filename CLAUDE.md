@@ -1028,6 +1028,13 @@ refused. **Read the long-form entry before changing the code it describes.**
   The index is the SDM's rule: a register base reduces modulo the width (`(idx & (W-1))` for a
   register index); a memory base addresses a bit STRING, so a register index over memory is refused
   and an immediate is admitted only below the width. `bitWrite` (`lifter.ts`) is the one declaration.
+- **`movabs` is a `mov`, and an immediate that is not a SAFE INTEGER is refused (`raw`), never
+  rounded.** `IRConst.value` is a JS number; a 64-bit magic constant beyond 2^53 would be silently
+  rounded to a value the program never contains and folded with downstream. `exactImmediate`
+  (`lifter.ts`) is the one declaration; `0xffffffffffffff0` is FIFTEEN digits (2^60 − 16, refused),
+  not −16. 36 of 42 corpus sites are refused this way — a measured cost left standing, since the
+  refusal keeps a `raw` hole (strncmp's masks stay unassigned) and the alternative is epic 2's
+  unknown-assignment.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

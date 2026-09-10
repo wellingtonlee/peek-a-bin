@@ -541,6 +541,23 @@ describe("decompileFunction — bts/btr/btc reach the page as bit writes", () =>
   });
 });
 
+describe("decompileFunction — movabs", () => {
+  it("lifts a safe 64-bit immediate and refuses one beyond 2^53 rather than rounding it", () => {
+    const code = run(
+      seq(0x401000, [
+        ["movabs", "rax, 0x2b992ddfa233"],
+        ["movabs", "r11, 0x8101010101010100"],
+        ["and", "rax, r11"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("/* unlifted: movabs r11, 0x8101010101010100 */");
+    expect(code).toContain("return 0x2B992DDFA233 & r11;");
+    expect(code).not.toContain("0x8101010101010000");
+  });
+});
+
 describe("decompileFunction — a spoiled compare read by setcc", () => {
   it("reads the value the compare compared, not the register the spoiler wrote", () => {
     const code = run(

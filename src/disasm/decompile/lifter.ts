@@ -210,6 +210,32 @@ function parseDestOperand(op: string, insn: Instruction, is64: boolean): IRExpr 
   return irUnknown(trimmed);
 }
 
+/**
+ * Can this operand, if it is an immediate, be held EXACTLY in an `IRConst`?
+ *
+ * `IRConst.value` is a JS number, exact only up to 2^53. `parseImm` already
+ * reinterprets a 64-bit hex immediate as signed — so `0xffffffffffffff0` is
+ * -16 and exact — but a magnitude past 2^53 either way is rounded by
+ * `parseInt`/`Number`, silently, to a constant the program never contains. Such
+ * an immediate is refused rather than lifted wrong; a non-immediate operand is
+ * trivially exact (peek-a-bin-n9cl.6).
+ */
+function exactImmediate(op: string): boolean {
+  const t = op.trim();
+  const m = t.match(HEX_PATTERN);
+  if (!m) return true;
+  const magnitude = BigInt(`0x${m[1]}`);
+  if (magnitude <= BigInt(Number.MAX_SAFE_INTEGER)) return true;
+  // A 64-bit immediate Capstone printed unsigned: read the top bit as the sign.
+  if (m[1].length <= 16) {
+    const signed = BigInt.asIntN(64, magnitude);
+    if (signed >= -BigInt(Number.MAX_SAFE_INTEGER) && signed <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function splitOperands(opStr: string): string[] {
   // Split on comma, respecting brackets
   const parts: string[] = [];
@@ -1424,8 +1450,18 @@ export function liftBlock(
       continue;
     }
 
-    // ── mov ──
-    if (mn === "mov") {
+    // ── mov / movabs ──
+    //
+    // Capstone spells the 64-bit-immediate form `movabs`, and this handler
+    // tested `mn === "mov"`, so all 42 corpus sites were `raw` — MSVC's magic
+    // constants (the strncmp zero-byte masks 0x8101010101010100 /
+    // 0x7efefefefefefeff, division-by-multiplication reciprocals). The refusal
+    // below is the part that matters: `IRConst.value` is a JS number, so an
+    // immediate beyond 2^53 would be silently ROUNDED to a value the program
+    // never contains, and every pass downstream would fold with it. A constant
+    // that cannot be held exactly stays `raw`, which the unlifted census counts
+    // (peek-a-bin-n9cl.6). 14 of the 21 per x64 binary are refused this way.
+    if (mn === "mov" || mn === "movabs") {
       // On x64 a 32-bit self-move is a ZERO-EXTENSION, not a no-op: writing a
       // 32-bit register clears bits 63:32 of its 64-bit parent, and MSVC emits
       // `mov r8d, r8d` deliberately for exactly that effect. Lifted as a plain
@@ -1480,7 +1516,7 @@ export function liftBlock(
           continue;
         }
       }
-      if (parts.length < 2) {
+      if (parts.length < 2 || !exactImmediate(parts[1])) {
         stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
         continue;
       }
