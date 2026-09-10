@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
+import type { CalleeClobbers } from "../../callSummary";
+import { recogniseCrtIdioms } from "../../crtIdioms";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
@@ -8169,5 +8171,193 @@ describe("a matched push/pop restores the value the machine saved", () => {
       ]),
     );
     expect(code).not.toMatch(/stk_/);
+  });
+});
+
+describe("decompileFunction — /GS: the check call takes no result and the return names the value before it", () => {
+  // THE DEFECT (peek-a-bin-n9cl.3). Every `call` defined RAX, including MSVC's
+  // `__security_check_cookie`, whose body provably preserves it. The function's
+  // real return value — computed just above the check — was therefore dead, and
+  // `foldReturnedCallResults` printed the tail as `return sub_140002000(rcx);`
+  // in every `/GS` function that returns a value: t64!sub_14000D3C8 is the
+  // witness in the bead. The fix is a FACT about the callee, read off its body
+  // by `crtIdioms.ts` and carried in `CalleeClobbers.idioms`; the NAME comes
+  // from the function map, as function detection sets it.
+  const CHECK64 = 0x402000;
+  const CHECK32 = 0x401da4;
+
+  /** t64's `__security_check_cookie` body, as the image-wide pass sees it. */
+  const check64 = (): Instruction[] => [
+    ins(CHECK64, "cmp", "rcx, qword ptr [rip + 0xff9]", 7), // cookie at 0x403000
+    ins(CHECK64 + 7, "jne", `0x${(CHECK64 + 0x1a).toString(16)}`, 2),
+    ins(CHECK64 + 9, "rol", "rcx, 0x10", 4),
+    ins(CHECK64 + 13, "test", "cx, 0xffff", 5),
+    ins(CHECK64 + 18, "jne", `0x${(CHECK64 + 0x16).toString(16)}`, 2),
+    ins(CHECK64 + 20, "ret", "", 2),
+    ins(CHECK64 + 22, "ror", "rcx, 0x10", 4),
+    ins(CHECK64 + 26, "jmp", "0x404290", 5),
+  ];
+  /** t32's. */
+  const check32 = (): Instruction[] => [
+    ins(CHECK32, "cmp", "ecx, dword ptr [0x412284]", 6),
+    ins(CHECK32 + 6, "jne", `0x${(CHECK32 + 10).toString(16)}`, 2),
+    ins(CHECK32 + 8, "ret", "", 2),
+    ins(CHECK32 + 10, "jmp", "0x403bf3", 5),
+  ];
+
+  const facts = (check: number, body: Instruction[], is64: boolean): CalleeClobbers => ({
+    byAddress: new Map(),
+    unresolved: [],
+    idioms: recogniseCrtIdioms(new Map([[check, body]]), is64),
+  });
+  /** As function detection names it (`functionDetect.ts`'s thunk-naming pass). */
+  const named = (check: number) =>
+    new Map([[check, { name: "__security_check_cookie", address: check }]]);
+
+  function decompile(
+    instructions: Instruction[],
+    is64: boolean,
+    funcMap: Map<number, { name: string; address: number }>,
+    clobbers: CalleeClobbers | undefined,
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      is64,
+      new Map(),
+      new Map(),
+      new Map(),
+      funcMap,
+      undefined,
+      undefined,
+      undefined,
+      clobbers,
+    ).code;
+  }
+
+  /**
+   * A `/GS` function on x64: load the cookie, mix it with RSP, park it; compute
+   * the return value from the first argument; unpark, unmix, check, return.
+   * `mov rax, [rip + 0x1ffc]` at 0x401000 (size 4) names 0x401004 + 0x1ffc =
+   * 0x403000, the address the check body compares against.
+   */
+  const gs64 = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "rax, qword ptr [rip + 0x1ffc]"],
+      ["xor", "rax, rsp"],
+      ["mov", "qword ptr [rsp + 0x28], rax"],
+      ["mov", "eax, dword ptr [rcx]"],
+      ["mov", "rcx, qword ptr [rsp + 0x28]"],
+      ["xor", "rcx, rsp"],
+      ["call", `0x${CHECK64.toString(16)}`],
+      ["ret"],
+    ]);
+
+  /** The same function on x86, where the cookie is mixed with EBP and the operand is absolute. */
+  const gs32 = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "eax, dword ptr [0x412284]"],
+      ["xor", "eax, ebp"],
+      ["mov", "dword ptr [ebp - 4], eax"],
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["mov", "ecx, dword ptr [ebp - 4]"],
+      ["xor", "ecx, ebp"],
+      ["call", `0x${CHECK32.toString(16)}`],
+      ["ret"],
+    ]);
+
+  const returnLine = (code: string) =>
+    (code.split("\n").find((l) => l.trim().startsWith("return")) ?? "").trim();
+  const headerIndex = (code: string) => code.split("\n").findIndex((l) => /^\S.*\) \{$/.test(l));
+
+  it("x64: the check is called as a statement and the return names the value before it", () => {
+    const code = decompile(gs64(), true, named(CHECK64), facts(CHECK64, check64(), true));
+
+    // The call is still there, by name, with its one argument — instrumentation
+    // is real control flow (a jne to __report_gsfailure) and is NAMED, not hidden.
+    expect(code).toMatch(/^\s*__security_check_cookie\(rcx\);$/m);
+    // And it produces nothing the return could read.
+    expect(returnLine(code)).not.toContain("__security_check_cookie");
+    expect(returnLine(code)).not.toBe("return;");
+    expect(code).not.toMatch(/=\s*__security_check_cookie\(/);
+  });
+
+  it("x64: the cookie load is spelled __security_cookie through the RIP grammar, and declared extern", () => {
+    const code = decompile(gs64(), true, named(CHECK64), facts(CHECK64, check64(), true));
+    const lines = code.split("\n");
+
+    expect(code).toContain("__security_cookie ^ rsp");
+    expect(code).not.toContain("0x403000");
+    // Above the header, with the typedefs — a declaration, not a statement.
+    const extern = lines.indexOf("extern uintptr_t __security_cookie;");
+    expect(extern).toBeGreaterThanOrEqual(0);
+    expect(extern).toBeLessThan(headerIndex(code));
+  });
+
+  it("x86: the same, with an absolute cookie operand and the xor against EBP kept alive", () => {
+    const code = decompile(gs32(), false, named(CHECK32), facts(CHECK32, check32(), false));
+
+    // The argument is the unmixed cookie — folded into the call as `var_4 ^ ebp`
+    // — and the call is a statement, not an assignment.
+    expect(code).toMatch(/^\s*__security_check_cookie\([^=]*\^ ebp\);$/m);
+    expect(returnLine(code)).not.toContain("__security_check_cookie");
+    expect(returnLine(code)).not.toBe("return;");
+    expect(code).toContain("__security_cookie ^ ebp");
+    expect(code).not.toContain("0x412284");
+    expect(code).toContain("extern uintptr_t __security_cookie;");
+    // The cookie unmix before the call: with the routine's signature the call
+    // reads ECX, so the xor is not dead — it is folded into the argument.
+    // Without it (see the control below) it was being deleted, which is the
+    // other half of "do not delete the xor".
+    expect(code).toContain("__security_check_cookie(var_4 ^ ebp);");
+  });
+
+  it("NEGATIVE CONTROL: with the call still defining the accumulator, the tail returns the check", () => {
+    // The bead's control: hand the recognised call a resultDest again — here by
+    // withholding the idiom map, which is the only thing that removes it — and
+    // the tail goes back to `return __security_check_cookie(…)`. The NAME alone
+    // fixes nothing; the callee FACT is what carries the repair.
+    const noIdioms: CalleeClobbers = { byAddress: new Map(), unresolved: [], idioms: new Map() };
+    const code64 = decompile(gs64(), true, named(CHECK64), noIdioms);
+    expect(returnLine(code64)).toMatch(/^return __security_check_cookie\(rcx\);$/);
+    expect(code64).not.toContain("__security_cookie");
+
+    const code32 = decompile(gs32(), false, named(CHECK32), noIdioms);
+    expect(returnLine(code32)).toBe("return __security_check_cookie();");
+    // Nothing reads ECX, so the unmix is deleted as dead: the xor is gone.
+    expect(code32).not.toContain("var_4 ^ ebp");
+  });
+
+  it("leaves a load of the cookie at another width spelled as the address", () => {
+    // Naming a byte of the cookie would claim a layout; the raw spelling is
+    // true even if less readable.
+    const code = decompile(
+      seq(0x401000, [["mov", "al, byte ptr [0x412284]"], ["ret"]]),
+      false,
+      named(CHECK32),
+      facts(CHECK32, check32(), false),
+    );
+    expect(code).toContain("0x412284");
+    expect(code).not.toContain("extern uintptr_t");
+  });
+
+  it("names a store to the cookie too, since it is the same object", () => {
+    const code = decompile(
+      seq(0x401000, [["mov", "dword ptr [0x412284], eax"], ["ret"]]),
+      false,
+      named(CHECK32),
+      facts(CHECK32, check32(), false),
+    );
+    expect(code).toMatch(/^\s*__security_cookie = eax;$/m);
   });
 });

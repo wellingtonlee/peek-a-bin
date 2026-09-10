@@ -1,6 +1,7 @@
 import type { RuntimeFunction, ScopeTableEntry } from "../../pe/types";
 import type { CalleeClobbers } from "../callSummary";
 import { buildCFG, detectLoops } from "../cfg";
+import { namedGlobalsFor } from "../crtIdioms";
 import { funcExceptionRecord } from "../funcInsns";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
@@ -327,7 +328,14 @@ export function decompileFunction(
     }
 
     // 9. Emit C text + lineMap
-    const result = emitFunction(irFunc, typeCtx, stringMap);
+    //
+    // The globals the recognised CRT routines identify — today the `/GS`
+    // cookie — so a load of `*(int64_t*)(0x1400143C8)` is spelled
+    // `__security_cookie` and declared `extern` above the header. Derived from
+    // the same per-callee facts the lifter read; absent when no summary was
+    // supplied, and then the emitter spells every address raw, as before.
+    const globals = namedGlobalsFor(calleeClobbers?.idioms, is64);
+    const result = emitFunction(irFunc, typeCtx, stringMap, globals);
     return {
       code: result.code,
       lineMap: Array.from(result.lineMap.entries()),

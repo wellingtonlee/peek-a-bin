@@ -141,6 +141,18 @@ for (const b of bins) {
     (x) => x.callees.lost,
     (a, c) => c > a,
   );
+  // The `/GS` cookie check's call, and whether the emitted C reads a result it
+  // never produces (peek-a-bin-n9cl.3). Report only — the epic's instruction
+  // was no new gate — but `results taken` rising from 0 is the defect coming
+  // back, and `recognised` falling to 0 is the recogniser going blind.
+  // Artifacts from before the row have no field.
+  if (B.gsCheck && C.gsCheck) {
+    row("/GS check recognised", (x) => x.gsCheck.checkFunctions);
+    row("/GS check calls", (x) => x.gsCheck.calls);
+    row("/GS check results taken", (x) => x.gsCheck.resultTaken);
+  } else {
+    note("  /GS check                     NOT MEASURED on both sides (a run predating the row)");
+  }
   // Statements liftBlock produced that structureCFG put nowhere, by object
   // identity. The absolute is NOT gated in the run itself — see the README —
   // but a rise between two pinned commits is a regression on its own terms:

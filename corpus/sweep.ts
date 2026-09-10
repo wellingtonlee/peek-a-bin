@@ -416,6 +416,35 @@ export interface BinResult {
   /** A callee the disassembly names that the emitted C never applies. Expect 0. */
   callees: { pairs: number; lost: number; funcsAffected: number; detail: string[] };
   /**
+   * THE `/GS` COOKIE CHECK, AND WHETHER ITS CALL TOOK A RESULT IT DOES NOT
+   * PRODUCE (peek-a-bin-n9cl.3). `checkFunctions` is how many detected
+   * functions `crtIdioms.ts` recognised as `__security_check_cookie` (one per
+   * image is the expectation; 0 means the recogniser found nothing and every
+   * other figure here is vacuous). `calls` counts emitted call statements to
+   * it; `resultTaken` counts the ones whose result the C reads —
+   * `x = __security_check_cookie(…)` or `return __security_check_cookie(…)` —
+   * which the routine never produces, so every one is a WRONG VALUE. Report
+   * only, on the epic's "no new gate" instruction; the negative control is to
+   * hand the recognised call a `resultDest` again, which takes `resultTaken`
+   * from 0 to `calls` on every x64 binary.
+   *
+   * `cookieBody` is the address the check routine's body compares against;
+   * `cookieLoadConfig` is `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` as the
+   * PE parser read it (`null` when the directory or the field is absent — both
+   * PE32+ corpus binaries carry no load config directory at all). They are two
+   * independent readings of one address; `agree` is their differential and
+   * says nothing when either is missing.
+   */
+  gsCheck: {
+    checkFunctions: number;
+    calls: number;
+    resultTaken: number;
+    cookieBody: number | null;
+    cookieLoadConfig: number | null;
+    agree: boolean | null;
+    detail: string[];
+  };
+  /**
    * STATEMENT DROPS ACROSS `structureCFG`, BY OBJECT IDENTITY.
    *
    * The complement of line map coverage, and a strictly sharper question. That
@@ -820,6 +849,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       detail: [],
     },
     callees: { pairs: 0, lost: 0, funcsAffected: 0, detail: [] },
+    gsCheck: gsCheckBaseline(af),
     stmtDrops: { tracked: 0, dropped: 0, byKind: {}, funcsAffected: 0, detail: [] },
     drops: [],
     unrecovered: {
@@ -1026,6 +1056,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       af.pe.is64,
     );
     auditCallees(res, func, insns, code, funcMap);
+    auditGsCheck(res, func, code);
     // The guard pass is what can name a jcc for an unrecovered condition — it
     // is the only thing here that anchors an emitted arm to a machine block —
     // so it runs first and hands over what it resolved.
@@ -1336,6 +1367,60 @@ function auditStatementDrops(
     res.stmtDrops.detail.push(
       `0x${func.address.toString(16)} ${func.name}: ${here.length} dropped (${kinds})`,
     );
+  }
+}
+
+/**
+ * The image-level half of `BinResult.gsCheck`: how many functions the session's
+ * own recogniser named, and the two readings of the cookie's address.
+ *
+ * Read from `af.calleeClobbers.idioms` rather than recomputed, for the reason
+ * the clobber summary itself is: the measurement must be of what the MCP
+ * decompile path consumed, not of a copy the harness built for itself.
+ */
+function gsCheckBaseline(af: Af): BinResult["gsCheck"] {
+  const idioms = [...(af.calleeClobbers.idioms?.values() ?? [])].filter(
+    (i) => i.kind === "security-check-cookie",
+  );
+  const bodies = new Set(idioms.map((i) => i.cookieAddress));
+  const cookieBody = bodies.size === 1 ? idioms[0].cookieAddress : null;
+  const lc = af.pe.loadConfig?.securityCookie;
+  const cookieLoadConfig = lc === undefined || lc === 0 ? null : lc;
+  return {
+    checkFunctions: idioms.length,
+    calls: 0,
+    resultTaken: 0,
+    cookieBody,
+    cookieLoadConfig,
+    agree:
+      cookieBody !== null && cookieLoadConfig !== null ? cookieBody === cookieLoadConfig : null,
+    detail: [],
+  };
+}
+
+/** A call to the cookie check as a statement, an assignment source, or a return value. */
+const GS_CALL = /\b__security_check_cookie\s*\(/;
+const GS_RESULT_TAKEN = /(?:=|\breturn)\s*__security_check_cookie\s*\(/;
+
+/**
+ * The per-function half of `BinResult.gsCheck`. Text over the emitted C, on
+ * purpose: the question is what the reader is told the call produces, and the
+ * IR's `resultDest` is one step removed from that (the emitter drops a dead
+ * one). A line starting `__security_check_cookie(` is the call as a statement;
+ * a line reading its value is the defect.
+ */
+function auditGsCheck(res: BinResult, func: Func, code: string): void {
+  for (const raw of code.split("\n")) {
+    const l = raw.trim();
+    if (l.startsWith("//") || l.startsWith("/*")) continue;
+    if (!GS_CALL.test(l)) continue;
+    // The routine's own header (`int __security_check_cookie() {`) is not a call.
+    if (/^\S.*\)\s*\{\s*$/.test(raw)) continue;
+    res.gsCheck.calls++;
+    if (GS_RESULT_TAKEN.test(l)) {
+      res.gsCheck.resultTaken++;
+      res.gsCheck.detail.push(`0x${func.address.toString(16)} ${func.name}: ${l}`);
+    }
   }
 }
 

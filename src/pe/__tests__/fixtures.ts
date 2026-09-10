@@ -93,6 +93,8 @@ export interface LoadConfigDef {
   directorySize?: number;
   /** Written at the CHPE offset, if the emitted structure is long enough to hold it. */
   chpeMetadataPointer?: number;
+  /** Written at the `SecurityCookie` offset (0x3C PE32 / 0x58 PE32+), if the structure holds it. */
+  securityCookie?: number;
 }
 
 export interface RelocBlockDef {
@@ -487,6 +489,10 @@ function buildDirectorySection(
       // The field is pointer-width in both layouts, so this is the same write
       // `writePtr` does everywhere else.
       writePtr(lcOff + chpeOffset, lc.chpeMetadataPointer);
+    }
+    const cookieOffset = is64 ? 0x58 : 0x3c;
+    if (lc.securityCookie !== undefined && emitted >= cookieOffset + chpeSize) {
+      writePtr(lcOff + cookieOffset, lc.securityCookie);
     }
     dirs.set(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, {
       virtualAddress: rvaOf(lcOff),

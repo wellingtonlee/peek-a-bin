@@ -1066,6 +1066,24 @@ entry-value copy inserted at the top of the guarded block, which moves the ancho
 text and the `if` count stay put. That is the shape to expect, and it is exactly why
 `polarity guards audited` falling means "read the emitted C" rather than "the change is wrong".
 
+**The `/GS` cookie check, and whether its call takes a result it never produces — `/GS cookie check`
+and `cookie address` in the report, three rows in `compare.mjs`, report-only (peek-a-bin-n9cl.3).**
+`recognised` is how many detected functions `src/disasm/crtIdioms.ts` named `__security_check_cookie`
+from their body — one per image is the expectation, and 0 makes every other figure vacuous (the
+recogniser has gone blind, or the binary has no `/GS`). `calls` counts emitted call statements to it
+and `results taken` the ones whose value the C reads (`x = __security_check_cookie(…)` or
+`return __security_check_cookie(…)`), which the routine never produces: **every such row is a wrong
+value**. Expected 24/15/13/22 calls and **0** taken on t32/t64/w64/w32 at 6299113. It proves the
+lifter dropped the `resultDest` on the recognised call and nothing more — it cannot see whether the
+value that replaced the call in the `return` is the right one; that was hand-read against `objdump`
+for three witnesses (`docs/gotchas.md`). Not a gate, on the epic's instruction; the negative control
+is to hand the recognised call a `resultDest` again (withhold `CalleeClobbers.idioms`, as
+`pipeline.test.ts` does), which takes `results taken` from 0 to `calls` on every binary. The second
+line is a differential: the cookie's address as the routine's body compares it against, beside
+`IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie` as the PE parser read it. t32 and w32 **AGREE**; both
+PE32+ binaries here carry no load config directory, so on x64 the format side is absent and the body
+is the only witness. No decompile path consults the comparison (the worker never sees the PE).
+
 **Call arity against `apitypes.ts`'s declared signatures** — `arity.ts`. For every emitted call
 whose callee `src/disasm/decompile/apitypes.ts` declares, the arguments the emitted C passes are
 counted against the parameters the table declares. **Measured on base `7082e66` with

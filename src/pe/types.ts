@@ -259,6 +259,20 @@ export interface LoadConfigDirectory {
    * evidence about the image.
    */
   chpeMetadataPointer?: number;
+  /**
+   * `SecurityCookie` as written — the VA of the `/GS` cookie global, 0x3C into
+   * the PE32 structure and 0x58 into the PE32+ one. Zero means the field is
+   * present and the image declares no cookie.
+   *
+   * `undefined` has the same meaning as for `chpeMetadataPointer`: the structure
+   * is too short, or the field is not inside the section's raw data. The
+   * decompiler does NOT read this — `disasm/crtIdioms.ts` recovers the cookie's
+   * address from the check routine's own body, and this field is the format's
+   * independent statement of the same address, reported beside it by
+   * `corpus/sweep.ts`. Making either path's output depend on the comparison is
+   * epic 2 (B2)'s decision, not this field's.
+   */
+  securityCookie?: number;
 }
 
 export interface RelocationEntry {

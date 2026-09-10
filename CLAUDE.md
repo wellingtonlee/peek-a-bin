@@ -107,7 +107,12 @@ Reuse them rather than re-rolling the logic.
     `hybridDisassemble` from the held sweep). `sectionMemo.ts` holds the memo key rule (bytes, load
     address, decoder identity).
   - `stackIdiom.ts` — the `push <imm>`/`pop <reg>` rule; **a leaf that imports nothing**.
-  - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`, `seh32.ts`.
+  - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`, `seh32.ts`. `branchTarget.ts` is the leaf both
+    `callSummary.ts` (re-exporting it) and `crtIdioms.ts` read the `call`/`jmp` target grammar from.
+  - `crtIdioms.ts` — CRT helpers recognised from their **body**, exactly (`__security_check_cookie`
+    today, a table built for `__SEH_epilog4` next): the name, `preservesResult`, the cookie's
+    address and the routine's register signature, riding in `CalleeClobbers.idioms` through the
+    same whole-image pass and `needInstructions` protocol as the clobber summaries.
 - **`disasm/arm64*.ts`** — `arm64.ts` (fixed-width sweep, `Arm64SweepCache`, jump-table reader,
   `arm64ThunkSlot`), `arm64Operands.ts` (**the single A64 branch/address grammar** — do not
   hand-roll a second), `arm64Frame.ts` (A64 frame from `.pdata`, a *second grammar* rather than a
@@ -1087,6 +1092,24 @@ refused. **Read the long-form entry before changing the code it describes.**
   guard outright. The summary **under-approximates** by construction; recursion needs no special
   case; it is x64 only. **`RegState.invalidateCallerSaved` must NOT be narrowed with it** — that
   needs an over-approximation.
+- **A call to a callee that PRESERVES the accumulator defines no result, and the `/GS` cookie check is
+  the one that mattered.** Every `call_stmt` took `resultDest: RAX/EAX`, `__security_check_cookie`
+  included, so the function's real return value was dead and every protected function that returns
+  a value printed `return sub_140002000(rcx);` — a WRONG VALUE (15/13/18/16 functions on
+  t64/w64/t32/w32 at 6299113). `disasm/crtIdioms.ts` recognises the routine's body **exactly** (two
+  shapes, both read off the corpus; an extra instruction, a compare against a register, a `je`, a
+  body writing EAX are all refused) and publishes `preservesResult`, the cookie's address and the
+  routine's one-register signature; the lifter then emits the call with **no `resultDest`** and the
+  signature's argument. The call and the `x ^ rsp` xor are **NAMED, never deleted** — instrumentation
+  is real control flow, and on x86 the argument is what keeps the xor alive. The name is applied
+  **at detection** (`functionDetect.ts`'s thunk pass), so the function list, the emitted C and the
+  harness's expected-callee set have one source and `distinct callees lost` stays 0 by construction.
+  The cookie load is spelled `__security_cookie` by the **emitter**, from the address the one operand
+  grammar already resolved, with an `extern` above the header; a load at another width keeps the
+  raw spelling. Format-side corroboration (`LoadConfigDirectory.securityCookie`) is parsed and
+  **reported, not consulted** — the worker never sees the PE. Measured cost: RAX now live at the
+  `ret` materialises phi copies, which withdrew **two** struct definitions on t64 and moved one
+  A2-anchored guard per x64 binary out of the polarity audit (arms swapped, hand-read correct).
 - **`RegState.defs` is keyed by literal operand text deliberately** (the recorded expression carries
   the operand's width). Ask `wroteAnyAlias` for the width-blind question; it returns a **boolean**,
   so the recorded expression can never be substituted at the call site.

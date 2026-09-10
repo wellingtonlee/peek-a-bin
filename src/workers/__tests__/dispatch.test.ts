@@ -2056,11 +2056,13 @@ describe("dispatch — decompileFunction builds the callee-clobber summary", () 
     expect(code).not.toContain("clobbered_");
   });
 
-  it("builds nothing for a 32-bit image, whose lift could not consult it", async () => {
+  it("builds no written-register summary for a 32-bit image, whose lift could not consult it", async () => {
     // `calleeClobbersFor` returns undefined unless `is64`: on x86 nothing is
     // passed in a register, so every register a summary could add would be new
-    // evidence the narrow model never had. Building it there is pure cost, and
-    // the two PE32 corpus binaries are the control that stays byte-identical.
+    // evidence the narrow model never had. Building it there is pure cost. What
+    // a PE32 image DOES build is the CRT idiom map (see the block below) — and
+    // that entry is keyed on the width, so the 64-bit request under the same
+    // token that follows is answered from a real build, not a PE32 leftover.
     const s = state();
     const code = (
       (await dispatch(
@@ -2128,5 +2130,84 @@ describe("dispatch — decompileFunction builds the callee-clobber summary", () 
     const after = await decompile(s, { funcExtents: EXTENTS_CALLER_ONLY, insnsToken: 7 });
 
     expect(after).not.toContain("clobbered_r10");
+  });
+});
+
+/**
+ * The other per-callee fact the summary pass carries: which callees are
+ * recognised CRT routines (`crtIdioms.ts`), so a `/GS` cookie check's call does
+ * not define the accumulator (peek-a-bin-n9cl.3). Same plumbing, same token,
+ * same `needInstructions` protocol — and, unlike the written-register half,
+ * built for PE32 too, because `__security_check_cookie@4` is an x86 routine.
+ */
+describe("dispatch — decompileFunction carries the CRT idiom map through the same summary", () => {
+  const CALLER = 0x401000;
+  const CHECK = 0x401da4;
+  /** `mov eax, [ebp+8]` / `mov ecx, [ebp-4]` / `xor ecx, ebp` / `call check` / `ret`, then t32's check body. */
+  const instructions = (): Instruction[] => [
+    insn(CALLER, "mov", "eax, dword ptr [ebp + 8]", 3),
+    insn(CALLER + 3, "mov", "ecx, dword ptr [ebp - 4]", 3),
+    insn(CALLER + 6, "xor", "ecx, ebp", 2),
+    insn(CALLER + 8, "call", `0x${CHECK.toString(16)}`, 5),
+    insn(CALLER + 13, "ret", "", 1),
+    insn(CHECK, "cmp", "ecx, dword ptr [0x412284]", 6),
+    insn(CHECK + 6, "jne", `0x${(CHECK + 10).toString(16)}`, 2),
+    insn(CHECK + 8, "ret", "", 2),
+    insn(CHECK + 10, "jmp", "0x403bf3", 5),
+  ];
+  const caller = { name: "sub_401000", address: CALLER, size: 14 };
+  const check = { name: "__security_check_cookie", address: CHECK, size: 15 };
+  const extents: [number, number][] = [
+    [caller.address, caller.size],
+    [check.address, check.size],
+  ];
+  const funcEntries = [
+    [caller.address, { name: caller.name, address: caller.address }],
+    [check.address, { name: check.name, address: check.address }],
+  ];
+  const request = (extra: Record<string, unknown>) => ({
+    func: caller,
+    funcInsns: instructions().filter((i) => i.address < CHECK),
+    stackFrame: null,
+    signature: null,
+    is64: false,
+    funcEntries,
+    funcExtents: extents,
+    insnsToken: 7,
+    ...extra,
+  });
+  const returnLine = (code: string) =>
+    (code.split("\n").find((l) => l.trim().startsWith("return")) ?? "").trim();
+
+  it("asks for the section on a PE32 image too, since the idiom map is built from it", async () => {
+    const r = await dispatch("decompileFunction", request({}), state());
+    expect(r).toEqual({ needInstructions: true });
+  });
+
+  it("drops the check call's result once the section has been seen", async () => {
+    const s = state();
+    const r = (await dispatch(
+      "decompileFunction",
+      request({ instructions: instructions() }),
+      s,
+    )) as { code: string };
+    // The argument is the unmixed cookie, folded into the call as `var_4 ^ ebp`.
+    expect(r.code).toMatch(/^\s*__security_check_cookie\([^=]*\^ ebp\);$/m);
+    expect(returnLine(r.code)).not.toContain("__security_check_cookie");
+    // And the second request under the token is served from the held entry.
+    const again = (await dispatch("decompileFunction", request({}), s)) as { code: string };
+    expect(again.code).toBe(r.code);
+  });
+
+  it("gives the pre-idiom answer when no extents are sent", async () => {
+    // The unchanged path: no summary, so the call defines EAX and the tail
+    // returns it — the defect, preserved exactly for a caller that never had
+    // extents to send.
+    const r = (await dispatch(
+      "decompileFunction",
+      request({ instructions: instructions(), funcExtents: undefined, insnsToken: undefined }),
+      state(),
+    )) as { code: string };
+    expect(returnLine(r.code)).toBe("return __security_check_cookie();");
   });
 });

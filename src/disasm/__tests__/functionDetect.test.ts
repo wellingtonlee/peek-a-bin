@@ -149,8 +149,20 @@ function fakeCs() {
           emit("ja", hex(here + 2 + ((bytes[i + 1] << 24) >> 24)), 2);
           continue;
         }
+        // 3B 0D disp32 — `cmp ecx, dword ptr [abs]`, the first instruction of
+        // x86 `__security_check_cookie`. The shipped decoder prints t32.exe's
+        // `3b 0d 84 22 41 00` as `cmp ecx, dword ptr [0x412284]`.
+        if (b === 0x3b && bytes[i + 1] === 0x0d && i + 5 < bytes.length) {
+          emit("cmp", `ecx, dword ptr [${hex(readI32(bytes, i + 2))}]`, 6);
+          continue;
+        }
         if (b === 0x3b && bytes[i + 1] >= 0xc0) {
           emit("cmp", `${R32[(bytes[i + 1] >> 3) & 7]}, ${R32[bytes[i + 1] & 7]}`, 2);
+          continue;
+        }
+        // 75 rel8 — `jne`.
+        if (b === 0x75 && i + 1 < bytes.length) {
+          emit("jne", hex(here + 2 + ((bytes[i + 1] << 24) >> 24)), 2);
           continue;
         }
         if (b === 0x6a && i + 1 < bytes.length) {
@@ -2488,6 +2500,42 @@ describe("detectFunctions — with a decoder", () => {
       pdataFunctions: [{ beginAddress: BASE, endAddress: BASE + 0x20 }],
     });
     expect(functions[0].isThunk).toBeUndefined();
+  });
+
+  it("names x86 __security_check_cookie from its body, with no IAT at all", () => {
+    // t32.exe's routine at 0x401DA4, byte for byte: `cmp ecx, [0x412284]` /
+    // `jne +1` / `ret` / `jmp __report_gsfailure`. Naming it HERE is what puts
+    // one name in the function list, the emitted C and the corpus harness's
+    // expected-callee set (peek-a-bin-n9cl.3). No import table is needed — the
+    // recogniser reads instructions, not the IAT — so the pass must run without
+    // one, which the thunk half never did.
+    // Reached by a direct call from the entry point, so it arrives under its
+    // default `sub_` name — an entry point is already named `entry_point` and
+    // the pass leaves every named function alone.
+    const img = image(0x40, {
+      0x00: [...callTo(0x00, BASE + 0x10), 0xc3],
+      0x10: [0x3b, 0x0d, ...le32(0x412284), 0x75, 0x01, 0xc3, 0xe9, ...le32(0x30 - 0x1e)],
+    });
+    const { functions } = detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), {
+      entryPoint: BASE,
+    });
+    const check = functions.find((f) => f.address === BASE + 0x10);
+    expect(check?.name).toBe("__security_check_cookie");
+    expect(check?.isThunk).toBeUndefined();
+  });
+
+  it("does not name a routine that differs from the shape by one instruction", () => {
+    // `je` in place of `jne`: not the routine, and the default name stays.
+    const img = image(0x40, {
+      0x00: [...callTo(0x00, BASE + 0x10), 0xc3],
+      0x10: [0x3b, 0x0d, ...le32(0x412284), 0x74, 0x01, 0xc3, 0xe9, ...le32(0x30 - 0x1e)],
+    });
+    const { functions } = detectFunctions(img, BASE, false, ctxOf({ cs32: fakeCs() }), {
+      entryPoint: BASE,
+    });
+    expect(functions.find((f) => f.address === BASE + 0x10)?.name).toBe(
+      `sub_${(BASE + 0x10).toString(16).toUpperCase()}`,
+    );
   });
 
   it("leaves a named function alone even if it looks like a thunk", () => {

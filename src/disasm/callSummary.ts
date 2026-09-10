@@ -38,10 +38,16 @@
  * their emitted C must not move.
  */
 
+import { resolveBranchTargetAddr } from "./branchTarget";
+import { type CrtIdiom, recogniseCrtIdioms } from "./crtIdioms";
 import { canonReg, isKnownRegister } from "./decompile/ir";
 import { buildFuncInsnMap, type FuncExtent } from "./funcInsns";
-import { resolveRipTarget } from "./ripRelative";
 import type { Instruction } from "./types";
+
+// The branch-target grammar used to live here and every importer still reads
+// it from here; it moved to a leaf so `crtIdioms.ts` can read it without this
+// module importing itself. See `branchTarget.ts`.
+export { type BranchTargetAddr, resolveBranchTargetAddr } from "./branchTarget";
 
 /**
  * The Windows x64 caller-saved integer registers, canonically named.
@@ -70,40 +76,18 @@ export interface CalleeClobbers {
   byAddress: Map<number, string[]>;
   /** Contribution of a callee this analysis could not identify. */
   unresolved: readonly string[];
-}
-
-// ── The branch-target grammar, by address ──────────────────────────────────
-
-/**
- * Where a `call`/`jmp` operand points, or null when it points nowhere nameable.
- *
- * `direct` is a code address — `call 0x140001000`. `indirectMem` is the address
- * of a *pointer*: `call qword ptr [rip + 0x…]` and `call dword ptr [0x…]` are
- * how both an import thunk and an ordinary indirect call through a global are
- * spelled, and telling them apart is the caller's job (look the address up in
- * the IAT first, as `lifter.ts` does).
- *
- * Deliberately the same grammar `resolveNamedTarget` reads, and RIP
- * displacements go through `ripRelative.ts` rather than a tenth private copy —
- * see the `parseOperand` gotcha in CLAUDE.md.
- */
-export type BranchTargetAddr =
-  | { kind: "direct"; addr: number }
-  | { kind: "indirectMem"; addr: number };
-
-export function resolveBranchTargetAddr(insn: Instruction): BranchTargetAddr | null {
-  const opStr = insn.opStr.trim();
-
-  const directM = opStr.match(/^0x([0-9a-fA-F]+)$/);
-  if (directM) return { kind: "direct", addr: parseInt(directM[1], 16) };
-
-  const rip = resolveRipTarget(insn);
-  if (rip !== null) return { kind: "indirectMem", addr: rip };
-
-  const addrM = opStr.match(/\[\s*0x([0-9a-fA-F]+)\s*\]/);
-  if (addrM) return { kind: "indirectMem", addr: parseInt(addrM[1], 16) };
-
-  return null;
+  /**
+   * Callee entry address → the CRT routine its body was recognised as, from
+   * `crtIdioms.ts`. The other per-callee fact the lifter needs from the whole
+   * image — whether a call defines the accumulator at all — and it rides here
+   * because it is computed in the same pass, from the same instruction array,
+   * keyed on the same token, and consumed at the same `call`. Optional so a
+   * caller that never built one (a test constructing the narrow answer by hand)
+   * gets exactly the pre-idiom behaviour: every call takes a result.
+   *
+   * Populated on BOTH widths, unlike `byAddress`: the `/GS` check is x86 too.
+   */
+  idioms?: ReadonlyMap<number, CrtIdiom>;
 }
 
 // ── Which registers one instruction writes ─────────────────────────────────
@@ -586,7 +570,7 @@ export function buildCallSummaries(args: BuildCallSummariesArgs): Map<number, st
  * so a hit for the wrong image cannot arise in the first place.
  */
 export class CallSummaryCache {
-  private entry?: { token: number; clobbers: CalleeClobbers };
+  private entry?: { token: number; is64: boolean; clobbers: CalleeClobbers };
 
   /**
    * The summaries for the instruction array `token` stands for, building them
@@ -594,24 +578,38 @@ export class CallSummaryCache {
    *
    * `unresolved` is left empty, matching `mcp/session.ts`: the ABI reading at an
    * unidentifiable callee is a separate policy that was measured separately.
+   *
+   * `is64` decides which halves are built. The written-register closure is x64
+   * only — on x86 nothing is passed in a register, so `calleeClobbersFor` never
+   * consults it and building it would be pure cost (peek-a-bin-hj1). The CRT
+   * idiom map is built on both widths, because the `/GS` cookie check is an x86
+   * routine too (`__security_check_cookie@4`, cookie in ECX) and its call
+   * wrongly defined EAX exactly as the x64 one defined RAX. The width is part of
+   * the key: a token is never reused across images in the app, but the same
+   * token asked at both widths must not be served the other's answer.
    */
   forToken(
     token: number,
     funcExtents: readonly FuncExtent[],
     instructions: Instruction[],
     iatMap: Map<number, { lib: string; func: string }>,
+    is64: boolean,
   ): CalleeClobbers {
     const hit = this.entry;
-    if (hit && hit.token === token) return hit.clobbers;
+    if (hit && hit.token === token && hit.is64 === is64) return hit.clobbers;
+    const funcInsnMap = buildFuncInsnMap(funcExtents, instructions);
     const clobbers: CalleeClobbers = {
-      byAddress: buildCallSummaries({
-        functionAddresses: funcExtents.map((f) => f.address),
-        funcInsnMap: buildFuncInsnMap(funcExtents, instructions),
-        iatMap,
-      }),
+      byAddress: is64
+        ? buildCallSummaries({
+            functionAddresses: funcExtents.map((f) => f.address),
+            funcInsnMap,
+            iatMap,
+          })
+        : new Map(),
       unresolved: [],
+      idioms: recogniseCrtIdioms(funcInsnMap, is64),
     };
-    this.entry = { token, clobbers };
+    this.entry = { token, is64, clobbers };
     return clobbers;
   }
 
@@ -626,10 +624,13 @@ export class CallSummaryCache {
    * client's address-keyed decompile cache (peek-a-bin-9gc9).
    *
    * Named for `SectionMemo.peek`, and for the same reason: a lookup that cannot
-   * compute, so it can never evict or pay for what it did not find.
+   * compute, so it can never evict or pay for what it did not find. Keyed on
+   * the width as {@link forToken} is, or a PE32 entry would answer a 64-bit
+   * request under the same token with no written-register closure at all.
    */
-  peek(token: number): CalleeClobbers | undefined {
-    return this.entry?.token === token ? this.entry.clobbers : undefined;
+  peek(token: number, is64: boolean): CalleeClobbers | undefined {
+    const e = this.entry;
+    return e?.token === token && e.is64 === is64 ? e.clobbers : undefined;
   }
 
   /** Forget the held image, so one file's summaries do not outlive it. */

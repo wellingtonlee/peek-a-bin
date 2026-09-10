@@ -7,6 +7,7 @@ import { type Anomaly, detectAnomalies } from "../analysis/anomalies";
 import { type DriverInfo, detectDriver } from "../analysis/driver";
 import { archForMachine, type ImageArch } from "../disasm/arch";
 import { buildCallSummaries, type CalleeClobbers } from "../disasm/callSummary";
+import { recogniseCrtIdioms } from "../disasm/crtIdioms";
 import { buildDataWindows } from "../disasm/dataWindows";
 import { StructRegistry } from "../disasm/decompile/structs";
 import { buildFuncInsnMap } from "../disasm/funcInsns";
@@ -300,16 +301,26 @@ export class FileSession {
     // corpus: the ABI answer moved the emitted C by 7 lines and 2 clobbered
     // reads per x64 binary, so it buys nothing that would justify re-admitting
     // it. See `corpus/README.md`.
+    //
+    // The CRT idiom map rides beside it (`crtIdioms.ts`): the same pass, the
+    // same `funcInsnMap`, and the same consumer — a `call` in the lifter — so
+    // that the MCP server, `corpus/sweep.ts` and the browser
+    // (`CallSummaryCache.forToken`) all answer "does this callee define the
+    // accumulator" from one recogniser. Built for both widths, since the `/GS`
+    // check is an x86 routine too.
+    const funcInsnMap = arch === "x86" ? buildFuncInsnMap(functions, instructions) : undefined;
     const calleeClobbers: CalleeClobbers = {
-      byAddress:
-        arch === "x86"
-          ? buildCallSummaries({
-              functionAddresses: functions.map((f) => f.address),
-              funcInsnMap: buildFuncInsnMap(functions, instructions),
-              iatMap,
-            })
-          : new Map(),
+      // Both widths, as before: the PE32 closure is unread by the lifter but is
+      // the `callee summaries` liveness row `corpus/sweep.ts` reports.
+      byAddress: funcInsnMap
+        ? buildCallSummaries({
+            functionAddresses: functions.map((f) => f.address),
+            funcInsnMap,
+            iatMap,
+          })
+        : new Map(),
       unresolved: [],
+      idioms: funcInsnMap ? recogniseCrtIdioms(funcInsnMap, is64) : undefined,
     };
 
     // 9. Detect anomalies

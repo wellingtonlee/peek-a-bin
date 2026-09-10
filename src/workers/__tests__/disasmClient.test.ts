@@ -2807,16 +2807,21 @@ describe("DisasmWorkerClient — a decompile request carries one function's inst
     expect(result.code).toContain("(rsi)");
   });
 
-  it("never asks for a PE32 image", async () => {
-    // `calleeClobbersFor` returns nothing unless `is64`, so a summary a 32-bit
-    // lift cannot consult is pure cost — and the `is64` gate stays in
-    // `dispatch.ts` alone rather than being spelled here as well.
+  it("asks exactly once for a PE32 image too, and the width is the worker's business", async () => {
+    // This used to be "never asks for a PE32 image": the written-register
+    // summary is x64 only. The CRT idiom map that rides with it is not — the
+    // `/GS` cookie check is an x86 routine as well (peek-a-bin-n9cl.3) — so a
+    // 32-bit image now pays the same one round trip on its first request. The
+    // client still models none of this: it sends what it has and resends when
+    // asked, whichever width the worker is deciding for.
     const { client, worker } = await loadClient();
 
     await drive(worker, freshState(), () => ask(client, fnA, { is64: false }));
 
-    expect(worker.received).toHaveLength(1);
+    expect(worker.received).toHaveLength(2);
     expect(worker.received[0].args.instructions).toBeUndefined();
+    expect(worker.received[1].args.instructions).toHaveLength(shared.length);
+    expect(worker.received[1].args.is64).toBe(false);
   });
 
   it("asks again after a configure dropped the worker's summary", async () => {

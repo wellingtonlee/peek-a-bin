@@ -1,6 +1,7 @@
 import type { CalleeClobbers } from "../callSummary";
 import { resolveBranchTargetAddr } from "../callSummary";
 import type { BasicBlock } from "../cfg";
+import type { CrtIdiom } from "../crtIdioms";
 import { resolveRipMemExpr, resolveRipTarget } from "../ripRelative";
 import { pushedImmediate, STACK_TRAFFIC } from "../stackIdiom";
 import type { DisasmFunction, Instruction } from "../types";
@@ -1426,9 +1427,15 @@ export function liftBlock(
     // ── call ──
     if (mn === "call") {
       const target = resolveCallTarget(insn, is64, iatMap, funcMap);
-      const args = is64
-        ? collectArgs64(regState)
-        : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
+      // A recognised CRT routine carries its own documented register
+      // signature, and whether it defines the accumulator at all — see
+      // `crtIdioms.ts` and `callResult` below.
+      const idiom = crtIdiomFor(insn, calleeClobbers);
+      const args = idiom
+        ? idiom.args.map((r) => irReg(r))
+        : is64
+          ? collectArgs64(regState)
+          : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
       const call: IRCall = {
         kind: "call",
         target: target.name,
@@ -1437,9 +1444,9 @@ export function liftBlock(
         clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
       };
       const retReg = is64 ? "rax" : "eax";
-      stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
+      stmts.push({ kind: "call_stmt", call, ...callResult(idiom, retReg), addr: insn.address });
       regState.invalidateCallerSaved();
-      regState.set(retReg, call);
+      if (!idiom?.preservesResult) regState.set(retReg, call);
       continue;
     }
 
@@ -1476,9 +1483,12 @@ export function liftBlock(
     if (mn === "jmp" && block.succs.length === 0 && insn === block.insns[block.insns.length - 1]) {
       const tail = resolveNamedTarget(insn, iatMap, funcMap);
       if (tail) {
-        const args = is64
-          ? collectArgs64(regState)
-          : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
+        const idiom = crtIdiomFor(insn, calleeClobbers);
+        const args = idiom
+          ? idiom.args.map((r) => irReg(r))
+          : is64
+            ? collectArgs64(regState)
+            : collectArgs32(block, insn, is64, calleeSavedFirstWrite);
         // An import thunk is NAMED after the import it jumps to (functionDetect's
         // thunk renaming), so the resolved name here is the function's own name
         // and `return RtlVirtualUnwind();` would be a call to itself. The
@@ -1493,9 +1503,12 @@ export function liftBlock(
           clobbers: calleeClobbersFor(insn, is64, iatMap, calleeClobbers),
         };
         const retReg = is64 ? "rax" : "eax";
-        stmts.push({ kind: "call_stmt", call, resultDest: irReg(retReg), addr: insn.address });
+        stmts.push({ kind: "call_stmt", call, ...callResult(idiom, retReg), addr: insn.address });
         regState.invalidateCallerSaved();
-        regState.set(retReg, call);
+        if (!idiom?.preservesResult) regState.set(retReg, call);
+        // The `return` below still names the accumulator: for an ordinary
+        // callee that is the call's result, for a result-preserving one it is
+        // whatever reached the jump — which is exactly what the machine returns.
         stmts.push({ kind: "return", value: irReg(retReg, is64 ? 8 : 4), addr: insn.address });
         continue;
       }
@@ -1938,6 +1951,39 @@ function calleeClobbersFor(
   }
   const out = regs.filter((r) => r !== "rax");
   return out.length > 0 ? out : undefined;
+}
+
+/**
+ * The CRT routine a direct `call`/`jmp` targets, when the image-wide pass
+ * recognised one there — see `crtIdioms.ts`.
+ *
+ * Direct targets only. A recognised routine is reached by `call 0x…` (it is
+ * statically linked); an indirect call through a pointer that happens to hold
+ * its address is not a fact this lift can see, and refusing it costs today's
+ * behaviour — a `resultDest` — rather than a wrong value.
+ */
+function crtIdiomFor(insn: Instruction, summaries: CalleeClobbers | undefined): CrtIdiom | null {
+  const idioms = summaries?.idioms;
+  if (!idioms) return null;
+  const target = resolveBranchTargetAddr(insn);
+  if (target?.kind !== "direct") return null;
+  return idioms.get(target.addr) ?? null;
+}
+
+/**
+ * Whether a `call_stmt` defines the accumulator.
+ *
+ * THE DEFECT: every call took `resultDest: RAX/EAX`, including the `/GS`
+ * cookie check, whose body provably preserves it — so the function's real
+ * return value, computed just above, was dead in the IR and
+ * `foldReturnedCallResults` printed `return sub_140002000(rcx);` at the tail of
+ * every protected function that returns a value (peek-a-bin-n9cl.3). A call to
+ * a routine recognised as result-preserving defines nothing, so the reaching
+ * definition of the accumulator survives into the `return`. The call itself is
+ * still emitted, by name: compiler instrumentation is real control flow.
+ */
+function callResult(idiom: CrtIdiom | null, retReg: string): { resultDest?: IRExpr } {
+  return idiom?.preservesResult ? {} : { resultDest: irReg(retReg) };
 }
 
 function resolveCallTarget(

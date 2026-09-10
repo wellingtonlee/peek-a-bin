@@ -656,17 +656,22 @@ export async function dispatch(
       const insns = (args.funcInsns as Instruction[] | undefined) ?? whole ?? [];
       // What each callee writes, so a call clobbers that rather than the whole
       // ABI volatile set — see `clobberedByCall` in decompile/ssa.ts for why the
-      // wide answer is worse. Two gates, and both mean "exactly the behaviour
-      // this path had before the summary existed":
+      // wide answer is worse — and which callees are recognised CRT routines
+      // (`crtIdioms.ts`), so the `/GS` cookie check does not define the
+      // accumulator. One gate, meaning "exactly the behaviour this path had
+      // before the summary existed": no extents sent — an older client, or a
+      // caller that never had them.
       //
-      //   * no extents sent — an older client, or a caller that never had them;
-      //   * not a 64-bit image — `calleeClobbersFor` returns undefined unless
-      //     `is64`, because on x86 nothing is passed in a register, so building
-      //     a summary a PE32 lift cannot consult is pure cost.
+      // The width is no longer a gate here. It used to be: `calleeClobbersFor`
+      // returns undefined unless `is64`, so a PE32 summary was pure cost. The
+      // idiom half is x86 too — `__security_check_cookie@4` defined EAX exactly
+      // as the x64 one defined RAX — so a PE32 image now pays the same one
+      // round trip on its first decompile, and `CallSummaryCache.forToken`
+      // decides per width which halves to build.
       const extents = args.funcExtents as [number, number][] | undefined;
       const token = args.insnsToken as number | undefined;
       let calleeClobbers: CalleeClobbers | undefined;
-      if (extents && token !== undefined && args.is64) {
+      if (extents && token !== undefined) {
         // Held, or buildable from a whole array this request carried. Anything
         // else and the client is asked to resend — never answered without the
         // summary, which is the one failure mode that would be silent: the
@@ -680,13 +685,14 @@ export async function dispatch(
         // and `configure` clears it, so the client cannot model when a miss
         // happens and must be told.
         calleeClobbers =
-          state.callSummaries.peek(token) ??
+          state.callSummaries.peek(token, args.is64 as boolean) ??
           (whole
             ? state.callSummaries.forToken(
                 token,
                 extents.map(([address, size]) => ({ address, size })),
                 whole,
                 state.iatMap,
+                args.is64 as boolean,
               )
             : undefined);
         if (!calleeClobbers) return { needInstructions: true };

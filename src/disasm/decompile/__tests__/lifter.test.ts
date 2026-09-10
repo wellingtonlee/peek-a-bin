@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { CalleeClobbers } from "../../callSummary";
 import type { BasicBlock } from "../../cfg";
+import type { CrtIdiom } from "../../crtIdioms";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
@@ -36,16 +38,24 @@ interface LiftOpts {
   state?: RegState;
   iat?: Map<number, { lib: string; func: string }>;
   funcs?: Map<number, { name: string; address: number }>;
+  /** Per-callee facts from `callSummary.ts`, including the CRT idiom map. */
+  clobbers?: CalleeClobbers;
+  /** For a tail-jump fixture: a block with no successors. */
+  succs?: number[];
 }
 
 function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
+  const block = blockOf(list);
+  if (opts.succs) block.succs = opts.succs;
   return liftBlock(
-    blockOf(list),
+    block,
     opts.state ?? new RegState(),
     opts.is64 ?? true,
     opts.iat ?? new Map(),
     new Map(),
     opts.funcs ?? new Map(),
+    undefined,
+    opts.clobbers,
   );
 }
 
@@ -1916,5 +1926,80 @@ describe("liftBlock — matched stack slots", () => {
         ["pop", "ebx"],
       ]).filter((s) => s.kind === "assign" && s.dest.kind === "reg" && s.dest.name === "ebx"),
     ).toEqual([]);
+  });
+});
+
+describe("liftBlock — a call to a result-preserving CRT routine defines no result", () => {
+  // `__security_check_cookie` as `crtIdioms.ts` publishes it: the routine
+  // compares RCX/ECX against the cookie and either returns or tail-jumps to
+  // `__report_gsfailure`, so RAX/EAX leaves it exactly as it entered. Giving
+  // the call a `resultDest` made the function's real return value dead
+  // (peek-a-bin-n9cl.3).
+  const CHECK = 0x402000;
+  const idiom = (acc: string): CrtIdiom => ({
+    kind: "security-check-cookie",
+    name: "__security_check_cookie",
+    preservesResult: true,
+    cookieAddress: 0x403000,
+    args: [acc],
+  });
+  const facts = (acc: string): CalleeClobbers => ({
+    byAddress: new Map(),
+    unresolved: [],
+    idioms: new Map([[CHECK, idiom(acc)]]),
+  });
+  const funcs = new Map([[CHECK, { name: "__security_check_cookie", address: CHECK }]]);
+
+  it("emits the call with no resultDest and the routine's own argument, x64", () => {
+    const stmts = lift([["call", "0x402000"]], { clobbers: facts("rcx"), funcs });
+    expect(stmts).toHaveLength(1);
+    expect(stmts[0].kind).toBe("call_stmt");
+    const call = stmts[0] as Extract<IRStmt, { kind: "call_stmt" }>;
+    expect(call.resultDest).toBeUndefined();
+    expect(call.call.target).toBe("__security_check_cookie");
+    expect(call.call.args).toEqual([irReg("rcx")]);
+  });
+
+  it("does the same on x86, where the argument is ECX and collectArgs32 would find nothing", () => {
+    // Nothing pushes for a `__fastcall` helper, so the push walk reports zero
+    // arguments and the `xor ecx, ebp` above the call is dead — the documented
+    // signature is what keeps it alive.
+    const stmts = lift([["call", "0x402000"]], { is64: false, clobbers: facts("ecx"), funcs });
+    const call = stmts[0] as Extract<IRStmt, { kind: "call_stmt" }>;
+    expect(call.resultDest).toBeUndefined();
+    expect(call.call.args).toEqual([irReg("ecx")]);
+  });
+
+  it("keeps the resultDest on a call to any other function", () => {
+    const stmts = lift([["call", "0x402100"]], { clobbers: facts("rcx"), funcs });
+    expect(stmts[0]).toMatchObject({ kind: "call_stmt", resultDest: irReg("rax") });
+  });
+
+  it("keeps the resultDest when no idiom map was supplied at all", () => {
+    // The pre-idiom behaviour, byte for byte: a caller that built no summary
+    // gets a call that defines the accumulator.
+    const stmts = lift([["call", "0x402000"]], { funcs });
+    expect(stmts[0]).toMatchObject({ kind: "call_stmt", resultDest: irReg("rax") });
+  });
+
+  it("keeps the resultDest on an indirect call, even with the routine's address in a register", () => {
+    // `call rax` is not evidence of which routine runs; refusing costs a
+    // resultDest, not a wrong value.
+    const stmts = lift([["call", "rax"]], { clobbers: facts("rcx"), funcs });
+    expect(stmts[0]).toMatchObject({ kind: "call_stmt", resultDest: irReg("rax") });
+  });
+
+  it("does not record the call as the accumulator's value in RegState", () => {
+    const state = new RegState();
+    lift([["call", "0x402000"]], { clobbers: facts("rcx"), funcs, state });
+    expect(state.wroteAnyAlias("rax")).toBe(false);
+  });
+
+  it("lifts a tail jump to the routine as a call with no result, returning what reached it", () => {
+    const stmts = lift([["jmp", "0x402000"]], { clobbers: facts("rcx"), funcs, succs: [] });
+    expect(stmts).toHaveLength(2);
+    const call = stmts[0] as Extract<IRStmt, { kind: "call_stmt" }>;
+    expect(call.resultDest).toBeUndefined();
+    expect(stmts[1]).toMatchObject({ kind: "return", value: irReg("rax", 8) });
   });
 });

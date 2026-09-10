@@ -615,6 +615,54 @@ describe("parseLoadConfig — CHPEMetadataPointer", () => {
     expect(lc?.directorySize).toBe(0x140);
   });
 
+  it("reads SecurityCookie from 0x58 on PE32+ and 0x3C on PE32", () => {
+    // The `/GS` cookie's VA — the format's own statement of the address
+    // `disasm/crtIdioms.ts` recovers from the check routine's body. Two
+    // layouts, two offsets, both read against their own structure.
+    const lc64 = parsePE(
+      buildMinimalPE64({ directories: { loadConfig: { securityCookie: PE64_BASE + 0x43c8 } } }),
+    ).loadConfig;
+    expect(lc64?.securityCookie).toBe(PE64_BASE + 0x43c8);
+
+    const lc32 = parsePE(
+      buildMinimalPE32({ directories: { loadConfig: { securityCookie: PE32_BASE + 0x12284 } } }),
+    ).loadConfig;
+    expect(lc32?.securityCookie).toBe(PE32_BASE + 0x12284);
+  });
+
+  it("leaves SecurityCookie undefined when the structure stops short of it", () => {
+    // 0x58 + 8 = 0x60 bytes are needed on PE32+; a 0x40-byte structure ends
+    // before the field, and "not readable" must not read as "zero".
+    const short = parsePE(
+      buildMinimalPE64({ directories: { loadConfig: { bytes: 0x40, securityCookie: 0x1234 } } }),
+    ).loadConfig;
+    expect(short).toBeDefined();
+    expect(short?.securityCookie).toBeUndefined();
+    // Present and zero is a different answer: the image declares no cookie.
+    const zero = parsePE(
+      buildMinimalPE64({ directories: { loadConfig: { securityCookie: 0 } } }),
+    ).loadConfig;
+    expect(zero?.securityCookie).toBe(0);
+  });
+
+  it("bounds SecurityCookie by the directory entry's size as well", () => {
+    // The two PE32 corpus binaries declare a 0x48-byte structure inside a
+    // 0x40-byte directory entry: 0x3C + 4 = 0x40 fits both, which is what makes
+    // the field readable there. One byte less of directory and it is not.
+    const fits = parsePE(
+      buildMinimalPE32({
+        directories: { loadConfig: { declaredSize: 0x48, directorySize: 0x40, securityCookie: 7 } },
+      }),
+    ).loadConfig;
+    expect(fits?.securityCookie).toBe(7);
+    const tooSmall = parsePE(
+      buildMinimalPE32({
+        directories: { loadConfig: { declaredSize: 0x48, directorySize: 0x3f, securityCookie: 7 } },
+      }),
+    ).loadConfig;
+    expect(tooSmall?.securityCookie).toBeUndefined();
+  });
+
   it("leaves loadConfig undefined when directory 10 is absent", () => {
     expect(parsePE(buildMinimalPE64()).loadConfig).toBeUndefined();
     expect(

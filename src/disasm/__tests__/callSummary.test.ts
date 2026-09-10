@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCallSummaries,
+  CallSummaryCache,
   isCoveredMnemonic,
   resolveBranchTargetAddr,
   writtenRegs,
@@ -262,5 +263,59 @@ describe("buildCallSummaries", () => {
       unresolved: X64_ABI_FALLBACK,
     });
     expect(abi.get(0x1000)).toEqual([...X64_ABI_FALLBACK]);
+  });
+});
+
+describe("CallSummaryCache — the CRT idiom map rides with the summaries", () => {
+  // t32's `__security_check_cookie` and a caller, as one section.
+  const CALLER = 0x401000;
+  const CHECK = 0x401da4;
+  const section = (): Instruction[] => [
+    insn("mov", "ecx, dword ptr [ebp - 4]", CALLER, 3),
+    insn("call", `0x${CHECK.toString(16)}`, CALLER + 3, 5),
+    insn("ret", "", CALLER + 8, 1),
+    insn("cmp", "ecx, dword ptr [0x412284]", CHECK, 6),
+    insn("jne", `0x${(CHECK + 10).toString(16)}`, CHECK + 6, 2),
+    insn("ret", "", CHECK + 8, 2),
+    insn("jmp", "0x403bf3", CHECK + 10, 5),
+  ];
+  const extents = [
+    { address: CALLER, size: 9 },
+    { address: CHECK, size: 15 },
+  ];
+
+  it("builds the idiom map on x86, where no written-register closure is built", () => {
+    // The `/GS` check is an x86 routine too, and it defined EAX exactly as the
+    // x64 one defined RAX — so a PE32 image builds this half and not the other.
+    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), false);
+    expect(facts.byAddress.size).toBe(0);
+    expect(facts.idioms?.get(CHECK)?.name).toBe("__security_check_cookie");
+    expect(facts.idioms?.get(CHECK)?.cookieAddress).toBe(0x412284);
+    expect(facts.idioms?.has(CALLER)).toBe(false);
+  });
+
+  it("builds both halves on x64", () => {
+    const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), true);
+    expect(facts.byAddress.size).toBe(2);
+    // The body compares ECX, not RCX, so at 64-bit width it is not the routine.
+    expect(facts.idioms?.size).toBe(0);
+  });
+
+  it("keys the entry on the width as well as the token", () => {
+    // A token is never reused across images in the app, but the same token
+    // asked at both widths must not be served the other's answer.
+    const cache = new CallSummaryCache();
+    const x86 = cache.forToken(1, extents, section(), new Map(), false);
+    const x64 = cache.forToken(1, extents, section(), new Map(), true);
+    expect(x64).not.toBe(x86);
+    expect(x64.byAddress.size).toBe(2);
+    expect(cache.peek(1, true)).toBe(x64);
+    expect(cache.peek(1, false)).toBeUndefined();
+  });
+
+  it("serves the held entry for the same token and width", () => {
+    const cache = new CallSummaryCache();
+    const first = cache.forToken(1, extents, section(), new Map(), false);
+    expect(cache.forToken(1, [], [], new Map(), false)).toBe(first);
   });
 });

@@ -7,6 +7,7 @@
 import { formatIOCTL, isPlausibleIOCTL } from "../analysis/driver";
 import { classifyArm64Branch } from "./arm64Operands";
 import { type CapstoneScan, createScan, requireCapstone } from "./capstoneWindow";
+import { CRT_IDIOM_MAX_BYTES, recogniseCrtIdiom } from "./crtIdioms";
 import { gridScan, type SweptInsn, sweepX86, type X86SweepCache } from "./linearSweep";
 import { resolveRipTarget } from "./ripRelative";
 import {
@@ -2695,20 +2696,35 @@ export function detectFunctions(
   }
   phase("sizes");
 
-  // --- Thunk detection ---
-  // These windows are 16 bytes and could not exhaust anything, but they still
-  // go through a scan: a decode that returns nothing is how a dead engine
-  // presents itself here too, and the invariant that no `cs.disasm` call in
-  // this codebase is unwindowed is worth more than the exemption.
-  if (cs && ctx.iatMap.size > 0) {
+  // --- Thunk detection, and CRT routines recognised from their body ---
+  // These windows are at most CRT_IDIOM_MAX_BYTES and could not exhaust
+  // anything, but they still go through a scan: a decode that returns nothing
+  // is how a dead engine presents itself here too, and the invariant that no
+  // `cs.disasm` call in this codebase is unwindowed is worth more than the
+  // exemption.
+  //
+  // Two namings share the decode. A CRT routine (`crtIdioms.ts` — the `/GS`
+  // cookie check today) is named from its instructions alone, so it needs no
+  // IAT; an import thunk is a single `jmp [iat slot]` and needs one. Naming
+  // here, at detection, is what puts `__security_check_cookie` in the function
+  // list, the decompiled C and `corpus/sweep.ts`'s expected-callee set from ONE
+  // source, so `distinct callees lost` stays 0 by construction rather than by a
+  // second spelling of the rename in the lifter.
+  if (cs) {
     const thunkScan = createScan(cs, "thunk detection");
     for (const fn of functions) {
       if (fn.name !== `sub_${fn.address.toString(16).toUpperCase()}`) continue;
-      if (fn.size > 16) continue;
+      if (fn.size > CRT_IDIOM_MAX_BYTES) continue;
       const fnOffset = fn.address - baseAddress;
       if (fnOffset < 0 || fnOffset + fn.size > len) continue;
       {
         const insns = thunkScan.decode(bytes, fnOffset, fnOffset + fn.size, fn.address);
+        const idiom = recogniseCrtIdiom(insns, is64);
+        if (idiom) {
+          fn.name = idiom.name;
+          continue;
+        }
+        if (ctx.iatMap.size === 0 || fn.size > 16) continue;
         let jmpInsn: { address: number; mnemonic: string; opStr: string; size: number } | null =
           null;
         let meaningfulCount = 0;

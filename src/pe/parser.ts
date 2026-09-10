@@ -1277,6 +1277,35 @@ const CHPE_METADATA_POINTER = {
   pe32plus: { offset: 0xc8, size: 8 },
 } as const;
 
+/** `IMAGE_LOAD_CONFIG_DIRECTORY{32,64}.SecurityCookie` — a pointer-width VA. */
+const SECURITY_COOKIE = {
+  pe32: { offset: 0x3c, size: 4 },
+  pe32plus: { offset: 0x58, size: 8 },
+} as const;
+
+/**
+ * One pointer-width field of the load config structure, or `undefined` unless
+ * all three size claims cover it — the structure's own `Size`, the directory
+ * entry's, and the section's raw data. See `parseLoadConfig`.
+ */
+function readLoadConfigPointer(
+  view: DataView,
+  loadConfigDir: DataDirectory,
+  sectionIndex: SectionIndex,
+  declaredSize: number,
+  field: { offset: number; size: number },
+): number | undefined {
+  const needed = field.offset + field.size;
+  // Both sizes have to cover the field. `declaredSize` is the one that is
+  // usually short; `loadConfigDir.size` is the one a crafted file inflates.
+  if (declaredSize < needed || loadConfigDir.size < needed) return undefined;
+  const fieldOffset = rvaRangeToFileOffset(loadConfigDir.virtualAddress, needed, sectionIndex);
+  if (fieldOffset < 0 || fieldOffset + needed > view.byteLength) return undefined;
+  return field.size === 8
+    ? Number(view.getBigUint64(fieldOffset + field.offset, true))
+    : view.getUint32(fieldOffset + field.offset, true);
+}
+
 /**
  * Read data directory 10 far enough to answer whether the image declares CHPE
  * metadata. See `LoadConfigDirectory` for what the answer means.
@@ -1308,26 +1337,16 @@ function parseLoadConfig(
   if (headerOffset < 0 || headerOffset + 4 > view.byteLength) return undefined;
   const declaredSize = view.getUint32(headerOffset, true);
 
-  const { offset, size } = is64 ? CHPE_METADATA_POINTER.pe32plus : CHPE_METADATA_POINTER.pe32;
-  const needed = offset + size;
-
-  let chpeMetadataPointer: number | undefined;
-  // Both sizes have to cover the field. `declaredSize` is the one that is
-  // usually short; `loadConfigDir.size` is the one a crafted file inflates.
-  if (declaredSize >= needed && loadConfigDir.size >= needed) {
-    const fieldOffset = rvaRangeToFileOffset(loadConfigDir.virtualAddress, needed, sectionIndex);
-    if (fieldOffset >= 0 && fieldOffset + needed <= view.byteLength) {
-      chpeMetadataPointer = is64
-        ? Number(view.getBigUint64(fieldOffset + offset, true))
-        : view.getUint32(fieldOffset + offset, true);
-    }
-  }
+  const layout = is64 ? "pe32plus" : "pe32";
+  const read = (field: { offset: number; size: number }) =>
+    readLoadConfigPointer(view, loadConfigDir, sectionIndex, declaredSize, field);
 
   return {
     virtualAddress: loadConfigDir.virtualAddress,
     directorySize: loadConfigDir.size,
     declaredSize,
-    chpeMetadataPointer,
+    chpeMetadataPointer: read(CHPE_METADATA_POINTER[layout]),
+    securityCookie: read(SECURITY_COOKIE[layout]),
   };
 }
 

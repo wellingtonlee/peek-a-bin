@@ -1,4 +1,5 @@
 import { formatIOCTL, ioctlCodeArgIndex, isPlausibleIOCTL } from "../../analysis/driver";
+import type { NamedGlobal } from "../crtIdioms";
 import { API_TYPES } from "./apitypes";
 import type { BinaryOp, IRExpr, IRFunction, IRStmt, IRTry } from "./ir";
 import {
@@ -305,6 +306,10 @@ function commentSafe(text: string): string {
 
 let _typeCtx: TypeContext | undefined;
 let _stringMap: Map<number, string> | undefined;
+/** Address → the global the recognised CRT routines say lives there — see `crtIdioms.ts`. */
+let _globals: ReadonlyMap<number, NamedGlobal> | undefined;
+/** The globals the body actually named, in first-use order, so each gets one `extern`. */
+let _globalsUsed: Map<string, NamedGlobal> = new Map();
 let _unrecovered: { name: string; note: string }[] = [];
 /** Name → struct id, for the names a declaration in scope already types as a struct pointer. */
 let _declaredTypes: Map<string, string> = new Map();
@@ -719,6 +724,28 @@ function fieldAccess(expr: IRExpr & { kind: "field_access" }): string {
       : Math.max(1, field.size);
   if (expr.size === elementSize) return `${base}->${expr.fieldName}[0]`;
   return `*(${sizeToType(expr.size)}*)${base}->${expr.fieldName}`;
+}
+
+/**
+ * The name of the global at a dereferenced constant address, when the recognised
+ * CRT routines identified one there and the access is at its declared width.
+ *
+ * `*(int64_t*)(0x1400143C8) ^ rsp` is the `/GS` cookie load, and the name
+ * `__security_cookie` is what a reader of MSVC output expects to see. The
+ * address arrives here already resolved by the lifter's one operand grammar
+ * (`parseMemExpr` and `ripRelative.ts`), so this is a lookup, never a second
+ * parse. A load at another width keeps the raw spelling: `(uint8_t)` of a
+ * cookie is not something this can name without claiming a layout.
+ *
+ * Recording the use is what lets the header declare exactly the globals the
+ * body named — the body is emitted first, as it is for `__unrecovered_N`.
+ */
+function namedGlobalAt(address: IRExpr, size: number): string | null {
+  if (!_globals || address.kind !== "const") return null;
+  const g = _globals.get(address.value);
+  if (!g || g.size !== size) return null;
+  _globalsUsed.set(g.name, g);
+  return g.name;
 }
 
 /**
@@ -1538,6 +1565,8 @@ function emitExpr(expr: IRExpr, parentPrec = 0, signed = false): string {
     }
 
     case "deref": {
+      const named = namedGlobalAt(expr.address, expr.size);
+      if (named) return named;
       const type = sizeToType(expr.size);
       const addr = emitExpr(expr.address, 0);
       return `*(${type}*)(${addr})`;
@@ -1717,8 +1746,8 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
     case "store": {
       const type = sizeToType(stmt.size);
-      const addrStr = emitExpr(stmt.address, 0);
-      const storeTarget = `*(${type}*)(${addrStr})`;
+      const storeTarget =
+        namedGlobalAt(stmt.address, stmt.size) ?? `*(${type}*)(${emitExpr(stmt.address, 0)})`;
       // Compound assignment for regular stores
       if (stmt.value.kind === "binary" && COMPOUND_OPS.has(stmt.value.op)) {
         const lhs = emitExpr(stmt.value.left, 0);
@@ -2514,6 +2543,7 @@ export function emitFunction(
   original: IRFunction,
   typeCtx?: TypeContext,
   stringMap?: Map<number, string>,
+  globals?: ReadonlyMap<number, NamedGlobal>,
 ): EmitFunctionResult {
   // Before anything reads the body: every analysis below has to be asked about
   // the statements the reader will see — see `foldReturnedCallResults`.
@@ -2533,6 +2563,8 @@ export function emitFunction(
   // than clear) keeps the state correct should emission ever nest.
   const prevTypeCtx = _typeCtx;
   const prevStringMap = _stringMap;
+  const prevGlobals = _globals;
+  const prevGlobalsUsed = _globalsUsed;
   const prevUnrecovered = _unrecovered;
   const prevDeclaredTypes = _declaredTypes;
   const prevStructDefs = _structDefs;
@@ -2545,6 +2577,8 @@ export function emitFunction(
   const prevCapturedOperands = _capturedOperands;
   _typeCtx = typeCtx;
   _stringMap = stringMap;
+  _globals = globals;
+  _globalsUsed = new Map();
   _unrecovered = [];
   _declaredTypes = new Map();
   _structDefs = new Map((func.typedefs ?? []).map((d) => [d.id, d]));
@@ -2586,6 +2620,8 @@ export function emitFunction(
   } finally {
     _typeCtx = prevTypeCtx;
     _stringMap = prevStringMap;
+    _globals = prevGlobals;
+    _globalsUsed = prevGlobalsUsed;
     _unrecovered = prevUnrecovered;
     _declaredTypes = prevDeclaredTypes;
     _structDefs = prevStructDefs;
@@ -2723,6 +2759,20 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
       lines.push("");
       lineAddrs.push(undefined);
     }
+  }
+
+  // The globals the body named in place of a dereferenced address — the `/GS`
+  // cookie today. `extern`, because the object is the CRT's and lives in
+  // `.data`; declared here rather than left to the reader because the emitter
+  // is what chose the name, and an undeclared identifier is what `preludeFor`
+  // would otherwise invent a type for.
+  if (_globalsUsed.size > 0) {
+    for (const g of _globalsUsed.values()) {
+      lines.push(`extern ${g.type} ${g.name};`);
+      lineAddrs.push(undefined);
+    }
+    lines.push("");
+    lineAddrs.push(undefined);
   }
 
   // Function header

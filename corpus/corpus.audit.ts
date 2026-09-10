@@ -1588,6 +1588,18 @@ function renderReport(): string {
       `  loop exit coverage          ${r.loops.audited} audited, ${r.loops.short} short of the machine`,
     );
     L.push(`  distinct callees lost       ${r.callees.lost} of ${r.callees.pairs}`);
+    {
+      const g = r.gsCheck;
+      const hex = (v: number | null) => (v === null ? "absent" : `0x${v.toString(16)}`);
+      const agree = g.agree === null ? "one side absent" : g.agree ? "AGREE" : "DISAGREE";
+      L.push(
+        `  /GS cookie check            ${g.checkFunctions} recognised, ${g.calls} calls, ` +
+          `${g.resultTaken} take a result it never produces — report only (peek-a-bin-n9cl.3)`,
+      );
+      L.push(
+        `    cookie address            body ${hex(g.cookieBody)}, load config ${hex(g.cookieLoadConfig)}: ${agree}`,
+      );
+    }
     L.push(`  gcc -fsyntax-only           ${c.clean}/${c.compiled} clean`);
     L.push(
       `  offsetof (compiled and run) ${o.fieldsCorrect}/${o.fields} fields, ` +
