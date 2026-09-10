@@ -8,6 +8,7 @@ import type { DisasmFunction, Instruction } from "../types";
 import {
   blockFlagOwner,
   canSpellCondition,
+  flagOwnerBefore,
   isFlagTransparent,
   parseBitTest,
   withoutLockPrefix,
@@ -492,15 +493,19 @@ export function setFlagsFromCompare(
  * derives the same name from the same address and asks whether the emitted
  * guard reads it.
  */
-interface SpoiledCompareCapture {
-  /** The spoiled compare's address — where the captures are placed. */
+interface OperandCapture {
+  /** The flag setter's address — where the captures are placed. */
   at: number;
-  mnemonic: "cmp" | "test";
-  /** One assignment per distinct non-constant operand, in operand order. */
+  /** The setter's base mnemonic, lowercased: `cmp`, `test`, and since peek-a-bin-n9cl.6 `sub`/`neg`. */
+  mnemonic: string;
+  /** One assignment per distinct captured operand, in operand order. */
   captures: IRStmt[];
-  /** What the condition is built over: a capture variable, or a const. */
-  left: IRExpr;
-  right: IRExpr;
+  /**
+   * What a reader is built over, one entry per operand of the setter: a capture
+   * variable where one was taken, otherwise the operand as `parseOperand` reads
+   * it (a constant, or an operand nothing asked to preserve).
+   */
+  operands: IRExpr[];
 }
 
 /** The name a captured operand is held under. One declaration; the audit derives it too. */
@@ -547,39 +552,125 @@ function capturedWidth(expr: IRExpr, is64: boolean): number {
   return is64 ? 8 : 4;
 }
 
-function spoiledCompareCapture(
+/**
+ * What one flag setter has to preserve for the readers that need it.
+ *
+ * `all` is the spoiled-compare rule: every non-constant operand is held, since
+ * a reader spelled over the compare's operands needs each of them as the
+ * compare read it. `forced` names operands that must be held whether or not
+ * anything overwrote them later — the destination of a `sub` whose borrow a
+ * later `sbb` reads, which the `sub` itself destroys (peek-a-bin-n9cl.6).
+ */
+interface CaptureNeed {
+  insn: Instruction;
+  mnemonic: string;
+  all: boolean;
+  forced: Set<number>;
+}
+
+/**
+ * The statements holding `need.insn`'s operands at its own program point, and
+ * the expressions a reader is then built over — or null when nothing is held.
+ *
+ * Two operands with identical text share one capture, so `test eax, eax`
+ * produces one statement rather than two of the same thing; a constant is never
+ * captured, because there is nothing to preserve and an `IRConst` in the
+ * condition is what every unspoiled compare already emits. The split is the
+ * same one `setFlagsFromCompare` makes, of the same text — no x86 memory
+ * operand contains a comma — so the two cannot disagree about the operands.
+ */
+function buildCapture(need: CaptureNeed, is64: boolean): OperandCapture | null {
+  const parts = need.insn.opStr.split(",").map((part) => part.trim());
+  const captures: IRStmt[] = [];
+  const operands: IRExpr[] = [];
+  const byText = new Map<string, IRExpr>();
+  for (let index = 0; index < parts.length; index++) {
+    const src = parseOperand(parts[index], need.insn, is64);
+    if (src.kind === "const" || !(need.all || need.forced.has(index))) {
+      operands.push(src);
+      continue;
+    }
+    const text = parts[index].toLowerCase();
+    const already = byText.get(text);
+    if (already) {
+      operands.push(already);
+      continue;
+    }
+    const dest = irVar(capturedOperandName(need.insn.address, index), capturedWidth(src, is64));
+    captures.push({ kind: "assign", dest, src, addr: need.insn.address });
+    byText.set(text, dest);
+    operands.push(dest);
+  }
+  if (captures.length === 0) return null;
+  return { at: need.insn.address, mnemonic: need.mnemonic, captures, operands };
+}
+
+/** Is this dispatch key a `setcc`? `COND_SET` is the one table of the forms lifted. */
+function isSetcc(mn: string): boolean {
+  return mn in COND_SET;
+}
+
+/**
+ * Every flag setter in `block` whose operands must be materialised at its own
+ * program point, keyed by the setter's address, because some later reader in
+ * the block would otherwise read them after something overwrote them.
+ *
+ * `spoiledCompareCapture` asked this question of ONE reader — the block's
+ * trailing Jcc — and of one owner kind. `setcc` and `cmovcc` built their
+ * conditions from `regState.getCondition` at their own program point instead,
+ * so `cmp eax, 5 / mov eax, edx / sete al` lifted to `al = (eax == 5)` *after*
+ * `eax = edx`, and SSA then bound the read to the `mov`: the exact defect the
+ * Jcc path was cured of (peek-a-bin-xe01, peek-a-bin-xskz), one reader over.
+ * Every in-block flag reader is asked here, so the placement and the reading are
+ * still two ends of one decision — the statements go in at the setter, the
+ * reader is built over them — with one map rather than one per reader:
+ *
+ * - the trailing Jcc, exactly as before: a block-local compare owner, spoiled,
+ *   with a resolvable direct target (`branchFor` refuses anything else, and the
+ *   captures would then be statements with no reader);
+ * - each `setcc`/`cmovcc`, whose owner is `flagOwnerBefore` at its own index —
+ *   block-local by construction, since the walk reads this block's instructions.
+ *
+ * Two readers of one setter merge their needs, so one statement per operand is
+ * emitted however many read it. A `result` or `bittest` owner of a Jcc or
+ * `setcc` is still untouched: its value is the instruction's own destination,
+ * and capturing it would mean reading a destination the instruction has not
+ * yet written.
+ */
+function operandCaptures(
   block: BasicBlock,
   is64: boolean,
   flagPred?: BasicBlock,
-): SpoiledCompareCapture | null {
-  const last = block.insns[block.insns.length - 1];
-  if (!last || !/^0x[0-9a-fA-F]+$/.test(last.opStr.trim())) return null;
-  const owned = blockFlagOwner(block, flagPred);
-  if (!owned || owned.fromPredecessor) return null;
-  const owner = owned.owner;
-  if (owner.kind !== "compare" || !owner.spoiled) return null;
-  // No x86 memory operand contains a comma — the same split `setFlagsFromCompare`
-  // makes, of the same text, so the two cannot disagree about the operands.
-  const parts = owner.insn.opStr.split(",").map((part) => part.trim());
-  if (parts.length < 2) return null;
-
-  const captures: IRStmt[] = [];
-  const byText = new Map<string, IRExpr>();
-  const capture = (index: number): IRExpr => {
-    const text = parts[index].toLowerCase();
-    const already = byText.get(text);
-    if (already) return already;
-    const src = parseOperand(parts[index], owner.insn, is64);
-    if (src.kind === "const") return src;
-    const dest = irVar(capturedOperandName(owner.address, index), capturedWidth(src, is64));
-    captures.push({ kind: "assign", dest, src, addr: owner.address });
-    byText.set(text, dest);
-    return dest;
+): Map<number, OperandCapture> {
+  const needs = new Map<number, CaptureNeed>();
+  const need = (insn: Instruction, mnemonic: string, all: boolean, forced: number[] = []) => {
+    const have = needs.get(insn.address) ?? { insn, mnemonic, all: false, forced: new Set() };
+    have.all ||= all;
+    for (const i of forced) have.forced.add(i);
+    needs.set(insn.address, have);
   };
-  const left = capture(0);
-  const right = capture(1);
-  if (captures.length === 0) return null;
-  return { at: owner.address, mnemonic: owner.mnemonic, captures, left, right };
+  const insns = block.insns;
+  const last = insns[insns.length - 1];
+  if (last && /^0x[0-9a-fA-F]+$/.test(last.opStr.trim())) {
+    const owned = blockFlagOwner(block, flagPred);
+    if (owned && !owned.fromPredecessor) {
+      const owner = owned.owner;
+      if (owner.kind === "compare" && owner.spoiled) need(owner.insn, owner.mnemonic, true);
+    }
+  }
+  for (let i = 0; i < insns.length; i++) {
+    const mn = withoutLockPrefix(insns[i].mnemonic);
+    if (isSetcc(mn) || CMOV_PATTERN.test(mn)) {
+      const owner = flagOwnerBefore(insns, i);
+      if (owner.kind === "compare" && owner.spoiled) need(owner.insn, owner.mnemonic, true);
+    }
+  }
+  const out = new Map<number, OperandCapture>();
+  for (const [addr, n] of needs) {
+    const built = buildCapture(n, is64);
+    if (built) out.set(addr, built);
+  }
+  return out;
 }
 
 /**
@@ -657,11 +748,13 @@ function reusablePredecessorCapture(
   flagPred: BasicBlock | undefined,
   compareAddr: number,
   is64: boolean,
-): SpoiledCompareCapture | null {
+): OperandCapture | null {
   if (!flagPred) return null;
   if (block.preds.length !== 1 || block.preds[0] !== flagPred.id) return null;
-  const capture = spoiledCompareCapture(flagPred, is64);
-  return capture && capture.at === compareAddr ? capture : null;
+  // Recomputed with none of the predecessor's own cross-block context, which is
+  // the conservative side: the predecessor's real lift had at least this much
+  // to go on, so an entry found here is one it placed.
+  return operandCaptures(flagPred, is64).get(compareAddr) ?? null;
 }
 
 /**
@@ -737,7 +830,7 @@ function branchFor(
   regState: RegState,
   is64: boolean,
   flagPred?: BasicBlock,
-  capture?: SpoiledCompareCapture | null,
+  captures: ReadonlyMap<number, OperandCapture> = new Map(),
 ): IRBranch | null {
   const owned = blockFlagOwner(block, flagPred);
   if (!owned || owned.jcc !== jcc) return null;
@@ -752,6 +845,8 @@ function branchFor(
     // its false arm narrows a compare owner to `never` and the spoiled path
     // cannot reach the owner's own fields through it.
     const compareAddr = owned.owner.address;
+    const compareMnemonic = owned.owner.mnemonic;
+    const capture = captures.get(compareAddr);
     if (owned.fromPredecessor) {
       const state = new RegState();
       if (canSpellCondition(owned.owner)) {
@@ -766,21 +861,21 @@ function branchFor(
         // (peek-a-bin-zylv).
         const reused = reusablePredecessorCapture(block, flagPred, compareAddr, is64);
         if (!reused) return null;
-        state.setFlags(reused.mnemonic, reused.left, reused.right);
+        state.setFlags(compareMnemonic, reused.operands[0], reused.operands[1]);
         capturedAt = reused.at;
       }
       condition = state.getCondition(jcc);
-    } else if (capture && capture.at === owned.owner.address) {
-      // Something overwrote an operand between the compare and this jump, and
-      // `liftBlock` has put a statement holding each compared value at the
+    } else if (capture) {
+      // Something overwrote an operand between the compare and a reader of it,
+      // and `liftBlock` has put a statement holding each compared value at the
       // compare's own address. The condition reads those, so the clobber cannot
-      // reach it — see `spoiledCompareCapture` for why that is sound and where
-      // its bounds are. The state is built fresh from the captured expressions
+      // reach it — see `operandCaptures` for why that is sound and where its
+      // bounds are. The state is built fresh from the captured expressions
       // rather than from `regState`, which holds the raw operand names: the same
       // shape the cross-block arm above uses, so `getCondition` sees exactly one
       // kind of input either way (peek-a-bin-xskz).
       const state = new RegState();
-      state.setFlags(owned.owner.mnemonic, capture.left, capture.right);
+      state.setFlags(owned.owner.mnemonic, capture.operands[0], capture.operands[1]);
       condition = state.getCondition(jcc);
       capturedAt = capture.at;
     } else {
@@ -900,14 +995,16 @@ export function liftBlock(
   const stmts: IRStmt[] = [];
 
   /**
-   * The compared values to materialise, when this block's trailing Jcc reads a
-   * `cmp`/`test` whose operands something after it overwrote. Computed once,
-   * here, because the placement and the reading are two ends of one decision:
-   * the statements go in at the compare below, `branchFor` builds the condition
-   * over them at the Jcc, and a plan half-applied would leave the guard naming
-   * a pseudo-register nothing assigns. Null for every ordinary block.
+   * The flag setters whose operands must be materialised at their own program
+   * point, because a later reader in this block — the trailing Jcc, a `setcc`,
+   * a `cmovcc` — would otherwise read them after something overwrote them.
+   * Computed once, here, because the placement and the reading are two ends of
+   * one decision: the statements go in at the setter below, `regState` and
+   * `branchFor` build the readers over them, and a plan half-applied would leave
+   * a reader naming a pseudo-register nothing assigns. Empty for every ordinary
+   * block (peek-a-bin-xskz, generalised in peek-a-bin-n9cl.6).
    */
-  const spoiledCapture = spoiledCompareCapture(block, is64, flagPred);
+  const captures = operandCaptures(block, is64, flagPred);
 
   /**
    * Did the *previous* instruction leave the flags somewhere this class cannot
@@ -988,6 +1085,17 @@ export function liftBlock(
     // own mark when it calls `regState.set`. `collectArgs64` is the only
     // reader; see `noteIndexReads`.
     noteIndexReads(regState, mn, parts);
+
+    // A flag setter some later reader needs the operands of, held here where
+    // they still are what the setter read — BEFORE the setter's own statement,
+    // since a `sub` overwrites the very operand its borrow is a function of. This
+    // is the one place a compare emits a statement, and it emits one only because
+    // the alternative is refusing the reader outright (`operandCaptures`).
+    // `regState` is deliberately not told about the pseudo-registers: it feeds
+    // `collectArgs64`'s "did this block write a fastcall register" question, and
+    // a capture is not an argument (peek-a-bin-xskz).
+    const captured = captures.get(insn.address);
+    if (captured) stmts.push(...captured.captures);
 
     // ── nop / int3 / ud2 ──
     if (mn === "nop" || mn === "int3" || mn === "ud2") continue;
@@ -1377,22 +1485,16 @@ export function liftBlock(
     // pass had to be taught to leave alone (peek-a-bin-c33).
     if (mn === "cmp" || mn === "test") {
       if (parts.length >= 2) {
+        // Where a later reader needs the compared values held, the flag state
+        // names the captures rather than the operands, so `getCondition` for a
+        // `setcc`/`cmovcc` spells the value the compare read and not whatever
+        // the register holds by then — the Jcc's reading, one reader over
+        // (peek-a-bin-n9cl.6). The statements themselves went in above.
         regState.setFlags(
           mn as "cmp" | "test",
-          parseOperand(parts[0], insn, is64),
-          parseOperand(parts[1], insn, is64),
+          captured?.operands[0] ?? parseOperand(parts[0], insn, is64),
+          captured?.operands[1] ?? parseOperand(parts[1], insn, is64),
         );
-      }
-      // …unless a later instruction in this block overwrites what the flags were
-      // set from, in which case the compared values are held here, where they
-      // still are what the compare read. This is the ONE place a compare emits a
-      // statement, and it emits one only because the alternative is refusing the
-      // guard outright (`spoiledCompareCapture`). `regState` is deliberately not
-      // told about the pseudo-registers: it feeds `collectArgs64`'s "did this
-      // block write a fastcall register" question, and a capture is not an
-      // argument (peek-a-bin-xskz).
-      if (spoiledCapture && insn.address === spoiledCapture.at) {
-        stmts.push(...spoiledCapture.captures);
       }
       continue;
     }
@@ -1563,7 +1665,7 @@ export function liftBlock(
     // see `branchFor`.
     if (mn === "jmp" || mn.startsWith("j")) {
       if (insn === block.insns[block.insns.length - 1]) {
-        const branch = branchFor(block, insn, mn, regState, is64, flagPred, spoiledCapture);
+        const branch = branchFor(block, insn, mn, regState, is64, flagPred, captures);
         if (branch) stmts.push(branch);
       }
       continue;

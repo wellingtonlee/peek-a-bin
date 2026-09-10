@@ -395,6 +395,20 @@ for (const b of bins) {
     } else {
       note("  guards emitted at a shape     NOT MEASURED on both sides (a run predating xskz)");
     }
+    // The same question of the OTHER in-block flag readers, setcc/cmovcc, which
+    // peek-a-bin-n9cl.6 built over the same capture map. A rise in the named
+    // count is a regression; the shape count is machine code and the recovered
+    // count is the recovery, both reported.
+    if (B.staleGuards.readerNamed !== undefined && C.staleGuards.readerNamed !== undefined) {
+      row(
+        "  setcc/cmovcc wrong-operand",
+        (x) => x.staleGuards.readerNamed,
+        (a, c) => c > a,
+      );
+      row("  setcc/cmovcc spoiled readings", (x) => x.staleGuards.readerShapes);
+      row("  setcc/cmovcc readers", (x) => x.staleGuards.readers);
+      row("  setcc/cmovcc recovered on page", (x) => x.staleGuards.readerEmitted);
+    }
   } else {
     note("  wrong-operand guards named    NOT MEASURED on both sides (a run predating the audit)");
   }

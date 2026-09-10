@@ -567,7 +567,7 @@ if (!pre.haveBins || !pre.haveCc) {
         shapes += sg.shapes;
         expect(
           `${r.key} wrong-operand: ${sg.rows
-            .filter((x) => x.why !== null)
+            .filter((x) => x.reader === "jcc" && x.why !== null)
             .slice(0, 5)
             .map((x) => `${x.func}@0x${x.jcc.toString(16)} ${x.kind} ${x.why} '${x.emitted}'`)
             .join("; ")}`,
@@ -576,6 +576,35 @@ if (!pre.haveBins || !pre.haveCc) {
         expect(sg.blocks).toBeGreaterThan(0);
       }
       expect(shapes).toBeGreaterThan(0);
+    });
+
+    /**
+     * The same gate over the OTHER in-block flag readers — `setcc`/`cmovcc` —
+     * since peek-a-bin-n9cl.6 built them over the same capture map the Jcc
+     * reads. `readerNamed` is 0 by construction; the liveness half is that the
+     * spoiled shape is still found (`readerShapes > 0`, 3 per binary at
+     * 6299113) and that at least one such reader reaches the page recovered.
+     * Disabling the capture for `setcc` takes `readerNamed` to the shape count.
+     */
+    it("never states a setcc/cmovcc value over operands the machine took away", () => {
+      let shapes = 0;
+      let emitted = 0;
+      for (const r of results.values()) {
+        const sg = r.staleGuards;
+        shapes += sg.readerShapes;
+        emitted += sg.readerEmitted;
+        expect(
+          `${r.key} wrong-operand reader: ${sg.rows
+            .filter((x) => x.reader !== "jcc" && x.why !== null)
+            .slice(0, 5)
+            .map((x) => `${x.func}@0x${x.jcc.toString(16)} ${x.kind} ${x.why} '${x.emitted}'`)
+            .join("; ")}`,
+        ).toBe(`${r.key} wrong-operand reader: `);
+        expect(sg.readerNamed).toBe(0);
+        expect(sg.readers).toBeGreaterThan(0);
+      }
+      expect(shapes).toBeGreaterThan(0);
+      expect(emitted).toBeGreaterThan(0);
     });
 
     /**
@@ -1750,6 +1779,13 @@ function renderReport(): string {
     L.push("    the spoiler could have written — since peek-a-bin-xskz the lifter materialises a");
     L.push("    spoiled compare's operands, so a guard being present is no longer the question.");
     L.push("    Sites in staleguards_<bin>.jsonl. See corpus/README.md.");
+    L.push(
+      `  wrong-operand setcc/cmovcc  ${sg.readerNamed} named of ${sg.readerShapes} spoiled readings ` +
+        `over ${sg.readers} readers (${sg.readerEmitted} recovered on the page)`,
+    );
+    L.push("    The same question asked of every OTHER in-block flag reader, built over the same");
+    L.push("    capture map since peek-a-bin-n9cl.6. Gated at 0; a reader the emitter admitted as");
+    L.push("    __unrecovered_N or left unlifted is a refusal and is not judged.");
     const ce = r.crossEdgeGuards;
     L.push(
       `  cross-edge guards           ${ce.admitted} answered / ${ce.named} named of ` +

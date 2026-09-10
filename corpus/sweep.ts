@@ -1073,7 +1073,24 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       if (!emittedAt.has(g.jcc)) emittedAt.set(g.jcc, g.cond);
     }
     const cfgForGuards = buildCFG(func, insns, af.xrefMap, jumpTables);
-    auditStaleGuards(res.staleGuards, key, func.name, func.address, cfgForGuards, emittedAt);
+    // The other in-block flag readers — `setcc`/`cmovcc` — have no guard to be
+    // anchored by, so they are judged by the emitted LINE the line map places
+    // at the reader's own address (peek-a-bin-n9cl.6). First line per address.
+    const codeLines = code.split("\n");
+    const emittedLineAt = new Map<number, string>();
+    for (const [line, addr] of lineMap) {
+      const text = codeLines[line]?.trim();
+      if (text && !emittedLineAt.has(addr)) emittedLineAt.set(addr, text);
+    }
+    auditStaleGuards(
+      res.staleGuards,
+      key,
+      func.name,
+      func.address,
+      cfgForGuards,
+      emittedAt,
+      emittedLineAt,
+    );
     // A GUARD THAT IS WRONG ON ONE INCOMING EDGE. The same `emittedAt` map and
     // the same CFG, for the question `staleGuards` structurally cannot ask: its
     // scan needs a `cmp`/`test` in the jcc's own block, and these blocks hold

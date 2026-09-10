@@ -473,6 +473,32 @@ describe("decompileFunction — a pipeline fault is a field, not code", () => {
   });
 });
 
+/**
+ * A spoiled compare read by a `setcc` — the Jcc's defect one reader over
+ * (peek-a-bin-n9cl.6). `cmp eax, 0x53 / mov eax, edx / sete al` used to lift
+ * `al = (eax == 0x53)` after `eax = edx`, so SSA bound the read to the `mov` and
+ * the page said `edx == 0x53`: the register the SPOILER read, which is
+ * peek-a-bin-xe01's signature and no gate can see. The compared value is now
+ * held at the compare and the setcc reads the capture.
+ */
+describe("decompileFunction — a spoiled compare read by setcc", () => {
+  it("reads the value the compare compared, not the register the spoiler wrote", () => {
+    const code = run(
+      seq(0x401000, [
+        ["cmp", "eax, 0x53"],
+        ["mov", "eax, edx"],
+        ["sete", "al"],
+        ["movzx", "eax, al"],
+        ["ret"],
+      ]),
+    );
+    expect(code).toContain("flg_401000_0 = eax;");
+    expect(code).toContain("return flg_401000_0 == 0x53;");
+    // The negative control — capture disabled for setcc — prints this instead.
+    expect(code).not.toContain("edx == 0x53");
+  });
+});
+
 describe("decompileFunction — conditionals reach the output with the right sense", () => {
   // The regression test for peek-a-bin-h9v, written at the level the bug was
   // actually visible at. `je` jumps when ecx == 0, and the jump target is the

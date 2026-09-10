@@ -4,7 +4,7 @@ import type { BasicBlock } from "../../cfg";
 import type { CrtIdiom } from "../../crtIdioms";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
-import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown } from "../ir";
+import { irBinary, irConst, irDeref, irReg, irUnary, irUnknown, irVar } from "../ir";
 import {
   crossBlockPopImmediates,
   firstCalleeSavedWrites,
@@ -595,6 +595,84 @@ describe("liftBlock — flags and conditionals", () => {
       },
       addr: START + SIZE,
     });
+  });
+});
+
+/**
+ * A spoiled compare read by an in-block reader OTHER than the trailing Jcc.
+ *
+ * `setcc`/`cmovcc` built their conditions from `regState.getCondition` at their
+ * own program point, so `cmp eax, 5 / mov eax, edx / sete al` lifted to
+ * `al = (eax == 5)` AFTER `eax = edx`, and SSA bound the read to the `mov` — the
+ * defect the Jcc path was cured of by materialising the compared values at the
+ * compare (peek-a-bin-xe01, peek-a-bin-xskz), one reader over. `operandCaptures`
+ * now asks every in-block flag reader, and the compare's flag state names the
+ * captures (peek-a-bin-n9cl.6). The negative control is the first row's shape
+ * with the capture disabled: it emits `al = eax == 5` below `eax = edx`.
+ */
+describe("liftBlock — a spoiled compare read by setcc/cmovcc", () => {
+  const flg = (i: number, size: number) => irVar(`flg_${START.toString(16)}_${i}`, size);
+
+  it("holds the compared value at the compare and builds the setcc over it", () => {
+    const stmts = lift([
+      ["cmp", "eax, 0x5"],
+      ["mov", "eax, edx"],
+      ["sete", "al"],
+    ]);
+    expect(stmts).toEqual([
+      { kind: "assign", dest: flg(0, 4), src: irReg("eax", 4), addr: START },
+      { kind: "assign", dest: irReg("eax", 4), src: irReg("edx", 4), addr: START + SIZE },
+      {
+        kind: "assign",
+        dest: irReg("al", 1),
+        src: irBinary("==", flg(0, 4), irConst(5, 8)),
+        addr: START + 2 * SIZE,
+      },
+    ]);
+  });
+
+  it("builds a spoiled cmovcc's condition over the capture too", () => {
+    const stmts = lift([
+      ["cmp", "rcx, rdx"],
+      ["mov", "rdx, 0x10"],
+      ["cmovb", "rax, rbx"],
+    ]);
+    // Both non-constant operands are held, in operand order, as the Jcc rule does.
+    expect(stmts[0]).toEqual({
+      kind: "assign",
+      dest: flg(0, 8),
+      src: irReg("rcx", 8),
+      addr: START,
+    });
+    expect(stmts[1]).toEqual({
+      kind: "assign",
+      dest: flg(1, 8),
+      src: irReg("rdx", 8),
+      addr: START,
+    });
+    expect(stmts[3]).toMatchObject({
+      dest: irReg("rax", 8),
+      src: { kind: "ternary", condition: irBinary("u<", flg(0, 8), flg(1, 8)) },
+    });
+  });
+
+  it("leaves an unspoiled setcc reading the register itself", () => {
+    const stmts = lift([
+      ["cmp", "eax, 0x5"],
+      ["mov", "ecx, edx"],
+      ["sete", "al"],
+    ]);
+    expect(stmts).toHaveLength(2);
+    expect(stmts[1]).toMatchObject({ src: irBinary("==", irReg("eax", 4), irConst(5, 8)) });
+  });
+
+  it("captures nothing for a constant operand and nothing when no reader follows", () => {
+    expect(
+      lift([
+        ["cmp", "eax, 0x5"],
+        ["mov", "eax, edx"],
+      ]),
+    ).toHaveLength(1);
   });
 });
 

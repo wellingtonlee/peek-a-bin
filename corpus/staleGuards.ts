@@ -96,7 +96,14 @@ export interface StaleGuardRec {
   bin: string;
   func: string;
   funcAddr: number;
-  /** The block's trailing conditional jump. */
+  /**
+   * Which kind of flag reader this row is about. `"jcc"` is the block's trailing
+   * conditional jump — the only reader until peek-a-bin-n9cl.6 — and the rows
+   * the `named` gate counts; `"setcc"`/`"cmovcc"` are the in-block readers the
+   * `reader*` counts cover.
+   */
+  reader: "jcc" | "setcc" | "cmovcc";
+  /** The reader's address: the trailing conditional jump, or the setcc/cmovcc. */
   jcc: number;
   jccMnem: string;
   /** Which mechanism spoiled the reading. */
@@ -150,6 +157,24 @@ export interface StaleGuardResult {
   emittedAtShape: number;
   bySuperseded: number;
   byClobbered: number;
+  /**
+   * The SAME question asked of every OTHER in-block flag reader — `setcc` and
+   * `cmovcc` — since peek-a-bin-n9cl.6 generalised the lifter's capture from
+   * the trailing Jcc to all of them. `readers` is the population examined,
+   * `readerShapes` the spoiled ones (machine shape, the liveness half),
+   * `readerNamed` the emitted lines at a spoiled reader that do not read the
+   * capture — THE DEFECT, and 0 by construction once every reader is built
+   * over the same map. `readerEmitted` is the recovery count, report-only.
+   *
+   * The emitted text judged is the line the line map places at the reader's
+   * own address, and a reader whose value the emitter admitted as
+   * `__unrecovered_N` or left `unlifted` is not judged: those are refusals,
+   * which is the other sound answer.
+   */
+  readers: number;
+  readerShapes: number;
+  readerNamed: number;
+  readerEmitted: number;
   rows: StaleGuardRec[];
 }
 
@@ -161,6 +186,10 @@ export function emptyStaleGuards(): StaleGuardResult {
     emittedAtShape: 0,
     bySuperseded: 0,
     byClobbered: 0,
+    readers: 0,
+    readerShapes: 0,
+    readerNamed: 0,
+    readerEmitted: 0,
     rows: [],
   };
 }
@@ -256,14 +285,105 @@ function wrongOperand(emitted: string, cmpAddr: number, clobbers: Set<string>): 
   return null;
 }
 
+/** One spoiled reading, before it is judged against what the emitter printed. */
+interface SpoiledReading {
+  kind: StaleGuardRec["kind"];
+  cmp: Instruction;
+  spoiler: Instruction;
+  clobbers: Set<string>;
+  clobbersMemory: boolean;
+}
+
+/**
+ * Is the flag reader at `insns[readerIndex]` reading a compare the machine has
+ * superseded or clobbered? The reading if so, null if the reader's flags are
+ * the last `cmp`/`test`'s exactly as it set them — or if no `cmp`/`test`
+ * precedes it in the block at all, which is not this audit's population.
+ *
+ * Asked of the instructions strictly before the reader and of nothing after
+ * it, so a `setcc` in the middle of a block is judged against what it could
+ * read, not against a compare that came later.
+ */
+function spoiledReading(insns: Instruction[], readerIndex: number): SpoiledReading | null {
+  // The last instruction to write the flags, and the last `cmp`/`test`. When
+  // they differ, the reader reads flags the compare did not set.
+  let winner: Instruction | null = null;
+  let lastCmpTest: Instruction | null = null;
+  for (let i = 0; i < readerIndex; i++) {
+    const mn = insns[i].mnemonic.toLowerCase();
+    if (mn === "cmp" || mn === "test") {
+      winner = insns[i];
+      lastCmpTest = insns[i];
+    } else if (!isFlagTransparent(mn)) {
+      winner = insns[i];
+    }
+  }
+  if (!lastCmpTest) return null;
+
+  // Everything written between the compare and the reader, not just the first
+  // offender. The row names the first, because that is what identifies the
+  // shape to a reader; judging the emitted condition needs the whole set — a
+  // guard is a wrong-operand guard if it mentions ANY of them.
+  const clobbers = new Set<string>();
+  let clobbersMemory = false;
+  const readsMemory = lastCmpTest.opStr.includes("[");
+
+  if (winner !== lastCmpTest) {
+    // peek-a-bin-jitf. `winner` cannot be null here: it is at least the
+    // `cmp` itself, and anything that displaced it is a flag writer.
+    return {
+      kind: "superseded",
+      cmp: lastCmpTest,
+      spoiler: winner as Instruction,
+      clobbers,
+      clobbersMemory,
+    };
+  }
+  // peek-a-bin-xe01. The flags are the compare's; are its operands still the
+  // values it compared by the time the reader is evaluated?
+  const named = regsNamed(lastCmpTest.opStr);
+  let spoiler: Instruction | null = null;
+  for (let i = 0; i < readerIndex; i++) {
+    if (insns[i].address <= lastCmpTest.address) continue;
+    const w = writesOf(insns[i]);
+    for (const r of w.regs) clobbers.add(r);
+    if (w.mem || w.opaque) clobbersMemory = true;
+    const hitsReg = [...w.regs].some((r) => named.has(r));
+    if (!spoiler && (w.opaque || hitsReg || (w.mem && readsMemory))) spoiler = insns[i];
+  }
+  if (!spoiler) return null;
+  return { kind: "clobbered", cmp: lastCmpTest, spoiler, clobbers, clobbersMemory };
+}
+
+/** Which in-block flag reader an instruction is, or null. The Jcc is the caller's. */
+function readerKind(mnemonic: string): "setcc" | "cmovcc" | null {
+  const mn = mnemonic.toLowerCase();
+  if (/^set[a-z]+$/.test(mn)) return "setcc";
+  if (/^cmov[a-z]+$/.test(mn)) return "cmovcc";
+  return null;
+}
+
+/**
+ * Whether an emitted line at a reader is one this audit may judge at all. A
+ * value the emitter admitted — `__unrecovered_N`, or the instruction left
+ * `unlifted` — is a refusal, which is the other sound answer to a spoiled
+ * reading and must not be counted as a wrong-operand one.
+ */
+function judgeable(line: string): boolean {
+  return !line.includes("__unrecovered_") && !line.includes("/* unlifted:");
+}
+
 /**
  * Classify every block of `func` that ends in a conditional jump — exactly
  * `extractCondition`'s own gate — and record the ones whose compare reading the
- * machine has superseded or clobbered.
+ * machine has superseded or clobbered. Then ask the same of every `setcc` and
+ * `cmovcc` in every block (peek-a-bin-n9cl.6).
  *
  * `emittedAt` maps a jcc address to the condition the emitted C states there,
  * for the jccs the polarity pass could anchor. A spoiled block that has an entry
- * is a wrong-operand guard on the page.
+ * is a wrong-operand guard on the page. `emittedLineAt` maps an instruction
+ * address to the emitted line the line map places there, for the other
+ * readers; omitting it leaves them counted but unjudged.
  */
 export function auditStaleGuards(
   out: StaleGuardResult,
@@ -272,65 +392,42 @@ export function auditStaleGuards(
   funcAddr: number,
   blocks: BasicBlock[],
   emittedAt: Map<number, string>,
+  emittedLineAt?: Map<number, string>,
 ): void {
   for (const block of blocks) {
     const insns = block.insns;
     const last = insns[insns.length - 1];
     if (!last) continue;
+
+    // The in-block readers first, so a block's rows are in address order.
+    for (let i = 0; i < insns.length; i++) {
+      const reader = readerKind(insns[i].mnemonic);
+      if (!reader) continue;
+      out.readers++;
+      const reading = spoiledReading(insns, i);
+      if (!reading) continue;
+      out.readerShapes++;
+      const line = emittedLineAt?.get(insns[i].address) ?? null;
+      const emitted = line !== null && judgeable(line) ? line : null;
+      if (emitted !== null) out.readerEmitted++;
+      const why =
+        emitted === null
+          ? null
+          : reading.kind === "superseded"
+            ? "superseded"
+            : wrongOperand(emitted, reading.cmp.address, reading.clobbers);
+      if (why !== null) out.readerNamed++;
+      out.rows.push(row(bin, funcName, funcAddr, reader, insns[i], reading, emitted, why));
+    }
+
     const jccMnem = last.mnemonic.toLowerCase();
     if (!jccMnem.startsWith("j") || jccMnem === "jmp") continue;
     out.blocks++;
-
-    // The last instruction to write the flags, and the last `cmp`/`test`. When
-    // they differ, the jcc reads flags the compare did not set.
-    let winner: Instruction | null = null;
-    let lastCmpTest: Instruction | null = null;
-    for (let i = 0; i < insns.length - 1; i++) {
-      const mn = insns[i].mnemonic.toLowerCase();
-      if (mn === "cmp" || mn === "test") {
-        winner = insns[i];
-        lastCmpTest = insns[i];
-      } else if (!isFlagTransparent(mn)) {
-        winner = insns[i];
-      }
-    }
-    if (!lastCmpTest) continue;
-
-    let kind: StaleGuardRec["kind"] | null = null;
-    let spoiler: Instruction | null = null;
-    // Everything written between the compare and the jcc, not just the first
-    // offender. The row names the first, because that is what identifies the
-    // shape to a reader; judging the emitted condition needs the whole set — a
-    // guard is a wrong-operand guard if it mentions ANY of them.
-    const clobbers = new Set<string>();
-    let clobbersMemory = false;
-    const readsMemory = lastCmpTest.opStr.includes("[");
-
-    if (winner !== lastCmpTest) {
-      // peek-a-bin-jitf. `winner` cannot be null here: it is at least the
-      // `cmp` itself, and anything that displaced it is a flag writer.
-      kind = "superseded";
-      spoiler = winner;
-    } else {
-      // peek-a-bin-xe01. The flags are the compare's; are its operands still
-      // the values it compared by the time the guard is evaluated?
-      const named = regsNamed(lastCmpTest.opStr);
-      for (let i = 0; i < insns.length - 1; i++) {
-        if (insns[i].address <= lastCmpTest.address) continue;
-        const w = writesOf(insns[i]);
-        for (const r of w.regs) clobbers.add(r);
-        if (w.mem || w.opaque) clobbersMemory = true;
-        const hitsReg = [...w.regs].some((r) => named.has(r));
-        if (!spoiler && (w.opaque || hitsReg || (w.mem && readsMemory))) {
-          kind = "clobbered";
-          spoiler = insns[i];
-        }
-      }
-    }
-    if (!kind || !spoiler) continue;
+    const reading = spoiledReading(insns, insns.length - 1);
+    if (!reading) continue;
 
     out.shapes++;
-    if (kind === "superseded") out.bySuperseded++;
+    if (reading.kind === "superseded") out.bySuperseded++;
     else out.byClobbered++;
     const emitted = emittedAt.get(last.address) ?? null;
     if (emitted !== null) out.emittedAtShape++;
@@ -342,25 +439,39 @@ export function auditStaleGuards(
     const why =
       emitted === null
         ? null
-        : kind === "superseded"
+        : reading.kind === "superseded"
           ? "superseded"
-          : wrongOperand(emitted, lastCmpTest.address, clobbers);
+          : wrongOperand(emitted, reading.cmp.address, reading.clobbers);
     if (why !== null) out.named++;
-    out.rows.push({
-      bin,
-      func: funcName,
-      funcAddr,
-      jcc: last.address,
-      jccMnem,
-      kind,
-      cmpAddr: lastCmpTest.address,
-      cmpText: `${lastCmpTest.mnemonic} ${lastCmpTest.opStr}`.trim(),
-      bySpoilerAddr: spoiler.address,
-      bySpoilerText: `${spoiler.mnemonic} ${spoiler.opStr}`.trim(),
-      emitted,
-      why,
-      clobbers: [...clobbers].sort(),
-      clobbersMemory,
-    });
+    out.rows.push(row(bin, funcName, funcAddr, "jcc", last, reading, emitted, why));
   }
+}
+
+function row(
+  bin: string,
+  func: string,
+  funcAddr: number,
+  reader: StaleGuardRec["reader"],
+  at: Instruction,
+  reading: SpoiledReading,
+  emitted: string | null,
+  why: string | null,
+): StaleGuardRec {
+  return {
+    bin,
+    func,
+    funcAddr,
+    reader,
+    jcc: at.address,
+    jccMnem: at.mnemonic.toLowerCase(),
+    kind: reading.kind,
+    cmpAddr: reading.cmp.address,
+    cmpText: `${reading.cmp.mnemonic} ${reading.cmp.opStr}`.trim(),
+    bySpoilerAddr: reading.spoiler.address,
+    bySpoilerText: `${reading.spoiler.mnemonic} ${reading.spoiler.opStr}`.trim(),
+    emitted,
+    why,
+    clobbers: [...reading.clobbers].sort(),
+    clobbersMemory: reading.clobbersMemory,
+  };
 }

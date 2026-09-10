@@ -1000,6 +1000,15 @@ refused. **Read the long-form entry before changing the code it describes.**
   deletable pseudo-register; the signal is `IRBranch.capturedAt`, an **address**; the scope is a
   block-local **compare** owner; and the emitter must **declare** the capture, or `preludeFor`
   manufactures it and gcc reads clean over C the harness completed.
+- **…and the capture is placed for EVERY in-block flag reader, not for the trailing Jcc alone.**
+  `setcc`/`cmovcc` built their conditions from `regState.getCondition` at their own program point,
+  so `cmp eax, 5 / mov eax, edx / sete al` lifted `al = (eax == 5)` *after* `eax = edx` — the Jcc's
+  defect one reader over, and it reached the page as `edx == 0x53`, the register the SPOILER read.
+  `operandCaptures` (`lifter.ts`) is the one map: every reader's owner is asked, needs merge per
+  setter, the compare's flag state names the captures, and `branchFor` looks its owner up in the
+  same map. `corpus/staleGuards.ts` gates the reader population (`readerNamed`, 0) beside the Jcc
+  one, judged from the emitted LINE at the reader's address; an admitted value is a refusal, not a
+  row.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*
