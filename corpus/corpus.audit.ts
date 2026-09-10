@@ -21,19 +21,29 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { API_TYPES } from "../src/disasm/decompile/apitypes";
 import { type ArityResult, auditApiArity } from "./arity";
+import { auditDuplicateBodies, type DuplicateBodiesResult } from "./duplicateBodies";
 import {
   type CcResult,
   ccSyntaxCheck,
+  copyPairs,
   emptyCaseBodies,
   gotoCheck,
+  gotosPer100Lines,
   memberNameAgreement,
   type OffsetofResult,
   offsetNamedArgs,
   offsetofCheck,
   paramClobberedAtEntry,
   signatureAgreement,
+  stackPointerScaffolding,
+  type UndeclaredResult,
+  type UnliftedResult,
+  undeclaredIdentifiers,
   unencodableNames,
+  unliftedCensus,
+  voidReturnsValue,
 } from "./emitAudits";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
 import { type BinResult, sweepBinary } from "./sweep";
@@ -53,6 +63,10 @@ const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
 const arResults = new Map<BinKey, ArityResult>();
 const ucResults = new Map<BinKey, UndefinedCalleeResult>();
+/** The prelude's inventions, classified. Report-only in this session (peek-a-bin-n9cl.1). */
+const udResults = new Map<BinKey, UndeclaredResult>();
+const ulResults = new Map<BinKey, UnliftedResult>();
+const dbResults = new Map<BinKey, DuplicateBodiesResult>();
 
 const auditedKeys = (): BinKey[] => [...results.keys()];
 function over<T>(keys: readonly BinKey[], m: Map<BinKey, T>): T[] {
@@ -98,6 +112,20 @@ if (!pre.haveBins || !pre.haveCc) {
         // only, in both directions — see `undefinedCallees.ts` on why an
         // undefined callee is an incompleteness rather than a false statement.
         ucResults.set(key, auditUndefinedCallees([{ funcs: r.funcs }]));
+        // What `preludeFor` has been inventing, compiled ONCE with no prelude
+        // and classified. The api set is the IAT's names plus `apitypes.ts`'s,
+        // so an import used as a value is `api` and not `other`.
+        udResults.set(
+          key,
+          undeclaredIdentifiers(
+            pre.cc,
+            join(artifactDir, "undeclared", key),
+            sets,
+            new Set([...r.importNames, ...Object.keys(API_TYPES)]),
+          ),
+        );
+        ulResults.set(key, unliftedCensus([{ funcs: r.funcs }]));
+        dbResults.set(key, auditDuplicateBodies(sets));
 
         // Written per binary rather than at the end, so a run that dies on the
         // fourth binary still leaves the first three on disk.
@@ -241,6 +269,41 @@ if (!pre.haveBins || !pre.haveCc) {
             ordered.map((x) => JSON.stringify(x)).join("\n") + (ordered.length > 0 ? "\n" : ""),
           );
         }
+        // Every (function, identifier) pair gcc reported undeclared with no
+        // prelude, classified. Written even when empty — the register-variables
+        // child expects to EMPTY the register class, and an absent file must
+        // then mean the audit did not run rather than that it found nothing.
+        {
+          const ud = udResults.get(key) as UndeclaredResult;
+          writeFileSync(
+            join(artifactDir, `undeclared_${key}.jsonl`),
+            ud.rows.map((x) => JSON.stringify(x)).join("\n") + (ud.rows.length > 0 ? "\n" : ""),
+          );
+        }
+        // Every `/* unlifted: … */` site with its base mnemonic, so the lifts
+        // child can read which instructions, where. Written even when empty.
+        {
+          const ul = ulResults.get(key) as UnliftedResult;
+          writeFileSync(
+            join(artifactDir, `unlifted_${key}.jsonl`),
+            ul.rows.map((x) => JSON.stringify(x)).join("\n") + (ul.rows.length > 0 ? "\n" : ""),
+          );
+        }
+        // Every group of two or more functions with the same normalised body.
+        {
+          const db = dbResults.get(key) as DuplicateBodiesResult;
+          writeFileSync(
+            join(artifactDir, `duplicates_${key}.jsonl`),
+            db.rows.map((x) => JSON.stringify(x)).join("\n") + (db.rows.length > 0 ? "\n" : ""),
+          );
+        }
+        // Why each function's labels survived `pruneLabels`, one row per
+        // function the structuring tap reported on.
+        writeFileSync(
+          join(artifactDir, `labels_${key}.jsonl`),
+          r.labelOrigins.rows.map((x) => JSON.stringify(x)).join("\n") +
+            (r.labelOrigins.rows.length > 0 ? "\n" : ""),
+        );
         writeFileSync(join(artifactDir, `jumpTables_${key}.json`), r.jumpTablesJson);
         writeFileSync(
           join(artifactDir, `summary_${key}.json`),
@@ -319,6 +382,31 @@ if (!pre.haveBins || !pre.haveCc) {
                 const uc = ucResults.get(key) as UndefinedCalleeResult;
                 return { ...uc, rows: uc.rows.length };
               })(),
+              // ── The readability instruments of peek-a-bin-n9cl.1. ALL
+              // report-only in this session; each has a liveness half asserted
+              // below, and `compare.mjs` judges only a RISE in an unlifted
+              // bucket. ──
+              undeclared: (() => {
+                const ud = udResults.get(key) as UndeclaredResult;
+                return { ...ud, rows: ud.rows.length };
+              })(),
+              unlifted: (() => {
+                const ul = ulResults.get(key) as UnliftedResult;
+                return { ...ul, rows: ul.rows.length };
+              })(),
+              voidReturns: voidReturnsValue([{ funcs: r.funcs }]),
+              stackPointer: stackPointerScaffolding([{ funcs: r.funcs }]),
+              copyPairs: copyPairs([{ funcs: r.funcs }]),
+              gotoDensity: (() => {
+                const g = gotoCheck([{ funcs: r.funcs }]);
+                return { ...g, per100Lines: gotosPer100Lines(g) };
+              })(),
+              duplicateBodies: (() => {
+                const db = dbResults.get(key) as DuplicateBodiesResult;
+                return { ...db, rows: db.rows.length };
+              })(),
+              labelOrigins: { ...r.labelOrigins, rows: r.labelOrigins.rows.length },
+              callShapes: r.callShapes,
             },
             null,
             1,
@@ -1148,10 +1236,164 @@ if (!pre.haveBins || !pre.haveCc) {
       expect(labels).toBeGreaterThan(0);
     });
 
+    // ── The readability instruments of peek-a-bin-n9cl.1: LIVENESS ONLY. ──
+    //
+    // Every one of these is report-only in this session, on the record: each
+    // sizes a piece of work or records a first durable measurement, and the
+    // child that does the work is the one that turns the relevant row into a
+    // gate. What IS asserted is that each instrument observed something — a
+    // census whose good direction is downward reports the best number in the
+    // report the moment it stops looking.
+
+    /**
+     * The prelude's inventions. `compiled` must equal `ccSyntaxCheck`'s, or the
+     * two gcc passes have drifted onto different populations; `api +
+     * unknownTypes > 0` says the prelude is still doing the work it exists for,
+     * which is what separates "nothing undeclared" from "gcc reported nothing".
+     * `register + minted` is REPORTED — the register-variables child gates it.
+     */
+    it("classifies what the prelude declares (instrument liveness, not a gate)", () => {
+      for (const [key, ud] of udResults) {
+        const cc = ccResults.get(key) as CcResult;
+        expect(`${key}: compiled=${ud.compiled} cc=${cc.compiled}`).toBe(
+          `${key}: compiled=${cc.compiled} cc=${cc.compiled}`,
+        );
+        expect(ud.unparseable).toBe(0);
+        expect(ud.api + ud.unknownTypes).toBeGreaterThan(0);
+        expect(ud.rows.length).toBe(ud.register + ud.minted + ud.api + ud.other);
+      }
+    });
+
+    /**
+     * Unlifted instructions by mnemonic. The count is not gated — CLAUDE.md
+     * records that the 16-byte moves have no C spelling — and a RISE in a
+     * bucket is judged in `compare.mjs`. `funcs` is the liveness half per
+     * binary; `sites` is asserted over the corpus, since a binary with nothing
+     * unlifted is a legitimate state the lifts child is aiming for.
+     */
+    it("reads the emitted C for unlifted instructions (instrument liveness)", () => {
+      let sites = 0;
+      for (const [key, ul] of ulResults) {
+        expect(`${key}: funcs=${ul.funcs > 0}`).toBe(`${key}: funcs=true`);
+        const summed = Object.values(ul.byMnemonic).reduce((a, n) => a + n, 0);
+        expect(summed).toBe(ul.sites);
+        expect(ul.rows.length).toBe(ul.sites);
+        sites += ul.sites;
+      }
+      expect(sites).toBeGreaterThan(0);
+    });
+
+    /**
+     * A void function returning a value. `voidValued` is REPORTED — the
+     * return-type child gates it at 0. `headers` and `nonVoidValued` are the
+     * liveness halves. `voidBare` is deliberately NOT asserted: the emitter
+     * elides a trailing `return;`, so that control is inert on this corpus
+     * (0 on all four at 6299113) and is recorded rather than tuned.
+     */
+    it("reads return types against returned values (instrument liveness)", () => {
+      for (const r of results.values()) {
+        const v = voidReturnsValue([{ funcs: r.funcs }]);
+        expect(`${r.key}: headers=${v.headers > 0} valued=${v.nonVoidValued > 0}`).toBe(
+          `${r.key}: headers=true valued=true`,
+        );
+      }
+    });
+
+    /** Stack-pointer scaffolding. `mentioning` is the liveness half. */
+    it("reads the emitted C for stack-pointer scaffolding (instrument liveness)", () => {
+      for (const r of results.values()) {
+        const sp = stackPointerScaffolding([{ funcs: r.funcs }]);
+        expect(`${r.key}: funcs=${sp.funcs > 0} mentioning=${sp.mentioning > 0}`).toBe(
+          `${r.key}: funcs=true mentioning=true`,
+        );
+        expect(sp.writeNoRead).toBeLessThanOrEqual(sp.mentioning);
+      }
+    });
+
+    /**
+     * Adjacent copy pairs. `lines` is the liveness half; `pairs` must NOT be
+     * asserted non-zero, since the pass this row sizes would take it to 0.
+     */
+    it("reads the emitted C for adjacent copy pairs (instrument liveness)", () => {
+      for (const r of results.values()) {
+        const cp = copyPairs([{ funcs: r.funcs }]);
+        expect(`${r.key}: lines=${cp.lines > 0}`).toBe(`${r.key}: lines=true`);
+        expect(cp.versionToRegister).toBeLessThanOrEqual(cp.pairs);
+      }
+    });
+
+    /**
+     * Duplicate bodies. `bodies` and `headersLocated` are the liveness halves;
+     * `selfRecursiveThunks` is REPORTED — the thunk child gates it at 0.
+     */
+    it("reads the emitted C for duplicate bodies (instrument liveness)", () => {
+      for (const [key, db] of dbResults) {
+        expect(`${key}: bodies=${db.bodies > 0} headers=${db.headersLocated > 0}`).toBe(
+          `${key}: bodies=true headers=true`,
+        );
+        expect(db.rows.length).toBe(db.groups);
+        expect(db.rows.reduce((a, g) => a + g.size, 0)).toBe(db.functions);
+      }
+    });
+
+    /**
+     * Label origins, from the structuring tap. `seen` is the liveness half and
+     * the identity is the instrument's integrity: a report that does not add up
+     * is a broken tap, not a finding. `kept` is cross-checked against the
+     * emitted `loc_` count only as an inequality — `cleanupStructured` runs
+     * after the tap and may remove a label with the `goto` that named it.
+     */
+    it("is told why every label survived pruning (instrument liveness)", () => {
+      for (const r of results.values()) {
+        const lo = r.labelOrigins;
+        expect(`${r.key}: funcs=${lo.funcs > 0} seen=${lo.seen > 0}`).toBe(
+          `${r.key}: funcs=true seen=true`,
+        );
+        expect(lo.inconsistent).toBe(0);
+        expect(lo.targetedOnly + lo.pinnedOnly + lo.both + lo.dropped + lo.duplicates).toBe(
+          lo.seen,
+        );
+        const emitted = r.funcs.reduce(
+          (a, f) => a + ((f.code ?? "").match(/^\s*loc_[0-9A-Fa-f]+:$/gm)?.length ?? 0),
+          0,
+        );
+        expect(emitted).toBeLessThanOrEqual(lo.targetedOnly + lo.pinnedOnly + lo.both);
+      }
+    });
+
+    /**
+     * Callees that are not names, and stack-argument stores. `calls` and
+     * `insns` are the liveness halves; the x86 pair's slot figures are
+     * structurally 0 and are asserted so, since a non-zero there would mean the
+     * `[rsp + N]` grammar matched a 32-bit operand.
+     */
+    it("reads call shapes and stack-argument stores (instrument liveness)", () => {
+      let indirect = 0;
+      for (const r of results.values()) {
+        const cs = r.callShapes;
+        expect(`${r.key}: insns=${cs.insns > 0} calls=${cs.calls > 0}`).toBe(
+          `${r.key}: insns=true calls=true`,
+        );
+        expect(cs.indirectRegCalls).toBeLessThanOrEqual(cs.indirectCalls);
+        expect(cs.slotStoresBeforeCall).toBeLessThanOrEqual(cs.slotStores);
+        if (!r.is64) {
+          expect(cs.slotStores).toBe(0);
+          expect(cs.slotReads).toBe(0);
+        }
+        indirect += cs.indirectCalls;
+      }
+      expect(indirect).toBeGreaterThan(0);
+    });
+
     it("resolves every goto to a label the same function defines", () => {
       const g = gotoCheck(over(auditedKeys(), results).map((r) => ({ funcs: r.funcs })));
       expect(g.dangling).toBe(0);
       expect(g.gotos).toBeGreaterThan(0);
+      // The density's denominator — every emitted line — is liveness for the
+      // report-only `gotos per 100 lines` row, which MUST NEVER GATE (see
+      // `gotosPer100Lines`).
+      expect(g.lines).toBeGreaterThan(g.gotos);
+      expect(g.labelsUntargeted).toBeLessThanOrEqual(g.labels);
     });
 
     it("emits C that a C compiler accepts, for every function", () => {
@@ -1675,6 +1917,133 @@ function renderReport(): string {
         "    Sites in undefinedcallees_<bin>.jsonl. See undefinedCallees.ts (peek-a-bin-pf5g).",
       );
     }
+    // ── The readability instruments of peek-a-bin-n9cl.1 — ALL report-only. ──
+    const ud = udResults.get(r.key);
+    if (ud !== undefined) {
+      L.push(
+        `  undeclared identifiers      ${ud.register} register, ${ud.minted} minted, ` +
+          `${ud.api} api, ${ud.other} other (function,name) pairs over ${ud.funcsAffected} of ` +
+          `${ud.compiled} functions; distinct ${ud.distinctRegister}/${ud.distinctMinted}/` +
+          `${ud.distinctApi}/${ud.distinctOther}; ${ud.unknownTypes} unknown type names ` +
+          `(${ud.distinctUnknownTypes} distinct) — REPORT-ONLY` +
+          (ud.otherNames.length > 0 ? `\n    other: ${ud.otherNames.join(", ")}` : ""),
+      );
+      L.push("    What `preludeFor` invents so that gcc reads clean: every `long rax;` is a");
+      L.push("    variable the emitted C USES AND NEVER DECLARES, so the 100% row above measures");
+      L.push("    the harness's completion of the output. Compiled ONCE with no prelude and");
+      L.push("    classified. `register + minted` is the figure peek-a-bin-k8i counted by hand");
+      L.push("    (1460/2456/2278/1417) and becomes a GATE at 0 in the register-variables child;");
+      L.push("    `api + unknown type names` is the liveness half — the prelude still doing the");
+      L.push("    work it exists for. Pairs in undeclared_<bin>.jsonl.");
+    }
+    const ul = ulResults.get(r.key);
+    if (ul !== undefined) {
+      const top = Object.entries(ul.byMnemonic)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${n} ${k}`)
+        .join(", ");
+      const reps = Object.entries(ul.repForms)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${n} ${k}`)
+        .join(", ");
+      L.push(
+        `  unlifted instructions       ${ul.sites} sites over ${ul.funcsAffected} of ${ul.funcs} functions — ` +
+          "REPORT-ONLY; a RISE in any bucket is judged in compare.mjs" +
+          (top ? `\n    by mnemonic: ${top}` : "") +
+          (reps ? `\n    rep forms:   ${reps}` : ""),
+      );
+      L.push("    `/* unlifted: <insn> */` is the emitter admitting it has no C for the");
+      L.push("    instruction. Filed by BASE mnemonic — a `lock` prefix stripped, a `rep`-family");
+      L.push("    prefix kept as the bucket (the lifter's rep path is what is dead against real");
+      L.push(
+        "    Capstone output). Not gated: nothing says how many `movdqa` should be lifted and",
+      );
+      L.push("    the 16-byte moves have no spelling at all. Sites in unlifted_<bin>.jsonl.");
+    }
+    const vr = voidReturnsValue([{ funcs: r.funcs }]);
+    L.push(
+      `  void returning a value      ${vr.voidValued} of ${vr.voidHeaders} void headers ` +
+        `(${vr.nonVoidValued} non-void with a valued return, ${vr.voidBare} void with a bare ` +
+        `return; over ${vr.headers} headers) — REPORT-ONLY, gates at 0 in the return-type child` +
+        (vr.rows.length > 0 ? `  [${vr.rows.slice(0, 6).join(", ")}]` : ""),
+    );
+    L.push("    `hasReturnValue` recurses into if/while/do_while only, so a valued return inside");
+    L.push("    a for, switch, try or labelled region leaves the header `void` over a body that");
+    L.push("    says `return rax;`. gcc accepts it under -w. `bare return;` is 0 on all four —");
+    L.push("    the emitter elides a trailing one — so that liveness half is INERT and reported.");
+    const sp = stackPointerScaffolding([{ funcs: r.funcs }]);
+    L.push(
+      `  stack-pointer scaffolding   ${sp.mentioning}/${sp.funcs} functions mention it, ` +
+        `${sp.writeNoRead} write it and never read it; ${sp.reads} reads, ${sp.writes} writes; ` +
+        `shapes: ${sp.copies} copies, ${sp.subs} -=, ${sp.adds} +=, ${sp.offsets} +0x, ` +
+        `${sp.xors} ^; ${sp.unliftedLeave} unlifted leave — REPORT-ONLY`,
+    );
+    L.push("    Prologue arithmetic, the frame-pointer copy, the /GS cookie and slot addresses,");
+    L.push("    all true and none of them what a reader wants. Sizes epic 2's prologue work;");
+    L.push("    `write and never read` is the candidate gate's report half. `reads` is the raw");
+    L.push("    count a by-reason split (gs-xor, unnamed-slot, alloca) will divide once");
+    L.push("    prologue.ts exists.");
+    const cp = copyPairs([{ funcs: r.funcs }]);
+    L.push(
+      `  adjacent copy pairs         ${cp.pairs} (${cp.versionToRegister} the swapDefWithCopy ` +
+        `shape) over ${cp.funcsAffected} of ${cp.funcs} functions, ${cp.lines} lines read — REPORT-ONLY`,
+    );
+    L.push("    `v = X; r = v;` — ssadestroy.ts writes the variable first and the register from");
+    L.push("    it, deliberately (appending the copy lost the register's only assignment to");
+    L.push("    foldBlock). Decides whether epic 2's dead-copy elimination is worth a session.");
+    const gd = gotoCheck([{ funcs: r.funcs }]);
+    L.push(
+      `  goto density                ${gotosPer100Lines(gd)} per 100 lines (${gd.gotos} gotos / ` +
+        `${gd.lines} lines), ${gd.labels} labels of which ${gd.labelsUntargeted} named by no goto — ` +
+        "MUST NEVER GATE",
+    );
+    L.push("    goto is the honest spelling for a transfer the tree cannot model, and the");
+    L.push("    recorded way to drive it down WRONGLY is a false `break` (armExits exists");
+    L.push("    because that happened, peek-a-bin-pqs5). It falls with recovery AND with");
+    L.push("    fabrication, and its denominator moves with detection. No worseIf, ever.");
+    const db = dbResults.get(r.key);
+    if (db !== undefined) {
+      L.push(
+        `  duplicate bodies            ${db.groups} groups over ${db.functions} functions ` +
+          `(largest ${db.largestGroup}) of ${db.bodies} bodies; ${db.selfRecursiveThunks} ` +
+          "self-recursive thunks — REPORT-ONLY, thunks gate at 0 in the thunk child" +
+          (db.thunkNames.length > 0 ? `  [${db.thunkNames.join(", ")}]` : ""),
+      );
+      L.push("    Bodies identical once sub_/loc_/struct_N/hex and the function's own name are");
+      L.push("    normalised. A duplicate is not a defect — the machine has two copies. A");
+      L.push(
+        "    self-recursive thunk IS: `int RtlVirtualUnwind() { return RtlVirtualUnwind(); }`",
+      );
+      L.push("    is an IAT jmp thunk named after its import. Groups in duplicates_<bin>.jsonl.");
+    }
+    const lo = r.labelOrigins;
+    L.push(
+      `  label origins (pruneLabels) ${lo.targetedOnly + lo.pinnedOnly + lo.both} kept of ${lo.seen} seen: ` +
+        `${lo.targetedOnly} targeted only, ${lo.pinnedOnly} pinned only, ${lo.both} both; ` +
+        `${lo.dropped} dropped, ${lo.duplicates} duplicates; ${lo.funcsWithPinnedOnly} functions ` +
+        `with a pinned-only label, ${lo.inconsistent} inconsistent reports — REPORT-ONLY`,
+    );
+    L.push("    Why each `loc_` label survived, from the structurer's own report on the tap.");
+    L.push("    `pinned only` is the population epic 2's label-note work would touch, and");
+    L.push("    deleting one from the IR is a FABRICATION hazard: structs.ts's baseGenerations");
+    L.push("    resets every key at a label no goto names. Per function in labels_<bin>.jsonl.");
+    const cs = r.callShapes;
+    L.push(
+      `  callees that are not names  ${cs.registerCallees} (*reg)() emitted, ${cs.unrecoveredCallees} ` +
+        `__unrecovered_N(), ${cs.indirectJmpRaws} indirect-jmp raws, over ${cs.indirectCalls} ` +
+        `indirect of ${cs.calls} machine calls (${cs.indirectRegCalls} through a register) — REPORT-ONLY`,
+    );
+    L.push(
+      `  x64 stack args (slot 5+)    ${cs.slotStoresBeforeCall} stores to [rsp+0x20..] before a call ` +
+        `of ${cs.slotStores} such stores, ${cs.slotReads} reads, over ${cs.funcsPassingStackArgs} ` +
+        `functions; emitted text: ${cs.textSlotStores} (rsp + 0x20..) = stores, ${cs.textSlotReads} reads` +
+        (r.is64 ? "" : " — STRUCTURALLY 0 on x86") +
+        " — REPORT-ONLY",
+    );
+    L.push("    Two sizes for epic 3: IRCall.targetExpr (a callee spelled `(*rax)()` or not at");
+    L.push("    all) and stack arguments five and up, which collectArgs64 reads none of — the");
+    L.push("    arity audit reports those as UNDER at the ABI ceiling. Counted from the machine");
+    L.push("    text because the C may spell the slot through an alias (`r11 = rsp`).");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
     }
@@ -1684,7 +2053,23 @@ function renderReport(): string {
   const un = unencodableNames(over(keys, results).map((r) => ({ funcs: r.funcs, is64: r.is64 })));
   L.push("");
   L.push(`── totals ${"─".repeat(54)}`);
-  L.push(`  gotos ${g.gotos}, labels ${g.labels}, dangling ${g.dangling}`);
+  L.push(
+    `  gotos ${g.gotos}, labels ${g.labels} (${g.labelsUntargeted} named by no goto), ` +
+      `dangling ${g.dangling}; ${gotosPer100Lines(g)} gotos per 100 lines over ${g.lines} lines — ` +
+      "density MUST NEVER GATE",
+  );
+  {
+    const db = auditDuplicateBodies(
+      keys
+        .filter((k) => results.has(k))
+        .map((k) => ({ tag: k, funcs: (results.get(k) as BinResult).funcs })),
+    );
+    L.push(
+      `  duplicate bodies corpus-wide ${db.groups} groups over ${db.functions} functions ` +
+        `(largest ${db.largestGroup}); ${db.selfRecursiveThunks} self-recursive thunks` +
+        (db.thunkNames.length > 0 ? ` [${db.thunkNames.join(", ")}]` : ""),
+    );
+  }
   L.push(
     `  unencodable register names  ${un.names} mentions, ${un.distinct} distinct, over ` +
       `${un.funcsAffected} of ${un.funcs} PE32 functions`,

@@ -608,11 +608,21 @@ export function offsetNamedArgs(sets: { funcs: FuncRec[]; is64: boolean }[]): Of
 
 export interface GotoResult {
   gotos: number;
+  /** `loc_` labels defined in functions that contain a `goto`. */
   labels: number;
+  /** Of those, labels no `goto` in the function names — kept for another reason. */
+  labelsUntargeted: number;
   /** A `goto` naming a label the function never defines. Expect 0. */
   dangling: number;
   fnWithGoto: number;
   fnWithDangling: number;
+  /**
+   * Emitted lines over EVERY function with code, goto or not — the denominator
+   * of `gotos per 100 lines`. Liveness for the scan.
+   */
+  lines: number;
+  /** Functions with code read. Liveness. */
+  funcs: number;
 }
 
 /**
@@ -623,10 +633,22 @@ export interface GotoResult {
  * functions.
  */
 export function gotoCheck(sets: { funcs: FuncRec[] }[]): GotoResult {
-  const out: GotoResult = { gotos: 0, labels: 0, dangling: 0, fnWithGoto: 0, fnWithDangling: 0 };
+  const out: GotoResult = {
+    gotos: 0,
+    labels: 0,
+    labelsUntargeted: 0,
+    dangling: 0,
+    fnWithGoto: 0,
+    fnWithDangling: 0,
+    lines: 0,
+    funcs: 0,
+  };
   for (const { funcs } of sets) {
     for (const r of funcs) {
       const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      out.lines += code.split("\n").length;
       // Read per line through `statementOnLine`, not with a multiline anchor: a
       // `goto` that is the body of a one-lined guard is still a goto, and a
       // line-start anchor would take the whole population out of this scan and
@@ -641,6 +663,8 @@ export function gotoCheck(sets: { funcs: FuncRec[] }[]): GotoResult {
       out.fnWithGoto++;
       out.gotos += g.length;
       out.labels += defined.size;
+      const named = new Set(g);
+      for (const l of defined) if (!named.has(l)) out.labelsUntargeted++;
       const bad = g.filter((n) => !defined.has(n)).length;
       out.dangling += bad;
       if (bad > 0) out.fnWithDangling++;
@@ -1007,6 +1031,548 @@ export function memberNameAgreement(sets: { tag: string; funcs: FuncRec[] }[]): 
             );
         }
       }
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  return out;
+}
+
+/**
+ * `goto` density, the one figure here that MUST NEVER GATE — in either
+ * direction — and the reason is recorded where the number is computed so it
+ * travels with it. (i) `goto` is the honest spelling for a transfer the tree
+ * cannot model, and the recorded way to drive it down WRONGLY is a false
+ * `break`: `armExits` exists because that happened (peek-a-bin-pqs5). (ii) It
+ * falls with recovery AND with fabrication, so its direction says nothing.
+ * (iii) Its denominator moves with function detection. `compare.mjs` prints it
+ * with no `worseIf`.
+ */
+export function gotosPer100Lines(g: GotoResult): number {
+  return g.lines === 0 ? 0 : Math.round((10_000 * g.gotos) / g.lines) / 100;
+}
+
+// ── Undeclared identifiers: what the prelude has been inventing ─────────────
+
+export type IdentClass = "register" | "minted" | "api" | "other";
+
+/**
+ * Every register name the emitter can spell, at every width, with an optional
+ * SSA version suffix. Written out rather than imported from `ir.ts` so the
+ * classification does not agree with the code under test by construction —
+ * `build/readabilityCensus.test.ts` holds the differential against
+ * `isKnownRegister`/`regAtSize`, which is where the two declarations are made to
+ * meet. `SIXTY_FOUR_BIT` above is the same list at one width.
+ */
+export const REGISTER_NAME = new RegExp(
+  "^(?:" +
+    "r(?:ax|bx|cx|dx|si|di|bp|sp)|" +
+    "e(?:ax|bx|cx|dx|si|di|bp|sp)|" +
+    "(?:ax|bx|cx|dx|si|di|bp|sp)|" +
+    "[abcd][lh]|(?:si|di|bp|sp)l|" +
+    "r(?:8|9|1[0-5])[bwd]?|" +
+    "[xy]mm(?:[0-9]|1[0-5])" +
+    ")(?:_\\d+)?$",
+);
+
+/** The emitter's own pseudo-variables, each minted from an address or a version. */
+const MINTED_NAME = /^(?:clobbered_|flg_|stk_|__unrecovered_)/;
+
+export function classifyIdentifier(name: string, apiNames: ReadonlySet<string>): IdentClass {
+  if (REGISTER_NAME.test(name)) return "register";
+  if (MINTED_NAME.test(name)) return "minted";
+  if (apiNames.has(name)) return "api";
+  return "other";
+}
+
+export interface UndeclaredRec {
+  fn: string;
+  addr: number;
+  name: string;
+  cls: IdentClass;
+}
+
+export interface UndeclaredResult {
+  /**
+   * Functions handed to the compiler, under the SAME admission rule as
+   * `ccSyntaxCheck` — asserted equal to its `compiled` in the run, so the two
+   * gcc passes cannot drift onto different populations.
+   */
+  compiled: number;
+  /** Compiles whose stderr held no parseable diagnostic at all. Expect 0. */
+  unparseable: number;
+  /** (function, name) pairs gcc reported `undeclared`, by class. */
+  register: number;
+  minted: number;
+  api: number;
+  other: number;
+  distinctRegister: number;
+  distinctMinted: number;
+  distinctApi: number;
+  distinctOther: number;
+  /** Functions with at least one undeclared identifier of any class. */
+  funcsAffected: number;
+  /** Functions with at least one REGISTER-class undeclared identifier. */
+  funcsWithRegisters: number;
+  /** (function, type) pairs gcc reported `unknown type name`. */
+  unknownTypes: number;
+  distinctUnknownTypes: number;
+  /** Up to two dozen distinct `other` names, so the bucket is adjudicable. */
+  otherNames: string[];
+  rows: UndeclaredRec[];
+}
+
+/**
+ * THE DECLARATIONS `preludeFor` HAS BEEN INVENTING, CLASSIFIED.
+ *
+ * `ccSyntaxCheck` compiles each function up to five times, declaring whatever
+ * gcc complained about the round before, and reports `clean` once gcc stops
+ * complaining. That is the right question for "is this C" and the wrong one for
+ * "is this the C a reader gets": every `long rax;` the prelude adds is a
+ * variable the emitted function USES AND NEVER DECLARES, and the 100%-clean row
+ * measures the harness's completion of the output rather than the output.
+ * `peek-a-bin-k8i` counted 1460/2456/2278/1417 such inventions with a throwaway
+ * script; nothing in the run recorded it (peek-a-bin-n9cl.1).
+ *
+ * This compiles each function ONCE, with `CC_HEADER` and no prelude, and
+ * classifies every `'X' undeclared` gcc reports:
+ *
+ *   - **register** — a register name at any width, versioned or not. The
+ *     decompiler uses these as program variables and declares none of them.
+ *     The register-variables child of `peek-a-bin-n9cl` is expected to take
+ *     `register + minted` to 0, at which point that sum becomes a GATE; here it
+ *     is report-only and records the first durable k8i measurement.
+ *   - **minted** — `clobbered_`, `flg_`, `stk_`, `__unrecovered_`: the emitter's
+ *     own pseudo-variables. `__unrecovered_N` IS declared by the emitter, so its
+ *     appearance here would mean the declaration spelling moved.
+ *   - **api** — an imported function or an `apitypes.ts` name used as a value
+ *     (a function pointer stored, say). The prelude legitimately supplies these
+ *     and always will; with `unknownTypes` this is the LIVENESS half — the
+ *     prelude still doing the work it exists for.
+ *   - **other** — everything else, listed by name so the bucket can be read.
+ *
+ * `-w` is kept, so an implicit function declaration is silent exactly as it is
+ * in `ccSyntaxCheck`; only identifiers used as VALUES reach this list. gcc
+ * reports each name once per function ("first use in this function"), so the
+ * counts are (function, name) pairs, which is what k8i counted.
+ */
+export function undeclaredIdentifiers(
+  cc: string,
+  workDir: string,
+  sets: { tag: string; funcs: FuncRec[] }[],
+  apiNames: ReadonlySet<string>,
+): UndeclaredResult {
+  rmSync(workDir, { recursive: true, force: true });
+  mkdirSync(workDir, { recursive: true });
+  const out: UndeclaredResult = {
+    compiled: 0,
+    unparseable: 0,
+    register: 0,
+    minted: 0,
+    api: 0,
+    other: 0,
+    distinctRegister: 0,
+    distinctMinted: 0,
+    distinctApi: 0,
+    distinctOther: 0,
+    funcsAffected: 0,
+    funcsWithRegisters: 0,
+    unknownTypes: 0,
+    distinctUnknownTypes: 0,
+    otherNames: [],
+    rows: [],
+  };
+  const distinct: Record<IdentClass, Set<string>> = {
+    register: new Set(),
+    minted: new Set(),
+    api: new Set(),
+    other: new Set(),
+  };
+  const unknownTypes = new Set<string>();
+  for (const { tag, funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code;
+      if (!code || /^\/\/ /.test(code)) continue;
+      out.compiled++;
+      const file = join(workDir, `${tag}_${r.addr.toString(16)}.c`);
+      writeFileSync(file, `${CC_HEADER}\n${code}\n`);
+      const diags = compileOnly(cc, file);
+      if (diags.some((d) => d.msg.startsWith("compiler failed with no parseable error")))
+        out.unparseable++;
+      const seen = new Set<string>();
+      let any = false;
+      let regs = false;
+      for (const d of diags) {
+        let m = /^unknown type name '([A-Za-z_]\w*)'/.exec(d.msg);
+        if (m) {
+          out.unknownTypes++;
+          unknownTypes.add(m[1]);
+          continue;
+        }
+        m = /^'([A-Za-z_]\w*)' undeclared/.exec(d.msg);
+        if (!m || seen.has(m[1])) continue;
+        seen.add(m[1]);
+        const cls = classifyIdentifier(m[1], apiNames);
+        out[cls]++;
+        distinct[cls].add(m[1]);
+        any = true;
+        if (cls === "register") regs = true;
+        out.rows.push({ fn: r.name, addr: r.addr, name: m[1], cls });
+      }
+      if (any) out.funcsAffected++;
+      if (regs) out.funcsWithRegisters++;
+    }
+  }
+  out.distinctRegister = distinct.register.size;
+  out.distinctMinted = distinct.minted.size;
+  out.distinctApi = distinct.api.size;
+  out.distinctOther = distinct.other.size;
+  out.distinctUnknownTypes = unknownTypes.size;
+  out.otherNames = [...distinct.other].sort().slice(0, 24);
+  return out;
+}
+
+// ── Unlifted instructions, by base mnemonic ─────────────────────────────────
+
+export interface UnliftedRec {
+  fn: string;
+  addr: number;
+  line: number;
+  mnemonic: string;
+  text: string;
+}
+
+export interface UnliftedResult {
+  /** `/* unlifted: … *\/` sites in the emitted C. */
+  sites: number;
+  funcsAffected: number;
+  /** Functions with code read. Liveness. */
+  funcs: number;
+  /** Sites by BASE mnemonic — a `lock` prefix stripped, a `rep`-family prefix kept as the bucket. */
+  byMnemonic: Record<string, number>;
+  /** The `rep`-family sites again, by their full two-token spelling. */
+  repForms: Record<string, number>;
+  rows: UnliftedRec[];
+}
+
+/**
+ * The comment `emit.ts` writes for an instruction the lifter has no C for.
+ * Quote-agnostic and indifferent to the trailing `;` and to indentation.
+ */
+const UNLIFTED = /\/\*\s*unlifted:\s*(.*?)\s*\*\//g;
+
+/**
+ * The mnemonic an unlifted site is filed under.
+ *
+ * The same rule `flagModel.ts`'s `withoutLockPrefix` applies, written
+ * independently: a `lock` prefix changes atomicity and nothing about which
+ * instruction went unlifted, so `lock or` files under `or`. A `rep`/`repne`
+ * prefix is NOT stripped — the `rep` path in the lifter is what is dead against
+ * real Capstone output (`lifter.test.ts`), so the prefix is the bucket the
+ * lifts child will look for, and the string operation it wraps is kept beside
+ * it in `repForms`.
+ */
+export function unliftedBaseMnemonic(text: string): { base: string; repForm: string | null } {
+  const tokens = text.trim().toLowerCase().split(/\s+/);
+  const first = tokens[0] ?? "";
+  if (first === "lock" && tokens.length > 1) return { base: tokens[1], repForm: null };
+  if (/^rep(?:n?[ez])?$/.test(first) && tokens.length > 1)
+    return { base: first, repForm: `${first} ${tokens[1]}` };
+  return { base: first, repForm: null };
+}
+
+/**
+ * EVERY INSTRUCTION THE EMITTED C ADMITS IT DID NOT LIFT, BY MNEMONIC.
+ *
+ * The census `peek-a-bin-n9cl` was planned from (leave 145, sbb 96, bts 94,
+ * movdqa 54, movnti 48, movabs 42, rep 32, btr 18 at `6299113`) was ad hoc;
+ * this makes it a row. A RISE in any bucket between two pinned runs is judged
+ * a regression in `compare.mjs`: an instruction that was lifted and no longer
+ * is hands the reader less than the commit before. The absolute is not gated
+ * in the run — nothing says what the right number of unlifted `movdqa` is, and
+ * CLAUDE.md records that the 16-byte moves have no C spelling at all.
+ *
+ * `funcs` is the liveness half. A text scrape fails by matching nothing, and
+ * this one's good direction is downward, so a scan that stopped seeing the
+ * comment would report the best number in the report.
+ */
+export function unliftedCensus(sets: { funcs: FuncRec[] }[]): UnliftedResult {
+  const out: UnliftedResult = {
+    sites: 0,
+    funcsAffected: 0,
+    funcs: 0,
+    byMnemonic: {},
+    repForms: {},
+    rows: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      let hits = 0;
+      const lines = code.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        UNLIFTED.lastIndex = 0;
+        for (const m of lines[i].matchAll(UNLIFTED)) {
+          hits++;
+          const { base, repForm } = unliftedBaseMnemonic(m[1]);
+          out.byMnemonic[base] = (out.byMnemonic[base] ?? 0) + 1;
+          if (repForm !== null) out.repForms[repForm] = (out.repForms[repForm] ?? 0) + 1;
+          out.rows.push({ fn: r.name, addr: r.addr, line: i + 1, mnemonic: base, text: m[1] });
+        }
+      }
+      out.sites += hits;
+      if (hits > 0) out.funcsAffected++;
+    }
+  }
+  return out;
+}
+
+// ── A void function that returns a value ────────────────────────────────────
+
+export interface VoidReturnResult {
+  /** Signature lines located. Liveness. */
+  headers: number;
+  voidHeaders: number;
+  /** `void` header AND a `return <expr>;` in the body. The row. Expect 0 once gated. */
+  voidValued: number;
+  /** Non-void header with a valued return — the ordinary case, and liveness. */
+  nonVoidValued: number;
+  /** `void` header with a bare `return;`. Reported; 0 across this corpus. */
+  voidBare: number;
+  /** Functions with code read. Liveness. */
+  funcs: number;
+  rows: string[];
+}
+
+/** The return type on a signature line: everything before the function's name. */
+export function headerReturnType(line: string): string | null {
+  const m = /^(.*?)\s*\b([A-Za-z_]\w*)\s*\(/.exec(line.trim());
+  return m ? m[1].trim() : null;
+}
+
+const VALUED_RETURN = /\breturn\s+[^;\s][^;]*;/;
+const BARE_RETURN = /\breturn\s*;/;
+
+/**
+ * A FUNCTION DECLARED `void` WHOSE BODY RETURNS A VALUE.
+ *
+ * `promote.ts`'s `hasReturnValue` decides the return type by looking for a
+ * valued `return` in the structured body, and it recurses into `if`, `while`
+ * and `do_while` only — not `for`, `switch`, `try` or a labelled region — so a
+ * function whose only valued return sits inside one of those is declared `void`
+ * and then says `return rax;`. That is a wrong statement about the function's
+ * interface, and gcc accepts it (`return` with a value in a void function is a
+ * warning, silenced by `-w`). The return-type child of `peek-a-bin-n9cl` is
+ * expected to take `voidValued` to 0, at which point it gates; here it is
+ * report-only.
+ *
+ * Two liveness halves: `nonVoidValued` says the body scan still finds valued
+ * returns at all, and `headers` says the signature grammar still matches. The
+ * bead also asked for `voidBare > 0` — a void function with a bare `return;` —
+ * and that control is INERT on this corpus: the emitter elides a trailing
+ * `return;`, so the count is 0 on all four binaries at `6299113`. It is reported
+ * rather than asserted, and recorded here so nobody re-adds the assertion.
+ */
+export function voidReturnsValue(sets: { funcs: FuncRec[] }[]): VoidReturnResult {
+  const out: VoidReturnResult = {
+    headers: 0,
+    voidHeaders: 0,
+    voidValued: 0,
+    nonVoidValued: 0,
+    voidBare: 0,
+    funcs: 0,
+    rows: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      const sig = declaredParams(code);
+      if (sig === null) continue;
+      out.headers++;
+      const rt = headerReturnType(sig.line);
+      const isVoid = rt !== null && /(^|\s)void$/.test(rt);
+      const body = code.slice(sig.bodyAt);
+      const valued = VALUED_RETURN.test(body);
+      if (isVoid) {
+        out.voidHeaders++;
+        if (valued) {
+          out.voidValued++;
+          if (out.rows.length < 12) out.rows.push(r.name);
+        }
+        if (BARE_RETURN.test(body)) out.voidBare++;
+      } else if (valued) out.nonVoidValued++;
+    }
+  }
+  return out;
+}
+
+// ── Stack-pointer scaffolding in the emitted C ──────────────────────────────
+
+export interface StackPointerResult {
+  /** Functions with code read. Liveness. */
+  funcs: number;
+  /** Functions whose body mentions the stack pointer at all. */
+  mentioning: number;
+  /** Functions with a stack-pointer WRITE and no stack-pointer READ. */
+  writeNoRead: number;
+  /** Stack-pointer reads, in total — the raw `rspReadsKept` before any reason exists. */
+  reads: number;
+  writes: number;
+  /** `= rsp;` / `= esp;` — a register copy of the stack pointer. */
+  copies: number;
+  /** `rsp -= ` / `esp -= `. */
+  subs: number;
+  /** `rsp += ` / `esp += `. */
+  adds: number;
+  /** `rsp + 0x` / `esp + 0x` — the address of a frame slot. */
+  offsets: number;
+  /** `^ rsp` / `^ esp` — the /GS cookie mixing. */
+  xors: number;
+  /** `/* unlifted: leave *\/` sites. */
+  unliftedLeave: number;
+  rows: string[];
+}
+
+const SP_TOKEN = /\b([re]sp)(?:_\d+)?\b/g;
+
+/**
+ * HOW MUCH OF THE EMITTED C IS THE STACK POINTER TALKING TO ITSELF.
+ *
+ * Prologue and epilogue arithmetic (`rsp -= 0x28`), the frame-pointer copy
+ * (`rbp = rsp`), the /GS cookie (`rax ^= rsp`) and the address of a slot
+ * (`rcx = rsp + 0x30`) are all true statements about the machine and none of
+ * them is what a reader wants to see; epic 2's prologue normalisation is sized
+ * by this census. REPORT-ONLY: a stack-pointer mention is not a defect, and the
+ * shapes are counted so a change can be seen to remove the shape it claims to
+ * and no other. `writeNoRead` is the gateable candidate — a function that
+ * adjusts RSP and never reads it back is one whose scaffolding could be
+ * elided entirely — and it is the report half of a gate that does not exist
+ * yet. `reads` is the raw count the future `rspReadsKept`-by-reason row will
+ * split; reasons only exist once `prologue.ts` lands.
+ *
+ * `mentioning` and `funcs` are the liveness halves.
+ */
+export function stackPointerScaffolding(sets: { funcs: FuncRec[] }[]): StackPointerResult {
+  const out: StackPointerResult = {
+    funcs: 0,
+    mentioning: 0,
+    writeNoRead: 0,
+    reads: 0,
+    writes: 0,
+    copies: 0,
+    subs: 0,
+    adds: 0,
+    offsets: 0,
+    xors: 0,
+    unliftedLeave: 0,
+    rows: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      const sig = declaredParams(code);
+      const body = sig === null ? code : code.slice(sig.bodyAt);
+      let reads = 0;
+      let writes = 0;
+      SP_TOKEN.lastIndex = 0;
+      for (const m of body.matchAll(SP_TOKEN)) {
+        const after = body.slice((m.index ?? 0) + m[0].length);
+        if (/^\s*(?:-=|\+=|=(?!=))/.test(after)) writes++;
+        else reads++;
+      }
+      if (reads + writes > 0) out.mentioning++;
+      if (writes > 0 && reads === 0) {
+        out.writeNoRead++;
+        if (out.rows.length < 12) out.rows.push(r.name);
+      }
+      out.reads += reads;
+      out.writes += writes;
+      // A plain copy, not a compound assignment: `rax ^= rsp;` is the xor row.
+      out.copies += (body.match(/(?<![-+*/^&|!<>=])=\s*[re]sp\s*;/g) ?? []).length;
+      out.subs += (body.match(/\b[re]sp\s*-=\s/g) ?? []).length;
+      out.adds += (body.match(/\b[re]sp\s*\+=\s/g) ?? []).length;
+      out.offsets += (body.match(/\b[re]sp\s*\+\s*0x/g) ?? []).length;
+      out.xors += (body.match(/\^=?\s*[re]sp\b/g) ?? []).length;
+      out.unliftedLeave += (body.match(/unlifted:\s*leave\b/g) ?? []).length;
+    }
+  }
+  return out;
+}
+
+// ── Adjacent copy pairs ─────────────────────────────────────────────────────
+
+export interface CopyPairResult {
+  /** Adjacent `v = X; r = v;` pairs. */
+  pairs: number;
+  /** Of those, `r` a bare register and `v` that register's own versioned name — `swapDefWithCopy`'s exact shape. */
+  versionToRegister: number;
+  funcsAffected: number;
+  /** Functions with code read. Liveness. */
+  funcs: number;
+  /** Statement lines read. Liveness. */
+  lines: number;
+  rows: string[];
+}
+
+const ASSIGN = /^([A-Za-z_]\w*)\s*=(?!=)\s*(.+);$/;
+const COPY = /^([A-Za-z_]\w*)\s*=(?!=)\s*([A-Za-z_]\w*);$/;
+
+/**
+ * `v = X;` IMMEDIATELY FOLLOWED BY `r = v;` — A DEFINITION AND ITS COPY.
+ *
+ * `ssadestroy.ts`'s `swapDefWithCopy` writes a split-out value to its variable
+ * first and the register from the variable second, on purpose: appending the
+ * copy the other way round lost the register's only assignment to `foldBlock`
+ * (its docstring has the measurement). The pair it leaves is correct and is
+ * also two lines where a reader would want one. Whether a dead-copy elimination
+ * pass (epic 2, A6) is worth a session is decided by this count, so it is a
+ * row: REPORT-ONLY, both directions — a fall is the pass landing, a rise is
+ * more values being split, and neither is a wrong statement about the machine.
+ *
+ * `versionToRegister` is the exact `swapDefWithCopy` shape — `ecx_1 = X;
+ * ecx = ecx_1;` — and `pairs` is the wider adjacency, so a pass that removes
+ * one shape and not the other is visible. `lines` is the liveness half; the
+ * pair count itself must not be asserted non-zero, since the pass this sizes
+ * would legitimately take it to 0.
+ */
+export function copyPairs(sets: { funcs: FuncRec[] }[]): CopyPairResult {
+  const out: CopyPairResult = {
+    pairs: 0,
+    versionToRegister: 0,
+    funcsAffected: 0,
+    funcs: 0,
+    lines: 0,
+    rows: [],
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      const lines = code
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      out.lines += lines.length;
+      let hits = 0;
+      for (let i = 0; i + 1 < lines.length; i++) {
+        const a = ASSIGN.exec(lines[i]);
+        if (a === null) continue;
+        const c = COPY.exec(lines[i + 1]);
+        if (c === null || c[2] !== a[1] || c[1] === a[1]) continue;
+        hits++;
+        // `ecx_1 = X; ecx = ecx_1;` — the copy's destination is a bare register
+        // and the definition's is that register's own versioned spelling.
+        const bareReg = REGISTER_NAME.test(c[1]) && !/_\d+$/.test(c[1]);
+        if (bareReg && new RegExp(`^${c[1]}_\\d+$`).test(a[1])) out.versionToRegister++;
+        if (out.rows.length < 8) out.rows.push(`${r.name}: ${lines[i]} ${lines[i + 1]}`);
+      }
+      out.pairs += hits;
       if (hits > 0) out.funcsAffected++;
     }
   }

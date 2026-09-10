@@ -839,6 +839,201 @@ for (const b of bins) {
     note("  params clobbered at entry     NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── The readability instruments of peek-a-bin-n9cl.1. ─────────────────────
+  //
+  // ALL REPORT-ONLY in the run, and all but one report-only here too: each
+  // either sizes a piece of work for a later child or records a first durable
+  // measurement, and the child that does the work is the one that gates the
+  // row. The exception is the UNLIFTED census, where a RISE in any mnemonic
+  // bucket IS judged a regression: an instruction that was lifted and no longer
+  // is hands the reader less than the commit before, whatever the baseline.
+  //
+  // Every block reads absent-on-either-side as NOT MEASURED, never as zero —
+  // the baseline for this session (`s29-base-6299113`) predates the
+  // instruments, and a run that never measured must not score as the best
+  // possible result.
+
+  // The prelude's inventions, classified. `register + minted` is the k8i figure
+  // and gates at 0 once the register-variables child lands; until then both
+  // directions are information. `api + unknown types` is liveness: a FALL to 0
+  // means the prelude has nothing left to do, which is not this codebase.
+  if (B.undeclared && C.undeclared) {
+    row("undeclared: register names", (x) => x.undeclared.register);
+    row("  minted pseudo-variables", (x) => x.undeclared.minted);
+    row("  register + minted (k8i)", (x) => x.undeclared.register + x.undeclared.minted);
+    row("  api names used as values", (x) => x.undeclared.api);
+    row("  other", (x) => x.undeclared.other);
+    row("  unknown type names", (x) => x.undeclared.unknownTypes);
+    row("  functions with a register", (x) => x.undeclared.funcsWithRegisters);
+    row(
+      "  functions compiled bare",
+      (x) => x.undeclared.compiled,
+      (a, c) => c === 0 && a > 0,
+      "THE BARE COMPILE STOPPED RUNNING",
+    );
+  } else {
+    note("  undeclared identifiers        NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Unlifted instructions by base mnemonic. THE ONE JUDGED ROW IN THIS GROUP:
+  // a rise in any bucket, or in the total, is a regression. A bucket present
+  // on one side only is compared against 0 on the other — a new mnemonic going
+  // unlifted is exactly the shape to catch.
+  if (B.unlifted && C.unlifted) {
+    row(
+      "unlifted instructions",
+      (x) => x.unlifted.sites,
+      (a, c) => c > a,
+      "MORE INSTRUCTIONS LEFT UNLIFTED",
+    );
+    row("  functions affected", (x) => x.unlifted.funcsAffected);
+    const mnems = [
+      ...new Set([...Object.keys(B.unlifted.byMnemonic), ...Object.keys(C.unlifted.byMnemonic)]),
+    ].sort(
+      (p, q) =>
+        (C.unlifted.byMnemonic[q] ?? 0) - (C.unlifted.byMnemonic[p] ?? 0) || p.localeCompare(q),
+    );
+    for (const mn of mnems) {
+      row(
+        `  unlifted ${mn}`,
+        (x) => x.unlifted.byMnemonic[mn] ?? 0,
+        (a, c) => c > a,
+        `MORE \`${mn}\` LEFT UNLIFTED`,
+      );
+    }
+    row(
+      "  functions scanned",
+      (x) => x.unlifted.funcs,
+      (a, c) => c === 0 && a > 0,
+      "THE UNLIFTED SCAN READ NOTHING",
+    );
+  } else {
+    note("  unlifted instructions         NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // A void function returning a value. Report-only here; gates at 0 in the
+  // return-type child. `headers` is liveness.
+  if (B.voidReturns && C.voidReturns) {
+    row("void returning a value", (x) => x.voidReturns.voidValued);
+    row("  void headers", (x) => x.voidReturns.voidHeaders);
+    row("  non-void with valued return", (x) => x.voidReturns.nonVoidValued);
+    row(
+      "  headers located",
+      (x) => x.voidReturns.headers,
+      (a, c) => c === 0 && a > 0,
+      "THE SIGNATURE SCAN STOPPED MATCHING",
+    );
+  } else {
+    note("  void returning a value        NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Stack-pointer scaffolding. Report-only in both directions: the shapes are
+  // printed so a prologue change can be seen to remove the shape it claims to.
+  if (B.stackPointer && C.stackPointer) {
+    row("stack pointer: functions mentioning", (x) => x.stackPointer.mentioning);
+    row("  write and never read", (x) => x.stackPointer.writeNoRead);
+    row("  reads (raw rspReadsKept)", (x) => x.stackPointer.reads);
+    row("  writes", (x) => x.stackPointer.writes);
+    row("  copies (= rsp;)", (x) => x.stackPointer.copies);
+    row("  subtractions (rsp -=)", (x) => x.stackPointer.subs);
+    row("  additions (esp +=)", (x) => x.stackPointer.adds);
+    row("  slot addresses (rsp + 0x)", (x) => x.stackPointer.offsets);
+    row("  cookie xors (^ rsp)", (x) => x.stackPointer.xors);
+    row("  unlifted leave", (x) => x.stackPointer.unliftedLeave);
+  } else {
+    note("  stack-pointer scaffolding     NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Adjacent copy pairs. Report-only; a fall is the dead-copy pass landing.
+  if (B.copyPairs && C.copyPairs) {
+    row("adjacent copy pairs", (x) => x.copyPairs.pairs);
+    row("  of those, swapDefWithCopy shape", (x) => x.copyPairs.versionToRegister);
+    row("  functions affected", (x) => x.copyPairs.funcsAffected);
+    row(
+      "  lines read",
+      (x) => x.copyPairs.lines,
+      (a, c) => c === 0 && a > 0,
+      "THE COPY-PAIR SCAN READ NOTHING",
+    );
+  } else {
+    note("  adjacent copy pairs           NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // GOTO DENSITY. NO worseIf, IN EITHER DIRECTION, EVER. (i) goto is the honest
+  // spelling for a transfer the tree cannot model and the recorded way to drive
+  // it down wrongly is a false `break` — `armExits` exists because that
+  // happened (peek-a-bin-pqs5); (ii) it falls with recovery AND with
+  // fabrication; (iii) its denominator moves with function detection.
+  if (B.gotoDensity && C.gotoDensity) {
+    row("gotos per 100 lines (never gated)", (x) => x.gotoDensity.per100Lines);
+    row("  gotos", (x) => x.gotoDensity.gotos);
+    row("  emitted lines", (x) => x.gotoDensity.lines);
+    row("  labels named by no goto", (x) => x.gotoDensity.labelsUntargeted);
+  } else {
+    note("  gotos per 100 lines           NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Duplicate bodies. Report-only; `self-recursive thunks` gates at 0 in the
+  // thunk child and is the row with a direction until then.
+  if (B.duplicateBodies && C.duplicateBodies) {
+    row("duplicate body groups", (x) => x.duplicateBodies.groups);
+    row("  functions in a group", (x) => x.duplicateBodies.functions);
+    row("  largest group", (x) => x.duplicateBodies.largestGroup);
+    row("  self-recursive thunks", (x) => x.duplicateBodies.selfRecursiveThunks);
+    row(
+      "  bodies read",
+      (x) => x.duplicateBodies.bodies,
+      (a, c) => c === 0 && a > 0,
+      "THE BODY SCAN READ NOTHING",
+    );
+  } else {
+    note("  duplicate bodies              NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Label origins. Report-only; `pinned only` is the fabrication-hazard
+  // population for epic 2's label-note work (baseGenerations resets at it).
+  if (B.labelOrigins && C.labelOrigins) {
+    row("labels kept: targeted only", (x) => x.labelOrigins.targetedOnly);
+    row("  pinned only (no goto names it)", (x) => x.labelOrigins.pinnedOnly);
+    row("  both", (x) => x.labelOrigins.both);
+    row("  dropped", (x) => x.labelOrigins.dropped);
+    row(
+      "  labels seen by pruneLabels",
+      (x) => x.labelOrigins.seen,
+      (a, c) => c === 0 && a > 0,
+      "THE STRUCTURING TAP STOPPED REPORTING LABELS",
+    );
+    row(
+      "  inconsistent reports",
+      (x) => x.labelOrigins.inconsistent,
+      (a, c) => c > a,
+      "A LABEL REPORT DOES NOT ADD UP",
+    );
+  } else {
+    note("  label origins                 NOT MEASURED on both sides (a run predating the audit)");
+  }
+
+  // Callees that are not names, and x64 stack-argument stores. Both size
+  // epic 3 and are report-only in both directions.
+  if (B.callShapes && C.callShapes) {
+    row("callees spelled (*reg)()", (x) => x.callShapes.registerCallees);
+    row("  __unrecovered_N in callee position", (x) => x.callShapes.unrecoveredCallees);
+    row("  indirect-jmp raws", (x) => x.callShapes.indirectJmpRaws);
+    row("  indirect machine calls", (x) => x.callShapes.indirectCalls);
+    row("stack-arg stores before a call", (x) => x.callShapes.slotStoresBeforeCall);
+    row("  [rsp+0x20..] stores, all", (x) => x.callShapes.slotStores);
+    row("  [rsp+0x20..] reads", (x) => x.callShapes.slotReads);
+    row("  emitted (rsp + 0x20..) = stores", (x) => x.callShapes.textSlotStores);
+    row(
+      "  machine calls read",
+      (x) => x.callShapes.calls,
+      (a, c) => c === 0 && a > 0,
+      "THE CALL SCAN READ NOTHING",
+    );
+  } else {
+    note("  call shapes                   NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // GUARDS LEAVING THE AUDITED SET IS ITSELF A SIGNAL. `polarity correct` below
   // is ok/checked, and a guard that stops being anchorable — or stops having a
   // single comparison operator, which is what an unrecovered condition is —

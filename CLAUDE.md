@@ -617,6 +617,19 @@ can be a *refusal* replacing a confident wrong answer), dropped statements, `off
 callees (watch `internalUnlabelled`, not `internal`), empty case bodies, loop shape, field accesses
 reaching the page (it rises with correct recovery *and* with fabrication).
 
+**Nine readability censuses landed as report-only rows ahead of the decompiler-readability epic
+(`peek-a-bin-n9cl.1`), each with a liveness half, none gating in this session**: `undeclared
+identifiers` (what `preludeFor` invents, classified register/minted/api/other — the register class
+gates at 0 in the register-variables child); `unlifted instructions` by base mnemonic (the ONE row
+of the group `compare.mjs` judges: a rise in any bucket is a regression); `void returning a value`
+(0/3/3/0 at 6299113 — the plan's 48/44 predates the `__try` narrowing; gates in the return-type
+child); `stack-pointer scaffolding` by shape; `adjacent copy pairs`; `goto density` (**MUST NEVER
+GATE**, three reasons recorded at `gotosPer100Lines`); `duplicate bodies` with
+`selfRecursiveThunks` 0/3/3/0 (gates in the thunk child); `label origins` from `pruneLabels`'s own
+report (`pinnedOnly` is the `baseGenerations` fabrication-hazard population); and `callees that are
+not names` beside the x64 `[rsp+0x20..]` store-before-call population. `corpus/README.md` carries
+the baseline figures and what each cannot see.
+
 **"Clean" is not "recovered".** A large minority of emitted functions contain an *admitted* gap —
 `__unrecovered_N` or `/* unlifted: … */` — and compile precisely because the emitter names what it
 failed to recover. Do not read "all of them compile" as "all of them are right"; gcc is

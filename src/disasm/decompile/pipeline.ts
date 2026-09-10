@@ -16,7 +16,7 @@ import { buildSSA, detectNaturalLoops } from "./ssa";
 import { destroySSA } from "./ssadestroy";
 import { ssaOptimize } from "./ssaopt";
 import { type StructGroupReport, type StructRegistry, synthesizeStructs } from "./structs";
-import { type SwitchArmExit, structureCFG } from "./structure";
+import { type LabelPruneReport, type SwitchArmExit, structureCFG } from "./structure";
 import { inferTypes } from "./typeInfer";
 
 export interface DecompileResult {
@@ -85,6 +85,15 @@ export interface StructuringTap {
    * with no recovered jump table, which is all of them on x64.
    */
   armExits: SwitchArmExit[];
+  /**
+   * Why each `loc_` label survived `pruneLabels` — kept because a `goto` names
+   * it, kept only because the leftover pass pinned it, or dropped. Here for the
+   * reason the three above are: the emitted C shows a label and not the ground
+   * it was kept on, and a pinned label is the one `structs.ts`'s
+   * `baseGenerations` resets every key at. `null` only if `structureCFG` never
+   * reached its final sweep, which on a non-empty CFG it always does.
+   */
+  labels: LabelPruneReport | null;
 }
 
 /**
@@ -261,6 +270,7 @@ export function decompileFunction(
     // the same reason: it is an instrument, so no production run may pay for it
     // or be able to notice it. `structureCFG` computes nothing from it.
     const armExits: SwitchArmExit[] = [];
+    let labels: LabelPruneReport | null = null;
     const structured = structureCFG(
       blocks,
       loops,
@@ -269,8 +279,13 @@ export function decompileFunction(
       is64,
       branches,
       tap ? (ev) => armExits.push(ev) : undefined,
+      tap
+        ? (report) => {
+            labels = report;
+          }
+        : undefined,
     );
-    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured, armExits });
+    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured, armExits, labels });
 
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
     let cleaned = cleanupStructured(structured);

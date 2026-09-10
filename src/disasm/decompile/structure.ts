@@ -165,7 +165,11 @@ function hasFreeContinue(stmts: IRStmt[]): boolean {
  * A duplicate definition of the same label does not compile, so the first one
  * wins; the walk visits a block once, but nothing downstream guarantees that.
  */
-function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
+function pruneLabels(
+  stmts: IRStmt[],
+  pinned: Set<string>,
+  onLabels?: (report: LabelPruneReport) => void,
+): IRStmt[] {
   const targets = new Set<string>();
   const collect = (list: IRStmt[]): void => {
     for (const s of list) {
@@ -175,13 +179,33 @@ function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
   };
   collect(stmts);
 
+  const report: LabelPruneReport = {
+    seen: 0,
+    targetedOnly: 0,
+    pinnedOnly: 0,
+    both: 0,
+    dropped: 0,
+    duplicates: 0,
+  };
   const defined = new Set<string>();
   const rewrite = (list: IRStmt[]): IRStmt[] => {
     const out: IRStmt[] = [];
     for (const s of list) {
       if (s.kind === "label") {
-        if (!targets.has(s.name) && !pinned.has(s.name)) continue;
-        if (defined.has(s.name)) continue;
+        report.seen++;
+        const targeted = targets.has(s.name);
+        const isPinned = pinned.has(s.name);
+        if (!targeted && !isPinned) {
+          report.dropped++;
+          continue;
+        }
+        if (defined.has(s.name)) {
+          report.duplicates++;
+          continue;
+        }
+        if (targeted && isPinned) report.both++;
+        else if (targeted) report.targetedOnly++;
+        else report.pinnedOnly++;
         defined.add(s.name);
         out.push(s);
         continue;
@@ -190,7 +214,41 @@ function pruneLabels(stmts: IRStmt[], pinned: Set<string>): IRStmt[] {
     }
     return out;
   };
-  return rewrite(stmts);
+  const result = rewrite(stmts);
+  if (onLabels) onLabels(report);
+  return result;
+}
+
+/**
+ * WHY EACH `loc_` LABEL SURVIVED `pruneLabels`, for one function.
+ *
+ * An instrument, on the terms `SwitchArmExit` is one: it reports a decision
+ * whose two sides are both internal to the structurer and neither of which
+ * survives into the emitted C, and it must never be able to change what
+ * `pruneLabels` decides. The question it answers is how many labels the output
+ * carries for a reason OTHER than a `goto` — a pinned label says "the code
+ * above does not fall into this region", and deleting one from the IR is a
+ * fabrication hazard for `structs.ts`'s `baseGenerations`, which resets every
+ * key at a label no `goto` names (docs/decompiler-ir.md). Any pass that wants
+ * to turn such a label into a note needs this census first. `corpus/sweep.ts`
+ * is the only consumer (peek-a-bin-n9cl.1).
+ *
+ * `seen === targetedOnly + pinnedOnly + both + dropped + duplicates` by
+ * construction; a consumer that finds otherwise has a broken instrument.
+ */
+export interface LabelPruneReport {
+  /** Label statements the sweep encountered, at any nesting depth. */
+  seen: number;
+  /** Kept because a `goto` names it and nothing pinned it. */
+  targetedOnly: number;
+  /** Kept ONLY because the leftover pass pinned it — no `goto` names it. */
+  pinnedOnly: number;
+  /** Kept on both grounds. */
+  both: number;
+  /** Removed: nothing names it and nothing pinned it. */
+  dropped: number;
+  /** Removed as a second definition of a name already kept. */
+  duplicates: number;
 }
 
 /**
@@ -393,6 +451,12 @@ export function structureCFG(
    * `pipeline.ts` passes it only when it has a tap of its own.
    */
   onArmExit?: (ev: SwitchArmExit) => void,
+  /**
+   * Told why each label survived `pruneLabels`, if anyone is watching. Last,
+   * after `onArmExit`, and an instrument on exactly its terms: `pruneLabels`
+   * computes nothing from it. `pipeline.ts` passes it only when it has a tap.
+   */
+  onLabels?: (report: LabelPruneReport) => void,
 ): IRStmt[] {
   if (blocks.length === 0) return [];
 
@@ -1913,5 +1977,5 @@ export function structureCFG(
     result.push(...tail);
   }
 
-  return pruneLabels(result, pinned);
+  return pruneLabels(result, pinned, onLabels);
 }

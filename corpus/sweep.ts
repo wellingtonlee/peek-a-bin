@@ -28,6 +28,7 @@ import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
 import { type ArmExitResult, auditArmExits, emptyArmExits } from "./armExits";
+import { auditCallShapes, type CallShapeResult, emptyCallShapes } from "./callShapes";
 import {
   auditCrossEdgeGuards,
   type CrossEdgeGuardResult,
@@ -47,6 +48,7 @@ import {
   splitForHeader,
   statementOnLine,
 } from "./guardShape";
+import { auditLabelOrigins, emptyLabelOrigins, type LabelOriginResult } from "./labelOrigins";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
 import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
@@ -647,6 +649,25 @@ export interface BinResult {
    */
   frameRepurpose: FrameRepurposeResult;
   structOverlaps: StructOverlapResult;
+  /**
+   * WHY EACH `loc_` LABEL SURVIVED `pruneLabels`, from the structuring tap.
+   * Report-only; `pinnedOnly` is the population epic 2's label-note work would
+   * touch and `baseGenerations` keys on. See `corpus/labelOrigins.ts`.
+   */
+  labelOrigins: LabelOriginResult;
+  /**
+   * CALLEES THAT ARE NOT NAMES, and STACK ARGUMENTS FIVE AND UP — two sizes for
+   * epic 3, from the machine text and the emitted C together. Report-only.
+   * See `corpus/callShapes.ts`.
+   */
+  callShapes: CallShapeResult;
+  /**
+   * Every imported function name the IAT resolves, distinct. Handed to
+   * `undeclaredIdentifiers` so an import used as a value classifies as `api`
+   * rather than `other`; read from the session's own `iatMap` so the audit and
+   * the decompiler agree about what an import is called.
+   */
+  importNames: string[];
   funcs: FuncRec[];
 }
 
@@ -841,6 +862,9 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     selfAssigns: emptySelfAssigns(),
     frameRepurpose: emptyFrameRepurpose(),
     structOverlaps: emptyStructOverlaps(),
+    labelOrigins: emptyLabelOrigins(),
+    callShapes: emptyCallShapes(),
+    importNames: [...new Set([...af.iatMap.values()].map((v) => v.func))].sort(),
     funcs: [],
   };
 
@@ -978,7 +1002,14 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       // of question — one whose two sides are both internal to the structuring
       // step and neither recoverable from the emitted C.
       auditArmExits(res.armExits, key, func, tapped[0].armExits);
+      // Why each label survived `pruneLabels`. Same tap again, and the same
+      // reason: the emitted C shows the label, never the ground it was kept on.
+      auditLabelOrigins(res.labelOrigins, func.name, func.address, tapped[0].labels);
     }
+    // Callees that are not names, and x64 stack-argument stores before a call.
+    // Reads the machine text and the emitted C side by side, so it lives here
+    // rather than in the emitted-text audits.
+    auditCallShapes(res.callShapes, insns, code, af.pe.is64);
     auditLineMapCoverage(res, func, insns, lineMap, jumpTables, af);
     // A SELF-ASSIGNMENT, resolved through the same line map to the instruction
     // it carries the address of. Here rather than in the emitted-text audits

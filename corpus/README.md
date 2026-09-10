@@ -1335,6 +1335,148 @@ of maximum cardinality over the same extents, by exhaustive search. `peek-a-bin-
 **Function, instruction and jump-table counts.** These move whenever detection changes, which is
 often, and usually because a defect was fixed.
 
+### The readability censuses — reported, and in this session never gated (`peek-a-bin-n9cl.1`)
+
+Nine rows landed together as the instruments for the decompiler-readability epic, BEFORE any
+engine change, so that every child of that epic has a pinned baseline to move against. All of
+them are report-only in the run; each has a liveness half asserted in `corpus.audit.ts`; each
+appears per binary in `summary_<key>.json` and in `compare.mjs`, where every one but the unlifted
+census is printed with no `worseIf`. Baseline figures are at `6299113`, in the report's order
+t32/t64/w64/w32, over emitted C that is **byte-identical** to `s29-base-6299113` (the instruments
+change no output — `compare.mjs` base→a0 reports 260/260, 279/279, 275/275, 258/258 identical
+and every new row `NOT MEASURED on both sides`, which is the correct reading of a baseline that
+predates them).
+
+**Undeclared identifiers, classified** (`undeclaredIdentifiers`, `emitAudits.ts`;
+`undeclared_<key>.jsonl`). *What it proves:* what `preludeFor` has been inventing so that the gcc
+row reads clean. `ccSyntaxCheck` compiles each function up to five times, declaring whatever gcc
+complained about the round before — so every `long rax;` it adds is a variable the emitted C
+**uses and never declares**, and `1072/1072 clean` measures the harness's completion of the
+output. This compiles each function ONCE with `CC_HEADER` and no prelude and classifies every
+`'X' undeclared`: **register** (any width, versioned or not — `REGISTER_NAME` is written out
+rather than imported from `ir.ts`, and `build/readabilityCensus.test.ts` is where the two
+declarations are made to meet in both directions), **minted** (`clobbered_`, `flg_`, `stk_`,
+`__unrecovered_`), **api** (an IAT name or an `apitypes.ts` name used as a value), **other**
+(listed by name). Baseline: register **1452/2438/2260/1409**, minted 6/17/17/6 (`stk_` slots on
+x86, `clobbered_` on x64), api 0, other 2/1/1/2 (all `INVALID_HANDLE_VALUE`), unknown type names
+21/279/276/20 (one distinct, the handle typedef). Those sum to `peek-a-bin-k8i`'s hand-counted
+1460/2456/2278/1417 exactly — k8i counted every undeclared pair; this splits them. *Liveness:*
+`compiled` equals `ccSyntaxCheck.compiled` (the two gcc passes are over one population) and
+`api + unknownTypes > 0` (the prelude is still doing the work it exists for). *Why it does not
+gate:* the register-variables child is expected to take `register + minted` to 0 and gates it
+there; a threshold at today's absolute would go stale with detection. *What it cannot see:*
+`-w` is kept, so an implicit function declaration is silent exactly as in `ccSyntaxCheck` — only
+identifiers used as values reach the list — and a register declared by the emitter but with the
+wrong type is not undeclared.
+
+**Unlifted instructions by base mnemonic** (`unliftedCensus`; `unlifted_<key>.jsonl`). *What it
+proves:* which instructions the emitter admits it has no C for, filed by base mnemonic — a `lock`
+prefix stripped (the rule `withoutLockPrefix` applies, written independently), a `rep`-family
+prefix KEPT as the bucket, since the lifter's `rep` path is what is dead against real Capstone
+output, with the string operation beside it in `repForms`. Baseline: 167/156/134/164 sites;
+corpus-wide leave 145, sbb 96, bts 94, movdqa 54, movnti 48, movabs 42, rep 32 (22 `rep movsd`,
+6 `rep stosd`, 4 `rep stosw`), btr 18, stosd 12, std 8, cld 8, repne 8, prefetchnta 8, adc 6,
+imul 6, or 6 (the `lock or` sites) — the plan's ad hoc census reproduced exactly. *A RISE in any
+bucket is the ONE thing in this group `compare.mjs` judges a regression*: an instruction that was
+lifted and no longer is hands the reader less than the commit before, whatever the baseline.
+*Liveness:* `funcs` per binary, `sites` over the corpus (a binary with nothing unlifted is the
+lifts child's target). *Why the absolute does not gate:* nothing says how many `movdqa` should be
+lifted, and CLAUDE.md records that the 16-byte moves have no C spelling at all.
+
+**A void function returning a value** (`voidReturnsValue`). *What it proves:* a header whose
+RETURN TYPE is `void` — read off the signature line, never `void` anywhere on it, so `int f(void)`
+is not one — over a body containing `return <expr>;`. `promote.ts`'s `hasReturnValue` recurses
+into `if`/`while`/`do_while` only, so a valued return inside a `for`, `switch`, `__try` or
+labelled region leaves the interface misstated; gcc accepts it under `-w`. **Baseline
+0/3/3/0** (t64 `sub_140004104`, `sub_14000B050`, `sub_14000CFA8`; w64 `sub_140004470`,
+`sub_140005144`, `sub_140005A20`), of 7/9/9/8 void headers. **The plan's 0/48/44/0 is NOT the
+figure at `6299113`**: that census was taken over `s26-change-oovn`, whose x64 C predates
+`038a605` (a `__try` only where the scope table says so) — there 75/72 x64 functions differ and
+54 t64 headers were `void` because the valued return sat inside a `__try` the recursion could not
+see. Record the measured figure, not the plan's. *Liveness:* `headers > 0` and `nonVoidValued > 0`
+per binary. **One requested liveness half is INERT and is reported rather than asserted**: "void
+headers with a bare `return;` > 0" is 0 on all four binaries, because the emitter elides a
+trailing `return;`. *Why it does not gate:* the return-type child gates it at 0.
+
+**Stack-pointer scaffolding** (`stackPointerScaffolding`). *What it proves:* how much of the
+emitted C is the stack pointer talking to itself, by shape, and how many functions adjust it and
+never read it back. A write is a token followed by `=`, `-=` or `+=` (not `==`); everything else
+is a read; `rsp_1` is still the stack pointer. Baseline: 181/99/96/180 of 260/279/275/258
+functions mention it (556 — the plan's 523 came from a narrower regex); write-and-never-read
+4/18/17/4; shapes `= rsp;` 178/36/34/177, `-=` 17/56/55/15, `+=` 66/0/0/61, `+ 0x` 4/79/72/4,
+`^` 1/17/15/1 (the plan's 25/21 `^ rsp` counted the `x = y ^ rsp` spelling and the `^=` one
+together; this row now counts both); unlifted `leave` 73/0/0/72; raw reads 210/693/525/209 — the
+`rspReadsKept` figure a by-reason split (gs-xor, unnamed-slot, alloca) will divide once
+`prologue.ts` exists. *Liveness:* `mentioning > 0`. *Why it does not gate:* a stack-pointer
+mention is a true statement about the machine; `writeNoRead` is the report half of a gate that
+epic 2 may earn.
+
+**Adjacent copy pairs** (`copyPairs`). *What it proves:* `v = X;` immediately followed by
+`r = v;` — the shape `ssadestroy.ts`'s `swapDefWithCopy` leaves on purpose (appending the copy
+the other way lost the register's only assignment to `foldBlock`). Baseline 420/488/417/380
+pairs, of which 213/297/239/192 are the exact `ecx_1 = X; ecx = ecx_1;` shape. Decides whether
+epic 2's dead-copy elimination is worth a session. *Liveness:* `lines > 0`; **`pairs` must not be
+asserted non-zero**, since the pass this sizes would legitimately take it to 0. *Why it does not
+gate:* neither direction is a wrong statement about the machine.
+
+**Goto density** (`gotoCheck` gained `lines`, `labelsUntargeted`, `funcs`; `gotosPer100Lines`).
+Baseline 5.62/4.99/4.99/5.36 per 100 lines — **3086 gotos over 58,873 lines**, 2527 labels in
+functions with a goto of which 391 are named by no goto (the plan's 2646/510 counted labels over
+ALL functions; the 119 extra are in functions with no goto at all and are all untargeted, so the
+two agree exactly; the plan's 59,155 lines came from a different line rule). **MUST NEVER GATE, in
+either direction**, and the reasons travel with the function: (i) `goto` is the honest spelling
+for a transfer the tree cannot model and the recorded way to drive it down wrongly is a false
+`break` — `armExits` exists because that happened (`peek-a-bin-pqs5`); (ii) it falls with
+recovery AND with fabrication; (iii) its denominator moves with function detection.
+`compare.mjs` prints it with no `worseIf`.
+
+**Duplicate bodies** (`corpus/duplicateBodies.ts`; `duplicates_<key>.jsonl`). *What it proves:*
+functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex constants, whitespace
+and the function's own name are normalised — how much of the output a reader reads twice, and
+whether an emitter change moved a family or one member. Baseline 4/12/12/4 groups over
+10/39/38/10 functions (largest 4/7/7/4); **32 groups over 97 functions corpus-wide** against the
+plan's 35/99, the difference being this normalisation (own name to `SELF`, whitespace collapsed,
+empty bodies excluded). **`selfRecursiveThunks` is the row with a direction: 0/3/3/0**
+(`RtlVirtualUnwind`, `RtlLookupFunctionEntry`, `RtlUnwindEx` on each x64 binary) — an IAT `jmp`
+thunk named after its import whose lifted tail call resolves to the same name, emitted as
+`int RtlVirtualUnwind() { return RtlVirtualUnwind(); }`. The thunk child gates it at 0. *Liveness:*
+`bodies > 0` and `headersLocated > 0`. *What it cannot see:* a group says the text is the same,
+never that the code is; and the thunk row is derived from header name and body text alone, so a
+rename that hides the recursion behind another callee spelling takes it to 0 without fixing it —
+read it beside `undefined callees, external`.
+
+**Label origins** (`corpus/labelOrigins.ts`, from `LabelPruneReport` on the structuring tap;
+`labels_<key>.jsonl`). *What it proves:* why each `loc_` label survived `pruneLabels` — a `goto`
+names it, the leftover pass PINNED it (a region the walk reached only by starting afresh at it),
+or both. Baseline: 748/655/585/658 kept of 4166/4037/3600/3722 seen — 586/603/535/523 targeted
+only, **76/8/8/74 pinned only**, 86/44/42/61 both, the rest dropped (5/3/3/5 duplicates); the
+kept total is exactly the 2646 `loc_` labels in the emitted C, so `cleanupStructured` removes no
+label. Read beside `labels named by no goto` (510 corpus-wide over all functions): 166 of those
+are pinned-only, and the other 344 were kept as a `goto`'s target whose `goto` a later pass
+rewrote (`gotoToBreak`, the adjacent-goto fold). `pinnedOnly` is the population epic 2's
+label-note work would touch, and deleting one from the IR is a FABRICATION hazard: `structs.ts`'s
+`baseGenerations` resets every key at a label no `goto` names (`docs/decompiler-ir.md`). *Liveness:*
+`seen > 0` per binary, and the identity `seen = targetedOnly + pinnedOnly + both + dropped +
+duplicates` (`inconsistent` is 0 — a report that does not add up is a broken tap). The observer is
+an instrument on `SwitchArmExit`'s terms: `pruneLabels` computes nothing from it, and
+`structure.test.ts` pins that the tree is the same with and without it.
+
+**Callees that are not names, and x64 stack arguments five and up** (`corpus/callShapes.ts`).
+Two sizes for epic 3, from the machine text and the emitted C together. *Callees:* emitted
+`(*reg)(` **0/0/0/0**, `__unrecovered_N(` in callee position **0/0/0/0**, `indirect jmp through`
+raws 2/0/0/2 — over 328/278/281/331 indirect machine calls of 1590/1419/1352/1523 (133/35/31/123
+through a register). So the `IRCall.targetExpr` population on this corpus is the register calls the
+lifter already spells `(*rax)()`-style at zero sites — every indirect call here is an IAT or
+data-pointer memory operand — and the two register tail jumps. *Stack arguments:* x64 stores to
+`[rsp + 0x20..]` whose NEXT control transfer is a `call` **245/214** (t64/w64) of 469/357 such
+stores, 687/620 reads, over 57/56 functions; the emitted C spells **none** of them as
+`(rsp + 0x20..) =` — it goes through an alias (`r11 = rsp; *(int64_t*)(r11 + 0x20) = …`) or a
+`var_` name — which is why the census is taken from the machine. The x86 pair's slot rows are
+**structurally 0** and asserted so (the 32-bit conventions pass by `push`, which `collectArgs32`
+reads). *Liveness:* `calls > 0`, `insns > 0` per binary; `indirectCalls > 0` over the corpus.
+*What it cannot see:* a home-area store through a register other than RSP, and a store the call
+reaches through a branch ("next transfer" is a straight-line reading).
+
 ## `corpus/parserDifferential.ts` — separate, and the only oracle over the PE parser
 
 `npm run corpus:parserdiff`. Over **all six** binaries — the x86 four *and* the ARM64 pair —
@@ -2509,7 +2651,7 @@ remaining gap and is not implemented.
 | `corpus.audit.ts` | The entry point. Preflight, the shared sweep, the gates, the report. |
 | `preflight.ts` | Where the corpus is, and whether this machine can run at all. |
 | `sweep.ts` | One load + decompile pass per binary; polarity, loop exits, callee loss, line map coverage, statement drops, unrecovered values, clobbered reads. |
-| `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos. |
+| `emitAudits.ts` | The audits that read only emitted text: gcc, `offsetof`, gotos and goto density, and the readability censuses — the prelude's inventions classified (`undeclaredIdentifiers`, one bare gcc pass), unlifted instructions by mnemonic, a `void` header over a valued return, stack-pointer scaffolding, adjacent copy pairs. |
 | `arity.ts` | Emitted call arity against `apitypes.ts`'s declared signatures. Reads only emitted text; the one oracle here that can see arity. |
 | `staleGuards.ts` | The wrong-operand guard audit: which instruction's flags a jcc reads, and whether the compare still describes them. |
 | `crossEdgeGuards.ts` | The cross-edge guard audit: whether a Jcc alone in its block is entered with the same flags however it was reached. |
@@ -2520,6 +2662,9 @@ remaining gap and is not implemented.
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent and, for an internal one, by whether the reader has any thread to the body (`internalLabelled`, `internalThreaded`, `internalUnlabelled`). Reads only emitted text. Report-only in both directions. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
+| `duplicateBodies.ts` | Emitted functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex and the function's own name are normalised, plus `selfRecursiveThunks` — a header name in `return <name>(` position in its own body. Reads only emitted text. Report-only; the thunk row gates once the thunk child lands. |
+| `labelOrigins.ts` | Why each `loc_` label survived `pruneLabels` — a `goto` names it, the leftover pass pinned it, or both — from the structurer's own `LabelPruneReport` on the structuring tap. Report-only; `pinnedOnly` is the `baseGenerations` fabrication-hazard population. |
+| `callShapes.ts` | Callees that are not names (`(*rax)()`, `__unrecovered_N(`, `indirect jmp through`) beside the machine's indirect calls, and x64 stores to `[rsp + 0x20..]` whose next control transfer is a `call` — the stack-arguments-five-and-up population. Machine text and emitted C side by side. Report-only. |
 | `arm64.ts` | **Separately invoked** (`npm run corpus:arm64`). The ARM64 audits: sweep integrity, the decode-rate floor in both directions, `.pdata` conformance, wild branches, unreachable decoded words, the `adrp`/`adr` reference grammar, A64 switch dispatch, PC-relative literal pools, and the `Arm64SweepCache` differential. Its judging functions are exported and take plain data, so `build/arm64Audit.test.ts` can negative-control the rows this corpus cannot make red. Writes no artifacts. |
 | `comments.ts` | **Separately invoked** (`npm run corpus:comments`). Is an ARM64 inline comment a reference or a collision, and has the x86 comment stream moved. Writes no artifacts. |
 | `jumpTableReach.ts` | **Separately invoked** (`npm run corpus:jumptables -- <path>`). A dispatch census over any PE at all. Writes no artifacts. |
@@ -2542,6 +2687,10 @@ remaining gap and is not implemented.
 | `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
 | `artifacts/<label>/structoverlaps_<key>.jsonl` | Every overlap `candidateFields` had to settle: the base's whole extent list, which reading was kept and which dropped, whether the dropped one was contained, whether the selection was maximal, whether the base was ambiguous, and any narrower same-offset reading that step 1 discarded. Empty file = audit ran and found none. |
 | `artifacts/<label>/undefinedcallees_<key>.jsonl` | Every emitted call to an identifier the output never defines, INTERNAL rows first, each with the caller's extent and whether a `loc_` label names the target. Empty file = audit ran and found none. |
+| `artifacts/<label>/undeclared_<key>.jsonl` | Every (function, identifier) pair gcc reported `undeclared` with NO prelude, classified `register`/`minted`/`api`/`other`. Empty file = audit ran and found none — which is the register-variables child's target. |
+| `artifacts/<label>/unlifted_<key>.jsonl` | Every `/* unlifted: … */` site with its base mnemonic and line. Empty file = audit ran and found none. |
+| `artifacts/<label>/duplicates_<key>.jsonl` | Every group of two or more functions with the same normalised body, largest first, with a truncated sample of the body. Empty file = audit ran and found none. |
+| `artifacts/<label>/labels_<key>.jsonl` | One `LabelPruneReport` per function the structuring tap reported on: labels seen, kept because targeted, kept because pinned, kept on both grounds, dropped, duplicates. |
 | `artifacts/` | Generated. Gitignored. |
 
 ### The audits that re-run the pipeline prefix, and why they have to

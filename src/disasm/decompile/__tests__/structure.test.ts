@@ -3,7 +3,7 @@ import type { BasicBlock, Loop } from "../../cfg";
 import type { Instruction } from "../../types";
 import type { IRExpr, IRStmt } from "../ir";
 import { irBinary, irConst, irDeref, irReg } from "../ir";
-import { type SwitchArmExit, structureCFG } from "../structure";
+import { type LabelPruneReport, type SwitchArmExit, structureCFG } from "../structure";
 
 const BASE = 0x401000;
 const addrOf = (id: number) => BASE + id * 0x100;
@@ -1173,5 +1173,83 @@ describe("structureCFG — switches", () => {
       },
       { kind: "goto", label: `loc_${addrOf(5).toString(16).toUpperCase()}` },
     ]);
+  });
+});
+
+describe("structureCFG — the label-origin report (corpus/labelOrigins.ts's instrument)", () => {
+  /**
+   * `pruneLabels` tells a watcher why each label survived: a `goto` names it,
+   * the leftover pass pinned it, or both — and how many it dropped. The report
+   * must add up, must not change the output, and must separate the two grounds,
+   * because `pinnedOnly` is the population `structs.ts`'s `baseGenerations`
+   * resets every key at (peek-a-bin-n9cl.1).
+   */
+  const withReport = (
+    blocks: BasicBlock[],
+    lifted: Record<number, IRStmt[]>,
+  ): { out: IRStmt[]; report: LabelPruneReport | null } => {
+    let report: LabelPruneReport | null = null;
+    const liftedMap = new Map<number, IRStmt[]>(
+      Object.entries(lifted).map(([k, v]) => [Number(k), v]),
+    );
+    const out = structureCFG(blocks, [], liftedMap, new Map(), false, new Map(), undefined, (r) => {
+      report = r;
+    });
+    return { out, report };
+  };
+
+  it("files a back-edge target as targeted only, drops the rest, and adds up", () => {
+    // 0 -> 1 -> 0: block 1 jumps back to 0, so `loc_401000` is a goto target;
+    // block 1's own label is named by nothing and is dropped.
+    const blocks = [
+      bb(0, { succs: [1], code: [["mov", "eax, 1"]] }),
+      bb(1, { succs: [0], preds: [0], code: [["jmp", 0]] }),
+    ];
+    const { out, report } = withReport(blocks, { 0: [mark(0)], 1: [mark(1)] });
+    expect(report).not.toBeNull();
+    const r = report as unknown as LabelPruneReport;
+    expect(r.seen).toBe(2);
+    expect(r.targetedOnly).toBe(1);
+    expect(r.pinnedOnly).toBe(0);
+    expect(r.both).toBe(0);
+    expect(r.dropped).toBe(1);
+    expect(r.duplicates).toBe(0);
+    expect(r.targetedOnly + r.pinnedOnly + r.both + r.dropped + r.duplicates).toBe(r.seen);
+    // The instrument changed nothing: the same call without it emits the same tree.
+    expect(structure(blocks, { 0: [mark(0)], 1: [mark(1)] })).toEqual(out);
+  });
+
+  it("files a leftover region's label as pinned only", () => {
+    // Block 1 is reachable from nothing: the entry returns. The leftover pass
+    // starts a fresh walk at it and pins its label, which no goto names.
+    const blocks = [bb(0, { code: [["ret", ""]] }), bb(1, { code: [["ret", ""]] })];
+    const { out, report } = withReport(blocks, { 0: [mark(0)], 1: [mark(1)] });
+    const r = report as unknown as LabelPruneReport;
+    expect(r.pinnedOnly).toBe(1);
+    expect(r.targetedOnly).toBe(0);
+    expect(out).toContainEqual(loc(1));
+  });
+
+  it("is not consulted at all when nobody is watching", () => {
+    let calls = 0;
+    structureCFG(
+      [bb(0, { code: [["ret", ""]] })],
+      [],
+      new Map([[0, [mark(0)]]]),
+      new Map(),
+      false,
+      new Map(),
+      undefined,
+      () => {
+        calls++;
+      },
+    );
+    expect(calls).toBe(1);
+    // And the empty CFG never reaches pruneLabels.
+    let empty = 0;
+    structureCFG([], [], new Map(), new Map(), false, new Map(), undefined, () => {
+      empty++;
+    });
+    expect(empty).toBe(0);
   });
 });
