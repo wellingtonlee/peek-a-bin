@@ -1572,9 +1572,7 @@ describe("graph mode: one CFG, one layout, one font size", () => {
       // layout was sized at the font size under test.
       await waitFor(() => {
         expect(overviewPublished.length).toBeGreaterThan(0);
-        expect(lastOverview().blocks.length).toBe(
-          container.querySelectorAll(".cfg-block").length,
-        );
+        expect(lastOverview().blocks.length).toBe(container.querySelectorAll(".cfg-block").length);
       });
       const published = lastOverview();
 
