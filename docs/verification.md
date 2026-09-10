@@ -1011,6 +1011,92 @@ re-taken.)
     base. The width sweep (1700 / 1536 / 1440 / 1366 / 1280 / 1152 / 1024 / 840 / 700px, checking the
     notice is readable and the byte column does not paint over the listing) is appended to
     `peek-a-bin-v2u`, which stays open.
+- **THE TWO PERSISTED-SIZE CLAMPS: ARITHMETIC AND WIRING MEASURED, LAYOUT NOT AT ALL — and the
+  height's listing floor is a BLOCKED ALTERNATIVE with a measured boundary
+  (2026-09-10, `peek-a-bin-0tt6`).** `Sidebar.tsx`'s width and
+  `BottomPanelContainer.tsx`'s docked height each persisted a dragged pixel size to localStorage and
+  restored it clamped against a pair of compile-time constants alone — `[180, 400]` and `[80, 600]` —
+  with no viewport term and no re-derivation on resize. `components/persistedSizeClamp.ts` is the one
+  declaration of the rule, on `floatingClamp.ts`'s model: pure, viewport injected, no DOM.
+  - **THE RULE, AND WHICH PARTS ARE DERIVED.** `Math.max(min, Math.min(max, viewport - reserve,
+    stored))` — three bounds, floor outermost. The *shape* is derived: the floor-wins ordering is
+    forced, because yielding to the viewport instead drives the size to `viewport - reserve`, which
+    reaches zero and then goes negative, and an element of no extent cannot be grabbed back, where an
+    overflowing floor still has the sidebar's collapse rail and the panel's close button. The
+    derive-don't-write-back rule is `floatingClamp`'s own history repeated one question over.
+  - **THE WIDTH RESERVE IS 306px AND CARRIES THREE STATED JUDGEMENTS.** Derived:
+    `.disasm-grid.hide-bytes` (`src/styles/index.css`) is `--col-badge 2.5ch` + `--col-addr` (18ch
+    for a 64-bit image) + `--col-mnemonic 8ch` before its `1fr`, i.e. **28.5ch of fixed columns**,
+    inside `--row-px: 1rem` on each side (32px). Judgement 1: the **bytes-hidden** column set is the
+    floor rather than the full 56.5ch, which would be 439px at the default 12px mono size and 575px
+    at 16px and would pin the sidebar to its floor on any window under ~760px — the listing scrolls
+    horizontally, so neither figure is a hard requirement. Judgement 2: the **0.6em character
+    advance**, a property of `--font-mono` that nothing here measures and jsdom could never check.
+    Judgement 3: taking the **16px** figure (`loadFontSize`'s ceiling) rather than the 12px default,
+    i.e. sizing for the worst case a user can select. No scrollbar allowance, deliberately.
+  - **THE HEIGHT RESERVE IS 166px AND IS A SUM OF FOUR MEASUREMENTS PLUS ONE JUDGEMENT.** The panel
+    sits at the bottom of `DisassemblyView`'s `h-full` column inside `main`, so what competes with it
+    is the two bars outside `main` (which shorten the column) plus the two strips above it inside it:
+    `AddressBar` **73** (`py-1.5` + `gap-1` + `border-b`; a `text-sm` button at `py-1` is 20+8=28, and
+    below `2xl` the view tabs take a row of their own — `basis-full`, added at `16f37df` — so
+    28+4+28+12+1=73 against 41 above that width, and **the two-row figure is taken**),
+    `DisassemblyToolbar` **31** (tallest child its `w-48 px-2 py-0.5` search input, 16+4+2=22, so
+    22+8+1), `Breadcrumbs` **21** (`py-0.5` + `border-b`), `StatusBar` **21** (`h-5` + `border-t`),
+    and one **20px** `--row-height` listing row. The four chrome terms are measurements; **the
+    listing floor is the judgement**, and it is one row because one is the only row count that is not
+    arbitrary — the boundary between a listing and no listing. Four conditional strips are NOT
+    counted (the driver banner, the analysis notice, the toolbar's search and filter sub-rows, ~30px
+    each): a reserve sized for chrome no session shows would exceed the chrome on screen.
+  - **WHERE EACH CLAMP STARTS BITING, so it is provably not a no-op.** Width: below a 720px viewport
+    for a stored 400 (500 → 194, 375 → the 180 floor). Height: below 766 for a stored 600 (700 → 534,
+    500 → 334, 200 → the 80 floor). Both are inert at jsdom's 1024x768, which is why no pre-existing
+    DOM assertion moves. Note a correction to the bead's own arithmetic worth carrying: a 768px-tall
+    *display* gives a maximised browser an `innerHeight` around 600-660, not 768, so the height clamp
+    engages on ordinary laptops even though it does not at jsdom's number.
+  - **ELEVEN NEGATIVE CONTROLS, NONE INERT.** Measured over the two new suites plus
+    `Sidebar.dom.test.tsx` and `BottomPanels.dom.test.tsx` (140 rows green unperturbed): reverting the
+    sidebar render to `style={{ width }}` → **6 red**; reverting the panel to `style={{ height }}` →
+    **6 red**; persisting the clamped value instead of the preference → **exactly the 3
+    derive-don't-store rows**; inverting the ordering so the viewport beats the floor → **4 red**;
+    deleting the sidebar's resize listener → **2 red**; transposing the two reserves at the call
+    sites → **12 red, including a pre-existing row**; +1px on the height reserve → **6 red**;
+    dropping the `max` term → **1 red and a typecheck failure**; flooring the answer → **1 red**;
+    raising the width reserve to 700 so it bites at 1024 → **11 red** (the liveness half for the
+    "already fits" rows); and the 246 reserve of the preferred five-row floor → **1 red, and it is
+    the pre-existing row named below**.
+  - **ONE ROW IS REDDENED BY NO PERTURBATION AND IS RECORDED RATHER THAN TUNED AWAY**: idempotence.
+    A `min`/`max` composition cannot be made non-idempotent without breaking one of its bounds, so
+    every control above that touches the function reddens a *bound* row first. It is kept as
+    documentation, exactly as `floatingClamp.test.ts` keeps its own.
+  - **THE BLOCKED ALTERNATIVE, MEASURED.** Four or five listing rows is the floor that would make the
+    pane worth looking at; the chrome-plus-five-rows reserve is 246. At jsdom's 768 that puts the
+    ceiling at 522, and `BottomPanels.dom.test.tsx`'s `it("clamps to the minimum and the maximum")`
+    asserts a rendered `600px` there. **The boundary was bisected: reserve 167 and 168 leave that
+    suite 45/45 green, 169 reddens exactly that one row.** The chosen 166 sits 2px inside it. That
+    row asserts the constants-only clamp this module exists to widen — the repo's own recurring
+    "the suite had pinned the defect as the rule" shape — so raising the floor is a decision about
+    that test and was reported rather than taken, per the instruction not to modify an existing test.
+    The width side was never constrained: its boundary is **624/625**, i.e. 318px of headroom over
+    the 306 chosen.
+  - **WHAT NONE OF IT ESTABLISHES.** jsdom performs no layout. Nothing has seen a sidebar be too
+    wide, a listing be squeezed to nothing, a docked panel overflow its column, a 180px sidebar in a
+    375px window be usable, or any of it come back when the window grows; `innerWidth`/`innerHeight`
+    are two numbers nothing lays anything out against, and the `resize` event is fired by hand
+    because there is no real resize to observe. Every reserve term is Tailwind-class arithmetic
+    **read, never measured** — a different fallback font or a padding change moves the 306, and a
+    class change in any of the four chrome elements moves the 166 with nothing to notice it by
+    except the pinned sum in `persistedSizeClamp.test.ts`. **Appended to `peek-a-bin-v2u`**: open the
+    app at 500x400, confirm the sidebar and the docked panel are both usable and both return to their
+    dragged size when the window is restored, and check the sidebar's Functions header and filter box
+    at the 180px floor — which the bead flags as never having been looked at and this change does not
+    address.
+  - **ONE THING DELIBERATELY NOT CONSOLIDATED.** There are now two window-`resize` listeners with the
+    same bail-out shape, `BottomPanelContainer`'s `{w, h}` pair and the sidebar's bare width. A
+    `useViewportSize` hook would fold them, and it was declined in the same change as a behaviour fix:
+    the sidebar persists nothing vertical, so a shared pair would re-render that tree on every
+    vertical resize it does not care about, and a primitive comparison gets the bail-out for free
+    where the pair needs object identity preserved by hand. The **rule** has one declaration, which is
+    what the bead asked for; the *listener* does not.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.

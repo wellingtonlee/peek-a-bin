@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { clampFloatingPosition } from "./floatingClamp";
+import { clampPersistedSize, DOCKED_PANEL_HEIGHT_RESERVE } from "./persistedSizeClamp";
 import { ResizeHandle } from "./ResizeHandle";
 
 interface PanelDef {
@@ -129,6 +130,11 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
    */
   const handleResizeEnd = useCallback(() => {
     try {
+      // The PREFERENCE, not `renderedHeight`. That value is derived per render
+      // against the live viewport and must never come back through here, or a
+      // session in a short window silently discards a tall preference — the
+      // mistake `floatingClamp`'s position made once and the reason the rule
+      // says so in its own docstring.
       localStorage.setItem("peek-a-bin:bottom-panel-height", String(height));
     } catch {}
   }, [height]);
@@ -191,13 +197,32 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
   const tabbedPanels = visiblePanels.filter((p) => !poppedOut.has(p.id));
   const floatingPanels = visiblePanels.filter((p) => poppedOut.has(p.id));
 
+  /**
+   * DERIVED FOR RENDERING, NEVER WRITTEN BACK — the docked twin of the
+   * `poppedOut` derivation below, reading the same `viewport` state so a resize
+   * re-runs it. `height` is what the user chose and what persists; this is the
+   * largest slice of it the window can afford above the app's own chrome, so a
+   * stored 600px panel renders at 234px in a 400px-tall window (rather than
+   * overflowing it) and returns to 600px when the window grows.
+   */
+  const renderedHeight = clampPersistedSize(
+    height,
+    MIN_HEIGHT,
+    MAX_HEIGHT,
+    viewport.h,
+    DOCKED_PANEL_HEIGHT_RESERVE,
+  );
+
   if (visiblePanels.length === 0) return null;
 
   return (
     <>
       {/* Tabbed container */}
       {tabbedPanels.length > 0 && (
-        <div className="shrink-0 flex flex-col panel-bg border-t border-theme" style={{ height }}>
+        <div
+          className="shrink-0 flex flex-col panel-bg border-t border-theme"
+          style={{ height: renderedHeight }}
+        >
           <ResizeHandle
             orientation="vertical"
             onResize={handleResize}

@@ -161,7 +161,35 @@ and the copies drifted. Reuse them rather than re-rolling the logic.
   `BottomPanelContainer.tsx`, and deliberately taking **no height**, since a whole-panel-inside
   rule pins a panel taller than the window. The clamped position is **derived, never written
   back** — a callback spreading that derived object into `poppedOut` replaces the user's stored
-  position with the picture of it, which is how the corner resize lost one. All
+  position with the picture of it, which is how the corner resize lost one.
+  **`persistedSizeClamp.ts`'s `clampPersistedSize` is the one declaration of the
+  NEIGHBOURING question — how large may a persisted, user-chosen SIZE be, given the
+  viewport — and it is a different function for a stated reason**: `floatingClamp`
+  anchors on a constant slice of a drag handle and therefore takes no size at all,
+  where this is *about* the size. Two sites read it, `Sidebar.tsx`'s width and
+  `BottomPanelContainer.tsx`'s docked height, each restored from localStorage against
+  a pair of compile-time constants alone until `peek-a-bin-0tt6`. Three rules, all
+  load-bearing. The answer is **derived for rendering and never written back**, which
+  is the paragraph above's fix repeated one question over — the state and the drag
+  carry the preference, so a large window restores the large sidebar. **When the floor
+  and the viewport cannot both be satisfied the FLOOR WINS** (`Math.max(min, …)`
+  outermost, a named and tested case): they genuinely cannot — a 180px minimum sidebar
+  beside a 306px reserve does not fit in a 375px viewport — and yielding drives the
+  size through zero to negative, leaving an element of no extent that cannot be dragged
+  back, where a floor that overflows still has a collapse rail and a close button.
+  And **a DRAG is not clamped**, deliberately unlike `floatingClamp`'s, whose write
+  *is*: a size drag is already bounded by the site's own `MAX`, and clamping the write
+  would let one drag in a narrow window discard a wide preference permanently. The two
+  reserves are **sums of measured element extents, not invented numbers** — 306px of
+  width from `.disasm-grid.hide-bytes`' 28.5ch of fixed columns at the 16px maximum
+  mono size plus `--row-px` both sides, and 166px of height from `AddressBar` at two
+  rows (73) + section-header bar (31) + breadcrumbs (21) + status bar (21) + one
+  `--row-height` listing row (20). **The height's one-row listing floor is a BLOCKED
+  ALTERNATIVE rather than a preference**: four or five rows is the size that makes the
+  pane worth looking at, and measured, any reserve above 168 reddens
+  `BottomPanels.dom.test.tsx`'s "clamps to the minimum and the maximum", which asserts
+  the constants-only clamp this module exists to widen — so raising it is a decision
+  about that test. Nothing here is verified as LAYOUT (`peek-a-bin-v2u`).
   **`Sidebar.tsx` is a flex column with ONE `flex-1` child, the function list, and
   nothing whose height follows the CURSOR may sit above it** — the Call Graph
   (Callers/Callees) block did, unbounded, so every caret move dragged the Functions
@@ -1509,6 +1537,31 @@ read "all of them compile" as "all of them are right".
   inline keyboard `onResizeEnd` stores the PRE-press one — the latter asserted with a harness
   that is deliberately the naive state-reading caller, since a `vi.fn()` can only see that the
   callback fired. Reverting the deferral reddens four tests across all three callers.
+- **THE TWO PERSISTED-SIZE CLAMPS ARE VERIFIED AS ARITHMETIC AND AS WIRING, AND AS LAYOUT NOT AT
+  ALL.** `persistedSizeClamp.test.ts` is the rule (11 rows: the ordinary case, both ceilings, both
+  floor-wins arms, both boundaries, the axis check, idempotence) and
+  `PersistedSizeClamp.dom.test.tsx` the wiring (14 rows: each site mounts a fitting size unchanged,
+  mounts an unaffordable one clamped, re-derives on a `resize`, holds its floor, keeps the stored
+  preference through a lapse, and persists what a drag asked for rather than what the window
+  granted — plus one row computing both sites' expected numbers from the rule itself, at four
+  viewports each, which is what makes "one rule, two sites" an assertion). **Eleven negative
+  controls, NONE INERT** — reverting either render to the raw stored value reddens 6 each; writing
+  the clamped value back reddens exactly the 3 derive-don't-store rows; inverting the floor/viewport
+  ordering reddens 4; removing the sidebar's resize listener reddens 2; transposing the two reserves
+  reddens 12 *including a pre-existing row*; ±1px on the height reserve reddens 6; dropping the
+  site-ceiling term reddens 1 and fails typecheck; flooring the answer reddens 1; and raising the
+  width reserve to 700 reddens 11. **One row is reddened by no perturbation of the function alone
+  and is recorded rather than tuned**: idempotence over a `min`/`max` composition cannot be broken
+  without breaking a bound, exactly as in `floatingClamp.test.ts`. **What NONE of it establishes**:
+  jsdom performs no layout, so nothing has seen a sidebar be too wide, a listing be squeezed to
+  nothing, a docked panel overflow its column, or any of it come back when the window grows — and
+  `innerWidth`/`innerHeight` are two numbers nothing lays anything out against, with the `resize`
+  event fired by hand. The two reserves are sums of Tailwind-class arithmetic **read, never
+  measured**; the 0.6em monospace advance behind the 306 is a property of `--font-mono` that nothing
+  here can check. Added to `peek-a-bin-v2u`. **A measured constraint worth carrying**: the height
+  reserve has 2px of headroom before `BottomPanels.dom.test.tsx` reddens (boundary 168/169) where
+  the width reserve has 318px (boundary 624/625), so only the height was ever constrained by an
+  existing test.
 - **Named holes inside the rendered set, so a green suite is not over-read**: `DisassemblyMinimap`
   and `ResourcesView`'s `RT_GROUP_ICON` preview mount and never paint — the preview's
   *reconstruction* has unit coverage, but no test and no human has seen an icon; and every popup's
@@ -2677,6 +2730,15 @@ mistake.
 
 - Capstone WASM is cached in IndexedDB (`peek-a-bin-wasm`). First load fetches, subsequent loads read from cache.
 
+- **A persisted pixel SIZE must be validated against the viewport, not only against a compile-time
+  constant — and the clamped value must never be written back.** Two sites, one rule, in
+  `components/persistedSizeClamp.ts`: the sidebar's width and the docked bottom panel's height.
+  **The rule and its three load-bearing halves are stated in full in the `floatingClamp.ts`
+  paragraph's neighbourhood under "Rendering and the rest"** — that is where the sibling question
+  lives and this entry exists so the order here matches `docs/gotchas.md`. Long-form, including the
+  reserves' derivation, the eleven negative controls and the one alternative an existing test
+  blocks, in [`docs/gotchas.md`](docs/gotchas.md) and
+  [`docs/verification.md`](docs/verification.md) (`peek-a-bin-0tt6`).
 - **`fold.ts` has a `castTypeSize` helper** for double-cast removal; it regexes the bit width out of type strings like `int32_t`.
 
 - **`cleanup.ts`** runs after `structureCFG`, before `inferTypes`. Guard clause flattening is single-level only, not recursive inversion.

@@ -13,6 +13,7 @@ import {
 import { copyText } from "../utils/clipboard";
 import { generateMarkdownReport } from "../utils/exportSchema";
 import { focusOnMount } from "./focusOnMount";
+import { clampPersistedSize, SIDEBAR_WIDTH_RESERVE } from "./persistedSizeClamp";
 import { ResizeHandle } from "./ResizeHandle";
 import { SkeletonRows } from "./Skeleton";
 
@@ -107,6 +108,21 @@ export function Sidebar() {
   const [sort, setSort] = useState<SortMode>("address");
   const listRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(loadWidth);
+  /**
+   * The viewport width every rendered width is clamped against, held as state
+   * so a resize re-runs the derivation below. Seeded from `window` at mount,
+   * which is safe because nothing here renders on a server.
+   *
+   * `BottomPanelContainer`'s equivalent is the precedent and carries the long
+   * argument for the shape — an unconditional listener, and a state write that
+   * returns the SAME NUMBER when the axis did not move so React bails out. Two
+   * differences, both deliberate: this holds a bare number rather than a
+   * `{w, h}` pair, because the sidebar persists nothing vertical and a shared
+   * pair would re-render this tree on every vertical resize it does not care
+   * about; and there is consequently no object identity to preserve, the
+   * primitive comparison doing it for free.
+   */
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [collapsed, setCollapsed] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [renamingFn, setRenamingFn] = useState<{ address: number; value: string } | null>(null);
@@ -208,12 +224,21 @@ export function Sidebar() {
   const containingFunc = useContainingFunc();
   const activeFuncAddr = containingFunc?.address ?? null;
 
-  // Persist width
+  // Persist width — the PREFERENCE, not the clamped width that is rendered.
+  // `renderedWidth` below is derived and must never come back through here, or
+  // one session in a small window silently discards a wide preference.
   useEffect(() => {
     try {
       localStorage.setItem("peek-a-bin:sidebar-width", String(width));
     } catch {}
   }, [width]);
+
+  useEffect(() => {
+    const onResize = () =>
+      setViewportWidth((prev) => (prev === window.innerWidth ? prev : window.innerWidth));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Persist sections/graph overview toggle
   useEffect(() => {
@@ -470,6 +495,25 @@ export function Sidebar() {
   const awaitingFunctions =
     state.functions.length === 0 && ANALYSIS_IN_PROGRESS[state.analysisPhase];
 
+  /**
+   * DERIVED FOR RENDERING, NEVER WRITTEN BACK. `width` is the preference and is
+   * what persists; this is the largest slice of it the current window can
+   * afford, so a 400px sidebar chosen on a 2560px monitor renders at 180px in a
+   * 500px window and returns to 400px when the window grows. Feeding this back
+   * into `setWidth` is the one thing that would break that (see the rule's own
+   * docstring, and `floatingClamp`'s history for the same mistake made once).
+   *
+   * The clamp is not applied to the collapsed rail below, whose width is a
+   * 40px constant and is smaller than any viewport this could bound.
+   */
+  const renderedWidth = clampPersistedSize(
+    width,
+    MIN_WIDTH,
+    MAX_WIDTH,
+    viewportWidth,
+    SIDEBAR_WIDTH_RESERVE,
+  );
+
   if (collapsed) {
     return (
       <aside className="w-10 panel-bg border-r border-theme flex flex-col items-center py-2 shrink-0">
@@ -560,7 +604,7 @@ export function Sidebar() {
   return (
     <aside
       className="panel-bg border-r border-theme flex flex-col overflow-hidden text-xs relative shrink-0"
-      style={{ width }}
+      style={{ width: renderedWidth }}
     >
       {/* Resize handle */}
       <button
