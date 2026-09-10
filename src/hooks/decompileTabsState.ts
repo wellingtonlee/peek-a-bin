@@ -1,5 +1,8 @@
 // Leaf module: this file must not import anything that pulls in disasmClient or
-// Capstone WASM, so tests can exercise the decisions below directly.
+// Capstone WASM, so tests can exercise the decisions below directly. (A `type`
+// import is erased and pulls in nothing.)
+
+import type { DecompileAdmissions } from "../disasm/decompile/emit";
 
 export type DecompileTab = "low" | "high" | "ai";
 export type HighLevelEngine = "ghidra" | "retdec" | "none";
@@ -11,6 +14,13 @@ export interface TabState {
   error: string;
   ready: boolean;
   engine?: HighLevelEngine;
+  /**
+   * Where the Low Level C admits a gap — see `DecompileAdmissions`. Set by the
+   * low tab's `LOAD_OK` only; the High Level and AI tabs never carry one, which
+   * is what makes "the admissions line is a Low Level affordance" a property of
+   * the state rather than a check in the component.
+   */
+  admissions?: DecompileAdmissions;
 }
 
 export interface DecompileTabsState {
@@ -30,6 +40,7 @@ export type TabAction =
       code: string;
       lineMap: Map<number, number>;
       engine?: HighLevelEngine;
+      admissions?: DecompileAdmissions;
     }
   | { type: "LOAD_ERR"; tab: DecompileTab; error: string }
   | { type: "AI_TOKEN"; accumulated: string }
@@ -61,6 +72,7 @@ export function initialTabsState(): DecompileTabsState {
 export interface LowCacheEntry {
   code: string;
   lineMap: Map<number, number>;
+  admissions: DecompileAdmissions;
   /** The user inputs this entry was decompiled under — see `decompileInputsKey()`. */
   inputsKey: string;
 }
@@ -119,6 +131,50 @@ export function writeLowCache(
   entry: LowCacheEntry,
 ): void {
   cache.set(addr, entry);
+}
+
+// ── The admissions line ──
+
+export type AdmissionKind = keyof DecompileAdmissions;
+
+/** One clause of the admissions line: what it says, how many, and where the first one is. */
+export interface AdmissionPart {
+  kind: AdmissionKind;
+  count: number;
+  /** 0-based line index of the first site, for "scroll to it". */
+  firstLine: number;
+  /** The clause as printed, e.g. `3 unrecovered`. */
+  text: string;
+}
+
+/** The order the clauses print in, and the word each prints with. */
+const ADMISSION_WORDS: readonly [AdmissionKind, string][] = [
+  ["unrecovered", "unrecovered"],
+  ["unlifted", "unlifted"],
+  ["gotos", "goto"],
+];
+
+/** What separates the clauses on the line. */
+export const ADMISSION_SEPARATOR = " · ";
+
+/**
+ * The Low Level panel's admissions line — `3 unrecovered · 5 unlifted · 2 goto`
+ * — as data, one clause per non-empty kind in a fixed order.
+ *
+ * ONE function owns both the count and the wording (the `matchSummary`
+ * precedent in the hex view), so a clause and the number it prints can never
+ * come apart, and the sentence can be tested without a DOM. A kind with no
+ * sites prints nothing; an empty result means the function was recovered whole
+ * and the panel renders no line at all.
+ */
+export function admissionSummary(adm: DecompileAdmissions): AdmissionPart[] {
+  const parts: AdmissionPart[] = [];
+  for (const [kind, word] of ADMISSION_WORDS) {
+    const sites = adm[kind];
+    if (sites.length === 0) continue;
+    parts.push({ kind, count: sites.length, firstLine: sites[0], text: `${sites.length} ${word}` });
+  }
+  return parts;
 }
 
 // ── High Level result cache ──
@@ -196,6 +252,7 @@ export function tabsReducer(state: DecompileTabsState, action: TabAction): Decom
           error: "",
           ready: true,
           engine: action.engine,
+          admissions: action.admissions,
         },
       };
     case "LOAD_ERR":

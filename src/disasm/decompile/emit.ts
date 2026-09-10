@@ -470,10 +470,32 @@ function byteArithOperand(expr: IRExpr, prec: number): string {
  * assert they are equal.
  */
 function unrecoveredValue(text: string): string {
-  const name = `__unrecovered_${_unrecovered.length + 1}`;
+  const name = `${UNRECOVERED_PREFIX}${_unrecovered.length + 1}`;
   _unrecovered.push({ name, note: text });
   return text ? `${name} /* ${commentSafe(text)} */` : name;
 }
+
+/**
+ * The admission spellings, declared ONCE each beside the code that emits them,
+ * and read back by {@link collectAdmissions} so the counter on screen and the
+ * emitter cannot disagree about what an admission looks like (peek-a-bin-n9cl.7).
+ *
+ * `UNRECOVERED_PREFIX` is what {@link unrecoveredValue} builds a name from;
+ * `UNRECOVERED_USE` is any line mentioning such a name; `UNRECOVERED_DECL` is
+ * the one line per name that is not a use — its `intptr_t` declaration at the
+ * top of the function — and is excluded, or every unrecovered value would be
+ * counted twice and the first site the panel scrolled to would be the
+ * declaration block. `corpus/emitAudits.ts` keeps its OWN text scans of the
+ * same spellings deliberately: an audit that read this field would stop being
+ * independent of the thing it audits.
+ */
+const UNRECOVERED_PREFIX = "__unrecovered_";
+const UNRECOVERED_USE = new RegExp(`\\b${UNRECOVERED_PREFIX}\\d+\\b`);
+/** Written by `emitFunctionBody`'s declaration block; the note text is `UNRECOVERED_DECL_NOTE`. */
+const UNRECOVERED_DECL_NOTE = "not recovered";
+const UNRECOVERED_DECL = new RegExp(
+  `^\\s*intptr_t ${UNRECOVERED_PREFIX}\\d+; /\\* ${UNRECOVERED_DECL_NOTE}`,
+);
 
 /**
  * The text inside `__except(...)`.
@@ -1643,6 +1665,17 @@ function oneLinedGuard(pad: string, cond: string, body: EmitResult): EmitResult 
   return { lines: [`${pad}if (${cond}) ${body.lines[0].trim()}`], addrs: [body.addrs[0]] };
 }
 
+/**
+ * The spelling of an instruction the lifter has no C for — see the `raw` case
+ * in {@link emitStmt} for why it is a comment and why the `;` follows it. The
+ * pattern beside it is what {@link collectAdmissions} counts; the two are one
+ * declaration so they cannot drift.
+ */
+function unliftedStatement(text: string): string {
+  return `/* unlifted: ${commentSafe(text)} */;`;
+}
+const UNLIFTED_LINE = /^\s*\/\* unlifted: .* \*\/;$/;
+
 function emitStmt(stmt: IRStmt, level: number): EmitResult {
   const pad = indent(level);
   const lines: string[] = [];
@@ -1865,7 +1898,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
       // keeps the position a statement, so a label or a one-statement block
       // body still compiles.
       const text = /^__asm \{(.*)\}$/.exec(stmt.text)?.[1]?.trim() ?? stmt.text;
-      push(`${pad}/* unlifted: ${commentSafe(text)} */;`, addr);
+      push(`${pad}${unliftedStatement(text)}`, addr);
       break;
     }
 
@@ -2349,8 +2382,22 @@ function labelForAddr(addr: number): string {
   return `loc_${addr.toString(16).toUpperCase()}`;
 }
 
+/** The `goto` statement itself; the one core every goto pattern below is built from. */
+const GOTO_STMT = String.raw`goto ([A-Za-z_]\w*);`;
 /** A whole line that is exactly a `goto`, so a string constant containing one cannot match. */
-const GOTO_LINE = /^(\s*)goto ([A-Za-z_]\w*);$/;
+const GOTO_LINE = new RegExp(`^(\\s*)${GOTO_STMT}$`);
+/** What `placeGotoLabels` appends to a `goto` whose target emitted no line. */
+const GOTO_NO_LABEL_NOTE = "// no label: nothing was emitted for this address";
+/**
+ * Every line that carries a `goto` as its statement, for {@link collectAdmissions}:
+ * a whole-line `goto`, the same one-lined as a guard's body (`if (c) goto L;`,
+ * see `oneLinedGuard`), either with the no-label note appended. Anchored at
+ * both ends like `GOTO_LINE`, so a `goto` inside a string constant still cannot
+ * match.
+ */
+const GOTO_ADMISSION_LINE = new RegExp(
+  `^\\s*(?:if \\(.*\\) )?${GOTO_STMT}(?: ${GOTO_NO_LABEL_NOTE.replace(/[/*]/g, "\\$&")})?$`,
+);
 
 /**
  * Give every emitted `goto` its label, or say why it has none.
@@ -2402,7 +2449,7 @@ function placeGotoLabels(lines: string[], lineAddrs: (number | undefined)[]): vo
   for (let i = 0; i < lines.length; i++) {
     const m = GOTO_LINE.exec(lines[i]);
     if (m && !anchors.has(m[2]) && !already.has(m[2])) {
-      lines[i] = `${lines[i]} // no label: nothing was emitted for this address`;
+      lines[i] = `${lines[i]} ${GOTO_NO_LABEL_NOTE}`;
     }
   }
 
@@ -2416,9 +2463,51 @@ function placeGotoLabels(lines: string[], lineAddrs: (number | undefined)[]): vo
   }
 }
 
+/**
+ * Where the emitted C admits it did not recover something, as 0-based LINE
+ * INDICES into `code` — one entry per line, so a line holding two unrecovered
+ * values is one site. Sites rather than counts because the count is `.length`
+ * and "scroll to the first" is `[0]`; lines rather than addresses because the
+ * line map is many-to-one and the declaration block has no address at all.
+ *
+ * Three kinds, each the reading of one declared pattern in this file:
+ *  - `unrecovered` — a use of an `__unrecovered_N` free variable, the emitter's
+ *    name for a machine value it could not spell (`unrecoveredValue`);
+ *    declarations are not sites.
+ *  - `unlifted` — an instruction left as `/* unlifted: … *\/;` (`unliftedStatement`).
+ *  - `gotos` — a `goto`, whole-line or as a one-lined guard's body: control flow
+ *    the structurer could not express as a construct.
+ *
+ * Computed by {@link collectAdmissions} AFTER `placeGotoLabels`, because that pass
+ * splices label lines in and every index below an insertion shifts by one. All
+ * three arrays are empty for a function the emitter recovered whole.
+ */
+export interface DecompileAdmissions {
+  unrecovered: number[];
+  unlifted: number[];
+  gotos: number[];
+}
+
+export function emptyAdmissions(): DecompileAdmissions {
+  return { unrecovered: [], unlifted: [], gotos: [] };
+}
+
+/** Read the admission sites off the FINAL lines — see {@link DecompileAdmissions}. */
+function collectAdmissions(lines: readonly string[]): DecompileAdmissions {
+  const out = emptyAdmissions();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (UNRECOVERED_USE.test(line) && !UNRECOVERED_DECL.test(line)) out.unrecovered.push(i);
+    if (UNLIFTED_LINE.test(line)) out.unlifted.push(i);
+    if (GOTO_ADMISSION_LINE.test(line)) out.gotos.push(i);
+  }
+  return out;
+}
+
 export interface EmitFunctionResult {
   code: string;
   lineMap: Map<number, number>; // line number (0-based) → instruction address
+  admissions: DecompileAdmissions;
 }
 
 export function emitFunction(
@@ -2658,7 +2747,7 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
     // width, and nothing here justifies claiming one.
     for (const u of _unrecovered) {
       const note = u.note ? `: ${commentSafe(u.note)}` : "";
-      lines.push(`    intptr_t ${u.name}; /* not recovered${note} */`);
+      lines.push(`    intptr_t ${u.name}; /* ${UNRECOVERED_DECL_NOTE}${note} */`);
       lineAddrs.push(undefined);
     }
     lines.push("");
@@ -2681,5 +2770,7 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
     }
   }
 
-  return { code: lines.join("\n"), lineMap };
+  // After `placeGotoLabels`, for the same reason the line map is: the indices
+  // have to name the lines the reader will see.
+  return { code: lines.join("\n"), lineMap, admissions: collectAdmissions(lines) };
 }

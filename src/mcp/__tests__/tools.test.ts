@@ -463,6 +463,37 @@ describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)
     expect(out.functionName).toBe("sub_401000");
     expect(out.code).toMatch(/^\w+ sub_401000\(/m);
   });
+
+  it("returns the admissions beside the code — three empty arrays for a whole recovery", async () => {
+    const { session } = x86Session({});
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const out = JSON.parse(textOf(await decompile({ fileId: "sample", address: "0x401000" })));
+
+    expect(out.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
+  });
+
+  it("returns an unlifted instruction's line index, pointing at the line that says so", async () => {
+    const { session } = stubSession({
+      pe: { is64: false, sections: [], runtimeFunctions: undefined },
+      functions: [{ name: "sub_401000", address: 0x401000, size: 16 }],
+      instructions: [
+        insn(0x401000, "push", "ebp"),
+        insn(0x401004, "mov", "ebp, esp"),
+        insn(0x401008, "leave", ""),
+        insn(0x40100c, "ret", ""),
+      ],
+      jumpTables: new Map(),
+      structRegistry: new StructRegistry(),
+      renames: {},
+    } as unknown as Partial<AnalyzedFile>);
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const out = JSON.parse(textOf(await decompile({ fileId: "sample", address: "0x401000" })));
+
+    expect(out.admissions.unlifted).toHaveLength(1);
+    expect(out.code.split("\n")[out.admissions.unlifted[0]]).toMatch(/\/\* unlifted: leave \*\/;/);
+  });
 });
 
 /** Just enough PE shape for the tools that read `af.pe`. */

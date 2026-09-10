@@ -3,6 +3,7 @@ import type { IRPDispatchEntry } from "../analysis/driver";
 // nothing itself, so it adds no edge to Capstone either.
 import { archForMachine, type ImageArch } from "../disasm/arch";
 import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
+import type { DecompileAdmissions } from "../disasm/decompile/emit";
 // A value import, but `funcInsns.ts` is address arithmetic over plain data and
 // imports nothing but types, so it adds no edge to Capstone either.
 import {
@@ -653,7 +654,7 @@ class DisasmWorkerClient {
     funcMap: Map<number, { name: string; address: number }>,
     runtimeFunctions?: import("../pe/types").RuntimeFunction[],
     functions?: readonly FuncExtent[],
-  ): Promise<{ code: string; lineMap: Map<number, number> }> {
+  ): Promise<{ code: string; lineMap: Map<number, number>; admissions: DecompileAdmissions }> {
     // NO CACHE HERE, AND THAT IS A DELETION. This method used to memoise its
     // reply on the bare function address, with a single caller —
     // `useDecompileTabs.decompileLow` — that keeps a cache of its own, and an
@@ -707,7 +708,12 @@ class DisasmWorkerClient {
       funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
       insnsToken: functions ? this.insnsToken(instructions) : undefined,
     });
-    type Reply = { code: string; lineMap: [number, number][]; needInstructions?: boolean };
+    type Reply = {
+      code: string;
+      lineMap: [number, number][];
+      admissions: DecompileAdmissions;
+      needInstructions?: boolean;
+    };
     let result: Reply = await this.send("decompileFunction", args);
     if (result?.needInstructions) {
       // The worker has to build a clobber summary for this token and holds
@@ -726,7 +732,7 @@ class DisasmWorkerClient {
       // worst sending the section twice.
       result = await this.send("decompileFunction", { ...args, instructions });
     }
-    return { code: result.code, lineMap: new Map(result.lineMap) };
+    return { code: result.code, lineMap: new Map(result.lineMap), admissions: result.admissions };
   }
 
   /** The stable token for this instruction array, minting one on first sight. */

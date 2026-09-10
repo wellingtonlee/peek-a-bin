@@ -252,6 +252,137 @@ describe("decompileFunction — decompiling twice against one registry is idempo
   });
 });
 
+/**
+ * ADMISSIONS AS DATA (peek-a-bin-n9cl.7). The emitted C already admits every
+ * gap in words — `__unrecovered_N`, `/* unlifted: … *\/;`, `goto` — and
+ * `DecompileResult.admissions` is those same admissions as LINE INDICES, read
+ * off the final lines by one declared pattern per kind. What these rows pin is
+ * that every index names a line carrying the spelling it claims (so the panel's
+ * "scroll to the first" lands on a site), that a declaration is not a site,
+ * that the indices are taken AFTER `placeGotoLabels` has shifted the lines, and
+ * that a whole recovery is three empty arrays.
+ */
+describe("decompileFunction — admissions are line indices into the emitted code", () => {
+  function runFull(instructions: Instruction[]) {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    );
+  }
+
+  it("is three empty arrays for a function recovered whole", () => {
+    const r = runFull(seq(0x401000, [["mov", "eax, 1"], ["ret"]]));
+    expect(r.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
+  });
+
+  it("points each unrecovered index at a USE, never at the declaration", () => {
+    // `rol` then `jb`: CF after a rotate is a function of nothing the IR names.
+    const r = runFull(
+      seq(0x401000, [
+        ["rol", "eax, 3"],
+        ["jb", "0x401014"],
+        ["mov", "ecx, 1"],
+        ["ret"],
+        ["mov", "ecx, 2"],
+        ["ret"],
+      ]),
+    );
+    const lines = r.code.split("\n");
+    expect(r.admissions.unrecovered.length).toBeGreaterThan(0);
+    for (const i of r.admissions.unrecovered) {
+      expect(lines[i]).toMatch(/__unrecovered_\d+/);
+      expect(lines[i]).not.toMatch(/^\s*intptr_t __unrecovered_/);
+    }
+    // The declaration exists and is NOT among the sites.
+    const decl = lines.findIndex((l) => /^\s*intptr_t __unrecovered_1;/.test(l));
+    expect(decl).toBeGreaterThan(-1);
+    expect(r.admissions.unrecovered).not.toContain(decl);
+    // The `rol` itself has no C form and is admitted as unlifted — one site,
+    // on the line that says so. Two kinds from one fixture, each on its own line.
+    expect(r.admissions.unlifted).toHaveLength(1);
+    expect(lines[r.admissions.unlifted[0]]).toMatch(/\/\* unlifted: rol eax, 3 \*\/;/);
+    // The unreachable `mov ecx, 2` block re-enters at the shared `ret` by a
+    // `goto`; whatever the structurer emits, every goto index names a goto line.
+    for (const i of r.admissions.gotos) expect(lines[i]).toMatch(/\bgoto loc_[0-9A-F]+;/);
+  });
+
+  it("points each unlifted index at an `/* unlifted: … */;` line", () => {
+    const r = runFull(seq(0x401000, [["push", "ebp"], ["mov", "ebp, esp"], ["leave"], ["ret"]]));
+    const lines = r.code.split("\n");
+    expect(r.admissions.unlifted).toHaveLength(1);
+    expect(lines[r.admissions.unlifted[0]]).toMatch(/^\s*\/\* unlifted: leave \*\/;$/);
+    expect(r.admissions.unrecovered).toEqual([]);
+  });
+
+  it("points each goto index at a `goto` line, with the label line not among them", () => {
+    // The shared-block fixture from the goto-label suite. Its label comes from
+    // `structure.ts`, not from `placeGotoLabels`' splice, so this row cannot see
+    // the collect-after-splice ordering — measured: collecting BEFORE the pass
+    // left it green. `emit.test.ts` pins that ordering with hand-built IR.
+    const r = runFull(
+      seq(0x401000, [
+        ["cmp", "eax, 1"],
+        ["jne", "0x401018"],
+        ["cmp", "ebx, 2"],
+        ["je", "0x401020"],
+        ["call", "0x402010"],
+        ["ret"],
+        ["call", "0x402000"],
+        ["jmp", "0x401028"],
+        ["call", "0x402014"],
+        ["jmp", "0x401030"],
+        ["call", "0x402004"],
+        ["jmp", "0x401010"],
+        ["call", "0x402008"],
+        ["jmp", "0x401028"],
+      ]),
+    );
+    const lines = r.code.split("\n");
+    expect(r.admissions.gotos.length).toBeGreaterThan(0);
+    for (const i of r.admissions.gotos) expect(lines[i]).toMatch(/\bgoto loc_[0-9A-F]+;/);
+    // Every goto line in the text is a site, and no other line is.
+    const textual = lines.flatMap((l, i) => (/\bgoto loc_[0-9A-F]+;/.test(l) ? [i] : []));
+    expect(r.admissions.gotos).toEqual(textual);
+    // The label line is not a site.
+    const label = lines.findIndex((l) => l.trim() === "loc_401028:");
+    expect(label).toBeGreaterThan(-1);
+    expect(r.admissions.gotos).not.toContain(label);
+  });
+
+  it("does not count the no-instructions comment as an admission", () => {
+    const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 8 };
+    const r = decompileFunction(
+      func,
+      [],
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    );
+    expect(r.code).toContain("no instructions found");
+    expect(r.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
+  });
+});
+
 describe("decompileFunction — conditionals reach the output with the right sense", () => {
   // The regression test for peek-a-bin-h9v, written at the level the bug was
   // actually visible at. `je` jumps when ecx == 0, and the jump target is the

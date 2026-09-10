@@ -264,6 +264,11 @@ export function registerTools(server: McpServer, session: FileSession): void {
           address: hex(func.address),
           code: result.code,
           lineMap: result.lineMap.map(([line, addr2]) => ({ line, address: hex(addr2) })),
+          // Where `code` admits a gap, as 0-based line indices into it — see
+          // `DecompileAdmissions` in emit.ts. An LLM client reads `code` as
+          // prose and has no other way to tell a recovered function from one
+          // that is mostly `__unrecovered_N`; three empty arrays mean whole.
+          admissions: result.admissions,
         });
       }),
   );

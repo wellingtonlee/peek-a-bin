@@ -5,7 +5,7 @@ import { funcExceptionRecord } from "../funcInsns";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { cleanupStructured } from "./cleanup";
-import { emitFunction } from "./emit";
+import { type DecompileAdmissions, emitFunction, emptyAdmissions } from "./emit";
 import { flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import type { IRBranch, IRStmt, IRTry } from "./ir";
@@ -22,7 +22,15 @@ import { inferTypes } from "./typeInfer";
 export interface DecompileResult {
   code: string;
   lineMap: [number, number][]; // serializable for worker transfer
+  /**
+   * Where `code` admits a gap, as line indices — see `DecompileAdmissions` in
+   * emit.ts. Plain arrays, so it crosses `postMessage` as-is. Empty arrays for a
+   * whole recovery, for the no-instructions comment and on `error`.
+   */
+  admissions: DecompileAdmissions;
 }
+
+export type { DecompileAdmissions } from "./emit";
 
 /**
  * The two sides of the structuring step, handed to an instrument that asks to
@@ -116,7 +124,13 @@ export function decompileFunction(
     // 1. Build CFG + detect loops
     const blocks = buildCFG(func, instructions, xrefMap, jumpTables);
     if (blocks.length === 0) {
-      return { code: `// ${func.name}: no instructions found`, lineMap: [] };
+      // A DETECTION admission, not a pipeline fault: the detector named a range
+      // no instruction was decoded in. Left as code deliberately.
+      return {
+        code: `// ${func.name}: no instructions found`,
+        lineMap: [],
+        admissions: emptyAdmissions(),
+      };
     }
     const loops = detectLoops(blocks);
 
@@ -290,11 +304,13 @@ export function decompileFunction(
     return {
       code: result.code,
       lineMap: Array.from(result.lineMap.entries()),
+      admissions: result.admissions,
     };
   } catch (err: any) {
     return {
       code: `// Decompilation error for ${func.name}: ${err?.message ?? String(err)}`,
       lineMap: [],
+      admissions: emptyAdmissions(),
     };
   }
 }

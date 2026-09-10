@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emitFunction } from "../emit";
 import type { IRCall, IRExpr, IRFunction, IRPhi, IRStmt } from "../ir";
-import { irBinary, irConst, irReg, irVar } from "../ir";
+import { irBinary, irConst, irReg, irUnknown, irVar } from "../ir";
 import { MAX_FIELD_OFFSET } from "../structs";
 import type { TypeContext } from "../typeInfer";
 
@@ -750,5 +750,99 @@ describe("emitFunction — the header's return type", () => {
   it("leaves a void header alone and never widens it", () => {
     const { code } = emitFunction(fn([ret()], { returnType: "void" }));
     expect(header(code)).toBe("void sub_1000() {");
+  });
+});
+
+/**
+ * `EmitFunctionResult.admissions` (peek-a-bin-n9cl.7): the three admission
+ * spellings this file emits, read back as line indices off the FINAL lines.
+ * Driven from IR directly so each kind is produced on purpose rather than
+ * hoped for from an instruction stream; `pipeline.test.ts` covers the same
+ * field end to end.
+ */
+describe("emitFunction — admissions name the lines that carry them", () => {
+  it("indexes an unrecovered USE, an unlifted statement and a goto, and not the declaration", () => {
+    const r = emitFunction(
+      fn([
+        { kind: "assign", dest: irVar("x", 4), src: irUnknown("jb") },
+        { kind: "raw", text: "leave", addr: 0x1004 },
+        { kind: "label", name: "loc_1008" },
+        { kind: "goto", label: "loc_1008" },
+      ]),
+    );
+    const lines = r.code.split("\n");
+
+    expect(r.admissions.unrecovered).toHaveLength(1);
+    expect(lines[r.admissions.unrecovered[0]]).toContain("x = __unrecovered_1");
+    // The `intptr_t __unrecovered_1;` declaration is in the text and not a site.
+    expect(lines.some((l) => /^\s*intptr_t __unrecovered_1;/.test(l))).toBe(true);
+    expect(lines[r.admissions.unrecovered[0]]).not.toMatch(/intptr_t/);
+
+    expect(r.admissions.unlifted).toHaveLength(1);
+    expect(lines[r.admissions.unlifted[0]].trim()).toBe("/* unlifted: leave */;");
+
+    expect(r.admissions.gotos).toHaveLength(1);
+    expect(lines[r.admissions.gotos[0]].trim()).toBe("goto loc_1008;");
+  });
+
+  it("indexes the FINAL line, after placeGotoLabels has spliced a label in above it", () => {
+    // A goto to an address that has an emitted line but no label statement:
+    // `placeGotoLabels` inserts `loc_1004:` above `x = 1;`, so everything below
+    // shifts by one. An index taken before that pass would name `x = 1;`.
+    // (`structure.ts` emits its own labels today, so the pipeline suite cannot
+    // reach this splice — the control that showed that is why this row exists.)
+    const r = emitFunction(
+      fn([
+        { kind: "assign", dest: irVar("x", 4), src: irConst(1, 4), addr: 0x1004 } as IRStmt,
+        { kind: "goto", label: "loc_1004" },
+      ]),
+    );
+    const lines = r.code.split("\n");
+
+    expect(lines.some((l) => l.trim() === "loc_1004:")).toBe(true);
+    expect(r.admissions.gotos).toHaveLength(1);
+    expect(lines[r.admissions.gotos[0]].trim()).toBe("goto loc_1004;");
+  });
+
+  it("counts a goto whose target emitted nothing, note and all", () => {
+    const r = emitFunction(fn([{ kind: "goto", label: "loc_2000" }]));
+    const lines = r.code.split("\n");
+
+    expect(r.admissions.gotos).toHaveLength(1);
+    expect(lines[r.admissions.gotos[0]]).toMatch(/^\s*goto loc_2000; \/\/ no label:/);
+  });
+
+  it("counts a goto one-lined as a guard's body", () => {
+    const r = emitFunction(
+      fn([
+        { kind: "label", name: "loc_1000" },
+        {
+          kind: "if",
+          condition: irBinary("==", irReg("eax", 4), irConst(0, 4)),
+          thenBody: [{ kind: "goto", label: "loc_1000" }],
+          elseBody: [],
+        } as unknown as IRStmt,
+      ]),
+    );
+    const lines = r.code.split("\n");
+
+    expect(r.admissions.gotos).toHaveLength(1);
+    expect(lines[r.admissions.gotos[0]].trim()).toBe("if (eax == 0) goto loc_1000;");
+  });
+
+  it("does not read a `goto` inside a string literal as an admission", () => {
+    // A constant the string map resolves is spelled as a C string literal.
+    const r = emitFunction(
+      fn([{ kind: "assign", dest: irVar("s", 4), src: irConst(0x404000, 4) }]),
+      undefined,
+      new Map([[0x404000, "goto x;"]]),
+    );
+    expect(r.code).toContain('"goto x;"');
+    expect(r.admissions.gotos).toEqual([]);
+  });
+
+  it("is three empty arrays for a body with nothing to admit", () => {
+    const r = emitFunction(fn([{ kind: "return", value: irConst(1, 4) }]));
+    expect(r.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
   });
 });

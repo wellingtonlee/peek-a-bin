@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { archForMachine } from "../disasm/arch";
+import type { DecompileAdmissions } from "../disasm/decompile/emit";
 import { inferSignature } from "../disasm/signatures";
 import { analyzeStackFrame } from "../disasm/stack";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -52,6 +53,8 @@ export interface UseDecompileTabsResult {
   activeLoading: boolean;
   activeError: string;
   activeLineMap: Map<number, number>;
+  /** The active tab's admissions; only the Low Level tab ever has any. */
+  activeAdmissions: DecompileAdmissions | undefined;
   syncDisabled: boolean;
 }
 
@@ -101,7 +104,13 @@ export function useDecompileTabs({
     const inputsKey = decompileInputsKey(renames);
     const cached = readLowCache(lowCache.current, addr, inputsKey);
     if (cached) {
-      dispatch({ type: "LOAD_OK", tab: "low", code: cached.code, lineMap: cached.lineMap });
+      dispatch({
+        type: "LOAD_OK",
+        tab: "low",
+        code: cached.code,
+        lineMap: cached.lineMap,
+        admissions: cached.admissions,
+      });
       return;
     }
 
@@ -135,7 +144,13 @@ export function useDecompileTabs({
         functions,
       );
       writeLowCache(lowCache.current, addr, { ...result, inputsKey });
-      dispatch({ type: "LOAD_OK", tab: "low", code: result.code, lineMap: result.lineMap });
+      dispatch({
+        type: "LOAD_OK",
+        tab: "low",
+        code: result.code,
+        lineMap: result.lineMap,
+        admissions: result.admissions,
+      });
     } catch (err: any) {
       dispatch({ type: "LOAD_ERR", tab: "low", error: err?.message ?? String(err) });
     }
@@ -352,6 +367,7 @@ export function useDecompileTabs({
   const activeLoading = activeTab.loading;
   const activeError = activeTab.error;
   const activeLineMap = activeTab.lineMap;
+  const activeAdmissions = activeTab.admissions;
 
   // Sync is disabled for AI tab
   const syncDisabled = tabsState.activeTab === "ai";
@@ -367,6 +383,7 @@ export function useDecompileTabs({
     activeLoading,
     activeError,
     activeLineMap,
+    activeAdmissions,
     syncDisabled,
   };
 }

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DecompileAdmissions } from "../disasm/decompile/emit";
 import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
+import { ADMISSION_SEPARATOR, admissionSummary } from "../hooks/decompileTabsState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
 import { copyText } from "../utils/clipboard";
 import { focusOnMount } from "./focusOnMount";
@@ -133,6 +135,14 @@ interface DecompileViewProps {
   syncDisabled?: boolean;
   scrollSyncEnabled?: boolean;
   onScrollSyncToggle?: () => void;
+  /**
+   * Where `code` admits a gap, as line indices (see `DecompileAdmissions`).
+   * Rendered as a header line with one button per kind, each scrolling to the
+   * first site. Only the Low Level tab's state ever carries one — that is a
+   * property of `TabState`, not a check here — so the line is absent on the
+   * High Level and AI tabs and on a function recovered whole.
+   */
+  admissions?: DecompileAdmissions;
   // Comment support
   comments?: Record<number, string>;
   lineMap?: Map<number, number>;
@@ -160,6 +170,7 @@ export function DecompileView({
   syncDisabled,
   scrollSyncEnabled,
   onScrollSyncToggle,
+  admissions,
   comments,
   lineMap,
   editingComment,
@@ -237,6 +248,22 @@ export function DecompileView({
     return at;
   }, [code]);
 
+  /**
+   * Bring one rendered line into view — the `loc_` label follow and the
+   * admissions line's buttons share it, so both name a line by its `data-line`
+   * and neither knows anything about the other's reason.
+   */
+  const scrollToLine = useCallback((line: number) => {
+    const el = preRef.current?.querySelector(`[data-line="${line}"]`);
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, []);
+
+  /** The admissions line's clauses; empty (so no line) for a whole recovery or no admissions. */
+  const admissionParts = useMemo(
+    () => (admissions ? admissionSummary(admissions) : []),
+    [admissions],
+  );
+
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -248,9 +275,9 @@ export function DecompileView({
       // THIS BRANCH IS WHY THE `onNavigate` GUARD MOVED. It used to sit at the
       // top of the handler, so a panel mounted without `onNavigate` could not
       // follow a label either — and following a label needs no caller at all.
-      if (labelLines.has(text)) {
-        const el = preRef.current?.querySelector(`[data-line="${labelLines.get(text)}"]`);
-        el?.scrollIntoView({ block: "center", behavior: "smooth" });
+      const labelLine = labelLines.get(text);
+      if (labelLine !== undefined) {
+        scrollToLine(labelLine);
         return;
       }
 
@@ -262,7 +289,7 @@ export function DecompileView({
         onNavigate(addr);
       }
     },
-    [onNavigate, labelLines],
+    [onNavigate, labelLines, scrollToLine],
   );
 
   // Auto-scroll to first highlighted line
@@ -462,6 +489,32 @@ export function DecompileView({
       {error && (
         <div className="px-3 py-1.5 text-[10px] text-red-400 bg-red-900/30 border-b border-red-800/50 shrink-0">
           {error}
+        </div>
+      )}
+
+      {/* Admissions line: what the C below admits it did not recover, each clause
+          a button to the first site. Rendered only when there is something to
+          admit; `admissionSummary` owns the count and the wording together. */}
+      {admissionParts.length > 0 && (
+        <div
+          data-testid="decompile-admissions"
+          className="flex flex-wrap items-center gap-x-1 px-3 py-1 text-[10px] text-amber-300/90 bg-amber-900/20 border-b border-amber-800/40 shrink-0"
+        >
+          {admissionParts.map((part, i) => (
+            <span key={part.kind} className="flex items-center gap-x-1">
+              {i > 0 && (
+                <span className="text-gray-500 select-none">{ADMISSION_SEPARATOR.trim()}</span>
+              )}
+              <button
+                type="button"
+                onClick={() => scrollToLine(part.firstLine)}
+                className="underline decoration-dotted hover:text-amber-200"
+                title={`Scroll to the first ${part.kind === "gotos" ? "goto" : part.kind} site (line ${part.firstLine + 1})`}
+              >
+                {part.text}
+              </button>
+            </span>
+          ))}
         </div>
       )}
 

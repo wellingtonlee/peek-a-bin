@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { type DecompileAdmissions, emptyAdmissions } from "../../disasm/decompile/emit";
 import {
+  ADMISSION_SEPARATOR,
+  admissionSummary,
   type DecompileServerConfig,
   decompileInputsKey,
   decompileServerKey,
@@ -89,6 +92,7 @@ describe("low-level cache: results are scoped to the renames they were emitted u
   const low = (code: string, inputsKey: string): LowCacheEntry => ({
     code,
     lineMap: new Map(),
+    admissions: emptyAdmissions(),
     inputsKey,
   });
 
@@ -257,5 +261,90 @@ describe("tabsReducer engine tracking", () => {
     expect(reset.high.engine).toBeUndefined();
     expect(reset.high.code).toBe("");
     expect(reset.high.ready).toBe(false);
+  });
+});
+
+/**
+ * The admissions line's sentence (peek-a-bin-n9cl.7). One pure function owns
+ * the count and the wording, so the panel cannot print a number beside the
+ * wrong word; tested here without a DOM, the way `matchSummary` is.
+ */
+describe("admissionSummary", () => {
+  const adm = (over: Partial<DecompileAdmissions>): DecompileAdmissions => ({
+    ...emptyAdmissions(),
+    ...over,
+  });
+
+  it("prints nothing for a function recovered whole", () => {
+    expect(admissionSummary(emptyAdmissions())).toEqual([]);
+  });
+
+  it("prints one clause per non-empty kind, in a fixed order, with the count as the length", () => {
+    const parts = admissionSummary(
+      adm({ unrecovered: [12, 40, 41], unlifted: [7, 8, 9, 10, 11], gotos: [30, 60] }),
+    );
+    expect(parts.map((p) => p.text)).toEqual(["3 unrecovered", "5 unlifted", "2 goto"]);
+    expect(parts.map((p) => p.text).join(ADMISSION_SEPARATOR)).toBe(
+      "3 unrecovered · 5 unlifted · 2 goto",
+    );
+  });
+
+  it("omits a kind with no sites rather than printing a zero", () => {
+    const parts = admissionSummary(adm({ gotos: [4] }));
+    expect(parts.map((p) => p.text)).toEqual(["1 goto"]);
+  });
+
+  it("names the FIRST site as the scroll target", () => {
+    const parts = admissionSummary(adm({ unlifted: [9, 3, 20] }));
+    // The emitter pushes indices in line order, so [0] is the first line; the
+    // summary takes [0] rather than re-sorting — it is a reading, not a repair.
+    expect(parts[0].firstLine).toBe(9);
+  });
+
+  it("keeps the order fixed whatever the counts", () => {
+    const parts = admissionSummary(
+      adm({ unrecovered: [1], unlifted: [2, 3, 4, 5], gotos: [6, 7] }),
+    );
+    expect(parts.map((p) => p.kind)).toEqual(["unrecovered", "unlifted", "gotos"]);
+  });
+});
+
+describe("tabs reducer carries the admissions with the code", () => {
+  it("LOAD_OK on the low tab stores them, and the other tabs have none", () => {
+    const admissions = { ...emptyAdmissions(), unlifted: [3] };
+    const s = tabsReducer(initialTabsState(), {
+      type: "LOAD_OK",
+      tab: "low",
+      code: "int f() {}",
+      lineMap: new Map(),
+      admissions,
+    });
+    expect(s.low.admissions).toBe(admissions);
+    expect(s.high.admissions).toBeUndefined();
+    expect(s.ai.admissions).toBeUndefined();
+  });
+
+  it("a LOAD_OK without admissions (High Level, AI) leaves the field undefined", () => {
+    const s = tabsReducer(initialTabsState(), {
+      type: "LOAD_OK",
+      tab: "high",
+      code: "int f() {}",
+      lineMap: new Map(),
+      engine: "ghidra",
+    });
+    expect(s.high.admissions).toBeUndefined();
+  });
+
+  it("RESET_FUNC clears them with the code", () => {
+    const loaded = tabsReducer(initialTabsState(), {
+      type: "LOAD_OK",
+      tab: "low",
+      code: "int f() {}",
+      lineMap: new Map(),
+      admissions: { ...emptyAdmissions(), gotos: [1] },
+    });
+    const reset = tabsReducer(loaded, { type: "RESET_FUNC" });
+    expect(reset.low.admissions).toBeUndefined();
+    expect(reset.low.code).toBe("");
   });
 });

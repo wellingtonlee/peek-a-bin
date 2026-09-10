@@ -1543,6 +1543,7 @@ export function DisassemblyView() {
                 }}
                 comments={state.comments}
                 lineMap={decompile.activeLineMap}
+                admissions={decompile.activeAdmissions}
                 editingComment={editingComment}
                 onEditComment={setEditingComment}
                 onCommitComment={(addr, text) =>

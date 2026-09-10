@@ -4,7 +4,9 @@ import "../../test/domSetup";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type DecompileAdmissions, emptyAdmissions } from "../../disasm/decompile/emit";
 import type { DecompileTab } from "../../hooks/decompileTabsState";
+import { ADMISSION_SEPARATOR, admissionSummary } from "../../hooks/decompileTabsState";
 import { DecompileView } from "../DecompileView";
 
 /**
@@ -430,6 +432,110 @@ describe("DecompileView loading, error and empty arms", () => {
     setup({ code: "", activeTab: "low" });
     expect(codePane()).toBeTruthy();
     expect(document.querySelectorAll("[data-line]")).toHaveLength(0);
+  });
+});
+
+// ── The admissions line ──
+
+/**
+ * The Low Level panel's admissions line (peek-a-bin-n9cl.7): what the C below
+ * admits it did not recover, one button per kind, each scrolling to the FIRST
+ * site. `admissionSummary` is pinned as a pure function in
+ * `decompileTabsState.test.ts`; what only a render can settle is that the line
+ * appears exactly when there is something to admit, prints the summary's text
+ * and nothing else, and that a click asks the RIGHT `data-line` element to come
+ * into view — nothing about scrolling, for the reason given at the `loc_` test.
+ */
+describe("DecompileView admissions line", () => {
+  const CODE = [
+    "int sub_401000(void) {",
+    "    intptr_t __unrecovered_1; /* not recovered: jb */",
+    "",
+    "    if (__unrecovered_1 /* jb */) {",
+    "        /* unlifted: leave */;",
+    "        goto loc_401028;",
+    "    }",
+    "loc_401028:",
+    "    return 0;",
+    "}",
+  ].join("\n");
+  const ADM: DecompileAdmissions = { unrecovered: [3], unlifted: [4], gotos: [5] };
+
+  const line = () => screen.queryByTestId("decompile-admissions");
+
+  it("renders no line when there are no admissions", () => {
+    setup({ code: CODE });
+    expect(line()).toBeNull();
+  });
+
+  it("renders no line for a function recovered whole", () => {
+    setup({ code: CODE, admissions: emptyAdmissions() });
+    expect(line()).toBeNull();
+  });
+
+  it("prints exactly the summary's clauses, in its order, separated as it says", () => {
+    setup({ code: CODE, admissions: ADM });
+    const expected = admissionSummary(ADM)
+      .map((p) => p.text)
+      .join(ADMISSION_SEPARATOR);
+    // Whitespace-normalised: the separator is its own span, so the DOM's text has
+    // the clauses and the dots but not the summary's spaces around them.
+    expect(line()?.textContent?.replace(/\s+/g, "")).toBe(expected.replace(/\s+/g, ""));
+    expect(line()?.textContent).toContain("1 unrecovered");
+    expect(line()?.textContent).toContain("1 unlifted");
+    expect(line()?.textContent).toContain("1 goto");
+  });
+
+  it("omits a kind with no sites", () => {
+    setup({ code: CODE, admissions: { ...emptyAdmissions(), gotos: [5, 5] } });
+    expect(line()?.textContent).toContain("2 goto");
+    expect(line()?.textContent).not.toContain("unrecovered");
+    expect(line()?.textContent).not.toContain("unlifted");
+  });
+
+  it.each([
+    ["1 unrecovered", "3"],
+    ["1 unlifted", "4"],
+    ["1 goto", "5"],
+  ])("clicking %s scrolls to the first site, data-line %s", async (label, dataLine) => {
+    const scrollIntoView = vi.fn();
+    // On `HTMLElement.prototype`, where `domSetup` installs its no-op — see the
+    // `loc_` test above for why a spy on `Element` never fires.
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: CODE, admissions: ADM });
+      await user.click(screen.getByRole("button", { name: label }));
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      const target = scrollIntoView.mock.instances[0] as HTMLElement;
+      expect(target.getAttribute("data-line")).toBe(dataLine);
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("does not move the app's cursor when a clause is clicked", async () => {
+    // A site is a line INSIDE the function on screen, as a `loc_` label is; the
+    // buttons must not reach `onNavigate` or `onLineClick`.
+    const onNavigate = vi.fn();
+    const onLineClick = vi.fn();
+    const { user } = setup({ code: CODE, admissions: ADM, onNavigate, onLineClick });
+    await user.click(screen.getByRole("button", { name: "1 goto" }));
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onLineClick).not.toHaveBeenCalled();
+  });
+
+  it("a pipeline fault renders the banner with an empty pane and no admissions line", () => {
+    // What the client's throw on `DecompileResult.error` reaches: the hook's
+    // LOAD_ERR, so `error` is set and `code` is empty. The pane is the blank
+    // <pre> of the no-code arm; nothing is admitted because nothing was emitted.
+    setup({ code: "", error: "Decompilation error for sub_401000: boom" });
+    expect(screen.getByText("Decompilation error for sub_401000: boom")).toBeTruthy();
+    expect(codePane()).toBeTruthy();
+    expect(document.querySelectorAll("[data-line]")).toHaveLength(0);
+    expect(line()).toBeNull();
   });
 });
 

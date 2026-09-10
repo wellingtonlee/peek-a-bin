@@ -429,6 +429,28 @@ variable on the app root.
   arriving and `buildAllXrefs` finishing. `fontSize` is read during render in both components and
   neither subscribes, which is what makes the two calls in one pass agree. `graphLayout` is gated on
   `viewMode === "graph"`, so linear mode runs no dagre.
+- **The decompile panel's ADMISSIONS ARE DATA, and a pipeline fault is a FAULT STATE.**
+  `DecompileAdmissions` (`decompile/emit.ts`) is three arrays of **0-based line indices** into the
+  emitted C — `unrecovered` (a use of `__unrecovered_N`, declarations excluded), `unlifted`
+  (`/* unlifted: … */;`), `gotos` (whole-line or a one-lined guard's body) — read off the FINAL lines
+  **after `placeGotoLabels`** by one declared pattern per admission beside its emit site
+  (`UNRECOVERED_USE`/`UNRECOVERED_DECL`, `UNLIFTED_LINE`, `GOTO_ADMISSION_LINE`, all built from the
+  spelling the emitter itself uses), so the counter and the emitter cannot disagree. Lines, not
+  addresses, because `lineMap` is many-to-one and the declaration block has none. Plumbed
+  `EmitFunctionResult` → `DecompileResult` → `dispatch` (as-is) → `disasmClient` → `LowCacheEntry` →
+  `TabState.admissions` (set by the low tab's `LOAD_OK` only — which is what makes it a Low Level
+  affordance as a property of the state) → `DecompileView`'s header line, `N unrecovered · N
+  unlifted · N goto`, each a button scrolling to the first site through the same `scrollToLine` the
+  `loc_` follow uses. **`admissionSummary` in `decompileTabsState.ts` owns count and wording
+  together** (the `matchSummary` precedent). MCP `decompile_function` returns `admissions` beside
+  `lineMap`. **`corpus/emitAudits.ts` keeps its own text scans** — an audit reading the field stops
+  being independent. `DecompileResult.error` is the fault: the pipeline's `catch` used to return
+  `// Decompilation error for …` **as code**, so a failure reached MCP as a successful response
+  holding a comment; now `code` is empty and `error` set, `disasmClient` **throws** it into the
+  hook's existing `LOAD_ERR` banner, MCP returns `err(...)`, and `corpus/sweep.ts` counts
+  `pipelineErrors` beside `throws` (a class the sweep's "0 throws" was blind to). `// <name>: no
+  instructions found` stays as code — a detection admission, not a pipeline fault. `DecompileView`
+  still takes no `ErrorBoundary`; no new custom event.
 - **AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
   sub-tab (`useDecompileTabs`) — both via `streamChat()`. **Neither keeps state in `AppState`.** The
   only AI custom event left is `peek-a-bin:open-chat`. Markdown via `marked` in

@@ -79,7 +79,18 @@ Decompile a function to C-like pseudocode. Runs the full pipeline: stack analysi
 | `fileId` | string | Yes | ID of the loaded PE file |
 | `address` | number or string | Yes | Function address (hex string or number) |
 
-Returns `{ functionName, address, code, lineMap }`.
+Returns `{ functionName, address, code, lineMap, admissions }`.
+
+- `functionName` and the header inside `code` agree: both come from the same rename map, so a
+  `rename_function` reaches the function's own header as well as every call site.
+- `admissions` — where `code` admits it did not recover something, as **0-based line indices into
+  `code`**: `{ unrecovered: number[], unlifted: number[], gotos: number[] }`. `unrecovered` lines use
+  an `__unrecovered_N` free variable (a machine value the decompiler could not spell; the `intptr_t`
+  declarations at the top are not counted); `unlifted` lines are `/* unlifted: … */;` (an
+  instruction with no C form); `gotos` lines carry a `goto` (control flow the structurer could not
+  express). Three empty arrays mean the function was recovered whole. Read this rather than
+  scanning `code` for the spellings: `code` is prose to an LLM, and a function that is mostly
+  `__unrecovered_N` looks exactly like a recovered one.
 
 **Declines on ARM64 images and on any machine type with no decoder**, before the address is even
 resolved: the decompiler is an x86
