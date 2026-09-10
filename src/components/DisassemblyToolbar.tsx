@@ -71,7 +71,7 @@ export function DisassemblyToolbar({
   return (
     <>
       {/* Section header bar */}
-      <div className="flex items-center gap-3 px-4 py-1 bg-gray-800/50 border-b border-gray-700 text-xs text-gray-400 shrink-0">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-1 bg-gray-800/50 border-b border-gray-700 text-xs text-gray-400 shrink-0">
         <span className="font-semibold text-gray-300">{sectionInfo.name}</span>
         <span>
           VA: 0x{sectionBaseVA.toString(16).toUpperCase()} – 0x

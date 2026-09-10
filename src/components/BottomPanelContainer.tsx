@@ -204,7 +204,7 @@ export function BottomPanelContainer({ panels }: BottomPanelContainerProps) {
             onResizeEnd={handleResizeEnd}
           />
           {/* Tab header */}
-          <div className="flex items-center gap-0.5 px-2 py-0.5 border-b border-gray-700 shrink-0">
+          <div className="flex flex-wrap items-center gap-0.5 px-2 py-0.5 border-b border-gray-700 shrink-0">
             {/* Pop-out and close are siblings of the tab button, not children:
                 buttons cannot nest, and as spans they were mouse-only. */}
             {tabbedPanels.map((p) => (

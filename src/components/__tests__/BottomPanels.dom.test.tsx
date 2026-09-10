@@ -126,6 +126,46 @@ describe("BottomPanelContainer", () => {
     expect((screen.getByText("b body").parentElement as HTMLElement).className).toBe("h-full");
   });
 
+  /**
+   * A CLASS-STRING ASSERTION AND NOTHING MORE — it reads `element.className`
+   * and checks React wrote a token. Tailwind is not loaded under vitest
+   * (`vitest.config.ts`) and jsdom performs no layout (`src/test/domSetup.ts`
+   * says so in its own comment), so this row is NOT evidence that the strip
+   * wraps, that a chip is on screen, or that any close button is clickable at
+   * any width. Only peek-a-bin-v2u — a human at a real browser — settles that.
+   *
+   * Why the token is here at all: the strip is one nowrap row carrying a chip
+   * per open panel, and each chip carries its OWN pop-out and close button — so
+   * with four or five panels open in a narrow window the last chip's close
+   * button went off the right edge, i.e. the affordance for closing a panel was
+   * the thing that disappeared once you had too many panels open. NOTHING IN
+   * THE STRIP CAN SHRINK: every chip is a single-word label plus two glyphs, so
+   * `min-width: auto` resolves to min-content == preferred width and the row
+   * cannot absorb a deficit. `shrink-0` would change nothing; that reasoning is
+   * `AddressBar`'s, measured at 16f37df, and the paragraph on the top bar in
+   * CLAUDE.md carries it. Wrapping is the right degradation here because the
+   * container is a fixed-height flex column whose body is `flex-1
+   * overflow-auto` — a second line of chips takes its height out of a scroller.
+   *
+   * The liveness half is deliberate: the loop is over a NON-EMPTY chip
+   * population, since a strip with no chips would pass this by no longer
+   * looking.
+   */
+  it("lets the tab strip wrap rather than push a close button off its row", () => {
+    render(
+      <BottomPanelContainer
+        panels={[panel("a", "Alpha"), panel("b", "Beta"), panel("c", "Gamma")]}
+      />,
+    );
+    const chips = screen.getAllByTitle("Close").map((b) => b.parentElement as HTMLElement);
+    expect(chips).toHaveLength(3);
+    const strips = new Set(chips.map((c) => c.parentElement as HTMLElement));
+    // One strip holding all three chips, so the element asserted on below is
+    // the row the chips actually share rather than one of several.
+    expect(strips.size).toBe(1);
+    expect([...strips][0].className).toContain("flex-wrap");
+  });
+
   it("calls the panel's OWN onClose, not the container's, and not a neighbour's", () => {
     const closeA = vi.fn();
     const closeB = vi.fn();

@@ -665,6 +665,32 @@ describe("the toolbar", () => {
     ]);
   });
 
+  /**
+   * A CLASS-STRING ASSERTION AND NOTHING MORE — it reads `element.className`
+   * and checks React wrote a token. Tailwind is not loaded under vitest
+   * (`vitest.config.ts`) and jsdom performs no layout (`src/test/domSetup.ts`
+   * says so in its own comment), so this row is NOT evidence that the bar
+   * wraps, that anything is on screen, or that the search box is reachable at
+   * any width. Only peek-a-bin-v2u — a human at a real browser — settles that.
+   *
+   * Why the token is here at all: this bar is one nowrap row of a section name,
+   * a ~30-char VA span, `Size:`, an instruction count, a `<select>`, a
+   * seven-button cluster and the search box, and NOTHING IN IT CAN SHRINK —
+   * every item is a single word, a fixed-size SVG, a `<select>` or an `<input>`
+   * with a definite width, so `min-width: auto` resolves to min-content ==
+   * preferred width and the row cannot absorb one pixel of deficit. Adding
+   * `shrink-0` would change nothing; that reasoning is `AddressBar`'s, measured
+   * at 16f37df, and the paragraph on the top bar in CLAUDE.md carries it.
+   * Unlike `AddressBar` this bar is INSIDE `<main className="flex-1
+   * overflow-auto">`, so overflow here degraded into a page-level horizontal
+   * scroll rather than into unreachability — the search box could be reached,
+   * but only by scrolling the disassembly listing sideways to get to it.
+   */
+  it("lets the section header bar wrap rather than overflow its row", async () => {
+    const { container } = await mountReady();
+    expect(toolbar(container).className).toContain("flex-wrap");
+  });
+
   it("enables Graph and Decompile only when the cursor is in a detected function", async () => {
     const disabled = (title: RegExp) => (screen.getByTitle(title) as HTMLButtonElement).disabled;
     const inside = await mountReady();

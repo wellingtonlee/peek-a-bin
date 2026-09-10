@@ -772,8 +772,15 @@ the DOM position back and push it down with `order`. **`min-w-0` on the tablist 
 token**: `basis-full` leaves exactly zero free space on its line, so nothing shrinks and
 `min-width: auto` would floor the strip at its own min-content and overflow the container — this
 bar's own defect one level down; with the floor at zero, `overflow-x-auto` makes it a scroller
-instead. `flex-wrap` is the **third** crowded toolbar here to answer overflow the same way
-(`HexView.tsx:855`, `XrefPanel.tsx:287`), so it is the house pattern rather than a new idea;
+instead. `flex-wrap` is the house answer to a crowded toolbar and **five** rows now carry it —
+`HexView.tsx`, `XrefPanel.tsx`, this bar, `DisassemblyToolbar`'s section-header bar and
+`BottomPanelContainer`'s tab strip (the last two at `peek-a-bin-7v1a`), whose whole fix was the one
+token because **the unshrinkable-items reasoning above is theirs too**. What separates them from
+this bar is `App.tsx`'s `<main className="flex-1 overflow-auto">`: a bar INSIDE it turns overflow
+into a page-level horizontal scroll, so the header bar's search box was reachable only by scrolling
+the listing sideways and the tab strip's last close button went off the right edge — bad, but not
+the unreachable-by-any-input case that ranks `AddressBar` and `StatusBar` above them. So when
+ranking a new instance, ask which side of `<main>` it is on first;
 Breadcrumbs' `overflow-x-auto` + `scrollbarWidth: "none"` are copied and its ResizeObserver fade
 machinery deliberately is **not** (four reasons in `docs/gotchas.md`). Nothing is conditionally
 unmounted — **CSS only** — because bare `G` focuses the address input by ref and the hidden Import
@@ -1626,7 +1633,13 @@ read "all of them compile" as "all of them are right".
   **encoded as a DOM-order assertion and not observed**, jsdom having no visual order. Nothing here
   has met a screen reader or a browser focus algorithm, and this is the app's first responsive code,
   so there is no prior breakpoint behaviour to compare against. The width sweep is appended to
-  `peek-a-bin-v2u` (`peek-a-bin-cgu1`).
+  `peek-a-bin-v2u` (`peek-a-bin-cgu1`). **The two `flex-wrap` rows added at `peek-a-bin-7v1a` are
+  the same contract in two more suites** — `DisassemblyPanel.dom.test.tsx` for
+  `DisassemblyToolbar`'s section-header bar, `BottomPanels.dom.test.tsx` for
+  `BottomPanelContainer`'s tab strip — and carry the same caveat verbatim: both read
+  `className`, both controls discriminate, and neither is evidence that either row wraps, that
+  the header bar's search box is on screen, or that a fifth panel's close button is clickable.
+  Their width figures are computed the same way and were never measured.
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
 - **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**
