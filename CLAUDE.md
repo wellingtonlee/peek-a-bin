@@ -2830,11 +2830,15 @@ repository-level opt-in that the **Team-maintainer** profile below refers to, an
 Conservative default's "do not commit unless explicitly asked". A current instruction not to
 commit still wins.
 
-**Pushing is NOT included, and the distinction is deliberate.** `main` has run many commits ahead
-of `origin/main` for a while; that is the normal state here, not a backlog to clear. Ask before
-`git push`, before `git pull --rebase`, and before any Dolt remote sync. One consequence worth
-knowing: **tool-created subagent worktrees are cut from `origin/main`, not your local `main`**, so
-while main is unpushed every such worktree silently lacks your recent work.
+**Pushing is NOT included, and the distinction is deliberate.** Ask before `git push`, before
+`git pull --rebase`, and before any Dolt remote sync. **Do not assume `main` is ahead of
+`origin/main` — CHECK.** That claim stood here for several sessions and was stale by v0.1.2: the
+last two releases each ended level with origin, because the user authorised the push as part of the
+release. Either state is normal; `git rev-list --count origin/main..main` is the only answer worth
+acting on. One consequence that still bites **when** main is ahead: **tool-created subagent
+worktrees are cut from `origin/main`, not your local `main`**, so every such worktree silently lacks
+your unpushed work — which is one reason the **Working in parallel** recipe creates worktrees from
+an explicit local SHA instead.
 
 ### Before you commit
 
