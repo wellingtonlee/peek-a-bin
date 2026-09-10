@@ -2218,6 +2218,7 @@ for its own reason:
 | offsetof | Looks only at struct declarations and field offsets. |
 | dangling gotos | Looks only at labels. |
 | throws | Nothing raised. |
+| pipeline errors | `decompileFunction` caught nothing of its own. (Until peek-a-bin-n9cl.7 this class came back as a `// Decompilation error …` comment in `code`, which `throws` could not see.) |
 
 So a green run means "no defect **of the kinds these audits model**", which is a real and
 useful claim but a narrower one than "the output is right". Wrong values are found by reading the

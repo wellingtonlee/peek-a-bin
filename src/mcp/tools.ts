@@ -259,6 +259,11 @@ export function registerTools(server: McpServer, session: FileSession): void {
           af.calleeClobbers,
         );
 
+        // A pipeline fault is an error response, not a `code` holding a
+        // comment — see `DecompileResult.error`. A client cannot otherwise tell
+        // it from a one-line decompilation.
+        if (result.error) return err(result.error);
+
         return json({
           functionName: af.renames[String(func.address)] ?? func.name,
           address: hex(func.address),

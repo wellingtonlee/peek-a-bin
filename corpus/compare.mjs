@@ -111,6 +111,16 @@ for (const b of bins) {
     (x) => x.throws,
     (a, c) => c > a,
   );
+  // `DecompileResult.error` rows, counted since peek-a-bin-n9cl.7; before that
+  // the class was returned as code and no summary carried it. Absent on either
+  // side must not read as zero.
+  if (B.pipelineErrors !== undefined && C.pipelineErrors !== undefined) {
+    row(
+      "pipeline errors",
+      (x) => x.pipelineErrors,
+      (a, c) => c > a,
+    );
+  }
   row(
     "polarity inverted",
     (x) => x.polarity.inverted,

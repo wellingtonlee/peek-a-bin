@@ -28,6 +28,18 @@ export interface DecompileResult {
    * whole recovery, for the no-instructions comment and on `error`.
    */
   admissions: DecompileAdmissions;
+  /**
+   * THE FAULT STATE. Set when the pipeline threw; `code` is then empty and
+   * `lineMap`/`admissions` empty too. This used to be returned AS CODE — a
+   * `// Decompilation error for <name>: <msg>` comment — so a failure reached
+   * MCP as a successful response holding a comment, the browser cached and
+   * rendered it as a decompilation, and `corpus/sweep.ts`'s `throws` (the
+   * standing expectation of 0) could never see the class at all: nothing in
+   * `src/` or `corpus/` matched that string. A field cannot be mistaken for an
+   * answer: `disasmClient` throws it, MCP returns `err(...)`, the sweep counts
+   * it. Absent means the pipeline ran to completion.
+   */
+  error?: string;
 }
 
 export type { DecompileAdmissions } from "./emit";
@@ -307,10 +319,14 @@ export function decompileFunction(
       admissions: result.admissions,
     };
   } catch (err: any) {
+    // A fault, not a decompilation — see `DecompileResult.error`. The name is
+    // the display name where the map has one, as the header would have been.
+    const name = funcMap.get(func.address)?.name ?? func.name;
     return {
-      code: `// Decompilation error for ${func.name}: ${err?.message ?? String(err)}`,
+      code: "",
       lineMap: [],
       admissions: emptyAdmissions(),
+      error: `Decompilation error for ${name}: ${err?.message ?? String(err)}`,
     };
   }
 }

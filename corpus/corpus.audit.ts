@@ -343,6 +343,16 @@ if (!pre.haveBins || !pre.haveCc) {
       }
     });
 
+    it("returns no pipeline fault for any function", () => {
+      // `DecompileResult.error` — the pipeline's own caught throw, which used to
+      // be returned as a comment in `code` and was invisible to the row above
+      // (peek-a-bin-n9cl.7). Same standing expectation, same shape of failure.
+      for (const r of results.values()) {
+        expect(`${r.key}: ${r.pipelineErrorDetail.slice(0, 3).join(" | ")}`).toBe(`${r.key}: `);
+        expect(r.pipelineErrors).toBe(0);
+      }
+    });
+
     it("states every guard at the polarity of the jcc it came from", () => {
       for (const r of results.values()) {
         // Anchor A only. A2 and B are reported but never gate — see README.
@@ -1318,6 +1328,7 @@ function renderReport(): string {
       `  functions ${r.functions}   instructions ${r.instructions}   jumpTables ${r.jumpTables}`,
     );
     L.push(`  throws                      ${r.throws}`);
+    L.push(`  pipeline errors             ${r.pipelineErrors}`);
     L.push(
       `  polarity (anchor A)         ${r.polarity.ok}/${r.polarity.checked} correct   ` +
         `inverted=${r.polarity.inverted} mismatch=${r.polarity.mismatch} skipped=${r.polarity.skipped}`,

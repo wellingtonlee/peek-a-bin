@@ -2563,6 +2563,49 @@ describe("DisasmWorkerClient — hybridDisassemble decodes through the held swee
  * is mocked but the `Worker` itself, and the args each test reads are the
  * post-`structuredClone` ones a worker would receive.
  */
+/**
+ * A pipeline fault crosses as `DecompileResult.error`, a FIELD in a successful
+ * reply, and the client throws it (peek-a-bin-n9cl.7). Before, the worker
+ * returned the fault as `code` — a `// Decompilation error …` comment — which
+ * the client resolved, cached and handed to the panel as a decompilation.
+ */
+describe("DisasmWorkerClient — a decompile reply carrying `error` rejects", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const func = { name: "sub_401000", address: 0x401000, size: 4 };
+  const insns: Instruction[] = [
+    { address: 0x401000, mnemonic: "ret", opStr: "", size: 1, bytes: new Uint8Array(1) },
+  ];
+
+  it("rejects with the error's text rather than resolving a comment as code", async () => {
+    const { client, worker } = await loadClient();
+    const pending = client.decompileFunction(func, insns, new Map(), null, null, false, new Map());
+    worker.reply(worker.posted[0].id, {
+      code: "",
+      lineMap: [],
+      admissions: { unrecovered: [], unlifted: [], gotos: [] },
+      error: "Decompilation error for sub_401000: boom",
+    });
+    await expect(pending).rejects.toThrow("Decompilation error for sub_401000: boom");
+  });
+
+  it("resolves a reply without `error`, admissions included", async () => {
+    const { client, worker } = await loadClient();
+    const pending = client.decompileFunction(func, insns, new Map(), null, null, false, new Map());
+    worker.reply(worker.posted[0].id, {
+      code: "int sub_401000() {\n    goto x;\n}",
+      lineMap: [[1, 0x401000]],
+      admissions: { unrecovered: [], unlifted: [], gotos: [1] },
+    });
+    const result = await pending;
+    expect(result.code).toContain("goto x;");
+    expect(result.lineMap.get(1)).toBe(0x401000);
+    expect(result.admissions.gotos).toEqual([1]);
+  });
+});
+
 describe("DisasmWorkerClient — a decompile request carries one function's instructions", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

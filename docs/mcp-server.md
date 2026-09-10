@@ -92,6 +92,12 @@ Returns `{ functionName, address, code, lineMap, admissions }`.
   scanning `code` for the spellings: `code` is prose to an LLM, and a function that is mostly
   `__unrecovered_N` looks exactly like a recovered one.
 
+**A pipeline fault is an error response.** If the decompiler throws part-way, the tool returns
+`isError: true` with `Error: Decompilation error for <name>: <message>`. It used to return a
+successful `{ code: "// Decompilation error for …" }` — a one-line "decompilation" no client could
+tell from a real one. `// <name>: no instructions found` is still returned as `code`: that is a
+detection admission (the detector named a range no instruction was decoded in), not a fault.
+
 **Declines on ARM64 images and on any machine type with no decoder**, before the address is even
 resolved: the decompiler is an x86
 instruction grammar, and fed A64 it returned a short, confident, wrong body — mostly

@@ -383,6 +383,94 @@ describe("decompileFunction — admissions are line indices into the emitted cod
   });
 });
 
+/**
+ * THE FAULT STATE (peek-a-bin-n9cl.7). The pipeline's `catch` used to return
+ * `// Decompilation error for <name>: <msg>` AS CODE, so a failure was a
+ * successful result holding a comment — cached by the browser, returned by MCP
+ * as a decompilation, invisible to the corpus sweep's `throws`. It is now a
+ * field, `DecompileResult.error`, with `code` empty. The fault is provoked with
+ * a malformed instruction (an `opStr` that is not a string), which is what a
+ * worker-side defect looks like from here.
+ */
+describe("decompileFunction — a pipeline fault is a field, not code", () => {
+  const broken = (): Instruction[] => [
+    {
+      address: 0x401000,
+      mnemonic: "mov",
+      opStr: undefined as unknown as string,
+      size: 4,
+      bytes: new Uint8Array(4),
+    },
+    ins(0x401004, "ret"),
+  ];
+
+  function runBroken(funcMap = new Map<number, { name: string; address: number }>()) {
+    const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 8 };
+    return decompileFunction(
+      func,
+      broken(),
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      funcMap,
+    );
+  }
+
+  it("returns an empty code with `error` set and nothing admitted", () => {
+    const r = runBroken();
+
+    expect(r.error).toMatch(/^Decompilation error for sub_401000: /);
+    expect(r.code).toBe("");
+    expect(r.lineMap).toEqual([]);
+    expect(r.admissions).toEqual({ unrecovered: [], unlifted: [], gotos: [] });
+  });
+
+  it("names the function by its display name, as the header would have", () => {
+    const r = runBroken(new Map([[0x401000, { name: "main", address: 0x401000 }]]));
+    expect(r.error).toMatch(/^Decompilation error for main: /);
+  });
+
+  it("leaves `error` absent on a function that decompiles", () => {
+    const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 8 };
+    const r = decompileFunction(
+      func,
+      seq(0x401000, [["mov", "eax, 1"], ["ret"]]),
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.code).not.toBe("");
+  });
+
+  it("keeps the no-instructions comment as code — a detection admission, not a fault", () => {
+    const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 8 };
+    const r = decompileFunction(
+      func,
+      [],
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.code).toBe("// sub_401000: no instructions found");
+  });
+});
+
 describe("decompileFunction — conditionals reach the output with the right sense", () => {
   // The regression test for peek-a-bin-h9v, written at the level the bug was
   // actually visible at. `je` jumps when ecx == 0, and the jump target is the

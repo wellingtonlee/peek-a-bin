@@ -494,6 +494,31 @@ describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)
     expect(out.admissions.unlifted).toHaveLength(1);
     expect(out.code.split("\n")[out.admissions.unlifted[0]]).toMatch(/\/\* unlifted: leave \*\/;/);
   });
+
+  it("returns a pipeline fault as an error response, not as code holding a comment", async () => {
+    // The fault has to be one only the PIPELINE reads — `analyzeStackFrame` and
+    // `inferSignature` run first and a malformed instruction faults there, in
+    // the handler. A null import map is read by nothing until `inferTypes`, so
+    // it reaches the pipeline's own catch. Before peek-a-bin-n9cl.7 that came
+    // back as `{ code: "// Decompilation error for …" }` with `isError` unset —
+    // a decompilation, to any client.
+    const { session } = stubSession({
+      pe: { is64: false, sections: [], runtimeFunctions: undefined },
+      functions: [{ name: "sub_401000", address: 0x401000, size: 8 }],
+      instructions: [insn(0x401000, "mov", "eax, 1"), insn(0x401004, "ret", "")],
+      jumpTables: new Map(),
+      structRegistry: new StructRegistry(),
+      iatMap: null,
+      renames: { [String(0x401000)]: "main" },
+    } as unknown as Partial<AnalyzedFile>);
+    const decompile = captureTools(session).get("decompile_function")!;
+
+    const result = await decompile({ fileId: "sample", address: "0x401000" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^Error: Decompilation error for main: /);
+    expect(textOf(result)).not.toMatch(/"code"/);
+  });
 });
 
 /** Just enough PE shape for the tools that read `af.pe`. */

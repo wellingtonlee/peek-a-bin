@@ -712,6 +712,7 @@ class DisasmWorkerClient {
       code: string;
       lineMap: [number, number][];
       admissions: DecompileAdmissions;
+      error?: string;
       needInstructions?: boolean;
     };
     let result: Reply = await this.send("decompileFunction", args);
@@ -732,6 +733,11 @@ class DisasmWorkerClient {
       // worst sending the section twice.
       result = await this.send("decompileFunction", { ...args, instructions });
     }
+    // A pipeline fault travels as a FIELD, not as code (`DecompileResult.error`),
+    // and is thrown here so it reaches the caller by the same path a worker
+    // rejection does — the hook's `LOAD_ERR` and the panel's red banner — rather
+    // than being cached and rendered as if it were a decompilation.
+    if (result.error) throw new Error(result.error);
     return { code: result.code, lineMap: new Map(result.lineMap), admissions: result.admissions };
   }
 

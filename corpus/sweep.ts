@@ -338,6 +338,16 @@ export interface BinResult {
   /** decompileFunction (or its prep) raising. The standing expectation is 0. */
   throws: number;
   throwDetail: string[];
+  /**
+   * `decompileFunction` returning `DecompileResult.error` — the pipeline's own
+   * caught throw. Counted apart from `throws` because until peek-a-bin-n9cl.7
+   * this class was returned AS CODE (a `// Decompilation error …` comment) and
+   * nothing here matched the string, so a pipeline fault read as a one-line
+   * function. Standing expectation 0, gated beside `throws`; a row that carries
+   * one is excluded from the downstream audits exactly as a throw is.
+   */
+  pipelineErrors: number;
+  pipelineErrorDetail: string[];
   polarity: {
     checked: number;
     ok: number;
@@ -758,6 +768,8 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     tablesFrom,
     throws: 0,
     throwDetail: [],
+    pipelineErrors: 0,
+    pipelineErrorDetail: [],
     polarity: {
       checked: 0,
       ok: 0,
@@ -933,8 +945,16 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // shows only the winner. See `corpus/structOverlaps.ts`.
         (g) => auditStructOverlaps(res.structOverlaps, key, g),
       );
-      code = r.code;
-      lineMap = r.lineMap;
+      if (r.error !== undefined) {
+        // The pipeline caught its own throw. Recorded as `threw` so the row is
+        // excluded from every audit below as a thrown row is, and counted apart.
+        threw = r.error;
+        res.pipelineErrors++;
+        res.pipelineErrorDetail.push(`decompile 0x${func.address.toString(16)}: ${r.error}`);
+      } else {
+        code = r.code;
+        lineMap = r.lineMap;
+      }
     } catch (e) {
       threw = String(e instanceof Error ? (e.stack ?? e.message) : e);
       res.throws++;
