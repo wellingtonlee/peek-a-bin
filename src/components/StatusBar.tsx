@@ -208,6 +208,18 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
           <span className="text-gray-300">{sectionInfo?.name ?? "---"}</span>
         )}
       </span>
+      {/* VA ahead of RVA and File, most absolute first. This bar showed the RVA
+          and the file offset and NEVER the virtual address, so on seven of the
+          eight tabs the toolbar's own readout was the only VA on screen —
+          which is exactly why peek-a-bin-cgu1.4 was allowed only to SHORTEN
+          that readout and not to hide it. With the value here too, dropping
+          the toolbar's copy becomes a zero-loss move at every width. */}
+      <span className="mr-4">
+        <span className="text-gray-500">VA:</span>{" "}
+        <span className="text-gray-300 font-mono">
+          0x{state.currentAddress.toString(16).toUpperCase()}
+        </span>
+      </span>
       <span className="mr-4">
         <span className="text-gray-500">RVA:</span>{" "}
         <span className="text-gray-300 font-mono">0x{rva.toString(16).toUpperCase()}</span>
@@ -218,8 +230,27 @@ export function StatusBar({ mcpStatus }: { mcpStatus?: "connected" | "disconnect
           {fileOffset !== null ? `0x${fileOffset.toString(16).toUpperCase()}` : "---"}
         </span>
       </span>
-      {insnBytesStr && <span className="mr-4 font-mono text-gray-300">{insnBytesStr}</span>}
-      {blockStr && <span className="mr-4 text-gray-500">{blockStr}</span>}
+      {/* THE TWO LARGEST FIELDS IN THE BAR, AND THE ONLY TWO WHOSE FACT IS ON
+          SCREEN SOMEWHERE ELSE, SO THEY ARE THE ONES THAT GO WHEN THE BAR IS
+          TOO NARROW. The bytes are a column of the disassembly listing under
+          the cursor and the block extent is drawn in the graph, where this bar
+          is the ONLY place the analysis notice at the far end is stated in the
+          status strip. Computed at text-[10px] and a 0.6em advance, they are
+          294px and 192px of content plus 16px of margin each — 518px, a third
+          of the bar's ~1650px preferred width.
+
+          `2xl` (1536px) AND NOT `lg`, WHICH WOULD BE INERT: `hidden lg:inline`
+          shows both fields at every width from 1024px up, i.e. across the whole
+          band that clips (1366 and 1440 included), and below 1024px the bar
+          still wants 1132px — so it would buy a clean layout at no width at
+          all. Hidden below 1536px the remaining fields fit unshrunk from
+          1132px, which covers every common laptop. Nothing is unmounted; this
+          is CSS, so `state.currentInstruction` stays readable to everything
+          else. (peek-a-bin-al07) */}
+      {insnBytesStr && (
+        <span className="hidden 2xl:inline mr-4 font-mono text-gray-300">{insnBytesStr}</span>
+      )}
+      {blockStr && <span className="hidden 2xl:inline mr-4 text-gray-500">{blockStr}</span>}
       <div className="flex-1" />
       {profileStore.profiles.length > 1 && (
         <span className="mr-3 relative" ref={popoverRef}>

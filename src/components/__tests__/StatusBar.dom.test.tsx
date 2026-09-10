@@ -291,3 +291,109 @@ describe("StatusBar's phase sentence", () => {
     expect(document.querySelector("svg.animate-spin")).toBeNull();
   });
 });
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE WIDTH CONTRACT: WHICH FIELDS LEAVE THE BAR WHEN IT WILL NOT FIT.
+ *
+ * `StatusBar` is one of only TWO bars outside `<main>` (`AddressBar` is the
+ * other), in a column whose `body` is `overflow: hidden`, so what runs off its
+ * right edge is clipped away rather than scrolled to — and the LAST child is
+ * the analysis notice, the one place this strip says the analysis failed or is
+ * partial. `peek-a-bin-cgu1` fixed the top bar; this is the other one.
+ *
+ * The two largest fields — the instruction bytes (up to 49 characters, since 15
+ * bytes IS x86's maximum instruction length) and the block extent — now hide
+ * below `2xl`. `2xl` AND NOT `lg`: at `lg` both fields are shown from 1024px
+ * up, which is the whole band that clips, so the token choice is the fix and
+ * `2xl:inline` is asserted by name below.
+ *
+ * *** NONE OF THIS IS EVIDENCE ABOUT LAYOUT. *** Tailwind is not loaded under
+ * vitest and jsdom performs no layout (`src/test/domSetup.ts:57-61` says so in
+ * its own comment), so `hidden` and `2xl:inline` have no computed effect in any
+ * test in this tree. Every row here reads a class string and checks that React
+ * wrote a token. Nothing has seen a field be hidden, nothing has seen the
+ * notice be on screen at any width, and every width figure behind the choice is
+ * COMPUTED from a 0.6em monospace advance at 10px — never measured. The width
+ * sweep is `peek-a-bin-v2u`. (peek-a-bin-al07)
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+describe("StatusBar's width contract", () => {
+  /** Fifteen bytes: x86's maximum instruction length, i.e. the widest this field ever gets. */
+  const INSN_BYTES = [
+    0x48, 0x8d, 0x0d, 0x11, 0x22, 0x33, 0x44, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ];
+  const CURSOR = PE.optionalHeader.imageBase + 0x1234;
+
+  /** Every optional field populated at once — the worst case for the bar's width. */
+  const FULL: Partial<AppState> = {
+    analysisPhase: "ready",
+    omittedPasses: ["call-targets"],
+    currentAddress: CURSOR,
+    currentInstruction: { bytes: INSN_BYTES, size: INSN_BYTES.length },
+    currentBlock: { startAddr: CURSOR, endAddr: CURSOR + 0x10 },
+  };
+
+  const hex = (n: number) => `0x${n.toString(16).toUpperCase()}`;
+  const BYTES_TEXT = `${INSN_BYTES.length}B: ${INSN_BYTES.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" ")}`;
+  const BLOCK_TEXT = `Block: ${hex(CURSOR)} – ${hex(CURSOR + 0x10)}`;
+
+  /**
+   * Tokens rather than a substring: `toContain("hidden")` would also be
+   * satisfied by an `overflow-hidden` somewhere in the same attribute.
+   */
+  function tokensOf(text: string): string[] {
+    return screen.getByText(text).className.split(/\s+/).filter(Boolean);
+  }
+
+  it("hides the instruction bytes below 2xl and at no narrower breakpoint", () => {
+    // The text is the LOCATOR and the class list is the assertion -- though
+    // getByText throwing on an absent field makes the spelling a contract too.
+    mount(FULL);
+    const t = tokensOf(BYTES_TEXT);
+    expect(t).toContain("hidden");
+    expect(t).toContain("2xl:inline");
+    // The token choice IS the fix: at lg both fields are shown across the
+    // entire clipping band, so a narrower breakpoint here buys nothing.
+    expect(t.filter((c) => /^(sm|md|lg|xl):/.test(c))).toEqual([]);
+    // Still the field it was.
+    expect(t).toContain("font-mono");
+  });
+
+  it("hides the block extent below 2xl and at no narrower breakpoint", () => {
+    mount(FULL);
+    const t = tokensOf(BLOCK_TEXT);
+    expect(t).toContain("hidden");
+    expect(t).toContain("2xl:inline");
+    expect(t.filter((c) => /^(sm|md|lg|xl):/.test(c))).toEqual([]);
+  });
+
+  it("prints the VA the cursor is at, beside the RVA it implies", () => {
+    // The VA is BEHAVIOUR, not a class string, and it is the reason
+    // peek-a-bin-cgu1.4 could only shorten the toolbar's readout rather than
+    // hide it: before this the bar had the RVA and the file offset and no VA at
+    // all. Both expectations are derived from the fixture's own image base, so
+    // an image based anywhere else still checks the same relationship.
+    mount(FULL);
+    const base = PE.optionalHeader.imageBase;
+    expect(screen.getByText("VA:").parentElement?.textContent).toBe(`VA: ${hex(CURSOR)}`);
+    expect(screen.getByText("RVA:").parentElement?.textContent).toBe(`RVA: ${hex(CURSOR - base)}`);
+  });
+
+  it("leaves the notice last in the bar, and rendered, with every field populated", () => {
+    // The liveness half of the two rows above: hiding must take the fields it
+    // named and nothing else. And the notice's POSITION is the defect's
+    // mechanism -- an overflowing LTR flex row loses its last child first -- so
+    // a deliberate reorder (a separate judgement, per the bead) has to come
+    // back through this row rather than landing green.
+    const { container } = mount(FULL);
+    const bar = container.firstElementChild as HTMLElement;
+    const notice = screen.getByText("Partial function list");
+    expect(bar.lastElementChild?.contains(notice)).toBe(true);
+    expect(notice.className).toContain("text-amber-400");
+    // And the notice itself is not responsive: it is the thing being kept.
+    const outer = (bar.lastElementChild as HTMLElement).className.split(/\s+/).filter(Boolean);
+    expect(outer).not.toContain("hidden");
+    expect(outer.filter((c) => /^(sm|md|lg|xl|2xl):/.test(c))).toEqual([]);
+  });
+});

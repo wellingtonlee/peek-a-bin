@@ -789,6 +789,36 @@ filters on `offsetParent`. Accepted cost: in the wide one-row tier the tabs sit 
 than after Undo/Redo. Every figure behind both breakpoints is **computed, never measured**
 (`peek-a-bin-cgu1`).
 
+**THE STATUS BAR IS THE OTHER BAR OUTSIDE `<main>`, AND WHAT IT CROWDED OFF ITS RIGHT EDGE IS THE
+ANALYSIS NOTICE.** Same containment fact as the top bar — `AddressBar` and `StatusBar` are the only
+two bars outside `<main>`, in a column whose `body` is `overflow: hidden` — and the notice is
+`StatusBar`'s **last child**, so an over-wide row loses exactly the red/amber label that is the one
+place the strip says the analysis failed, timed out or is partial. Up to eleven `mr-4`-spaced fields
+give the row a **~1650px** preferred width (computed at `text-[10px]`, a 0.6em advance, so 6px per
+character). **`hidden 2xl:inline` on the two largest, `insnBytesStr` (294px — `"15B: "` plus fifteen
+`XX ` groups, and 15 IS x86's maximum instruction length) and `blockStr` (192px), recovers 518px**
+and leaves ~1132px, which fits unshrunk from 1132px up to the breakpoint. Both are the only fields
+whose fact is on screen somewhere else — the bytes are a disassembly column, the block extent is
+drawn in the graph. **`2xl` AND NOT `lg`, WHICH IS MEASURABLY INERT AND IS WHAT THE BEAD ASKED FOR**:
+`hidden lg:inline` shows both fields at every width from 1024px up, i.e. across the entire clipping
+band with 1366 and 1440 inside it, and below 1024px the reduced bar still wants 1132px — so it buys
+a clean layout at **no width at all**. **AND THE MECHANISM DIFFERS FROM THE TOP BAR'S IN THE ONE WAY
+THAT MATTERS: these fields CAN shrink.** Every one is wrappable text with no `whitespace-nowrap`
+anywhere, so `min-width: auto` resolves to min-content (the longest word) rather than to the
+preferred width — the opposite of `AddressBar`, whose items are single words, SVGs and a fixed-width
+`<input>`. So the old bar did not clip at 1366px, it **shrink-wrapped**: the notice kept its box
+while its text wrapped inside a 48px column, and the 294px byte field crushed toward 24px and
+wrapped to ~15 lines of 12px inside a 20px `items-center` box with visible overflow, ~80px of it
+painting over `<main>`. Hard horizontal clipping of the notice begins below **840px** (718px with
+the two fields hidden). **`h-5` IS DELIBERATELY UNTOUCHED** — `h-auto min-h-5` + `flex-wrap` is the
+direct analogue of the top bar's repair and was refused for changing the app's vertical budget on
+every narrow window; reordering the notice was refused because its placement beside the count is a
+recorded decision; `shrink-0` was refused for the top bar's own reason. **A `VA:` field was added
+ahead of `RVA:` and `File:`** — the bar had the RVA and the file offset and never the virtual
+address, which is exactly why `peek-a-bin-cgu1.4` could only shorten the toolbar's VA readout and
+not hide it; with the value here too, dropping the toolbar's copy is zero-loss at every width. Every
+figure is **computed, never measured** (`peek-a-bin-al07`).
+
 **AI features**: two tools — Chat (`useAIChat`) and Enhance/Explain in the decompile panel's **AI**
 sub-tab (`useDecompileTabs`) — both using `streamChat()` from `src/llm/client.ts`. **Neither keeps
 state in `AppState`**: the chat panel is local state in `DisassemblyView` and the enhance/explain
@@ -1640,6 +1670,22 @@ read "all of them compile" as "all of them are right".
   `className`, both controls discriminate, and neither is evidence that either row wraps, that
   the header bar's search box is on screen, or that a fifth panel's close button is clickable.
   Their width figures are computed the same way and were never measured.
+- **THE STATUS BAR'S WIDTH CONTRACT IS FOUR CLASS-STRING AND TEXT ASSERTIONS AND NOTHING MORE, AND
+  ITS BREAKPOINT REASONING HAS NEVER BEEN MEASURED.** Same blindness as the toolbar's, one bar down:
+  Tailwind is not loaded under vitest and jsdom performs no layout, so `hidden` and `2xl:inline` have
+  no computed effect in any test in this tree — nothing has seen the instruction-bytes field hide at
+  1535px, nothing has seen the analysis notice be on screen at any width, and nothing has seen the
+  wrap-and-vertical-spill the pre-fix bar produced between 840px and 1650px. `~1650px` preferred,
+  `~1132px` with the two fields hidden, `840px`/`718px` for the onset of true horizontal clipping and
+  the `518px` recovered are all **COMPUTED** from a 0.6em advance at 10px plus the Tailwind spacing
+  scale; a different fallback font moves every one. The `2xl`-not-`lg` argument is arithmetic over
+  those same figures, so it inherits their standing. **What IS measured is the suite**: eight negative
+  controls, **all eight discriminating, none inert**, each reddening exactly one row — dropping
+  `hidden` from either field, respelling either `2xl:inline` as `lg:inline` (the control that pins the
+  deviation from the bead's own proposal), deleting the VA field, printing the RVA in its place,
+  appending a sibling after the notice, and hiding the notice itself. The VA field's **value** is real
+  behaviour and is asserted as such, derived from the fixture's own image base. Added to
+  `peek-a-bin-v2u` (`peek-a-bin-al07`).
 - **No human has looked at this branch in a browser.** `peek-a-bin-v2u` is the checklist; ~15
   minutes with the app open closes more risk than any further static work.
 - **The metrics worker's Blob hand-off is verified for EQUIVALENCE and not at all for SPEED.**

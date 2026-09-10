@@ -932,6 +932,85 @@ re-taken.)
     left-to-right then top-to-bottom **with no jump between rows** — the property no test here can
     check) is appended to `peek-a-bin-v2u`, which stays open. This is the app's first responsive
     code, so there is also no prior breakpoint behaviour to compare against.
+- **THE STATUS BAR'S WIDTH CONTRACT: THE BEAD'S BREAKPOINT WAS INERT AND ITS MECHANISM WAS WRONG;
+  THE SUITE IS FOUR CLASS-STRING AND TEXT ASSERTIONS AND NOTHING MORE (2026-09-10, base `16f37df`,
+  `peek-a-bin-al07`).** `StatusBar` is the second of the only two bars outside `<main>`, in a column
+  whose `body` is `overflow: hidden`, and its **last child** is the analysis notice — the one place
+  the strip says the analysis failed, timed out or is partial. `hidden 2xl:inline` on the two largest
+  low-value fields is the repair, `h-5` untouched.
+  - **THE RECOMPUTED ARITHMETIC (computed, never measured — 6px per character from a 0.6em advance at
+    `text-[10px]`, plus the Tailwind spacing scale).** Worst realistic content, per field, as
+    preferred / min-content / margin in px: `Function: sub_140001000` 138 / 78 / 16; `Section:
+    .textbss` 102 / 48 / 16; `VA: 0x140001000` **90 / 66 / 16 (new)**; `RVA: 0x1B2C3D` 78 / 48 / 16;
+    `File: 0x1B2C3D` 84 / 48 / 16; the instruction bytes (`"15B: "` plus fifteen `XX ` groups = 49
+    characters, 15 being x86's maximum instruction length) **294 / 24 / 16**; the block extent
+    **192 / 66 / 16**; the AI-profile chip 82 / 82 / 12; the MCP dot 28 / 28 / 12; `1234 functions
+    (partial)` 144 / 54 / 16; the `KERNEL DRIVER` chip 92 / 50 / 16; the notice label (`Partial
+    function list`, the longest that CO-OCCURS with a cursor on an instruction — `Unsupported
+    architecture` is longer but implies no disassembly at all) 126 / 48 / 0. Plus `px-4` = 32.
+    **Preferred total ~1650px with the new VA field, ~1544px without it. Hiding the two recovers
+    exactly 518px, leaving ~1132px.** Min-content totals are **840px** with every field and **718px**
+    with the two hidden.
+  - **THE BEAD'S ~1338px IS LOW BY ~206px AND ITS THREE COMPONENTS ARE NAMED**: it omitted
+    `" (partial)"` from the function-count field (+60px, and that string is present *by construction*
+    in the case where a notice exists), used a 5-character section name rather than the format's
+    8-character maximum, and took a shorter notice label. Its own text is internally inconsistent by
+    28px — "above ~1338 it is fine" beside "on a 1366 laptop … the fault report is off-screen".
+  - **`hidden lg:inline`, WHICH IS WHAT THE BEAD AND THE BRIEF BOTH ASKED FOR, IS INERT AT EVERY
+    WIDTH, AND THIS IS THE HEADLINE FINDING.** `lg` hides *below* 1024px. So the two fields are SHOWN
+    across `[1024, 1650)` — the entire band in which the bar is over-wide, 1366 and 1440 inside it —
+    and below 1024px the reduced bar still wants 1132px. There is no width at which `lg` produces a
+    row that fits. The brief's expected "~820px residual" is `1338 - 518` and rests on the same slip:
+    that difference is the reduced bar's preferred width, but the reduction is only in force below
+    1024px, where it is never the operative threshold. **`2xl` (1536px) is what the intent requires**,
+    and it is also the breakpoint `peek-a-bin-cgu1` chose for its own only-fits-wide decision. Bands
+    under `2xl`: `>= 1650px` every field at full size; `[1536, 1650)` a mild shrink of at most 114px
+    spread across ten items; **`[1132, 1536)` clean and unshrunk — 1152, 1280, 1366 and 1440 all sit
+    here**; `[718, 1132)` progressive shrink; `< 718px` true horizontal overflow and the notice is
+    clipped away.
+  - **A CORRECTION TO THE DEFECT'S MECHANISM, AND IT IS THE OPPOSITE OF THE TOP BAR'S.** The bead
+    asserts "nothing shrinks here either (same `min-width: auto` reasoning as cgu1's epic body)".
+    That reasoning holds for `AddressBar`, every item of which is a single word, a fixed-size SVG or
+    an `<input>` with a definite width, so min-content == preferred width. It does **not** hold here:
+    every field is wrappable text, and there is no `whitespace-nowrap` anywhere in
+    `StatusBar.tsx` or `src/styles/` (checked), so `min-width: auto` resolves to the longest word —
+    24px for the 294px byte field. So above ~840px the pre-fix bar did not clip, it **shrank**: the
+    notice kept its box on the line while its text wrapped to two ~12px lines in a 48px column, and
+    the byte field wrapped to ~15 lines inside a 20px `h-5 items-center` box whose overflow is
+    `visible`, spilling ~80px above (over `<main>`) and ~80px below (off the viewport, `body` being
+    `overflow: hidden`). A visually broken bar with a partly-legible notice, rather than a notice
+    that is wholly gone. **Both readings agree that the row does not fit and that the notice is the
+    casualty; they disagree about what a 1366px window looks like, and only the corrected one
+    explains why `lg` cannot help.** Nothing has observed either behaviour — see the blindness note
+    below.
+  - **EIGHT NEGATIVE CONTROLS, ALL EIGHT DISCRIMINATING, NONE INERT**, each reddening exactly one row
+    of `StatusBar.dom.test.tsx` and no other: drop `hidden` from the byte field; respell its
+    `2xl:inline` as `lg:inline`; the same two on the block field; delete the VA field; print `rva`
+    where the VA goes; append a sibling after the notice span; give the notice span
+    `hidden 2xl:inline`. The `lg:inline` pair is the control that pins the deviation from the bead's
+    own proposal, so a future agent "correcting" the breakpoint back reddens a row with the reason
+    beside it. **No existing test was modified**: the diff is 108 insertions and 0 deletions and the
+    file's first 293 lines hash identically to `16f37df`, so all 27 pre-existing tests are
+    byte-for-byte unchanged, and the source change alone read 144 files / 5144 tests green before any
+    new assertion was added.
+  - **THREE REFUSALS, RECORDED SO THEY ARE NOT RE-ATTEMPTED.** (1) `h-auto min-h-5` + `flex-wrap`,
+    the direct analogue of the top bar's repair: it makes the strip two lines on every narrow window
+    and changes the app's vertical budget, which is a bigger judgement than this defect needs.
+    (2) Reordering so the notice is not last: its placement is a recorded decision — the `(partial)`
+    marker sits *beside the count* on purpose — and moving it is a separate judgement, which is why
+    the fourth assertion pins "last" rather than leaving a reorder to land green. (3) `shrink-0`, or
+    expecting anything to absorb the deficit, for `peek-a-bin-cgu1`'s reason at the top bar — though
+    note the correction above: here items *can* shrink, and `shrink-0` would convert the wrap into
+    the clean horizontal clip the fix exists to prevent.
+  - **WHAT A GREEN SUITE STILL SAYS NOTHING ABOUT.** Tailwind is not loaded under vitest and jsdom
+    performs no layout, so `hidden` and `2xl:inline` have no computed effect in any test here: no
+    test has seen a field hide at 1535px, seen the notice be on screen at any width, or seen the
+    wrap-and-spill described above. The `2xl`-not-`lg` argument is arithmetic over computed figures
+    and inherits their standing; a different fallback font moves every number. The VA field's
+    **value** is the one genuinely behavioural assertion and is derived from the fixture's own image
+    base. The width sweep (1700 / 1536 / 1440 / 1366 / 1280 / 1152 / 1024 / 840 / 700px, checking the
+    notice is readable and the byte column does not paint over the listing) is appended to
+    `peek-a-bin-v2u`, which stays open.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
 When a UI or deployment change lands, the honest report says which of these it did *not* move.
