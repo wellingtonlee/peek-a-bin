@@ -5,14 +5,55 @@ import "../../test/domSetup";
 // entropy-strip effect constructs both — see the stub's docstring for what it
 // does and does not buy (it buys nothing whatever about measured widths).
 import "../../test/browserApiStubs";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import type { AppState } from "../../hooks/usePEFile";
+import { useReducer } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type AppState, appReducer } from "../../hooks/usePEFile";
 import { buildMinimalPE64 } from "../../pe/__tests__/fixtures";
 import { parsePE } from "../../pe/parser";
-import { HexView, MAX_BYTE_PATTERN_MATCHES } from "../HexView";
+import { BYTE_SEARCH_DEBOUNCE_MS, HexView, MAX_BYTE_PATTERN_MATCHES } from "../HexView";
 import { AppHarness, harnessPE, IMAGE_BASE, stateWithPE } from "./appStateHarness";
+
+/**
+ * Every `scrollToIndex` the component asks for, in order.
+ *
+ * NOTHING HAS BEEN SEEN TO SCROLL AND NOTHING CAN BE. `virtual-core` measures
+ * the scroll element with `offsetHeight`, which is 0 here, so the grid renders
+ * no rows at all (asserted at the bottom of this file) and a scroll request
+ * moves nothing that exists. This records the REQUEST — the index the view was
+ * told to bring into range — and that is the whole of what next/prev can be
+ * checked against in jsdom.
+ *
+ * `vi.hoisted` because a `vi.mock` factory is hoisted above the imports and
+ * would otherwise reach a `const` in its temporal dead zone.
+ */
+const virt = vi.hoisted(() => ({ scrolls: [] as number[] }));
+
+vi.mock("@tanstack/react-virtual", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-virtual")>();
+  // `scrollToIndex` is an instance property assigned in `Virtualizer`'s
+  // constructor, not a prototype method, so it cannot be spied on the class.
+  // The instance is held in `useState` and is therefore stable across renders —
+  // hence the guard, without which each render would wrap the wrapper and one
+  // call would be recorded many times.
+  const patched = new WeakSet<object>();
+  return {
+    ...actual,
+    useVirtualizer: (options: never) => {
+      const v = actual.useVirtualizer(options);
+      if (!patched.has(v)) {
+        patched.add(v);
+        const inner = v.scrollToIndex.bind(v);
+        v.scrollToIndex = (index, opts) => {
+          virt.scrolls.push(index);
+          inner(index, opts);
+        };
+      }
+      return v;
+    },
+  };
+});
 
 /**
  * The hex tab's toolbar. NOT the hex grid.
@@ -246,6 +287,402 @@ describe("HexView byte search scope", () => {
   it("follows the selected section rather than naming one of them always", () => {
     renderHex({ currentAddress: IMAGE_BASE + RDATA_VA });
     expect(screen.getByLabelText("Byte search in .rdata")).toBe(byteSearchBox());
+  });
+});
+
+/** RVA of {@link renderNeedles}'s one section. */
+const NEEDLE_VA = 0x1000;
+
+/**
+ * A PE whose one section is zeros except for an `AA` at each named offset, so a
+ * one-byte `AA` search has a known match list AT KNOWN ROWS — which is what the
+ * navigation rows below assert against. The offsets are deliberately spread
+ * across several sixteen-byte rows, since a match list inside one row cannot
+ * tell a right `scrollToIndex` from a wrong one.
+ */
+function needlePE(offsets: number[], others: number[], size: number) {
+  const data = new Uint8Array(size);
+  for (const o of offsets) data[o] = 0xaa;
+  for (const o of others) data[o] = 0xbb;
+  return parsePE(
+    buildMinimalPE64({
+      imageBase: IMAGE_BASE,
+      sections: [
+        {
+          name: ".needle",
+          virtualAddress: NEEDLE_VA,
+          virtualSize: size,
+          data,
+          characteristics: 0x40000040, // INITIALIZED_DATA | MEM_READ
+        },
+      ],
+    }),
+  );
+}
+
+function renderNeedles(offsets: number[], others: number[] = [], size = 0x60) {
+  const pe = needlePE(offsets, others, size);
+  const dispatch = vi.fn();
+  render(
+    <AppHarness
+      state={stateWithPE(pe, { currentAddress: IMAGE_BASE + NEEDLE_VA })}
+      dispatch={dispatch}
+    >
+      <HexView />
+    </AppHarness>,
+  );
+  // The mount itself scrolls: `currentAddress` is the section base, so the
+  // effect watching `currentRowIdx` asks for row 0 before any search exists.
+  // Dropping it here is what makes `virt.scrolls` a record of the BUTTONS.
+  virt.scrolls.length = 0;
+  return { dispatch, base: IMAGE_BASE + NEEDLE_VA };
+}
+
+/**
+ * The same fixture through the REAL reducer, so `SET_ADDRESS` actually lands.
+ *
+ * Every other row here uses a `vi.fn()` dispatch, which means `currentAddress`
+ * never moves and the memo chain behind `sectionBytes` is trivially stable. It
+ * is not trivial in the app: stepping dispatches `SET_ADDRESS`, which re-runs
+ * the `sectionInfo` memo, and if that returned a fresh object the `sectionBytes`
+ * memo below it would too — re-running the scan effect, which resets `matchIdx`
+ * to -1. A second press would then be a first press again, forever. What makes
+ * it hold is that `sectionInfo` returns an element OF `pe.sections`, so the
+ * identity survives an address change within one section; this is the row that
+ * executes that argument rather than reasoning about it.
+ */
+function renderNeedlesLive(offsets: number[]) {
+  const pe = needlePE(offsets, [], 0x60);
+  const init = stateWithPE(pe, { currentAddress: IMAGE_BASE + NEEDLE_VA });
+  function Host() {
+    // `useReducer`'s dispatch is stable by React's own guarantee, so it needs
+    // no `useCallback` and no dependency entry.
+    const [state, dispatch] = useReducer(appReducer, init);
+    return (
+      <AppHarness state={state} dispatch={dispatch}>
+        <HexView />
+      </AppHarness>
+    );
+  }
+  render(<Host />);
+  virt.scrolls.length = 0;
+}
+
+/** Type into the byte search box without `userEvent`, which deadlocks under fake timers. */
+function typeSearch(value: string) {
+  fireEvent.change(byteSearchBox(), { target: { value } });
+}
+
+/** Let a pending debounce fire, inside `act` so React flushes what it schedules. */
+function settle(ms = BYTE_SEARCH_DEBOUNCE_MS) {
+  act(() => {
+    vi.advanceTimersByTime(ms);
+  });
+}
+
+/**
+ * THE DEBOUNCE, ASSERTED ON BOTH SIDES OF ITS BOUNDARY.
+ *
+ * A single advance PAST the boundary cannot tell a 150 ms debounce from no
+ * debounce at all: "the result is on screen now" is equally true of a scan that
+ * ran synchronously on the keystroke. So every row here asserts the short side
+ * as well — and the second row goes further, keeping the total elapsed time
+ * WELL PAST the boundary while no single gap reaches it, which a plain
+ * `setTimeout` that is merely never reset would fail.
+ *
+ * `userEvent` and `waitFor` both deadlock under `vi.useFakeTimers()` (the first
+ * awaits between keystrokes, the second polls on a timer of its own), hence
+ * `fireEvent.change` and an explicit `act`.
+ */
+describe("HexView byte search debounce", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    virt.scrolls.length = 0;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not scan until the wait has elapsed, and then does", () => {
+    renderNeedles([0x05, 0x25]);
+    typeSearch("AA");
+    settle(BYTE_SEARCH_DEBOUNCE_MS - 1);
+    // Short of the boundary: no count, and — the half that matters — no claim
+    // that the section lacks the pattern either.
+    expect(screen.queryByText(/matches in \.needle/)).toBeNull();
+    expect(screen.queryByText(/^No matches/)).toBeNull();
+    settle(1);
+    expect(screen.getByText("2 matches in .needle")).toBeTruthy();
+  });
+
+  it("reports nothing from a query superseded before the wait elapsed", () => {
+    // THE NAME IS EXACT AND THE NARROWER CLAIM IS DELIBERATE. What this pins is
+    // that the ANSWER shown is never the superseded query's; it does not pin
+    // that the superseded query was never SCANNED. Cancelling the pending timer
+    // is measured INERT (control C3) and reported rather than tuned away: with
+    // the settled gate in place a stale timer's result is judged unsettled and
+    // says nothing, so the only cost left is the wasted walk — and counting
+    // walks would need a seam in `HexView` existing solely for a test.
+    renderNeedles([0x05, 0x25]);
+    // `BB` occurs nowhere, so had the first keystroke's timer been the only one
+    // there would be a visible, wrong, durable "No matches in .needle" here.
+    typeSearch("BB");
+    settle(BYTE_SEARCH_DEBOUNCE_MS - 20);
+    typeSearch("AA");
+    settle(BYTE_SEARCH_DEBOUNCE_MS - 20);
+    // Well past 150 ms in total; no single gap reached it.
+    expect(screen.queryByText(/matches in \.needle/)).toBeNull();
+    expect(screen.queryByText(/^No matches/)).toBeNull();
+    settle(20);
+    expect(screen.getByText("2 matches in .needle")).toBeTruthy();
+  });
+
+  it("applies an emptied box at once, without waiting", () => {
+    // The debounce exists to stop a walk per keystroke and clearing walks
+    // nothing, so waiting would pay the delay on the one affordance whose job
+    // is to make the highlights go away.
+    renderNeedles([0x05]);
+    typeSearch("AA");
+    settle();
+    expect(screen.getByText("1 match in .needle")).toBeTruthy();
+    typeSearch("");
+    expect(screen.queryByText(/match/)).toBeNull();
+  });
+
+  it("applies the query at once on Enter, cancelling the wait", () => {
+    renderNeedles([0x05, 0x25]);
+    typeSearch("AA");
+    fireEvent.keyDown(byteSearchBox(), { key: "Enter" });
+    // No timer has been advanced at all.
+    expect(screen.getByText("2 matches in .needle")).toBeTruthy();
+  });
+});
+
+/**
+ * THE PENDING STATE SAYS NOTHING ABOUT THE SECTION, WHICH IS A DEFECT CLASS AND
+ * NOT A POLISH ITEM.
+ *
+ * The moment the typed query and the scanned query are two pieces of state
+ * there is a window — a durable 150 ms one while the debounce runs, and a
+ * one-frame one between `activeSearch` moving and the effect running — in which
+ * the toolbar describes the OLD scan under the NEW query. One of the things it
+ * says there is "No matches in .needle", which is a POSITIVE CLAIM ABOUT THE
+ * SECTION standing over a pattern nothing has looked for yet: the same
+ * narrower-answer-wearing-a-complete-one's-shape rule as `ImportEntry.truncated`
+ * and `ResourceTree.incomplete`.
+ *
+ * The fix is to carry the query and the section WITH the result and compare both
+ * against what is on screen (`searchSettled`), so "not scanned yet" and
+ * "scanned, found nothing" are distinguishable states rather than one.
+ *
+ * NEGATIVE CONTROL: gate the sentences on `activeSearch` — the query the scan
+ * keys on, which is what the first sketch of this change did — and both rows
+ * below go red, because during the wait `activeSearch` still equals the result's
+ * own query and the stale sentence is judged current.
+ */
+describe("HexView byte search pending state", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    virt.scrolls.length = 0;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("withdraws 'No matches' while a newly typed query is unscanned", () => {
+    renderNeedles([0x05]);
+    typeSearch("BB");
+    settle();
+    expect(screen.getByText("No matches in .needle")).toBeTruthy();
+    // `AA` is in this section, so the standing sentence is not merely stale, it
+    // is about to be contradicted.
+    typeSearch("AA");
+    expect(screen.queryByText(/^No matches/)).toBeNull();
+    expect(screen.getByText("Searching…")).toBeTruthy();
+    settle();
+    expect(screen.getByText("1 match in .needle")).toBeTruthy();
+  });
+
+  it("withdraws a settled count while a newly typed query is unscanned", () => {
+    renderNeedles([0x05, 0x25]);
+    typeSearch("AA");
+    settle();
+    expect(screen.getByText("2 matches in .needle")).toBeTruthy();
+    typeSearch("BB");
+    expect(screen.queryByText(/matches in \.needle/)).toBeNull();
+    expect(screen.queryByText("Previous match")).toBeNull();
+    expect(screen.getByText("Searching…")).toBeTruthy();
+    settle();
+    expect(screen.getByText("No matches in .needle")).toBeTruthy();
+  });
+
+  it("reports nothing pending for a query that is not a byte pattern", () => {
+    // Gibberish is not a scan in flight, and "Searching…" over `zz` would be a
+    // spinner that never resolves.
+    renderNeedles([0x05]);
+    typeSearch("zz");
+    expect(screen.queryByText("Searching…")).toBeNull();
+    settle();
+    expect(screen.queryByText("Searching…")).toBeNull();
+    expect(screen.queryByText(/match/)).toBeNull();
+  });
+});
+
+/**
+ * NEXT/PREV. THE OFFSETS USED TO BE COMPUTED AND THROWN AWAY.
+ *
+ * The scan folded up to 1000 offsets into a highlight set and dropped the array,
+ * so a 200 KB section with forty hits could be counted and then only found by
+ * scrolling. What is asserted here is the REQUEST to bring a row into range and
+ * the address the rest of the app is moved to — see {@link virt}: nothing in
+ * this environment has been seen to scroll, and no row of the grid exists to
+ * scroll to.
+ */
+describe("HexView byte search navigation", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    virt.scrolls.length = 0;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const next = () => fireEvent.click(screen.getByLabelText("Next match"));
+  const prev = () => fireEvent.click(screen.getByLabelText("Previous match"));
+
+  it("offers no navigation until a scan has found something", () => {
+    renderNeedles([0x05]);
+    expect(screen.queryByLabelText("Next match")).toBeNull();
+    typeSearch("BB");
+    settle();
+    expect(screen.getByText("No matches in .needle")).toBeTruthy();
+    expect(screen.queryByLabelText("Next match")).toBeNull();
+  });
+
+  it("steps forward through the matches in address order and wraps", () => {
+    // Rows 0, 2 and 4 of the sixteen-byte grid.
+    const { dispatch, base } = renderNeedles([0x05, 0x25, 0x45]);
+    typeSearch("AA");
+    settle();
+    expect(screen.getByText("3 matches in .needle")).toBeTruthy();
+    // No position of ANY value is claimed before a step: a position over a view
+    // that has not moved is a statement about where the grid is. The regex
+    // rather than a literal "1/3" because an off-by-one would print "0/3".
+    expect(screen.queryByText(/^\d+\/\d+\+?$/)).toBeNull();
+
+    next();
+    expect(screen.getByText("1/3")).toBeTruthy();
+    next();
+    next();
+    expect(screen.getByText("3/3")).toBeTruthy();
+    next();
+    expect(screen.getByText("1/3")).toBeTruthy();
+
+    expect(virt.scrolls).toEqual([0, 2, 4, 0]);
+    expect(dispatch.mock.calls.map((c) => c[0])).toEqual([
+      { type: "SET_ADDRESS", address: base + 0x05 },
+      { type: "SET_ADDRESS", address: base + 0x25 },
+      { type: "SET_ADDRESS", address: base + 0x45 },
+      { type: "SET_ADDRESS", address: base + 0x05 },
+    ]);
+  });
+
+  it("steps backward to the LAST match from a cursor that is nowhere yet", () => {
+    // -1 is a third state and not a zero: plain modular arithmetic on it lands
+    // one short of the end going backwards.
+    const { dispatch, base } = renderNeedles([0x05, 0x25, 0x45]);
+    typeSearch("AA");
+    settle();
+    prev();
+    expect(screen.getByText("3/3")).toBeTruthy();
+    expect(virt.scrolls).toEqual([4]);
+    prev();
+    expect(screen.getByText("2/3")).toBeTruthy();
+    expect(virt.scrolls).toEqual([4, 2]);
+    // The app's address follows the cursor too, so the data inspector and the
+    // address bar agree with the row the grid was told to show.
+    expect(dispatch.mock.calls.map((c) => c[0])).toEqual([
+      { type: "SET_ADDRESS", address: base + 0x45 },
+      { type: "SET_ADDRESS", address: base + 0x25 },
+    ]);
+  });
+
+  it("steps on Enter and back on Shift+Enter once the box is settled", () => {
+    renderNeedles([0x05, 0x25]);
+    typeSearch("AA");
+    settle();
+    fireEvent.keyDown(byteSearchBox(), { key: "Enter" });
+    expect(screen.getByText("1/2")).toBeTruthy();
+    fireEvent.keyDown(byteSearchBox(), { key: "Enter", shiftKey: true });
+    expect(screen.getByText("2/2")).toBeTruthy();
+    expect(virt.scrolls).toEqual([0, 2]);
+  });
+
+  it("starts a fresh list unpositioned when the query changes", () => {
+    // The second query MUST also match something: a query that finds nothing
+    // renders no navigator at all, so it would hide a cursor carried over
+    // rather than test that none was — measured, as an inert control, before
+    // the `BB` needle was added here.
+    renderNeedles([0x05, 0x25, 0x45], [0x35]);
+    typeSearch("AA");
+    settle();
+    next();
+    expect(screen.getByText("1/3")).toBeTruthy();
+    typeSearch("BB");
+    settle();
+    expect(screen.getByText("1 match in .needle")).toBeTruthy();
+    // A new scan is a new list; carrying the old index into it would claim a
+    // position the view was never moved to.
+    expect(screen.queryByText(/^\d+\/\d+\+?$/)).toBeNull();
+  });
+
+  it("keeps its place across steps when the real reducer moves the address", () => {
+    // See {@link renderNeedlesLive}: with a `vi.fn()` dispatch nothing moves, so
+    // no other row here can tell a surviving cursor from one that is reset and
+    // re-set on every press.
+    renderNeedlesLive([0x05, 0x25, 0x45]);
+    typeSearch("AA");
+    settle();
+    next();
+    expect(screen.getByText("1/3")).toBeTruthy();
+    next();
+    expect(screen.getByText("2/3")).toBeTruthy();
+    next();
+    expect(screen.getByText("3/3")).toBeTruthy();
+    // And the section did not change under it, so the count still stands.
+    expect(screen.getByText("3 matches in .needle")).toBeTruthy();
+  });
+
+  it("marks the denominator as a floor when the scan stopped at the cap", () => {
+    // The `+` is `matchSummary`'s own admission carried onto the position, since
+    // "2/1000" over a truncated scan states a total the scan never established.
+    const data = new Uint8Array(MAX_BYTE_PATTERN_MATCHES + 1).fill(0xaa);
+    const pe = parsePE(
+      buildMinimalPE64({
+        imageBase: IMAGE_BASE,
+        sections: [
+          {
+            name: ".fill",
+            virtualAddress: FILL_VA,
+            virtualSize: data.length,
+            data,
+            characteristics: 0x40000040,
+          },
+        ],
+      }),
+    );
+    render(
+      <AppHarness
+        state={stateWithPE(pe, { currentAddress: IMAGE_BASE + FILL_VA })}
+        dispatch={vi.fn()}
+      >
+        <HexView />
+      </AppHarness>,
+    );
+    typeSearch(FILL_BYTE);
+    settle();
+    fireEvent.click(screen.getByLabelText("Next match"));
+    expect(screen.getByText(`1/${MAX_BYTE_PATTERN_MATCHES}+`)).toBeTruthy();
   });
 });
 

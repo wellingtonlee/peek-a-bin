@@ -2398,6 +2398,32 @@ mistake.
   and the debounce plus next/prev navigation are their own bead — the debounce brings the two
   measured jsdom traps (fake timers deadlock `waitFor`/`userEvent`; advance SHORT of the boundary
   first or the control is inert, as it came back twice). (`peek-a-bin-v3uh.7`)
+- **…AND DEBOUNCING THAT SCAN CREATES THE SAME CLASS IN REVERSE — A SENTENCE ABOUT A SCAN THAT HAS
+  NOT HAPPENED — SO THE SCANNED QUERY IS CARRIED WITH ITS RESULT.** The hex byte search now waits
+  `BYTE_SEARCH_DEBOUNCE_MS` (150, `DisassemblyToolbar`'s figure, not a second number) before
+  walking the section, and keeps the offsets it used to throw away, for next/prev. **The debounce
+  is not a free performance change**: the moment the typed input and the scanned query are two
+  pieces of state there is a window where the toolbar describes the OLD scan under the NEW query,
+  and one of the things it says there is `No matches in .rdata`, **which is a positive claim about
+  the section** — so typing over a query that found nothing left that sentence standing for 150 ms
+  beside a pattern nothing had looked for yet. `ByteSearchResult` carries `{ query, data, offsets,
+  truncated, highlighted }` and **`searchSettled` compares BOTH against what is on screen —
+  `result.query === byteSearch` (the BOX, never `activeSearch`, which by construction still equals
+  the result's own query throughout the wait) and `result.data === sectionBytes`**; every sentence
+  and every control is gated on it, and a parseable-but-unsettled query prints a neutral
+  `Searching…`, which claims nothing. The highlight set is deliberately NOT gated, a stale
+  highlight being invisible where blinking every match off and on again is not. **Three inert
+  controls, reported not tuned away**: cancelling the pending timer moves no row (the settled gate
+  makes a stale scan's result unsayable, so only the wasted walk is left and nothing here can count
+  walks), the `data` half cannot be reddened at all (its window is one frame and testing-library
+  flushes effects inside the same `act`), and an emptied box waiting out the debounce moves nothing
+  (every sentence is already gone; only the highlights would linger, and jsdom renders no grid
+  rows). **Both sides of the boundary are pinned**, since one side cannot tell 150 ms from 0. The
+  navigator asserts the `scrollToIndex` REQUEST — via a `vi.mock` wrapping the virtualizer instance,
+  `scrollToIndex` being a constructor-assigned property and so unspyable on the prototype —
+  **nothing has been seen to scroll**, and `matchIdx === -1` is a third state (forward is the first
+  match, backward the last). **Whole-file scope and an ASCII mode were left out**; had scope
+  landed, the scan would have to move to the METRICS worker. (`peek-a-bin-f4gz`)
 - **THE x64 `.pdata` LANGUAGE-SPECIFIC DATA IS NOT SELF-DESCRIBING, SO THE SCOPE TABLE IS
   PUBLISHED ONLY BEHIND A FOUR-PART STRUCTURAL CHECK.** `UNWIND_INFO` says only *that* a handler
   exists and gives its RVA; the bytes after it are whatever **that handler's** convention says, and

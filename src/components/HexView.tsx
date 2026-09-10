@@ -18,6 +18,24 @@ import { focusOnMount } from "./focusOnMount";
 
 const BYTES_PER_ROW = 16;
 
+/**
+ * How long the byte search waits after a keystroke before it scans.
+ *
+ * The scan is a main-thread walk of the WHOLE selected section (up to
+ * `sizeOfRawData`) that also rebuilds a `Set` of every matched byte, and it ran
+ * on every character typed — so `4D 5A 90 00` was four full walks, three of them
+ * over prefixes nobody asked about. 150 ms is `DisassemblyToolbar`'s figure for
+ * the same job, taken deliberately rather than minting a second number to keep
+ * in step.
+ *
+ * Exported so a test can derive BOTH sides of the boundary from it. A single
+ * advance past a debounce cannot tell one from no debounce at all — "nothing has
+ * happened yet" is equally true of a 0 ms timer nobody ticked — and that control
+ * has come back inert twice in this repo, so the tests assert short of this
+ * value as well as past it.
+ */
+export const BYTE_SEARCH_DEBOUNCE_MS = 150;
+
 /** Stable empty result, so the handlers below keep stable identities. */
 const NO_BLOCKS: number[] = [];
 
@@ -107,6 +125,54 @@ function matchSummary(count: number, truncated: boolean, scope: string): string 
   return `${count}${truncated ? "+" : ""} ${plural} in ${scope}${admission}`;
 }
 
+/**
+ * One COMPLETED scan, carrying the question it answers.
+ *
+ * The query and the section are stored beside the offsets because the answer and
+ * the question live in different commits. `byteSearch` is what is in the box;
+ * the scan runs {@link BYTE_SEARCH_DEBOUNCE_MS} later off `activeSearch`, and a
+ * passive effect flushes after the render that scheduled it. So there are two
+ * windows in which the two disagree — a 150 ms one while the debounce is
+ * pending, and a one-frame one between `activeSearch` moving and the effect
+ * running — and in both of them the toolbar was describing the PREVIOUS scan
+ * under the CURRENT query.
+ *
+ * That is not cosmetic, because one of the things it says is `No matches in
+ * .rdata`, WHICH IS A POSITIVE CLAIM ABOUT THE SECTION. Typing over a query that
+ * found nothing left that sentence standing for 150 ms beside a pattern nothing
+ * had looked for yet — a narrower answer (in fact no answer) wearing a complete
+ * one's shape, the `ImportEntry.truncated` / `ResourceTree.incomplete` /
+ * `PEFile.stringScan` rule in its most literal form.
+ *
+ * So the two states are made distinguishable rather than merged: `query` and
+ * `data` are compared against what is on screen NOW (`searchSettled`), and every
+ * sentence and every control the search offers is gated on that. `data` is
+ * compared by IDENTITY and is the second axis on purpose — switching sections
+ * changes neither the box nor the debounce, so a query-only test would have
+ * reported one section's count under another section's name.
+ */
+interface ByteSearchResult {
+  /** The query scanned. Compared against the BOX, not against `activeSearch`. */
+  query: string;
+  /** The section scanned, by identity. */
+  data: Uint8Array | null;
+  /** Where the matches are — see {@link HexView}'s `matchOffsets`. */
+  offsets: number[];
+  /** Whether {@link findBytePatternMatches} stopped short of the section. */
+  truncated: boolean;
+  /** Every byte covered by a match, for the grid's per-cell highlight. */
+  highlighted: Set<number>;
+}
+
+/** The state before anything has been searched for, and after the box is emptied. */
+const NO_BYTE_SEARCH: ByteSearchResult = {
+  query: "",
+  data: null,
+  offsets: [],
+  truncated: false,
+  highlighted: new Set(),
+};
+
 function entropyColor(entropy: number): string {
   // blue(0) -> yellow(4) -> red(8)
   if (entropy <= 4) {
@@ -134,10 +200,23 @@ export function HexView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [goToInput, setGoToInput] = useState("");
   const [byteSearch, setByteSearch] = useState("");
-  const [byteMatches, setByteMatches] = useState<Set<number>>(new Set());
-  const [matchCount, setMatchCount] = useState(0);
-  /** Whether {@link findBytePatternMatches} stopped short of the section. */
-  const [matchesTruncated, setMatchesTruncated] = useState(false);
+  /**
+   * The query the SCAN is keyed on, as against `byteSearch`, which is what is in
+   * the box. The debounce is the only writer.
+   */
+  const [activeSearch, setActiveSearch] = useState("");
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  /**
+   * The last completed scan.
+   *
+   * WHERE the matches are, not merely how many there were: the effect used to
+   * fold the offsets into the highlight set and drop the array on the floor, so
+   * a 200 KB section with forty hits could be counted and then only found by
+   * scrolling. Keeping them is what next/prev is.
+   */
+  const [searchResult, setSearchResult] = useState<ByteSearchResult>(NO_BYTE_SEARCH);
+  /** Which match next/prev last moved to; -1 before either has been pressed. */
+  const [matchIdx, setMatchIdx] = useState(-1);
   const [selectedOffset, setSelectedOffset] = useState<number | null>(null);
   const [selectionEnd, setSelectionEnd] = useState<number | null>(null);
   const [editingByte, setEditingByte] = useState<number | null>(null);
@@ -257,30 +336,120 @@ export function HexView() {
     // for the component's lifetime and cannot make this effect re-fire.
   }, [currentRowIdx, virtualizer]);
 
-  // Byte pattern search
+  /**
+   * Debounce the box into {@link activeSearch}, which is what the scan keys on.
+   *
+   * AN EMPTY BOX IS APPLIED AT ONCE, and that asymmetry is the point rather than
+   * a shortcut: the debounce exists to stop a walk of the section per keystroke,
+   * and clearing the search walks nothing — so waiting would be the one case
+   * where the delay is paid and nothing is saved, on the affordance whose whole
+   * job is to make the highlights go away.
+   *
+   * The timer is held in a ref as well as in the cleanup so that ENTER can
+   * cancel it and apply the query itself; the effect's own cleanup is what
+   * cancels it on a keystroke, which is why the empty-box arm below does not
+   * clear it a second time.
+   *
+   * NEITHER HALF OF THIS ARM CAN BE MADE RED FROM HERE and that is reported
+   * rather than tuned away (control C14): with an empty box every sentence the
+   * toolbar prints is gated on `byteSearch` and is therefore already gone, so
+   * the only thing the delay would hold back is the HIGHLIGHTS — and jsdom
+   * measures the scroll container as 0px, so the grid renders no rows to
+   * highlight. It is kept because the behaviour is right in a browser.
+   */
   useEffect(() => {
-    if (!sectionBytes || !byteSearch.trim()) {
-      setByteMatches(new Set());
-      setMatchCount(0);
-      setMatchesTruncated(false);
+    if (byteSearch === activeSearch) return;
+    if (!byteSearch.trim()) {
+      setActiveSearch(byteSearch);
       return;
     }
-    const pattern = parseBytePattern(byteSearch);
-    if (!pattern) {
-      setByteMatches(new Set());
-      setMatchCount(0);
-      setMatchesTruncated(false);
+    const timer = setTimeout(() => setActiveSearch(byteSearch), BYTE_SEARCH_DEBOUNCE_MS);
+    searchDebounceRef.current = timer;
+    return () => clearTimeout(timer);
+  }, [byteSearch, activeSearch]);
+
+  // Byte pattern search
+  useEffect(() => {
+    // A new result is a new list, so the cursor into it starts UNSET rather than
+    // at 0: a "1/40" nothing has scrolled to is a claim about where the view is.
+    setMatchIdx(-1);
+    const pattern = sectionBytes && activeSearch.trim() ? parseBytePattern(activeSearch) : null;
+    if (!sectionBytes || !pattern) {
+      // Stamped with the query and the section even so, or an unparseable query
+      // would never settle and the toolbar would report a pending scan forever.
+      setSearchResult({ ...NO_BYTE_SEARCH, query: activeSearch, data: sectionBytes });
       return;
     }
     const { offsets, truncated } = findBytePatternMatches(sectionBytes, pattern);
-    const s = new Set<number>();
+    const highlighted = new Set<number>();
     for (const off of offsets) {
-      for (let j = 0; j < pattern.length; j++) s.add(off + j);
+      for (let j = 0; j < pattern.length; j++) highlighted.add(off + j);
     }
-    setByteMatches(s);
-    setMatchCount(offsets.length);
-    setMatchesTruncated(truncated);
-  }, [sectionBytes, byteSearch]);
+    setSearchResult({ query: activeSearch, data: sectionBytes, offsets, truncated, highlighted });
+  }, [sectionBytes, activeSearch]);
+
+  /**
+   * Whether {@link searchResult} answers the query and the section now on
+   * screen. EVERYTHING THE SEARCH SAYS OR OFFERS IS GATED ON THIS — see
+   * {@link ByteSearchResult} for the two windows in which it is false and for
+   * why a stale sentence there is a defect rather than a flicker.
+   *
+   * The highlight set is deliberately NOT gated on it: a highlight is a mark on
+   * bytes that really did match a query the user really did type, where blinking
+   * every match off and on again between keystrokes is a cost with nothing bought.
+   *
+   * THE `data` HALF CANNOT BE MADE RED BY ANY TEST HERE, reported rather than
+   * dropped (control C9). Its window is one frame — a section switch changes
+   * `sectionBytes` and the scan effect re-runs immediately after that render —
+   * and testing-library flushes passive effects inside the same `act`, so the
+   * frame in which the old section's count sits under the new section's name is
+   * never observable. The query half's window is a durable 150 ms and is pinned
+   * below in "HexView byte search pending state".
+   */
+  const searchSettled = searchResult.query === byteSearch && searchResult.data === sectionBytes;
+  const byteMatches = searchResult.highlighted;
+  const matchOffsets = searchResult.offsets;
+
+  /**
+   * Move to one match: the cursor, the scroll and the app's current address.
+   *
+   * TWO scroll routes converge here and both are wanted. The dispatch is what
+   * makes the REST of the app agree — the address bar, the data inspector, and
+   * the Disasm button, which hands whatever is current to the other tab. The
+   * direct `scrollToIndex` is what makes the button work when the address does
+   * NOT change: two matches sharing a row leave `currentRowIdx` where it was, so
+   * the effect watching it fires nothing, and a user who has scrolled away
+   * presses "next" and stays away. It is the same pair `handleEntropyClick` uses.
+   */
+  const goToMatch = useCallback(
+    (idx: number) => {
+      const off = matchOffsets[idx];
+      if (off === undefined) return;
+      setMatchIdx(idx);
+      setSelectedOffset(off);
+      setSelectionEnd(null);
+      virtualizer.scrollToIndex(Math.floor(off / BYTES_PER_ROW), { align: "center" });
+      dispatch({ type: "SET_ADDRESS", address: baseAddress + off });
+    },
+    [matchOffsets, virtualizer, dispatch, baseAddress],
+  );
+
+  /**
+   * Next/prev, wrapping, from a cursor that may not be anywhere yet.
+   *
+   * `matchIdx === -1` is a third state and not a zero: forward from it is the
+   * FIRST match and backward from it is the LAST, which plain modular arithmetic
+   * on -1 gets wrong in the backward direction (it lands one short of the end).
+   */
+  const stepMatch = useCallback(
+    (delta: 1 | -1) => {
+      const n = matchOffsets.length;
+      if (n === 0) return;
+      const from = matchIdx < 0 ? (delta === 1 ? -1 : 0) : matchIdx;
+      goToMatch((((from + delta) % n) + n) % n);
+    },
+    [matchOffsets, matchIdx, goToMatch],
+  );
 
   // Track the strip's width *in device pixels* so the block count can follow it.
   //
@@ -669,6 +838,12 @@ export function HexView() {
    * every sentence the search prints names it; see {@link matchSummary}.
    */
   const searchScope = sectionInfo?.name ?? "this section";
+  /**
+   * Whether what is in the box is a byte pattern at all. Kept apart from
+   * {@link searchSettled}: gibberish is not a pending scan, and reporting one
+   * would put a "Searching…" that never ends beside a `zz`.
+   */
+  const searchParses = parseBytePattern(byteSearch) !== null;
 
   if (!pe || !sectionBytes) {
     return <div className="p-4 text-gray-400 text-sm">No section data to display.</div>;
@@ -719,17 +894,71 @@ export function HexView() {
           type="text"
           value={byteSearch}
           onChange={(e) => setByteSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              // Enter APPLIES a pending query, or steps if the result on screen
+              // already answers the box. Stepping on an unsettled box would move
+              // to a match of the PREVIOUS pattern, so the two cases are told
+              // apart by exactly that test rather than by a timer.
+              clearTimeout(searchDebounceRef.current);
+              if (searchSettled && matchOffsets.length > 0) stepMatch(e.shiftKey ? -1 : 1);
+              else setActiveSearch(byteSearch);
+            }
+            if (e.key === "Escape") (e.target as HTMLElement).blur();
+          }}
           placeholder="Byte search (e.g. 4D 5A ?? 00)..."
-          title={`Byte search in ${searchScope} — hex bytes, ?? wildcard`}
+          title={`Byte search in ${searchScope} — hex bytes, ?? wildcard; Enter for the next match`}
           aria-label={`Byte search in ${searchScope}`}
           className="w-44 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
         />
-        {byteSearch && matchCount > 0 && (
-          <span className="text-gray-500 text-[10px]">
-            {matchSummary(matchCount, matchesTruncated, searchScope)}
-          </span>
+        {/*
+          Exactly one of these four states is on screen at a time, and the
+          pending one exists so that "No matches" — a positive claim about the
+          section — cannot stand over a query nothing has scanned yet. See
+          `ByteSearchResult`.
+        */}
+        {byteSearch && searchParses && !searchSettled && (
+          <span className="text-gray-500 text-[10px]">Searching…</span>
         )}
-        {byteSearch && matchCount === 0 && parseBytePattern(byteSearch) && (
+        {byteSearch && searchSettled && matchOffsets.length > 0 && (
+          <>
+            <span className="text-gray-500 text-[10px]">
+              {matchSummary(matchOffsets.length, searchResult.truncated, searchScope)}
+            </span>
+            <button
+              type="button"
+              onClick={() => stepMatch(-1)}
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600"
+            >
+              ◀
+            </button>
+            <button
+              type="button"
+              onClick={() => stepMatch(1)}
+              aria-label="Next match"
+              title="Next match (Enter)"
+              className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600"
+            >
+              ▶
+            </button>
+            {/*
+              The position appears only once a step has happened. Before that
+              there is no position: printing "1/40" over a view that has not
+              moved would be a claim about where the grid is. The `+` is
+              `matchSummary`'s, for the same reason — the denominator is a floor
+              rather than a total once the scan stopped at the cap.
+            */}
+            {matchIdx >= 0 && (
+              <span className="text-blue-400 text-[10px]">
+                {matchIdx + 1}/{matchOffsets.length}
+                {searchResult.truncated ? "+" : ""}
+              </span>
+            )}
+          </>
+        )}
+        {byteSearch && searchSettled && searchParses && matchOffsets.length === 0 && (
           <span className="text-red-400 text-[10px]">No matches in {searchScope}</span>
         )}
 
