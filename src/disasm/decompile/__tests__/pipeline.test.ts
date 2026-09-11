@@ -315,10 +315,13 @@ describe("decompileFunction — admissions are line indices into the emitted cod
   });
 
   it("points each unrecovered index at a USE, never at the declaration", () => {
-    // `rol` then `jb`: CF after a rotate is a function of nothing the IR names.
+    // `rcr` then `jb`: CF after a rotate-through-carry is a function of nothing
+    // the IR names, and `rcr` itself stays unlifted. (`rol` was the fixture
+    // until peek-a-bin-5b6q.3 lifted it; its dead result is then deletable, and
+    // an `if` whose arms lift to nothing is dropped by `cleanup.ts`.)
     const r = runFull(
       seq(0x401000, [
-        ["rol", "eax, 3"],
+        ["rcr", "eax, 3"],
         ["jb", "0x401014"],
         ["mov", "ecx, 1"],
         ["ret"],
@@ -336,10 +339,10 @@ describe("decompileFunction — admissions are line indices into the emitted cod
     const decl = lines.findIndex((l) => /^\s*intptr_t __unrecovered_1;/.test(l));
     expect(decl).toBeGreaterThan(-1);
     expect(r.admissions.unrecovered).not.toContain(decl);
-    // The `rol` itself has no C form and is admitted as unlifted — one site,
+    // The `rcr` itself has no C form and is admitted as unlifted — one site,
     // on the line that says so. Two kinds from one fixture, each on its own line.
     expect(r.admissions.unlifted).toHaveLength(1);
-    expect(lines[r.admissions.unlifted[0]]).toMatch(/\/\* unlifted: rol eax, 3 \*\/;/);
+    expect(lines[r.admissions.unlifted[0]]).toMatch(/\/\* unlifted: rcr eax, 3 \*\/;/);
     // The unreachable `mov ecx, 2` block re-enters at the shared `ret` by a
     // `goto`; whatever the structurer emits, every goto index names a goto line.
     for (const i of r.admissions.gotos) expect(lines[i]).toMatch(/\bgoto loc_[0-9A-F]+;/);
@@ -1387,14 +1390,17 @@ describe("decompileFunction — what the emitter says when recovery failed", () 
   });
 
   it("gives two unrecovered values two names, since they are two facts", () => {
+    // `rcr`, not `rol`: the fixture needs an instruction that stays unlifted,
+    // or the dead second rotate is deleted, its `if` empties and is dropped,
+    // and the two facts become one (peek-a-bin-5b6q.3).
     const code = run(
       seq(0x401000, [
-        ["rol", "eax, 3"],
+        ["rcr", "eax, 3"],
         ["jb", "0x401014"],
         ["mov", "ecx, 1"],
         ["jmp", "0x401018"],
         ["mov", "ecx, 2"], // 0x401010
-        ["rol", "edx, 1"], // 0x401014
+        ["rcr", "edx, 1"], // 0x401014
         ["jb", "0x401028"],
         ["mov", "esi, 3"],
         ["ret"],
@@ -8766,6 +8772,51 @@ describe("decompileFunction — every setcc form goes through the Jcc table", ()
     const code = run(body("setb", ["test", "ecx, ecx"]));
     expect(code).toMatch(/return __unrecovered_1 \/\* jb after test \*\/;/);
     expect(code).not.toMatch(/return 0;|return 1;/);
+    expect(code).not.toContain("unlifted");
+  });
+});
+
+/**
+ * rol/ror, bswap, one-operand imul and movnti reach the page (peek-a-bin-5b6q.3).
+ * Each was `raw` before — a dataflow hole — so the register read after one
+ * named the value from before it.
+ */
+describe("decompileFunction — rotates, bswap, the widening imul and movnti are lifted", () => {
+  it("a ror by an immediate is shifts and ors over the width", () => {
+    const code = run(seq(0x401000, [["mov", "eax, ecx"], ["ror", "eax, 0x8"], ["ret"]]));
+    expect(code).toContain("return (uint32_t)ecx >> 8 | ecx << 0x18;");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("a bswap is the MSVC intrinsic of its width", () => {
+    const code = run(seq(0x140001000, [["mov", "rax, rcx"], ["bswap", "rax"], ["ret"]]), true);
+    expect(code).toContain("_byteswap_uint64(rcx)");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("an imul whose source is the high register reads it BEFORE the high half is written", () => {
+    // MSVC's divide-by-constant: `imul rdx` with the magic in RAX. The high
+    // half must be the product of the pre-multiply RDX, not of the high half
+    // just written.
+    const code = run(
+      seq(0x140001000, [
+        ["mov", "rax, 0x2aab"],
+        ["mov", "rdx, rcx"],
+        ["imul", "rdx"],
+        ["sar", "rdx, 0x3"],
+        ["mov", "rax, rdx"],
+        ["ret"],
+      ]),
+      true,
+    );
+    expect(code).toContain("return 0x2AAB * rcx >> 0x40 >> 3;");
+    expect(code).not.toContain("unlifted");
+    expect(code).not.toContain("tmp_mul");
+  });
+
+  it("a movnti is a plain store", () => {
+    const code = run(seq(0x140001000, [["movnti", "qword ptr [rcx-0x8], rdx"], ["ret"]]), true);
+    expect(code).toContain("*(int64_t*)(rcx - 8) = rdx;");
     expect(code).not.toContain("unlifted");
   });
 });

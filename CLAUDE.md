@@ -1106,6 +1106,20 @@ refused. **Read the long-form entry before changing the code it describes.**
   (`jo`/`jno`/`jp`/`jnp`; `jb`/`jae` after `test`, which are constants) are refused as a value, not
   spelled `al = 0`, for the reason `getCondition` refuses `if (1)`. Corpus population is **0**, so the
   change is byte-identical there; the discriminating control is `pipeline.test.ts`.
+- **`rol`/`ror` are shifts and ors over the destination's own width, `bswap` is `_byteswap_ulong`/
+  `_byteswap_uint64` by width, one-operand `imul` is the `mul` shape with signed casts, and `movnti`
+  is a plain store.** `rotate` (`lifter.ts`) reduces an immediate count as the SDM does (mask, then
+  modulo the width) and refuses a count that reduces to 0; a `cl` count is `cl & (W-1)` with its
+  complement `(W - cl) & (W-1)` — never `W - cl`, a full-width shift at `cl == 0`. `rcl`/`rcr` stay
+  `raw` (CF per iteration). The 16-bit `bswap` is refused: the SDM leaves it undefined.
+  `wideningMultiply` is shared by `mul` and `imul`; **a source that IS the high register (`imul rdx`,
+  two of six corpus sites) or is addressed through it goes through a temporary**, or the high half's
+  write destroys the operand the low half reads. The 64-bit high half is still `>> 64`, `mul`'s
+  standing spelling limit (`__mulh` would be exact). Every corpus one-operand `imul` follows a REFUSED
+  `movabs` (the magic is past 2^53), so RAX there is the raw hole the movabs entry records — the lift
+  names it rather than reading `rdx` stale as before; the repair is the unknown-assignment bead, not
+  a change here. A lifted statement is subject to DCE where a `raw` was not: the failure-path `ror`
+  in `__security_check_cookie` is now deleted because the tail call is spelled with no arguments.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

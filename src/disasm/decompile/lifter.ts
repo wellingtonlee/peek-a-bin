@@ -29,6 +29,7 @@ import {
   isKnownRegister,
   pushBeforeTerminator,
   regSize,
+  walkExpr,
 } from "./ir";
 import { bitTestValue, RegState } from "./regstate";
 
@@ -982,6 +983,143 @@ function bitWrite(
   return { dest, result };
 }
 
+/** The signed C type of a register width, for the casts a signed operation spells. */
+const SIGNED_TYPE: Record<number, string> = {
+  1: "int8_t",
+  2: "int16_t",
+  4: "int32_t",
+  8: "int64_t",
+};
+
+/**
+ * The destination width of a register-or-sized-memory operand, or null when the
+ * operand is neither (an immediate, an unsized memory reference).
+ */
+function destWidth(dest: IRExpr, text: string): number | null {
+  if (dest.kind === "reg") return regSize(dest.name);
+  if (dest.kind === "deref" && memPrefixSize(text) > 0) return dest.size;
+  return null;
+}
+
+/**
+ * The destination and new value of a `rol`/`ror`, or null for a form the lifter
+ * refuses. Spelled with shifts and ors over the destination's own width:
+ *
+ *     rol d, n  →  (d << n) | (d >>> (W - n))
+ *     ror d, n  →  (d >>> n) | (d << (W - n))
+ *
+ * The SDM masks the count to 5 bits (6 at 64-bit operand size) and the rotation
+ * is then modulo the width, so an immediate is reduced here exactly; a
+ * reduction to 0 is a no-op the compiler never emits and is refused rather than
+ * spelled as a self-assignment. A `cl` count is spelled `cl & (W-1)`, and its
+ * complement `(W - cl) & (W-1)` — never `W - cl`, which is `W` at `cl == 0` and
+ * a shift by the full width, undefined in C. `rcl`/`rcr` are not here: they
+ * rotate through CF once per iteration, and CF is a value this file spells for
+ * exactly one setter at a time (peek-a-bin-5b6q.3).
+ */
+function rotate(
+  mn: "rol" | "ror",
+  parts: string[],
+  insn: Instruction,
+  is64: boolean,
+): { dest: IRExpr; result: IRExpr } | null {
+  if (parts.length < 2) return null;
+  const dest = parseDestOperand(parts[0], insn, is64);
+  const destVal = parseOperand(parts[0], insn, is64);
+  const size = destWidth(dest, parts[0]);
+  if (size !== 1 && size !== 2 && size !== 4 && size !== 8) return null;
+  const width = size * 8;
+
+  const countText = parts[1].trim().toLowerCase();
+  const imm = parseImm(countText);
+  let count: IRExpr;
+  let complement: IRExpr;
+  if (imm !== null) {
+    const n = (imm & (size === 8 ? 63 : 31)) % width;
+    if (n === 0) return null;
+    count = irConst(n, size);
+    complement = irConst(width - n, size);
+  } else if (countText === "cl") {
+    const cl = irReg("cl", 1);
+    count = irBinary("&", cl, irConst(width - 1, size));
+    complement = irBinary("&", irBinary("-", irConst(width, size), cl), irConst(width - 1, size));
+  } else {
+    return null;
+  }
+  const result =
+    mn === "rol"
+      ? irBinary("|", irBinary("<<", destVal, count), irBinary(">>>", destVal, complement))
+      : irBinary("|", irBinary(">>>", destVal, count), irBinary("<<", destVal, complement));
+  return { dest, result };
+}
+
+/** Does `expr` read the register whose canonical name is `canon`, at any width? */
+function readsRegister(expr: IRExpr, canon: string): boolean {
+  let found = false;
+  walkExpr(expr, (e) => {
+    if (e.kind === "reg" && canonReg(e.name) === canon) found = true;
+  });
+  return found;
+}
+
+/**
+ * The statements of a one-operand widening multiply — `mul src` and `imul src`
+ * — over the accumulator, or null for a form the lifter refuses.
+ *
+ * The product of the accumulator and the source lands in the accumulator pair:
+ * `AX` for a byte source, `DX:AX`/`EDX:EAX`/`RDX:RAX` above that. The signed
+ * form casts BOTH operands to the signed type of their width, which is the
+ * whole difference between `imul` and `mul` here (the unsigned form keeps the
+ * bare spelling the `mul` handler has always had, so its output is unchanged).
+ * The high half is the product shifted by the width — the same spelling limit
+ * the `mul` handler carries at 64 bits, where `>> 64` of a 64-bit product is
+ * not C; `__mulh`/`__umulh` would be the exact spelling and is left for a
+ * change that takes `mul` with it.
+ *
+ * ORDER: both halves are computed from the accumulator BEFORE the multiply, and
+ * the high half is written first so the low half's write cannot be read by it.
+ * That is not enough when the source IS the high register — `imul rdx`, two
+ * of the six corpus sites — or a memory source addressed through it: writing
+ * RDX first destroys the operand the low half then reads. The product goes
+ * through a temporary there, as `xchg` does, and copy propagation folds it.
+ */
+function wideningMultiply(
+  signed: boolean,
+  parts: string[],
+  insn: Instruction,
+  is64: boolean,
+): IRStmt[] | null {
+  if (parts.length < 1) return null;
+  const rawSrc = parseOperand(parts[0], insn, is64);
+  const size =
+    rawSrc.kind === "reg" ? regSize(rawSrc.name) : rawSrc.kind === "deref" ? rawSrc.size : 4;
+  if (size !== 1 && size !== 2 && size !== 4 && size !== 8) return null;
+  const accLo = size === 8 ? "rax" : size === 4 ? "eax" : size === 2 ? "ax" : "al";
+  const accHi = size === 8 ? "rdx" : size === 4 ? "edx" : size === 2 ? "dx" : null;
+  const cast = (e: IRExpr): IRExpr =>
+    signed ? { kind: "cast", type: SIGNED_TYPE[size], operand: e } : e;
+  const product = irBinary("*", cast(irReg(accLo, size)), cast(rawSrc));
+  const addr = insn.address;
+
+  // A byte multiply widens into AX alone; there is no high register to order.
+  if (accHi === null) {
+    return [{ kind: "assign", dest: irReg("ax", 2), src: product, addr }];
+  }
+  const width = size * 8;
+  if (readsRegister(rawSrc, canonReg(accHi))) {
+    const tmp = irReg("tmp_mul", size);
+    return [
+      { kind: "assign", dest: tmp, src: product, addr },
+      { kind: "assign", dest: irReg(accHi), src: irBinary(">>", tmp, irConst(width)), addr },
+      { kind: "assign", dest: irReg(accLo), src: tmp, addr },
+    ];
+  }
+  return [
+    { kind: "assign", dest: irReg(accHi), src: irBinary(">>", product, irConst(width)), addr },
+    { kind: "assign", dest: irReg(accLo), src: product, addr },
+  ];
+}
+
 /**
  * Is a `RESULT_OWNERS` instruction one the lifter actually lifted, so that its
  * destination read after it names the result? A `raw` is a dataflow hole: the
@@ -1763,7 +1901,17 @@ export function liftBlock(
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);
       } else {
-        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        // One operand: the signed widening multiply into the accumulator pair
+        // (peek-a-bin-5b6q.3). See `wideningMultiply`.
+        const lifted = wideningMultiply(true, parts, insn, is64);
+        if (lifted === null) {
+          stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+          continue;
+        }
+        for (const st of lifted) {
+          stmts.push(st);
+          if (st.kind === "assign" && st.dest.kind === "reg") regState.set(st.dest.name, st.src);
+        }
       }
       continue;
     }
@@ -2224,30 +2372,87 @@ export function liftBlock(
 
     // ── mul (single-operand) ──
     if (mn === "mul") {
-      if (parts.length >= 1) {
-        const src = parseOperand(parts[0], insn, is64);
-        const srcSize =
-          src.kind === "reg" ? regSize(src.name) : src.kind === "deref" ? src.size : 4;
-        const accLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
-        const accHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
-        const loVal = irReg(accLo, regSize(accLo));
-        const result = irBinary("*", loVal, src);
-        // High part first — SSA DCE will eliminate it if unused. Both halves
-        // are computed from the accumulator *before* the multiply, so writing
-        // the low half first would make the high half read the product and
-        // square it.
+      // High part first — SSA DCE will eliminate it if unused. Both halves
+      // are computed from the accumulator *before* the multiply, so writing
+      // the low half first would make the high half read the product and
+      // square it. Shared with the one-operand `imul`: see `wideningMultiply`.
+      const lifted = wideningMultiply(false, parts, insn, is64);
+      if (lifted === null) {
+        stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
+        continue;
+      }
+      for (const st of lifted) {
+        stmts.push(st);
+        if (st.kind === "assign" && st.dest.kind === "reg") regState.set(st.dest.name, st.src);
+      }
+      continue;
+    }
+
+    // ── rol / ror ──
+    if (mn === "rol" || mn === "ror") {
+      const lifted = rotate(mn, parts, insn, is64);
+      if (lifted === null) {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      const { dest, result } = lifted;
+      if (dest.kind === "deref") {
         stmts.push({
-          kind: "assign",
-          dest: irReg(accHi),
-          src: irBinary(">>", result, irConst(srcSize * 8)),
+          kind: "store",
+          address: dest.address,
+          value: result,
+          size: dest.size,
           addr: insn.address,
         });
-        stmts.push({ kind: "assign", dest: irReg(accLo), src: result, addr: insn.address });
-        regState.set(accLo, result);
-        regState.set(accHi, irBinary(">>", result, irConst(srcSize * 8)));
       } else {
-        stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
+        stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+        if (dest.kind === "reg") regState.set(dest.name, result);
       }
+      continue;
+    }
+
+    // ── bswap → the MSVC intrinsic, by width ──
+    // A 32-bit `bswap` is `_byteswap_ulong`, a 64-bit one `_byteswap_uint64`.
+    // The 16-bit encoding exists and the SDM leaves its result UNDEFINED, so it
+    // is refused rather than spelled `_byteswap_ushort` (peek-a-bin-5b6q.3).
+    // The intrinsics are deliberately not in `apitypes.ts` — the arity oracle
+    // must not measure its own input — and, like `__movsd`, they compile under
+    // the harness's gnu89 as implicitly declared functions.
+    if (mn === "bswap") {
+      const dest = parts.length >= 1 ? parseDestOperand(parts[0], insn, is64) : null;
+      const size = dest?.kind === "reg" ? regSize(dest.name) : 0;
+      if (dest === null || dest.kind !== "reg" || (size !== 4 && size !== 8)) {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      const result: IRExpr = {
+        kind: "call",
+        target: size === 8 ? "_byteswap_uint64" : "_byteswap_ulong",
+        args: [parseOperand(parts[0], insn, is64)],
+      };
+      stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
+      regState.set(dest.name, result);
+      continue;
+    }
+
+    // ── movnti → a plain store ──
+    // A non-temporal hint changes the cache, not the value: the SDM gives it
+    // `mov` semantics and no flags. Memory destination, register source is the
+    // only encoding (peek-a-bin-5b6q.3).
+    if (mn === "movnti") {
+      const dest = parts.length >= 2 ? parseDestOperand(parts[0], insn, is64) : null;
+      const src = parts.length >= 2 ? parseOperand(parts[1], insn, is64) : null;
+      if (dest === null || src === null || dest.kind !== "deref" || src.kind !== "reg") {
+        stmts.push({ kind: "raw", text: `${rawMn} ${insn.opStr}`, addr: insn.address });
+        continue;
+      }
+      stmts.push({
+        kind: "store",
+        address: dest.address,
+        value: src,
+        size: dest.size,
+        addr: insn.address,
+      });
       continue;
     }
 

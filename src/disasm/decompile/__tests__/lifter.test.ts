@@ -445,8 +445,78 @@ describe("liftBlock — arithmetic", () => {
     });
   });
 
-  it("falls back to raw text for one-operand imul", () => {
-    expect(liftOne("imul", "rcx")).toEqual({ kind: "raw", text: "imul rcx", addr: START });
+  // One-operand `imul` is the signed widening multiply into the accumulator
+  // pair — the `mul` shape with signed casts on both operands (peek-a-bin-5b6q.3).
+  it("lifts one-operand imul as the signed widening multiply, high half first", () => {
+    const cast = (e: IRExpr, type: string): IRExpr => ({ kind: "cast", type, operand: e });
+    const product = irBinary(
+      "*",
+      cast(irReg("eax", 4), "int32_t"),
+      cast(irReg("ecx", 4), "int32_t"),
+    );
+    const stmts = lift([["imul", "ecx"]]);
+    expect(stmts).toEqual([
+      {
+        kind: "assign",
+        dest: irReg("edx"),
+        src: irBinary(">>", product, irConst(32)),
+        addr: START,
+      },
+      { kind: "assign", dest: irReg("eax"), src: product, addr: START },
+    ]);
+    expect(lift([["imul", "rcx"]])[1]).toMatchObject({
+      dest: irReg("rax", 8),
+      src: { op: "*", left: { kind: "cast", type: "int64_t" } },
+    });
+  });
+
+  it("widens a byte multiply into AX alone", () => {
+    // `AL * r/m8` lands in AX; there is no high register to order.
+    expect(lift([["imul", "cl"]])).toEqual([
+      {
+        kind: "assign",
+        dest: irReg("ax", 2),
+        src: irBinary(
+          "*",
+          { kind: "cast", type: "int8_t", operand: irReg("al", 1) },
+          { kind: "cast", type: "int8_t", operand: irReg("cl", 1) },
+        ),
+        addr: START,
+      },
+    ]);
+    expect(lift([["mul", "cl"]])).toEqual([
+      {
+        kind: "assign",
+        dest: irReg("ax", 2),
+        src: irBinary("*", irReg("al", 1), irReg("cl", 1)),
+        addr: START,
+      },
+    ]);
+  });
+
+  it("routes a widening multiply through a temporary when the source is the high register", () => {
+    // `imul rdx`: writing RDX first destroys the operand the low half then
+    // reads, so both halves are taken from one temporary. Two of the six
+    // corpus sites have this shape.
+    const stmts = lift([["imul", "rdx"]]);
+    expect(stmts).toHaveLength(3);
+    expect(stmts[0]).toMatchObject({ kind: "assign", dest: irReg("tmp_mul", 8), src: { op: "*" } });
+    expect(stmts[1]).toEqual({
+      kind: "assign",
+      dest: irReg("rdx"),
+      src: irBinary(">>", irReg("tmp_mul", 8), irConst(64)),
+      addr: START,
+    });
+    expect(stmts[2]).toEqual({
+      kind: "assign",
+      dest: irReg("rax"),
+      src: irReg("tmp_mul", 8),
+      addr: START,
+    });
+    // A memory source addressed through the high register is the same case.
+    expect(lift([["mul", "dword ptr [edx]"]])[0]).toMatchObject({ dest: irReg("tmp_mul", 4) });
+    // …and the plain shape stays two statements.
+    expect(lift([["mul", "ecx"]])).toHaveLength(2);
   });
 
   it("lifts inc and dec as +/- 1", () => {
@@ -510,6 +580,99 @@ describe("liftBlock — arithmetic", () => {
 
   it("falls back to raw asm for div with no operand", () => {
     expect(liftOne("div", "")).toEqual({ kind: "raw", text: "__asm { div  }", addr: START });
+  });
+
+  // rol/ror are shifts and ors over the destination's width (peek-a-bin-5b6q.3).
+  it("lifts rol/ror by an immediate as shifts and ors over the width", () => {
+    expect(liftOne("rol", "eax, 0x8")).toEqual({
+      kind: "assign",
+      dest: irReg("eax", 4),
+      src: irBinary(
+        "|",
+        irBinary("<<", irReg("eax", 4), irConst(8, 4)),
+        irBinary(">>>", irReg("eax", 4), irConst(24, 4)),
+      ),
+      addr: START,
+    });
+    expect(liftOne("ror", "rcx, 0x10")).toMatchObject({
+      dest: irReg("rcx", 8),
+      src: irBinary(
+        "|",
+        irBinary(">>>", irReg("rcx", 8), irConst(16, 8)),
+        irBinary("<<", irReg("rcx", 8), irConst(48, 8)),
+      ),
+    });
+  });
+
+  it("reduces the rotate count the way the machine does, and refuses a no-op", () => {
+    // SDM: the count is masked to 5 bits, then the rotation is modulo the width.
+    expect(liftOne("rol", "al, 0x9")).toMatchObject({
+      src: irBinary(
+        "|",
+        irBinary("<<", irReg("al", 1), irConst(1, 1)),
+        irBinary(">>>", irReg("al", 1), irConst(7, 1)),
+      ),
+    });
+    // A rotation by the full width is a no-op the compiler never emits; refused
+    // rather than spelled as a self-assignment.
+    expect(liftOne("rol", "eax, 0x20")).toEqual({
+      kind: "raw",
+      text: "rol eax, 0x20",
+      addr: START,
+    });
+  });
+
+  it("spells a cl count masked to the width, and its complement masked too", () => {
+    // `(W - cl) & (W-1)`, never `W - cl`: at cl == 0 that is a shift by the
+    // full width, undefined in C.
+    const cl = irReg("cl", 1);
+    expect(liftOne("rol", "eax, cl")).toMatchObject({
+      src: irBinary(
+        "|",
+        irBinary("<<", irReg("eax", 4), irBinary("&", cl, irConst(31, 4))),
+        irBinary(
+          ">>>",
+          irReg("eax", 4),
+          irBinary("&", irBinary("-", irConst(32, 4), cl), irConst(31, 4)),
+        ),
+      ),
+    });
+    // Any other register count is not an encoding; refused.
+    expect(liftOne("rol", "eax, dl")).toMatchObject({ kind: "raw" });
+  });
+
+  it("lifts a rotate of memory as a store, and leaves rcl/rcr raw", () => {
+    expect(liftOne("ror", "dword ptr [ecx+0x8], 1")).toMatchObject({ kind: "store", size: 4 });
+    // rcl/rcr rotate through CF once per iteration; CF is spelled for one
+    // setter at a time here, so they stay unlifted.
+    expect(liftOne("rcr", "eax, 1")).toMatchObject({ kind: "raw" });
+    expect(liftOne("rcl", "eax, 1")).toMatchObject({ kind: "raw" });
+  });
+
+  it("lifts bswap as the MSVC intrinsic of its width, and refuses the undefined 16-bit form", () => {
+    expect(liftOne("bswap", "eax")).toEqual({
+      kind: "assign",
+      dest: irReg("eax", 4),
+      src: { kind: "call", target: "_byteswap_ulong", args: [irReg("eax", 4)] },
+      addr: START,
+    });
+    expect(liftOne("bswap", "rax")).toMatchObject({
+      src: { kind: "call", target: "_byteswap_uint64", args: [irReg("rax", 8)] },
+    });
+    // SDM: the result of a 16-bit bswap is undefined.
+    expect(liftOne("bswap", "ax")).toEqual({ kind: "raw", text: "bswap ax", addr: START });
+  });
+
+  it("lifts movnti as a plain store", () => {
+    expect(liftOne("movnti", "qword ptr [rcx-0x8], rdx")).toEqual({
+      kind: "store",
+      address: irBinary("-", irReg("rcx", 8), irConst(8, 8)),
+      value: irReg("rdx", 8),
+      size: 8,
+      addr: START,
+    });
+    // Register destination is not an encoding.
+    expect(liftOne("movnti", "rax, rdx")).toMatchObject({ kind: "raw" });
   });
 
   it("lifts the sign-extension idioms", () => {
