@@ -246,6 +246,18 @@ describe("DecompileView syntax highlighting", () => {
     expect(tokensOf(1)).toContainEqual(["loc_4011A0", clickable]);
   });
 
+  it("gives a struct_N identifier the same clickable class, at a use AND at its typedef", () => {
+    setup({ code: "struct struct_1 {\n  struct_1 *p = arg_0;" });
+    const clickable = "dc-type underline cursor-pointer hover:opacity-80";
+    // The typedef line's own name is a link too: clicking it scrolls to itself,
+    // which is harmless, and special-casing the declaring line would need the
+    // tokenizer to know which line it is on — it takes one line and no context.
+    expect(tokensOf(0)).toContainEqual(["struct_1", clickable]);
+    expect(tokensOf(1)).toContainEqual(["struct_1", clickable]);
+    // `struct` the keyword stays a keyword; the prefix test is on the token.
+    expect(tokensOf(0)).toContainEqual(["struct", "dc-keyword font-semibold"]);
+  });
+
   it("classes `void` as a keyword, so it does NOT match its sibling types", () => {
     // `void` is in both KEYWORDS and TYPES and KEYWORDS is tested first, so
     // `void *p` is coloured like `if`/`return` while `int a` beside it is
@@ -386,6 +398,119 @@ describe("DecompileView sub_ navigation", () => {
     // Nothing to assert but the absence of a throw: the early return in
     // `handleClick` is the only thing standing between this and a TypeError.
     expect(codePane()).toBeTruthy();
+  });
+});
+
+// ── Clicking a struct_N token ──
+
+describe("DecompileView struct_ typedef follow", () => {
+  /** A four-line function using one synthesised struct, typedef first. */
+  const STRUCT_CODE = [
+    "struct struct_1 {",
+    "  int field_0x0;",
+    "};",
+    "int64_t sub_401000(struct_1 *arg_0) {",
+    "  return arg_0->field_0x0;",
+    "}",
+  ].join("\n");
+
+  it("scrolls to the typedef instead of navigating, when a struct_ token is clicked", async () => {
+    const onNavigate = vi.fn();
+    const scrollIntoView = vi.fn();
+    // Same instrument and same bound as the `loc_` row: the panel asked the
+    // RIGHT ELEMENT to come into view, and nothing about scrolling. Spied on
+    // `HTMLElement.prototype`, where `domSetup` installs its no-op.
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: STRUCT_CODE, onNavigate });
+      await user.click(tokenSpan(3, "struct_1"));
+
+      // A `struct_N` names a typedef INSIDE the function on screen, so following
+      // it must not move the app's cursor.
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      // The element it asked for is the TYPEDEF's line, not the parameter's.
+      const target = scrollIntoView.mock.instances[0] as HTMLElement;
+      expect(target.getAttribute("data-line")).toBe("0");
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("takes the FIRST typedef line when the same name opens twice", async () => {
+    // A second `struct struct_1 {` would be an emitter defect, not a choice for
+    // this map to make; the row pins that the map does not prefer the later one.
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({
+        code: "struct struct_1 {\n};\nstruct struct_1 {\n};\n  struct_1 *p;",
+      });
+      await user.click(tokenSpan(4, "struct_1"));
+      const target = scrollIntoView.mock.instances[0] as HTMLElement;
+      expect(target.getAttribute("data-line")).toBe("0");
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("does nothing for a struct_ token with no typedef in the text", async () => {
+    // The control, and the honest bound: a `struct_N` mentioned with no
+    // `struct struct_N {` on the page — the AI tab rewriting the declarations,
+    // or a fixture like this one — silently does nothing rather than scrolling
+    // somewhere arbitrary. `onNavigate` is supplied so the row can also assert
+    // the token is NOT mistaken for a `sub_` and navigated on.
+    const onNavigate = vi.fn();
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: "  struct_1 *p = arg_0;", onNavigate });
+      await user.click(tokenSpan(0, "struct_1"));
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("does NOT resolve a typedef from an indented or field-position mention", async () => {
+    // The pattern is anchored at column 0 on `struct <name> {`: a nested or
+    // indented `struct struct_2 {` is not how `synthesizeStructs` opens a
+    // definition, and treating it as one would send the reader into the body
+    // of another struct.
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: "  struct struct_2 {\n  struct_2 *q;" });
+      await user.click(tokenSpan(1, "struct_2"));
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore.mockRestore();
+    }
+  });
+
+  it("follows a typedef even with no onNavigate, since following one needs no caller", async () => {
+    const scrollIntoView = vi.fn();
+    const restore = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(scrollIntoView);
+    try {
+      const { user } = setup({ code: STRUCT_CODE });
+      await user.click(tokenSpan(4, "arg_0"));
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      await user.click(tokenSpan(3, "struct_1"));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      restore.mockRestore();
+    }
   });
 });
 

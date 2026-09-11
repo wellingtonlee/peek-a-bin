@@ -73,14 +73,15 @@ function tokenizeLine(line: string): Token[] {
         tokens.push({ text, cls: "dc-keyword font-semibold" });
       } else if (TYPES.has(text)) {
         tokens.push({ text, cls: "dc-type" });
-      } else if (text.startsWith("sub_") || text.startsWith("loc_")) {
-        // Both are styled as links and both now DO something — `sub_` navigates
-        // the app to that address, `loc_` scrolls this panel to the label. They
-        // were styled identically before either of them worked, which made the
+      } else if (text.startsWith("sub_") || text.startsWith("loc_") || text.startsWith("struct_")) {
+        // All three are styled as links and all three DO something — `sub_`
+        // navigates the app to that address, `loc_` scrolls this panel to the
+        // label, `struct_` scrolls it to the typedef. `sub_` and `loc_` were
+        // styled identically before either of them worked, which made the
         // `loc_` half a dead affordance; the alternative was to stop styling it,
         // and following the label is the thing a reader actually wants. This
         // function takes no line map and cannot ask whether a particular label
-        // exists, so resolvability is checked at the click instead.
+        // or typedef exists, so resolvability is checked at the click instead.
         tokens.push({ text, cls: "dc-type underline cursor-pointer hover:opacity-80" });
       } else if (text === "__asm") {
         tokens.push({ text, cls: "dc-comment italic" });
@@ -249,9 +250,39 @@ export function DecompileView({
   }, [code]);
 
   /**
-   * Bring one rendered line into view — the `loc_` label follow and the
-   * admissions line's buttons share it, so both name a line by its `data-line`
-   * and neither knows anything about the other's reason.
+   * Where each `struct_N` typedef opens, by line number — the `loc_` mechanism
+   * applied to the other identifier the emitter mints for something INSIDE the
+   * text on screen.
+   *
+   * `synthesizeStructs` puts every definition the function uses above its
+   * header as `struct struct_N {`, and every use of the name below is a field
+   * access through it, so the thing a reader wants from a `struct_3` token is
+   * the declaration — which line 40 of a 200-line function has scrolled away.
+   * Read off the rendered text for the same reason `labelLines` is: the
+   * typedef is right there, and it needs no line map.
+   *
+   * First occurrence wins. A definition is emitted once per function, so a
+   * second `struct struct_N {` would be a defect in the emitter and not a
+   * choice this map should paper over by preferring it.
+   *
+   * THE CHEAP HALF ONLY. Renaming a struct or a field here was REFUSED:
+   * `struct_N` is a `nextId++` in the worker's registry, reset per file, so a
+   * name persisted under `struct_3` lands on a DIFFERENT struct next session
+   * and the C would state something false (peek-a-bin-5b6q.8).
+   */
+  const structLines = useMemo(() => {
+    const at = new Map<string, number>();
+    code.split("\n").forEach((line, i) => {
+      const m = line.match(/^struct (struct_\w+) \{/);
+      if (m && !at.has(m[1])) at.set(m[1], i);
+    });
+    return at;
+  }, [code]);
+
+  /**
+   * Bring one rendered line into view — the `loc_` label follow, the `struct_`
+   * typedef follow and the admissions line's buttons share it, so each names a
+   * line by its `data-line` and none knows anything about the others' reason.
    */
   const scrollToLine = useCallback((line: number) => {
     const el = preRef.current?.querySelector(`[data-line="${line}"]`);
@@ -281,6 +312,15 @@ export function DecompileView({
         return;
       }
 
+      // Click on struct_N → scroll to its typedef, in this panel. Same shape as
+      // the label follow, and for the same reason it sits above the
+      // `onNavigate` guard: a typedef is internal to the text on screen.
+      const structLine = structLines.get(text);
+      if (structLine !== undefined) {
+        scrollToLine(structLine);
+        return;
+      }
+
       // Click on sub_XXXX → navigate to that address
       if (!onNavigate) return;
       const subMatch = text.match(/^sub_([0-9a-fA-F]+)$/);
@@ -289,7 +329,7 @@ export function DecompileView({
         onNavigate(addr);
       }
     },
-    [onNavigate, labelLines, scrollToLine],
+    [onNavigate, labelLines, structLines, scrollToLine],
   );
 
   // Auto-scroll to first highlighted line

@@ -388,6 +388,29 @@ assignment nobody reads is noise. `_assignedRegs` follows the same rule, so a re
 not respelled as `(uint8_t)rax` in a function whose only write of RAX went unprinted
 (`peek-a-bin-oro`).
 
+## The Low Level panel (`components/DecompileView.tsx`)
+
+What the panel does with the emitted text, beyond colouring it. Every affordance below resolves
+against the RENDERED TEXT or a prop, never against the worker, so each works on the AI and High
+Level tabs wherever the text still carries the spelling.
+
+- **`loc_<HEX>` follows to its label** — `labelLines` maps `^\s*(loc_[0-9a-fA-F]+):` to a line and
+  the click scrolls this panel there through `scrollToLine`, the one scroll primitive the
+  admissions line's buttons share. Nothing moves the app's cursor.
+- **`struct_N` follows to its typedef** — `structLines` maps `^struct (struct_\w+) \{` to a line,
+  first occurrence wins (a definition is emitted once per function; a second would be an emitter
+  defect this map must not paper over). Same mechanism, same scroll, and like `loc_` it sits ABOVE
+  the `onNavigate` guard because it needs no caller. A `struct_N` with no typedef on the page (the
+  AI tab rewriting the declarations) does nothing rather than scrolling somewhere arbitrary.
+  **Refused, and why (peek-a-bin-5b6q.8)**: persisted struct or field renames. `struct_N` is a
+  `nextId++` in `StructRegistry`, reset per file by `configure`, so a rename saved under
+  `struct_3` lands on a *different* struct next session and the C would state something false; a
+  field key would need the struct's identity too. Session-only renames need worker plumbing, a
+  cache-key change and UI for a rename that dies on reload — a half-feature. The real epic is a
+  stable struct identity (the fingerprint is not one; `mergeFields` grows it), a registry-level
+  name table, persistence, MCP and collision rules.
+- **`sub_<HEX>` navigates** — `onNavigate(addr)`, which `DisassemblyView` wires to `SET_ADDRESS`.
+
 ## Testing
 
 **`__tests__/pipeline.test.ts` is the one that matters.** It is the only end-to-end suite:

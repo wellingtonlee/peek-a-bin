@@ -446,7 +446,11 @@ variable on the app root.
   `TabState.admissions` (set by the low tab's `LOAD_OK` only — which is what makes it a Low Level
   affordance as a property of the state) → `DecompileView`'s header line, `N unrecovered · N
   unlifted · N goto`, each a button scrolling to the first site through the same `scrollToLine` the
-  `loc_` follow uses. **`admissionSummary` in `decompileTabsState.ts` owns count and wording
+  `loc_` follow uses. **A `struct_N` token follows to its typedef the same way** (`structLines`,
+  `/^struct (struct_\w+) \{/` over the rendered text, first occurrence wins, above the `onNavigate`
+  guard like `loc_`); **struct/field RENAMES ARE REFUSED** — `struct_N` is a `nextId++` reset per
+  file, so a name persisted under it lands on a different struct next session.
+  **`admissionSummary` in `decompileTabsState.ts` owns count and wording
   together** (the `matchSummary` precedent). MCP `decompile_function` returns `admissions` beside
   `lineMap`. **`corpus/emitAudits.ts` keeps its own text scans** — an audit reading the field stops
   being independent. `DecompileResult.error` is the fault: the pipeline's `catch` used to return
