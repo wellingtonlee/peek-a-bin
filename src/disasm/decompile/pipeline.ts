@@ -5,7 +5,7 @@ import { namedGlobalsFor } from "../crtIdioms";
 import { funcExceptionRecord } from "../funcInsns";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
-import { cleanupStructured } from "./cleanup";
+import { type CleanupStats, cleanupStructured, emptyCleanupStats } from "./cleanup";
 import { type DecompileAdmissions, emitFunction, emptyAdmissions } from "./emit";
 import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
@@ -95,6 +95,18 @@ export interface StructuringTap {
    * reached its final sweep, which on a non-empty CFG it always does.
    */
   labels: LabelPruneReport | null;
+  /**
+   * What `cleanupStructured` did to the tree above — today the count of
+   * `goto`s dropped from the end of an `if` arm whose next sibling is the
+   * label they name. Here for the reason the four above are: a `goto` the
+   * cleanup removed and a `goto` the structurer never wrote are the same
+   * absence in the emitted C. This is why the tap fires AFTER cleanup rather
+   * than before it — `structured` is still the structurer's own output, since
+   * no cleanup pass mutates the tree it is handed (each builds new lists and
+   * `rewriteBodies` copies the statement), and the statement-drop audit that
+   * reads it by identity is unaffected. `corpus/sweep.ts` is the only reader.
+   */
+  cleanup: CleanupStats;
 }
 
 /**
@@ -287,10 +299,15 @@ export function decompileFunction(
           }
         : undefined,
     );
-    if (tap && liftedBefore) tap({ func, lifted: liftedBefore, structured, armExits, labels });
-
     // 5b. Post-structuring cleanup (guard clauses, goto/empty-block elimination)
-    let cleaned = cleanupStructured(structured);
+    //
+    // The stats object exists only when somebody is watching, on the same
+    // terms as `liftedBefore`: an instrument no production run pays for.
+    const cleanupStats = tap ? emptyCleanupStats() : undefined;
+    let cleaned = cleanupStructured(structured, cleanupStats);
+    if (tap && liftedBefore && cleanupStats) {
+      tap({ func, lifted: liftedBefore, structured, armExits, labels, cleanup: cleanupStats });
+    }
 
     // 5c. Exception handling: wrap try/except regions from .pdata
     if (runtimeFunctions && runtimeFunctions.length > 0) {

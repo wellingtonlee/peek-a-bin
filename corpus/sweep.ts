@@ -696,6 +696,15 @@ export interface BinResult {
    */
   labelOrigins: LabelOriginResult;
   /**
+   * `goto`s `cleanup.ts` dropped from the end of an `if` arm whose next sibling
+   * is the label they name (`dropArmGotosTo`), from the structuring tap.
+   * REPORT-ONLY, and the liveness half of that rule: a `goto` it removed and a
+   * `goto` the structurer never wrote are the same absence in the emitted C,
+   * so this is the only place the rule can be seen firing at all
+   * (peek-a-bin-5b6q.6). `funcs` is how many functions carried a tap.
+   */
+  armGotos: { dropped: number; funcsAffected: number; funcs: number };
+  /**
    * CALLEES THAT ARE NOT NAMES, and STACK ARGUMENTS FIVE AND UP — two sizes for
    * epic 3, from the machine text and the emitted C together. Report-only.
    * See `corpus/callShapes.ts`.
@@ -915,6 +924,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     frameRepurpose: emptyFrameRepurpose(),
     structOverlaps: emptyStructOverlaps(),
     labelOrigins: emptyLabelOrigins(),
+    armGotos: { dropped: 0, funcsAffected: 0, funcs: 0 },
     callShapes: emptyCallShapes(),
     importNames: [...new Set([...af.iatMap.values()].map((v) => v.func))].sort(),
     funcs: [],
@@ -1057,6 +1067,11 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       // Why each label survived `pruneLabels`. Same tap again, and the same
       // reason: the emitted C shows the label, never the ground it was kept on.
       auditLabelOrigins(res.labelOrigins, func.name, func.address, tapped[0].labels);
+      // What the cleanup passes did. Same tap, same reason once more: the
+      // emitted C shows the absence of a `goto`, never who removed it.
+      res.armGotos.funcs++;
+      res.armGotos.dropped += tapped[0].cleanup.armGotosDropped;
+      if (tapped[0].cleanup.armGotosDropped > 0) res.armGotos.funcsAffected++;
     }
     // Callees that are not names, and x64 stack-argument stores before a call.
     // Reads the machine text and the emitted C side by side, so it lives here

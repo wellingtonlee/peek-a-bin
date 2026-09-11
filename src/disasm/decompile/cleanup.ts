@@ -3,21 +3,44 @@ import { rewriteBodies } from "./ir";
 import { RegState } from "./regstate";
 
 /**
+ * WHAT THE CLEANUP PASSES DID, for an instrument that asks.
+ *
+ * On `SwitchArmExit`'s terms: a count whose two sides are both internal to this
+ * file and neither of which survives into the emitted C — a `goto` this pass
+ * removed is indistinguishable, in the output, from one the structurer never
+ * wrote. Nothing here is computed from it. `corpus/sweep.ts` reads it off the
+ * structuring tap as the liveness half of the arm-goto rule (peek-a-bin-5b6q.6).
+ */
+export interface CleanupStats {
+  /**
+   * `goto L` statements dropped from the end of an `if` arm because the `if`'s
+   * next sibling is `label L` — see `dropArmGotosTo`.
+   */
+  armGotosDropped: number;
+}
+
+export const emptyCleanupStats = (): CleanupStats => ({ armGotosDropped: 0 });
+
+/**
  * Post-structuring cleanup pass.
  * Applied after structureCFG, before inferTypes.
  *
  * - Guard clause flattening: if (cond) { ...; return; } else { rest } → if (cond) { ...; return; } rest
  * - Redundant goto elimination: goto L; L: → remove goto
+ * - Arm goto elimination: if (c) { ...; goto L; } L: → drop the goto (see `dropArmGotosTo`)
  * - Empty block elimination: if (cond) {} → remove; if (cond) {} else { body } → if (!cond) { body }
  * - Loop exit spelling: goto L inside a loop that L immediately follows → break
  * - Loop tail: if (c) { continue; } break; → if (!c) { break; }
+ *
+ * `stats`, when given, is incremented in place and read by nobody here.
  */
-export function cleanupStructured(body: IRStmt[]): IRStmt[] {
+export function cleanupStructured(body: IRStmt[], stats?: CleanupStats): IRStmt[] {
+  const st = stats ?? emptyCleanupStats();
   let result = body;
   // Run cleanup passes until stable (max 5 iterations for deeply nested guards)
   for (let i = 0; i < 5; i++) {
     const prev = result;
-    result = cleanupPass(result);
+    result = cleanupPass(result, st);
     if (result.length === prev.length && result.every((s, j) => s === prev[j])) break;
   }
   return giveTrailingLabelsAStatement(collapseLoopTailContinue(breakForwardGotos(result)));
@@ -146,8 +169,9 @@ function giveTrailingLabelsAStatement(stmts: IRStmt[]): IRStmt[] {
   return out;
 }
 
-function cleanupPass(stmts: IRStmt[]): IRStmt[] {
+function cleanupPass(stmts: IRStmt[], st: CleanupStats): IRStmt[] {
   const result: IRStmt[] = [];
+  const recurse = (list: IRStmt[]): IRStmt[] => cleanupPass(list, st);
 
   for (let i = 0; i < stmts.length; i++) {
     const stmt = stmts[i];
@@ -162,7 +186,7 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
 
     // Process if statements
     if (stmt.kind === "if") {
-      const cleaned = cleanupIf(stmt, stmts.slice(i + 1));
+      const cleaned = cleanupIf(stmt, stmts[i + 1], st);
       if (cleaned) {
         result.push(...cleaned.stmts);
         i += cleaned.consumed; // skip consumed trailing statements
@@ -171,18 +195,58 @@ function cleanupPass(stmts: IRStmt[]): IRStmt[] {
     }
 
     // Recurse into compound statements
-    result.push(rewriteBodies(stmt, cleanupPass));
+    result.push(rewriteBodies(stmt, recurse));
   }
 
   return result;
 }
 
+/**
+ * `if (c) { …; goto L; } L:` → `if (c) { …; } L:` — the same `goto` elimination
+ * `cleanupPass` applies to an adjacent pair, one level down.
+ *
+ * `structure.ts`'s `armFrom` closes an arm the walk would not follow with a
+ * `goto` to where control really goes. Where that place is the very statement
+ * after the `if` — the join the fall-through side reaches on its own — the
+ * `goto` and falling off the end of the arm say the same thing, and the arm
+ * without it is what a reader would have written. Pure spelling: no guard text
+ * moves, no label moves, and a `goto` to any OTHER label stays exactly where it
+ * is. That last point is the whole rule — dropping `goto M` for M ≠ L rejoins
+ * the arm to code the machine never falls into, and nothing downstream could
+ * tell: the statement-drop audit is blind (the structurer created the `goto`)
+ * and `gotoCheck` asks only that a `goto` name a label the function defines.
+ *
+ * Both arms are asked, independently. An arm this empties is then the `if`
+ * with an empty body that `cleanupIf` already removes, which is the existing
+ * treatment of a test whose outcome the tree does not distinguish. The
+ * sibling test is what keeps a `switch` arm out: a `goto` at the end of a case
+ * body has no next sibling, and falling off a case body falls into the next
+ * case, which is a different program (peek-a-bin-5b6q.6).
+ */
+function dropArmGotosTo(arm: IRStmt[], label: string, st: CleanupStats): IRStmt[] {
+  if (arm.length === 0) return arm;
+  const last = arm[arm.length - 1];
+  if (last.kind !== "goto" || last.label !== label) return arm;
+  st.armGotosDropped++;
+  return arm.slice(0, -1);
+}
+
 function cleanupIf(
   stmt: IRStmt & { kind: "if" },
-  _trailing: IRStmt[],
+  nextSibling: IRStmt | undefined,
+  st: CleanupStats,
 ): { stmts: IRStmt[]; consumed: number } | null {
-  const thenBody = cleanupPass(stmt.thenBody);
-  const elseBody = stmt.elseBody ? cleanupPass(stmt.elseBody) : undefined;
+  let thenBody = cleanupPass(stmt.thenBody, st);
+  let elseBody = stmt.elseBody ? cleanupPass(stmt.elseBody, st) : undefined;
+
+  // Arm goto elimination, ahead of the guard-clause flattening below: an arm
+  // that only reached the join by `goto` is not a terminating arm once the
+  // `goto` is gone, so the pair stays an `if`/`else` rather than becoming a
+  // guard over code that then falls into the label anyway.
+  if (nextSibling?.kind === "label") {
+    thenBody = dropArmGotosTo(thenBody, nextSibling.name, st);
+    if (elseBody) elseBody = dropArmGotosTo(elseBody, nextSibling.name, st);
+  }
 
   // Empty then block elimination
   if (thenBody.length === 0) {
@@ -200,10 +264,10 @@ function cleanupIf(
   // Guard clause flattening: if (cond) { ...; return; } else { rest } → if (cond) { ...; return; } rest
   if (elseBody && elseBody.length > 0 && endsWithTerminator(thenBody)) {
     // Recursively clean the flattened result to handle nested guards
-    const flatResult = cleanupPass([
-      { kind: "if", condition: stmt.condition, thenBody },
-      ...elseBody,
-    ]);
+    const flatResult = cleanupPass(
+      [{ kind: "if", condition: stmt.condition, thenBody }, ...elseBody],
+      st,
+    );
     return {
       stmts: flatResult,
       consumed: 0,

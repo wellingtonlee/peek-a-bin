@@ -1061,6 +1061,21 @@ for (const b of bins) {
     note("  label origins                 NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // Arm gotos dropped by cleanup.ts. Report-only; the rule is pure spelling
+  // and this row is its liveness — the emitted C cannot show a goto that was
+  // removed rather than never written.
+  if (B.armGotos && C.armGotos) {
+    row(
+      "arm gotos dropped",
+      (x) => x.armGotos.dropped,
+      (a, c) => c === 0 && a > 0,
+      "THE ARM-GOTO RULE STOPPED FIRING",
+    );
+    row("  functions affected", (x) => x.armGotos.funcsAffected);
+  } else {
+    note("  arm gotos dropped             NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // Callees that are not names, and x64 stack-argument stores. Both size
   // epic 3 and are report-only in both directions.
   if (B.callShapes && C.callShapes) {

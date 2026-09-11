@@ -1460,6 +1460,17 @@ for a transfer the tree cannot model and the recorded way to drive it down wrong
 recovery AND with fabrication; (iii) its denominator moves with function detection.
 `compare.mjs` prints it with no `worseIf`.
 
+**Arm gotos dropped** (`armGotos` in `sweep.ts`, from `StructuringTap.cleanup`). *What it proves:*
+`cleanup.ts`'s `dropArmGotosTo` — `if (c) { …; goto L; } L:` with the `goto` removed — is running:
+the emitted C cannot show a `goto` that was removed rather than never written, so the count on the
+tap is the rule's only liveness. Baseline **2/8/7/2 over 2/6/5/2 functions** at `2c2ceeb`, gotos
+3086 → 3067. **REPORT-ONLY**; `compare.mjs` marks it falling to 0 as `THE ARM-GOTO RULE STOPPED
+FIRING`, and the audit asserts `dropped > 0` over the corpus (a binary with no such shape is a
+legitimate state). *What it cannot see:* whether the dropped `goto` named the right label — that is
+the name-exact test in the rule itself, pinned in `cleanup.test.ts`, and its corpus-level control
+(drop any trailing `goto` when a label follows) is caught by **loop exit coverage** and `guard
+lines seen`, not by `dangling` (a deleted `goto` cannot dangle).
+
 **Duplicate bodies** (`corpus/duplicateBodies.ts`; `duplicates_<key>.jsonl`). *What it proves:*
 functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex constants, whitespace
 and the function's own name are normalised — how much of the output a reader reads twice, and

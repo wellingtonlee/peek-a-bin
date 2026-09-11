@@ -1186,6 +1186,14 @@ refused. **Read the long-form entry before changing the code it describes.**
   own `EmitResult` with the guard out of scope, or the arm anchors to the jcc one decision earlier.
   Only the four **terminators** are admitted — a one-lined assignment would hand `selfAssigns.ts` the
   guard as its destination.
+- **`if (c) { …; goto L; } L:` drops the `goto`** (`dropArmGotosTo`, `cleanup.ts`): the arm's
+  fallthrough reaches L anyway. **Sibling-only and name-exact**, and the two refusals are the rule —
+  a `goto` to any other label is a transfer the fallthrough does not make, and a `switch` arm has no
+  sibling (falling off a case body is the next case). Runs **before** guard-clause flattening so
+  the pair stays an `if`/`else`. Liveness is `StructuringTap.cleanup.armGotosDropped` (the tap now
+  fires **after** cleanup, which never mutates the tree); the control — drop `goto M`, M ≠ L —
+  was caught by **loop exit coverage and `guard lines seen`, NOT by `dangling`** (a deleted `goto`
+  cannot dangle). 19 sites at 2c2ceeb, polarity CHANGED 0.
 - **A `for`'s init need not be the statement immediately before the loop** (`initHoistable`), and
   hoisting moves the init **later**, so four refusals carry it, including a **whitelist** of what may
   intervene rather than a blacklist. `initAt >= 0` is **not** redundant with the equality test.

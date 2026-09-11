@@ -8891,3 +8891,101 @@ describe("decompileFunction — a division is admitted only behind its high-half
     expect(none).toContain("/* unlifted: div esi */;");
   });
 });
+
+/**
+ * `if (c) { …; goto L; } L:` — the `goto` is dropped (`cleanup.ts`'s
+ * `dropArmGotosTo`), and ONLY when it names the label that follows.
+ *
+ * The shape is MSVC's ordinary skip-over: a `jcc` over a block whose own
+ * conditional exit leaves it and whose fall-through is the jcc's target. The
+ * structurer closes that arm with a `goto` to the join, one line above the
+ * join's label (t64 `sub_1400043DC` three times, t32 `sub_403FB2`). The second
+ * fixture is the negative control from the corpus run (t64 `sub_14000F0FC`): an
+ * arm whose trailing `goto` names a loop EXIT while a different label follows.
+ * A rule that dropped any trailing `goto` deleted that way out, and the corpus
+ * caught it through loop exit coverage — not through `dangling`, which a
+ * deleted `goto` cannot raise (peek-a-bin-5b6q.6).
+ */
+describe("decompileFunction — arm goto elimination", () => {
+  function decompileWithTap(instructions: Instruction[]): { code: string; dropped: number } {
+    const last = instructions[instructions.length - 1];
+    const taps: StructuringTap[] = [];
+    const r = decompileFunction(
+      {
+        name: "sub_401000",
+        address: instructions[0].address,
+        size: last.address + last.size - instructions[0].address,
+      },
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      undefined,
+      (ev) => taps.push(ev),
+    );
+    expect(taps).toHaveLength(1);
+    return { code: r.code, dropped: taps[0].cleanup.armGotosDropped };
+  }
+
+  it("drops an arm's goto to the label that follows the if", () => {
+    // Loop body: `ecx != 0` skips over a test whose own exit leaves the loop;
+    // when the test does not fire, control falls into 0x40101C, the skip's target.
+    const { code, dropped } = decompileWithTap(
+      seq(0x401000, [
+        ["mov", "eax, 0"], // 0x401000
+        ["cmp", "eax, 0xa"], // 0x401004  header
+        ["jge", "0x401024"], // 0x401008  -> exit 1
+        ["cmp", "ecx, 0"], // 0x40100c
+        ["je", "0x40101c"], // 0x401010  -> L (skip)
+        ["cmp", "edx, 5"], // 0x401014
+        ["je", "0x40102c"], // 0x401018  -> exit 2
+        ["add", "eax, 1"], // 0x40101c  L
+        ["jmp", "0x401004"], // 0x401020
+        ["mov", "edx, 2"], // 0x401024  exit 1
+        ["ret"], // 0x401028
+        ["mov", "edx, 3"], // 0x40102c  exit 2
+        ["jmp", "0x401024"], // 0x401030
+      ]),
+    );
+    expect(dropped).toBe(1);
+    expect(code).not.toContain("goto loc_40101C");
+    // The label itself stays, and the test that leaves the loop is still there.
+    expect(code).toContain("loc_40101C:");
+    expect(code).toContain("if (edx == 5) goto loc_40102C;");
+  });
+
+  it("keeps an arm's trailing goto to a different label (negative control)", () => {
+    // t64 sub_14000F0FC's shape: inside a do/while, an arm ends with a jump to
+    // a loop exit (spelled `break` after cleanup) and a DIFFERENT label follows.
+    // Dropping that goto would fall into 0x401020 instead of leaving the loop.
+    const { code, dropped } = decompileWithTap(
+      seq(0x401000, [
+        ["mov", "eax, 0"], // 0x401000
+        ["add", "eax, 1"], // 0x401004  header
+        ["cmp", "eax, 0"], // 0x401008
+        ["jne", "0x401020"], // 0x40100c  -> L
+        ["call", "0x402000"], // 0x401010
+        ["cmp", "eax, 0x3d"], // 0x401014
+        ["je", "0x401020"], // 0x401018  -> L
+        ["jmp", "0x401034"], // 0x40101c  -> exit 2, the arm's trailing goto
+        ["add", "edx, 8"], // 0x401020  L
+        ["cmp", "edx, 0x40"], // 0x401024
+        ["jl", "0x401004"], // 0x401028  back edge
+        ["mov", "eax, 1"], // 0x40102c  exit 1
+        ["ret"], // 0x401030
+        ["mov", "eax, 2"], // 0x401034  exit 2
+        ["ret"], // 0x401038
+      ]),
+    );
+    expect(dropped).toBe(0);
+    // Two ways out of the loop: its own test and the arm's break.
+    expect(code).toContain("break;");
+    expect(code).toContain("while (edx < 0x40)");
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanupStructured } from "../cleanup";
+import { cleanupStructured, emptyCleanupStats } from "../cleanup";
 import type { IRStmt } from "../ir";
 import { irBinary, irConst, irReg, irUnary, irUnknown } from "../ir";
 
@@ -143,5 +143,97 @@ describe("cleanupStructured — loop tail continue", () => {
       loop([{ kind: "if", condition: both, thenBody: [{ kind: "continue" }] }, { kind: "break" }]),
     ]);
     expect(tailOf(out)).toHaveLength(2);
+  });
+});
+
+/**
+ * `if (c) { …; goto L; } L:` → `if (c) { …; } L:`.
+ *
+ * `structure.ts`'s `armFrom` closes an arm the walk would not follow with a
+ * `goto` to where control really goes; where that is the very statement after
+ * the `if`, falling off the arm says the same thing. The rule is sibling-only
+ * and name-exact, and the two refusals below are the whole of it: a `goto` to
+ * any other label is a transfer the arm's fallthrough does not make, and a case
+ * body's trailing `goto` has no sibling because falling off a case body falls
+ * into the next case (peek-a-bin-5b6q.6).
+ */
+describe("cleanupStructured — arm goto elimination", () => {
+  const c = () => irBinary("==", irReg("ecx", 4), irConst(0));
+  const set = (n: number): IRStmt => ({ kind: "assign", dest: irReg("eax", 4), src: irConst(n) });
+  const label = (name: string): IRStmt => ({ kind: "label", name });
+  const go = (name: string): IRStmt => ({ kind: "goto", label: name });
+  const iff = (thenBody: IRStmt[], elseBody?: IRStmt[]): IRStmt => ({
+    kind: "if",
+    condition: c(),
+    thenBody,
+    elseBody,
+  });
+
+  it("drops a then-arm goto to the label that follows the if", () => {
+    const stats = emptyCleanupStats();
+    const out = cleanupStructured([iff([set(1), go("loc_A")]), label("loc_A"), set(2)], stats);
+    expect(out).toEqual([iff([set(1)]), label("loc_A"), set(2)]);
+    expect(stats.armGotosDropped).toBe(1);
+  });
+
+  it("drops the goto from both arms, and keeps the if/else rather than flattening it", () => {
+    // With the goto gone the then arm no longer terminates, so guard-clause
+    // flattening does not fire and the two arms stay where the machine put them.
+    const stats = emptyCleanupStats();
+    const out = cleanupStructured(
+      [iff([set(1), go("loc_A")], [set(2), go("loc_A")]), label("loc_A"), set(3)],
+      stats,
+    );
+    expect(out).toEqual([iff([set(1)], [set(2)]), label("loc_A"), set(3)]);
+    expect(stats.armGotosDropped).toBe(2);
+  });
+
+  it("removes the if entirely when the goto was the whole arm", () => {
+    // The existing treatment of a test whose outcome the tree does not
+    // distinguish: `if (c) {}` is removed.
+    const out = cleanupStructured([iff([go("loc_A")]), label("loc_A"), set(2)]);
+    expect(out).toEqual([label("loc_A"), set(2)]);
+  });
+
+  it("keeps a goto to a different label", () => {
+    // The negative control for the rule: `goto loc_B` is a transfer the arm's
+    // fallthrough does not make. Dropping it would rejoin the arm to `loc_A`.
+    const stats = emptyCleanupStats();
+    const out = cleanupStructured(
+      [iff([set(1), go("loc_B")]), label("loc_A"), set(2), label("loc_B"), set(3)],
+      stats,
+    );
+    expect(out[0]).toEqual(iff([set(1), go("loc_B")]));
+    expect(stats.armGotosDropped).toBe(0);
+  });
+
+  it("keeps the goto when the next sibling is not a label", () => {
+    const out = cleanupStructured([iff([set(1), go("loc_A")]), set(2), label("loc_A"), set(3)]);
+    expect(out[0]).toEqual(iff([set(1), go("loc_A")]));
+  });
+
+  it("keeps a goto that is not the arm's last statement", () => {
+    const out = cleanupStructured([iff([go("loc_A"), set(1)]), label("loc_A"), set(2)]);
+    expect(out[0]).toEqual(iff([go("loc_A"), set(1)]));
+  });
+
+  it("does not reach into a switch arm, whose fallthrough is the next case", () => {
+    const sw: IRStmt = {
+      kind: "switch",
+      expr: irReg("ecx", 4),
+      cases: [{ values: [1], body: [set(1), go("loc_A")] }],
+    };
+    const out = cleanupStructured([sw, label("loc_A"), set(2)]);
+    expect(out[0]).toEqual(sw);
+  });
+
+  it("fires on a nested if whose sibling label is inside the same arm", () => {
+    const stats = emptyCleanupStats();
+    const out = cleanupStructured(
+      [iff([iff([set(1), go("loc_A")]), label("loc_A"), set(2)]), set(3)],
+      stats,
+    );
+    expect(out).toEqual([iff([iff([set(1)]), label("loc_A"), set(2)]), set(3)]);
+    expect(stats.armGotosDropped).toBe(1);
   });
 });

@@ -406,6 +406,7 @@ if (!pre.haveBins || !pre.haveCc) {
                 return { ...db, rows: db.rows.length };
               })(),
               labelOrigins: { ...r.labelOrigins, rows: r.labelOrigins.rows.length },
+              armGotos: r.armGotos,
               callShapes: r.callShapes,
             },
             null,
@@ -1421,6 +1422,24 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * The arm-goto rule's liveness. `cleanup.ts` drops `goto L` from the end of
+     * an `if` arm whose next sibling is `label L`; the emitted C cannot show
+     * that a `goto` was removed rather than never written, so the count on the
+     * tap is the only evidence the rule runs. `funcs` says the tap fired at
+     * all; `dropped` is asserted over the corpus, not per binary, because a
+     * binary with no such shape is a legitimate state (peek-a-bin-5b6q.6).
+     */
+    it("is told how many arm gotos the cleanup dropped (instrument liveness)", () => {
+      let dropped = 0;
+      for (const r of results.values()) {
+        expect(`${r.key}: funcs=${r.armGotos.funcs > 0}`).toBe(`${r.key}: funcs=true`);
+        expect(r.armGotos.funcsAffected).toBeLessThanOrEqual(r.armGotos.funcs);
+        dropped += r.armGotos.dropped;
+      }
+      expect(dropped).toBeGreaterThan(0);
+    });
+
+    /**
      * Callees that are not names, and stack-argument stores. `calls` and
      * `insns` are the liveness halves; the x86 pair's slot figures are
      * structurally 0 and are asserted so, since a non-zero there would mean the
@@ -2121,6 +2140,12 @@ function renderReport(): string {
         `${lo.dropped} dropped, ${lo.duplicates} duplicates; ${lo.funcsWithPinnedOnly} functions ` +
         `with a pinned-only label, ${lo.inconsistent} inconsistent reports — REPORT-ONLY`,
     );
+    const ag = r.armGotos;
+    L.push(
+      `  arm gotos dropped           ${ag.dropped} over ${ag.funcsAffected} of ${ag.funcs} functions — REPORT-ONLY`,
+    );
+    L.push("    `if (c) { …; goto L; } L:` with the goto dropped (cleanup.ts dropArmGotosTo).");
+    L.push("    Pure spelling; this row is the only place the rule can be seen firing.");
     L.push("    Why each `loc_` label survived, from the structurer's own report on the tap.");
     L.push("    `pinned only` is the population epic 2's label-note work would touch, and");
     L.push("    deleting one from the IR is a FABRICATION hazard: structs.ts's baseGenerations");
