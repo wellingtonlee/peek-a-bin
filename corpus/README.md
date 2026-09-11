@@ -205,7 +205,12 @@ conditional jump inside it whose target leaves it is an exit the machine has; th
 offer at least as many (its own test, plus each `break`, `return` and outward `goto`). *A failure
 means a test the program makes is not in the output.* This finds what polarity cannot: a guard that
 states one of two tests and drops the other passes the polarity audit perfectly, because the
-operator it does state matches its own jcc.
+operator it does state matches its own jcc. *What it cannot see:* WHERE a way out lands. It counts
+`break`/`return`/outward `goto` against the machine's exit jccs and never asks which block the
+loop statement's own failed test falls into — so a `while (c)` continued into the wrong exit (14
+functions in the baseline at `2c2ceeb`, `peek-a-bin-5b6q.6`) and the fewest-edges continuation
+control both passed it at 0 short. `structure.test.ts` pins the continuation; the goto count is
+its bound.
 
 **Distinct callees lost.** The callees the disassembly names — direct `call` through the function
 map, indirect through the IAT — against the identifiers the emitted C applies. *A failure means a

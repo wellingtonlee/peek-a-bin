@@ -252,6 +252,25 @@ export interface LabelPruneReport {
 }
 
 /**
+ * What `structureLoop` hands back: the loop statement(s), and the block that
+ * FALLING OUT of the loop statement lands on, if the statement has one.
+ *
+ * `while (c) { B }`, `for (…; c; …) { B }` and `do { B } while (c)` all leave to
+ * exactly one place when `c` fails, and nothing in the tree spells that
+ * transfer — the statement after the loop is where it lands. That block is the
+ * `implicitExit`, and `structureFrom` must continue into it or the emitted C
+ * states a transfer the machine does not make. `null` for the shapes whose
+ * every way out is an explicit `goto`: `while (1) { H; if (!c) goto exit; B }`
+ * and an infinite `do`/`while`. There the continuation is a free choice, and
+ * `structureFrom` takes the exit the most exiting edges land on
+ * (peek-a-bin-5b6q.6).
+ */
+interface LoopStructure {
+  stmts: IRStmt[];
+  implicitExit: number | null;
+}
+
+/**
  * WRITES MEMORY, asked of one statement and everything nested inside it.
  *
  * `IRAssign.dest` is an `IRExpr`, so an assignment whose destination is a
@@ -844,7 +863,7 @@ export function structureCFG(
       const loop = loopByHeader.get(block.startAddr);
       if (loop && !visited.has(current) && !forced) {
         visited.add(current);
-        const loopResult = structureLoop(block, loop);
+        const { stmts: loopResult, implicitExit } = structureLoop(block, loop);
 
         // A `for` header repeats the init assignment, which the walk has
         // already emitted as part of an earlier block. Emitting both runs it
@@ -894,10 +913,27 @@ export function structureCFG(
         // of them can be the block this walk carries on into. This used to keep
         // whichever candidate the scan happened to see last, which dropped the
         // rest of the function hanging off every other exit (peek-a-bin-cb2).
-        // The lowest address is picked instead so the choice does not depend on
-        // block ordering, and the leftover pass at the end of `structureCFG`
-        // picks up the exits this walk does not reach.
-        const exits: number[] = [];
+        // The leftover pass at the end of `structureCFG` picks up the exits
+        // this walk does not reach.
+        //
+        // WHICH exit is a spelling decision, and `breakForwardGotos`
+        // (cleanup.ts) is why: a `goto` out of the loop can be spelled `break`
+        // only when its target is the statement after the loop, so the exit
+        // chosen here is the one whose `goto`s become `break`s and every other
+        // exit keeps its `goto`s. The exit the most exiting edges land on is
+        // therefore the one that reads best; ties go to the lowest address,
+        // which was the whole rule before (it kept the choice independent of
+        // block ordering, and still does). The count is of EDGES, not of
+        // blocks: two body blocks jumping to one exit are two `goto`s that
+        // become two `break`s.
+        //
+        // Nothing gates this choice, and the negative control shows why: picking
+        // the FEWEST-edged exit instead raises the goto count and leaves loop
+        // exit coverage green, because every exit is still spelled — as a
+        // `goto` where it was a `break` — and the coverage audit counts ways out,
+        // not their spelling. `structure.test.ts` pins the choice; the goto
+        // count in `compare.mjs` is the bound (peek-a-bin-5b6q.6).
+        const exitEdges = new Map<number, number>();
         for (const bid of blocks) {
           if (!loop.bodyAddrs.has(bid.startAddr) && !loop.bodyAddrs.has(bid.insns[0]?.address))
             continue;
@@ -908,14 +944,44 @@ export function structureCFG(
               !loop.bodyAddrs.has(succBlock.startAddr) &&
               !loop.bodyAddrs.has(succBlock.insns[0]?.address)
             ) {
-              if (!visited.has(succ) && !exits.includes(succ)) exits.push(succ);
+              if (!visited.has(succ)) exitEdges.set(succ, (exitEdges.get(succ) ?? 0) + 1);
             }
           }
         }
-        exits.sort(
-          (a, b) => (blockById.get(a)?.startAddr ?? 0) - (blockById.get(b)?.startAddr ?? 0),
-        );
-        current = exits.length > 0 ? exits[0] : null;
+        const exits = [...exitEdges.keys()].sort((a, b) => {
+          const byEdges = (exitEdges.get(b) ?? 0) - (exitEdges.get(a) ?? 0);
+          if (byEdges !== 0) return byEdges;
+          return (blockById.get(a)?.startAddr ?? 0) - (blockById.get(b)?.startAddr ?? 0);
+        });
+        const mostEdged = exits.length > 0 ? exits[0] : null;
+
+        // …EXCEPT where the loop statement itself decides. A `while (c)`, a
+        // `for` and a `do { } while (c)` fall out to ONE block — the header's
+        // or the back edge's other successor — and nothing spells that
+        // transfer: the statement after the loop IS where the failed test
+        // lands. So when the loop has an implicit exit the walk MUST continue
+        // into it, whatever the edge counts and whatever the addresses; the
+        // edge-count rule decides only for the shapes whose every exit is an
+        // explicit `goto` (`while (1) { H; if (!c) goto exit; B }`, and an
+        // infinite `do`/`while`). The lowest-address rule this replaces had the
+        // same hazard and was right only when the header's exit happened to
+        // sit lowest — `structure.test.ts` pins the shape it got wrong.
+        //
+        // An implicit exit the walk has already emitted elsewhere is spelled
+        // as the `goto` it is, on the single-successor rule below: falling out
+        // of the loop into whatever this walk emits next would state a
+        // transfer the machine does not make.
+        const implicitBlock = implicitExit !== null ? blockById.get(implicitExit) : undefined;
+        if (implicitBlock && implicitExit !== null) {
+          if (visited.has(implicitExit) && !stopAt.has(implicitExit)) {
+            result.push({ kind: "goto", label: labelNameFor(implicitBlock.startAddr) });
+            current = mostEdged;
+          } else {
+            current = implicitExit;
+          }
+        } else {
+          current = mostEdged;
+        }
         continue;
       }
 
@@ -1248,7 +1314,7 @@ export function structureCFG(
   }
 
   /** Structure a loop. */
-  function structureLoop(header: BasicBlock, loop: Loop): IRStmt[] {
+  function structureLoop(header: BasicBlock, loop: Loop): LoopStructure {
     const condition = extractCondition(header);
     const headerStmts = liftedBlocks.get(header.id) ?? [];
 
@@ -1343,24 +1409,30 @@ export function structureCFG(
           const exitBlock = blockById.get(exitId);
           const exitLabel = exitBlock ? labelNameFor(exitBlock.startAddr) : null;
           if (firstNonLabel(bodyWithContinue) < 0 && multiExits.length === 0) {
-            return [{ kind: "do_while", condition: whileCondition, body: fullBody }];
+            return {
+              stmts: [{ kind: "do_while", condition: whileCondition, body: fullBody }],
+              implicitExit: exitId,
+            };
           }
           if (exitLabel !== null) {
-            return [
-              {
-                kind: "while",
-                condition: { kind: "const", value: 1, size: 4 },
-                body: [
-                  ...headerStmts,
-                  {
-                    kind: "if",
-                    condition: RegState.negate(whileCondition),
-                    thenBody: [{ kind: "goto", label: exitLabel }],
-                  },
-                  ...bodyWithContinue,
-                ],
-              },
-            ];
+            return {
+              stmts: [
+                {
+                  kind: "while",
+                  condition: { kind: "const", value: 1, size: 4 },
+                  body: [
+                    ...headerStmts,
+                    {
+                      kind: "if",
+                      condition: RegState.negate(whileCondition),
+                      thenBody: [{ kind: "goto", label: exitLabel }],
+                    },
+                    ...bodyWithContinue,
+                  ],
+                },
+              ],
+              implicitExit: null,
+            };
           }
         }
 
@@ -1376,13 +1448,16 @@ export function structureCFG(
             first.thenBody[0].kind === "break" &&
             !first.elseBody
           ) {
-            return [
-              {
-                kind: "while",
-                condition: RegState.negate(first.condition),
-                body: [...fullBody.slice(0, leadIdx), ...fullBody.slice(leadIdx + 1)],
-              },
-            ];
+            return {
+              stmts: [
+                {
+                  kind: "while",
+                  condition: RegState.negate(first.condition),
+                  body: [...fullBody.slice(0, leadIdx), ...fullBody.slice(leadIdx + 1)],
+                },
+              ],
+              implicitExit: exitId,
+            };
           }
         }
 
@@ -1410,18 +1485,24 @@ export function structureCFG(
           // detectForLoop returns `condition: irConst(1)` as a placeholder and
           // documents that the caller fills it in — the header condition is
           // only available here. Always override it.
-          return [
-            {
-              kind: "for",
-              init: forLoop.init,
-              condition: whileCondition,
-              update: forLoop.update,
-              body: fullBody.slice(0, -1),
-            },
-          ];
+          return {
+            stmts: [
+              {
+                kind: "for",
+                init: forLoop.init,
+                condition: whileCondition,
+                update: forLoop.update,
+                body: fullBody.slice(0, -1),
+              },
+            ],
+            implicitExit: exitId,
+          };
         }
 
-        return [{ kind: "while", condition: whileCondition, body: fullBody }];
+        return {
+          stmts: [{ kind: "while", condition: whileCondition, body: fullBody }],
+          implicitExit: exitId,
+        };
       }
     }
 
@@ -1469,6 +1550,12 @@ export function structureCFG(
       loopCondition = extractCondition(backEdgeBlock);
       backEdgeConditionBlocks.add(backEdgeBlock.id);
     }
+    // Where falling out of the `do`/`while` lands: the back-edge block's other
+    // successor. An infinite loop has no implicit exit. See `LoopStructure`.
+    let fallExit: number | null = null;
+    if (backEdgeBlock && endsWithCondJmp(backEdgeBlock)) {
+      fallExit = backEdgeBlock.succs.find((sid) => sid !== header.id) ?? null;
+    }
 
     // The body starts at the header, walked as an ordinary region.
     //
@@ -1511,16 +1598,22 @@ export function structureCFG(
       lead.thenBody[0].kind === "break" &&
       !lead.elseBody
     ) {
-      return [
-        {
-          kind: "while",
-          condition: RegState.negate(lead.condition),
-          body: [...body.slice(0, leadIdx), ...body.slice(leadIdx + 1)],
-        },
-      ];
+      return {
+        stmts: [
+          {
+            kind: "while",
+            condition: RegState.negate(lead.condition),
+            body: [...body.slice(0, leadIdx), ...body.slice(leadIdx + 1)],
+          },
+        ],
+        implicitExit: fallExit,
+      };
     }
 
-    return [{ kind: "do_while", condition: loopCondition, body }];
+    return {
+      stmts: [{ kind: "do_while", condition: loopCondition, body }],
+      implicitExit: fallExit,
+    };
   }
 
   /** Collect block IDs that are part of a loop body. */

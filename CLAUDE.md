@@ -1194,6 +1194,18 @@ refused. **Read the long-form entry before changing the code it describes.**
   fires **after** cleanup, which never mutates the tree); the control — drop `goto M`, M ≠ L —
   was caught by **loop exit coverage and `guard lines seen`, NOT by `dangling`** (a deleted `goto`
   cannot dangle). 19 sites at 2c2ceeb, polarity CHANGED 0.
+- **After a loop the walk continues into the loop's IMPLICIT exit when it has one, and only a
+  loop whose every exit is an explicit `goto` gets a choice.** `while (c)`, `for` and
+  `do … while (c)` fall out to ONE block and nothing spells the transfer, so the statement after the
+  loop *is* where the failed test lands (`LoopStructure.implicitExit`, `structure.ts`). The
+  lowest-address rule this replaces displaced that block whenever a body exit sat lower — **14
+  functions on the corpus had a `while (c)` falling into the wrong block, with the real exit a
+  pinned leftover** (`pinned only` 76/8/74/8 → 74/3/72/3), and an implicit exit already emitted
+  elsewhere is now spelled `goto` (14 sites). **No gate sees any of this** — loop exit coverage
+  counts ways out, not where the fall-out lands; the pin is `structure.test.ts`. For the free
+  choice, the exit the MOST exiting edges land on wins (those `goto`s become `break`s), ties to the
+  lowest address; the fewest-edges control raised gotos with every gate green, so the goto count
+  in `compare.mjs` is its bound, not a gate.
 - **A `for`'s init need not be the statement immediately before the loop** (`initHoistable`), and
   hoisting moves the init **later**, so four refusals carry it, including a **whitelist** of what may
   intervene rather than a blacklist. `initAt >= 0` is **not** redundant with the equality test.

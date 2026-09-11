@@ -8962,8 +8962,9 @@ describe("decompileFunction — arm goto elimination", () => {
 
   it("keeps an arm's trailing goto to a different label (negative control)", () => {
     // t64 sub_14000F0FC's shape: inside a do/while, an arm ends with a jump to
-    // a loop exit (spelled `break` after cleanup) and a DIFFERENT label follows.
-    // Dropping that goto would fall into 0x401020 instead of leaving the loop.
+    // a loop exit that is NOT where the loop's own test falls out, and a
+    // DIFFERENT label follows. Dropping that goto would fall into 0x401020
+    // instead of leaving the loop.
     const { code, dropped } = decompileWithTap(
       seq(0x401000, [
         ["mov", "eax, 0"], // 0x401000
@@ -8984,8 +8985,10 @@ describe("decompileFunction — arm goto elimination", () => {
       ]),
     );
     expect(dropped).toBe(0);
-    // Two ways out of the loop: its own test and the arm's break.
-    expect(code).toContain("break;");
-    expect(code).toContain("while (edx < 0x40)");
+    // Two ways out of the loop: its own test, which falls out to `return 1`,
+    // and the arm's goto — kept as a goto, since its target is not the
+    // statement after the loop.
+    expect(code).toContain("goto loc_40101C;");
+    expect(code).toContain("while (edx < 0x40);\n    return 1;");
   });
 });

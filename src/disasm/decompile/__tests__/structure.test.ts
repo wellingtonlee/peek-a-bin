@@ -679,6 +679,95 @@ describe("structureCFG — loops", () => {
   });
 });
 
+describe("structureCFG — loop continuation choice", () => {
+  /**
+   * Which exit the walk continues into after a loop is a spelling decision for
+   * some loops and a correctness one for others, and the two are pinned apart.
+   *
+   * A `while (c)` FALLS OUT to one block and nothing spells the transfer, so the
+   * statement after the loop must be that block — whatever the edge counts and
+   * whatever the addresses. The lowest-address rule this replaces got that
+   * wrong whenever a body exit sat below the header's exit, and no corpus gate
+   * sees it (loop exit coverage counts ways out, not where the fall-out lands).
+   * Where every exit is an explicit `goto` — a header with statements is
+   * spelled `while (1) { H; if (!c) goto exit; B }` — the choice is free, and
+   * the exit the most exiting edges land on is the one whose `goto`s
+   * `breakForwardGotos` can spell as `break`; ties go to the lowest address.
+   * The negative control (fewest edges) reverses the second pin and the goto
+   * count in `compare.mjs` is its bound (peek-a-bin-5b6q.6).
+   *
+   * Header 1 tests and leaves to block 5 (one edge); two body guards leave to
+   * block 4 (two edges, the LOWER address).
+   */
+  function twoExitLoop(): BasicBlock[] {
+    return [
+      bb(0, { succs: [1], code: [["jmp", 1]] }),
+      bb(1, {
+        succs: [5, 2],
+        preds: [0, 3],
+        code: [
+          ["cmp", "ecx, 0x0"],
+          ["je", 5],
+        ],
+      }),
+      bb(2, {
+        succs: [4, 3],
+        preds: [1],
+        code: [
+          ["cmp", "edx, 0x0"],
+          ["je", 4],
+        ],
+      }),
+      bb(3, {
+        succs: [4, 1],
+        preds: [2],
+        code: [
+          ["cmp", "ebx, 0x0"],
+          ["je", 4],
+        ],
+      }),
+      bb(4, { preds: [2, 3], code: [["ret", ""]] }),
+      bb(5, { preds: [1], code: [["ret", ""]] }),
+    ];
+  }
+  const bodies = { 2: [mark(2)], 3: [mark(3)], 4: [mark(4)], 5: [mark(5)] };
+  /** Index of the top-level statement carrying `mark(n)`, loops excluded. */
+  const at = (out: IRStmt[], n: number) =>
+    out.findIndex((s) => s.kind === "assign" && JSON.stringify(s).includes(`"value":${n}`));
+
+  it("continues into a pre-tested loop's implicit exit, not the most-targeted or lowest one", () => {
+    const out = structure(twoExitLoop(), bodies, [loopOf(1, [2, 3], 3)]);
+    expect(out[0].kind).toBe("while");
+    // Both exits reach the output; block 5 — where `ecx == 0` lands — is the
+    // statement after the loop, and block 4 is a leftover region behind it.
+    expect(at(out, 5)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 4)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 5)).toBeLessThan(at(out, 4));
+  });
+
+  it("continues into the exit the most exiting edges land on when every exit is a goto", () => {
+    // Header statements make the loop `while (1) { H; if (!c) goto loc_5; B }`:
+    // block 5 is now reached by a goto too, and two edges beat one.
+    const out = structure(twoExitLoop(), { ...bodies, 1: [mark(1)] }, [loopOf(1, [2, 3], 3)]);
+    expect(out[0].kind).toBe("while");
+    expect(at(out, 4)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 5)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 4)).toBeLessThan(at(out, 5));
+  });
+
+  it("breaks a tie between explicit exits by the lowest address", () => {
+    // Block 3 only loops back: one edge to each exit, and block 4 sits lower.
+    const blocks = twoExitLoop();
+    blocks[3] = bb(3, { succs: [1], preds: [2], code: [["jmp", 1]] });
+    blocks[4] = bb(4, { preds: [2], code: [["ret", ""]] });
+    blocks[5] = bb(5, { preds: [1], code: [["ret", ""]] });
+    const out = structure(blocks, { ...bodies, 1: [mark(1)] }, [loopOf(1, [2, 3], 3)]);
+    expect(at(out, 4)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 5)).toBeGreaterThanOrEqual(0);
+    expect(at(out, 4)).toBeLessThan(at(out, 5));
+  });
+});
+
 describe("structureCFG — for loops", () => {
   /** Counted loop: 0 initialises ecx, 1 tests, 2 is the body + increment. */
   function counted(): BasicBlock[] {
