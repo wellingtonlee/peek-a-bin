@@ -1076,6 +1076,28 @@ for (const b of bins) {
     note("  arm gotos dropped             NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // Label notes, read off the text. Report-only except `under a goto-named
+  // label`, which must stay 0 (the pass fired outside its population).
+  if (B.labelNotes && C.labelNotes) {
+    row("label notes: no predecessor", (x) => x.labelNotes.noPredecessor);
+    row("  entered by the unwinder", (x) => x.labelNotes.unwinder);
+    row("  untargeted, no note", (x) => x.labelNotes.untargetedNoNote);
+    row(
+      "  under a goto-named label",
+      (x) => x.labelNotes.notedButTargeted,
+      (a, c) => c > a,
+      "A NOTE UNDER A LABEL A GOTO NAMES",
+    );
+    row(
+      "  labels read",
+      (x) => x.labelNotes.labels,
+      (a, c) => c === 0 && a > 0,
+      "THE LABEL-NOTE SCAN READ NOTHING",
+    );
+  } else {
+    note("  label notes                   NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // Callees that are not names, and x64 stack-argument stores. Both size
   // epic 3 and are report-only in both directions.
   if (B.callShapes && C.callShapes) {

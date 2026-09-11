@@ -1,6 +1,6 @@
 import type { RuntimeFunction, ScopeTableEntry } from "../../pe/types";
 import type { CalleeClobbers } from "../callSummary";
-import { buildCFG, detectLoops } from "../cfg";
+import { type BasicBlock, buildCFG, detectLoops } from "../cfg";
 import { namedGlobalsFor } from "../crtIdioms";
 import { funcExceptionRecord } from "../funcInsns";
 import type { FunctionSignature } from "../signatures";
@@ -9,7 +9,7 @@ import { type CleanupStats, cleanupStructured, emptyCleanupStats } from "./clean
 import { type DecompileAdmissions, emitFunction, emptyAdmissions } from "./emit";
 import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
-import type { IRBranch, IRStmt, IRTry } from "./ir";
+import { bodiesOf, type IRBranch, type IRStmt, type IRTry, rewriteBodies } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
@@ -17,7 +17,7 @@ import { buildSSA, detectNaturalLoops } from "./ssa";
 import { destroySSA } from "./ssadestroy";
 import { ssaOptimize } from "./ssaopt";
 import { type StructGroupReport, type StructRegistry, synthesizeStructs } from "./structs";
-import { type LabelPruneReport, type SwitchArmExit, structureCFG } from "./structure";
+import { type LabelPruneReport, labelAddrFor, type SwitchArmExit, structureCFG } from "./structure";
 import { inferTypes } from "./typeInfer";
 
 export interface DecompileResult {
@@ -314,6 +314,15 @@ export function decompileFunction(
       cleaned = wrapExceptionRegions(cleaned, func, runtimeFunctions);
     }
 
+    // 5d. Say what a label no `goto` names is doing there. Spelling only —
+    // the labels themselves are untouched, see `annotateLabels`.
+    cleaned = annotateLabels(
+      cleaned,
+      blocks,
+      func.address,
+      runtimeFunctions ? unwinderEntryVAs(func, runtimeFunctions) : new Set(),
+    );
+
     // 6. Type inference
     const typeCtx = inferTypes(cleaned, iatMap);
 
@@ -509,4 +518,102 @@ function wrapExceptionRegions(
   };
 
   return [tryStmt];
+}
+
+/** The note a label gets when `buildCFG` found no edge into its block. */
+export const LABEL_NOTE_NO_PREDECESSOR = "no predecessor in the recovered CFG";
+/** The note a label gets when the image's scope table names its address. */
+export const LABEL_NOTE_UNWINDER = "entered by the unwinder (.pdata scope table)";
+
+/**
+ * Every VA the selected `.pdata` record's scope table says the unwinder can
+ * transfer control to inside this function: an `__except` body (`jumpTarget`)
+ * and any funclet a `handler` field names. x64 only, because `.pdata` is; the
+ * 32-bit SEH scope table (`seh32.ts`) is not read here yet — that plumbing is
+ * epic 3's — so on x86 this set is empty and no label claims the unwinder.
+ *
+ * Reads the record `funcExceptionRecord` selects and nothing else: the same
+ * idempotent selection `wrapExceptionRegions` applies, deliberately not moved
+ * into it (see that function's docstring for why the selector stays a leaf).
+ * A record with no validated scope table contributes nothing — an unreadable
+ * table is not a table with no entries.
+ */
+function unwinderEntryVAs(func: DisasmFunction, runtimeFunctions: RuntimeFunction[]): Set<number> {
+  const out = new Set<number>();
+  const rf = funcExceptionRecord(func, runtimeFunctions);
+  if (!rf?.scopeTable) return out;
+  const imageBase = func.address - rf.beginAddress;
+  for (const e of rf.scopeTable) {
+    if (e.jumpTarget !== 0) out.add(e.jumpTarget + imageBase);
+    // 0 and 1 are the format's own flag values, never addresses.
+    if (e.handler > 1) out.add(e.handler + imageBase);
+  }
+  return out;
+}
+
+/**
+ * Give every label no `goto` in the tree names a note saying why it is there —
+ * where the CFG can vouch for one.
+ *
+ * WHY THIS IS SPELLING AND NOT A REWRITE. A label no `goto` names is exactly the
+ * one `structs.ts`'s `baseGenerations` resets every key at, and that asymmetry
+ * is its whole soundness argument (docs/decompiler-ir.md); deleting such a
+ * label from the IR is a fabrication hazard. So the label statement stays, its
+ * name stays, and the note rides on `IRLabel.note`, which nothing but the
+ * emitter reads. The emitter prints it on the line after the label, so the
+ * `^\s*(loc_[0-9A-F]+):$` scrapes in `corpus/` see exactly what they saw.
+ *
+ * WHICH LABELS. "No `goto` names it" is the population `pruneLabels` kept on
+ * another ground — but it is NOT the population the note is true of. About a
+ * third of these labels are the targets of a `goto` a later pass rewrote:
+ * `breakForwardGotos` turned it into `break`, `cleanupPass` folded `goto L; L:`
+ * or an arm's trailing `goto L` — and every one of those has a predecessor,
+ * the fall-through or the loop. Saying "no predecessor" there would be false.
+ * So the note is decided from `buildCFG`'s own edges: a block with no `preds`
+ * really is entered by nothing the CFG recovered (an unwinder continuation, or
+ * a region only a jump the disassembly missed reaches), and a label whose block
+ * has predecessors gets no note at all. The entry block is excluded: it has no
+ * predecessor and is entered by `call`.
+ *
+ * WHICH TEXT. "Entered by the unwinder" is a CLAIM about the machine and is
+ * made only where the image says so — the label's address is a scope-table
+ * `jumpTarget` or funclet in the record `funcExceptionRecord` selected
+ * (x64; see `unwinderEntryVAs`). Everything else gets the fact about the CFG,
+ * which is all that is known (peek-a-bin-5b6q.6).
+ */
+function annotateLabels(
+  body: IRStmt[],
+  blocks: BasicBlock[],
+  entryAddr: number,
+  unwinderVAs: Set<number>,
+): IRStmt[] {
+  const targets = new Set<string>();
+  const collect = (list: IRStmt[]): void => {
+    for (const s of list) {
+      if (s.kind === "goto") targets.add(s.label);
+      for (const nested of bodiesOf(s)) collect(nested);
+    }
+  };
+  collect(body);
+
+  const blockByAddr = new Map(blocks.map((b) => [b.startAddr, b]));
+  const noteFor = (name: string): string | undefined => {
+    if (targets.has(name)) return undefined;
+    const addr = labelAddrFor(name);
+    if (addr === null || addr === entryAddr) return undefined;
+    if (unwinderVAs.has(addr)) return LABEL_NOTE_UNWINDER;
+    const block = blockByAddr.get(addr);
+    if (block && block.preds.length === 0) return LABEL_NOTE_NO_PREDECESSOR;
+    return undefined;
+  };
+
+  const rewrite = (list: IRStmt[]): IRStmt[] =>
+    list.map((s) => {
+      if (s.kind === "label") {
+        const note = noteFor(s.name);
+        return note ? { ...s, note } : s;
+      }
+      return rewriteBodies(s, rewrite);
+    });
+  return rewrite(body);
 }

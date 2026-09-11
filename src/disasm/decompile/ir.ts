@@ -206,6 +206,19 @@ export interface IRGoto {
 export interface IRLabel {
   kind: "label";
   name: string;
+  /**
+   * A fact about this label the emitter prints as a comment on the line AFTER
+   * it — never on the label's own line, which `corpus/undefinedCallees.ts` and
+   * `gotoCheck` scrape as `^\s*(loc_[0-9A-F]+):$`.
+   *
+   * A FIELD, not a kind, deliberately: a label no `goto` names is load-bearing
+   * for `structs.ts`'s `baseGenerations`, which resets every key at one, so
+   * such a label must stay in the IR exactly as it is and anything said about
+   * it is spelling at emission. `pipeline.ts`'s `annotateLabels` is the only
+   * writer, and `structure.ts`'s `pushLabel` the only constructor
+   * (peek-a-bin-5b6q.6).
+   */
+  note?: string;
 }
 
 export interface IRComment {

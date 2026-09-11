@@ -15,7 +15,7 @@ rather than trusting a count.
 present. The docstring at the top of `pipeline.ts` lists a shorter, outdated order — trust the
 code, not that comment.)
 
-**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (18 kinds including if/while/do_while/for/switch/break/continue/phi/try/**branch**).
+**IR** (`ir.ts`): `IRExpr` union (12 kinds: const, reg, var, binary, unary, deref, call, cast, ternary, field_access, array_access, unknown) + `IRStmt` union (18 kinds including if/while/do_while/for/switch/break/continue/phi/try/**branch**). `IRLabel` carries an optional `note` — a FIELD, not a kind, so it enters no dispatch census; `pipeline.ts`'s `annotateLabels` is the only writer and `emit.ts` the only reader, printing it on the line after the label (see the `baseGenerations` entry below for why a label no `goto` names must stay in the IR untouched).
 
 **`branch` is confined to `liftedBlocks` and never appears in a structured tree — but its *condition* does, and `structureCFG` now takes it as a sixth argument.** `liftBlock` turns a block's trailing conditional jump into an `IRBranch` so its condition is a real IR reader — an SSA version, a reaching definition, a place in every use count — and `pipeline.ts` step 4b lifts every one of them out of `liftedBlocks` into a `Map<blockId, IRBranch>` *before* `structureCFG`, which `extractCondition` prefers over re-parsing `insn.opStr`. Two orderings are load-bearing and neither is obvious:
 
@@ -327,7 +327,11 @@ standing in for the SSA version `destroySSA` collapsed away, and `accessKey` is
     by the **unwinder** (`peek-a-bin-d3z`, 1160 such blocks here), an edge no statement in the tree
     expresses, so a generation carried into one would be a value the unwinder never established.
     `structs.test.ts` pins it at a shape whose edges *would* agree, so the test fails if the arm is
-    removed rather than merely being satisfied by accident.
+    removed rather than merely being satisfied by accident. **This is why epic 2's label-note work
+    (peek-a-bin-5b6q.6) is a field on `IRLabel` spelled at emission and never a deletion**: the
+    label stays, `baseGenerations` keeps resetting at it, and the note — decided from `buildCFG`'s
+    `preds`, which on the corpus coincide exactly with the pinned-only population (74/3/72/3) —
+    is printed one line below it.
   - **The edge set is a SUPERSET of the real one everywhere else, so an error in it can only reset
     MORE.** The fall-through is counted whenever the preceding sibling is not a `return`/`goto`/
     `break`/`continue`, which over-counts for a goto-named leftover region the pass above appended

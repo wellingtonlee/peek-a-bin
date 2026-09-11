@@ -23,8 +23,14 @@ import { computeDominators, computeRPO } from "./ssa";
  * `labelForAddr` derives the same name from the same address for the labels it
  * places itself, and has its own note about why.
  */
-function labelNameFor(addr: number): string {
+export function labelNameFor(addr: number): string {
   return `loc_${addr.toString(16).toUpperCase()}`;
+}
+
+/** The inverse of `labelNameFor`; null for a name it did not produce. */
+export function labelAddrFor(name: string): number | null {
+  const m = /^loc_([0-9A-F]+)$/.exec(name);
+  return m ? Number.parseInt(m[1], 16) : null;
 }
 
 /** The union of two `clobberedAfter` scans: written by either, opaque to either. */

@@ -1476,6 +1476,24 @@ the name-exact test in the rule itself, pinned in `cleanup.test.ts`, and its cor
 (drop any trailing `goto` when a label follows) is caught by **loop exit coverage** and `guard
 lines seen`, not by `dangling` (a deleted `goto` cannot dangle).
 
+**Label notes** (`labelNotes` in `emitAudits.ts`, a text scan). *What it proves:* what
+`pipeline.ts`'s `annotateLabels` said under each `loc_` label no `goto` names — `// no predecessor
+in the recovered CFG` where `buildCFG` found no edge into the block, `// entered by the unwinder
+(.pdata scope table)` where the selected x64 record's `jumpTarget`/funclet is the label's address,
+nothing where the tree reaches the label by fall-through or `break` (a `goto` a later pass
+rewrote), since "no predecessor" would be false there. Baseline at `fbdb8d3`+: **74/3/3/72
+no-predecessor+unwinder (t32/t64/w64/w32; unwinder 0/2/2/0), 85/96/88/78 untargeted with no note,
+of 159/99/91/150 goto-less labels over 750/649/580/660 label lines** — the noted population is
+exactly `label origins`' `pinned only`. Read one line below each label with the same
+`^\s*(loc_[0-9A-F]+):$` anchor `gotoCheck` and `undefinedCallees.ts` use, deliberately not off
+`IRLabel.note` (an audit reading the field it audits is not independent). **REPORT-ONLY except
+`notedButTargeted`** — a note under a label a `goto` names — which must be 0 and gates in the
+audit. *Liveness:* `labels > 0` and `untargeted > 0` per binary, `noPredecessor > 0` over the
+corpus, and the three buckets sum to `untargeted`. *What it cannot see:* whether the CFG's
+`preds` are right — a jump the disassembly missed makes a block look unentered, and the note
+says "recovered" for that reason. x86 never carries the unwinder note (the seh32 table is not
+read here; epic 3).
+
 **Duplicate bodies** (`corpus/duplicateBodies.ts`; `duplicates_<key>.jsonl`). *What it proves:*
 functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex constants, whitespace
 and the function's own name are normalised — how much of the output a reader reads twice, and

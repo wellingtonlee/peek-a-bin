@@ -31,6 +31,7 @@ import {
   emptyCaseBodies,
   gotoCheck,
   gotosPer100Lines,
+  labelNotes,
   memberNameAgreement,
   type OffsetofResult,
   offsetNamedArgs,
@@ -407,6 +408,7 @@ if (!pre.haveBins || !pre.haveCc) {
               })(),
               labelOrigins: { ...r.labelOrigins, rows: r.labelOrigins.rows.length },
               armGotos: r.armGotos,
+              labelNotes: labelNotes([{ funcs: r.funcs }]),
               callShapes: r.callShapes,
             },
             null,
@@ -1440,6 +1442,29 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * Label notes, read off the text. `labels` and `untargeted` are the
+     * liveness halves; `noPredecessor` is asserted over the corpus (a binary
+     * may have no leftover region); `notedButTargeted` must be 0 on every
+     * binary — a note under a label a goto names means `annotateLabels` fired
+     * outside its population. `unwinder` is NOT asserted: it needs an x64
+     * `__except` body that is also a leftover head, which this corpus may not
+     * have (peek-a-bin-5b6q.6).
+     */
+    it("reads the note under each label no goto names (instrument liveness)", () => {
+      let noPredecessor = 0;
+      for (const r of results.values()) {
+        const ln = labelNotes([{ funcs: r.funcs }]);
+        expect(`${r.key}: labels=${ln.labels > 0} untargeted=${ln.untargeted > 0}`).toBe(
+          `${r.key}: labels=true untargeted=true`,
+        );
+        expect(ln.notedButTargeted).toBe(0);
+        expect(ln.noPredecessor + ln.unwinder + ln.untargetedNoNote).toBe(ln.untargeted);
+        noPredecessor += ln.noPredecessor;
+      }
+      expect(noPredecessor).toBeGreaterThan(0);
+    });
+
+    /**
      * Callees that are not names, and stack-argument stores. `calls` and
      * `insns` are the liveness halves; the x86 pair's slot figures are
      * structurally 0 and are asserted so, since a non-zero there would mean the
@@ -2146,6 +2171,15 @@ function renderReport(): string {
     );
     L.push("    `if (c) { …; goto L; } L:` with the goto dropped (cleanup.ts dropArmGotosTo).");
     L.push("    Pure spelling; this row is the only place the rule can be seen firing.");
+    const ln = labelNotes([{ funcs: r.funcs }]);
+    L.push(
+      `  label notes                 ${ln.noPredecessor} no-predecessor, ${ln.unwinder} unwinder, ` +
+        `${ln.untargetedNoNote} untargeted with no note, of ${ln.untargeted} labels no goto names ` +
+        `(${ln.labels} labels read); ${ln.notedButTargeted} under a goto-named label — REPORT-ONLY, the last must be 0`,
+    );
+    L.push("    Read off the text, one line under each `loc_:` line (pipeline.ts annotateLabels).");
+    L.push("    A label reached by fall-through or break gets no note: 'no predecessor' would be");
+    L.push("    false of it. The unwinder note is a claim and is made only where .pdata says so.");
     L.push("    Why each `loc_` label survived, from the structurer's own report on the tap.");
     L.push("    `pinned only` is the population epic 2's label-note work would touch, and");
     L.push("    deleting one from the IR is a FABRICATION hazard: structs.ts's baseGenerations");

@@ -8992,3 +8992,90 @@ describe("decompileFunction — arm goto elimination", () => {
     expect(code).toContain("while (edx < 0x40);\n    return 1;");
   });
 });
+
+/**
+ * A label no `goto` names carries a note on the line after it, and the note is
+ * decided from the CFG rather than from the absence of the `goto`.
+ *
+ * The label itself is untouched — `structs.ts`'s `baseGenerations` resets every
+ * key at exactly this label, so the IR must keep it (`structs.test.ts`, "does
+ * not group across a label no goto names"). "Entered by the unwinder" is a claim
+ * about the machine and is made only where the `.pdata` scope table names the
+ * address; everything else the CFG can vouch for gets the CFG fact; a label the
+ * tree reaches by fall-through or `break` (a `goto` a later pass rewrote) gets
+ * nothing, because "no predecessor" would be false of it (peek-a-bin-5b6q.6).
+ */
+describe("decompileFunction — label notes", () => {
+  // Entry returns; the block at 0x401008 is reachable from nothing the CFG
+  // recovered, so the leftover pass emits it under a pinned label.
+  const leftover = seq(0x401000, [
+    ["mov", "eax, 1"], // 0x401000
+    ["ret"], // 0x401004
+    ["mov", "eax, 2"], // 0x401008
+    ["ret"], // 0x40100c
+  ]);
+  const func: DisasmFunction = { name: "sub_401000", address: 0x401000, size: 16 };
+  const decompile = (runtimeFunctions?: RuntimeFunction[]) =>
+    decompileFunction(
+      func,
+      leftover,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      runtimeFunctions,
+    ).code;
+
+  it("notes a leftover region's label as having no predecessor in the recovered CFG", () => {
+    const code = decompile();
+    expect(code).toContain("loc_401008:\n    // no predecessor in the recovered CFG\n");
+    expect(code).not.toContain("unwinder");
+  });
+
+  it("notes the label as entered by the unwinder where the scope table names its address", () => {
+    // RVAs under a 0x400000 image base: the __except body is at RVA 0x1008.
+    const code = decompile([
+      {
+        beginAddress: 0x1000,
+        endAddress: 0x1010,
+        unwindInfoAddress: 0x3000,
+        handlerAddress: 0x2000,
+        handlerFlags: 1,
+        scopeTable: [{ begin: 0x1000, end: 0x1004, handler: 0x2000, jumpTarget: 0x1008 }],
+      },
+    ]);
+    expect(code).toContain(
+      "loc_401008:\n        // entered by the unwinder (.pdata scope table)\n",
+    );
+    expect(code).not.toContain("no predecessor");
+  });
+
+  it("gives no note to a label the tree reaches by break", () => {
+    // The two-exit loop: `loc_401020` follows the loop and its only goto became
+    // a `break`, so it is named by no goto — and has a predecessor.
+    const code = run(
+      seq(0x401000, [
+        ["mov", "eax, 0"], // 0x401000
+        ["cmp", "eax, 0xa"], // 0x401004
+        ["jge", "0x401020"], // 0x401008
+        ["cmp", "ecx, 0"], // 0x40100c
+        ["je", "0x401028"], // 0x401010
+        ["add", "eax, 1"], // 0x401014
+        ["jmp", "0x401004"], // 0x401018
+        ["nop"], // 0x40101c
+        ["mov", "edx, 1"], // 0x401020
+        ["ret"], // 0x401024
+        ["mov", "edx, 2"], // 0x401028
+        ["ret"], // 0x40102c
+      ]),
+    );
+    expect(code).toContain("loc_401020:");
+    expect(code).not.toContain("goto loc_401020");
+    expect(code).not.toContain("loc_401020:\n    //");
+  });
+});

@@ -2131,6 +2131,10 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
 
     case "label":
       push(`${stmt.name}:`);
+      // On its own following line, with no address: the label line must stay
+      // exactly `name:` for the scrapes that read it (see `IRLabel.note`), and
+      // a note is not an instruction.
+      if (stmt.note) push(`${pad}// ${commentSafe(stmt.note)}`);
       break;
 
     case "comment":

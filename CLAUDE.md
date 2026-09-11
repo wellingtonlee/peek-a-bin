@@ -1206,6 +1206,17 @@ refused. **Read the long-form entry before changing the code it describes.**
   choice, the exit the MOST exiting edges land on wins (those `goto`s become `break`s), ties to the
   lowest address; the fewest-edges control raised gotos with every gate green, so the goto count
   in `compare.mjs` is its bound, not a gate.
+- **A label no `goto` names is SPELLED ABOUT, never deleted: `IRLabel.note` is a FIELD** (no kind,
+  no dispatch census; `pushLabel` the only constructor, `pipeline.ts`'s `annotateLabels` the only
+  writer), because `structs.ts`'s `baseGenerations` resets every key at exactly that label. The
+  emitter prints the note on its **own following line** with no address — the label line stays
+  `name:` for the `^\s*(loc_[0-9A-F]+):$` scrapes. **The note is decided from `buildCFG`'s
+  `preds`, NOT from the missing `goto`**: a third of goto-less labels are targets of a `goto` a
+  later pass rewrote (`break`, the adjacent fold, the arm fold) and *have* a predecessor. On the
+  corpus the no-predecessor population (74/3/3/72) is exactly `pinned only`. `entered by the
+  unwinder (.pdata scope table)` is a **claim**, made only where the selected x64 record's
+  `jumpTarget`/funclet equals the label's address (2+2 sites, hand-checked); **x86 is skipped** —
+  the seh32 plumbing is epic 3's.
 - **A `for`'s init need not be the statement immediately before the loop** (`initHoistable`), and
   hoisting moves the init **later**, so four refusals carry it, including a **whitelist** of what may
   intervene rather than a blacklist. `initAt >= 0` is **not** redundant with the equality test.

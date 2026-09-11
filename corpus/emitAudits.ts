@@ -1099,6 +1099,82 @@ export function gotosPer100Lines(g: GotoResult): number {
   return g.lines === 0 ? 0 : Math.round((10_000 * g.gotos) / g.lines) / 100;
 }
 
+// ── Label notes: what a label no goto names says about itself ───────────────
+
+export interface LabelNoteResult {
+  /** `loc_` label lines read, over every function with code. Liveness. */
+  labels: number;
+  /** Of those, labels no `goto` in the same function names. */
+  untargeted: number;
+  /** Untargeted labels whose next line is the CFG note. */
+  noPredecessor: number;
+  /** Untargeted labels whose next line is the unwinder note. */
+  unwinder: number;
+  /**
+   * Untargeted labels with NO note — the tree reaches them by fall-through or
+   * `break` (a `goto` a later pass rewrote), so "no predecessor" would be
+   * false. Expected to be most of the untargeted population.
+   */
+  untargetedNoNote: number;
+  /** A note under a label a `goto` DOES name. Expect 0: the pass must not fire there. */
+  notedButTargeted: number;
+  /** Functions with code read. Liveness. */
+  funcs: number;
+}
+
+/**
+ * What `pipeline.ts`'s `annotateLabels` said, read back off the emitted C.
+ *
+ * Deliberately a TEXT SCAN and not a read of `IRLabel.note`: an audit that
+ * reads the field it audits stops being independent, and the field's whole
+ * contract is where the emitter puts it — on the line AFTER the label, with the
+ * label line left exactly `name:` for `gotoCheck` and `undefinedCallees.ts` to
+ * scrape. So this reads label lines with the same anchor those two use and
+ * looks one line down. REPORT-ONLY, with `notedButTargeted` the one row that
+ * must be 0 (peek-a-bin-5b6q.6).
+ */
+export function labelNotes(sets: { funcs: FuncRec[] }[]): LabelNoteResult {
+  const out: LabelNoteResult = {
+    labels: 0,
+    untargeted: 0,
+    noPredecessor: 0,
+    unwinder: 0,
+    untargetedNoNote: 0,
+    notedButTargeted: 0,
+    funcs: 0,
+  };
+  for (const { funcs } of sets) {
+    for (const r of funcs) {
+      const code = r.code ?? "";
+      if (code === "") continue;
+      out.funcs++;
+      const lines = code.split("\n");
+      const named = new Set<string>();
+      for (const line of lines) {
+        const m = /^goto ([A-Za-z_]\w*);/.exec(statementOnLine(line));
+        if (m) named.add(m[1]);
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const m = /^\s*(loc_[0-9A-F]+):$/.exec(lines[i]);
+        if (!m) continue;
+        out.labels++;
+        const next = (lines[i + 1] ?? "").trim();
+        const cfgNote = next === "// no predecessor in the recovered CFG";
+        const unwNote = next === "// entered by the unwinder (.pdata scope table)";
+        if (named.has(m[1])) {
+          if (cfgNote || unwNote) out.notedButTargeted++;
+          continue;
+        }
+        out.untargeted++;
+        if (cfgNote) out.noPredecessor++;
+        else if (unwNote) out.unwinder++;
+        else out.untargetedNoNote++;
+      }
+    }
+  }
+  return out;
+}
+
 // ── Undeclared identifiers: what the prelude has been inventing ─────────────
 
 export type IdentClass = "register" | "residue" | "minted" | "api" | "other";
