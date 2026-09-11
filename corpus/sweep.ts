@@ -10,6 +10,10 @@
  * with a call — is measuring a different program than the one production emits.
  * Every audit here therefore reads the results of the same pass, taken over
  * every detected function in address order, which is what the worker does.
+ * (`PEEK_CORPUS_ORDER=postorder` is the ONE departure — callees before
+ * callers, see `sweepOrder.ts` — and a run made with it is a measurement of
+ * the ordering question, NOT of this commit as the browser runs it; the report
+ * says so on every binary.)
  *
  * The audits computed here are the ones that need instructions, a CFG or a line
  * map. The ones that need only the emitted text — gcc, offsetof, goto
@@ -51,7 +55,7 @@ import {
 import { auditLabelOrigins, emptyLabelOrigins, type LabelOriginResult } from "./labelOrigins";
 import { auditLostDefs, emptyLostDefs, type LostDefResult } from "./lostDefs";
 import { auditPopReads, emptyPopReads, type PopReadResult } from "./popReads";
-import { type BinKey, binPath, substitutedTablesDir } from "./preflight";
+import { type BinKey, binPath, requestedOrder, substitutedTablesDir } from "./preflight";
 import { auditSelfAssigns, emptySelfAssigns, type SelfAssignResult } from "./selfAssigns";
 import { auditStaleGuards, emptyStaleGuards, type StaleGuardResult } from "./staleGuards";
 import { auditStaleV0Reads, emptyStaleV0, type StaleV0Result } from "./staleReads";
@@ -60,6 +64,7 @@ import {
   emptyStructOverlaps,
   type StructOverlapResult,
 } from "./structOverlaps";
+import { postorderFunctions, type SweepOrder } from "./sweepOrder";
 import { auditWildBranches, emptyWildBranches, type WildBranchResult } from "./wildBranches";
 
 // ── Condition polarity ─────────────────────────────────────────────────────
@@ -337,6 +342,12 @@ export interface BinResult {
   jumpTablesJson: string;
   /** Set when THESE tables came from another run's artifact, naming the file. */
   tablesFrom: string | null;
+  /**
+   * The order the functions were decompiled in. `address` is production's;
+   * anything else means the shared `StructRegistry` was filled in a different
+   * sequence and the C can differ for that reason alone (`peek-a-bin-5b6q.10`).
+   */
+  order: SweepOrder;
   /** decompileFunction (or its prep) raising. The standing expectation is 0. */
   throws: number;
   throwDetail: string[];
@@ -802,6 +813,16 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     tablesFrom = file;
   }
 
+  // THE DECOMPILE ORDER. Production is address order (the loop below used to
+  // read `af.functions` directly). `postorder` walks the call graph callees
+  // first so the question "would a caller's C improve if its callees had
+  // already shaped the registry?" can be answered by running both and
+  // diffing. `res.funcs` is re-sorted to address order after the loop so the
+  // artifacts stay comparable row for row; only the REGISTRY sees the order.
+  const order = requestedOrder();
+  const ordered =
+    order === "postorder" ? postorderFunctions(af.functions, af.callGraph) : af.functions;
+
   const funcInsnMap = buildFuncInsnMap(af.functions, af.instructions);
   const funcMap = new Map(
     af.functions.map((f) => [f.address, { name: f.name, address: f.address }]),
@@ -816,6 +837,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     jumpTables: jumpTables.size,
     jumpTablesJson: serializeJumpTables(jumpTables),
     tablesFrom,
+    order,
     throws: 0,
     throwDetail: [],
     pipelineErrors: 0,
@@ -908,7 +930,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     af.pe.optionalHeader.imageBase + af.pe.optionalHeader.sizeOfImage,
   );
 
-  for (const func of af.functions) {
+  for (const func of ordered) {
     const insns = funcInsnMap.get(func.address) ?? [];
     if (insns.length === 0) {
       res.funcs.push({
@@ -1156,6 +1178,10 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
   }
 
   auditClobbered(res);
+  // Address order for the artifacts whatever order the registry saw — see the
+  // comment at `ordered`. A no-op for the default, kept unconditional so the
+  // two runs' `funcs_<bin>.jsonl` differ only where the C does.
+  res.funcs.sort((a, b) => a.addr - b.addr);
   return res;
 }
 

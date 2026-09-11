@@ -42,6 +42,7 @@ npm run corpus:arm64                  # A64 sweep, .pdata, xrefs, jump tables, s
 npm run corpus:comments               # ARM64 comment audit + x86 comment digest
 npm run corpus:parserdiff             # PE parser vs an independent from-spec reader, all six binaries
 npm run corpus:compare -- <base> <change>   # diff two runs; takes PATHS (corpus/artifacts/<label>)
+PEEK_CORPUS_ORDER=postorder npm run corpus  # callees-first registry fill — an INSTRUMENT, not production
 npm run corpus:jumptables    -- <pe>  # indirect-dispatch census
 npm run corpus:gridserve     -- <pe>  # hybridDisassemble grid coincidence + served-vs-decoded diff
 npm run corpus:uploadcost    -- <pe>  # what re-sending .text costs
@@ -615,6 +616,14 @@ driven only by the `corpus/` harnesses.
   the row is also asked over well-formed input. **An INERT control must be reported, not tuned
   away.**
 - **A green row over an empty population says nothing.** Most audits carry a liveness half.
+- **A `PEEK_CORPUS_ORDER=postorder` run is not a measurement of the commit.** It fills the shared
+  `StructRegistry` callees-first and the report says so on every binary. Measured at the s30-nav C6
+  tree: the C of 53/53/47/50 functions changes, **no recovery figure moves** (unrecovered,
+  unlifted, guard verdicts, field+array access totals all equal), and x86 gets a readability
+  regression — the `_iobuf`-shaped struct merges into the 87-member stride-walk struct and its
+  fields print as `array_0xN[0]`, with that definition emitted 27× (t32 +1954 lines). **The
+  browser callee prefetch is refused on that number** (`corpus/README.md`, "Does the decompile
+  order matter").
 - **ARM64 and the Go binary are separate runs deliberately**: the audits iterate over whatever
   binaries they find, so an extra one changes every gate's population and every summed denominator.
   **Never put a Go binary in the corpus directory** — Go's ABI and prologues are not MSVC's.

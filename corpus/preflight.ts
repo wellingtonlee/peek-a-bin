@@ -44,6 +44,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SWEEP_ORDERS, type SweepOrder } from "./sweepOrder";
 
 /** The repo root — this file is `<root>/corpus/preflight.ts`. */
 const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -323,6 +324,25 @@ export function resolveArmCorpus(): ArmCorpus {
  */
 export function substitutedTablesDir(): string | null {
   return setting("PEEK_CORPUS_TABLES") ?? null;
+}
+
+/**
+ * `PEEK_CORPUS_ORDER`: the order `sweep.ts` decompiles each binary's functions
+ * in. Default `address`, which is production's order; `postorder` puts callees
+ * before callers (see `corpus/sweepOrder.ts`). Read through `setting`, so it
+ * may be set in `.env` like the other per-machine variables, though a
+ * per-machine default for it would be a mistake — a postorder run is NOT a
+ * measurement of the commit as it behaves in the browser, and the report says
+ * so on every binary. An unknown value throws, as `PEEK_CORPUS_BINS` does,
+ * rather than silently running the default.
+ */
+export function requestedOrder(): SweepOrder {
+  const raw = setting("PEEK_CORPUS_ORDER");
+  if (!raw) return "address";
+  if (!(SWEEP_ORDERS as readonly string[]).includes(raw)) {
+    throw new Error(`PEEK_CORPUS_ORDER is ${raw}, which is not one of ${SWEEP_ORDERS.join(", ")}`);
+  }
+  return raw as SweepOrder;
 }
 
 export interface Preflight {

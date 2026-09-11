@@ -1134,5 +1134,19 @@ re-taken.)
     a real binary has still never been seen.
 - `@vitest/coverage-v8` is not installed, so `npm run test:coverage` fails.
 
-When a UI or deployment change lands, the honest report says which of these it did *not* move.
+**Decompile order (`PEEK_CORPUS_ORDER=postorder`, peek-a-bin-5b6q.10).** `corpus/sweep.ts` can fill the shared `StructRegistry` callees-first instead of in address order
+(`corpus/sweepOrder.ts`, a DFS post-order with back edges broken at the cycle; the result is
+asserted a permutation; `build/sweepOrder.test.ts`, 11 rows, negative-controlled — an identity walk
+reddens 7). Both orders were run at the s30-nav C6 tree (address order there byte-identical to
+`s29-main-2c2ceeb`, 260/279/275/258): postorder changes the C of **53/53/47/50** functions on
+t32/t64/w64/w32; `__unrecovered_N` 34/14/13/31, unlifted 126/66/66/125 and every guard verdict are
+unmoved (7–8 guards per binary CHANGED by struct-name or `array_0xN[0]` respelling only);
+`->field_0x` + `->array_0x[0]` totals are equal (549/455/441/534); distinct struct names fall
+36→30, 44→41, 44→41, 37→30; emitted lines rise +1954/+263/+251/+1777. The x86 growth is one merge:
+the `_iobuf`-shaped struct into the 87-member stride-walk struct, its definition emitted 27× on t32
+(7× before) and every FILE field respelled `array_0xC[0]` (44 on t32, 59 on w32). Nothing
+recovered, nothing lost, readability worse — the browser callee prefetch is **refused on that
+number**. The full table is in `corpus/README.md`. What the flag is blind to: any order other than
+callee-first, and anything `structOverlaps` cannot see (it reports 0 in both runs).
 
+When a UI or deployment change lands, the honest report says which of these it did *not* move.

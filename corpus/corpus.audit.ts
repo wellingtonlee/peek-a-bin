@@ -1618,6 +1618,17 @@ function renderReport(): string {
     L.push(`  *** CROSS-SUBSTITUTION RUN — ${subbed.join(", ")} used ANOTHER run's jump tables.`);
     L.push("  *** These numbers do not describe this commit as it would actually behave.");
   }
+  // Same loudness for the same reason: a postorder run fills the shared
+  // StructRegistry in an order the browser never uses.
+  const reordered = keys.filter((k) => (results.get(k) as BinResult).order !== "address");
+  if (reordered.length > 0) {
+    const orders = [...new Set(reordered.map((k) => (results.get(k) as BinResult).order))];
+    L.push("");
+    L.push(
+      `  *** DECOMPILE ORDER ${orders.join("/")} — ${reordered.join(", ")} filled the StructRegistry callees-first (PEEK_CORPUS_ORDER).`,
+    );
+    L.push("  *** These numbers do not describe this commit as it would actually behave.");
+  }
   L.push("");
 
   for (const key of keys) {
@@ -2133,6 +2144,9 @@ function renderReport(): string {
     L.push("    text because the C may spell the slot through an alias (`r11 = rsp`).");
     if (r.tablesFrom !== null) {
       L.push(`  *** CROSS-SUBSTITUTED jump tables from ${r.tablesFrom}`);
+    }
+    if (r.order !== "address") {
+      L.push(`  *** DECOMPILE ORDER ${r.order} — not production's address order`);
     }
   }
 

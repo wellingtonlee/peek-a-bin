@@ -99,6 +99,7 @@ CORPUS AUDITS SKIPPED — nothing was verified.
 | `PEEK_CORPUS_OUT` | Where artifacts go. Default `corpus/artifacts` (gitignored). |
 | `PEEK_CORPUS_LABEL` | Subdirectory under the output dir. Default `local`. Use it to keep two runs apart. |
 | `PEEK_CORPUS_TABLES` | Directory of another run's `jumpTables_<key>.json`, used instead of this commit's own. See "Did my change cause that". |
+| `PEEK_CORPUS_ORDER` | `address` (default, production's order) or `postorder` (callees before callers). A postorder run is a measurement of the ORDERING question, not of the commit as the browser runs it, and its report says so on every binary. See "Does the decompile order matter". |
 | `CC` | Compiler to invoke. Default `gcc`. |
 
 All of these may also be set in `.env` at the repo root, with a shell setting taking precedence.
@@ -2675,6 +2676,76 @@ reproduce the 80 removed instructions, because those go away through `jumpTableS
 map. So one commit's two effects come apart cleanly: the map explains the restructuring, the spans
 explain the instruction removal. Substituting the instruction stream as well would close the
 remaining gap and is not implemented.
+
+## Does the decompile order matter? `PEEK_CORPUS_ORDER=postorder`
+
+`StructRegistry` is cross-function state shared for the lifetime of a loaded file, so the C
+emitted for a function depends on which functions were decompiled before it. Production — the
+worker, and this harness by default — goes in **address order**, the linker's layout. The
+readability epic asked whether decompiling **callees before their callers** would let a caller see
+a struct its callee had already shaped, and whether the browser should therefore prefetch a
+function's callees when the panel opens (`peek-a-bin-5b6q.10`).
+
+**The prefetch was refused before it was built**: the disasm worker is a serial FIFO shared with
+`hybridDisassemble`, so a 20-callee function would queue ~20 × (clone + ~6 ms) ahead of the C the
+user asked for; the registry already links caller and callee views both ways
+(`paramLinks`/`paramViews`, `structs.ts`); and nothing measured said callee-first changes the
+caller's C. This flag exists so the last point could be **measured instead of argued**.
+
+`PEEK_CORPUS_ORDER=postorder npm run corpus` decompiles each binary in a depth-first post-order
+over `FileSession`'s call graph (`corpus/sweepOrder.ts`: roots in address order, callees in
+address order, a callee that is not a detected function ignored, **back edges broken at the
+cycle** — a callee still on the DFS stack is skipped, so a recursive function or `A ↔ B` is emitted
+once in the order the walk first reached it). The result is asserted to be a permutation of the
+function list; `build/sweepOrder.test.ts` pins the walk without a binary. `res.funcs` is
+re-sorted to address order after the loop so `funcs_<bin>.jsonl` differs from an address-order run
+**only where the C does**, and only the registry ever sees the order. The report header and every
+per-binary block carry `*** DECOMPILE ORDER postorder`, and `summary_<bin>.json` records `order`.
+
+### What it measured (both sides at the s30-nav C6 tree, base `010bbcb`; address order there is byte-identical to `s29-main-2c2ceeb`)
+
+| | t32 | t64 | w64 | w32 |
+|---|---|---|---|---|
+| functions whose C differs | **53**/260 | **53**/279 | **47**/275 | **50**/258 |
+| `__unrecovered_N` (decls = uses) | 34 → 34 | 14 → 14 | 13 → 13 | 31 → 31 |
+| `/* unlifted: … */` | 126 → 126 | 66 → 66 | 66 → 66 | 125 → 125 |
+| guards CHANGED (all struct-name or `array_0xN[0]` respellings; verdicts unmoved) | 8 | 7 | 7 | 7 |
+| distinct `struct_N` names | 36 → 30 | 44 → 41 | 44 → 41 | 37 → 30 |
+| struct definitions emitted | 80 → 81 | 70 → 70 | 68 → 68 | 79 → 79 |
+| struct member lines emitted | 1043 → 2625 | 497 → 753 | 494 → 743 | 1043 → 2342 |
+| `->field_0xN` accesses | 544 → **500** | 455 → 455 | 441 → 441 | 529 → **470** |
+| `->array_0xN[0]` accesses | 5 → **49** | 0 → 0 | 0 → 0 | 5 → **64** |
+| field + array[0] accesses | 549 → 549 | 455 → 455 | 441 → 441 | 534 → 534 |
+| total emitted lines | 15323 → 17277 | 15708 → 15971 | 14175 → 14426 | 13998 → 15775 |
+
+**Nothing was recovered and nothing was lost — the order changes the C in three ways, none of
+them a gain.** Read at three functions:
+
+- **t32 `sub_401FE5`** (64 → 75 lines): the body is identical token for token except that
+  `struct_0` is now `struct_6`, and the inlined definition of the struct read through `eax` grew
+  from three members to twelve (`_pad_0xC[8]`, `field_0x14`, `field_0x5C`, `field_0xC8`,
+  `field_0x14B` …) — fields **other functions** put on that base, now visible because they were
+  decompiled first. The same access count, a bigger declaration.
+- **t64 `sub_14000228C`** (55 → 65 lines): the same shape on x64 — `struct_0`/`struct_1` are
+  `struct_8`/`struct_3`, the second definition carries ten more members, every body line is the
+  same with the names substituted. x64's field-access count does not move at all.
+- **w32 `sub_40CB97`** (123 → 201 lines, field accesses 18 → 3): the MSVC `_iobuf`-shaped struct
+  (`field_0x0/0x4/0x8/0xC/0x18` — `_ptr`, `_cnt`, `_base`, `_flag`, `_bufsiz`) **merged into the
+  87-member array-of-struct stride-walk struct** (`struct_9` in address order, `struct_4` in
+  postorder), so every FILE field is now spelled `((struct_4 *)esi)->array_0xC[0]`, and the
+  87-member definition is emitted **27 times** on t32 (7 in address order) — that is the whole of
+  the +1954 lines. The accesses are all still there (the two counts sum to the same 534), spelled
+  as one-element arrays through a struct that describes a different object. `structOverlaps` sees
+  nothing in either run, as CLAUDE.md's struct-synthesis entry says it cannot.
+
+So callee-first ordering, on this corpus, is a **readability regression** (larger declarations,
+FILE fields as `array_0xN[0]`, a merge across two unrelated objects) with zero movement in any
+recovery figure. **The browser prefetch stays refused, now with numbers**; the address-order run
+stays the production measurement; `postorder` stays available as an instrument. What this does
+not settle: whether some *other* order (a caller-first pre-order, or the browser's own
+click-order) would do better — only that callee-first does not, and that the C is order-sensitive
+at the rate of ~one function in five, which is a fact about the registry worth knowing before the
+stable-struct-identity epic.
 
 ## Layout
 
