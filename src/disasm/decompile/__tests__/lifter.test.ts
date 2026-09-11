@@ -579,6 +579,63 @@ describe("liftBlock — flags and conditionals", () => {
     expect(liftOne("setne", "al")).toMatchObject({ src: { kind: "unknown" } });
   });
 
+  // Every `setcc` form goes through the Jcc table — `set<cc>` is dispatched as
+  // `j<cc>` — so the forms the fourteen-entry `COND_SET` never named are lifted
+  // exactly as the Jcc would be (peek-a-bin-5b6q.3).
+  it("lifts every setcc form through the same table as the Jcc", () => {
+    const lifted = (mn: string) =>
+      lift([
+        ["cmp", "ecx, edx"],
+        [mn, "al"],
+      ])[0];
+    expect(lifted("setb")).toMatchObject({
+      kind: "assign",
+      dest: irReg("al", 1),
+      src: irBinary("u<", irReg("ecx", 4), irReg("edx", 4)),
+    });
+    // Alias spellings the hand-written table did not carry.
+    expect(lifted("setnbe")).toMatchObject({
+      src: irBinary("u>", irReg("ecx", 4), irReg("edx", 4)),
+    });
+    expect(lifted("setnl")).toMatchObject({
+      src: irBinary(">=", irReg("ecx", 4), irReg("edx", 4)),
+    });
+    expect(lifted("setc")).toMatchObject({ src: irBinary("u<", irReg("ecx", 4), irReg("edx", 4)) });
+  });
+
+  it("lifts a setcc form getCondition cannot answer as an ASSIGNMENT of unknown, never raw", () => {
+    // A definition SSA sees: the destination read later binds to it instead of
+    // to whatever the register held before. `raw` is a dataflow hole.
+    const lifted = (setup: [string, string], mn: string) => lift([setup, [mn, "al"]])[0];
+    for (const mn of ["seto", "setno", "setp", "setnp"]) {
+      expect(lifted(["cmp", "ecx, edx"], mn)).toMatchObject({
+        kind: "assign",
+        dest: irReg("al", 1),
+        src: { kind: "unknown", text: `j${mn.slice(3)} after cmp` },
+      });
+    }
+    // `jb`/`jae` after `test` are constants, and a constant is refused rather
+    // than spelled `al = 0` — the same reason `getCondition` will not emit
+    // `if (1)`.
+    expect(lifted(["test", "ecx, ecx"], "setb")).toMatchObject({
+      kind: "assign",
+      src: { kind: "unknown", text: "jb after test" },
+    });
+    expect(lifted(["test", "ecx, ecx"], "setae")).toMatchObject({
+      kind: "assign",
+      src: { kind: "unknown", text: "jae after test" },
+    });
+  });
+
+  it("does not read a set-prefixed mnemonic without a condition-code suffix as a setcc", () => {
+    // `setssbsy` (CET) is the one such mnemonic; it stays raw.
+    expect(liftOne("setssbsy", "")).toEqual({
+      kind: "raw",
+      text: "__asm { setssbsy  }",
+      addr: START,
+    });
+  });
+
   it("lifts cmovcc as a ternary over the old destination value", () => {
     const stmts = lift([
       ["cmp", "eax, 0x1"],

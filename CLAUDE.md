@@ -1098,6 +1098,14 @@ refused. **Read the long-form entry before changing the code it describes.**
   store plus the advance. **Refused**: anything inside a block-local `std` region (the primitive runs
   backwards; `std`/`cld` themselves stay `raw`), and every `repne`/`repnz` form. **The intrinsics are
   NOT in `apitypes.ts`** — the arity oracle must not measure its own input.
+- **Every `setcc` form goes through the Jcc table, and a form the table cannot answer is an
+  ASSIGNMENT of `__unrecovered_N`, never `raw`.** `CONDITION_CODES` (`lifter.ts`) is the one
+  declaration of the thirty `cc` suffixes; `set<cc>` and `cmov<cc>` are dispatched as `j<cc>` through
+  `getCondition` (`conditionJcc`), replacing a fourteen-entry hand-written map that sent `seto`,
+  `setp` and every alias spelling to `raw` — a dataflow hole. The unanswerable forms
+  (`jo`/`jno`/`jp`/`jnp`; `jb`/`jae` after `test`, which are constants) are refused as a value, not
+  spelled `al = 0`, for the reason `getCondition` refuses `if (1)`. Corpus population is **0**, so the
+  change is byte-identical there; the discriminating control is `pipeline.test.ts`.
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

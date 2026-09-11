@@ -374,24 +374,74 @@ function isValueNeutralLockedRmw(op: BinaryOp, src: IRExpr): boolean {
   return ZERO_NEUTRAL_OPS.has(op) && src.kind === "const" && src.value === 0;
 }
 
-const COND_SET: Record<string, string> = {
-  sete: "je",
-  setne: "jne",
-  setz: "jz",
-  setnz: "jnz",
-  setg: "jg",
-  setge: "jge",
-  setl: "jl",
-  setle: "jle",
-  seta: "ja",
-  setae: "jae",
-  setb: "jb",
-  setbe: "jbe",
-  sets: "js",
-  setns: "jns",
-};
+/**
+ * The thirty condition-code suffixes the ISA spells a `Jcc`, `SETcc` or
+ * `CMOVcc` with, as ONE declaration. The three families read the flags through
+ * one grammar — `set<cc>` computes exactly the predicate `j<cc>` would branch on
+ * — so a `setcc` or `cmovcc` is dispatched by rewriting its suffix onto `j` and
+ * asking `RegState.getCondition` the Jcc's question. That is what makes every
+ * form reach the same table: `COND_SET`, the fourteen-entry hand-written map
+ * this replaced, answered `sete` … `setns` and sent `seto`/`setno`/`setp`/`setnp`
+ * (and every alias spelling) to the `raw` fallthrough, a dataflow hole
+ * (peek-a-bin-5b6q.3).
+ *
+ * The set is the guard on the pattern: `setssbsy` (CET) is not a `setcc`, and
+ * `set(\w+)` alone would hand `getCondition` a Jcc that does not exist.
+ *
+ * A form `getCondition` cannot answer — `jo`/`jno`/`jp`/`jnp` everywhere, and
+ * `jb`/`jae` after `test`, which are constants — is returned as `unknown` and
+ * emitted as an ASSIGNMENT of `__unrecovered_N`: a definition SSA sees, so a
+ * later read of the destination binds to it rather than to whatever the
+ * register held before, which is strictly better than `raw` (`fold.ts`'s
+ * `blockLiveOut` reads a `raw` as reading nothing). The constant forms are
+ * deliberately not spelled as `al = 1`: the reason `getCondition` refuses to
+ * emit `if (1)` — a constant is a control-flow claim no gate models — applies
+ * to a value that will be tested one instruction later just the same.
+ */
+const CONDITION_CODES: ReadonlySet<string> = new Set([
+  "o",
+  "no",
+  "b",
+  "c",
+  "nae",
+  "ae",
+  "nb",
+  "nc",
+  "e",
+  "z",
+  "ne",
+  "nz",
+  "be",
+  "na",
+  "a",
+  "nbe",
+  "s",
+  "ns",
+  "p",
+  "pe",
+  "np",
+  "po",
+  "l",
+  "nge",
+  "ge",
+  "nl",
+  "le",
+  "ng",
+  "g",
+  "nle",
+]);
 
+const SETCC_PATTERN = /^set(\w+)$/;
 const CMOV_PATTERN = /^cmov(\w+)$/;
+
+/**
+ * The Jcc whose condition a `setcc`/`cmovcc` dispatch key computes — `setb` →
+ * `jb`, `cmovne` → `jne` — or null when the mnemonic is not of that family.
+ */
+function conditionJcc(mn: string, family: RegExp): string | null {
+  const m = mn.match(family);
+  return m && CONDITION_CODES.has(m[1]) ? `j${m[1]}` : null;
+}
 
 const FASTCALL_REGS_64 = ["rcx", "rdx", "r8", "r9"];
 
@@ -674,9 +724,14 @@ function buildCapture(need: CaptureNeed, is64: boolean): OperandCapture | null {
   return { at: need.insn.address, mnemonic: need.mnemonic, captures, operands };
 }
 
-/** Is this dispatch key a `setcc`? `COND_SET` is the one table of the forms lifted. */
+/** Is this dispatch key a `setcc`? Every form with a condition-code suffix is one. */
 function isSetcc(mn: string): boolean {
-  return mn in COND_SET;
+  return conditionJcc(mn, SETCC_PATTERN) !== null;
+}
+
+/** Is this dispatch key a `cmovcc`? */
+function isCmovcc(mn: string): boolean {
+  return conditionJcc(mn, CMOV_PATTERN) !== null;
 }
 
 /**
@@ -737,7 +792,7 @@ function operandCaptures(
   }
   for (let i = 0; i < insns.length; i++) {
     const mn = withoutLockPrefix(insns[i].mnemonic);
-    if (isSetcc(mn) || CMOV_PATTERN.test(mn)) {
+    if (isSetcc(mn) || isCmovcc(mn)) {
       const owner = flagOwnerBefore(insns, i);
       if (owner.kind === "compare" && owner.spoiled) need(owner.insn, owner.mnemonic, true);
       continue;
@@ -1914,10 +1969,13 @@ export function liftBlock(
     }
 
     // ── setXX ──
-    if (mn in COND_SET) {
+    // Every form, through the Jcc table: see `CONDITION_CODES`. An unanswerable
+    // form arrives here as `unknown` and leaves as an assignment of it.
+    const setJcc = conditionJcc(mn, SETCC_PATTERN);
+    if (setJcc !== null) {
       if (parts.length >= 1) {
         const dest = parseDestOperand(parts[0], insn, is64);
-        const cond = regState.getCondition(COND_SET[mn]);
+        const cond = regState.getCondition(setJcc);
         stmts.push({ kind: "assign", dest, src: cond, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, cond);
       }
@@ -1925,14 +1983,13 @@ export function liftBlock(
     }
 
     // ── cmovXX ──
-    const cmovM = mn.match(CMOV_PATTERN);
-    if (cmovM) {
+    const cmovJcc = conditionJcc(mn, CMOV_PATTERN);
+    if (cmovJcc !== null) {
       if (parts.length >= 2) {
         const dest = parseDestOperand(parts[0], insn, is64);
         const destVal = parseOperand(parts[0], insn, is64);
         const src = parseOperand(parts[1], insn, is64);
-        const jcc = "j" + cmovM[1];
-        const cond = regState.getCondition(jcc);
+        const cond = regState.getCondition(cmovJcc);
         const result: IRExpr = { kind: "ternary", condition: cond, then: src, else: destVal };
         stmts.push({ kind: "assign", dest, src: result, addr: insn.address });
         if (dest.kind === "reg") regState.set(dest.name, result);

@@ -8732,3 +8732,40 @@ describe("decompileFunction — a phi's lowered copy is a write in the predecess
     expect(code).toContain("*(int32_t*)(r9 + 0x18) = esi;");
   });
 });
+
+/**
+ * Every `setcc` form reads the Jcc table (peek-a-bin-5b6q.3). Before this the
+ * lifter carried a fourteen-entry map and every other form — `seto`, `setp`,
+ * the alias spellings — fell to `raw`, a dataflow hole: the destination read
+ * afterwards named the value from BEFORE the instruction.
+ */
+describe("decompileFunction — every setcc form goes through the Jcc table", () => {
+  const body = (setcc: string, setup: [string, string] = ["cmp", "ecx, edx"]) =>
+    seq(0x401000, [setup, [setcc, "al"], ["movzx", "eax, al"], ["ret"]]);
+
+  it("a setb after a cmp reaches the page as the unsigned compare", () => {
+    const code = run(body("setb"));
+    expect(code).toContain("return ecx < edx;");
+    expect(code).not.toContain("unlifted");
+    expect(code).not.toContain("__unrecovered_");
+  });
+
+  it("an alias spelling reaches the page too", () => {
+    expect(run(body("setnbe"))).toContain("return ecx > edx;");
+  });
+
+  it("a seto is an unrecovered ASSIGNMENT the return then reads — never an unlifted comment", () => {
+    const code = run(body("seto"));
+    // The value is admitted, and the read of AL binds to the admission: the
+    // return names the unrecovered value rather than an AL nothing defined.
+    expect(code).toMatch(/return __unrecovered_1 \/\* jo after cmp \*\/;/);
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("a setb after a test is a constant, and is refused rather than spelled al = 0", () => {
+    const code = run(body("setb", ["test", "ecx, ecx"]));
+    expect(code).toMatch(/return __unrecovered_1 \/\* jb after test \*\/;/);
+    expect(code).not.toMatch(/return 0;|return 1;/);
+    expect(code).not.toContain("unlifted");
+  });
+});

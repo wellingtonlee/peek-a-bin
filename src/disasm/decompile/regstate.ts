@@ -338,7 +338,12 @@ export class RegState {
     if (jcc === "js") return irBinary("<", irBinary("-", left, right), irConst(0));
     if (jcc === "jns") return irBinary(">=", irBinary("-", left, right), irConst(0));
 
-    return { kind: "unknown", text: `${jcc}(${left}, ${right})` };
+    // `jo`/`jno` (OF is not modelled) and `jp`/`jnp` (PF has no cheap
+    // spelling). Named after the owner kind, never by interpolating the
+    // operands — an `IRExpr` in a template string is `[object Object]`, which
+    // is what this line printed until a `setcc` first carried it to the page
+    // (peek-a-bin-5b6q.3).
+    return { kind: "unknown", text: `${jcc} after ${this.flagOp ?? "cmp"}` };
   }
 
   /** Negate a condition (for structuring: if-not-taken path). */
