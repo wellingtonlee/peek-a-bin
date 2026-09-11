@@ -46,6 +46,7 @@ import {
   unliftedCensus,
   voidReturnsValue,
 } from "./emitAudits";
+import { auditGlobals, type GlobalsResult } from "./globals";
 import { type BinKey, corpusDir, corpusDirSource, DOC_BINS, preflight } from "./preflight";
 import { type BinResult, sweepBinary } from "./sweep";
 import { auditUndefinedCallees, type UndefinedCalleeResult } from "./undefinedCallees";
@@ -64,6 +65,8 @@ const ccResults = new Map<BinKey, CcResult>();
 const ozResults = new Map<BinKey, OffsetofResult>();
 const arResults = new Map<BinKey, ArityResult>();
 const ucResults = new Map<BinKey, UndefinedCalleeResult>();
+/** What a dereferenced absolute address is called, and what stayed raw. Report-only (peek-a-bin-5b6q.4). */
+const glResults = new Map<BinKey, GlobalsResult>();
 /** The prelude's inventions, classified. `register + minted` GATES at 0 (peek-a-bin-n9cl.4). */
 const udResults = new Map<BinKey, UndeclaredResult>();
 const ulResults = new Map<BinKey, UnliftedResult>();
@@ -113,6 +116,10 @@ if (!pre.haveBins || !pre.haveCc) {
         // only, in both directions — see `undefinedCallees.ts` on why an
         // undefined callee is an incompleteness rather than a false statement.
         ucResults.set(key, auditUndefinedCallees([{ funcs: r.funcs }]));
+        // Every `g_`/`__imp_` the emitter named and every `*(T*)(0x…)` it left,
+        // the latter classified against the section table. Report-only — a raw
+        // deref is an incompleteness — see `globals.ts`.
+        glResults.set(key, auditGlobals([{ funcs: r.funcs }], r.sections));
         // What `preludeFor` has been inventing, compiled ONCE with no prelude
         // and classified. The api set is the IAT's names plus `apitypes.ts`'s,
         // so an import used as a value is `api` and not `other`.
@@ -270,6 +277,20 @@ if (!pre.haveBins || !pre.haveCc) {
             ordered.map((x) => JSON.stringify(x)).join("\n") + (ordered.length > 0 ? "\n" : ""),
           );
         }
+        // Every raw absolute deref left on the page, classified by where its
+        // address falls, then every `g_` declared outside a data section (expect
+        // none). Written even when empty, for the usual reason.
+        {
+          const gl = glResults.get(key) as GlobalsResult;
+          const rows = [
+            ...gl.unplacedNamed.map((x) => ({ kind: "namedUnplaced", ...x })),
+            ...gl.rows,
+          ];
+          writeFileSync(
+            join(artifactDir, `globals_${key}.jsonl`),
+            rows.map((x) => JSON.stringify(x)).join("\n") + (rows.length > 0 ? "\n" : ""),
+          );
+        }
         // Every (function, identifier) pair gcc reported undeclared with no
         // prelude, classified. Written even when empty — the register-variables
         // child expects to EMPTY the register class, and an absent file must
@@ -382,6 +403,13 @@ if (!pre.haveBins || !pre.haveCc) {
               undefinedCallees: (() => {
                 const uc = ucResults.get(key) as UndefinedCalleeResult;
                 return { ...uc, rows: uc.rows.length };
+              })(),
+              // What a dereferenced absolute address is called, and what stayed
+              // raw. Per binary so `compare.mjs` can show the residue moving;
+              // report-only in every column (peek-a-bin-5b6q.4).
+              globals: (() => {
+                const gl = glResults.get(key) as GlobalsResult;
+                return { ...gl, rows: gl.rows.length, unplacedNamed: gl.unplacedNamed.length };
               })(),
               // ── The readability instruments of peek-a-bin-n9cl.1. ALL
               // report-only in this session; each has a liveness half asserted
@@ -1245,6 +1273,22 @@ if (!pre.haveBins || !pre.haveCc) {
     });
 
     /**
+     * NOT A GATE — a raw `*(T*)(0x…)` is an incompleteness, not a falsehood, and
+     * the residue's classes (`globals.ts`) each have a reason to stay. What is
+     * asserted is that the scan READ something: every MSVC CRT here reads
+     * `.data` globals in dozens of functions, so a binary with no `g_` at all is
+     * a text scan that stopped matching, not a clean output. `namedUnplaced` is
+     * a false claim and is reported beside it for `compare.mjs` to show — see
+     * the header on why it is not gated here.
+     */
+    it("reads the emitted C for named globals (instrument liveness)", () => {
+      for (const [key, gl] of glResults) {
+        expect(`${key}: funcs=${gl.funcs > 0}`).toBe(`${key}: funcs=true`);
+        expect(`${key}: named=${gl.named > 0}`).toBe(`${key}: named=true`);
+      }
+    });
+
+    /**
      * Not a gate, for the reason in `emptyCaseBodies`' docstring: one row can be
      * legitimate, and the count is 0 over a corpus where the legitimate
      * population is empty too — so a gate would rest on nothing. What is
@@ -2049,6 +2093,33 @@ function renderReport(): string {
       L.push(
         "    Sites in undefinedcallees_<bin>.jsonl. See undefinedCallees.ts (peek-a-bin-pf5g).",
       );
+    }
+    const gl = glResults.get(r.key);
+    if (gl !== undefined) {
+      L.push(
+        `  named globals               ${gl.named} g_ declared (${gl.namedDistinct} distinct addresses, ` +
+          `${gl.mixedWidth} byte arrays, ${gl.namedSites} mentions), ${gl.namedImp} __imp_ slots ` +
+          `(${gl.impSites} mentions), over ${gl.funcsNaming} of ${gl.funcs} functions; ` +
+          `${gl.namedUnplaced} named outside a data section`,
+      );
+      L.push(
+        `  raw absolute derefs left    ${gl.derefsAbsolute} over ${gl.funcsWithRaw} functions — ` +
+          `${gl.unplaced} in no section, ${gl.inCode} in code, ${gl.inData} in data; ` +
+          `${gl.stringDerefs} string derefs; ${gl.addressLiterals} data addresses taken, not dereferenced`,
+      );
+      L.push("    A dereferenced constant in a data section is `g_<HEX>` (extern, with the");
+      L.push("    section in the comment; a byte array where the body read it at more than one");
+      L.push("    width — no width is picked), an IAT slot read at the pointer width is `__imp_X`");
+      L.push("    (the slot, never the API). REPORT-ONLY: the raw residue is an incompleteness.");
+      L.push("    `in no section` is the emitter's own refusal and must stay raw; `in code` is a");
+      L.push("    code address read as data (not this bead's); `in data` is a string's address");
+      L.push("    (keeps its literal), a slot read narrower than a pointer, or a cookie whose two");
+      L.push("    readings disagree. `named outside a data section` is a FALSE claim: expect 0.");
+      L.push(
+        "    `data addresses taken, not dereferenced` is the address-taken residue this stage",
+      );
+      L.push("    leaves literal on purpose — the deref is the provenance. Sites in");
+      L.push("    globals_<bin>.jsonl. See globals.ts (peek-a-bin-5b6q.4).");
     }
     // ── The readability instruments of peek-a-bin-n9cl.1. Report-only, except
     // the undeclared-identifier row, which peek-a-bin-n9cl.4 turned into a gate. ──

@@ -4,7 +4,7 @@
  * These exist because the "which section holds the code?" predicate was written
  * out by hand at seven call sites, none of which referenced the named flag.
  */
-import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "./constants";
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE } from "./constants";
 import type { SectionHeader } from "./types";
 
 const DATA_SECTION_NAMES = new Set([".data", ".rdata", ".bss"]);
@@ -54,14 +54,46 @@ export function isDataSection(section: SectionHeader): boolean {
   );
 }
 
+/**
+ * One data section as a VA range, with the two facts the decompiler's global
+ * naming reads off it: the section's name (printed in the `extern` comment) and
+ * whether the image maps it writable.
+ */
+export interface DataSectionRange {
+  va: number;
+  size: number;
+  /** NUL-stripped and trimmed, as the section table spells it (`.data`, `.rdata`). */
+  name: string;
+  /** `IMAGE_SCN_MEM_WRITE` — `.rdata` is not, `.data`/`.bss` are. */
+  writable: boolean;
+}
+
+/**
+ * The data sections as VA ranges carrying their name and writability.
+ *
+ * THE ONE FILTER: `dataSectionRanges` below is a projection of this, so the xref
+ * builder and the decompiler's `NamingContext` (`decompile/naming.ts`) cannot
+ * disagree about which sections are data. The extent is the VIRTUAL size, as
+ * `sectionAtVirtualAddress` reads it.
+ */
+export function dataSectionTable(
+  sections: readonly SectionHeader[],
+  imageBase: number,
+): DataSectionRange[] {
+  return sections.filter(isDataSection).map((s) => ({
+    va: imageBase + s.virtualAddress,
+    size: s.virtualSize,
+    name: s.name.replace(/\0/g, "").trim(),
+    writable: (s.characteristics & IMAGE_SCN_MEM_WRITE) !== 0,
+  }));
+}
+
 /** Data section VA ranges, in the shape the xref builder expects. */
 export function dataSectionRanges(
   sections: readonly SectionHeader[],
   imageBase: number,
 ): { va: number; size: number }[] {
-  return sections
-    .filter(isDataSection)
-    .map((s) => ({ va: imageBase + s.virtualAddress, size: s.virtualSize }));
+  return dataSectionTable(sections, imageBase).map(({ va, size }) => ({ va, size }));
 }
 
 /**

@@ -258,8 +258,17 @@ export function offsetofCheck(
       const found = defsIn(preamble);
       if (found.length === 0) continue;
       // One program per distinct preamble; the same struct set recurs across
-      // functions and compiling it once is enough.
-      const key = `${tag}\n${preamble}`;
+      // functions and compiling it once is enough. The `extern` block is not
+      // part of the key: it names the globals THIS function reads, so with it
+      // in, two functions carrying one struct set compiled that set twice and
+      // the field denominator rose 321 → 530 on t32 with no declaration changed
+      // (peek-a-bin-5b6q.4). Blank lines go too: the block's separator would
+      // otherwise keep the two keys apart. 321 → 312 in the end, the base having
+      // compiled the `/GS` functions' cookie-extern preambles twice.
+      const key = `${tag}\n${preamble
+        .split("\n")
+        .filter((l) => l !== "" && !l.startsWith("extern "))
+        .join("\n")}`;
       if (seen.has(key)) continue;
       seen.add(key);
 

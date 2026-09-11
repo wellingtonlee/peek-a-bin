@@ -1479,6 +1479,22 @@ describe("DisasmWorkerClient — the architecture travels with the decode reques
 
     expect(worker.received[0].args.chpeMetadataPointer).toBeUndefined();
   });
+
+  it("sends the data section table and the cookie address with the machine type", async () => {
+    // What the worker's emitter names `g_<HEX>` from (`decompile/naming.ts`);
+    // posted on the load handshake because they describe the same file.
+    const { client, worker } = await loadClient();
+    const ranges = [{ va: 0x414000, size: 0x1000, name: ".data", writable: true }];
+
+    void client.configure(new Map(), new Map(), {
+      machine: 0x14c,
+      dataRanges: ranges,
+      securityCookie: 0x414004,
+    });
+
+    expect(worker.received[0].args.dataRanges).toEqual(ranges);
+    expect(worker.received[0].args.securityCookie).toBe(0x414004);
+  });
 });
 
 /**

@@ -257,6 +257,8 @@ export function registerTools(server: McpServer, session: FileSession): void {
           af.pe.runtimeFunctions,
           undefined,
           af.calleeClobbers,
+          undefined,
+          af.naming,
         );
 
         // A pipeline fault is an error response, not a `code` holding a

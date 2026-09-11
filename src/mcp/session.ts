@@ -9,13 +9,14 @@ import { archForMachine, type ImageArch } from "../disasm/arch";
 import { buildCallSummaries, type CalleeClobbers } from "../disasm/callSummary";
 import { recogniseCrtIdioms } from "../disasm/crtIdioms";
 import { buildDataWindows } from "../disasm/dataWindows";
+import type { NamingContext } from "../disasm/decompile/naming";
 import { StructRegistry } from "../disasm/decompile/structs";
 import { buildFuncInsnMap } from "../disasm/funcInsns";
 import { buildIATLookup } from "../disasm/operands";
 import { jumpTableTargets } from "../disasm/seeds";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { extractStrings, parsePE } from "../pe/parser";
-import { dataSectionRanges, findCodeSection } from "../pe/sections";
+import { dataSectionRanges, dataSectionTable, findCodeSection } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import {
   buildXrefMap,
@@ -79,6 +80,14 @@ export interface AnalyzedFile {
    * it declines on that architecture anyway.
    */
   calleeClobbers: CalleeClobbers;
+  /**
+   * What the emitter names a dereferenced constant address from — the data
+   * section table, the IAT and the load config's cookie address
+   * (`decompile/naming.ts`). Built once per file from `pe` and handed to every
+   * `decompileFunction` this session and `corpus/sweep.ts` make, so the MCP
+   * server and the harness name globals from one table.
+   */
+  naming: NamingContext;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
   structRegistry: StructRegistry;
@@ -323,6 +332,13 @@ export class FileSession {
       idioms: funcInsnMap ? recogniseCrtIdioms(funcInsnMap, is64) : undefined,
     };
 
+    // 8d. The naming evidence for the emitter — see `decompile/naming.ts`.
+    const naming: NamingContext = {
+      dataRanges: dataSectionTable(pe.sections, imageBase),
+      iatMap,
+      securityCookie: pe.loadConfig?.securityCookie,
+    };
+
     // 9. Detect anomalies
     const anomalies = detectAnomalies(pe);
 
@@ -346,6 +362,7 @@ export class FileSession {
       jumpTables,
       arch,
       calleeClobbers,
+      naming,
       anomalies,
       driverInfo,
       structRegistry,

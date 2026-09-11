@@ -34,7 +34,7 @@ import {
 } from "./hooks/usePEFile";
 import { loadFontSize } from "./llm/settings";
 import { parsePE } from "./pe/parser";
-import { dataSectionRanges, findCodeSection } from "./pe/sections";
+import { dataSectionRanges, dataSectionTable, findCodeSection } from "./pe/sections";
 import { applyTheme, loadTheme } from "./styles/themes";
 import { annotationKey, loadAnnotations, saveAnnotations } from "./utils/annotationKey";
 import { recentFileKey, saveRecentFile } from "./utils/recentFiles";
@@ -311,6 +311,12 @@ export default function App() {
         // structure too short to reach the field — is the ordinary case and
         // produces exactly the message this threw before.
         chpeMetadataPointer: pe.loadConfig?.chpeMetadataPointer,
+        // The section table and the format's cookie address the worker's
+        // emitter names `g_<HEX>` / `__security_cookie` from — see
+        // `decompile/naming.ts`. Only this configure carries them: the
+        // strings-only one below leaves them alone, as it leaves the machine.
+        dataRanges: dataSectionTable(pe.sections, pe.optionalHeader.imageBase),
+        securityCookie: pe.loadConfig?.securityCookie,
       })
       .then(() =>
         disasmWorker.detectFunctions(sectionBytes, baseAddr, pe.is64, {

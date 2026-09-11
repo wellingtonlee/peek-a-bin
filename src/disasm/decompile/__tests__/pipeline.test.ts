@@ -5,6 +5,7 @@ import { recogniseCrtIdioms } from "../../crtIdioms";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
+import type { NamingContext } from "../naming";
 import { decompileFunction, type StructuringTap } from "../pipeline";
 import { StructRegistry } from "../structs";
 
@@ -9077,5 +9078,188 @@ describe("decompileFunction — label notes", () => {
     expect(code).toContain("loc_401020:");
     expect(code).not.toContain("goto loc_401020");
     expect(code).not.toContain("loc_401020:\n    //");
+  });
+});
+
+/**
+ * GLOBALS AND IMPORTS ARE NAMED FROM THE DEREFERENCE PLUS THE SECTION TABLE
+ * (peek-a-bin-5b6q.4).
+ *
+ * `*(int32_t*)(0x414620) != 0` is true and unreadable; `g_414620 != 0` is the
+ * reading MSVC output gets in every other tool. The name is a CLAIM — that the
+ * address is an object in a data section — and the grounding is stated once in
+ * `naming.ts`: the constant must be DEREFERENCED (a `deref` or a `store`), and
+ * the address must fall in a range the `NamingContext` says is data. Three of
+ * the cases below are the negative controls on that grounding, and each was
+ * run against the corresponding relaxation to confirm it discriminates:
+ * naming every constant in a data range regardless of the deref reddens the
+ * provenance case; picking the widest width for a mixed-width global reddens
+ * the byte-array case; dropping the section check reddens the unplaced case.
+ */
+describe("decompileFunction — a dereferenced data-section address is a named global", () => {
+  const sections: NamingContext["dataRanges"] = [
+    { va: 0x413000, size: 0x1000, name: ".rdata", writable: false },
+    { va: 0x414000, size: 0x1000, name: ".data", writable: true },
+  ];
+  const slot = 0x402000;
+  const iat = new Map([[slot, { lib: "kernel32.dll", func: "MessageBoxW" }]]);
+
+  function decompile(
+    instructions: Instruction[],
+    is64: boolean,
+    naming: NamingContext | undefined,
+    strings: Map<number, string> = new Map(),
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      is64,
+      new Map(),
+      naming?.iatMap ? new Map(naming.iatMap) : new Map(),
+      strings,
+      new Map(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      naming,
+    ).code;
+  }
+  const ctx: NamingContext = { dataRanges: sections, iatMap: iat };
+  /** The function header's line: column 0, ending `) {`. */
+  const headerIndex = (code: string) => code.split("\n").findIndex((l) => /^\S.*\) \{$/.test(l));
+
+  it("spells a load from .data as g_<HEX> and declares it extern at the width it was read, above the header", () => {
+    const code = decompile(
+      seq(0x401000, [["mov", "eax, dword ptr [0x414620]"], ["ret"]]),
+      false,
+      ctx,
+    );
+    const lines = code.split("\n");
+
+    expect(code).toContain("return g_414620;");
+    expect(code).not.toContain("0x414620");
+    const extern = lines.indexOf("extern int32_t g_414620; /* .data */");
+    expect(extern).toBeGreaterThanOrEqual(0);
+    expect(extern).toBeLessThan(headerIndex(code));
+  });
+
+  it("names a STORE's destination the same way, and says a .rdata object is read-only", () => {
+    const code = decompile(
+      seq(0x401000, [
+        ["mov", "ecx, dword ptr [0x413100]"],
+        ["mov", "dword ptr [0x414620], ecx"],
+        ["ret"],
+      ]),
+      false,
+      ctx,
+    );
+
+    expect(code).toContain("g_414620 = g_413100;");
+    expect(code).toContain("extern int32_t g_413100; /* .rdata, read-only */");
+    expect(code).toContain("extern int32_t g_414620; /* .data */");
+  });
+
+  it("spells a load of an IAT slot as __imp_<func> — the slot, never the API — through importSlotName, and declares it", () => {
+    // rip after the 4-byte instruction at 0x401000 is 0x401004; the slot is at 0x402000.
+    const code = decompile(
+      seq(0x401000, [["mov", "rax, qword ptr [rip + 0xffc]"], ["ret"]]),
+      true,
+      ctx,
+    );
+
+    expect(code).toContain("return __imp_MessageBoxW;");
+    expect(code).not.toContain("return MessageBoxW");
+    expect(code).toContain(
+      "extern void *__imp_MessageBoxW; /* IAT slot: kernel32.dll!MessageBoxW */",
+    );
+  });
+
+  it("PROVENANCE CONTROL: a constant EQUAL to a data address but not dereferenced stays a literal", () => {
+    // `lea`/`mov reg, imm` take the address; nothing here reads through it.
+    const code = decompile(seq(0x401000, [["mov", "eax, 0x414620"], ["ret"]]), false, ctx);
+
+    expect(code).toContain("return 0x414620;");
+    expect(code).not.toContain("g_414620");
+    expect(code).not.toContain("extern");
+  });
+
+  it("MIXED WIDTHS: a global read at two widths is a byte array, and every access casts at ITS width — no width is picked", () => {
+    const code = decompile(
+      seq(0x401000, [
+        ["mov", "eax, dword ptr [0x414620]"],
+        ["mov", "cl, byte ptr [0x414620]"],
+        ["add", "eax, ecx"],
+        ["ret"],
+      ]),
+      false,
+      ctx,
+    );
+
+    expect(code).toContain("extern uint8_t g_414620[]; /* .data; accessed at 1 and 4 bytes */");
+    expect(code).toContain("*(int32_t*)g_414620");
+    expect(code).toContain("*(uint8_t*)g_414620");
+    expect(code).not.toContain("extern int32_t g_414620");
+    expect(code).not.toContain("extern uint8_t g_414620;");
+  });
+
+  it("UNPLACED CONTROL: an address in no section keeps the raw dereference and is never named", () => {
+    const code = decompile(
+      seq(0x401000, [["mov", "eax, dword ptr [0x500000]"], ["ret"]]),
+      false,
+      ctx,
+    );
+
+    expect(code).toContain("return *(int32_t*)(0x500000);");
+    expect(code).not.toContain("g_500000");
+    expect(code).not.toContain("extern");
+  });
+
+  it("a slot read at less than the pointer width is neither the import nor a g_ global", () => {
+    // A 32-bit read of a 64-bit slot is not "the import", and the slot is in a
+    // data section, so the ordinary rule would misname it: it stays raw.
+    const code = decompile(
+      seq(0x401000, [["mov", "eax, dword ptr [rip + 0xffc]"], ["ret"]]),
+      true,
+      ctx,
+    );
+
+    expect(code).toContain("*(int32_t*)(0x402000)");
+    expect(code).not.toContain("__imp_");
+    expect(code).not.toContain("g_402000");
+  });
+
+  it("a string's address keeps the literal spelling it already had", () => {
+    const code = decompile(
+      seq(0x401000, [["mov", "al, byte ptr [0x413100]"], ["ret"]]),
+      false,
+      ctx,
+      new Map([[0x413100, "abc"]]),
+    );
+
+    expect(code).toContain('*(uint8_t*)("abc")');
+    expect(code).not.toContain("g_413100");
+  });
+
+  it("with no context, every address is spelled exactly as before", () => {
+    const code = decompile(
+      seq(0x401000, [["mov", "eax, dword ptr [0x414620]"], ["ret"]]),
+      false,
+      undefined,
+    );
+
+    expect(code).toContain("return *(int32_t*)(0x414620);");
+    expect(code).not.toContain("g_414620");
   });
 });

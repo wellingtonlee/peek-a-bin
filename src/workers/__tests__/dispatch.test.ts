@@ -157,6 +157,43 @@ describe("dispatch — configure", () => {
     expect(s.driverMode).toBe(false);
   });
 
+  it("keeps the section table and cookie from the load handshake across the strings-only configure", async () => {
+    // `configure` is sent twice per file: once with the machine type (the load
+    // handshake), once when the strings arrive, with neither table. The second
+    // must not clear what the first said — the same rule `chpeMetadataPointer`
+    // follows — or every decompile after the strings land would name nothing.
+    const s = state();
+    const ranges = [{ va: 0x414000, size: 0x1000, name: ".data", writable: true }];
+    await dispatch(
+      "configure",
+      {
+        stringEntries: [],
+        iatEntries: [],
+        machine: 0x14c,
+        dataRanges: ranges,
+        securityCookie: 0x414004,
+      },
+      s,
+    );
+    expect(s.dataRanges).toEqual(ranges);
+    expect(s.securityCookie).toBe(0x414004);
+
+    await dispatch("configure", { stringEntries: [[0x1000, "late"]], iatEntries: [] }, s);
+    expect(s.dataRanges).toEqual(ranges);
+    expect(s.securityCookie).toBe(0x414004);
+  });
+
+  it("a handshake carrying no table clears the previous file's rather than letting it name the next file's addresses", async () => {
+    const s = state({
+      dataRanges: [{ va: 0x414000, size: 0x1000, name: ".data", writable: true }],
+      securityCookie: 0x414004,
+    });
+    await dispatch("configure", { stringEntries: [], iatEntries: [], machine: 0x14c }, s);
+
+    expect(s.dataRanges).toEqual([]);
+    expect(s.securityCookie).toBeUndefined();
+  });
+
   it("starts a fresh struct registry for the new file", async () => {
     // Struct synthesis is cross-function but must not leak between binaries.
     const s = state();

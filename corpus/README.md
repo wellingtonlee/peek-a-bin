@@ -1541,6 +1541,31 @@ reads). *Liveness:* `calls > 0`, `insns > 0` per binary; `indirectCalls > 0` ove
 *What it cannot see:* a home-area store through a register other than RSP, and a store the call
 reaches through a branch ("next transfer" is a straight-line reading).
 
+**Named globals and the raw residue — report-only** (`auditGlobals`, `globals.ts`; `globals_<key>.jsonl`;
+`peek-a-bin-5b6q.4`). *What it reports:* what the emitted C now calls a dereferenced absolute
+address, and what it left as `*(T*)(0x…)`. `g_ declared` (declarations, one per function per
+address), `distinct addresses`, `byte arrays` (a global the body read at more than one width —
+`extern uint8_t g_X[]`, accesses `*(T*)g_X`), `__imp_ slots declared`, and the raw residue split by
+where the address falls against the sweep's section table: `in no section` (the emitter's OWN
+refusal — the CRT's `MZ` check reads the image base, which is a header; a `gs:` TEB read lifted as
+`0x10`), `in a code section`, `in a data section` (a string's address keeping its literal, a slot
+read narrower than a pointer, a cookie whose two readings disagree). `named OUTSIDE a data section`
+is a `g_` the table cannot place — a false claim, 0 on all four; `data addresses not deref'd` is the
+address-taken residue this stage leaves literal on purpose. Measured at `d9b3ded` against
+`s29-main-b6ee426`, t32/t64/w64/w32: raw derefs **331/287/283/327 → 2/3/3/2**, all `in no section`;
+`g_` 220/193/187/214 over 124/102/103/125 addresses, byte arrays 1/0/0/1 (`t32!sub_4010D4`,
+`w32!sub_401164`), `__imp_` 4/3/3/4 (the x64 four are thunk targets — that CRT has no slot loads),
+string derefs 13/13/7/7, literals 200/184/175/186. *Why report-only:* a raw deref is an
+incompleteness, not a falsehood, and each residue class has a reason to stay. *Liveness:* `funcs >
+0` and `named > 0` per binary — every MSVC CRT here reads `.data` globals in dozens of functions,
+so a 0 is a scan that stopped matching. *What it cannot see:* whether two adjacent `g_` are one
+object; whether the width read is the declared type. Patterns are written out rather than imported
+from `naming.ts`. Beside it, `offsetofCheck`'s dedupe key now strips `extern` lines and the blank lines between
+blocks — with them in, identical struct sets compiled once per extern set and the field denominator
+rose 321 → 530 with no declaration changed; it now reads 312/280/287/320 against the base's
+321/284/291/325, the fall being struct sets the old key compiled twice for the cookie's `extern`.
+Ratio 1.00 on both sides.
+
 ## `corpus/parserDifferential.ts` — separate, and the only oracle over the PE parser
 
 `npm run corpus:parserdiff`. Over **all six** binaries — the x86 four *and* the ARM64 pair —
@@ -2798,6 +2823,7 @@ stable-struct-identity epic.
 | `wildBranches.ts` | A filed direct branch whose target the image does not contain. Reads the instruction stream and the PE header; nothing else. |
 | `selfAssigns.ts` | An emitted `X = X;` resolved through the line map to its instruction. Two gates on the instrument (`wrong`, `unresolved`); `openOperand` is reported. |
 | `undefinedCallees.ts` | An emitted `sub_<hex>(` the output defines nowhere, split by whether the target is inside the caller's own extent and, for an internal one, by whether the reader has any thread to the body (`internalLabelled`, `internalThreaded`, `internalUnlabelled`). Reads only emitted text. Report-only in both directions. |
+| `globals.ts` | What the emitted C calls a dereferenced absolute address (`g_<HEX>`, `__imp_<func>`) and the raw `*(T*)(0x…)` residue, classified against the section table. Reads only emitted text plus `BinResult.sections`. Report-only. |
 | `structOverlaps.ts` | Which of two overlapping readings of one struct base became a field, and whether the sweep's answer is of maximum cardinality. Re-derives both of `candidateFields`' steps from the raw accesses. Report-only in every column; `groups` is the liveness half. |
 | `duplicateBodies.ts` | Emitted functions whose bodies are the same text once `sub_`/`loc_`/`struct_N`/hex and the function's own name are normalised, plus `selfRecursiveThunks` — a header name in `return <name>(` position in its own body. Reads only emitted text. Report-only; the thunk row gates once the thunk child lands. |
 | `labelOrigins.ts` | Why each `loc_` label survived `pruneLabels` — a `goto` names it, the leftover pass pinned it, or both — from the structurer's own `LabelPruneReport` on the structuring tap. Report-only; `pinnedOnly` is the `baseGenerations` fabrication-hazard population. |
@@ -2824,6 +2850,7 @@ stable-struct-identity epic.
 | `artifacts/<label>/selfassigns_<key>.jsonl` | Every self-assignment in the emitted C with the instruction it resolved to and the verdict — **including the `identity` rows**, because those are the liveness denominator and a file holding only failures would make a vacuous zero look clean. |
 | `artifacts/<label>/structoverlaps_<key>.jsonl` | Every overlap `candidateFields` had to settle: the base's whole extent list, which reading was kept and which dropped, whether the dropped one was contained, whether the selection was maximal, whether the base was ambiguous, and any narrower same-offset reading that step 1 discarded. Empty file = audit ran and found none. |
 | `artifacts/<label>/undefinedcallees_<key>.jsonl` | Every emitted call to an identifier the output never defines, INTERNAL rows first, each with the caller's extent and whether a `loc_` label names the target. Empty file = audit ran and found none. |
+| `artifacts/<label>/globals_<key>.jsonl` | Every raw absolute deref left on the page with the section its address falls in (or none), preceded by any `g_` declared outside a data section (expect none). Empty file = audit ran and found none. |
 | `artifacts/<label>/undeclared_<key>.jsonl` | Every (function, identifier) pair gcc reported `undeclared` with NO prelude, classified `register`/`residue`/`minted`/`api`/`other`. `register + minted` gates at 0 (`peek-a-bin-n9cl.4`); the file still holds the residue, api and other rows, so an empty file means the emitter declared everything AND the prelude had nothing to invent. |
 | `artifacts/<label>/unlifted_<key>.jsonl` | Every `/* unlifted: … */` site with its base mnemonic and line. Empty file = audit ran and found none. |
 | `artifacts/<label>/duplicates_<key>.jsonl` | Every group of two or more functions with the same normalised body, largest first, with a truncated sample of the body. Empty file = audit ran and found none. |

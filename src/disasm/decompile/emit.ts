@@ -12,7 +12,8 @@ import {
   walkExpr,
   walkStmts,
 } from "./ir";
-import { isCapturedOperandName } from "./lifter";
+import { IMPORT_SLOT_PREFIX, importSlotName, isCapturedOperandName } from "./lifter";
+import { type DataRange, dataRangeAt, globalName, type NamingContext } from "./naming";
 import type { DecompType, TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 
@@ -311,6 +312,24 @@ let _stringMap: Map<number, string> | undefined;
 let _globals: ReadonlyMap<number, NamedGlobal> | undefined;
 /** The globals the body actually named, in first-use order, so each gets one `extern`. */
 let _globalsUsed: Map<string, NamedGlobal> = new Map();
+/** The section table, IAT and format-declared cookie a dereferenced address is named from — see `naming.ts`. */
+let _naming: NamingContext | undefined;
+/** The pointer width of the image being emitted: what an IAT slot holds, so what a load of one must read. */
+let _pointerWidth = 8;
+/** Address → every width the body dereferences it at, computed BEFORE the body — see `collectGlobalWidths`. */
+let _globalWidths: Map<number, Set<number>> = new Map();
+/** The data-section globals the body named, keyed on address, so each gets one `extern`. */
+let _dataGlobalsUsed: Map<number, DataGlobalUse> = new Map();
+/** The IAT slots the body named as `__imp_X`: name → `lib!func` for the comment, or null when only the thunk spelling named it. */
+let _importSlotsUsed: Map<string, string | null> = new Map();
+
+/** One data-section global the body named, with what its declaration has to say. */
+interface DataGlobalUse {
+  name: string;
+  range: DataRange;
+  /** Every width the body dereferences it at, ascending. One width is a scalar; more is a byte array. */
+  widths: number[];
+}
 let _unrecovered: { name: string; note: string }[] = [];
 /** Name → struct id, for the names a declaration in scope already types as a struct pointer. */
 let _declaredTypes: Map<string, string> = new Map();
@@ -750,8 +769,104 @@ function namedGlobalAt(address: IRExpr, size: number): string | null {
   if (!_globals || address.kind !== "const") return null;
   const g = _globals.get(address.value);
   if (!g || g.size !== size) return null;
+  // The format's own statement of the cookie's address, where the load config
+  // carries one (`LoadConfigDirectory.securityCookie`). The idiom recogniser
+  // read the address off the check routine's body; when the two speak and
+  // disagree, neither is trusted with the name and the address falls to the
+  // ordinary `g_` rule below — a section is a weaker claim than an identity.
+  const declared = _naming?.securityCookie;
+  if (declared !== undefined && declared !== 0 && declared !== address.value) return null;
   _globalsUsed.set(g.name, g);
   return g.name;
+}
+
+/**
+ * The spelling of a dereferenced constant address, or null for the raw
+ * `*(T*)(0x…)` form.
+ *
+ * THE GROUNDING IS THE DEREFERENCE PLUS THE SECTION TABLE — see `naming.ts`.
+ * This is asked from exactly two places, the `deref` expression and the `store`
+ * statement, which are the two ways the IR reads or writes memory at a
+ * constant; a bare constant never reaches it, so an address-taken value stays a
+ * literal however exactly it equals a data address. Four answers, in order:
+ *
+ *  1. The `/GS` cookie, by the recognised routine's body (`namedGlobalAt`).
+ *  2. An IAT slot, by `iatMap`: `__imp_<func>` through `importSlotName` — the
+ *     linker's symbol for the slot, and never the bare API name, because the
+ *     slot HOLDS a pointer to the function. Only at the pointer width: a
+ *     narrower read of a slot is not "the import" and is left raw rather than
+ *     handed to the `g_` rule (the slot is in a data section, so it would
+ *     otherwise be misnamed as an ordinary global).
+ *  3. A string's address keeps the older spelling — `*(uint8_t*)("…")` — since
+ *     the literal is what the reader wants to see there.
+ *  4. An address in a data section: `g_<HEX>`. A global the body reads at ONE
+ *     width is a scalar of that width; one read at several widths is declared
+ *     `uint8_t g_X[]` and every access is spelled `*(T*)g_X` at ITS width — the
+ *     emitter never picks one (the same-offset-width defect
+ *     `docs/decompiler-ir.md` records for `_ioinit`, not repeated here).
+ *
+ * An address in no section — and every address when no context was supplied —
+ * is left exactly as before. Recording the use is what lets the header declare
+ * exactly the globals the body named: the body is emitted first.
+ */
+function globalAt(address: IRExpr, size: number): string | null {
+  const cookie = namedGlobalAt(address, size);
+  if (cookie !== null) return cookie;
+  if (!_naming || address.kind !== "const") return null;
+  const va = address.value;
+  if (!Number.isSafeInteger(va) || va < 0) return null;
+  const imported = _naming.iatMap.get(va);
+  if (imported) {
+    if (size !== _pointerWidth) return null;
+    const name = importSlotName(imported.func);
+    _importSlotsUsed.set(name, `${imported.lib}!${imported.func}`);
+    return name;
+  }
+  if (_stringMap?.has(va)) return null;
+  const range = dataRangeAt(_naming.dataRanges, va);
+  if (!range) return null;
+  const name = globalName(va);
+  let use = _dataGlobalsUsed.get(va);
+  if (!use) {
+    const widths = [...(_globalWidths.get(va) ?? [size])].sort((a, b) => a - b);
+    use = { name, range, widths };
+    _dataGlobalsUsed.set(va, use);
+  }
+  return use.widths.length === 1 ? name : `*(${sizeToType(size)}*)${name}`;
+}
+
+/**
+ * Every width the body dereferences each constant address at — the pre-pass
+ * behind `globalAt`'s scalar-or-byte-array decision, which has to be settled
+ * before the FIRST access is spelled. Both memory forms, since a global that is
+ * only ever stored is still a global: `deref` expressions through `walkStmts`,
+ * `store` statements through the structured tree (`bodiesOf`, plus a `for`'s
+ * two single statements, which `bodiesOf` deliberately does not reach).
+ */
+function collectGlobalWidths(body: readonly IRStmt[], out: Map<number, Set<number>>): void {
+  const add = (address: IRExpr, size: number) => {
+    if (address.kind !== "const") return;
+    let widths = out.get(address.value);
+    if (!widths) {
+      widths = new Set();
+      out.set(address.value, widths);
+    }
+    widths.add(size);
+  };
+  walkStmts(body as IRStmt[], (expr) => {
+    if (expr.kind === "deref") add(expr.address, expr.size);
+  });
+  const visit = (stmts: readonly IRStmt[]) => {
+    for (const stmt of stmts) {
+      if (stmt.kind === "store") add(stmt.address, stmt.size);
+      if (stmt.kind === "for") {
+        if (stmt.init.kind === "store") add(stmt.init.address, stmt.init.size);
+        if (stmt.update.kind === "store") add(stmt.update.address, stmt.update.size);
+      }
+      for (const nested of bodiesOf(stmt)) visit(nested);
+    }
+  };
+  visit(body);
 }
 
 /**
@@ -786,7 +901,14 @@ function calleeText(name: string): string {
   // (16/4/4/16 on t32/t64/w64/w32).
   else if (isKnownRegister(target))
     value = registerText({ kind: "reg", name: target, size: regSize(target) }, false);
-  else value = target;
+  else {
+    // An import thunk's `(*__imp_X)` (`importThunkTransfer`) names the slot the
+    // way a load of it does, so it is declared the same way — without the
+    // `lib!func`, which the thunk's own comment line already carries.
+    if (target.startsWith(IMPORT_SLOT_PREFIX) && !_importSlotsUsed.has(target))
+      _importSlotsUsed.set(target, null);
+    value = target;
+  }
   return `((intptr_t (*)())${value})`;
 }
 
@@ -1782,8 +1904,8 @@ function emitExpr(expr: IRExpr, parentPrec = 0, signed = false): string {
     }
 
     case "deref": {
-      const named = namedGlobalAt(expr.address, expr.size);
-      if (named) return named;
+      const named = globalAt(expr.address, expr.size);
+      if (named !== null) return named;
       const type = sizeToType(expr.size);
       const addr = emitExpr(expr.address, 0);
       return `*(${type}*)(${addr})`;
@@ -1973,7 +2095,7 @@ function emitStmt(stmt: IRStmt, level: number): EmitResult {
     case "store": {
       const type = sizeToType(stmt.size);
       const storeTarget =
-        namedGlobalAt(stmt.address, stmt.size) ?? `*(${type}*)(${emitExpr(stmt.address, 0)})`;
+        globalAt(stmt.address, stmt.size) ?? `*(${type}*)(${emitExpr(stmt.address, 0)})`;
       // Compound assignment for regular stores
       if (stmt.value.kind === "binary" && COMPOUND_OPS.has(stmt.value.op)) {
         const lhs = emitExpr(stmt.value.left, 0);
@@ -2779,6 +2901,7 @@ export function emitFunction(
   typeCtx?: TypeContext,
   stringMap?: Map<number, string>,
   globals?: ReadonlyMap<number, NamedGlobal>,
+  naming?: NamingContext,
 ): EmitFunctionResult {
   // Before anything reads the body: every analysis below has to be asked about
   // the statements the reader will see — see `foldReturnedCallResults`.
@@ -2800,6 +2923,11 @@ export function emitFunction(
   const prevStringMap = _stringMap;
   const prevGlobals = _globals;
   const prevGlobalsUsed = _globalsUsed;
+  const prevNaming = _naming;
+  const prevPointerWidth = _pointerWidth;
+  const prevGlobalWidths = _globalWidths;
+  const prevDataGlobalsUsed = _dataGlobalsUsed;
+  const prevImportSlotsUsed = _importSlotsUsed;
   const prevUnrecovered = _unrecovered;
   const prevDeclaredTypes = _declaredTypes;
   const prevStructDefs = _structDefs;
@@ -2815,6 +2943,14 @@ export function emitFunction(
   _stringMap = stringMap;
   _globals = globals;
   _globalsUsed = new Map();
+  _naming = naming;
+  _pointerWidth = func.is64 ? 8 : 4;
+  // Before the body, like the layouts: the first access to a global has to
+  // know whether the body reads it at one width or several — see `globalAt`.
+  _globalWidths = new Map();
+  collectGlobalWidths(func.body, _globalWidths);
+  _dataGlobalsUsed = new Map();
+  _importSlotsUsed = new Map();
   _unrecovered = [];
   _declaredTypes = new Map();
   _structDefs = new Map((func.typedefs ?? []).map((d) => [d.id, d]));
@@ -2870,6 +3006,11 @@ export function emitFunction(
     _stringMap = prevStringMap;
     _globals = prevGlobals;
     _globalsUsed = prevGlobalsUsed;
+    _naming = prevNaming;
+    _pointerWidth = prevPointerWidth;
+    _globalWidths = prevGlobalWidths;
+    _dataGlobalsUsed = prevDataGlobalsUsed;
+    _importSlotsUsed = prevImportSlotsUsed;
     _unrecovered = prevUnrecovered;
     _declaredTypes = prevDeclaredTypes;
     _structDefs = prevStructDefs;
@@ -2882,6 +3023,35 @@ export function emitFunction(
     _capturedCalls = prevCapturedCalls;
     _capturedOperands = prevCapturedOperands;
   }
+}
+
+/**
+ * The `extern` block's lines, in a stable order: the CRT-named globals in
+ * first-use order (one today), then IAT slots by name, then data-section
+ * globals by address. Stable so the block does not move when the body does.
+ */
+function externDeclarations(): string[] {
+  const out: string[] = [];
+  for (const g of _globalsUsed.values()) out.push(`extern ${g.type} ${g.name};`);
+  for (const [name, holds] of [..._importSlotsUsed].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // `void *`: the slot holds a pointer to the function, and claiming the
+    // signature would be `apitypes.ts`'s job, not a load's. The call sites cast
+    // it themselves (`calleeText`).
+    out.push(
+      `extern void *${name};${holds === null ? "" : ` /* IAT slot: ${commentSafe(holds)} */`}`,
+    );
+  }
+  const byAddress = [..._dataGlobalsUsed.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [, use] of byAddress) {
+    const where = commentSafe(use.range.writable ? use.range.name : `${use.range.name}, read-only`);
+    if (use.widths.length === 1) {
+      out.push(`extern ${sizeToType(use.widths[0])} ${use.name}; /* ${where} */`);
+    } else {
+      const widths = `${use.widths.slice(0, -1).join(", ")} and ${use.widths[use.widths.length - 1]}`;
+      out.push(`extern uint8_t ${use.name}[]; /* ${where}; accessed at ${widths} bytes */`);
+    }
+  }
+  return out;
 }
 
 function emitFunctionBody(func: IRFunction): EmitFunctionResult {
@@ -3011,13 +3181,18 @@ function emitFunctionBody(func: IRFunction): EmitFunctionResult {
   }
 
   // The globals the body named in place of a dereferenced address — the `/GS`
-  // cookie today. `extern`, because the object is the CRT's and lives in
-  // `.data`; declared here rather than left to the reader because the emitter
-  // is what chose the name, and an undeclared identifier is what `preludeFor`
-  // would otherwise invent a type for.
-  if (_globalsUsed.size > 0) {
-    for (const g of _globalsUsed.values()) {
-      lines.push(`extern ${g.type} ${g.name};`);
+  // cookie, the IAT slots, the data-section globals (`globalAt`). `extern`,
+  // because the objects are the image's and live in its sections; declared here
+  // rather than left to the reader because the emitter is what chose the name,
+  // and an undeclared identifier is what `preludeFor` would otherwise invent a
+  // type for. One block, above the header, addresses undefined like the typedef
+  // block. The section name in the comment is the ground the name stands on;
+  // a byte-array declaration says every width the body read, so the reader is
+  // told there was no single width to pick.
+  const externs = externDeclarations();
+  if (externs.length > 0) {
+    for (const line of externs) {
+      lines.push(line);
       lineAddrs.push(undefined);
     }
     lines.push("");

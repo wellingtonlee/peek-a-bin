@@ -31,6 +31,7 @@ import { inferSignature } from "../src/disasm/signatures";
 import { analyzeStackFrame } from "../src/disasm/stack";
 import type { Instruction } from "../src/disasm/types";
 import { FileSession } from "../src/mcp/session";
+import { isDataSection } from "../src/pe/sections";
 import { type ArmExitResult, auditArmExits, emptyArmExits } from "./armExits";
 import { auditCallShapes, type CallShapeResult, emptyCallShapes } from "./callShapes";
 import {
@@ -335,6 +336,13 @@ export interface BinResult {
   key: BinKey;
   path: string;
   is64: boolean;
+  /**
+   * Every section as a VA extent, with whether the emitter's naming rule treats
+   * it as data (`isDataSection`) — what `corpus/globals.ts` classifies a raw
+   * deref's address against. Small (a handful of rows), so it rides in the
+   * summary.
+   */
+  sections: { va: number; size: number; name: string; data: boolean }[];
   functions: number;
   instructions: number;
   jumpTables: number;
@@ -841,6 +849,12 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
     key,
     path,
     is64: af.pe.is64,
+    sections: af.pe.sections.map((s) => ({
+      va: af.pe.optionalHeader.imageBase + s.virtualAddress,
+      size: s.virtualSize,
+      name: s.name.replace(/\0/g, "").trim(),
+      data: isDataSection(s),
+    })),
     functions: af.functions.length,
     instructions: af.instructions.length,
     jumpTables: jumpTables.size,
@@ -1030,6 +1044,9 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // discarded are both internal to the pass, and the emitted declaration
         // shows only the winner. See `corpus/structOverlaps.ts`.
         (g) => auditStructOverlaps(res.structOverlaps, key, g),
+        // The section table and IAT the emitter names globals from — the
+        // session's, so the harness names what the MCP path names.
+        af.naming,
       );
       if (r.error !== undefined) {
         // The pipeline caught its own throw. Recorded as `threw` so the row is

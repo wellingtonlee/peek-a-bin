@@ -11,6 +11,7 @@ import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import { bodiesOf, type IRBranch, type IRStmt, type IRTry, rewriteBodies } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
+import type { NamingContext } from "./naming";
 import { promoteVars } from "./promote";
 import { RegState } from "./regstate";
 import { buildSSA, detectNaturalLoops } from "./ssa";
@@ -153,6 +154,15 @@ export function decompileFunction(
    * `corpus/structOverlaps.ts` is the only caller. See `StructGroupReport`.
    */
   structTap?: (g: StructGroupReport) => void,
+  /**
+   * The section table, the IAT and the format's cookie address, from which the
+   * emitter NAMES a dereferenced constant — `g_<HEX>` in a data section,
+   * `__imp_<func>` for an IAT slot. See `naming.ts` for the grounding rule.
+   * Absent means exactly the spelling this pipeline had before: `*(T*)(0x…)`
+   * everywhere but the cookie. Last, after `structTap`, for the reason every
+   * parameter since `tap` is last: appending keeps the call sites unrenumbered.
+   */
+  naming?: NamingContext,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -362,7 +372,7 @@ export function decompileFunction(
     // the same per-callee facts the lifter read; absent when no summary was
     // supplied, and then the emitter spells every address raw, as before.
     const globals = namedGlobalsFor(calleeClobbers?.idioms, is64);
-    const result = emitFunction(irFunc, typeCtx, stringMap, globals);
+    const result = emitFunction(irFunc, typeCtx, stringMap, globals, naming);
     return {
       code: result.code,
       lineMap: Array.from(result.lineMap.entries()),

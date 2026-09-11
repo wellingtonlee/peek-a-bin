@@ -772,6 +772,30 @@ for (const b of bins) {
     note("  undefined callees             NOT MEASURED on both sides (a run predating the audit)");
   }
 
+  // ── What a dereferenced absolute address is called (globals.ts). ──────────
+  //
+  // REPORT-ONLY in every column, on the bead's instruction (peek-a-bin-5b6q.4):
+  // a raw `*(T*)(0x…)` is an incompleteness, and each class of the residue has
+  // a reason to stay (`in no section` is the emitter's OWN refusal). Read
+  // `named OUTSIDE a data section` as a defect if it ever leaves 0 — a `g_`
+  // claims a section — and `g_ globals declared` falling to 0 as a scan that
+  // stopped matching. A run predating the audit leaves the rows unmeasured.
+  if (B.globals && C.globals) {
+    row("g_ globals declared", (x) => x.globals.named);
+    row("  distinct addresses", (x) => x.globals.namedDistinct);
+    row("  of those, byte arrays", (x) => x.globals.mixedWidth);
+    row("  named OUTSIDE a data section", (x) => x.globals.namedUnplaced);
+    row("  __imp_ slots declared", (x) => x.globals.namedImp);
+    row("raw absolute derefs left", (x) => x.globals.derefsAbsolute);
+    row("  in no section (refused)", (x) => x.globals.unplaced);
+    row("  in a code section", (x) => x.globals.inCode);
+    row("  in a data section", (x) => x.globals.inData);
+    row("  string derefs", (x) => x.globals.stringDerefs);
+    row("  data addresses not deref'd", (x) => x.globals.addressLiterals);
+  } else {
+    note("  named globals                 NOT MEASURED on both sides (a run predating the audit)");
+  }
+
   // ── A register name the image has no encoding for (emitAudits.ts). ─────────
   //
   // Gated at 0 in the run, so a rise here names which binary. PE32 ONLY: on the

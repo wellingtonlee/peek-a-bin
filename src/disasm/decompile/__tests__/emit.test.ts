@@ -1135,3 +1135,85 @@ describe("emitFunction — register variables are declared at the widest width a
     ]);
   });
 });
+
+/**
+ * The declaration block's order: typedefs, then the `extern` block (CRT-named
+ * globals, IAT slots, data-section globals — in that order), then the header.
+ * The externs sit with the typedefs because they are declarations of what the
+ * body names, and above the header because C needs them before the first use;
+ * `lineAddrs` is undefined for every one of them, like the typedef block, so
+ * `lineMap` never points a declaration at an instruction (peek-a-bin-5b6q.4).
+ */
+describe("emitFunction — the extern block sits after the typedefs and before the header", () => {
+  const def = {
+    id: "struct_0",
+    fields: [
+      {
+        name: "field_0x0",
+        offset: 0,
+        size: 4,
+        type: { kind: "int", size: 4, signed: false },
+        isArray: false,
+      },
+    ],
+  } as unknown as NonNullable<IRFunction["typedefs"]>[number];
+  const naming = {
+    dataRanges: [{ va: 0x414000, size: 0x1000, name: ".data", writable: true }],
+    iatMap: new Map([[0x402000, { lib: "kernel32.dll", func: "MessageBoxW" }]]),
+  };
+  const deref = (address: number, size: number): IRExpr => ({
+    kind: "deref",
+    address: irConst(address, 8),
+    size,
+  });
+
+  it("orders typedefs, externs, header, and gives no declaration line an address", () => {
+    const result = emitFunction(
+      fn(
+        [
+          { kind: "assign", dest: irReg("rax", 8), src: deref(0x402000, 8), addr: 0x1000 },
+          { kind: "assign", dest: irReg("rcx", 8), src: deref(0x414620, 4), addr: 0x1004 },
+          {
+            kind: "store",
+            address: irConst(0x414628, 8),
+            value: irReg("rcx", 8),
+            size: 8,
+            addr: 0x1008,
+          },
+        ],
+        { typedefs: [def] },
+      ),
+      undefined,
+      undefined,
+      undefined,
+      naming,
+    );
+    const lines = result.code.split("\n");
+    const at = (needle: string) => lines.findIndex((l) => l.startsWith(needle));
+
+    const typedef = at("typedef struct struct_0");
+    const imp = at("extern void *__imp_MessageBoxW;");
+    const g1 = at("extern int32_t g_414620;");
+    const g2 = at("extern int64_t g_414628;");
+    const header = at("int sub_1000(");
+    expect(typedef).toBeGreaterThanOrEqual(0);
+    expect(typedef).toBeLessThan(imp);
+    // IAT slots before data globals; data globals by address.
+    expect(imp).toBeLessThan(g1);
+    expect(g1).toBeLessThan(g2);
+    expect(g2).toBeLessThan(header);
+    for (const i of [typedef, imp, g1, g2, header]) expect(result.lineMap.has(i)).toBe(false);
+  });
+
+  it("declares an import thunk's (*__imp_X) target the same way a load of the slot is declared", () => {
+    const call = {
+      kind: "call_stmt",
+      call: { kind: "call", target: "(*__imp_RtlVirtualUnwind)", args: [] } as unknown as IRCall,
+      addr: 0x1000,
+    } as IRStmt;
+    const code = emitFunction(fn([call])).code;
+
+    expect(code).toContain("((intptr_t (*)())__imp_RtlVirtualUnwind)()");
+    expect(code).toContain("extern void *__imp_RtlVirtualUnwind;");
+  });
+});

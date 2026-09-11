@@ -267,6 +267,15 @@ loading state.
   still reach the fallback (`"ready"` with an empty list, `"failed"`, `"no-code"`, `"timed-out"`);
   gating on `phase === "ready"` withholds the listing from three of them. `disassembling` stays
   **true** across the early return so the pane keeps its spinner.
+- **The emitter's naming evidence is a `NamingContext` (`decompile/naming.ts`) — the data section
+  table, the IAT and the load config's cookie address — and it is the LAST optional parameter of
+  `decompileFunction`, after `structTap`.** Three sources build it from the `PEFile`, all through
+  `pe/sections.ts`'s `dataSectionTable` (the one data-section filter, which `dataSectionRanges` is a
+  projection of): `App.tsx`'s first `configure` posts `dataRanges`/`securityCookie` beside `machine`
+  and the worker keeps them on **`chpeMetadataPointer`'s rule** — taken from the load handshake,
+  untouched by the strings-only `configure`, cleared by a handshake that omits them; `mcp/session.ts`
+  holds one on `AnalyzedFile.naming`; `corpus/sweep.ts` passes the session's. Absent means the
+  pre-naming spelling everywhere but the cookie.
 
 ### Architectures, and refusing one
 
@@ -1333,6 +1342,25 @@ refused. **Read the long-form entry before changing the code it describes.**
   (`lifter.ts`) are the one declaration of the `__imp_` spelling**; epic n9cl's IAT-slot loads must
   reuse it, and `corpus/sweep.ts`'s `emittedCallees` reads the prefix back so `distinct callees
   lost` stays 0.
+- **A dereferenced constant is named from the DEREF plus the SECTION TABLE, and from nothing else.**
+  `*(int32_t*)(0x414620) != 0` is `g_414620 != 0` only when the constant is the address of a
+  `deref`/`store` AND `NamingContext.dataRanges` (`decompile/naming.ts`) places it in a data
+  section; `globalAt` (`emit.ts`) is the one rule and is asked from exactly those two IR sites, so a
+  bare constant equal to a data address (`lea`, a pointer passed on) stays literal — the value
+  coincidence is the provenance the string substitution already lacks, and `corpus/globals.ts`
+  counts that residue (200/184/175/186 literals). An IAT slot read at pointer width is
+  `__imp_<func>` through `importSlotName` — the slot, never the API; narrower reads stay raw rather
+  than fall to `g_`. **MIXED WIDTHS ARE A BYTE ARRAY**: `extern uint8_t g_X[]; /* .data; accessed at
+  1 and 4 bytes */` with every access `*(T*)g_X` at ITS width — the emitter never picks one
+  (`_ioinit`'s same-offset-width defect, not repeated). One `extern` block above the header, after
+  the typedefs, `lineAddrs` undefined; `offsetofCheck`'s dedupe key strips it. The load config's
+  `securityCookie` is CORROBORATION only: a disagreement with the idiom's address refuses the name
+  and the address falls to `g_`. **`.rdata` SCALAR FOLDING IS REFUSED** — what survives as an
+  `.rdata` read is pointers (image-base-relative), tables and strings; two later S candidates are in
+  `docs/decompiler-ir.md`. Measured at `d9b3ded`: raw derefs 331/287/283/327 → **2/3/3/2**, every
+  survivor in NO section (the `MZ` check at the image base, a `gs:` TEB read lifted as `0x10`);
+  196 polarity CHANGED rows, all the renamed-operand shape; `undeclared other` 4 → 1 on x64 (the
+  three `__imp_` thunk names, now declared).
 - **One variable per register made a SPELLING device load-bearing, and the value-level repair had
   to replace it.** `peek-a-bin-pzws` spelled two live ranges of R9 as `r9` and `r9d` so that `mov
   rbp, r9 / mov r9d, r14d / … / mov [rbp+0x18], esi` — copy propagation forwards `rbp` to the entry

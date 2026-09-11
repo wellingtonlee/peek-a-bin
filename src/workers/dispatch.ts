@@ -28,6 +28,7 @@ import {
 import { buildArm64Xrefs } from "../disasm/arm64Xref";
 import { type CalleeClobbers, CallSummaryCache } from "../disasm/callSummary";
 import { unpackDataWindows } from "../disasm/dataWindows";
+import type { DataRange } from "../disasm/decompile/naming";
 import { decompileFunction } from "../disasm/decompile/pipeline";
 import { StructRegistry } from "../disasm/decompile/structs";
 import {
@@ -116,6 +117,15 @@ export interface WorkerState {
    * never sends one gets.
    */
   chpeMetadataPointer?: number;
+  /**
+   * The image's data sections and the load config's cookie address, from the
+   * `configure` that declared the machine — the load handshake — and left alone
+   * by the strings-only `configure` that follows it, on `chpeMetadataPointer`'s
+   * rule. Read by `decompileFunction` alone, as the emitter's `NamingContext`
+   * (`decompile/naming.ts`). Empty until told: nothing is named.
+   */
+  dataRanges: DataRange[];
+  securityCookie?: number;
   stringMap: Map<number, string>;
   iatMap: Map<number, { lib: string; func: string }>;
   driverMode: boolean;
@@ -184,6 +194,7 @@ export function createWorkerState(ready: Promise<void>): WorkerState {
     cs64: undefined,
     csArm64: undefined,
     arch: "x86",
+    dataRanges: [],
     stringMap: new Map(),
     iatMap: new Map(),
     driverMode: false,
@@ -329,6 +340,14 @@ export async function dispatch(
       // the next one's refusal message; the second `configure` of a file re-sends
       // only the strings and would still, correctly, leave it alone.
       if (args.machine !== undefined) state.chpeMetadataPointer = args.chpeMetadataPointer;
+      // Same rule again: the section table and the cookie address belong to the
+      // file the handshake announces, so an omitted table on the handshake
+      // clears the previous file's rather than letting it name the next file's
+      // addresses, and the strings-only `configure` cannot touch either.
+      if (args.machine !== undefined) {
+        state.dataRanges = (args.dataRanges as DataRange[] | undefined) ?? [];
+        state.securityCookie = args.securityCookie as number | undefined;
+      }
       state.structRegistry = new StructRegistry();
       // Memory hygiene only. A declared machine type is the load handshake, so
       // this is where one file's instructions stop being worth holding — but
@@ -712,6 +731,15 @@ export async function dispatch(
         args.runtimeFunctions,
         undefined,
         calleeClobbers,
+        undefined,
+        // What the emitter names a dereferenced constant from — see
+        // `decompile/naming.ts`. The IAT is the one `configure` sent; the
+        // section table is the handshake's.
+        {
+          dataRanges: state.dataRanges,
+          iatMap: state.iatMap,
+          securityCookie: state.securityCookie,
+        },
       );
     }
 

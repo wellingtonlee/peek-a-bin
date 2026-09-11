@@ -1,9 +1,10 @@
 import type { IRPDispatchEntry } from "../analysis/driver";
-// A value import, but `arch.ts` is pure predicates over a number and imports
-// nothing itself, so it adds no edge to Capstone either.
 import { archForMachine, type ImageArch } from "../disasm/arch";
 import { type DataWindow, packDataWindows } from "../disasm/dataWindows";
 import type { DecompileAdmissions } from "../disasm/decompile/emit";
+// A value import, but `arch.ts` is pure predicates over a number and imports
+// nothing itself, so it adds no edge to Capstone either.
+import type { DataRange } from "../disasm/decompile/naming";
 // A value import, but `funcInsns.ts` is address arithmetic over plain data and
 // imports nothing but types, so it adds no edge to Capstone either.
 import {
@@ -337,7 +338,13 @@ class DisasmWorkerClient {
   async configure(
     strings: Map<number, string>,
     iat: Map<number, { lib: string; func: string }>,
-    options?: { driverMode?: boolean; machine?: number; chpeMetadataPointer?: number },
+    options?: {
+      driverMode?: boolean;
+      machine?: number;
+      chpeMetadataPointer?: number;
+      dataRanges?: DataRange[];
+      securityCookie?: number;
+    },
   ): Promise<void> {
     if (options?.machine !== undefined) this.imageMachine = options.machine;
     this.disasmCache.clear();
@@ -354,6 +361,12 @@ class DisasmWorkerClient {
       // in any cache key — so unlike `machine` it does not have to be on each
       // request, and a caller that omits it gets the previous message verbatim.
       chpeMetadataPointer: options?.chpeMetadataPointer,
+      // The data section table and the load config's cookie address, from which
+      // the worker's emitter names a dereferenced constant (`decompile/naming.ts`).
+      // Sent with the machine type because they describe the same file; the
+      // worker keeps them on the same rule as `chpeMetadataPointer`.
+      dataRanges: options?.dataRanges,
+      securityCookie: options?.securityCookie,
     });
   }
 
