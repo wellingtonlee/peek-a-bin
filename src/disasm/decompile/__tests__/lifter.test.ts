@@ -59,6 +59,11 @@ function lift(list: [string, string][], opts: LiftOpts = {}): IRStmt[] {
   );
 }
 
+/** The last statement a fixture lifted to. */
+function lastOf(stmts: IRStmt[]): IRStmt {
+  return stmts[stmts.length - 1];
+}
+
 /** Lift one instruction and return its single statement. */
 function liftOne(mnemonic: string, opStr: string, opts: LiftOpts = {}): IRStmt {
   const stmts = lift([[mnemonic, opStr]], opts);
@@ -557,29 +562,213 @@ describe("liftBlock — arithmetic", () => {
     expect(lift([["mul", "cx"]])[1]).toMatchObject({ dest: irReg("ax", 2) });
   });
 
+  const cast = (type: string, e: IRExpr): IRExpr => ({ kind: "cast", type, operand: e });
+
   it("lifts div into a quotient and a remainder over the original dividend", () => {
     // One instruction writes both halves from the same input, so the statement
     // that overwrites the dividend must come second — EDX first. Emitting EAX
     // first made the remainder read the quotient: `edx = (eax / ecx) % ecx`.
+    // The `xor edx, edx` is the high-half setup the lift now requires
+    // (peek-a-bin-5b6q.3); the operands carry the unsigned casts of their width.
     const st = new RegState();
     st.set("eax", irConst(100));
-    const stmts = lift([["div", "ecx"]], { state: st });
-    expect(stmts[0]).toEqual({
-      kind: "assign",
-      dest: irReg("edx", 4),
-      src: irBinary("%", irReg("eax", 4), irReg("ecx", 4)),
-      addr: START,
-    });
+    const stmts = lift(
+      [
+        ["xor", "edx, edx"],
+        ["div", "ecx"],
+      ],
+      { state: st },
+    );
+    const u = (r: string) => cast("uint32_t", irReg(r, 4));
     expect(stmts[1]).toEqual({
       kind: "assign",
+      dest: irReg("edx", 4),
+      src: irBinary("%", u("eax"), u("ecx")),
+      addr: START + SIZE,
+    });
+    expect(stmts[2]).toEqual({
+      kind: "assign",
       dest: irReg("eax", 4),
-      src: irBinary("/", irReg("eax", 4), irReg("ecx", 4)),
-      addr: START,
+      src: irBinary("/", u("eax"), u("ecx")),
+      addr: START + SIZE,
     });
   });
 
   it("falls back to raw asm for div with no operand", () => {
     expect(liftOne("div", "")).toEqual({ kind: "raw", text: "__asm { div  }", addr: START });
+  });
+
+  // div/idiv: the IR spells the dividend as its LOW half, which is a wrong value
+  // unless the high half really was that half's extension — zero for `div`,
+  // sign for `idiv`. The lift is admitted only where the stream shows the
+  // matching setup, and refused (raw, counted) otherwise (peek-a-bin-5b6q.3).
+  it("lifts idiv with signed casts after the sign-extension of its width", () => {
+    const s32 = (r: string) => cast("int32_t", irReg(r, 4));
+    expect(
+      lift([
+        ["cdq", ""],
+        ["idiv", "ecx"],
+      ])[2],
+    ).toEqual({
+      kind: "assign",
+      dest: irReg("eax", 4),
+      src: irBinary("/", s32("eax"), s32("ecx")),
+      addr: START + SIZE,
+    });
+    expect(
+      lift([
+        ["cqo", ""],
+        ["idiv", "rcx"],
+      ])[2],
+    ).toMatchObject({
+      dest: irReg("rax", 8),
+      src: irBinary("/", cast("int64_t", irReg("rax", 8)), cast("int64_t", irReg("rcx", 8))),
+    });
+    expect(
+      lift([
+        ["cwd", ""],
+        ["idiv", "cx"],
+      ])[2],
+    ).toMatchObject({
+      dest: irReg("ax", 2),
+      src: irBinary("/", cast("int16_t", irReg("ax", 2)), cast("int16_t", irReg("cx", 2))),
+    });
+    // A memory divisor carries the cast too.
+    expect(
+      lift([
+        ["xor", "edx, edx"],
+        ["div", "dword ptr [esi]"],
+      ])[2],
+    ).toMatchObject({
+      src: { op: "/", right: { kind: "cast", type: "uint32_t", operand: { kind: "deref" } } },
+    });
+  });
+
+  it("refuses a division whose high half was not set up to match — raw, never a wrong value", () => {
+    const raw = (list: [string, string][]) => {
+      const last = lastOf(lift(list));
+      expect(last).toMatchObject({ kind: "raw" });
+      expect((last as { text: string }).text).toMatch(/^__asm \{ i?div /);
+    };
+    // No setup in the stream at all.
+    raw([["div", "ecx"]]);
+    raw([
+      ["mov", "eax, ecx"],
+      ["idiv", "esi"],
+    ]);
+    // The setup of the OTHER signedness: a `div` after `cdq` divides a huge
+    // dividend when EAX is negative; an `idiv` after `xor edx, edx` divides a
+    // large positive one when EAX is past 2^31.
+    raw([
+      ["cdq", ""],
+      ["div", "ecx"],
+    ]);
+    raw([
+      ["xor", "edx, edx"],
+      ["idiv", "ecx"],
+    ]);
+    // A sign-extension at another width is a WRITE of the high half.
+    raw([
+      ["cqo", ""],
+      ["idiv", "ecx"],
+    ]);
+    // Something wrote the high half between the setup and the divide.
+    raw([
+      ["xor", "edx, edx"],
+      ["mov", "edx, ecx"],
+      ["div", "esi"],
+    ]);
+    raw([
+      ["xor", "edx, edx"],
+      ["call", "0x401100"],
+      ["div", "esi"],
+    ]);
+    raw([
+      ["xor", "edx, edx"],
+      ["pop", "rdx"],
+      ["div", "rsi"],
+    ]);
+    raw([
+      ["xor", "edx, edx"],
+      ["xchg", "rcx, rdx"],
+      ["div", "rsi"],
+    ]);
+    // A 16-bit zeroing does not zero EDX.
+    raw([
+      ["xor", "dx, dx"],
+      ["div", "ecx"],
+    ]);
+    // The byte form's high half is AH; refused outright.
+    raw([
+      ["xor", "edx, edx"],
+      ["div", "cl"],
+    ]);
+  });
+
+  it("steps over instructions that do not write the high half, and accepts every zeroing spelling", () => {
+    // The corpus's commonest shape: the setup is two instructions back.
+    expect(
+      lift([
+        ["xor", "edx, edx"],
+        ["lea", "rax, [rdx-0x20]"],
+        ["div", "rcx"],
+      ]),
+    ).toHaveLength(4);
+    expect(
+      lift([
+        ["xor", "edx, edx"],
+        ["mov", "eax, ecx"],
+        ["div", "esi"],
+      ]),
+    ).toHaveLength(4);
+    // A 32-bit zeroing zero-extends into RDX, so it sets up a 64-bit divide.
+    expect(
+      lastOf(
+        lift([
+          ["xor", "edx, edx"],
+          ["mov", "rax, rbx"],
+          ["div", "rcx"],
+        ]),
+      ),
+    ).toMatchObject({
+      kind: "assign",
+      dest: irReg("rax"),
+    });
+    for (const zero of [
+      ["sub", "edx, edx"],
+      ["mov", "edx, 0"],
+      ["and", "edx, 0"],
+      ["xor", "rdx, rdx"],
+    ] as [string, string][]) {
+      expect(lastOf(lift([zero, ["div", "ecx"]]))).toMatchObject({
+        kind: "assign",
+        dest: irReg("eax"),
+      });
+    }
+    // A two-operand imul writes only its destination, so it is stepped over…
+    expect(
+      lastOf(
+        lift([
+          ["xor", "edx, edx"],
+          ["imul", "eax, ecx"],
+          ["div", "esi"],
+        ]),
+      ),
+    ).toMatchObject({
+      kind: "assign",
+    });
+    // …where the one-operand form writes EDX and refuses.
+    expect(
+      lastOf(
+        lift([
+          ["xor", "edx, edx"],
+          ["imul", "ecx"],
+          ["div", "esi"],
+        ]),
+      ),
+    ).toMatchObject({
+      kind: "raw",
+    });
   });
 
   // rol/ror are shifts and ors over the destination's width (peek-a-bin-5b6q.3).

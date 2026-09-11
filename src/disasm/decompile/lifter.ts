@@ -991,6 +991,14 @@ const SIGNED_TYPE: Record<number, string> = {
   8: "int64_t",
 };
 
+/** The unsigned C type of a register width, for the casts an unsigned operation spells. */
+const UNSIGNED_TYPE: Record<number, string> = {
+  1: "uint8_t",
+  2: "uint16_t",
+  4: "uint32_t",
+  8: "uint64_t",
+};
+
 /**
  * The destination width of a register-or-sized-memory operand, or null when the
  * operand is neither (an immediate, an unsized memory reference).
@@ -1117,6 +1125,153 @@ function wideningMultiply(
   return [
     { kind: "assign", dest: irReg(accHi), src: irBinary(">>", product, irConst(width)), addr },
     { kind: "assign", dest: irReg(accLo), src: product, addr },
+  ];
+}
+
+/**
+ * Mnemonics that write the DX-family register without naming it as an operand.
+ * `cdq`/`cqo`/`cwd` are here too: a sign-extension at the WRONG width is a
+ * write of the high half and not a setup for it (`cqo` before `div ecx`).
+ */
+const IMPLICIT_DX_WRITERS: ReadonlySet<string> = new Set([
+  "call",
+  "syscall",
+  "cdq",
+  "cqo",
+  "cwd",
+  "mul",
+  "imul",
+  "div",
+  "idiv",
+  "rdtsc",
+  "rdtscp",
+  "rdmsr",
+  "cpuid",
+  "xgetbv",
+  "cmpxchg8b",
+  "cmpxchg16b",
+]);
+
+/**
+ * Does `insn` write the register whose canonical name is `canon`, at any width?
+ * Conservative in the refusing direction: the implicit writers above, both
+ * operands of `xchg`/`mulx`, the second of `xadd`, and otherwise the first
+ * operand when it is a register. A two-operand `imul` names its destination
+ * and is caught by that last rule; the one-operand form is in the set.
+ */
+function writesRegister(insn: Instruction, canon: string): boolean {
+  const mn = withoutLockPrefix(insn.mnemonic);
+  const parts = splitOperands(insn.opStr);
+  const names = (op: string | undefined): boolean => {
+    const t = op?.trim().toLowerCase() ?? "";
+    return isKnownRegister(t) && canonReg(t) === canon;
+  };
+  if (IMPLICIT_DX_WRITERS.has(mn) && (canon === "rdx" || canon === "rax" || mn === "call")) {
+    // A one-operand imul is in the set; the two- and three-operand forms only
+    // write their first operand.
+    if (mn === "imul" && parts.length >= 2) return names(parts[0]);
+    return true;
+  }
+  if (mn === "xchg" || mn === "mulx") return names(parts[0]) || names(parts[1]);
+  if (mn === "xadd") return names(parts[1]);
+  return names(parts[0]);
+}
+
+/** Is `insn` a zeroing of a register aliasing `canon` at least `minSize` bytes wide? */
+function zeroesRegister(insn: Instruction, canon: string, minSize: number): boolean {
+  const mn = withoutLockPrefix(insn.mnemonic);
+  const parts = splitOperands(insn.opStr);
+  if (parts.length !== 2) return false;
+  const d = parts[0].trim().toLowerCase();
+  if (!isKnownRegister(d) || canonReg(d) !== canon || regSize(d) < minSize) return false;
+  const src = parts[1].trim().toLowerCase();
+  if ((mn === "xor" || mn === "sub") && src === d) return true;
+  return (mn === "mov" || mn === "and") && parseImm(src) === 0;
+}
+
+/** How the high half of a division's dividend was set up, or null when it was not, readably. */
+type DividendSetup = "zeroed" | "sign-extended";
+
+/**
+ * How the high half of the dividend was set up before the `div`/`idiv` at
+ * `insns[index]` — the instruction stream is walked BACKWARDS from it, and the
+ * first instruction that writes the high register decides:
+ *
+ * - `xor edx, edx` / `sub edx, edx` / `mov edx, 0` (a 32-bit write zero-extends,
+ *   so `xor edx, edx` zeroes RDX; `xor dx, dx` does not zero EDX) → `"zeroed"`;
+ * - `cdq` / `cqo` / `cwd` at the dividend's own width → `"sign-extended"`;
+ * - anything else that writes it — a `call`, a `mov edx, ecx`, a `pop rdx`, a
+ *   sign-extension at another width — → null;
+ * - the start of the stream with no writer found → null.
+ *
+ * Instructions that do not write the high half are stepped over: the corpus's
+ * commonest shape is `xor edx, edx / lea rax, [rdx-0x20] / div rcx`, and "the
+ * immediately preceding statement" would refuse nearly every well-set-up site.
+ * The stream may carry a unique predecessor's tail ahead of the block's own
+ * instructions (`carryScanStream`), the same step the CF and flag walks take,
+ * since a block with one way in is entered with that predecessor's registers.
+ */
+function dividendSetup(
+  insns: Instruction[],
+  index: number,
+  hiCanon: string,
+  size: number,
+): DividendSetup | null {
+  const extender = size === 8 ? "cqo" : size === 4 ? "cdq" : "cwd";
+  for (let i = index - 1; i >= 0; i--) {
+    const insn = insns[i];
+    const mn = withoutLockPrefix(insn.mnemonic);
+    if (mn === extender) return "sign-extended";
+    if (zeroesRegister(insn, hiCanon, Math.min(size, 4))) return "zeroed";
+    if (writesRegister(insn, hiCanon)) return null;
+  }
+  return null;
+}
+
+/**
+ * The statements of a `div`/`idiv`, or null for a form the lifter refuses.
+ *
+ * The machine divides the DOUBLE-width `hi:lo` by the operand. The IR spells
+ * `lo / src` — the dividend as its low half alone — and that is a wrong value
+ * unless the high half really was the low half's extension: zero for `div`,
+ * sign for `idiv`. So the lift is admitted only where `dividendSetup` finds the
+ * matching setup, and a `div` after `cdq` (a negative EAX makes a huge
+ * dividend) or an `idiv` after `xor edx, edx` (an EAX past 2^31 is a large
+ * positive dividend) is refused with the rest: `raw`, counted by the unlifted
+ * census, and reported as a number rather than read as a display gap
+ * (peek-a-bin-5b6q.3). Both operands carry the cast of their signedness and
+ * width, which is the whole difference between the two mnemonics. The byte
+ * form (`AX / r/m8` into AL, AH) is refused: its "high half" is AH.
+ *
+ * Remainder first: both statements read the dividend and one instruction
+ * writes both halves from the same input, so the one overwriting the dividend
+ * has to come second or SSA binds the other's read to it.
+ */
+function divide(
+  signed: boolean,
+  parts: string[],
+  insn: Instruction,
+  is64: boolean,
+  stream: Instruction[],
+  index: number,
+): IRStmt[] | null {
+  if (parts.length < 1) return null;
+  const divisor = parseOperand(parts[0], insn, is64);
+  const size =
+    divisor.kind === "reg" ? regSize(divisor.name) : divisor.kind === "deref" ? divisor.size : 0;
+  if (size !== 2 && size !== 4 && size !== 8) return null;
+  const hi = size === 8 ? "rdx" : size === 4 ? "edx" : "dx";
+  const lo = size === 8 ? "rax" : size === 4 ? "eax" : "ax";
+  const setup = dividendSetup(stream, index, "rdx", size);
+  if (setup !== (signed ? "sign-extended" : "zeroed")) return null;
+  const type = signed ? SIGNED_TYPE[size] : UNSIGNED_TYPE[size];
+  const cast = (e: IRExpr): IRExpr => ({ kind: "cast", type, operand: e });
+  const loVal = cast(irReg(lo, size));
+  const src = cast(divisor);
+  const addr = insn.address;
+  return [
+    { kind: "assign", dest: irReg(hi), src: irBinary("%", loVal, src), addr },
+    { kind: "assign", dest: irReg(lo), src: irBinary("/", loVal, src), addr },
   ];
 }
 
@@ -2341,31 +2496,27 @@ export function liftBlock(
     }
 
     // ── div / idiv ──
+    // Admitted only where the high half of the dividend was set up to match
+    // the mnemonic's signedness; see `divide` and `dividendSetup`. The stream
+    // walked is this block's prefix with a unique predecessor's tail ahead of
+    // it, exactly the stream `carryFor` reads (peek-a-bin-5b6q.3).
     if (mn === "div" || mn === "idiv") {
-      if (parts.length >= 1) {
-        const divisor = parseOperand(parts[0], insn, is64);
-        const srcSize =
-          divisor.kind === "reg"
-            ? regSize(divisor.name)
-            : divisor.kind === "deref"
-              ? divisor.size
-              : 4;
-        const dividendHi = srcSize === 8 ? "rdx" : srcSize === 2 ? "dx" : "edx";
-        const dividendLo = srcSize === 8 ? "rax" : srcSize === 2 ? "ax" : "eax";
-        const loVal = irReg(dividendLo, regSize(dividendLo));
-        const quotient = irBinary("/", loVal, divisor);
-        const remainder = irBinary("%", loVal, divisor);
-        // Remainder first. Both expressions read the dividend, and one
-        // instruction writes both halves *from the same input* — so the
-        // statement that overwrites the dividend has to come second or SSA
-        // binds the other one's read to it, giving `edx = (eax / ecx) % ecx`.
-        // Emitting EDX first also keeps a divisor like `[eax]` readable.
-        stmts.push({ kind: "assign", dest: irReg(dividendHi), src: remainder, addr: insn.address });
-        stmts.push({ kind: "assign", dest: irReg(dividendLo), src: quotient, addr: insn.address });
-        regState.set(dividendLo, quotient);
-        regState.set(dividendHi, remainder);
-      } else {
+      const scan = carryScanStream(block, insnIndex, carryPred);
+      const lifted = divide(
+        mn === "idiv",
+        parts,
+        insn,
+        is64,
+        scan.insns,
+        scan.prepended + insnIndex,
+      );
+      if (lifted === null) {
         stmts.push({ kind: "raw", text: `__asm { ${rawMn} ${insn.opStr} }`, addr: insn.address });
+        continue;
+      }
+      for (const st of lifted) {
+        stmts.push(st);
+        if (st.kind === "assign" && st.dest.kind === "reg") regState.set(st.dest.name, st.src);
       }
       continue;
     }

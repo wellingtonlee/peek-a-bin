@@ -1120,6 +1120,23 @@ refused. **Read the long-form entry before changing the code it describes.**
   names it rather than reading `rdx` stale as before; the repair is the unknown-assignment bead, not
   a change here. A lifted statement is subject to DCE where a `raw` was not: the failure-path `ror`
   in `__security_check_cookie` is now deleted because the tail call is spelled with no arguments.
+- **A `div`/`idiv` is lifted only behind the high-half setup that MATCHES its signedness, and its
+  operands carry the cast of their width.** The IR spells the dividend as its low half, a wrong value
+  unless the high half was that half's extension — zero for `div`, sign for `idiv`. `dividendSetup`
+  (`lifter.ts`) walks BACKWARDS over the block (with a unique predecessor's tail ahead of it, the
+  stream `carryFor` reads), stepping over instructions that do not write the high register — the
+  corpus's commonest shape is `xor edx,edx / lea rax,[rdx-0x20] / div rcx`, so "the immediately
+  preceding statement" refuses nearly every good site — and the first writer decides: `xor`/`sub`/
+  `mov 0`/`and 0` of the register (a 32-bit write zero-extends into RDX; `xor dx,dx` does not zero
+  EDX) admits `div`; `cdq`/`cqo`/`cwd` at the dividend's own width admits `idiv`; anything else (a
+  `call`, a `mov edx,…`, a `pop rdx`, the other signedness's setup, an extension at another width,
+  the stream's start) REFUSES to `raw`, counted in the unlifted census. `writesRegister` is the one
+  declaration of "writes this register", conservative in the refusing direction. The byte form is
+  refused (its high half is AH). Corpus: **4 refusals, all correct** — the two `div`s of the CRT's
+  `_aulldvrm` per PE32 binary, whose EDX really is a remainder or a shifted high dword — and 0 on x64.
+  The corpus has no `idiv`. The casts reach the page only where `fold.ts` does not strip them (a
+  same-width cast on a register, a cast on a constant), so the signedness shows on a memory divisor
+  and in the promoted variables' declared types (`uint32_t var_8` vs `int32_t var_8`).
 - **Which instruction a Jcc's flags belong to is `flagModel.ts`'s answer**, and `branchFor` is the
   only place that asks. It refuses four ways, each a case where an answer would be a guess. The third
   (a result/bittest owner in a block that also holds a `cmp`) is a **policy**, to be revisited *with*

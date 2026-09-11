@@ -4221,8 +4221,10 @@ describe("decompileFunction — an instruction is lifted once, and reads what it
   it("takes a div's quotient and remainder from the same dividend", () => {
     // One instruction writes EAX and EDX from the same input. Emitting EAX
     // first made the remainder read the quotient.
+    // `xor edx, edx` is the high-half setup the lift requires (peek-a-bin-5b6q.3).
     const code = run(
       seq(0x401000, [
+        ["xor", "edx, edx"],
         ["div", "ecx"],
         ["mov", "dword ptr [esi], eax"],
         ["mov", "dword ptr [edi], edx"],
@@ -8818,5 +8820,74 @@ describe("decompileFunction — rotates, bswap, the widening imul and movnti are
     const code = run(seq(0x140001000, [["movnti", "qword ptr [rcx-0x8], rdx"], ["ret"]]), true);
     expect(code).toContain("*(int64_t*)(rcx - 8) = rdx;");
     expect(code).not.toContain("unlifted");
+  });
+});
+
+/**
+ * div/idiv are lifted only behind the high-half setup that matches their
+ * signedness, and the casts carry it to the page (peek-a-bin-5b6q.3). `fold.ts`
+ * strips a cast at a register's own width, so the signedness shows on the
+ * divisor's cast and in the promoted variables' declared types.
+ */
+describe("decompileFunction — a division is admitted only behind its high-half setup", () => {
+  const stackDivide = (setup: [string, string?], mn: string) =>
+    seq(0x401000, [
+      ["mov", "eax, dword ptr [esp+0x4]"],
+      setup,
+      [mn, "dword ptr [esp+0x8]"],
+      ["ret"],
+    ]);
+
+  it("an idiv after cdq emits signed casts and signed declarations", () => {
+    const code = run(stackDivide(["cdq"], "idiv"));
+    expect(code).toContain("int32_t var_8;");
+    expect(code).toContain("eax /= (int32_t)var_8;");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("a div after xor edx, edx emits unsigned casts and unsigned declarations", () => {
+    const code = run(stackDivide(["xor", "edx, edx"], "div"));
+    expect(code).toContain("uint32_t var_8;");
+    expect(code).toContain("eax /= (uint32_t)var_8;");
+    expect(code).not.toContain("unlifted");
+  });
+
+  it("CONTROL: an idiv with no high-half setup stays unlifted rather than dividing the low half", () => {
+    const code = run(seq(0x401000, [["mov", "eax, ecx"], ["idiv", "esi"], ["ret"]]));
+    expect(code).toContain("/* unlifted: idiv esi */;");
+    expect(code).not.toContain("/ esi");
+    // …and so does the setup of the other signedness.
+    const wrong = run(seq(0x401000, [["mov", "eax, ecx"], ["cdq"], ["div", "esi"], ["ret"]]));
+    expect(wrong).toContain("/* unlifted: div esi */;");
+  });
+
+  it("reads the setup from a unique predecessor's tail, and refuses without one", () => {
+    // `xor edx, edx` in the block above the `jbe`; the divide's block has one
+    // way in, so it is entered with EDX zero.
+    const code = run(
+      seq(0x401000, [
+        ["xor", "edx, edx"],
+        ["cmp", "ecx, 5"],
+        ["jbe", "0x401018"],
+        ["mov", "eax, ecx"],
+        ["div", "esi"],
+        ["ret"],
+        ["ret"], // 0x401018
+      ]),
+    );
+    expect(code).toContain("return ecx / esi;");
+    expect(code).not.toContain("unlifted");
+
+    const none = run(
+      seq(0x401000, [
+        ["cmp", "ecx, 5"],
+        ["jbe", "0x401014"],
+        ["mov", "eax, ecx"],
+        ["div", "esi"],
+        ["ret"],
+        ["ret"], // 0x401014
+      ]),
+    );
+    expect(none).toContain("/* unlifted: div esi */;");
   });
 });
