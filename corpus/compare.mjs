@@ -192,8 +192,18 @@ for (const b of bins) {
     );
     row("  entry copies taken", (x) => x.staleV0.copies);
     row("  sites of the shape", (x) => x.staleV0.sites);
+    // Sites whose register's entry value is a PARAMETER and were spelled as
+    // one (peek-a-bin-n9cl.5). `sites` falls by what this rises by; a run
+    // predating the column reads 0 here, which is what it measured.
+    row("  entry-bound reads", (x) => x.staleV0.entryBound ?? 0);
   } else {
     note("  stale version-0 names         NOT MEASURED on both sides (a run predating the audit)");
+  }
+  // Parameter slots carrying struct provenance, both directions. Report only;
+  // absent on a run predating the row (peek-a-bin-n9cl.5).
+  if (B.structProvenance && C.structProvenance) {
+    row("struct provenance links", (x) => x.structProvenance.links);
+    row("  callee parameter views", (x) => x.structProvenance.views);
   }
 
   // ── Branch and value recovery. ─────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BasicBlock } from "../../cfg";
+import type { EntryBinding } from "../entryBindings";
 import type { IRExpr, IRStmt } from "../ir";
 import { canonReg, irBinary, irConst, irDeref, irReg } from "../ir";
 import { buildSSA, computeDomFrontier, computeDominators, computeRPO } from "../ssa";
@@ -401,6 +402,245 @@ describe("destroySSA", () => {
     // Block 3 should still have a return
     const retStmt = ctx.liftedBlocks.get(3)!.find((s) => s.kind === "return");
     expect(retStmt).toBeDefined();
+  });
+});
+
+/**
+ * A register whose ENTRY value is a parameter reads as the parameter.
+ *
+ * Version 0 is the one version no statement defines (`newVersion` starts at 1),
+ * so it is the only point at which the pipeline knows a read is the incoming
+ * value; `bindEntryValues` runs on that information before the versions come
+ * off. The bindings here are what `entryBindings.ts` produces for an x64
+ * function with a two-parameter signature (peek-a-bin-n9cl.5).
+ */
+describe("destroySSA — entry values bound to parameters", () => {
+  const X64: ReadonlyMap<string, EntryBinding> = new Map([
+    ["rcx", { name: "arg_0", size: 8, register: "rcx" }],
+    ["rdx", { name: "arg_1", size: 8, register: "rdx" }],
+  ]);
+  const X86_THISCALL: ReadonlyMap<string, EntryBinding> = new Map([
+    ["rcx", { name: "arg_ecx", size: 4, register: "rcx" }],
+  ]);
+
+  it("rewrites a read of version 0 to the parameter, and only version 0", () => {
+    const blocks = [makeBlock(0, [1], []), makeBlock(1, [], [0])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    // `rax = [rcx + 8]` reads the entry RCX; `rcx = [rdx]` redefines it; the
+    // store then reads the NEW rcx, which is not the argument.
+    liftedBlocks.set(0, [
+      {
+        kind: "assign",
+        dest: irReg("rax", 8),
+        src: irDeref(irBinary("+", irReg("rcx", 8), irConst(8)), 8),
+      },
+      { kind: "assign", dest: irReg("rcx", 8), src: irDeref(irReg("rdx", 8), 8) },
+      { kind: "store", address: irReg("rcx", 8), value: irReg("rax", 8), size: 8 },
+    ]);
+    liftedBlocks.set(1, [{ kind: "return", value: irReg("rax", 8) }]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+
+    const [load, redef, store] = ctx.liftedBlocks.get(0) ?? [];
+    expect(load).toEqual({
+      kind: "assign",
+      dest: irReg("rax", 8),
+      src: irDeref(irBinary("+", { kind: "var", name: "arg_0", size: 8 }, irConst(8)), 8),
+    });
+    // The other argument register, read at version 0 as the load's address.
+    expect(redef).toEqual({
+      kind: "assign",
+      dest: irReg("rcx", 8),
+      src: irDeref({ kind: "var", name: "arg_1", size: 8 }, 8),
+    });
+    // A later version stays the register.
+    expect(store).toEqual({
+      kind: "store",
+      address: irReg("rcx", 8),
+      value: irReg("rax", 8),
+      size: 8,
+    });
+  });
+
+  it("takes no copy at entry for a bound register", () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: "assign", dest: irReg("rax", 8), src: irReg("rcx", 8) },
+      { kind: "assign", dest: irReg("rcx", 8), src: irConst(0) },
+      { kind: "store", address: irReg("rax", 8), value: irReg("rcx", 8), size: 8 },
+    ]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+    const stmts = ctx.liftedBlocks.get(0) ?? [];
+    // The parameter IS the entry value: nothing writes a `rcx_0` or a `rcx`
+    // from it, and nothing mentions `rcx_0` at all.
+    const names = new Set<string>();
+    for (const st of stmts) {
+      if (st.kind === "assign" && st.dest.kind === "var") names.add(st.dest.name);
+    }
+    expect([...names]).toEqual([]);
+    expect(stmts[0]).toEqual({
+      kind: "assign",
+      dest: irReg("rax", 8),
+      src: { kind: "var", name: "arg_0", size: 8 },
+    });
+  });
+
+  // The parameter AT THE READ'S WIDTH, not a cast: the emitter chooses the
+  // cast's signedness from the operation (`varText`), which a cast node baked
+  // into the IR cannot — `(uint32_t)arg_0 < 0` for a `js` is constantly false.
+  it("spells a narrower read of the entry value as the parameter at that width", () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: "assign", dest: irReg("eax", 4), src: irReg("ecx", 4) },
+      { kind: "assign", dest: irReg("ebx", 4), src: irReg("cl", 1) },
+      { kind: "assign", dest: irReg("edi", 4), src: irReg("ch", 1) },
+    ]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+    expect(ctx.liftedBlocks.get(0)).toEqual([
+      { kind: "assign", dest: irReg("eax", 4), src: { kind: "var", name: "arg_0", size: 4 } },
+      { kind: "assign", dest: irReg("ebx", 4), src: { kind: "var", name: "arg_0", size: 1 } },
+      // A high byte cannot be expressed as a width and keeps the explicit shape.
+      {
+        kind: "assign",
+        dest: irReg("edi", 4),
+        src: {
+          kind: "cast",
+          type: "uint8_t",
+          operand: irBinary(">>", { kind: "var", name: "arg_0", size: 8 }, irConst(8)),
+        },
+      },
+    ]);
+  });
+
+  it("reads a branch condition's entry value as the parameter", () => {
+    const blocks = [makeBlock(0, [1, 2], []), makeBlock(1, [], [0]), makeBlock(2, [], [0])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      {
+        kind: "branch",
+        condition: irBinary("==", irReg("rcx", 8), irConst(0)),
+        target: 2,
+        jcc: "je",
+      },
+    ]);
+    liftedBlocks.set(1, []);
+    liftedBlocks.set(2, []);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+    expect(ctx.liftedBlocks.get(0)?.[0]).toEqual({
+      kind: "branch",
+      condition: irBinary("==", { kind: "var", name: "arg_0", size: 8 }, irConst(0)),
+      target: 2,
+      jcc: "je",
+    });
+  });
+
+  it("leaves an unbound argument register alone", () => {
+    // `r8` at version 0 in a function whose signature has two parameters: the
+    // scan never saw it read, so it stays a register — and under n9cl.4 a
+    // declared, uninitialised one on the page, which is the visible refusal.
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("rax", 8), src: irReg("r8", 8) }]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+    expect(ctx.liftedBlocks.get(0)).toEqual([
+      { kind: "assign", dest: irReg("rax", 8), src: irReg("r8", 8) },
+    ]);
+  });
+
+  // The phi's operand is typed IRReg and cannot be rewritten in place, so the
+  // lowering reads the parameter when it emits the copy — and it MUST emit one:
+  // the same-register self-copy skip would leave C's `rcx` holding nothing on
+  // the path where the machine leaves the argument in the register.
+  it("lowers a phi operand that is the entry value to a copy from the parameter", () => {
+    const blocks = [makeBlock(0, [1, 2], []), makeBlock(1, [2], [0]), makeBlock(2, [], [0, 1])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      {
+        kind: "branch",
+        condition: irBinary("==", irReg("rax", 8), irConst(0)),
+        target: 2,
+        jcc: "je",
+      },
+    ]);
+    liftedBlocks.set(1, [
+      { kind: "assign", dest: irReg("rcx", 8), src: irDeref(irReg("rbx", 8), 8) },
+    ]);
+    liftedBlocks.set(2, [
+      { kind: "store", address: irReg("rbx", 8), value: irReg("rcx", 8), size: 8 },
+    ]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X64);
+
+    // Block 0's bypass edge carries the entry value into the join.
+    const b0 = ctx.liftedBlocks.get(0) ?? [];
+    expect(b0).toContainEqual({
+      kind: "assign",
+      dest: irReg("rcx", 8),
+      src: { kind: "var", name: "arg_0", size: 8 },
+    });
+    // The copy lands before the terminator, and no `rcx_0` repair was taken.
+    expect(b0[b0.length - 1].kind).toBe("branch");
+    for (const [, stmts] of ctx.liftedBlocks)
+      for (const st of stmts)
+        expect(st.kind === "assign" && st.dest.kind === "var" && st.dest.name === "rcx_0").toBe(
+          false,
+        );
+    // The join reads the register, which the copy has just assigned.
+    expect(ctx.liftedBlocks.get(2)).toEqual([
+      { kind: "store", address: irReg("rbx", 8), value: irReg("rcx", 8), size: 8 },
+    ]);
+  });
+
+  it("spells an x86 thiscall body's entry ECX as arg_ecx at the code's width", () => {
+    const blocks = [makeBlock(0, [1, 2], []), makeBlock(1, [2], [0]), makeBlock(2, [], [0, 1])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [
+      { kind: "assign", dest: irReg("eax", 4), src: irDeref(irReg("ecx", 4), 4) },
+      {
+        kind: "branch",
+        condition: irBinary("==", irReg("eax", 4), irConst(0)),
+        target: 2,
+        jcc: "je",
+      },
+    ]);
+    liftedBlocks.set(1, [
+      { kind: "assign", dest: irReg("ecx", 4), src: irDeref(irReg("ebx", 4), 4) },
+    ]);
+    liftedBlocks.set(2, [
+      { kind: "store", address: irReg("ebx", 4), value: irReg("ecx", 4), size: 4 },
+    ]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx, X86_THISCALL);
+    const b0 = ctx.liftedBlocks.get(0) ?? [];
+    expect(b0[0]).toEqual({
+      kind: "assign",
+      dest: irReg("eax", 4),
+      src: irDeref({ kind: "var", name: "arg_ecx", size: 4 }, 4),
+    });
+    // The phi copy is spelled `ecx`, the width the code uses, never `rcx`.
+    expect(b0).toContainEqual({
+      kind: "assign",
+      dest: irReg("ecx", 4),
+      src: { kind: "var", name: "arg_ecx", size: 4 },
+    });
+  });
+
+  // NEGATIVE CONTROL for the whole describe: no bindings, no change.
+  it("changes nothing when no register is bound", () => {
+    const blocks = [makeBlock(0, [], [])];
+    const liftedBlocks = new Map<number, IRStmt[]>();
+    liftedBlocks.set(0, [{ kind: "assign", dest: irReg("rax", 8), src: irReg("rcx", 8) }]);
+    const ctx = buildSSA(blocks, liftedBlocks);
+    destroySSA(ctx);
+    expect(ctx.liftedBlocks.get(0)).toEqual([
+      { kind: "assign", dest: irReg("rax", 8), src: irReg("rcx", 8) },
+    ]);
   });
 });
 

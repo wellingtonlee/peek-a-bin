@@ -7,6 +7,7 @@ import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { type CleanupStats, cleanupStructured, emptyCleanupStats } from "./cleanup";
 import { type DecompileAdmissions, emitFunction, emptyAdmissions } from "./emit";
+import { entryBindings } from "./entryBindings";
 import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
 import { bodiesOf, type IRBranch, type IRStmt, type IRTry, rewriteBodies } from "./ir";
@@ -232,10 +233,15 @@ export function decompileFunction(
     liftCrossBlockPops(blocks, liftedBlocks);
 
     // 3. SSA: build → optimize → destroy
+    //
+    // `destroySSA` is handed which registers carry a parameter on entry, from
+    // the same signature `promoteVars` (step 7) declares the header's register
+    // parameters from — `entryBindings` is the one table both read, so the
+    // header and the body cannot disagree about them (peek-a-bin-n9cl.5).
     const ssaCtx = buildSSA(blocks, liftedBlocks);
     const naturalLoops = detectNaturalLoops(blocks, ssaCtx.idom, ssaCtx.domTree);
     ssaOptimize(ssaCtx, naturalLoops.size > 0 ? naturalLoops : undefined);
-    destroySSA(ssaCtx);
+    destroySSA(ssaCtx, entryBindings(signature, is64));
 
     // 4. Fold per block (constant folding + single-use inlining, post-SSA)
     //

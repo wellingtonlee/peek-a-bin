@@ -384,6 +384,17 @@ export type IRStmt =
 export interface IRParam {
   name: string;
   type: string;
+  /**
+   * The canonical register this parameter arrives in, for a parameter
+   * `entryBindings.ts` bound (`rcx` for x64's `arg_0`, `rcx` for x86's
+   * `arg_ecx`); absent for a stack slot `stack.ts` recovered. `structs.ts`'s
+   * `stackDerivedBases` reads the absence: a positionally named STACK slot is
+   * evidence the frame register was derived from the entry stack pointer, and
+   * a register parameter spelled `arg_0` is not — without this field every x64
+   * function with a signature would have its RBP excluded from struct
+   * synthesis on the strength of a name (peek-a-bin-n9cl.5).
+   */
+  register?: string;
 }
 
 export interface IRLocal {

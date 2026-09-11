@@ -345,6 +345,15 @@ let _enumTypesNeeded: Set<string> = new Set();
 let _declaredVarTypes: Map<string, string> = new Map();
 /** Canonical register → the ONE C variable this function declares for it — see `registerText`. */
 let _regVars: Map<string, RegVar> = new Map();
+/**
+ * Register PARAMETERS (`IRParam.register` set) → the register's width, so a
+ * read of one narrower than that width is spelled through the parameter with a
+ * cast chosen from the context — see `varText`. Only these: a local or a stack
+ * slot is declared at its narrowest access (`inferVarTypes`), so no read of it
+ * is narrower than its declaration, and a deduped homed slot keeps the frame's
+ * type deliberately (peek-a-bin-n9cl.5).
+ */
+let _registerParamWidths: Map<string, number> = new Map();
 /** Name → declared type, for every IRVar the body mentions that nothing else declares. */
 let _varDecls: Map<string, string> = new Map();
 /** Call statements whose result register is read — see `collectCapturedCalls`. */
@@ -1003,6 +1012,27 @@ interface RegVar {
  * is printed as is: the residue class `corpus/emitAudits.ts` counts and does
  * not gate (see `registerVariables`).
  */
+/**
+ * A register parameter read NARROWER than the register it arrived in, spelled
+ * `(uint32_t)arg_0` / `(int32_t)arg_0` — `registerText`'s rule, asked of the
+ * parameter `destroySSA` bound the register's entry value to (`boundRead` in
+ * `ssadestroy.ts` hands the read over as the variable at the read's width).
+ *
+ * The signedness comes from the operation for the same reason it does there:
+ * `test ecx, ecx / js` is a signed test of bit 31, and an unsigned cast baked
+ * into the IR made it `(uint32_t)arg_0 < 0` — constantly false, in ten guards
+ * per x64 binary at the first run of peek-a-bin-n9cl.5. Only the emitter sees
+ * the operation, so only the emitter may choose the cast. Every other variable
+ * prints its name: no read of a local or a stack slot is narrower than its
+ * declaration (see `_registerParamWidths`).
+ */
+function varText(expr: IRExpr & { kind: "var" }, signed: boolean): string {
+  const width = _registerParamWidths.get(expr.name);
+  if (width === undefined || expr.size >= width) return expr.name;
+  const spelling = signed ? SIGNED_TYPE[expr.size] : UNSIGNED_TYPE[expr.size];
+  return spelling ? `(${spelling})${expr.name}` : expr.name;
+}
+
 function registerText(expr: IRExpr & { kind: "reg" }, signed: boolean): string {
   const lower = expr.name.toLowerCase();
   if (!isKnownRegister(lower)) return expr.name;
@@ -1863,7 +1893,7 @@ function emitExpr(expr: IRExpr, parentPrec = 0, signed = false): string {
       return registerText(expr, signed);
 
     case "var":
-      return expr.name;
+      return varText(expr, signed);
 
     case "binary": {
       // C has no logical-shift-right operator; this one needs a width.
@@ -2960,6 +2990,9 @@ export function emitFunction(
   _usedEnums = new Map();
   _enumTypesNeeded = new Set();
   _declaredVarTypes = new Map();
+  _registerParamWidths = new Map(
+    func.params.filter((p) => p.register !== undefined).map((p) => [p.name, func.is64 ? 8 : 4]),
+  );
   // Which calls print their result has to be settled before the declarations
   // are collected: it decides what the body says, and the declaration block has
   // to agree with what the body says.

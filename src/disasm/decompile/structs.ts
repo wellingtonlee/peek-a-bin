@@ -209,6 +209,18 @@ export class StructRegistry {
     return this.paramViews.get(slotKey(funcAddr, paramIdx));
   }
 
+  /**
+   * How many parameter slots carry provenance, both ways — an INSTRUMENT for
+   * `corpus/sweep.ts`, which reports the two counts beside `offsetof`. Nothing
+   * in synthesis reads it. Added with peek-a-bin-n9cl.5, which moved x64
+   * provenance from the argument register's NAME (`reg:rcx`, a key every value
+   * the register ever held shared) to the bound parameter (`var:arg_0`): views
+   * on a reused RCX left, views and links through the parameter arrived.
+   */
+  provenanceCounts(): { links: number; views: number } {
+    return { links: this.paramLinks.size, views: this.paramViews.size };
+  }
+
   clear(): void {
     this.structs.clear();
     this.nextId = 0;
@@ -1133,8 +1145,12 @@ function stackDerivedBases(func: IRFunction, canonBase: (e: IRExpr) => string): 
 
   // A verified frame pointer, named as such by stack.ts. An `arg_0x10` — the
   // spelling for a slot whose frame was *not* verified — deliberately does not
-  // match, so an FPO function's RBP keeps its struct.
-  if (func.params.some((p) => STACK_PARAM_RE.test(p.name))) {
+  // match, so an FPO function's RBP keeps its struct. Nor does a REGISTER
+  // parameter: since peek-a-bin-n9cl.5 x64's rcx/rdx/r8/r9 are spelled `arg_<n>`
+  // too, and a name the ABI gave says nothing about the frame — read on the
+  // name alone, every x64 function with a signature would lose its RBP object
+  // here. `IRParam.register` is what tells the two apart.
+  if (func.params.some((p) => p.register === undefined && STACK_PARAM_RE.test(p.name))) {
     derived.add(FRAME_POINTER_KEY);
     derived.add(canonBase(irReg(canonReg("rbp"), 8)));
   }
@@ -1464,97 +1480,59 @@ function isFieldOffset(offset: number): boolean {
 
 // ── Parameter Provenance ──
 
-/** Integer argument registers of the x64 calling convention, in argument order. */
-const X64_ARG_REGS = ["rcx", "rdx", "r8", "r9"];
-
 /**
- * A stack parameter whose name carries a known argument index. stack.ts names a
- * slot `arg_<decimal index>` only when it recovered the frame register's
- * displacement, the offset divided evenly into a slot, AND — inside the x64
- * home space — the callee was shown to spill that argument's own register into
- * it; otherwise the name is the offset (`arg_0x10`), which this deliberately
- * does not match. The home-space condition exists for this map in particular:
- * a home slot's `arg_<N>` DISPLACES the argument register's claim below, so a
- * saved register named `arg_0` would be linked to whatever the callers pass as
- * argument 0 (peek-a-bin-sx57).
+ * A parameter whose name carries a known argument index — the ONE spelling
+ * both kinds of parameter share since peek-a-bin-n9cl.5:
+ *
+ * - **A stack slot** `stack.ts` named `arg_<decimal index>`, which it does only
+ *   when it recovered the frame register's displacement, the offset divided
+ *   evenly into a slot, AND — inside the x64 home space — the callee was shown
+ *   to spill that argument's own register into it; otherwise the name is the
+ *   offset (`arg_0x10`), which this deliberately does not match.
+ * - **A register parameter** `entryBindings.ts` bound: `arg_0 … arg_3` for x64's
+ *   rcx/rdx/r8/r9. `destroySSA` spells every read of the register's entry value
+ *   as that variable, so the body's accesses through the argument register are
+ *   keyed `var:arg_<n>` — the same key a homed spill of the same argument gets,
+ *   because `promote.ts` resolves the two to ONE parameter.
+ *
+ * x86's `arg_ecx`/`arg_edx` carry no index by design (see `entryBindings.ts`)
+ * and do not match: the slot numbering is by offset there, and a register
+ * argument is not a slot.
  */
 const STACK_PARAM_RE = /^arg_(\d+)$/;
 
 /**
  * Canonical base key → argument index, for bases that *are* a parameter.
  *
- * Two naming schemes, and which one applies is decided by the parameter names
- * promoteVars produced:
+ * One naming scheme now. Every parameter this reads is a `var:` key, and N is
+ * the argument index the caller's side counts too — a slot, not a source-level
+ * argument, so an argument occupying two slots shifts caller and callee
+ * indices identically and they still pair correctly.
  *
- * - `arg0`…`arg3` are only emitted for an x64 function with a detected
- *   signature, and they are never substituted into the body — the body still
- *   reads RCX. Their presence is therefore the signal that the argument
- *   registers mean what they say. Without it the register mapping must not be
- *   applied: in an x86 function ECX is a scratch register, not parameter 0.
- * - `arg_N` is a promoted stack slot, and N is its argument index, derived in
- *   stack.ts from the slot's offset above the frame pointer. A slot stack.ts
- *   could not derive an index for is named after its offset instead, so it does
- *   not match here and contributes no provenance. That is the whole gate: an
- *   `arg_N` reaching this point means the frame register was shown to be
- *   derived from the entry stack pointer, which matters most on x64, where RBP
- *   is more often a callee-saved object pointer whose `[rbp+0x10]` is a struct
- *   field rather than an argument.
- *
- * Both schemes count the same thing the call-site side counts — a slot, not a
- * source-level argument — so an argument occupying two slots shifts caller and
- * callee indices identically and they still pair correctly. On x64 the two
- * schemes agree by construction rather than merely coexisting: `[rbp+0x10]` is
- * the home slot of the argument that arrives in RCX, so a homed parameter maps
- * to the same index from either direction.
+ * WHAT THIS REPLACED, because the shape it removed is the tempting one. Until
+ * peek-a-bin-n9cl.5 the x64 register parameters were spelled `arg0 … arg3`, never
+ * substituted into the body, and mapped here to `reg:rcx` … `reg:r9` — with a
+ * "home slot wins" rule for the collision where a spilled `arg_0` and RCX both
+ * claimed index 0, on the argument that RCX reused after the spill no longer
+ * holds the argument. That whole apparatus rested on the register's NAME
+ * standing for the argument throughout the function, which is the flow-blind
+ * claim `baseGenerations` exists to refuse. With the entry value bound, a read
+ * of the argument is `var:arg_0` and a read of a reused RCX is `reg:rcx` — two
+ * different keys by construction, so there is no collision to adjudicate, and
+ * `buildAliasMap` folds nothing between them because no copy connects them
+ * (pinned in `structs.test.ts`). An x86 function's ECX is `reg:rcx` and matches
+ * nothing here, exactly as before.
  *
  * (N ≥ 4 on x64 is a real stack argument. Nothing links to it today, since
  * `collectArgs64` stops at the four argument registers, so it is published and
- * looked up harmlessly. The 32-bit side is where this earns its keep: every
- * argument is a stack slot there, and provenance did not reach it at all.)
- *
- * The two schemes can both claim one index, in an x64 function that spills RCX
- * to its home slot: RCX and `arg_0` are then the same argument. Where they
- * really are the same value the body reloads it, `buildAliasMap` folds the two
- * keys into one, and no collision reaches here. A collision that survives that
- * therefore means RCX no longer holds the argument — it was reused for
- * something else after the spill, which is routine for a volatile register —
- * and only one of the two bases can be argument N.
- *
- * The home slot wins, and since peek-a-bin-sx57 that rests on evidence rather
- * than on the ABI. `[rbp+0x10]` reaching this point as `arg_0` now means
- * stack.ts saw this function spill RCX into that slot — the home space is
- * *callee scratch* under the Microsoft x64 ABI, so the slot is argument 0's
- * storage only when the callee made it so, and a slot holding a saved register
- * is named after its offset and never gets here. (This paragraph used to argue
- * "that is the ABI", which was the wrong way round: the ABI reserves the slot
- * and then gives it away.) RCX's
- * claim rests on two heuristics instead — that the signature detector got the
- * parameter count right, and that the register still holds the incoming value
- * at the point of use — and the surviving collision is evidence the second one
- * has already failed. Keeping both would link the reused register's object to
- * the caller's argument and then publish it over the correct view, since the
- * last write to a slot wins. One base per index, so neither can happen.
+ * looked up harmlessly. The 32-bit side is where the stack half earns its keep:
+ * every argument is a stack slot there.)
  */
 function paramIndexByBase(func: IRFunction): Map<string, number> {
-  const names = new Set(func.params.map((p) => p.name));
   const byBase = new Map<string, number>();
-  const claimedBy = new Map<number, string>();
-
-  for (let i = 0; i < X64_ARG_REGS.length; i++) {
-    if (names.has(`arg${i}`)) {
-      const key = `reg:${canonReg(X64_ARG_REGS[i])}`;
-      byBase.set(key, i);
-      claimedBy.set(i, key);
-    }
-  }
-  for (const name of names) {
-    const m = STACK_PARAM_RE.exec(name);
-    if (!m) continue;
-    const index = Number(m[1]);
-    const heldByRegister = claimedBy.get(index);
-    if (heldByRegister !== undefined) byBase.delete(heldByRegister);
-    byBase.set(`var:${name}`, index);
-    claimedBy.set(index, `var:${name}`);
+  for (const p of func.params) {
+    const m = STACK_PARAM_RE.exec(p.name);
+    if (m) byBase.set(`var:${p.name}`, Number(m[1]));
   }
   return byBase;
 }

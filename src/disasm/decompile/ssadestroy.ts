@@ -1,3 +1,4 @@
+import type { EntryBinding } from "./entryBindings";
 import type { IRExpr, IRReg, IRStmt } from "./ir";
 import {
   canonReg,
@@ -10,11 +11,22 @@ import {
 import type { SSAContext } from "./ssa";
 import { clobberedByCall, clobberedName, versionKey as ssaVersionKey } from "./ssa";
 
+/** No bindings: every entry value stays a register — the behaviour before peek-a-bin-n9cl.5. */
+const NO_BINDINGS: ReadonlyMap<string, EntryBinding> = new Map();
+
 /**
  * Destroy SSA form: convert phi nodes to copy assignments at predecessors,
  * strip all version numbers from registers.
+ *
+ * `entryBindings` names the registers whose ENTRY value is a parameter (see
+ * `entryBindings.ts`); every read of such a register's version 0 is spelled as
+ * that parameter before the versions come off. Absent means no register here
+ * is a parameter, which is what a caller with no signature should say.
  */
-export function destroySSA(ctx: SSAContext): void {
+export function destroySSA(
+  ctx: SSAContext,
+  entryBindings: ReadonlyMap<string, EntryBinding> = NO_BINDINGS,
+): void {
   // Before anything rewrites a read: this reads the register *names* the
   // function's own statements use, and `nameClobberedReads` replaces some of
   // them with variables.
@@ -22,11 +34,19 @@ export function destroySSA(ctx: SSAContext): void {
 
   nameClobberedReads(ctx, spell);
 
+  // Before `splitStaleReads`, and the order is the mechanism: version 0 is the
+  // only point at which the pipeline knows a read is the ENTRY value, and a
+  // bound entry value is a parameter — never stale, never in need of an entry
+  // copy. Bound first, the splitter never sees those reads at all, so it cannot
+  // take `rcx_0 = rcx` for a register whose C variable no longer holds the
+  // argument (nothing initialises `rcx` once its entry value is `arg_0`).
+  bindEntryValues(ctx, entryBindings);
+
   // Before the phis go: they are definitions, and the splitter has to see them
   // as such. Converting them to copies first would leave a phi destination
   // version with no definition anywhere, because the copies are written against
   // the *unversioned* register name.
-  const phiRepairs = splitStaleReads(ctx, spell);
+  const phiRepairs = splitStaleReads(ctx, spell, entryBindings);
 
   // Insert copies for phi operands at end of predecessor blocks
   for (const [, blockPhis] of ctx.phis) {
@@ -53,6 +73,14 @@ export function destroySSA(ctx: SSAContext): void {
           op.value.version !== undefined &&
           ctx.clobbered.has(ssaVersionKey(srcCanon, op.value.version));
 
+        // An operand that IS the entry value of a bound register reads the
+        // parameter, exactly as a statement's read of it does (`bindEntryValues`
+        // cannot rewrite it in place: a phi operand is typed `IRReg`). And it is
+        // never a self-copy: once the entry value is `arg_0`, C's `rcx` holds
+        // nothing until something assigns it, so the copy `rcx = arg_0` is the
+        // one statement that puts the argument into the register on this edge.
+        const bound = op.value.version === 0 ? entryBindings.get(srcCanon) : undefined;
+
         // Skip self-copies. Versions are stripped a few lines below, so a copy
         // between two versions of the *same* canonical register emits literally
         // `rax = rax` — a no-op that only adds a line. (Reserving version 0 for
@@ -63,7 +91,7 @@ export function destroySSA(ctx: SSAContext): void {
         // `rax = rax` is a no-op precisely *because* the register still holds
         // the version, which is the one thing staleness rules out. There the
         // copy has to run, reading the variable.
-        if (destCanon === srcCanon && !clobber && !repair) continue;
+        if (destCanon === srcCanon && !clobber && !repair && !bound) continue;
 
         // Canonical is the *identity* of the register, not its spelling: a phi
         // is created and renamed under the 64-bit parent whatever the code
@@ -77,15 +105,17 @@ export function destroySSA(ctx: SSAContext): void {
         const copy: IRStmt = {
           kind: "assign",
           dest: { kind: "reg", name: destName, size: regSize(destName) },
-          src: repair
-            ? { kind: "var", name: repair, size: op.value.size }
-            : clobber
-              ? {
-                  kind: "var",
-                  name: clobberedName(srcName, op.value.version as number),
-                  size: op.value.size,
-                }
-              : { kind: "reg", name: srcName, size: regSize(srcName) },
+          src: bound
+            ? boundRead(bound, regSize(srcName))
+            : repair
+              ? { kind: "var", name: repair, size: op.value.size }
+              : clobber
+                ? {
+                    kind: "var",
+                    name: clobberedName(srcName, op.value.version as number),
+                    size: op.value.size,
+                  }
+                : { kind: "reg", name: srcName, size: regSize(srcName) },
         };
         // A phi's copy belongs on the edge, so it must precede the predecessor's
         // terminator rather than follow it.
@@ -321,6 +351,112 @@ function nameClobberedReads(ctx: SSAContext, spell: Speller): void {
   }
 }
 
+// ── Entry values that are parameters ──
+
+/** C's unsigned integer of each width, for a read narrower than the parameter. */
+const UNSIGNED_AT: Record<number, string> = {
+  1: "uint8_t",
+  2: "uint16_t",
+  4: "uint32_t",
+  8: "uint64_t",
+};
+
+/** `ah`, `bh`, `ch`, `dh`: bits 15:8, which no cast alone can name. */
+const HIGH_BYTE_READ = /^[abcd]h$/;
+
+/**
+ * The parameter, read at `width` bytes.
+ *
+ * A read of the whole register is the parameter itself. A NARROWER read is the
+ * parameter variable AT THE READ'S WIDTH — `{kind:"var", name:"arg_0", size:4}`
+ * for `ecx` in x64 code — and `emit.ts`'s `varText` spells it `(uint32_t)arg_0`
+ * or `(int32_t)arg_0` from the CONTEXT, exactly as `registerText` spells a
+ * narrow read of a declared register. It is deliberately NOT a cast node here,
+ * for a reason the corpus found: `test ecx, ecx / js` is a signed test of bit
+ * 31, and a baked-in `(uint32_t)arg_0` made the guard `(uint32_t)arg_0 < 0` —
+ * constantly false, a different program that compiles (10 guards per x64
+ * binary at the first run of peek-a-bin-n9cl.5). The signedness belongs to the
+ * operation, so only the emitter, which sees the operation, may choose the
+ * cast. A second reason: a cast node is what `inferTypes` reads as the
+ * variable's type, and it would have narrowed every parameter read once at
+ * 32 bits to `uint32_t` whatever the other reads said.
+ *
+ * A high-byte read (`ch`) cannot be expressed as a width and keeps the
+ * explicit `(uint8_t)(arg_0 >> 8)` shape `registerText` uses.
+ */
+function boundRead(binding: EntryBinding, width: number, spelling?: string): IRExpr {
+  const param: IRExpr = { kind: "var", name: binding.name, size: binding.size };
+  if (width >= binding.size) return param;
+  const type = UNSIGNED_AT[width];
+  if (!type) return param;
+  if (spelling !== undefined && HIGH_BYTE_READ.test(spelling)) {
+    return {
+      kind: "cast",
+      type,
+      operand: {
+        kind: "binary",
+        op: ">>",
+        left: param,
+        right: { kind: "const", value: 8, size: 4 },
+      },
+    };
+  }
+  return { kind: "var", name: binding.name, size: width };
+}
+
+/**
+ * Spell every read of a bound register's ENTRY value as the parameter it is.
+ *
+ * Version 0 is the register's function-entry value (`newVersion` in `ssa.ts`
+ * starts the definitions at 1), so a read carrying it is the decompiler saying
+ * "the value this register was given on the way in" — and where the ABI says
+ * that value is argument N, the read *is* `arg_N`. Before this pass the header
+ * declared `int64_t arg0` while the body read `rcx`: the parameter was
+ * decorative in every x64 function, and `structs.ts` could give the argument
+ * registers no provenance because nothing in the body named the parameter
+ * (peek-a-bin-n9cl.5).
+ *
+ * THREE THINGS THIS DOES NOT DO, each deliberate:
+ *
+ *  - **No copy at entry.** `rcx = arg_0` as a first statement would make the
+ *    register a second name for the same value and hand every later read the
+ *    aliasing question back. The parameter IS the entry value; the register
+ *    variable holds nothing until the function writes it.
+ *  - **A later version stays a register.** `mov rcx, rdx; call f(rcx)` reads
+ *    version 1, which is not the argument, and is spelled `rcx` as before.
+ *  - **An unbound entry register stays a register.** `r8` version 0 in a
+ *    function whose signature says two parameters is left alone, and under
+ *    peek-a-bin-n9cl.4 it is then a declared, uninitialised `int64_t r8;` on
+ *    the page — the refusal made VISIBLE, which is what makes a lower-bound
+ *    arity scan safe to act on.
+ *
+ * A phi operand is not a statement and is typed `IRReg`, so it cannot be
+ * rewritten here; `destroySSA` consults the same map when it lowers the operand
+ * to a copy, and `splitStaleReads` declines to repair it. The `branch` arm of
+ * `mapReads` covers a guard's reads, so `if (arg_0 == 0)` comes out of the same
+ * rewrite as everything else.
+ */
+function bindEntryValues(ctx: SSAContext, bindings: ReadonlyMap<string, EntryBinding>): void {
+  if (bindings.size === 0) return;
+  for (const [blockId, stmts] of ctx.liftedBlocks) {
+    ctx.liftedBlocks.set(
+      blockId,
+      stmts.map((s) =>
+        mapReads(s, (reg) => {
+          if (reg.version !== 0) return null;
+          const binding = bindings.get(canonReg(reg.name));
+          if (!binding) return null;
+          const spelling = reg.name.toLowerCase();
+          // The read's own width is the width of the name it carries — the
+          // lifter's invariant, and the one `emit.ts`'s `operandWidth` reads.
+          const width = isKnownRegister(spelling) ? regSize(spelling) : reg.size;
+          return boundRead(binding, width, spelling);
+        }),
+      ),
+    );
+  }
+}
+
 // ── Live-range splitting ──
 
 /**
@@ -355,7 +491,21 @@ function nameClobberedReads(ctx: SSAContext, spell: Speller): void {
  * case the bead was filed for and had to guess at block entry for anything
  * defined elsewhere (peek-a-bin-bld).
  */
-function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
+function splitStaleReads(
+  ctx: SSAContext,
+  spell: Speller,
+  /**
+   * Registers whose entry value is a parameter. `bindEntryValues` has already
+   * rewritten every *statement's* read of their version 0, so the only place
+   * this pass can still meet one is a phi operand — and there it is not stale:
+   * a parameter is never redefined, and `destroySSA` lowers the operand to a
+   * copy from the parameter directly. Without this refusal the operand would be
+   * judged against the predecessor's exit state, found stale (the register
+   * *has* been redefined), and repaired with an entry copy `rcx_0 = rcx` that
+   * reads a C variable nothing initialises.
+   */
+  bound: ReadonlyMap<string, EntryBinding>,
+): Map<string, string> {
   /** `<predecessor block>|<version key>` → the variable holding that version. */
   const phiRepairs = new Map<string, string>();
   const blockIds = ctx.blocks.map((b) => b.id);
@@ -448,7 +598,11 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
         const clobber =
           op.value.version !== undefined &&
           ctx.clobbered.has(ssaVersionKey(srcCanon, op.value.version));
-        if (srcCanon === canon && !clobber) continue;
+        // A bound entry value is the third shape `destroySSA` emits a copy for
+        // (`rcx = arg_0`), so it is a write in the predecessor exactly as the
+        // other two are.
+        const boundOp = op.value.version === 0 && bound.has(srcCanon);
+        if (srcCanon === canon && !clobber && !boundOp) continue;
         noteDef(canon, op.blockId);
         const list = phiCopiesOut.get(op.blockId) ?? [];
         list.push({ canon, version: phi.dest.version });
@@ -580,6 +734,9 @@ function splitStaleReads(ctx: SSAContext, spell: Speller): Map<string, string> {
         // would park the *pre-call* value in a variable and call it the value
         // the call left.
         if (ctx.clobbered.has(ssaVersionKey(canon, op.value.version))) continue;
+        // A bound entry value is a parameter, and `destroySSA` copies from the
+        // parameter — see the `bound` parameter above.
+        if (op.value.version === 0 && bound.has(canon)) continue;
         const live = exitState.get(op.blockId)?.get(canon);
         if (live === undefined || live === op.value.version) continue;
         stale.push({

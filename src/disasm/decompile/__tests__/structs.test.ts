@@ -1413,13 +1413,28 @@ describe("synthesizeStructs — call-site propagation", () => {
 // the shape guards — which cost a two-field partial view its ability to be
 // completed — do not apply.
 describe("synthesizeStructs — provenance-based merging", () => {
-  /** An x64 function whose parameters were named by the register path. */
+  /**
+   * An x64 function whose parameters are register parameters — spelled
+   * `arg_<i>` and marked with the register they arrive in, as `promoteVars`
+   * declares them since peek-a-bin-n9cl.5. The BODY reads the parameter
+   * variable, because `destroySSA` has spelled every read of the register's
+   * entry value as `arg_<i>`; a bare RCX in such a body is a *later* value of
+   * the register, not the argument.
+   */
+  const X64_ARG_REGS = ["rcx", "rdx", "r8", "r9"];
   const callee = (body: IRStmt[], address: number, paramCount = 1): IRFunction =>
     fn(body, {
       address,
       name: `sub_${address.toString(16)}`,
-      params: Array.from({ length: paramCount }, (_, i) => ({ name: `arg${i}`, type: "int64_t" })),
+      params: Array.from({ length: paramCount }, (_, i) => ({
+        name: `arg_${i}`,
+        type: "int64_t",
+        register: X64_ARG_REGS[i],
+      })),
     });
+  /** The bound entry value of RCX / RDX: what the callee's body reads. */
+  const ARG0 = irVar("arg_0", 8);
+  const ARG1 = irVar("arg_1", 8);
 
   const caller = (body: IRStmt[], address = 0x401000): IRFunction =>
     fn(body, { address, name: `sub_${address.toString(16)}` });
@@ -1434,7 +1449,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
     synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]), reg);
     // B only ever touches two of them — too weak a shape to merge on, but its
     // base *is* the object A passed.
-    const b = synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), reg);
+    const b = synthesizeStructs(callee(reads(ARG0, [0, 8]), 0x402000), reg);
 
     expect(reg.getAll()).toHaveLength(1);
     expect(b.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8, 16]);
@@ -1449,10 +1464,10 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]),
       callerFirst,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), callerFirst);
+    synthesizeStructs(callee(reads(ARG0, [0, 8]), 0x402000), callerFirst);
 
     const calleeFirst = new StructRegistry();
-    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), calleeFirst);
+    synthesizeStructs(callee(reads(ARG0, [0, 8]), 0x402000), calleeFirst);
     synthesizeStructs(
       caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]),
       calleeFirst,
@@ -1478,7 +1493,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
       ]),
       conflicting,
     );
-    synthesizeStructs(callee(reads(RCX, [4, 16]), 0x402000), conflicting);
+    synthesizeStructs(callee(reads(ARG0, [4, 16]), 0x402000), conflicting);
     expect(conflicting.getAll()).toHaveLength(2);
 
     // Control: the same pair with the callee reading offset 8 instead of 4 has
@@ -1492,26 +1507,80 @@ describe("synthesizeStructs — provenance-based merging", () => {
       ]),
       compatible,
     );
-    synthesizeStructs(callee(reads(RCX, [8, 16]), 0x402000), compatible);
+    synthesizeStructs(callee(reads(ARG0, [8, 16]), 0x402000), compatible);
     expect(compatible.getAll()).toHaveLength(1);
   });
 
-  // `arg0`…`arg3` are only produced for an x64 function with a detected
-  // signature, and the argument registers only mean argument 0..3 there. In an
-  // x86 function RCX is a scratch register.
-  it("only reads RCX as a parameter for a function that has register parameters", () => {
+  // The argument register carries provenance ONLY through the parameter
+  // variable `destroySSA` bound it to. A body that reads a bare RCX reads a
+  // value the register holds at some later point — or, in an x86 function, a
+  // scratch register — and `paramIndexByBase` has no `reg:` branch to guess
+  // otherwise from (peek-a-bin-n9cl.5 deleted it).
+  it("reads a register parameter only through its bound variable, never through the register", () => {
     const withParams = new StructRegistry();
     synthesizeStructs(
       caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]),
       withParams,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), withParams);
+    synthesizeStructs(callee(reads(ARG0, [0, 8]), 0x402000), withParams);
     expect(withParams.getAll()).toHaveLength(1);
+
+    // Same callee header, but the body reads RCX itself: no provenance.
+    const bareRegister = new StructRegistry();
+    synthesizeStructs(
+      caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]),
+      bareRegister,
+    );
+    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000), bareRegister);
+    expect(bareRegister.getAll()).toHaveLength(2);
 
     const noParams = new StructRegistry();
     synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]), noParams);
     synthesizeStructs(fn(reads(RCX, [0, 8]), { address: 0x402000, name: "sub_402000" }), noParams);
     expect(noParams.getAll()).toHaveLength(2);
+  });
+
+  // `buildAliasMap` folds a `rbx = arg_0` copy onto `var:arg_0`, and used to fold
+  // the `rcx_0 = rcx` entry copy onto `reg:rcx`. With the entry value bound
+  // there is no copy between the register and the parameter at all, so the two
+  // keys stay apart: a reused RCX keeps its own object.
+  it("does not alias the parameter variable onto the argument register", () => {
+    const reg = new StructRegistry();
+    synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]), reg);
+    // The callee reads the argument through arg_0 and, after reusing RCX for
+    // something else, reads a second object through the register.
+    synthesizeStructs(
+      callee(
+        [...reads(ARG0, [0, 8]), assign(RCX, at(irReg("rbx", 8), 0x40, 8)), ...reads(RCX, [0, 24])],
+        0x402000,
+      ),
+      reg,
+    );
+    const shapes = reg.getAll().map((d) => d.fields.map((f) => f.offset));
+    expect(shapes).toContainEqual([0, 8, 16]);
+    expect(shapes).toContainEqual([0, 24]);
+    expect(reg.getAll()).toHaveLength(2);
+  });
+
+  // `stackDerivedBases` reads a positional `arg_<n>` as evidence the frame
+  // register was derived from the entry stack pointer and excludes RBP from
+  // synthesis. A REGISTER parameter is spelled the same way and says nothing
+  // about the frame: an x64 function with a signature whose RBP holds an
+  // object pointer (frame-pointer omission) must keep that object.
+  it("does not read a register parameter's name as frame-pointer evidence", () => {
+    const rbp = irReg("rbp", 8);
+    const registerParam = synthesizeStructs(
+      fn(reads(rbp, [0, 8]), { params: [{ name: "arg_0", type: "int64_t", register: "rcx" }] }),
+      new StructRegistry(),
+    );
+    expect(registerParam.typedefs).toHaveLength(1);
+
+    // Control: the same name from a recovered STACK slot is frame evidence.
+    const stackParam = synthesizeStructs(
+      fn(reads(rbp, [0, 8]), { params: [{ name: "arg_0", type: "int64_t" }] }),
+      new StructRegistry(),
+    );
+    expect(stackParam.typedefs ?? []).toHaveLength(0);
   });
 
   it("matches the argument index, not merely the presence of an argument", () => {
@@ -1522,7 +1591,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [irConst(0), RCX])]),
       rightSlot,
     );
-    synthesizeStructs(callee(reads(RDX, [0, 8]), 0x402000, 2), rightSlot);
+    synthesizeStructs(callee(reads(ARG1, [0, 8]), 0x402000, 2), rightSlot);
     expect(rightSlot.getAll()).toHaveLength(1);
 
     const wrongSlot = new StructRegistry();
@@ -1530,7 +1599,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [irConst(0), RCX])]),
       wrongSlot,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 8]), 0x402000, 2), wrongSlot);
+    synthesizeStructs(callee(reads(ARG0, [0, 8]), 0x402000, 2), wrongSlot);
     expect(wrongSlot.getAll()).toHaveLength(2);
   });
 
@@ -1595,28 +1664,26 @@ describe("synthesizeStructs — provenance-based merging", () => {
     expect(b.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8]);
   });
 
-  // An x64 function that spills RCX to its home slot has both an `arg0`
-  // register parameter and an `arg_0` stack parameter for the same argument.
-  // Where they really are the same value the body reloads it and buildAliasMap
-  // folds the two bases into one, so a collision that gets this far means RCX
-  // was reused for something else after the spill. The home slot is argument
-  // 0's storage by ABI; the register's claim is a heuristic that this collision
-  // is itself evidence against.
-  it("gives a contested argument index to the stack slot, not the register", () => {
+  // An x64 function that spills RCX to its home slot has ONE parameter,
+  // `arg_0`: `promote.ts` resolves the homed slot and the register to the same
+  // declaration, and both the reload from the slot and a read of the register's
+  // entry value are spelled `arg_0`. A bare RCX in the body is then the reused
+  // register — no longer the argument — and nothing here can be asked to
+  // adjudicate a collision, because there is none: `var:arg_0` and `reg:rcx`
+  // are different keys by construction. (This replaced a "home slot wins" rule
+  // over a collision the old `arg0` spelling manufactured.)
+  it("keeps a homed argument and the reused register apart", () => {
     const reg = new StructRegistry();
     const p = irVar("p", 8);
     // The caller passes a three-field object as argument 0.
     synthesizeStructs(caller([...reads(p, [0, 8, 16]), callStmt("sub_402000", [p])]), reg);
 
-    // The callee reads argument 0 through its home slot, and separately uses
+    // The callee reads argument 0 through the parameter, and separately uses
     // RCX — no longer the argument — as the base of an unrelated object.
-    const homed = fn([...reads(irVar("arg_0", 8), [0, 8]), ...reads(RCX, [0, 24])], {
+    const homed = fn([...reads(ARG0, [0, 8]), ...reads(RCX, [0, 24])], {
       address: 0x402000,
       name: "sub_402000",
-      params: [
-        { name: "arg_0", type: "int64_t" },
-        { name: "arg0", type: "int64_t" },
-      ],
+      params: [{ name: "arg_0", type: "int64_t" }],
     });
     synthesizeStructs(homed, reg);
 
@@ -1660,7 +1727,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 8]), callStmt("sub_403000", [RCX])], 0x401000),
       corroborated,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), corroborated);
+    synthesizeStructs(callee(reads(ARG0, [0, 24]), 0x403000), corroborated);
     synthesizeStructs(
       caller([...reads(RCX, [0, 16]), callStmt("sub_403000", [RCX])], 0x402000),
       corroborated,
@@ -1681,7 +1748,7 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 8]), callStmt("sub_403000", [RCX])], 0x401000),
       inOrder,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), inOrder);
+    synthesizeStructs(callee(reads(ARG0, [0, 24]), 0x403000), inOrder);
     synthesizeStructs(
       caller([...reads(RCX, [0, 16]), callStmt("sub_403000", [RCX])], 0x402000),
       inOrder,
@@ -1697,17 +1764,17 @@ describe("synthesizeStructs — provenance-based merging", () => {
       caller([...reads(RCX, [0, 16]), callStmt("sub_403000", [RCX])], 0x402000),
       callersFirst,
     );
-    synthesizeStructs(callee(reads(RCX, [0, 24]), 0x403000), callersFirst);
+    synthesizeStructs(callee(reads(ARG0, [0, 24]), 0x403000), callersFirst);
     expect(callersFirst.getAll()).toHaveLength(2);
   });
 
   it("follows an alias from the parameter register to the base actually used", () => {
     const reg = new StructRegistry();
     synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]), reg);
-    // `rbx = rcx` then everything through RBX — the normal shape once a
+    // `rbx = arg_0` then everything through RBX — the normal shape once a
     // parameter is kept across a call.
     const b = synthesizeStructs(
-      callee([assign(irReg("rbx", 8), RCX), ...reads(irReg("rbx", 8), [0, 8])], 0x402000),
+      callee([assign(irReg("rbx", 8), ARG0), ...reads(irReg("rbx", 8), [0, 8])], 0x402000),
       reg,
     );
 
@@ -1719,10 +1786,10 @@ describe("synthesizeStructs — provenance-based merging", () => {
     const reg = new StructRegistry();
     synthesizeStructs(caller([...reads(RCX, [0, 8, 16]), callStmt("sub_402000", [RCX])]), reg);
     synthesizeStructs(
-      callee([...reads(RCX, [0, 8]), callStmt("sub_403000", [RCX])], 0x402000),
+      callee([...reads(ARG0, [0, 8]), callStmt("sub_403000", [ARG0])], 0x402000),
       reg,
     );
-    const c = synthesizeStructs(callee(reads(RCX, [0, 32]), 0x403000), reg);
+    const c = synthesizeStructs(callee(reads(ARG0, [0, 32]), 0x403000), reg);
 
     expect(reg.getAll()).toHaveLength(1);
     expect(c.typedefs?.[0].fields.map((f) => f.offset)).toEqual([0, 8, 16, 32]);

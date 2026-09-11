@@ -900,37 +900,169 @@ describe("promoteVars — synthesized stack frame", () => {
 describe("promoteVars — register parameters", () => {
   const sig = (paramCount: number): FunctionSignature => ({ convention: "fastcall", paramCount });
 
-  it("adds one arg per x64 register parameter", () => {
+  // `arg_<n>`, with the underscore — the same pattern `stack.ts` gives a spilled
+  // home slot and `structs.ts`'s `STACK_PARAM_RE` keys provenance on. `arg0`
+  // matched neither (peek-a-bin-n9cl.5).
+  it("adds one arg_<n> per x64 register parameter, naming the register it arrives in", () => {
     const fn = promote([], { signature: sig(2) });
     expect(fn.params).toEqual([
-      { name: "arg0", type: "int64_t" },
-      { name: "arg1", type: "int64_t" },
+      { name: "arg_0", type: "int64_t", register: "rcx" },
+      { name: "arg_1", type: "int64_t", register: "rdx" },
     ]);
   });
 
   it("caps register parameters at four", () => {
-    expect(promote([], { signature: sig(7) }).params).toHaveLength(4);
+    expect(promote([], { signature: sig(7) }).params.map((p) => p.name)).toEqual([
+      "arg_0",
+      "arg_1",
+      "arg_2",
+      "arg_3",
+    ]);
   });
 
   it("adds nothing for a zero-parameter signature", () => {
     expect(promote([], { signature: sig(0) }).params).toEqual([]);
   });
 
-  it("adds no register parameters in 32-bit mode", () => {
-    expect(promote([], { signature: sig(3), is64: false }).params).toEqual([]);
+  // x86 has no `arg_<n>` register parameters: the slot numbering is by offset,
+  // so `[ebp+8]` is `arg_0` under `__fastcall` although it is the third source
+  // argument, and `inferSignature32` leaves register arguments out of
+  // `paramCount`. The incoming ECX/EDX are named for what they are.
+  it("declares arg_ecx for an x86 thiscall body and nothing for its paramCount", () => {
+    const fn = promote([], { signature: { convention: "thiscall", paramCount: 3 }, is64: false });
+    expect(fn.params).toEqual([{ name: "arg_ecx", type: "int32_t", register: "rcx" }]);
   });
 
-  // KNOWN BUG (reported, not fixed): the x64 home area at [rbp+0x10] holds the
-  // *same* arguments that arrive in RCX/RDX/R8/R9. The dedupe check compares
-  // 'arg0' against the stack name 'arg_0', never matches, and the parameter
-  // list ends up listing each spilled register argument twice.
-  it("lists a spilled register argument twice", () => {
+  it("declares arg_ecx and arg_edx for an x86 fastcall body, ahead of the stack slots", () => {
+    const frame = frameOf(stackVar({ name: "arg_0", offset: 8, key: stackVarKey("bp", 8) }));
+    const fn = promote([], {
+      frame,
+      signature: { convention: "fastcall", paramCount: 1 },
+      is64: false,
+    });
+    expect(fn.params.map((p) => p.name)).toEqual(["arg_ecx", "arg_edx", "arg_0"]);
+    expect(fn.params[1]).toEqual({ name: "arg_edx", type: "int32_t", register: "rdx" });
+  });
+
+  it("declares no register parameter for an x86 cdecl or stdcall body", () => {
+    expect(
+      promote([], { signature: { convention: "cdecl", paramCount: 2 }, is64: false }).params,
+    ).toEqual([]);
+    expect(
+      promote([], { signature: { convention: "stdcall", paramCount: 2 }, is64: false }).params,
+    ).toEqual([]);
+  });
+
+  // The x64 home slot at [rbp+0x10] holds the SAME argument that arrives in RCX,
+  // and `stack.ts` names it `arg_0` only when it saw the callee spill RCX there.
+  // One argument, one parameter: the frame's declaration is kept — its type is
+  // the spill's width — in the register's position. (Under the old `arg0`
+  // spelling the dedupe never matched and the argument was listed twice.)
+  it("resolves a spilled register argument and its home slot to one parameter", () => {
     const frame = frameOf(stackVar({ name: "arg_0", offset: 0x10, key: stackVarKey("bp", 0x10) }));
-    const fn = promote([assign(irReg("eax", 4), bpParam(0x10))], { frame, signature: sig(1) });
+    const fn = promote([assign(irReg("eax", 4), bpParam(0x10))], { frame, signature: sig(2) });
     expect(fn.params).toEqual([
       { name: "arg_0", type: "int32_t" },
-      { name: "arg0", type: "int64_t" }, // same incoming argument as arg_0
+      { name: "arg_1", type: "int64_t", register: "rdx" },
     ]);
+  });
+
+  // Once RCX's entry value is spelled `arg_0`, the spill `mov [rbp+0x10], rcx`
+  // is `arg_0 = arg_0`: a store of the argument into the argument's own storage,
+  // which the ABI makes an identity. It is dropped, at any depth, through any
+  // width cast the binding put on the read.
+  it("drops a homed spill that promotes to a parameter identity", () => {
+    const frame = frameOf(stackVar({ name: "arg_0", offset: 0x10, key: stackVarKey("bp", 0x10) }));
+    const spill: IRStmt = {
+      kind: "store",
+      address: irBinary("+", irReg("rbp", 8), irConst(0x10)),
+      value: irVar("arg_0", 8),
+      size: 8,
+      addr: 0x401004,
+    };
+    const narrowSpill: IRStmt = {
+      kind: "store",
+      address: irBinary("+", irReg("rbp", 8), irConst(0x10)),
+      value: { kind: "cast", type: "uint32_t", operand: irVar("arg_0", 8) },
+      size: 4,
+      addr: 0x401008,
+    };
+    const guarded: IRStmt = {
+      kind: "if",
+      condition: irReg("eax", 4),
+      thenBody: [spill, assign(irReg("ebx", 4), irConst(1))],
+    };
+    const fn = promote([spill, narrowSpill, guarded, assign(irReg("eax", 4), bpParam(0x10))], {
+      frame,
+      signature: sig(1),
+    });
+    expect(fn.body).toEqual([
+      { kind: "if", condition: irReg("eax", 4), thenBody: [assign(irReg("ebx", 4), irConst(1))] },
+      assign(irReg("eax", 4), irVar("arg_0", 4)),
+    ]);
+  });
+
+  // `inferTypes` reads the cast the binding puts on a narrow read as the
+  // parameter's type. Taken blindly that printed `uint32_t arg_0` above a
+  // 64-bit store of it, so a register parameter keeps the register's width
+  // wherever the body reads it at that width; a parameter read only narrowly
+  // is a narrow argument and keeps the narrow type. A STACK parameter is the
+  // control: its width is the slot's, and the guard does not apply.
+  it("refuses a narrowing type for a register parameter the body reads at full width", () => {
+    // A fresh context per call: the refusal WRITES the declared type back into
+    // it, so the emitter's cast suppression sees the header's type and not the
+    // narrow one (pinned below).
+    const narrow = () => typeCtxOf({ arg_0: { kind: "int", size: 4, signed: false } });
+    const cast = (name: string): IRExpr => ({
+      kind: "cast",
+      type: "uint32_t",
+      operand: irVar(name, 8),
+    });
+    const fullAndNarrow = [
+      assign(irReg("eax", 4), cast("arg_0")),
+      assign(irReg("rbx", 8), irVar("arg_0", 8)),
+    ];
+    const refused = narrow();
+    expect(promote(fullAndNarrow, { signature: sig(1), typeCtx: refused }).params).toEqual([
+      { name: "arg_0", type: "int64_t", register: "rcx" },
+    ]);
+    expect(refused.types.get("arg_0")).toEqual({ kind: "int", size: 8, signed: true });
+    // Read only narrowly: the narrow type is the honest one.
+    expect(
+      promote([assign(irReg("eax", 4), cast("arg_0"))], { signature: sig(1), typeCtx: narrow() })
+        .params,
+    ).toEqual([{ name: "arg_0", type: "uint32_t", register: "rcx" }]);
+    // A pointer is not a narrowing.
+    const ptr = typeCtxOf({ arg_0: { kind: "ptr", pointee: { kind: "unknown" } } });
+    expect(promote(fullAndNarrow, { signature: sig(1), typeCtx: ptr }).params).toEqual([
+      { name: "arg_0", type: "PVOID", register: "rcx" },
+    ]);
+    // Control: a stack parameter takes the inferred type as before.
+    const frame = frameOf(
+      stackVar({ name: "arg_0", offset: 0x10, size: 8, key: stackVarKey("bp", 0x10) }),
+    );
+    expect(promote(fullAndNarrow, { frame, typeCtx: narrow() }).params).toEqual([
+      { name: "arg_0", type: "uint32_t" },
+    ]);
+  });
+
+  // NEGATIVE CONTROLS for the deletion: a LOCAL's identity and a REGISTER's are
+  // left exactly as they were — `var_8 = var_8` is a lost operand, the class
+  // `corpus/selfAssigns.ts` exists to catch, and must reach the page.
+  it("keeps a local's and a register's self-assignment", () => {
+    const frame = frameOf(
+      stackVar({ name: "var_8", offset: 8, key: stackVarKey("bp", -8) }),
+      stackVar({ name: "arg_0", offset: 0x10, key: stackVarKey("bp", 0x10) }),
+    );
+    const localIdentity: IRStmt = {
+      kind: "store",
+      address: irBinary("-", irReg("rbp", 8), irConst(8)),
+      value: bpLocal(8),
+      size: 4,
+    };
+    const regIdentity = assign(irReg("eax", 4), irReg("eax", 4));
+    const fn = promote([localIdentity, regIdentity], { frame, signature: sig(1) });
+    expect(fn.body).toEqual([assign(irVar("var_8", 4), irVar("var_8", 4)), regIdentity]);
   });
 });
 

@@ -1,8 +1,9 @@
 import type { FunctionSignature } from "../signatures";
 import { stackVarKey } from "../stack";
 import type { StackFrame } from "../types";
+import { entryBindings } from "./entryBindings";
 import type { IRCall, IRExpr, IRFunction, IRLocal, IRParam, IRStmt } from "./ir";
-import { bodiesOf, irVar, walkStmts } from "./ir";
+import { bodiesOf, irVar, rewriteBodies, walkStmts } from "./ir";
 import type { TypeContext } from "./typeInfer";
 import { typeToString } from "./typeInfer";
 
@@ -604,6 +605,73 @@ function promoteStmt(
   }
 }
 
+// ── A register parameter's width ──
+
+/** Bytes of an `intN_t`/`uintN_t` spelling, or null for anything else. */
+function integerWidth(type: string): number | null {
+  const m = /^u?int(8|16|32|64)_t$/.exec(type);
+  return m ? Number(m[1]) / 8 : null;
+}
+
+/**
+ * The variables the body reads at their own width somewhere — i.e. mentioned
+ * other than as the direct operand of a cast. `destroySSA` spells a narrow
+ * read of a bound parameter as `(uint32_t)arg_0`, so a variable that only ever
+ * appears under a cast is only ever read narrowly.
+ */
+function fullWidthVarReads(body: IRStmt[]): Set<string> {
+  const mentions = new Map<string, number>();
+  const narrow = new Map<string, number>();
+  walkStmts(body, (e) => {
+    if (e.kind === "var") mentions.set(e.name, (mentions.get(e.name) ?? 0) + 1);
+    if (e.kind === "cast" && e.operand.kind === "var")
+      narrow.set(e.operand.name, (narrow.get(e.operand.name) ?? 0) + 1);
+  });
+  const out = new Set<string>();
+  for (const [name, n] of mentions) if (n > (narrow.get(name) ?? 0)) out.add(name);
+  return out;
+}
+
+// ── Identities promotion creates ──
+
+/**
+ * `arg_0 = arg_0;` → nothing, at every nesting depth.
+ *
+ * Only for a PARAMETER, and only for an identity — the same name on both sides,
+ * through any casts the binding put on a narrower read (`arg_0 = (uint32_t)arg_0`
+ * is `mov [rbp+0x10], ecx` spilling the low half into the home slot). The shape
+ * arises exactly once: an x64 callee spills an argument register into that
+ * argument's home slot, `stack.ts` names the slot `arg_<n>` (it saw the spill —
+ * `inUnfilledHomeSpace`), `destroySSA` has spelled the register's entry value
+ * `arg_<n>` too, and the store promotes to an assignment of a parameter to
+ * itself. The ABI is what makes it an identity: the home slot IS the
+ * argument's storage, so the store changes nothing the C can observe.
+ *
+ * Dropped here rather than at emit because it is a statement about the IR
+ * (`corpus/selfAssigns.ts` would otherwise read `arg_0 = arg_0` off the page at
+ * the spill's address and file it as an open-operand `mov`, a row that says
+ * nothing — measured as the negative control for this deletion). The
+ * instruction leaves the line map, which is the honest reading: nothing on the
+ * page stands for it. A LOCAL's identity is deliberately not touched — `var_8 =
+ * var_8` would be a lost operand, exactly the class `selfAssigns` exists to
+ * catch — and neither is a register's.
+ *
+ * `rewriteBodies` is `ir.ts`'s one exhaustive declaration of which statement
+ * kinds hold nested lists, so a new compound kind reaches this pass by
+ * construction.
+ */
+function dropParameterIdentities(body: IRStmt[], paramNames: ReadonlySet<string>): IRStmt[] {
+  const isIdentity = (s: IRStmt): boolean => {
+    if (s.kind !== "assign" || s.dest.kind !== "var" || !paramNames.has(s.dest.name)) return false;
+    let src: IRExpr = s.src;
+    while (src.kind === "cast") src = src.operand;
+    return src.kind === "var" && src.name === s.dest.name;
+  };
+  const prune = (list: IRStmt[]): IRStmt[] =>
+    list.filter((s) => !isIdentity(s)).map((s) => rewriteBodies(s, prune));
+  return prune(body);
+}
+
 // ── Detect whether any `return` in the structured tree carries a value ──
 
 /**
@@ -818,19 +886,44 @@ export function promoteVars(
     stackFrame?.frameEstablishedAt ?? null,
   );
 
-  // For x64 fastcall: add register params
-  if (is64 && signature && signature.paramCount > 0) {
-    for (let i = 0; i < Math.min(signature.paramCount, 4); i++) {
-      const paramName = `arg${i}`;
-      // Only add if not already present from stack frame
-      if (!params.some((p) => p.name === paramName)) {
-        params.push({ name: paramName, type: "int64_t" });
-      }
-    }
+  // Register parameters, from the same table `destroySSA` spelled the body's
+  // entry-value reads from (`entryBindings.ts`): `arg_0 … arg_3` for x64's
+  // rcx/rdx/r8/r9, `arg_ecx`/`arg_edx` for an x86 thiscall/fastcall body. In
+  // argument order, AHEAD of the stack slots — that is source order on both
+  // architectures (register arguments precede the stack ones).
+  //
+  // THE DEDUPE IS ABI TRUTH, NOT A TIDY-UP. On x64 a spilled home slot is named
+  // `arg_<n>` by `stack.ts` (`argSlotName`) and the register that arrived in it
+  // is `arg_<n>` here — the same pattern on purpose, because the home slot is
+  // that argument's own storage. Where both exist the frame's declaration is
+  // kept in the register's position, typed from the spill's width: one
+  // parameter, read through either name, which is what `structs.ts` then keys
+  // `var:arg_0` for both. (`arg0`, the old spelling, never matched `arg_0`, so
+  // a spilled register argument was listed twice.)
+  const registerParams: IRParam[] = [];
+  for (const [register, binding] of entryBindings(signature, is64)) {
+    const homed = params.find((p) => p.name === binding.name);
+    registerParams.push(homed ?? { name: binding.name, type: sizeToType(binding.size), register });
+  }
+  if (registerParams.length > 0) {
+    const named = new Set(registerParams.map((p) => p.name));
+    params.splice(0, params.length, ...registerParams, ...params.filter((p) => !named.has(p.name)));
   }
 
   // Infer variable types from access patterns
   inferVarTypes(body, locals, is64, varLookup, paramLookup, bpAliases);
+
+  // Promote body — and drop the identities promotion itself creates. A homed
+  // spill `mov [rsp+8], rcx` promotes to `arg_0 = arg_0` once the register's
+  // entry value is bound to the parameter: a store of the argument into the
+  // argument's own storage, which is a statement about the ABI and not about
+  // the program. See `dropParameterIdentities`.
+  const paramNames = new Set(params.map((p) => p.name));
+  const promoted = dropParameterIdentities(
+    body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases)),
+    paramNames,
+  );
+  const promotedForTypes = promoted;
 
   // Apply type inference results from SSA-level analysis
   if (typeCtx) {
@@ -840,16 +933,40 @@ export function promoteVars(
         local.type = typeToString(inferred);
       }
     }
+    // A REGISTER parameter's width is the register's, and a narrowing type is
+    // taken only where the body never reads the parameter at full width. The
+    // cast the binding puts on a narrow read (`(uint32_t)arg_0` for `ecx`) is
+    // what `inferTypes` reads as the variable's type, and it has no evidence
+    // the other way — a full-width read carries no cast — so `mov [rdx], rcx /
+    // mov eax, ecx` came out `uint32_t arg_0` above a 64-bit store of it: valid
+    // C storing 32 bits where the machine stores 64. The same guard
+    // `registerVariables` applies to a declared register (a type is taken only
+    // at the declared width, peek-a-bin-n9cl.4), asked here of the parameter.
+    // A parameter read ONLY narrowly keeps the narrow type: `movzx eax, cl`
+    // alone is a callee reading a byte argument, and `uint8_t arg_0` says so.
+    const fullWidthReads = fullWidthVarReads(promotedForTypes);
     for (const param of params) {
       const inferred = typeCtx.types.get(param.name);
-      if (inferred && inferred.kind !== "unknown") {
-        param.type = typeToString(inferred);
+      if (!inferred || inferred.kind === "unknown") continue;
+      const spelled = typeToString(inferred);
+      const width = is64 ? 8 : 4;
+      if (
+        param.register !== undefined &&
+        fullWidthReads.has(param.name) &&
+        integerWidth(spelled) !== null &&
+        (integerWidth(spelled) as number) < width
+      ) {
+        // The refusal has to reach the emitter too: `emit.ts` suppresses a cast
+        // whose type equals the operand's KNOWN type, and the known type here
+        // is the narrow one just refused — so without this the narrow read
+        // printed as a bare `arg_0` under an `int64_t arg_0` header, a 64-bit
+        // read where the machine reads 32. The declared type is the known type.
+        typeCtx.types.set(param.name, { kind: "int", size: width, signed: true });
+        continue;
       }
+      param.type = spelled;
     }
   }
-
-  // Promote body
-  const promoted = body.map((s) => promoteStmt(s, is64, varLookup, paramLookup, bpAliases));
 
   // Type-based variable renaming
   const renameMap = new Map<string, string>();

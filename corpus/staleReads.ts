@@ -41,6 +41,7 @@
 
 import type { CalleeClobbers } from "../src/disasm/callSummary";
 import { buildCFG } from "../src/disasm/cfg";
+import type { EntryBinding } from "../src/disasm/decompile/entryBindings";
 import { carryPredecessor, flagPredecessor } from "../src/disasm/decompile/flagModel";
 import { blockLiveOut, foldBlock } from "../src/disasm/decompile/fold";
 import type { IRExpr, IRReg, IRStmt } from "../src/disasm/decompile/ir";
@@ -93,8 +94,22 @@ export interface StaleV0Result {
   functionsScanned: number;
   /** Every read of a version-0 register it saw. Instrument liveness. */
   v0Reads: number;
-  /** Version-0 reads with a definition of the same register dominating them. */
+  /**
+   * Version-0 reads with a definition of the same register dominating them,
+   * EXCLUDING the reads of a bound entry register (below). This is the
+   * population the verdict is asked over.
+   */
   sites: number;
+  /**
+   * Version-0 reads of the shape whose register's entry value is a PARAMETER
+   * (`entryBindings.ts`), and which the lowering spelled as that parameter.
+   * They leave `sites` — a parameter is not a bare register and cannot be
+   * clobbered — and are counted here so the fall in `sites` is ACCOUNTED FOR
+   * rather than read as the audit going blind (peek-a-bin-n9cl.5). A bound
+   * register whose read nevertheless survives as a bare register is a binding
+   * MISS, and stays in `sites` to be judged like any other.
+   */
+  entryBound: number;
   /** Of those, the ones that survive lowering as a bare register name. */
   confirmed: number;
   /** Of those, the ones where the register provably holds another value. GATE. */
@@ -115,6 +130,7 @@ export function emptyStaleV0(): StaleV0Result {
     functionsScanned: 0,
     v0Reads: 0,
     sites: 0,
+    entryBound: 0,
     confirmed: 0,
     wrong: 0,
     funcsWrong: 0,
@@ -309,6 +325,13 @@ export function auditStaleV0Reads(
   stringMap: Map<number, string>,
   funcMap: Map<number, { name: string; address: number }>,
   calleeClobbers: CalleeClobbers | undefined,
+  /**
+   * The registers whose entry value the pipeline spells as a parameter — the
+   * SAME map `pipeline.ts` hands `destroySSA`, built by the caller from the same
+   * signature, so this replica lowers the program the emitter lowers. Absent
+   * means none, which is what a run predating the binding measured.
+   */
+  entryBindings: ReadonlyMap<string, EntryBinding> = new Map(),
 ): void {
   let ctx: SSAContext;
   try {
@@ -530,7 +553,7 @@ export function auditStaleV0Reads(
   // visible write. Stopping at `destroySSA` measures a program nobody emits,
   // and on this corpus it doubles the count (151 against 78 on t64).
   try {
-    destroySSA(ctx);
+    destroySSA(ctx, entryBindings);
     // With the live-out sets, because that is what `pipeline.ts` folds with: a
     // fold that deletes a definition escaping its block produces a program
     // nobody emits (peek-a-bin-7eyn).
@@ -562,12 +585,14 @@ export function auditStaleV0Reads(
 
   let wrongHere = 0;
   for (const s of sites) {
-    res.sites++;
     // The read: a bare, version-stripped read of the same register at the same
     // instruction address, with no preserved entry value of that register named
     // at the same address.
     let survives = false;
     let repaired = false;
+    /** The lowering spelled this address's read of the register as its parameter. */
+    let bound = false;
+    const binding = entryBindings.get(s.canon);
     /** How the surviving reads at this address actually spell the register. */
     const readNames = new Set<string>();
     for (const [, stmts] of ctx.liftedBlocks)
@@ -581,7 +606,19 @@ export function auditStaleV0Reads(
         const names = new Set<string>();
         varsIn(st, names);
         for (const n of names) if (preserved.get(n) === s.canon) repaired = true;
+        if (binding !== undefined && names.has(binding.name)) bound = true;
       }
+    // A bound entry value is a parameter on the page, not a register: it leaves
+    // the population and is counted apart (`entryBound`). Same one-address-one-
+    // verdict rule as `repaired`: the parameter named at this address IS the
+    // version-0 read, whatever else the instruction reads. A bound register with
+    // NO parameter named here fell through the binding and is judged below —
+    // its bare name now denotes an uninitialised variable, which is `wrong`.
+    if (bound) {
+      res.entryBound++;
+      continue;
+    }
+    res.sites++;
     if (repaired) continue;
     // ── The write: a strictly dominating block assigns the variable the read
     // is spelled through ──

@@ -533,10 +533,11 @@ if (!pre.haveBins || !pre.haveCc) {
      * Both liveness assertions matter. `sites` non-zero says the audit still
      * finds the *shape* — a version-0 read a dominating definition overwrote —
      * which is common and is not itself a defect once the value is preserved.
-     * `copies` non-zero says it can still see the preservation; that check
-     * depends on `ssadestroy.ts` spelling a preserved entry value `<reg>_0`,
-     * and a spelling change would otherwise turn every repaired site back into
-     * a reported defect.
+     * `copies + entryBound` non-zero says it can still see the preservation —
+     * an entry copy `<reg>_0 = <reg>`, or (since peek-a-bin-n9cl.5) the bound
+     * parameter named where the version-0 read was. Each check depends on how
+     * `ssadestroy.ts` spells its answer, and a spelling change would otherwise
+     * turn every repaired site back into a reported defect.
      */
     it("never names a register for a value it no longer holds", () => {
       for (const r of results.values()) {
@@ -556,7 +557,16 @@ if (!pre.haveBins || !pre.haveCc) {
         ).toBe(`${r.key} spoiled repairs: `);
         expect(v.copiesCorrupted).toBe(0);
         expect(v.sites).toBeGreaterThan(0);
-        expect(v.copies).toBeGreaterThan(0);
+        // The preservation half: an entry copy `<reg>_0 = <reg>` OR a bound
+        // parameter named where the version-0 read was. Since
+        // peek-a-bin-n9cl.5 every x64 entry copy the corpus took was for an
+        // argument register (156/147 → 0/0 on t64/w64), and those reads are
+        // parameters now — so `copies` alone is 0 there by construction, and
+        // `entryBound` is the count that says the audit still sees how the
+        // entry value reached the page. Both spellings are checked
+        // structurally (`entryCopyName`; the binding's own name at the
+        // address), so a change to either turns sites red rather than green.
+        expect(v.copies + v.entryBound).toBeGreaterThan(0);
       }
     });
 
@@ -1763,6 +1773,11 @@ function renderReport(): string {
       `  offsetof (compiled and run) ${o.fieldsCorrect}/${o.fields} fields, ` +
         `${o.distinctCorrect}/${o.distinctDefs} distinct definitions`,
     );
+    const prov = r.structProvenance;
+    L.push(
+      `    struct provenance         ${prov.links} caller-linked parameter slots, ${prov.views} callee views ` +
+        "(registry total so far; report only)",
+    );
     const mn = memberNameAgreement([{ tag: key, funcs: r.funcs }]);
     L.push(
       `  member name vs brackets     ${mn.disagreeing} disagreeing of ${mn.members} members ` +
@@ -1886,7 +1901,7 @@ function renderReport(): string {
     const sv = r.staleV0;
     L.push(
       `  stale version-0 names       ${sv.wrong} wrong of ${sv.confirmed} confirmed, ` +
-        `${sv.sites} sites over ${sv.v0Reads} version-0 reads`,
+        `${sv.sites} sites over ${sv.v0Reads} version-0 reads; ${sv.entryBound} entry-bound reads left the population`,
     );
     L.push(
       `    entry-value copies        ${sv.copies}, of which ${sv.copiesCorrupted} spoiled ` +

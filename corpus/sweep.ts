@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isCoveredMnemonic, X64_VOLATILE } from "../src/disasm/callSummary";
 import { buildCFG, detectLoops } from "../src/disasm/cfg";
+import { entryBindings } from "../src/disasm/decompile/entryBindings";
 import type { IRStmt } from "../src/disasm/decompile/ir";
 import { IMPORT_SLOT_PREFIX } from "../src/disasm/decompile/lifter";
 import { decompileFunction, type StructuringTap } from "../src/disasm/decompile/pipeline";
@@ -610,6 +611,14 @@ export interface BinResult {
    */
   staleV0: StaleV0Result;
   /**
+   * `StructRegistry.provenanceCounts()` after the whole binary: parameter
+   * slots a caller linked a struct into (`links`) and slots the callee built
+   * its own view of (`views`). REPORT-ONLY and cumulative over the session's
+   * registry, i.e. over the four binaries in run order. Both were 0 on x64
+   * before peek-a-bin-n9cl.5 gave register parameters a name the body reads.
+   */
+  structProvenance: { links: number; views: number };
+  /**
    * A GUARD THAT NAMES THE RIGHT OPERATOR OVER THE WRONG OPERANDS.
    *
    * A GATE at 0 on `named`, for the same reason `staleV0` is one: every row is
@@ -928,6 +937,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       uncoveredMnemonics: af.instructions.filter((i) => !isCoveredMnemonic(i.mnemonic)).length,
     },
     staleV0: emptyStaleV0(),
+    structProvenance: { links: 0, views: 0 },
     staleGuards: emptyStaleGuards(),
     crossEdgeGuards: emptyCrossEdgeGuards(),
     popReads: emptyPopReads(),
@@ -1193,7 +1203,9 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       funcMap,
       af.calleeClobbers,
     );
-    // Version-0 reads a dominating definition has overwritten.
+    // Version-0 reads a dominating definition has overwritten. The replica is
+    // handed the same entry bindings `pipeline.ts` lowers with, from the same
+    // signature, or it would measure a program the emitter never sees.
     auditStaleV0Reads(
       res.staleV0,
       key,
@@ -1206,6 +1218,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
       af.stringMap,
       funcMap,
       af.calleeClobbers,
+      entryBindings(signature, af.pe.is64),
     );
   }
 
@@ -1214,6 +1227,7 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
   // comment at `ordered`. A no-op for the default, kept unconditional so the
   // two runs' `funcs_<bin>.jsonl` differ only where the C does.
   res.funcs.sort((a, b) => a.addr - b.addr);
+  res.structProvenance = af.structRegistry.provenanceCounts();
   return res;
 }
 

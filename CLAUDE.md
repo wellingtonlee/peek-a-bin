@@ -1025,7 +1025,8 @@ refused. **Read the long-form entry before changing the code it describes.**
   an oracle.**
 - **`arg_N` means argument *position*; the frame register's displacement from entry SP is
   `StackFrame.frameDelta`.** The name is the only channel to `structs.ts`, which keys `^arg_(\d+)$`
-  to exclude frame-pointer-omitted RBP — **do not loosen it**. `frameRegisterAliases` follows a
+  for cross-function provenance and, **on a STACK slot only** (`IRParam.register` absent), to
+  exclude frame-pointer-omitted RBP — **do not loosen it**. `frameRegisterAliases` follows a
   `splitStaleReads` copy **only when `frameDelta !== null`**; under FPO two versions are two objects.
   The stack pointer gets none of this — it moves. **`isParam` is decided by that displacement, not by
   whether the prologue was canonical**, and a refusal is **total**. `addressesOwnFrame` refuses
@@ -1033,6 +1034,34 @@ refused. **Read the long-form entry before changing the code it describes.**
   (`__SEH_prolog4`): the rule is stack **arithmetic**, not a byte pattern, carried by three refusals.
   **On x64 an index is not enough to name a slot** — an unfilled home slot is **withdrawn entirely**
   by `inUnfilledHomeSpace`, not re-labelled, since the caller owns the storage.
+- **x64 register parameters are `arg_<n>` and BOUND AT ENTRY; x86's are `arg_ecx`/`arg_edx`.**
+  `decompile/entryBindings.ts` is the one table (rcx/rdx/r8/r9 → `arg_0..3` for `i <
+  min(paramCount, 4)`; ecx → `arg_ecx` under thiscall/fastcall, edx → `arg_edx` under fastcall;
+  `this` REFUSED), read by `destroySSA` — every read of the register's **SSA version 0** becomes the
+  parameter variable, a narrower read the same variable at the read's width, **before
+  `splitStaleReads`** — and by
+  `promoteVars` for the header, so the two cannot disagree. Before this the header said `int64_t
+  arg0` and the body read `rcx`: the parameter was decorative in every x64 function, and `arg0`
+  matched neither `argSlotName`'s spelling nor `STACK_PARAM_RE`. Four refusals: **no copy at
+  entry** (the parameter IS the entry value); a later version stays a register; an unbound `r8`
+  under `paramCount 2` stays a declared, uninitialised register — the lower-bound arity scan made
+  **visible**; and a phi operand that is the entry value lowers to `rcx = arg_0` (never skipped as
+  a self-copy). **A narrower read is the parameter AT THE READ'S WIDTH, never a cast node** —
+  `emit.ts`'s `varText` chooses `(int32_t)`/`(uint32_t)` from the operation as `registerText`
+  does; a baked-in unsigned cast made `test ecx, ecx / js` print `(uint32_t)arg_0 < 0`, constantly
+  false, in 10 guards per x64 binary, and the polarity audit is blind to a cast's signedness.
+  **x86 is not renumbered** — `argSlotName` numbers slots by offset, `inferSignature32` excludes
+  register args from `paramCount`, and four readers take `arg_<N>` as a slot index. **Same commit,
+  ABI-justified**: a homed spill `arg_0 = arg_0` is deleted by `dropParameterIdentities` (params
+  only, through casts; **0 sites in the corpus** — the spills promote as `rsp`-keyed locals);
+  `paramIndexByBase`'s `X64_ARG_REGS`/`reg:` branch and its "home slot wins" collision rule are
+  **gone** (`var:arg_0` and `reg:rcx` are different keys by construction — and the register branch
+  had been publishing a parameter VIEW for every struct on a REUSED rcx, 10 wrong views per x64
+  binary, now withdrawn). A register parameter's `intN_t` type from `inferTypes` is refused where
+  it is narrower than the register and the body reads the parameter at full width, and the refusal
+  is **written back into `typeCtx`**. `corpus/staleReads.ts` gained `entryBound` so the fall in
+  `sites` is accounted for, and its liveness half is `copies + entryBound > 0` — every x64 entry
+  copy was an argument register's.
 - **`regSize()` is not a membership test** — it falls back to 4 for any unrecognised name. Use
   `isKnownRegister()`.
 - **`sectionInfo.characteristics & 0x20000000` = `IMAGE_SCN_MEM_EXECUTE`.**

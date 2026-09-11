@@ -308,6 +308,17 @@ from gcc's own complaints, because the decompiler deliberately does not declare 
 > printing something plausible. Do not read "all of them compile" as "all of them are right". The
 > `__unrecovered_N` half of that is now counted: see **Unrecovered values** below.
 
+**Struct provenance (report only).** `StructRegistry.provenanceCounts()` after each binary —
+parameter slots a caller linked a struct into (`links`) and slots the callee built its own view of
+(`views`), per binary. Added with `peek-a-bin-n9cl.5`, which changed WHERE x64 provenance comes
+from: `paramIndexByBase` used to map `arg0` to `reg:rcx`, so a struct on ANY value RCX ever held
+published a view for parameter 0 — measured at `098cb04`, 10 of t64's 39 views were on a REUSED
+rcx (`sub_14000B000`'s section-header pointer, `memset`'s running destination) and are withdrawn;
+the body reading `var:arg_0` publishes the honest ones and links the callers'. A move here is
+provenance the merges act on and says nothing about whether a merge was RIGHT — `offsetof` below
+proves a declaration self-consistent and can never see a wrong identity, so every function a
+provenance change moves is read against `objdump`, not counted.
+
 **Struct layout, by a compiled and *run* `offsetof` program.** Field names record the offsets
 recovery found (`field_0x18`), so a declaration C would not lay out that way states something
 false, and every `p->field_0x18` in that body then reads bytes the access never touched. Reading
@@ -340,10 +351,25 @@ character as `polarity inverted`, which gates for the same reason.
 
 Two liveness assertions sit beside it and both matter. `sites > 0` says the audit still finds the
 *shape* — a version-0 read a dominating definition overwrote — which is common (28/159/28/158) and
-is not itself a defect once the value is preserved. `copies > 0` says it can still see the
-preservation, and that check depends on `ssadestroy.ts` spelling a preserved entry value
-`<reg>_0`; a spelling change would otherwise turn every repaired site back into a reported defect.
-It is the one place the audit has to know anything about how the code under test writes its answer.
+is not itself a defect once the value is preserved. `copies + entryBound > 0` says it can still
+see the preservation — an entry copy spelled `<reg>_0`, or the bound parameter named where the
+version-0 read was — and each check depends on `ssadestroy.ts` spelling its answer that way; a
+spelling change would otherwise turn every repaired site back into a reported defect. These are
+the places the audit has to know how the code under test writes its answer.
+
+**`entryBound` accounts for the sites that LEFT the population** (`peek-a-bin-n9cl.5`). A register
+whose entry value is a parameter — x64's rcx/rdx/r8/r9 within `signature.paramCount`, x86's
+ecx/edx under thiscall/fastcall (`src/disasm/decompile/entryBindings.ts`) — is spelled as that
+parameter by `destroySSA`, so a version-0 read of it is a parameter on the page and not a bare
+register: it cannot be clobbered and is not a `site`. It is counted in `entryBound` when the
+lowering named the parameter at that address; a bound register whose read nevertheless survives as
+a bare register is a binding MISS and stays in `sites`, where its name now denotes an uninitialised
+variable and is judged `wrong`. The replica is handed the SAME bindings `pipeline.ts` lowers with,
+from the same signature — a replica lowering a different program would measure nothing. `sites`
+fell on x64 by what `entryBound` rose by (34/229/227/34 → 32/40/40/32 sites, 0 → 2/189/187/2 entry-bound, t32/t64/w64/w32 at `098cb04` → this change); `copies` stays
+non-zero because callee-saved registers and unbound argument registers still take entry copies.
+An audit reaching a smaller number by no longer looking is this repo's recurring failure, and this
+column is the difference between that and a population that moved.
 
 Per-site detail is in `stalev0_<bin>.jsonl` — the wrong reads first, then the spoiled copies.
 

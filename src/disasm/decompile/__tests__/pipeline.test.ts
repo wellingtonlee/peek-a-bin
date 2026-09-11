@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
 import type { CalleeClobbers } from "../../callSummary";
 import { recogniseCrtIdioms } from "../../crtIdioms";
+import type { FunctionSignature } from "../../signatures";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
 import { isKnownRegister } from "../ir";
@@ -3660,6 +3661,224 @@ describe("decompileFunction — an incoming register value is not the first defi
     // whatever eax already held.
     expect(code).not.toMatch(/return edx;/);
     expect(code).toContain("if (ecx != 0)");
+  });
+});
+
+/**
+ * A register's ENTRY value is the parameter the ABI says it is, and the body
+ * reads the parameter (peek-a-bin-n9cl.5).
+ *
+ * Before this the header declared `int64_t arg0` while every line of the body
+ * read `rcx`: the parameter was decorative in every x64 function, and a reader
+ * had to know the convention to connect the two. The binding is taken at
+ * version 0 in `destroySSA`, from the same `entryBindings` table `promoteVars`
+ * declares the header from, so the two cannot disagree.
+ */
+describe("decompileFunction — entry registers are parameters", () => {
+  /** As `run`, with a signature and (optionally) the frame `stack.ts` recovers. */
+  function runSigned(
+    instructions: Instruction[],
+    is64: boolean,
+    signature: FunctionSignature,
+    withFrame = false,
+  ): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      withFrame ? analyzeStackFrame(func, instructions, "x86", is64) : null,
+      signature,
+      is64,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+    ).code;
+  }
+  const fastcall = (paramCount: number): FunctionSignature => ({
+    convention: "fastcall",
+    paramCount,
+  });
+
+  it("reads the incoming RCX as arg_0 in the body, under a header spelling it the same way", () => {
+    const code = runSigned(
+      seq(0x401000, [["mov", "rax, qword ptr [rcx + 8]"], ["ret"]]),
+      true,
+      fastcall(1),
+    );
+    expect(code).toContain("int64_t arg_0");
+    expect(code).not.toContain("arg0");
+    expect(code).toMatch(/return \*\(int64_t\*\)\(arg_0 \+ 8\);/);
+    // The register itself is never mentioned, so n9cl.4 declares no `rcx`.
+    expect(code).not.toMatch(/\brcx\b/);
+  });
+
+  // The binding hands a narrow read over as the parameter AT THE READ'S WIDTH
+  // and `emit.ts`'s `varText` spells the cast — from the operation, as
+  // `registerText` does for a declared register. The header keeps the
+  // register's width: nothing here claims the argument is 32 bits.
+  it("spells a narrower read of the entry value through the parameter", () => {
+    const code = runSigned(seq(0x401000, [["mov", "eax, ecx"], ["ret"]]), true, fastcall(1));
+    expect(code).toContain("int64_t arg_0");
+    expect(code).toContain("return (uint32_t)arg_0;");
+    expect(code).not.toMatch(/\becx\b/);
+    // Beside a full-width read: the same spelling, the same header.
+    const wide = runSigned(
+      seq(0x401000, [["mov", "qword ptr [rdx], rcx"], ["mov", "eax, ecx"], ["ret"]]),
+      true,
+      fastcall(2),
+    );
+    expect(wide).toContain("int64_t arg_0");
+    expect(wide).toContain("*(int64_t*)(arg_1) = arg_0;");
+    expect(wide).toContain("return (uint32_t)arg_0;");
+    // A pointer type from a deref is kept beside the cast.
+    const deref = runSigned(
+      seq(0x401000, [
+        ["mov", "rax, qword ptr [rcx]"],
+        ["mov", "edx, ecx"],
+        ["add", "eax, edx"],
+        ["ret"],
+      ]),
+      true,
+      fastcall(1),
+    );
+    expect(deref).toContain("PVOID arg_0");
+    expect(deref).toContain("(uint32_t)arg_0");
+  });
+
+  // THE CORPUS FOUND THIS. `test ecx, ecx / js` is a signed test of bit 31 and
+  // the first cut baked `(uint32_t)arg_0` into the IR, so ten guards per x64
+  // binary read `(uint32_t)arg_0 < 0` — constantly false in C, a different
+  // program that compiles and that the polarity audit (which checks the
+  // operator) cannot see. The cast's signedness is the operation's to choose.
+  it("spells a signed test of a narrow entry read with a signed cast", () => {
+    const code = runSigned(
+      seq(0x401000, [["test", "ecx, ecx"], ["js", "0x40100c"], ["mov", "eax, 1"], ["ret"]]),
+      true,
+      fastcall(1),
+    );
+    expect(code).toContain("(int32_t)arg_0");
+    expect(code).not.toContain("(uint32_t)arg_0 < 0");
+    expect(code).not.toContain("(uint32_t)arg_0 >= 0");
+  });
+
+  it("keeps a redefined RCX as the register", () => {
+    const code = runSigned(
+      seq(0x401000, [
+        ["mov", "rax, qword ptr [rcx]"], // entry RCX: arg_0
+        ["mov", "rcx, qword ptr [rdx]"], // a new value in RCX: not the argument
+        ["mov", "qword ptr [rcx + 0x10], rax"], // two reads, so the definition
+        ["mov", "qword ptr [rcx + 0x18], rax"], // is not inlined into one use
+        ["ret"],
+      ]),
+      true,
+      fastcall(2),
+    );
+    expect(code).toContain("*(int64_t*)(arg_0)");
+    expect(code).toContain("rcx = *(int64_t*)(arg_1);");
+    expect(code).toContain("*(int64_t*)(rcx + 0x10) = rax;");
+  });
+
+  // NEGATIVE CONTROL on the arity: a register the signature does not cover is
+  // not a parameter. `inferSignature64` is a lower bound, and the honest page
+  // for a register it missed is the declared, uninitialised register — which is
+  // exactly what n9cl.4 prints — not an invented `arg_2`.
+  it("leaves an argument register beyond the signature's count as a register", () => {
+    const code = runSigned(
+      seq(0x401000, [["mov", "rax, qword ptr [r8]"], ["ret"]]),
+      true,
+      fastcall(2),
+    );
+    expect(code).not.toContain("arg_2");
+    expect(code).toContain("int64_t r8;");
+    expect(code).toContain("*(int64_t*)(r8)");
+  });
+
+  it("puts the parameter into the register on the edge where the machine leaves it there", () => {
+    // RCX is redefined only when RAX is non-zero; the join reads RCX either
+    // way. On the bypass path the C's `rcx` must be given the argument, or the
+    // store reads an uninitialised variable.
+    const code = runSigned(
+      seq(0x401000, [
+        ["test", "rax, rax"],
+        ["je", "0x40100c"],
+        ["mov", "rcx, qword ptr [rbx]"],
+        ["mov", "qword ptr [rbx + 8], rcx"], // 0x40100c — the join
+        ["ret"],
+      ]),
+      true,
+      fastcall(1),
+    );
+    expect(code).toContain("rcx = arg_0;");
+    expect(code).toContain("*(int64_t*)(rbx + 8) = rcx;");
+  });
+
+  // The home slot IS the argument's storage, so the spill is an identity and is
+  // not printed; the reload reads the one parameter both names resolve to.
+  it("does not print a homed spill of the argument into its own slot", () => {
+    const code = runSigned(
+      seq(0x401000, [
+        ["push", "rbp"],
+        ["mov", "rbp, rsp"],
+        ["sub", "rsp, 0x20"],
+        ["mov", "qword ptr [rbp + 0x10], rcx"], // the spill: arg_0 = arg_0
+        ["call", "0x402000"],
+        ["mov", "rax, qword ptr [rbp + 0x10]"], // the reload
+        ["add", "rsp, 0x20"],
+        ["pop", "rbp"],
+        ["ret"],
+      ]),
+      true,
+      fastcall(1),
+      true,
+    );
+    expect(code).not.toContain("arg_0 = arg_0");
+    expect(code).toContain("return arg_0;");
+    // One parameter, not two: the homed slot and the register are one argument.
+    const header = code.split("\n").find((l) => /^\w[^;]*\(/.test(l)) ?? "";
+    expect(header.match(/arg_0/g)).toHaveLength(1);
+    expect(header).not.toContain("arg0");
+  });
+
+  it("spells an x86 thiscall body's incoming ECX as arg_ecx, not as a numbered slot", () => {
+    const code = runSigned(seq(0x401000, [["mov", "eax, dword ptr [ecx + 4]"], ["ret"]]), false, {
+      convention: "thiscall",
+      paramCount: 0,
+    });
+    expect(code).toContain("int32_t arg_ecx");
+    expect(code).toContain("*(int32_t*)(arg_ecx + 4)");
+    expect(code).not.toContain("arg_0");
+    expect(code).not.toMatch(/\bthis\b/);
+    expect(code).not.toMatch(/\becx\b/);
+  });
+
+  it("spells an x86 fastcall body's incoming ECX and EDX as arg_ecx and arg_edx", () => {
+    const code = runSigned(
+      seq(0x401000, [["mov", "eax, dword ptr [ecx]"], ["add", "eax, edx"], ["ret"]]),
+      false,
+      { convention: "fastcall", paramCount: 0 },
+    );
+    // `arg_ecx` is dereferenced, so `inferTypes` types it a pointer.
+    expect(code).toMatch(/\(PVOID arg_ecx, int32_t arg_edx\)/);
+    expect(code).toContain("*(int32_t*)(arg_ecx)");
+    expect(code).toContain("arg_edx");
+    expect(code).not.toMatch(/\bedx\b/);
+  });
+
+  it("binds nothing for an x86 cdecl body", () => {
+    const code = runSigned(seq(0x401000, [["mov", "eax, dword ptr [ecx]"], ["ret"]]), false, {
+      convention: "cdecl",
+      paramCount: 1,
+    });
+    expect(code).not.toContain("arg_ecx");
+    expect(code).toContain("*(int32_t*)(ecx)");
   });
 });
 
