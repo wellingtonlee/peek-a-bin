@@ -410,6 +410,47 @@ Level tabs wherever the text still carries the spelling.
   stable struct identity (the fingerprint is not one; `mergeFields` grows it), a registry-level
   name table, persistence, MCP and collision rules.
 - **`sub_<HEX>` navigates** — `onNavigate(addr)`, which `DisassemblyView` wires to `SET_ADDRESS`.
+  **Hovering one shows the recovered signature** (`fastcall, 2 params`): the `subTitle(addr)` prop,
+  answered by `DisassemblyView` from `funcMap.get(addr)` through the same cached `getSigForFunc`
+  the function-label rows read, spelled by `formatSignature` in `disasm/signatures.ts` — extracted
+  from `DisassemblyRows` so the label and the hover cannot drift. Asked at render, not in the
+  `lines` memo, because the callback is a fresh closure every parent render and one Map lookup per
+  `sub_` token is cheaper than re-tokenising the page. A 0-parameter signature answers nothing,
+  as the label row does.
+- **A hex constant inside a SECTION is a link** — `tokenizeLine` tags every `0x…` literal
+  `kind: "hex"`; the `lines` memo asks `classifyAddress(value, sections, imageBase, sizeOfImage)`
+  (`components/classifyAddress.ts`) and applies the link class only for `"code"` or `"data"`,
+  recording the answer as `data-const`. The click asks the same function: `"code"` →
+  `onNavigate` (the listing); `"data"` → `onNavigateData`, which `DisassemblyView` wires to
+  `SET_ADDRESS` then `SET_TAB "hex"` (`HexView` follows `currentAddress`, so the hex view opens on
+  the byte). **The grounding is "inside a section", not "inside the image"**: a hex literal in
+  emitted C is far more often a mask, a stride or a struct offset than an address, and the headers
+  and alignment gaps between sections are inside the image with nothing to show — so a value in
+  no section is a plain number, and `0x10` in `var_8 + 0x10` is the control. `"data"` is "any
+  section that is not code" rather than `isDataSection`: the hex view shows every section's
+  bytes, and `isDataSection`'s question (could a pointer plausibly target this?) is the xref
+  builder's. A panel given no image renders every constant plain.
+- **Copy carries the comments** — `codeWithComments(code, lineMap, comments)` in
+  `hooks/decompileTabsState.ts` appends ` // <first line>` to every line whose address has a
+  comment, through the same `formatComment` the render uses (moved there from the component so
+  screen and clipboard share one declaration; a multi-line comment contributes `first [...]`).
+  It mirrors the screen line for line: `lineMap` is many-to-one and the render puts a shared
+  comment beside every sharing line, so the clipboard does too rather than adding a second
+  placement rule. With no comments the result is `code` byte for byte. **Shift-click copies raw**
+  (title `Copy (Shift: without comments)`); on the **AI tab** (`syncDisabled`) Copy is always raw
+  under the plain `Copy to clipboard` title, since that tab's line map numbers a different body
+  and a trailer placed by it would sit on the wrong line, exactly as the suppressed on-screen
+  comment would. The string is built before `copyText` is called, so the write stays inside the
+  user gesture (`utils/clipboard.ts`).
+
+**What jsdom has verified and what it has not.** Every row above asserts a class string, an
+attribute, or which callback received which address; the `onNavigateData` wiring in
+`DisassemblyView` (two dispatches) is verified as wiring only — `DisassemblyView.dom.test.tsx`
+does not mount the decompile panel — and no hover, no scroll and no hex-view landing has been
+seen in a browser. The negative controls at `peek-a-bin-5b6q.9`: Copy forced raw reddens the two
+trailer rows; grounding on the image extent instead of the section reddens the two no-section
+rows; dropping the `title` reddens the hover row; never applying the link class reddens the
+styling row.
 
 ## Testing
 

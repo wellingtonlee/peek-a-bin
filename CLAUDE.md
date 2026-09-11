@@ -449,8 +449,20 @@ variable on the app root.
   `loc_` follow uses. **A `struct_N` token follows to its typedef the same way** (`structLines`,
   `/^struct (struct_\w+) \{/` over the rendered text, first occurrence wins, above the `onNavigate`
   guard like `loc_`); **struct/field RENAMES ARE REFUSED** — `struct_N` is a `nextId++` reset per
-  file, so a name persisted under it lands on a different struct next session.
-  **`admissionSummary` in `decompileTabsState.ts` owns count and wording
+  file, so a name persisted under it lands on a different struct next session. **Copy carries the
+  comments as ` // <first line>` trailers** through `codeWithComments` in `decompileTabsState.ts`,
+  which owns `formatComment` too — ONE declaration for screen and clipboard; the string is built
+  before `copyText` is called; Shift-click copies raw (title `Copy (Shift: without comments)`); on
+  the AI tab (`syncDisabled`) it is raw with the plain title, since that line map numbers a
+  different body. **An in-section hex constant is a link**, grounded by `classifyAddress`
+  (`components/classifyAddress.ts`, beside `parseBranchTarget`'s home): `"code"` → `onNavigate`,
+  `"data"` → `onNavigateData` (`SET_ADDRESS` + `SET_TAB "hex"`; `HexView` follows
+  `currentAddress`), `null` for a value in NO SECTION — inside the image is not enough (headers,
+  alignment gaps), so `0x10` in `var_8 + 0x10` stays a plain number; the link class is applied
+  in the `lines` memo from the same classifier the click asks. **A `sub_` token's hover is the
+  recovered signature** via `subTitle(addr)` → `funcMap` → the cached `getSigForFunc` →
+  `formatSignature` (`disasm/signatures.ts`), the ONE spelling `DisassemblyRows`' label row also
+  reads. **`admissionSummary` in `decompileTabsState.ts` owns count and wording
   together** (the `matchSummary` precedent). MCP `decompile_function` returns `admissions` beside
   `lineMap`. **`corpus/emitAudits.ts` keeps its own text scans** — an audit reading the field stops
   being independent. `DecompileResult.error` is the fault: the pipeline's `catch` used to return

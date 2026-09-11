@@ -13,6 +13,20 @@ export interface FunctionSignature {
   paramCount: number;
 }
 
+/**
+ * The one spelling of a recovered signature as prose: `fastcall, 2 params`.
+ *
+ * Extracted from `DisassemblyRows`' function-label row so the decompile
+ * panel's `sub_` hover can say the same thing about the same function. Two
+ * sites each spelling `${convention}, ${n} param${n !== 1 ? "s" : ""}` by hand
+ * is the drift shape this repo names again and again; the row wraps this in
+ * parentheses and the hover uses it bare, which is a difference of framing
+ * and not of wording (peek-a-bin-5b6q.9).
+ */
+export function formatSignature(sig: FunctionSignature): string {
+  return `${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""}`;
+}
+
 const FASTCALL_REGS_64 = ["rcx", "rdx", "r8", "r9"];
 
 /**

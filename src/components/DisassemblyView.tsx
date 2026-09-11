@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { archForMachine } from "../disasm/arch";
 import { type CFGEdge, type LayoutBlock, layoutCFG } from "../disasm/cfg";
 import { canonReg } from "../disasm/decompile/ir";
-import { type FunctionSignature, inferSignature } from "../disasm/signatures";
+import { type FunctionSignature, formatSignature, inferSignature } from "../disasm/signatures";
 import { arm64UnwindContext, stackFrameFor } from "../disasm/stackFrame";
 import type { DisasmFunction, Instruction } from "../disasm/types";
 import { useAIChat } from "../hooks/useAIChat";
@@ -1526,6 +1526,23 @@ export function DisassemblyView() {
                 onExplain={() => decompile.triggerAI("explain")}
                 onCancelAI={decompile.cancelAI}
                 onNavigate={(addr) => dispatch({ type: "SET_ADDRESS", address: addr })}
+                // A constant in a NON-code section lands in the hex view, which
+                // follows `currentAddress`; two dispatches, the tab last, so the
+                // hex view mounts already knowing where to scroll.
+                onNavigateData={(addr) => {
+                  dispatch({ type: "SET_ADDRESS", address: addr });
+                  dispatch({ type: "SET_TAB", tab: "hex" });
+                }}
+                sections={pe.sections}
+                imageBase={pe.optionalHeader.imageBase}
+                sizeOfImage={pe.optionalHeader.sizeOfImage}
+                // The same cached `getSigForFunc` the function-label rows read,
+                // spelled by the same `formatSignature`, so hover and label agree.
+                subTitle={(addr) => {
+                  const fn = funcMap.get(addr);
+                  const sig = fn ? getSigForFunc(fn) : null;
+                  return sig ? formatSignature(sig) : undefined;
+                }}
                 onClose={() => setShowDecompile(false)}
                 highlightLines={decompileHighlightLines}
                 onLineClick={handleDecompileLineClick}

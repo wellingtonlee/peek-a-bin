@@ -3,9 +3,11 @@ import { type DecompileAdmissions, emptyAdmissions } from "../../disasm/decompil
 import {
   ADMISSION_SEPARATOR,
   admissionSummary,
+  codeWithComments,
   type DecompileServerConfig,
   decompileInputsKey,
   decompileServerKey,
+  formatComment,
   type HighCacheEntry,
   initialTabsState,
   type LowCacheEntry,
@@ -346,5 +348,68 @@ describe("tabs reducer carries the admissions with the code", () => {
     const reset = tabsReducer(loaded, { type: "RESET_FUNC" });
     expect(reset.low.admissions).toBeUndefined();
     expect(reset.low.code).toBe("");
+  });
+});
+
+// ── Copy with comments ──
+
+describe("formatComment", () => {
+  it("returns a one-line comment as itself", () => {
+    expect(formatComment("why 1")).toBe("why 1");
+  });
+
+  it("keeps the first line and marks the rest", () => {
+    expect(formatComment("first\nsecond\nthird")).toBe("first [...]");
+  });
+});
+
+describe("codeWithComments", () => {
+  const CODE = "int f(void) {\n  x = 1;\n  y = 2;\n  return x;\n}";
+
+  it("returns the code BYTE-IDENTICAL when nothing is commented", () => {
+    // What keeps the panel's "copies the whole code, not the rendered text"
+    // true in the common case: no comments, no change — not even a trailing
+    // newline gained or lost.
+    expect(codeWithComments(CODE, new Map([[1, 0x401004]]), {})).toBe(CODE);
+    expect(codeWithComments(`${CODE}\n`, new Map(), { 0x401004: "x" })).toBe(`${CODE}\n`);
+  });
+
+  it("appends the comment as a ` // ` trailer on the mapped line", () => {
+    const out = codeWithComments(CODE, new Map([[1, 0x401004]]), { 0x401004: "why 1" });
+    expect(out.split("\n")[1]).toBe("  x = 1; // why 1");
+    // Every other line untouched.
+    expect(out.split("\n").filter((_, i) => i !== 1)).toEqual(
+      CODE.split("\n").filter((_, i) => i !== 1),
+    );
+  });
+
+  it("uses formatComment, so a multi-line comment contributes its first line and [...]", () => {
+    const out = codeWithComments(CODE, new Map([[2, 0x401008]]), { 0x401008: "a\nb" });
+    expect(out.split("\n")[2]).toBe("  y = 2; // a [...]");
+  });
+
+  it("repeats a comment on EVERY line sharing its address — the screen's rule", () => {
+    // `lineMap` is many-to-one and the render puts the comment beside every
+    // sharing line; the clipboard is a picture of the page, so it does the same
+    // rather than adding a second placement rule.
+    const out = codeWithComments(
+      CODE,
+      new Map([
+        [1, 0x401004],
+        [2, 0x401004],
+      ]),
+      { 0x401004: "shared" },
+    );
+    expect(out.split("\n")[1]).toBe("  x = 1; // shared");
+    expect(out.split("\n")[2]).toBe("  y = 2; // shared");
+  });
+
+  it("ignores a comment whose address maps to no line, and a mapped line with no comment", () => {
+    const out = codeWithComments(CODE, new Map([[1, 0x401004]]), { 0x999999: "orphan" });
+    expect(out).toBe(CODE);
+  });
+
+  it("treats an empty comment as absent", () => {
+    expect(codeWithComments(CODE, new Map([[1, 0x401004]]), { 0x401004: "" })).toBe(CODE);
   });
 });

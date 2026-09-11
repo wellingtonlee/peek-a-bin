@@ -5,7 +5,7 @@
 import type { Dispatch } from "react";
 import { MNEMONIC_HINTS } from "../disasm/mnemonics";
 import { parseOperandTargets } from "../disasm/operands";
-import type { FunctionSignature } from "../disasm/signatures";
+import { type FunctionSignature, formatSignature } from "../disasm/signatures";
 import type { DataItem, DisasmFunction, Instruction, Xref } from "../disasm/types";
 import type { DisplayRow } from "../hooks/useDisassemblyRows";
 import type { AppAction } from "../hooks/usePEFile";
@@ -259,9 +259,7 @@ export function LabelRow({
         ; ──── {displayName}
         {(() => {
           const sig = getSigForFunc(fn);
-          return sig
-            ? ` (${sig.convention}, ${sig.paramCount} param${sig.paramCount !== 1 ? "s" : ""})`
-            : "";
+          return sig ? ` (${formatSignature(sig)})` : "";
         })()} ────
       </span>
       {xrefCount > 0 &&

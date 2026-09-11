@@ -184,6 +184,48 @@ export function admissionSummary(adm: DecompileAdmissions): AdmissionPart[] {
  * high-level result. Declared structurally rather than imported so this module
  * stays a leaf.
  */
+/**
+ * How a user comment is shown beside a line: its first line, with ` [...]`
+ * when there is more. ONE declaration for the screen and the clipboard — it
+ * lived as a closure inside `DecompileView` until the Copy button learned to
+ * carry comments, at which point a second spelling would have let the copied
+ * text disagree with the rendered one (peek-a-bin-5b6q.9).
+ */
+export function formatComment(text: string): string {
+  const firstLine = text.split("\n")[0];
+  return text.includes("\n") ? `${firstLine} [...]` : firstLine;
+}
+
+/**
+ * The emitted C with each commented line carrying its comment as a
+ * ` // <first line>` trailer — what the Copy button puts on the clipboard.
+ *
+ * MIRRORS THE SCREEN LINE FOR LINE. `lineMap` is many-to-one, so a comment on
+ * an address several C lines share is rendered beside EVERY one of them, and
+ * this repeats it the same way rather than picking one: the clipboard is a
+ * picture of the page, and a rule that chose the lowest sharing line here
+ * would be a second placement rule beside the one `editingLine` already has.
+ *
+ * With no comments the answer is `code` itself, byte for byte — which is what
+ * keeps "copies the whole code, not the rendered text" true in the common
+ * case. Lines are joined back with `\n` exactly as they were split, so a
+ * trailing newline survives.
+ */
+export function codeWithComments(
+  code: string,
+  lineMap: ReadonlyMap<number, number>,
+  comments: Readonly<Record<number, string>>,
+): string {
+  return code
+    .split("\n")
+    .map((line, i) => {
+      const addr = lineMap.get(i);
+      const text = addr === undefined ? undefined : comments[addr];
+      return text ? `${line} // ${formatComment(text)}` : line;
+    })
+    .join("\n");
+}
+
 export interface DecompileServerConfig {
   enabled: boolean;
   ghidraUrl: string;

@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DecompileAdmissions } from "../disasm/decompile/emit";
 import type { DecompileTab, HighLevelEngine } from "../hooks/decompileTabsState";
-import { ADMISSION_SEPARATOR, admissionSummary } from "../hooks/decompileTabsState";
+import {
+  ADMISSION_SEPARATOR,
+  admissionSummary,
+  codeWithComments,
+  formatComment,
+} from "../hooks/decompileTabsState";
 import { useDismissOnOutsideClick } from "../hooks/useDismissOnOutsideClick";
+import type { SectionHeader } from "../pe/types";
 import { copyText } from "../utils/clipboard";
+import { type AddressKind, classifyAddress } from "./classifyAddress";
 import { focusOnMount } from "./focusOnMount";
 
 // ── Syntax Highlighting ──
@@ -11,7 +18,24 @@ import { focusOnMount } from "./focusOnMount";
 interface Token {
   text: string;
   cls: string;
+  /**
+   * `"hex"` for a `0x…` literal. The tokenizer takes one line and no image, so
+   * it can only SAY a token is a hex number; whether that number is an address
+   * a reader can be sent to is decided in the `lines` memo, which has the
+   * section table, and recorded in `link`.
+   */
+  kind?: "hex";
+  /** Set at render time on a hex literal that lands inside a section. */
+  link?: AddressKind;
 }
+
+/** A `sub_<HEX>` identifier, as the emitter and `funcMap` spell it. */
+const SUB_NAME = /^sub_([0-9a-fA-F]+)$/;
+/** A bare hex literal, as the emitter spells a constant. */
+const HEX_LITERAL = /^0x([0-9a-fA-F]+)$/;
+
+/** The link styling every clickable token carries, `sub_`/`loc_`/`struct_`/constant alike. */
+const LINK_CLS = "underline cursor-pointer hover:opacity-80";
 
 const KEYWORDS = new Set([
   "if",
@@ -62,8 +86,8 @@ function tokenizeLine(line: string): Token[] {
       // Comment
       tokens.push({ text, cls: "dc-comment italic" });
     } else if (m[5]) {
-      // Hex number
-      tokens.push({ text, cls: "dc-number" });
+      // Hex number. Tagged so the render pass can ask whether it is an address.
+      tokens.push({ text, cls: "dc-number", kind: "hex" });
     } else if (m[6]) {
       // Decimal number
       tokens.push({ text, cls: "dc-number" });
@@ -82,7 +106,7 @@ function tokenizeLine(line: string): Token[] {
         // and following the label is the thing a reader actually wants. This
         // function takes no line map and cannot ask whether a particular label
         // or typedef exists, so resolvability is checked at the click instead.
-        tokens.push({ text, cls: "dc-type underline cursor-pointer hover:opacity-80" });
+        tokens.push({ text, cls: `dc-type ${LINK_CLS}` });
       } else if (text === "__asm") {
         tokens.push({ text, cls: "dc-comment italic" });
       } else {
@@ -130,6 +154,29 @@ interface DecompileViewProps {
   onExplain?: () => void;
   onCancelAI?: () => void;
   onNavigate?: (addr: number) => void;
+  /**
+   * Where a clicked constant that lands in a NON-code section goes: the hex
+   * view, which follows `currentAddress`. Kept apart from `onNavigate` because
+   * the two land on different tabs, and a panel mounted without it simply
+   * renders data constants as plain numbers.
+   */
+  onNavigateData?: (addr: number) => void;
+  /**
+   * The image a constant is classified against — `classifyAddress` needs all
+   * three, and a panel given none renders every constant as a plain number.
+   * `sections` is the parsed table by reference, so the `lines` memo is stable
+   * across renders.
+   */
+  sections?: readonly SectionHeader[];
+  imageBase?: number;
+  sizeOfImage?: number;
+  /**
+   * The hover text for a `sub_<HEX>` token, asked by address at render time —
+   * `DisassemblyView` answers from `funcMap` and the same cached
+   * `getSigForFunc` the function-label rows read, spelled by
+   * `formatSignature`. `undefined` means "nothing to say" and no `title` is set.
+   */
+  subTitle?: (addr: number) => string | undefined;
   onClose: () => void;
   highlightLines?: Set<number>;
   onLineClick?: (lineNum: number) => void;
@@ -165,6 +212,11 @@ export function DecompileView({
   onExplain,
   onCancelAI,
   onNavigate,
+  onNavigateData,
+  sections,
+  imageBase,
+  sizeOfImage,
+  subTitle,
   onClose,
   highlightLines,
   onLineClick,
@@ -183,14 +235,27 @@ export function DecompileView({
   const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
 
+  /**
+   * Whether the image was supplied, so a constant CAN be classified. All three
+   * or nothing: a base without a size (or the reverse) cannot bound the image.
+   */
+  const imageKnown = sections !== undefined && imageBase !== undefined && sizeOfImage !== undefined;
+
   const lines = useMemo(() => {
     if (!code) return [];
     return code.split("\n").map((line, i) => ({
       num: i,
       displayNum: i + 1,
-      tokens: tokenizeLine(line),
+      tokens: tokenizeLine(line).map((tok): Token => {
+        if (tok.kind !== "hex" || !imageKnown) return tok;
+        // The link class is applied HERE and only for a value inside a
+        // section — `0x10` in `var_8 + 0x10` stays a plain number. Same
+        // classifier the click asks, so the two cannot disagree.
+        const kind = classifyAddress(parseInt(tok.text, 16), sections, imageBase, sizeOfImage);
+        return kind === null ? tok : { ...tok, cls: `${tok.cls} ${LINK_CLS}`, link: kind };
+      }),
     }));
-  }, [code]);
+  }, [code, imageKnown, sections, imageBase, sizeOfImage]);
 
   /**
    * The one line the comment editor mounts on, or null.
@@ -223,9 +288,34 @@ export function DecompileView({
     return best;
   }, [editingComment, syncDisabled, lineMap]);
 
-  const handleCopy = useCallback(() => {
-    void copyText(code);
-  }, [code]);
+  /**
+   * Whether Copy can carry the comments: a line map to place them by and a
+   * comment store to read, and NOT the AI tab (`syncDisabled`), whose line map
+   * numbers a different body — a trailer placed by it would sit on the wrong
+   * line, exactly as the on-screen comment would, and the render suppresses
+   * that one for the same reason.
+   */
+  const commentsCopyable = !syncDisabled && lineMap !== undefined && comments !== undefined;
+
+  /**
+   * Copy the code, with each commented line's comment as a ` // …` trailer
+   * (`codeWithComments`, the leaf — ONE declaration with what the screen
+   * shows). Shift-click copies the raw code, the old behaviour. With no
+   * comments the two are byte-identical.
+   *
+   * The string is built BEFORE `copyText` is called, so the write is still
+   * inside the user gesture — `utils/clipboard.ts`'s rule.
+   */
+  const handleCopy = useCallback(
+    (e: React.MouseEvent) => {
+      const text =
+        commentsCopyable && !e.shiftKey && lineMap && comments
+          ? codeWithComments(code, lineMap, comments)
+          : code;
+      void copyText(text);
+    },
+    [code, commentsCopyable, lineMap, comments],
+  );
 
   /**
    * Where each `loc_<HEX>` label sits, by line number.
@@ -321,15 +411,40 @@ export function DecompileView({
         return;
       }
 
+      // Click on 0x… → where in the image it lands, if anywhere. The render
+      // pass gave the token a link class on the same answer; asked again here
+      // rather than read off a `data-` attribute so the two cannot drift.
+      // Above the `onNavigate` guard: a data constant needs `onNavigateData`
+      // and nothing else.
+      const hexMatch = text.match(HEX_LITERAL);
+      if (hexMatch) {
+        if (!imageKnown) return;
+        const value = parseInt(hexMatch[1], 16);
+        const kind = classifyAddress(value, sections, imageBase, sizeOfImage);
+        if (kind === "code") onNavigate?.(value);
+        else if (kind === "data") onNavigateData?.(value);
+        return;
+      }
+
       // Click on sub_XXXX → navigate to that address
       if (!onNavigate) return;
-      const subMatch = text.match(/^sub_([0-9a-fA-F]+)$/);
+      const subMatch = text.match(SUB_NAME);
       if (subMatch) {
         const addr = parseInt(subMatch[1], 16);
         onNavigate(addr);
       }
     },
-    [onNavigate, labelLines, structLines, scrollToLine],
+    [
+      onNavigate,
+      onNavigateData,
+      imageKnown,
+      sections,
+      imageBase,
+      sizeOfImage,
+      labelLines,
+      structLines,
+      scrollToLine,
+    ],
   );
 
   // Auto-scroll to first highlighted line
@@ -389,13 +504,6 @@ export function DecompileView({
     },
     [syncDisabled, lineMap, highlightLines, onEditComment, comments],
   );
-
-  // Format inline comment display
-  const formatComment = (text: string): string => {
-    const firstLine = text.split("\n")[0];
-    const hasMore = text.includes("\n");
-    return hasMore ? `${firstLine} [...]` : firstLine;
-  };
 
   const isStreaming = activeTab === "ai" && loading && aiMode != null;
 
@@ -511,7 +619,7 @@ export function DecompileView({
           type="button"
           onClick={handleCopy}
           className="px-1.5 py-0.5 rounded text-[10px] bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
-          title="Copy to clipboard"
+          title={commentsCopyable ? "Copy (Shift: without comments)" : "Copy to clipboard"}
         >
           Copy
         </button>
@@ -623,15 +731,20 @@ export function DecompileView({
                     {line.displayNum}
                   </span>
                   <span className="flex-1">
-                    {line.tokens.map((tok, i) =>
-                      tok.cls ? (
-                        <span key={i} className={tok.cls}>
+                    {line.tokens.map((tok, i) => {
+                      if (!tok.cls) return <span key={i}>{tok.text}</span>;
+                      // A `sub_` token's hover is asked at RENDER, not in the
+                      // `lines` memo: `subTitle` is a fresh closure every parent
+                      // render, and one Map lookup per `sub_` token is cheaper than
+                      // re-tokenising the page.
+                      const sub = subTitle ? tok.text.match(SUB_NAME) : null;
+                      const title = sub && subTitle ? subTitle(parseInt(sub[1], 16)) : undefined;
+                      return (
+                        <span key={i} className={tok.cls} title={title} data-const={tok.link}>
                           {tok.text}
                         </span>
-                      ) : (
-                        <span key={i}>{tok.text}</span>
-                      ),
-                    )}
+                      );
+                    })}
                     {commentText && !isEditing && (
                       <span className="disasm-user-comment ml-4 select-none">
                         {"// "}

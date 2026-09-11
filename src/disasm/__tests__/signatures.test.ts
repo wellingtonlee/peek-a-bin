@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferSignature } from "../signatures";
+import { formatSignature, inferSignature } from "../signatures";
 import { analyzeStackFrame } from "../stack";
 import type { DisasmFunction, Instruction } from "../types";
 
@@ -912,5 +912,21 @@ describe("inferSignature — architecture refusal", () => {
     expect(s?.convention).not.toBe("cdecl");
     expect(s?.convention).not.toBe("thiscall");
     expect(s?.convention).not.toBe("stdcall");
+  });
+});
+
+/**
+ * `formatSignature` is the one spelling of a recovered signature as prose,
+ * read by `DisassemblyRows`' function-label row and by the decompile panel's
+ * `sub_` hover. Pinned so the two cannot drift apart again.
+ */
+describe("formatSignature", () => {
+  it("spells convention and count, plural above one", () => {
+    expect(formatSignature({ convention: "fastcall", paramCount: 2 })).toBe("fastcall, 2 params");
+    expect(formatSignature({ convention: "cdecl", paramCount: 0 })).toBe("cdecl, 0 params");
+  });
+
+  it("uses the singular for exactly one", () => {
+    expect(formatSignature({ convention: "thiscall", paramCount: 1 })).toBe("thiscall, 1 param");
   });
 });

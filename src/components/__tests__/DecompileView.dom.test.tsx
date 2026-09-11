@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type DecompileAdmissions, emptyAdmissions } from "../../disasm/decompile/emit";
 import type { DecompileTab } from "../../hooks/decompileTabsState";
 import { ADMISSION_SEPARATOR, admissionSummary } from "../../hooks/decompileTabsState";
+import { IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ } from "../../pe/constants";
+import type { SectionHeader } from "../../pe/types";
 import { DecompileView } from "../DecompileView";
 
 /**
@@ -514,6 +516,170 @@ describe("DecompileView struct_ typedef follow", () => {
   });
 });
 
+// ── Hex constants inside a section are links ──
+
+function section(
+  name: string,
+  virtualAddress: number,
+  virtualSize: number,
+  characteristics: number,
+): SectionHeader {
+  return {
+    name,
+    virtualAddress,
+    virtualSize,
+    sizeOfRawData: virtualSize,
+    pointerToRawData: virtualAddress,
+    pointerToRelocations: 0,
+    pointerToLinenumbers: 0,
+    numberOfRelocations: 0,
+    numberOfLinenumbers: 0,
+    characteristics,
+  };
+}
+
+/** `.text` at 0x401000–0x401FFF, `.rdata` at 0x402000–0x402FFF; the image runs to 0x405000. */
+const IMAGE = {
+  sections: [
+    section(".text", 0x1000, 0x1000, IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ),
+    section(".rdata", 0x2000, 0x1000, IMAGE_SCN_MEM_READ),
+  ],
+  imageBase: 0x400000,
+  sizeOfImage: 0x5000,
+};
+
+const CONST_CODE = [
+  "  x = *(int *)0x402010;", // data
+  "  y = var_8 + 0x10;", // the control: a small constant
+  "  z = 0x401234;", // code
+  "  w = 0x404000;", // inside the image, in no section
+].join("\n");
+
+const NUMBER_LINK = "dc-number underline cursor-pointer hover:opacity-80";
+
+describe("DecompileView constants as links", () => {
+  it("styles an in-section constant as a link and tags it with where it lands", () => {
+    setup({ code: CONST_CODE, ...IMAGE });
+    const data = tokenSpan(0, "0x402010");
+    expect(data.className).toBe(NUMBER_LINK);
+    expect(data.getAttribute("data-const")).toBe("data");
+    const code = tokenSpan(2, "0x401234");
+    expect(code.className).toBe(NUMBER_LINK);
+    expect(code.getAttribute("data-const")).toBe("code");
+  });
+
+  it("leaves `0x10` in `var_8 + 0x10` a plain number — THE CONTROL", () => {
+    setup({ code: CONST_CODE, ...IMAGE });
+    const small = tokenSpan(1, "0x10");
+    expect(small.className).toBe("dc-number");
+    expect(small.hasAttribute("data-const")).toBe(false);
+  });
+
+  it("leaves a constant inside the image but in no section plain", () => {
+    // The grounding is the section table, not the image extent — the headers
+    // and the alignment gaps are inside the image and hold nothing to show.
+    setup({ code: CONST_CODE, ...IMAGE });
+    expect(tokenSpan(3, "0x404000").className).toBe("dc-number");
+  });
+
+  it("renders every constant plain when the panel is given no image", () => {
+    setup({ code: CONST_CODE });
+    expect(tokenSpan(0, "0x402010").className).toBe("dc-number");
+    expect(tokenSpan(2, "0x401234").className).toBe("dc-number");
+  });
+
+  it("navigates the listing for a code constant, and only the listing", async () => {
+    const onNavigate = vi.fn();
+    const onNavigateData = vi.fn();
+    const { user } = setup({ code: CONST_CODE, ...IMAGE, onNavigate, onNavigateData });
+    await user.click(tokenSpan(2, "0x401234"));
+    expect(onNavigate.mock.calls).toEqual([[0x401234]]);
+    expect(onNavigateData).not.toHaveBeenCalled();
+  });
+
+  it("hands a data constant to onNavigateData, and only that", async () => {
+    const onNavigate = vi.fn();
+    const onNavigateData = vi.fn();
+    const { user } = setup({ code: CONST_CODE, ...IMAGE, onNavigate, onNavigateData });
+    await user.click(tokenSpan(0, "0x402010"));
+    expect(onNavigateData.mock.calls).toEqual([[0x402010]]);
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for the control constant, or for one in no section", async () => {
+    const onNavigate = vi.fn();
+    const onNavigateData = vi.fn();
+    const { user } = setup({ code: CONST_CODE, ...IMAGE, onNavigate, onNavigateData });
+    await user.click(tokenSpan(1, "0x10"));
+    await user.click(tokenSpan(3, "0x404000"));
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onNavigateData).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when the panel has no image, even with both callbacks", async () => {
+    const onNavigate = vi.fn();
+    const onNavigateData = vi.fn();
+    const { user } = setup({ code: CONST_CODE, onNavigate, onNavigateData });
+    await user.click(tokenSpan(2, "0x401234"));
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onNavigateData).not.toHaveBeenCalled();
+  });
+
+  it("is inert for a data constant with no onNavigateData, and a code one with no onNavigate", async () => {
+    // The two callbacks are independent — a data constant needs only
+    // `onNavigateData`, so its branch sits above the `onNavigate` guard.
+    const onNavigateData = vi.fn();
+    const { user } = setup({ code: CONST_CODE, ...IMAGE, onNavigateData });
+    await user.click(tokenSpan(2, "0x401234"));
+    await user.click(tokenSpan(0, "0x402010"));
+    expect(onNavigateData.mock.calls).toEqual([[0x402010]]);
+  });
+
+  it("does not mistake a sub_ token for a constant, or a constant for a sub_", async () => {
+    const onNavigate = vi.fn();
+    const onNavigateData = vi.fn();
+    const { user } = setup({
+      code: "  sub_402010();\n  x = 0x401000;",
+      ...IMAGE,
+      onNavigate,
+      onNavigateData,
+    });
+    // `sub_402010` names a function by address; it navigates the listing even
+    // though the same number as a constant would be classed data.
+    await user.click(tokenSpan(0, "sub_402010"));
+    expect(onNavigate.mock.calls).toEqual([[0x402010]]);
+    expect(onNavigateData).not.toHaveBeenCalled();
+  });
+});
+
+// ── sub_ hover shows the recovered signature ──
+
+describe("DecompileView sub_ hover", () => {
+  it("puts subTitle's answer on the sub_ span as its title, asked by parsed address", () => {
+    const subTitle = vi.fn((addr: number) =>
+      addr === 0x401000 ? "fastcall, 2 params" : undefined,
+    );
+    setup({ code: "  sub_401000();\n  sub_4011A0();", subTitle });
+    expect(tokenSpan(0, "sub_401000").getAttribute("title")).toBe("fastcall, 2 params");
+    // `undefined` means "nothing to say": no attribute, not an empty one.
+    expect(tokenSpan(1, "sub_4011A0").hasAttribute("title")).toBe(false);
+    // Asked with the hex-parsed address, once per sub_ token per render.
+    expect(subTitle.mock.calls.map((c) => c[0]).sort()).toEqual([0x401000, 0x4011a0].sort());
+  });
+
+  it("sets no title when no subTitle is supplied", () => {
+    setup({ code: "  sub_401000();" });
+    expect(tokenSpan(0, "sub_401000").hasAttribute("title")).toBe(false);
+  });
+
+  it("asks nothing for tokens that are not sub_", () => {
+    const subTitle = vi.fn(() => "never");
+    setup({ code: "  goto loc_401000;\n  x = 0x401000;" });
+    setup({ code: "  struct_1 *p;", subTitle });
+    expect(subTitle).not.toHaveBeenCalled();
+  });
+});
+
 // ── Loading, error, empty ──
 
 describe("DecompileView loading, error and empty arms", () => {
@@ -814,6 +980,69 @@ describe("DecompileView toolbar", () => {
     fireEvent.click(screen.getByTitle("Copy to clipboard"));
     // The `code` prop verbatim: no line numbers, no token splitting.
     expect(writeText.mock.calls).toEqual([["int64_t f(void) {\n  return 0;\n}"]]);
+  });
+
+  /**
+   * COPY CARRIES THE COMMENTS. The on-screen comment is a `<span>` beside the
+   * line; the old Copy put the bare `code` prop on the clipboard, so a reader
+   * who annotated a function and pasted it elsewhere lost every annotation.
+   * `codeWithComments` (the leaf) builds the string and `formatComment` is
+   * shared with the render, so the trailer is the text on screen.
+   *
+   * The assertion is SYNCHRONOUS after the click, deliberately: `copyText`
+   * must be reached before the first suspension (clipboard writes must stay
+   * inside the user gesture), and a `writeText` recorded without an `await`
+   * is what shows the string was built and handed over on the same tick.
+   */
+  const COMMENTED = {
+    code: "int f(void) {\n  x = 1;\n  y = 2;\n}",
+    lineMap: new Map([
+      [1, 0x401004],
+      [2, 0x401008],
+    ]),
+    comments: { 0x401004: "why 1" },
+  };
+
+  it("includes a comment as a ` // ` trailer on its line, and says Shift copies without", () => {
+    setup(COMMENTED);
+    const writeText = stubClipboard();
+    const btn = screen.getByTitle("Copy (Shift: without comments)");
+    fireEvent.click(btn);
+    expect(writeText.mock.calls).toEqual([["int f(void) {\n  x = 1; // why 1\n  y = 2;\n}"]]);
+  });
+
+  it("copies the raw code on Shift-click", () => {
+    setup(COMMENTED);
+    const writeText = stubClipboard();
+    fireEvent.click(screen.getByTitle("Copy (Shift: without comments)"), { shiftKey: true });
+    expect(writeText.mock.calls).toEqual([[COMMENTED.code]]);
+  });
+
+  it("puts the same text on the clipboard that the screen shows for a multi-line comment", () => {
+    setup({ ...COMMENTED, comments: { 0x401004: "first\nsecond" } });
+    // The rendered span and the trailer share `formatComment`.
+    expect(screen.getByText("// first [...]")).toBeTruthy();
+    const writeText = stubClipboard();
+    fireEvent.click(screen.getByTitle("Copy (Shift: without comments)"));
+    expect(writeText.mock.calls[0][0]).toContain("  x = 1; // first [...]\n");
+  });
+
+  it("copies byte-identical code when the map is present but nothing is commented", () => {
+    setup({ ...COMMENTED, comments: {} });
+    const writeText = stubClipboard();
+    fireEvent.click(screen.getByTitle("Copy (Shift: without comments)"));
+    expect(writeText.mock.calls).toEqual([[COMMENTED.code]]);
+  });
+
+  it("copies raw on the AI tab, where the line map numbers a different body", () => {
+    // `syncDisabled` is the AI tab's flag. The render already suppresses the
+    // on-screen comments there for this reason; Copy follows it, and the title
+    // drops the Shift hint because there is nothing for Shift to leave out.
+    setup({ ...COMMENTED, activeTab: "ai", syncDisabled: true });
+    expect(screen.queryByTitle("Copy (Shift: without comments)")).toBeNull();
+    const writeText = stubClipboard();
+    fireEvent.click(screen.getByTitle("Copy to clipboard"));
+    expect(writeText.mock.calls).toEqual([[COMMENTED.code]]);
   });
 
   /**
