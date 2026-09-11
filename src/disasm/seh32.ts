@@ -259,3 +259,148 @@ export function seh32FuncletsOfPrologue(
   }
   return funclets;
 }
+
+// ── The table as the DECOMPILER reads it: which scope a trylevel store opens ──
+
+/** A scope table and where it lives, so an annotation can name both. */
+export interface Seh32ScopeTable {
+  /** The `_EH4_SCOPETABLE`'s address — the immediate the prologue pushed. */
+  tableAddr: number;
+  records: Seh32ScopeRecord[];
+}
+
+/**
+ * `_EH4_SCOPETABLE`'s `TRYLEVEL_NONE`: the value `mov [ebp - 4], -2` stores when
+ * control leaves every `__try`. Also the enclosing level of an outermost record.
+ */
+export const EH4_TRYLEVEL_NONE = -2;
+
+/**
+ * The scope table a function's own prologue hands to `__SEH_prolog4`, or null.
+ *
+ * The decompiler's reading of the same prologue {@link seh32FuncletsOfPrologue}
+ * reads for function detection, with one difference in what a second table
+ * means. Detection UNIONS the funclets of every immediate that reads as a table
+ * (a wider withdrawal set is the safe direction there); an annotation has to
+ * name THE table a trylevel indexes, so two immediates that both read as
+ * tables are an ambiguity and the answer is null. The corpus has none — a frame
+ * size maps to nothing — so this is a refusal the record can state rather than
+ * a case it has seen.
+ */
+export function seh32ScopeTableOfPrologue(
+  head: HeadReader,
+  reader: Seh32Reader,
+  isCodeAddress: (addr: number) => boolean,
+): Seh32ScopeTable | null {
+  let found: Seh32ScopeTable | null = null;
+  for (const imm of seh32PrologImmediates(head)) {
+    const records = readSeh32ScopeTable(imm, reader, isCodeAddress);
+    if (records.length === 0) continue;
+    if (found !== null) return null;
+    found = { tableAddr: imm, records };
+  }
+  return found;
+}
+
+/**
+ * A {@link HeadReader} over instructions a caller already holds — one
+ * function's slice of the whole-image array, as `collectFuncInsns` or
+ * `buildFuncInsnMap` yield it. The pull shape is kept so the same rule reads a
+ * decoded-on-demand head (detection) and an already-decoded one (the
+ * decompiler's callers) identically.
+ */
+export function headReaderOfInsns(insns: readonly HeadInsn[]): HeadReader {
+  return (index: number) => insns[index];
+}
+
+/** The least a readable data span has to carry — structurally a `DataWindow`. */
+export interface Seh32Window {
+  /** Virtual address `bytes[0]` is loaded at. */
+  base: number;
+  bytes: Uint8Array;
+}
+
+/**
+ * Little-endian reads over data windows (`.rdata` above all), for callers that
+ * hold the image's sections rather than `functionDetect.ts`'s private reader.
+ * Nothing maps → null, exactly as {@link readSeh32ScopeTable} expects.
+ */
+export function seh32ReaderOver(windows: readonly Seh32Window[]): Seh32Reader {
+  const raw32 = (addr: number): number | null => {
+    for (const w of windows) {
+      const o = addr - w.base;
+      if (o >= 0 && o + 4 <= w.bytes.length) {
+        const b = w.bytes;
+        return b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24);
+      }
+    }
+    return null;
+  };
+  return {
+    i32: (addr) => {
+      const v = raw32(addr);
+      return v === null ? null : v | 0;
+    },
+    u32: (addr) => {
+      const v = raw32(addr);
+      return v === null ? null : v >>> 0;
+    },
+  };
+}
+
+const hex = (n: number): string => `0x${n.toString(16).toUpperCase()}`;
+
+/**
+ * THE ONE DECLARATION of what an EH4 trylevel store says — the comment the
+ * decompiler places at `mov [ebp - 4], <level>` under a `__SEH_prolog4` frame.
+ *
+ * `[ebp - 4]` is EH4's trylevel slot under that frame (`__SEH_prolog4` itself
+ * initialises it to -2 — see the body in `crtIdioms.ts`), and a store of `k`
+ * there is the compiler saying "control is now inside scope k of THIS
+ * function's table". This is NOT the refused call-site comment for a folded
+ * funclet (`docs/gotchas.md`, "A folded funclet leaves its parent calling…"):
+ * it sits at the trylevel store, which exists at 100% of scopes, and what it
+ * names — the funclet's ADDRESS — comes from the table, not from a guess about
+ * which call is the funclet. It mirrors what x64 already prints from `.pdata`
+ * (`wrapExceptionRegions`), and like that comment it places no extent onto
+ * statements: `__try { … }` braces are peek-a-bin-fcgu's deferred problem.
+ *
+ * `level` is the stored constant as the lifter read it: `0xFFFFFFFE` and `-2`
+ * are the same value and both spell `none`. A level the table has no record
+ * for is REFUSED (null) rather than annotated — a store the format does not
+ * explain is not one to explain confidently.
+ */
+export function trylevelComment(level: number, table: Seh32ScopeTable): string | null {
+  const lvl = level >= 0x80000000 ? level - 0x100000000 : level;
+  const where = `scope table ${hex(table.tableAddr)}`;
+  if (lvl === EH4_TRYLEVEL_NONE) return `EH4 trylevel none (${where})`;
+  if (!Number.isInteger(lvl) || lvl < 0 || lvl >= table.records.length) return null;
+  const rec = table.records[lvl];
+  const kind =
+    rec.filter === 0
+      ? `__finally at ${hex(rec.handler)}`
+      : `__except at ${hex(rec.handler)}, filter at ${hex(rec.filter)}`;
+  const enclosing =
+    rec.enclosingLevel === EH4_TRYLEVEL_NONE ? "" : `, inside trylevel ${rec.enclosingLevel}`;
+  return `EH4 trylevel ${lvl}: ${kind}${enclosing} (${where})`;
+}
+
+/**
+ * The composition every decompile caller performs: this function's head over
+ * the image's data windows. `funcInsns` is the function's own instructions in
+ * address order; `codeLo`/`codeHi` bound the code section (a handler is code).
+ * Here so the MCP session and the browser hook cannot drift apart on it.
+ */
+export function seh32ScopeTableOfFunction(
+  funcInsns: readonly HeadInsn[],
+  windows: readonly Seh32Window[],
+  codeLo: number,
+  codeHi: number,
+): Seh32ScopeTable | null {
+  if (funcInsns.length === 0) return null;
+  return seh32ScopeTableOfPrologue(
+    headReaderOfInsns(funcInsns),
+    seh32ReaderOver(windows),
+    (addr) => addr >= codeLo && addr < codeHi,
+  );
+}

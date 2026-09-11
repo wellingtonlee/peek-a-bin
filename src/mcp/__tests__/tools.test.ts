@@ -439,6 +439,7 @@ describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)
       instructions: [insn(0x401000, "mov", "eax, 1"), insn(0x401004, "ret", "")],
       jumpTables: new Map(),
       structRegistry: new StructRegistry(),
+      seh32Scopes: new Map(),
       renames,
     } as unknown as Partial<AnalyzedFile>);
   }
@@ -485,6 +486,7 @@ describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)
       ],
       jumpTables: new Map(),
       structRegistry: new StructRegistry(),
+      seh32Scopes: new Map(),
       renames: {},
     } as unknown as Partial<AnalyzedFile>);
     const decompile = captureTools(session).get("decompile_function")!;
@@ -508,6 +510,7 @@ describe("decompile_function — a rename reaches the header (peek-a-bin-n9cl.7)
       instructions: [insn(0x401000, "mov", "eax, 1"), insn(0x401004, "ret", "")],
       jumpTables: new Map(),
       structRegistry: new StructRegistry(),
+      seh32Scopes: new Map(),
       iatMap: null,
       renames: { [String(0x401000)]: "main" },
     } as unknown as Partial<AnalyzedFile>);

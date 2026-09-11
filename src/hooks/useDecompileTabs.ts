@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { archForMachine } from "../disasm/arch";
+import { buildDataWindows } from "../disasm/dataWindows";
 import type { DecompileAdmissions } from "../disasm/decompile/emit";
+import { collectFuncInsns } from "../disasm/funcInsns";
+import { seh32ScopeTableOfFunction } from "../disasm/seh32";
 import { inferSignature } from "../disasm/signatures";
 import { analyzeStackFrame } from "../disasm/stack";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
@@ -8,6 +11,7 @@ import { GhidraClient } from "../ghidra/client";
 import { streamEnhance } from "../llm/client";
 import { SYSTEM_PROMPT_EXPLAIN } from "../llm/prompt";
 import { llmConfigProblem, loadDecompileServer, loadSettings } from "../llm/settings";
+import { findCodeSection } from "../pe/sections";
 import type { PEFile } from "../pe/types";
 import { disasmWorker } from "../workers/disasmClient";
 import type {
@@ -56,6 +60,24 @@ export interface UseDecompileTabsResult {
   /** The active tab's admissions; only the Low Level tab ever has any. */
   activeAdmissions: DecompileAdmissions | undefined;
   syncDisabled: boolean;
+}
+
+/**
+ * The scope table `func`'s own prologue hands to `__SEH_prolog4`, read off the
+ * PE's data sections — the same composition `mcp/session.ts` performs once per
+ * function at load. Null for a function with no such prologue.
+ */
+function seh32ScopeTableFor(func: DisasmFunction, instructions: Instruction[], pe: PEFile) {
+  const code = findCodeSection(pe.sections);
+  if (!code) return null;
+  const imageBase = pe.optionalHeader.imageBase;
+  const lo = imageBase + code.virtualAddress;
+  return seh32ScopeTableOfFunction(
+    collectFuncInsns(func, instructions),
+    buildDataWindows(pe.buffer, pe.sections, imageBase),
+    lo,
+    lo + code.sizeOfRawData,
+  );
 }
 
 export function useDecompileTabs({
@@ -123,6 +145,12 @@ export function useDecompileTabs({
       // The frame is handed over rather than recomputed — on x86-32 the
       // parameter count is read off its `arg_<N>` slots (peek-a-bin-j4uk.6).
       const sig = inferSignature(currentFunc, instructions, arch, pe.is64, undefined, sf);
+      // This function's own EH4 scope table, read here because the worker holds
+      // no `.rdata`: the windows are views onto the file buffer and the read is
+      // one prologue head plus a few words, so it is done per click rather than
+      // cached against anything (peek-a-bin-s1f6.3).
+      const seh32Scopes =
+        arch === "x86" && !pe.is64 ? seh32ScopeTableFor(currentFunc, instructions, pe) : null;
       const funcEntries: [number, { name: string; address: number }][] = [];
       for (const fn of functions) {
         funcEntries.push([fn.address, { name: getDisplayName(fn, renames), address: fn.address }]);
@@ -142,6 +170,7 @@ export function useDecompileTabs({
         // summary is a property of the image and is cached against the
         // instruction array (peek-a-bin-s2ws).
         functions,
+        seh32Scopes,
       );
       writeLowCache(lowCache.current, addr, { ...result, inputsKey });
       dispatch({

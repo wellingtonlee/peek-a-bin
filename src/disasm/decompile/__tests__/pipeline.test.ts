@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeFunction, ScopeTableEntry } from "../../../pe/types";
 import type { CalleeClobbers } from "../../callSummary";
 import { recogniseCrtIdioms } from "../../crtIdioms";
+import type { Seh32ScopeTable } from "../../seh32";
 import type { FunctionSignature } from "../../signatures";
 import { analyzeStackFrame } from "../../stack";
 import type { DisasmFunction, Instruction, Xref } from "../../types";
@@ -9641,5 +9642,137 @@ describe("decompileFunction — x86 EH4: __SEH_epilog4 takes no result and the r
     // the (result-preserving) epilogue: the accumulator is reloaded between.
     expect(returnLine(code)).not.toContain("__SEH_prolog4");
     expect(returnLine(code)).toMatch(/^return (eax|arg_0);$/);
+  });
+});
+
+describe("decompileFunction — EH4 trylevel stores are annotated from the function's own scope table", () => {
+  // `[ebp - 4]` is EH4's trylevel under a `__SEH_prolog4` frame. A store of k
+  // there opens scope k of the table the prologue pushed; -2 closes. The
+  // annotation names the funclet's ADDRESS from the table — the fact x64
+  // already prints from `.pdata` — at the store, which exists at 100% of
+  // scopes. It is NOT the refused call-site comment for a folded funclet, and
+  // it places no `__try {}` extent (peek-a-bin-fcgu) (peek-a-bin-s1f6.3, B7).
+  const table: Seh32ScopeTable = {
+    tableAddr: 0x411228,
+    records: [
+      { enclosingLevel: -2, filter: 0, handler: 0x403334 },
+      { enclosingLevel: 0, filter: 0, handler: 0x403270 },
+    ],
+  };
+
+  function decompile(instructions: Instruction[], scopes: Seh32ScopeTable | null, is64 = false) {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      is64,
+      new Map(),
+      new Map(),
+      new Map(),
+      new Map(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      scopes,
+    ).code;
+  }
+
+  /** Open scope 0, nest scope 1, close with -2, and one `and` spelling of 0. */
+  const body = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "dword ptr [ebp - 4], 0"],
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["mov", "dword ptr [ebp - 4], 1"],
+      ["add", "eax, 1"],
+      ["mov", "dword ptr [ebp - 4], 0xfffffffe"],
+      ["and", "dword ptr [ebp - 4], 0"],
+      ["mov", "dword ptr [ebp - 8], 0"],
+      ["ret"],
+    ]);
+
+  const lines = (code: string) => code.split("\n").map((l) => l.trim());
+
+  it("places a comment naming the scope after each trylevel store, in order", () => {
+    const ls = lines(decompile(body(), table));
+    const i0 = ls.indexOf("// EH4 trylevel 0: __finally at 0x403334 (scope table 0x411228)");
+    const i1 = ls.indexOf(
+      "// EH4 trylevel 1: __finally at 0x403270, inside trylevel 0 (scope table 0x411228)",
+    );
+    const iNone = ls.indexOf("// EH4 trylevel none (scope table 0x411228)");
+    expect(i0).toBeGreaterThanOrEqual(0);
+    expect(i1).toBeGreaterThan(i0);
+    expect(iNone).toBeGreaterThan(i1);
+    // The store itself is untouched and the comment FOLLOWS it — a comment
+    // ahead of a store that opens a guard body un-anchors the polarity audit
+    // (its anchor is the body's first addressed line).
+    expect(ls[i0 - 1]).toMatch(/^(var_4|\*\(int32_t\*\)\(ebp - 4\)) = 0;$/);
+    expect(ls[i1 - 1]).toMatch(/^(var_4|\*\(int32_t\*\)\(ebp - 4\)) = 1;$/);
+    expect(ls[iNone - 1]).toMatch(/^(var_4|\*\(int32_t\*\)\(ebp - 4\)) = (0xFFFFFFFE|-2);$/);
+    // `and [ebp-4], 0` is a store of 0: a second trylevel-0 comment.
+    expect(ls.filter((l) => l.startsWith("// EH4 trylevel 0:"))).toHaveLength(2);
+    // The neighbouring slot is not the trylevel.
+    expect(ls.filter((l) => l.startsWith("// EH4"))).toHaveLength(4);
+    // No `__try` braces: the extent is deferred, not implied.
+    expect(decompile(body(), table)).not.toContain("__try");
+  });
+
+  it("NEGATIVE CONTROL: a table with the records at the wrong index names the wrong address", () => {
+    // The comment is read from the table BY INDEX; swap the records and the
+    // address printed for trylevel 0 changes — which is what makes the row
+    // above a test of the lookup rather than of the wording.
+    const swapped: Seh32ScopeTable = { ...table, records: [table.records[1], table.records[0]] };
+    const code = decompile(body(), swapped);
+    expect(code).not.toContain("trylevel 0: __finally at 0x403334");
+    expect(code).toContain("trylevel 0: __finally at 0x403270");
+  });
+
+  it("annotates nothing without a table, on x64, or for a level the table lacks", () => {
+    expect(decompile(body(), null)).not.toContain("EH4");
+    expect(decompile(body(), table, true)).not.toContain("EH4");
+    const one: Seh32ScopeTable = { ...table, records: [table.records[0]] };
+    const code = decompile(body(), one);
+    expect(code).toContain("// EH4 trylevel 0:");
+    expect(code).not.toContain("trylevel 1");
+    // The unexplained store stays, uncommented.
+    expect(code).toMatch(/^\s*(var_4|\*\(int32_t\*\)\(ebp - 4\)) = 1;$/m);
+  });
+
+  it("annotates a register store whose value SSA resolved to a constant — MSVC's `mov [ebp-4], edx` after `xor edx, edx; inc edx`", () => {
+    // 18/16 of the corpus's trylevel stores on t32/w32 are this shape. The
+    // annotation runs after folding, where the constant is in the IR.
+    const code = decompile(
+      seq(0x401000, [
+        ["xor", "edx, edx"],
+        ["inc", "edx"],
+        ["mov", "dword ptr [ebp - 4], edx"],
+        ["ret"],
+      ]),
+      table,
+    );
+    expect(code).toContain("// EH4 trylevel 1: __finally at 0x403270");
+  });
+
+  it("REFUSES a register store whose value is not one constant — an argument, here", () => {
+    const code = decompile(
+      seq(0x401000, [
+        ["mov", "ecx, dword ptr [ebp + 8]"],
+        ["mov", "dword ptr [ebp - 4], ecx"],
+        ["ret"],
+      ]),
+      table,
+    );
+    expect(code).not.toContain("EH4");
   });
 });

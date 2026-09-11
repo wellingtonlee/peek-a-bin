@@ -14,6 +14,7 @@ import { StructRegistry } from "../disasm/decompile/structs";
 import { buildFuncInsnMap } from "../disasm/funcInsns";
 import { buildIATLookup } from "../disasm/operands";
 import { jumpTableTargets } from "../disasm/seeds";
+import { type Seh32ScopeTable, seh32ScopeTableOfFunction } from "../disasm/seh32";
 import type { DisasmFunction, Instruction, Xref } from "../disasm/types";
 import { extractStrings, parsePE } from "../pe/parser";
 import { dataSectionRanges, dataSectionTable, findCodeSection } from "../pe/sections";
@@ -88,6 +89,14 @@ export interface AnalyzedFile {
    * server and the harness name globals from one table.
    */
   naming: NamingContext;
+  /**
+   * Function entry → the `_EH4_SCOPETABLE` its own prologue pushes
+   * (`disasm/seh32.ts`), for the decompiler's trylevel annotations. Computed
+   * here, from the same head the detector read for its funclet relation, and
+   * never inside `detectFunctions` — the detector's answer is a boundary, this
+   * one is a name. Empty on anything but 32-bit x86: there is no EH4 elsewhere.
+   */
+  seh32Scopes: Map<number, Seh32ScopeTable>;
   anomalies: Anomaly[];
   driverInfo: DriverInfo;
   structRegistry: StructRegistry;
@@ -338,6 +347,21 @@ export class FileSession {
       iatMap,
       securityCookie: pe.loadConfig?.securityCookie,
     };
+    // 8d. Each function's own EH4 scope table, for the trylevel annotations.
+    //
+    // The same composition the browser hook performs per click
+    // (`seh32ScopeTableOfFunction`), over the whole function list once: the
+    // data windows are views onto `buffer`, so this costs one head read per
+    // function and a handful of u32 reads per table.
+    const seh32Scopes = new Map<number, Seh32ScopeTable>();
+    if (funcInsnMap && !is64) {
+      const windows = buildDataWindows(buffer, pe.sections, imageBase);
+      const codeHi = textBase + textBytes.length;
+      for (const [addr, insns] of funcInsnMap) {
+        const table = seh32ScopeTableOfFunction(insns, windows, textBase, codeHi);
+        if (table) seh32Scopes.set(addr, table);
+      }
+    }
 
     // 9. Detect anomalies
     const anomalies = detectAnomalies(pe);
@@ -363,6 +387,7 @@ export class FileSession {
       arch,
       calleeClobbers,
       naming,
+      seh32Scopes,
       anomalies,
       driverInfo,
       structRegistry,

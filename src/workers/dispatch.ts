@@ -42,6 +42,7 @@ import {
   type ImageBounds,
 } from "../disasm/functionDetect";
 import { X86SweepCache } from "../disasm/linearSweep";
+import type { Seh32ScopeTable } from "../disasm/seh32";
 import type { FunctionSignature } from "../disasm/signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../disasm/types";
 import { extractStrings } from "../pe/parser";
@@ -740,6 +741,8 @@ export async function dispatch(
           iatMap: state.iatMap,
           securityCookie: state.securityCookie,
         },
+        // Read by the client off the PE, since the worker has no `.rdata`.
+        args.seh32Scopes as Seh32ScopeTable | null | undefined,
       );
     }
 

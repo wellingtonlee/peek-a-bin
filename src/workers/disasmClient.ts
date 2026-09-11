@@ -667,6 +667,12 @@ class DisasmWorkerClient {
     funcMap: Map<number, { name: string; address: number }>,
     runtimeFunctions?: import("../pe/types").RuntimeFunction[],
     functions?: readonly FuncExtent[],
+    /**
+     * This function's own EH4 scope table (`disasm/seh32.ts`), read by the
+     * caller from the PE's data sections — the worker holds no `.rdata`. A few
+     * numbers; absent or null means no trylevel annotations, as before.
+     */
+    seh32Scopes?: import("../disasm/seh32").Seh32ScopeTable | null,
   ): Promise<{ code: string; lineMap: Map<number, number>; admissions: DecompileAdmissions }> {
     // NO CACHE HERE, AND THAT IS A DELETION. This method used to memoise its
     // reply on the bare function address, with a single caller —
@@ -720,6 +726,7 @@ class DisasmWorkerClient {
       runtimeFunctions: pdataRecord ? [pdataRecord] : undefined,
       funcExtents: functions?.map((f) => [f.address, f.size] as [number, number]),
       insnsToken: functions ? this.insnsToken(instructions) : undefined,
+      seh32Scopes: seh32Scopes ?? undefined,
     });
     type Reply = {
       code: string;

@@ -1057,6 +1057,9 @@ export async function sweepBinary(key: BinKey): Promise<BinResult> {
         // The section table and IAT the emitter names globals from — the
         // session's, so the harness names what the MCP path names.
         af.naming,
+        // The function's own EH4 scope table, as the session computed it for
+        // the MCP path — the trylevel annotations are measured from the same map.
+        af.seh32Scopes.get(func.address) ?? null,
       );
       if (r.error !== undefined) {
         // The pipeline caught its own throw. Recorded as `threw` so the row is

@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  EH4_TRYLEVEL_NONE,
   type HeadReader,
+  headReaderOfInsns,
   MAX_SEH32_SCOPE_RECORDS,
   readSeh32ScopeTable,
   type Seh32Reader,
+  type Seh32ScopeTable,
   seh32FuncletsOfPrologue,
   seh32PrologImmediates,
+  seh32ReaderOver,
+  seh32ScopeTableOfFunction,
+  seh32ScopeTableOfPrologue,
+  trylevelComment,
 } from "../seh32";
 
 const CODE_LO = 0x401000;
@@ -239,5 +246,142 @@ describe("seh32FuncletsOfPrologue", () => {
     ];
     const head: HeadReader = (i) => insns[i];
     expect(seh32FuncletsOfPrologue(head, readerOf(TABLE, T32_411110), isCodeAddress)).toEqual([]);
+  });
+});
+
+describe("seh32ScopeTableOfPrologue — THE table a trylevel indexes", () => {
+  const reader = readerOf(TABLE, T32_411110);
+  const head = (...pairs: [string, string][]): HeadReader =>
+    headReaderOfInsns(pairs.map(([mnemonic, opStr]) => ({ mnemonic, opStr })));
+
+  it("returns the table and its address for a real prologue", () => {
+    const table = seh32ScopeTableOfPrologue(
+      head(["push", "0x38"], ["push", "0x411110"], ["call", "0x404170"]),
+      reader,
+      isCodeAddress,
+    );
+    expect(table).toEqual({
+      tableAddr: TABLE,
+      records: [
+        { enclosingLevel: -2, filter: 0, handler: 0x403334 },
+        { enclosingLevel: 0, filter: 0, handler: 0x403270 },
+      ],
+    });
+  });
+
+  it("is null for a prologue that is not one, and for an immediate that is not a table", () => {
+    expect(seh32ScopeTableOfPrologue(head(["push", "ebp"]), reader, isCodeAddress)).toBeNull();
+    expect(
+      seh32ScopeTableOfPrologue(
+        head(["push", "0x38"], ["call", "0x404170"]),
+        reader,
+        isCodeAddress,
+      ),
+    ).toBeNull();
+  });
+
+  it("REFUSES two immediates that both read as tables — an annotation needs one", () => {
+    // Detection unions them; a name cannot. Two pushes of the same table
+    // address make both immediates read as tables.
+    expect(
+      seh32ScopeTableOfPrologue(
+        head(["push", "0x411110"], ["push", "0x411110"], ["call", "0x404170"]),
+        reader,
+        isCodeAddress,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("seh32ReaderOver — little-endian reads over data windows", () => {
+  const bytes = new Uint8Array([0xfe, 0xff, 0xff, 0xff, 0x34, 0x33, 0x40, 0x00, 0x00]);
+  const reader = seh32ReaderOver([{ base: 0x411000, bytes }]);
+
+  it("reads i32 signed and u32 unsigned, and null where nothing maps", () => {
+    expect(reader.i32(0x411000)).toBe(-2);
+    expect(reader.u32(0x411000)).toBe(0xfffffffe);
+    expect(reader.u32(0x411004)).toBe(0x403334);
+    // Last full word ends at +8; +6 would need bytes 6..9 and there are 9.
+    expect(reader.u32(0x411005)).toBe(0x00403334 >>> 8);
+    expect(reader.u32(0x411006)).toBeNull();
+    expect(reader.i32(0x410fff)).toBeNull();
+    expect(seh32ReaderOver([]).u32(0x411000)).toBeNull();
+  });
+
+  it("agrees with the transcribed-word reader on a real table", () => {
+    const words = new Uint8Array(T32_411110.length * 4);
+    new DataView(words.buffer).setUint32(0, 0, true);
+    T32_411110.forEach((w, i) => new DataView(words.buffer).setUint32(i * 4, w, true));
+    const over = seh32ReaderOver([{ base: TABLE, bytes: words }]);
+    expect(readSeh32ScopeTable(TABLE, over, isCodeAddress)).toEqual(
+      readSeh32ScopeTable(TABLE, readerOf(TABLE, T32_411110), isCodeAddress),
+    );
+  });
+});
+
+describe("seh32ScopeTableOfFunction — the composition the callers share", () => {
+  it("reads a function's own table from its instructions and the image's windows", () => {
+    const words = new Uint8Array(T32_411110.length * 4);
+    T32_411110.forEach((w, i) => new DataView(words.buffer).setUint32(i * 4, w, true));
+    const insns = [
+      { mnemonic: "push", opStr: "0x38" },
+      { mnemonic: "push", opStr: "0x411110" },
+      { mnemonic: "call", opStr: "0x404170" },
+      { mnemonic: "mov", opStr: "ebx, dword ptr [ebp + 8]" },
+    ];
+    const table = seh32ScopeTableOfFunction(
+      insns,
+      [{ base: TABLE, bytes: words }],
+      CODE_LO,
+      CODE_HI,
+    );
+    expect(table?.tableAddr).toBe(TABLE);
+    expect(table?.records).toHaveLength(2);
+    expect(
+      seh32ScopeTableOfFunction([], [{ base: TABLE, bytes: words }], CODE_LO, CODE_HI),
+    ).toBeNull();
+  });
+});
+
+describe("trylevelComment — the one declaration of what a trylevel store says", () => {
+  const table: Seh32ScopeTable = {
+    tableAddr: TABLE,
+    records: [
+      { enclosingLevel: -2, filter: 0, handler: 0x403334 },
+      { enclosingLevel: 0, filter: 0, handler: 0x403270 },
+      { enclosingLevel: -2, filter: 0x4033a0, handler: 0x4033c0 },
+    ],
+  };
+
+  it("names a __finally scope by its handler and the table", () => {
+    expect(trylevelComment(0, table)).toBe(
+      "EH4 trylevel 0: __finally at 0x403334 (scope table 0x411110)",
+    );
+  });
+
+  it("names the enclosing level of a nested scope", () => {
+    expect(trylevelComment(1, table)).toBe(
+      "EH4 trylevel 1: __finally at 0x403270, inside trylevel 0 (scope table 0x411110)",
+    );
+  });
+
+  it("names an __except scope by handler and filter", () => {
+    expect(trylevelComment(2, table)).toBe(
+      "EH4 trylevel 2: __except at 0x4033C0, filter at 0x4033A0 (scope table 0x411110)",
+    );
+  });
+
+  it("spells TRYLEVEL_NONE from either reading of the constant", () => {
+    expect(trylevelComment(EH4_TRYLEVEL_NONE, table)).toBe(
+      "EH4 trylevel none (scope table 0x411110)",
+    );
+    expect(trylevelComment(0xfffffffe, table)).toBe("EH4 trylevel none (scope table 0x411110)");
+  });
+
+  it("REFUSES a level the table has no record for, and a non-integer", () => {
+    expect(trylevelComment(3, table)).toBeNull();
+    expect(trylevelComment(-1, table)).toBeNull();
+    expect(trylevelComment(0xffffffff, table)).toBeNull();
+    expect(trylevelComment(0.5, table)).toBeNull();
   });
 });

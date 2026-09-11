@@ -108,7 +108,10 @@ Reuse them rather than re-rolling the logic.
     `hybridDisassemble` from the held sweep). `sectionMemo.ts` holds the memo key rule (bytes, load
     address, decoder identity).
   - `stackIdiom.ts` — the `push <imm>`/`pop <reg>` rule; **a leaf that imports nothing**.
-  - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`, `seh32.ts`. `branchTarget.ts` is the leaf both
+  - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`. `seh32.ts` reads the x86 `_EH4_SCOPETABLE` twice
+    over: as a funclet-of-parent **relation** for detection, and as **THE table** a trylevel indexes
+    for the decompiler (`seh32ScopeTableOfFunction`, `trylevelComment` — the one declaration of the
+    wording). `branchTarget.ts` is the leaf both
     `callSummary.ts` (re-exporting it) and `crtIdioms.ts` read the `call`/`jmp` target grammar from.
   - `crtIdioms.ts` — CRT helpers recognised from their **body**, exactly: `__security_check_cookie`
     (two shapes), x86 `__SEH_epilog4` (result-preserving, argument-less) and x86 `__SEH_prolog4`
@@ -1333,6 +1336,24 @@ refused. **Read the long-form entry before changing the code it describes.**
   callers plus the two helpers; every gate flat; `undefinedCallees` internal **33/0/0/31 unmoved**;
   two guards entered the polarity audit (`eax = var_1C; if (arg_0 != 1) eax = var_24;` in
   `t32!sub_406B3C`/`w32!sub_4064F9`) because the value they select became live — hand-read correct.
+- **An x86 EH4 trylevel store is annotated from the function's OWN scope table, AFTER the store and
+  AFTER folding — both placements measured.** `[ebp - 4]` is the trylevel under a `__SEH_prolog4`
+  frame; `mov [ebp-4], k` opens scope k of the `_EH4_SCOPETABLE` the prologue pushed and `-2` closes.
+  `pipeline.ts` step 4a puts a `comment` statement behind each such store naming the funclet's
+  **address from the table** (`// EH4 trylevel 0: __finally at 0x403334 (scope table 0x411228)`,
+  `__except at …, filter at …`, `trylevel none`). **Not the refused folded-funclet call-site comment**:
+  it sits at the store, which exists at 100% of scopes, and names what the format states. **No `__try`
+  braces and no `IRTry.finally`** — extents are `peek-a-bin-fcgu`'s. The table is read by the
+  **caller** (`mcp/session.ts` once per file, `useDecompileTabs` per click, both through
+  `seh32ScopeTableOfFunction`; the worker holds no `.rdata`) and arrives as `decompileFunction`'s
+  last parameter; **never inside function detection**. Two placements are load-bearing: the comment
+  **trails** the store, because the polarity audit anchors a guard on its body's first *addressed*
+  line and a leading comment silently dropped one guard per 32-bit binary from the audited set; and it
+  runs after `foldBlock`, because 18/16 of the 70/66 trylevel stores are `mov [ebp-4], edi` behind
+  `xor edi, edi` and only SSA knows the constant. A value that is still not one constant (3/3, phis)
+  is **refused, silently**. Measured at 5596002: 67/63 comments in 31/29 functions on t32/w32,
+  x64 byte-identical, `undefinedCallees` internal 33/0/0/31 unmoved (its `hex thread` liveness column
+  rose 15→17 / 13→15 — the handler address is now on the page), every gate flat.
 - **`RegState.defs` is keyed by literal operand text deliberately** (the recorded expression carries
   the operand's width). Ask `wroteAnyAlias` for the width-blind question; it returns a **boolean**,
   so the recorded expression can never be substituted at the call site.

@@ -3,6 +3,7 @@ import type { CalleeClobbers } from "../callSummary";
 import { type BasicBlock, buildCFG, detectLoops } from "../cfg";
 import { namedGlobalsFor } from "../crtIdioms";
 import { funcExceptionRecord } from "../funcInsns";
+import { type Seh32ScopeTable, trylevelComment } from "../seh32";
 import type { FunctionSignature } from "../signatures";
 import type { DisasmFunction, Instruction, StackFrame, Xref } from "../types";
 import { type CleanupStats, cleanupStructured, emptyCleanupStats } from "./cleanup";
@@ -10,7 +11,7 @@ import { type DecompileAdmissions, emitFunction, emptyAdmissions } from "./emit"
 import { entryBindings } from "./entryBindings";
 import { carryPredecessor, flagPredecessor } from "./flagModel";
 import { blockLiveOut, foldBlock } from "./fold";
-import { bodiesOf, type IRBranch, type IRStmt, type IRTry, rewriteBodies } from "./ir";
+import { bodiesOf, type IRBranch, type IRExpr, type IRStmt, type IRTry, rewriteBodies } from "./ir";
 import { firstCalleeSavedWrites, liftBlock, liftCrossBlockPops, matchedStackSlots } from "./lifter";
 import type { NamingContext } from "./naming";
 import { promoteVars } from "./promote";
@@ -164,6 +165,16 @@ export function decompileFunction(
    * parameter since `tap` is last: appending keeps the call sites unrenumbered.
    */
   naming?: NamingContext,
+  /**
+   * The `_EH4_SCOPETABLE` this function's own prologue hands to
+   * `__SEH_prolog4` (`disasm/seh32.ts`), read by the CALLER from the image —
+   * `mcp/session.ts`, `corpus/sweep.ts` and the browser hook all compute it
+   * from `seh32ScopeTableOfPrologue` over the function's head and the data
+   * sections, never inside function detection. x86 only; absent or null means
+   * exactly the pre-annotation output. Last, after `structTap`, for the reason
+   * every parameter above it is last. See `annotateTrylevelStores`.
+   */
+  seh32Scopes?: Seh32ScopeTable | null,
 ): DecompileResult {
   try {
     // 1. Build CFG + detect loops
@@ -254,6 +265,21 @@ export function decompileFunction(
     for (const [blockId, stmts] of liftedBlocks) {
       liftedBlocks.set(blockId, foldBlock(stmts, liveOut.get(blockId)));
     }
+
+    // 4a. EH4 trylevel stores, named from the function's own scope table.
+    //
+    // A comment statement AFTER each `[ebp - 4] = k` store, saying which scope
+    // of which table the store opened (`trylevelComment` is the one declaration
+    // of the wording). Two placements are load-bearing. AFTER the store, because
+    // `corpus/sweep.ts`'s polarity audit anchors a guard on its body's first
+    // ADDRESSED line: a comment placed ahead of a store that opens a guard body
+    // has no `lineMap` entry, and the guard silently left the audited set (one
+    // per 32-bit binary, `t32!0x40bb46` / `w32!0x4048d5`, measured). And after
+    // FOLDING rather than at lift time, because 18/16 of the corpus's 70/66
+    // trylevel stores on t32/w32 are `mov [ebp-4], edi` after `xor edi, edi` —
+    // the lifter emits a plain register read and propagation belongs to SSA, so
+    // only here is the constant the machine stores in the IR to be read.
+    if (!is64 && seh32Scopes) annotateTrylevelStores(liftedBlocks, seh32Scopes);
 
     // 4b. Extract the branch statements again.
     //
@@ -454,6 +480,72 @@ export function decompileFunction(
  * region here could not be read" would be the fabrication all over again, in
  * the voice of an admission.
  */
+/**
+ * The EH4 trylevel slot as the lifter spells it: `deref(ebp - 4)`, four bytes.
+ *
+ * `parseMemExpr` lifts `[ebp - 4]` to `binary("-", reg ebp, const 4)`; the
+ * store's `size` is the operand's `dword ptr`. Anything else — another slot,
+ * another width, a based-and-indexed address — is not the trylevel and gets
+ * nothing. Only under a scope table: the caller supplies one exactly when this
+ * function's prologue pushed it, and under that prologue `[ebp - 4]` IS the
+ * trylevel by the `__SEH_prolog4` frame layout (`crtIdioms.ts`).
+ */
+function isTrylevelSlot(address: IRExpr, size: number): boolean {
+  if (size !== 4 || address.kind !== "binary" || address.op !== "-") return false;
+  const { left, right } = address;
+  return (
+    left.kind === "reg" &&
+    left.name.toLowerCase() === "ebp" &&
+    right.kind === "const" &&
+    right.value === 4
+  );
+}
+
+/**
+ * The constant a trylevel store writes, or null when the folded IR does not
+ * hold one. `mov [ebp-4], imm` is a `const`, and so — after SSA's propagation
+ * and `foldBlock` — is `mov [ebp-4], edx` behind `xor edx, edx; inc edx`;
+ * `and [ebp-4], 0` (MSVC's three-byte spelling of storing 0) is
+ * `binary("&", …, const 0)`, which is 0 whatever the left operand holds. A
+ * store whose value is still a register or an expression here (a value from
+ * another block SSA could not resolve to one constant) is REFUSED and left as
+ * an uncommented store rather than a guess.
+ */
+function trylevelStored(value: IRExpr): number | null {
+  if (value.kind === "const") return value.value;
+  if (value.kind === "binary" && value.op === "&") {
+    if (value.right.kind === "const" && value.right.value === 0) return 0;
+    if (value.left.kind === "const" && value.left.value === 0) return 0;
+  }
+  return null;
+}
+
+/**
+ * Insert, after every `[ebp - 4] = <const>` store, a comment naming the scope
+ * it opened — see `trylevelComment` for what it says and does not say, and
+ * step 4a for why it follows the store rather than leading it. A level the
+ * table has no record for gets no comment: the store stays, the refusal is
+ * silent, and nothing is invented.
+ */
+function annotateTrylevelStores(liftedBlocks: Map<number, IRStmt[]>, table: Seh32ScopeTable): void {
+  for (const [id, stmts] of liftedBlocks) {
+    let out: IRStmt[] | null = null;
+    for (let i = 0; i < stmts.length; i++) {
+      const st = stmts[i];
+      if (out !== null) out.push(st);
+      if (st.kind === "store" && isTrylevelSlot(st.address, st.size)) {
+        const level = trylevelStored(st.value);
+        const text = level === null ? null : trylevelComment(level, table);
+        if (text !== null) {
+          if (out === null) out = stmts.slice(0, i + 1);
+          out.push({ kind: "comment", text });
+        }
+      }
+    }
+    if (out !== null) liftedBlocks.set(id, out);
+  }
+}
+
 function wrapExceptionRegions(
   body: IRStmt[],
   func: DisasmFunction,

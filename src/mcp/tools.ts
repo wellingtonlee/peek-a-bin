@@ -259,6 +259,7 @@ export function registerTools(server: McpServer, session: FileSession): void {
           af.calleeClobbers,
           undefined,
           af.naming,
+          af.seh32Scopes.get(func.address) ?? null,
         );
 
         // A pipeline fault is an error response, not a `code` holding a
