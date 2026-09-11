@@ -110,10 +110,12 @@ Reuse them rather than re-rolling the logic.
   - `stackIdiom.ts` — the `push <imm>`/`pop <reg>` rule; **a leaf that imports nothing**.
   - `callSummary.ts`, `seeds.ts`, `dataWindows.ts`, `seh32.ts`. `branchTarget.ts` is the leaf both
     `callSummary.ts` (re-exporting it) and `crtIdioms.ts` read the `call`/`jmp` target grammar from.
-  - `crtIdioms.ts` — CRT helpers recognised from their **body**, exactly (`__security_check_cookie`
-    today, a table built for `__SEH_epilog4` next): the name, `preservesResult`, the cookie's
-    address and the routine's register signature, riding in `CalleeClobbers.idioms` through the
-    same whole-image pass and `needInstructions` protocol as the clobber summaries.
+  - `crtIdioms.ts` — CRT helpers recognised from their **body**, exactly: `__security_check_cookie`
+    (two shapes), x86 `__SEH_epilog4` (result-preserving, argument-less) and x86 `__SEH_prolog4`
+    (**name only** — it writes EAX and takes its arguments on the stack, so it publishes no
+    signature and the call-site walk stays). Each publishes the name, `preservesResult`, and where
+    it has one the cookie's address and the register signature, riding in `CalleeClobbers.idioms`
+    through the same whole-image pass and `needInstructions` protocol as the clobber summaries.
 - **`disasm/arm64*.ts`** — `arm64.ts` (fixed-width sweep, `Arm64SweepCache`, jump-table reader,
   `arm64ThunkSlot`), `arm64Operands.ts` (**the single A64 branch/address grammar** — do not
   hand-roll a second), `arm64Frame.ts` (A64 frame from `.pdata`, a *second grammar* rather than a
@@ -1316,6 +1318,21 @@ refused. **Read the long-form entry before changing the code it describes.**
   **reported, not consulted** — the worker never sees the PE. Measured cost: RAX now live at the
   `ret` materialises phi copies, which withdrew **two** struct definitions on t64 and moved one
   A2-anchored guard per x64 binary out of the polarity audit (arms swapped, hand-read correct).
+- **…and x86 `__SEH_epilog4` is the second such callee, and the x86 return-value defect it fixed was
+  larger.** Every MSVC `__try` function on PE32 ends `call __SEH_epilog4; ret`; the helper restores
+  `fs:[0]`, pops the saved registers and the frame and returns through the address it parked in ECX,
+  never touching EAX. With the call defining EAX, the real result — `t32!sub_40C9DE`'s `var_1C`,
+  computed on every path — was dead and **all 31 / 29 call sites on t32 / w32 printed `return
+  sub_4041B5();`**. `crtIdioms.ts` admits the routine's 11-instruction body **exactly** (an extra or
+  missing instruction, a write of EAX, a `call`, another frame slot, `retn 4` are all refused) and
+  publishes `preservesResult: true, args: []` — empty, not absent, because the routine takes nothing
+  and a call-site walk would decorate it with whatever `push` precedes the call. `__SEH_prolog4` is
+  recognised beside it for its **name alone** (`preservesResult: false`, **no `args`**: its two
+  arguments are pushed immediates and a published empty signature would REPLACE the walk that
+  recovers them). Measured at 21fbfa3: t64/w64 **byte-identical**; t32/w32 changed exactly the 31/29
+  callers plus the two helpers; every gate flat; `undefinedCallees` internal **33/0/0/31 unmoved**;
+  two guards entered the polarity audit (`eax = var_1C; if (arg_0 != 1) eax = var_24;` in
+  `t32!sub_406B3C`/`w32!sub_4064F9`) because the value they select became live — hand-read correct.
 - **`RegState.defs` is keyed by literal operand text deliberately** (the recorded expression carries
   the operand's width). Ask `wroteAnyAlias` for the width-blind question; it returns a **boolean**,
   so the recorded expression can never be substituted at the call site.

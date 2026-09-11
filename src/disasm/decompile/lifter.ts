@@ -2307,7 +2307,9 @@ export function liftBlock(
       // signature, and whether it defines the accumulator at all — see
       // `crtIdioms.ts` and `callResult` below.
       const idiom = crtIdiomFor(insn, calleeClobbers);
-      const args = idiom
+      // A routine with no published register signature (`__SEH_prolog4`, whose
+      // arguments are pushed) keeps the call-site walk.
+      const args = idiom?.args
         ? idiom.args.map((r) => irReg(r))
         : is64
           ? collectArgs64(regState)
@@ -2360,7 +2362,7 @@ export function liftBlock(
       const tail = resolveNamedTarget(insn, iatMap, funcMap);
       if (tail) {
         const idiom = crtIdiomFor(insn, calleeClobbers);
-        const args = idiom
+        const args = idiom?.args
           ? idiom.args.map((r) => irReg(r))
           : is64
             ? collectArgs64(regState)

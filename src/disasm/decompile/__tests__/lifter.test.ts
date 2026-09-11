@@ -2975,3 +2975,59 @@ describe("liftBlock — a call to a result-preserving CRT routine defines no res
     expect(stmts[1]).toMatchObject({ kind: "return", value: irReg("rax", 8) });
   });
 });
+
+describe("liftBlock — a recognised routine with NO register signature keeps the call-site walk", () => {
+  // `__SEH_prolog4` is named from its body but takes its two arguments on the
+  // stack, so `crtIdioms.ts` publishes no `args`; a published empty list would
+  // REPLACE the push walk with nothing. It writes EAX, so the result stays.
+  const PROLOG4 = 0x404170;
+  const facts: CalleeClobbers = {
+    byAddress: new Map(),
+    unresolved: [],
+    idioms: new Map<number, CrtIdiom>([
+      [PROLOG4, { kind: "seh-prolog4", name: "__SEH_prolog4", preservesResult: false }],
+    ]),
+  };
+  const funcs = new Map([[PROLOG4, { name: "__SEH_prolog4", address: PROLOG4 }]]);
+
+  it("x86: the pushed immediates are the arguments and the call defines EAX", () => {
+    const stmts = lift(
+      [
+        ["push", "0x28"],
+        ["push", "0x411228"],
+        ["call", "0x404170"],
+      ],
+      { is64: false, clobbers: facts, funcs },
+    );
+    const call = lastOf(stmts) as Extract<IRStmt, { kind: "call_stmt" }>;
+    expect(call.kind).toBe("call_stmt");
+    expect(call.call.target).toBe("__SEH_prolog4");
+    expect(call.call.args).toHaveLength(2);
+    expect(call.resultDest).toEqual(irReg("eax"));
+  });
+
+  it("x86: __SEH_epilog4 takes no arguments whatever was pushed, and defines nothing", () => {
+    const EPILOG4 = 0x4041b5;
+    const withEpilog: CalleeClobbers = {
+      ...facts,
+      idioms: new Map<number, CrtIdiom>([
+        [EPILOG4, { kind: "seh-epilog4", name: "__SEH_epilog4", preservesResult: true, args: [] }],
+      ]),
+    };
+    const stmts = lift(
+      [
+        ["push", "0x28"],
+        ["call", "0x4041b5"],
+      ],
+      {
+        is64: false,
+        clobbers: withEpilog,
+        funcs: new Map([[EPILOG4, { name: "__SEH_epilog4", address: EPILOG4 }]]),
+      },
+    );
+    const call = lastOf(stmts) as Extract<IRStmt, { kind: "call_stmt" }>;
+    expect(call.call.target).toBe("__SEH_epilog4");
+    expect(call.call.args).toEqual([]);
+    expect(call.resultDest).toBeUndefined();
+  });
+});

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CRT_RECOGNISERS,
+  type CrtIdiom,
   type IdiomInsn,
   namedGlobalsFor,
   recogniseCrtIdiom,
@@ -20,6 +21,10 @@ import {
 function ins(address: number, mnemonic: string, opStr = "", size = 4): IdiomInsn {
   return { address, mnemonic, opStr, size };
 }
+
+/** The cookie address a match publishes — only the cookie check has one. */
+const cookieOf = (idiom: CrtIdiom | null | undefined): number | undefined =>
+  idiom?.kind === "security-check-cookie" ? idiom.cookieAddress : undefined;
 
 /** t64's `__security_check_cookie`, byte-exact addresses and sizes. */
 const hardened = (): IdiomInsn[] => [
@@ -56,7 +61,7 @@ describe("recogniseCrtIdiom — __security_check_cookie, hardened x64 shape", ()
   it("accepts a `rep ret` spelled with its prefix", () => {
     const body = hardened();
     body[5] = { ...body[5], mnemonic: "rep ret" };
-    expect(recogniseCrtIdiom(body, true)?.cookieAddress).toBe(0x1400143c8);
+    expect(cookieOf(recogniseCrtIdiom(body, true))).toBe(0x1400143c8);
   });
 
   it("ignores trailing int3/nop alignment padding, which is not the routine", () => {
@@ -105,7 +110,7 @@ describe("recogniseCrtIdiom — __security_check_cookie, classic x86 shape", () 
   it("accepts the three-instruction form when detection ended the routine at its ret", () => {
     // The jne then leaves the body entirely — that is what makes it the
     // failure path rather than a branch within the routine.
-    expect(recogniseCrtIdiom(classic().slice(0, 3), false)?.cookieAddress).toBe(0x412284);
+    expect(cookieOf(recogniseCrtIdiom(classic().slice(0, 3), false))).toBe(0x412284);
   });
 
   it("refuses the three-instruction form when the jne lands inside the body", () => {
@@ -122,7 +127,7 @@ describe("recogniseCrtIdiom — __security_check_cookie, classic x86 shape", () 
       ins(0x140002009, "ret", "", 2),
       ins(0x14000200b, "jmp", "0x140004290", 5),
     ];
-    expect(recogniseCrtIdiom(body, true)?.cookieAddress).toBe(0x1400143c8);
+    expect(cookieOf(recogniseCrtIdiom(body, true))).toBe(0x1400143c8);
   });
 });
 
@@ -229,12 +234,197 @@ describe("namedGlobalsFor — the cookie as a named global", () => {
   });
 });
 
-describe("CRT_RECOGNISERS — the table a second routine is added to", () => {
-  it("holds one entry today, and every entry refuses an empty body", () => {
-    expect(CRT_RECOGNISERS).toHaveLength(1);
+describe("CRT_RECOGNISERS — the table a new routine is added to", () => {
+  it("holds three entries today, and every entry refuses an empty body", () => {
+    expect(CRT_RECOGNISERS).toHaveLength(3);
     for (const recognise of CRT_RECOGNISERS) {
       expect(recognise([], true)).toBeNull();
       expect(recognise([], false)).toBeNull();
     }
+  });
+});
+
+/**
+ * `__SEH_epilog4`, transcribed from `t32!0x4041B5` at 21fbfa3 through Capstone
+ * (`w32!0x404415` is byte-identical). Real addresses and sizes: 20 bytes.
+ */
+const EPILOG4 = 0x4041b5;
+const epilog4 = (): IdiomInsn[] => [
+  ins(EPILOG4, "mov", "ecx, dword ptr [ebp - 0x10]", 3),
+  ins(EPILOG4 + 3, "mov", "dword ptr fs:[0], ecx", 7),
+  ins(EPILOG4 + 10, "pop", "ecx", 1),
+  ins(EPILOG4 + 11, "pop", "edi", 1),
+  ins(EPILOG4 + 12, "pop", "edi", 1),
+  ins(EPILOG4 + 13, "pop", "esi", 1),
+  ins(EPILOG4 + 14, "pop", "ebx", 1),
+  ins(EPILOG4 + 15, "mov", "esp, ebp", 2),
+  ins(EPILOG4 + 17, "pop", "ebp", 1),
+  ins(EPILOG4 + 18, "push", "ecx", 1),
+  ins(EPILOG4 + 19, "ret", "", 1),
+];
+
+/** `__SEH_prolog4`, `t32!0x404170` at 21fbfa3: 21 instructions, 69 bytes. */
+const PROLOG4 = 0x404170;
+const prolog4 = (): IdiomInsn[] => {
+  const rows: [string, string, number][] = [
+    ["push", "0x4041d0", 5],
+    ["push", "dword ptr fs:[0]", 7],
+    ["mov", "eax, dword ptr [esp + 0x10]", 4],
+    ["mov", "dword ptr [esp + 0x10], ebp", 4],
+    ["lea", "ebp, [esp + 0x10]", 4],
+    ["sub", "esp, eax", 2],
+    ["push", "ebx", 1],
+    ["push", "esi", 1],
+    ["push", "edi", 1],
+    ["mov", "eax, dword ptr [0x412284]", 5],
+    ["xor", "dword ptr [ebp - 4], eax", 3],
+    ["xor", "eax, ebp", 2],
+    ["push", "eax", 1],
+    ["mov", "dword ptr [ebp - 0x18], esp", 3],
+    ["push", "dword ptr [ebp - 8]", 3],
+    ["mov", "eax, dword ptr [ebp - 4]", 3],
+    ["mov", "dword ptr [ebp - 4], 0xfffffffe", 7],
+    ["mov", "dword ptr [ebp - 8], eax", 3],
+    ["lea", "eax, [ebp - 0x10]", 3],
+    ["mov", "dword ptr fs:[0], eax", 6],
+    ["ret", "", 1],
+  ];
+  let at = PROLOG4;
+  return rows.map(([mn, ops, size]) => {
+    const i = ins(at, mn, ops, size);
+    at += size;
+    return i;
+  });
+};
+
+describe("recogniseCrtIdiom — __SEH_epilog4, exact body", () => {
+  it("accepts the real t32/w32 body and publishes a result-preserving, argument-less routine", () => {
+    expect(recogniseCrtIdiom(epilog4(), false)).toEqual({
+      kind: "seh-epilog4",
+      name: "__SEH_epilog4",
+      preservesResult: true,
+      args: [],
+    });
+  });
+
+  it("ignores w32's seven bytes of int3 padding after the ret", () => {
+    const body = epilog4();
+    for (let k = 0; k < 7; k++) body.push(ins(EPILOG4 + 20 + k, "int3", "", 1));
+    expect(recogniseCrtIdiom(body, false)?.name).toBe("__SEH_epilog4");
+  });
+
+  it("is case- and whitespace-insensitive over the operand text, and nothing else", () => {
+    const body = epilog4();
+    body[0] = { ...body[0], opStr: "ECX,  dword ptr [EBP - 0x10]" };
+    expect(recogniseCrtIdiom(body, false)?.name).toBe("__SEH_epilog4");
+    body[0] = { ...body[0], opStr: "ecx, dword ptr [ebp - 0xc]" };
+    expect(recogniseCrtIdiom(body, false)).toBeNull();
+  });
+
+  it("refuses the body on a 64-bit image", () => {
+    expect(recogniseCrtIdiom(epilog4(), true)).toBeNull();
+  });
+
+  it("refuses an extra instruction anywhere inside the body, including a harmless one", () => {
+    // Inside the body only: one AFTER the `ret` is alignment padding and is
+    // stripped, as the row above pins.
+    for (let at = 0; at < 11; at++) {
+      const body = epilog4();
+      body.splice(at, 0, ins(0x500000, "nop", "", 1));
+      expect(recogniseCrtIdiom(body, false), `extra at ${at}`).toBeNull();
+    }
+  });
+
+  it("refuses a missing instruction", () => {
+    for (let at = 0; at < 11; at++) {
+      const body = epilog4();
+      body.splice(at, 1);
+      expect(recogniseCrtIdiom(body, false), `missing ${at}`).toBeNull();
+    }
+  });
+
+  it("refuses a body that writes the accumulator — the bead's control", () => {
+    const body = epilog4();
+    body.splice(7, 0, ins(0x500000, "mov", "eax, 0", 5));
+    expect(recogniseCrtIdiom(body, false)).toBeNull();
+    // And with the count preserved: swapping a pop for a write of EAX.
+    const swapped = epilog4();
+    swapped[4] = { ...swapped[4], mnemonic: "mov", opStr: "eax, edi" };
+    expect(recogniseCrtIdiom(swapped, false)).toBeNull();
+  });
+
+  it("refuses a body with a call inside it", () => {
+    const body = epilog4();
+    body[7] = { ...body[7], mnemonic: "call", opStr: "0x401000" };
+    expect(recogniseCrtIdiom(body, false)).toBeNull();
+  });
+
+  it("refuses a different frame slot, the wrong register popped, and a `retn 4`", () => {
+    const slot = epilog4();
+    slot[0] = { ...slot[0], opStr: "ecx, dword ptr [ebp - 0x14]" };
+    expect(recogniseCrtIdiom(slot, false)).toBeNull();
+    const reg = epilog4();
+    reg[6] = { ...reg[6], opStr: "ebp" };
+    expect(recogniseCrtIdiom(reg, false)).toBeNull();
+    const ret = epilog4();
+    ret[10] = { ...ret[10], opStr: "4" };
+    expect(recogniseCrtIdiom(ret, false)).toBeNull();
+  });
+});
+
+describe("recogniseCrtIdiom — __SEH_prolog4, name only", () => {
+  it("accepts the real t32 body and publishes NO signature and preservesResult false", () => {
+    const idiom = recogniseCrtIdiom(prolog4(), false);
+    expect(idiom).toEqual({ kind: "seh-prolog4", name: "__SEH_prolog4", preservesResult: false });
+    expect(idiom?.args).toBeUndefined();
+  });
+
+  it("accepts w32's body, which differs only in the handler and cookie addresses", () => {
+    const body = prolog4();
+    body[0] = { ...body[0], opStr: "0x404430" };
+    body[9] = { ...body[9], opStr: "eax, dword ptr [0x410284]" };
+    expect(recogniseCrtIdiom(body, false)?.name).toBe("__SEH_prolog4");
+  });
+
+  it("refuses a pushed register or a based cookie load in the two variable rows", () => {
+    const push = prolog4();
+    push[0] = { ...push[0], opStr: "eax" };
+    expect(recogniseCrtIdiom(push, false)).toBeNull();
+    const load = prolog4();
+    load[9] = { ...load[9], opStr: "eax, dword ptr [ebx + 4]" };
+    expect(recogniseCrtIdiom(load, false)).toBeNull();
+  });
+
+  it("refuses an extra or a missing instruction, and the body on x64", () => {
+    const extra = prolog4();
+    extra.splice(12, 0, ins(0x500000, "nop", "", 1));
+    expect(recogniseCrtIdiom(extra, false)).toBeNull();
+    const missing = prolog4();
+    missing.splice(12, 1);
+    expect(recogniseCrtIdiom(missing, false)).toBeNull();
+    expect(recogniseCrtIdiom(prolog4(), true)).toBeNull();
+  });
+
+  it("publishes no named global — the cookie load inside it is not what this template is for", () => {
+    const idioms = new Map([[PROLOG4, recogniseCrtIdiom(prolog4(), false) as CrtIdiom]]);
+    expect(namedGlobalsFor(idioms, false).size).toBe(0);
+  });
+});
+
+describe("recogniseCrtIdioms — both EH4 helpers in one image", () => {
+  it("names each at its entry and leaves the cookie check's answer alone", () => {
+    const out = recogniseCrtIdioms(
+      new Map<number, IdiomInsn[]>([
+        [PROLOG4, prolog4()],
+        [EPILOG4, epilog4()],
+        [0x401da4, classic()],
+        [0x401000, [ins(0x401000, "push", "ebp", 1), ins(0x401001, "ret", "", 1)]],
+      ]),
+      false,
+    );
+    expect([...out.keys()].sort()).toEqual([0x401da4, PROLOG4, EPILOG4].sort());
+    expect(out.get(EPILOG4)?.preservesResult).toBe(true);
+    expect(out.get(PROLOG4)?.preservesResult).toBe(false);
+    expect(cookieOf(out.get(0x401da4))).toBe(0x412284);
   });
 });

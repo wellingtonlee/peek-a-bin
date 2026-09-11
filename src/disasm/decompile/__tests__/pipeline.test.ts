@@ -9482,3 +9482,164 @@ describe("decompileFunction — a dereferenced data-section address is a named g
     expect(code).not.toContain("g_414620");
   });
 });
+
+describe("decompileFunction — x86 EH4: __SEH_epilog4 takes no result and the return names the value before it", () => {
+  // THE DEFECT (peek-a-bin-s1f6.3, B7). Every `__try` function on PE32 ends
+  // `call __SEH_epilog4; ret`, and the helper's body — restore fs:[0], pop the
+  // callee-saved registers and the frame, return through the address parked in
+  // ECX — never writes EAX. With the call defining EAX, the real return value
+  // computed on every path above it was dead, and t32!sub_40C9DE printed
+  // `return sub_4041B5();` — at all 31 / 29 call sites on t32 / w32.
+  const EPILOG4 = 0x4041b5;
+  const PROLOG4 = 0x404170;
+
+  /** t32's `__SEH_epilog4` body, as the image-wide pass sees it (20 bytes). */
+  const epilog4 = (): Instruction[] => [
+    ins(EPILOG4, "mov", "ecx, dword ptr [ebp - 0x10]", 3),
+    ins(EPILOG4 + 3, "mov", "dword ptr fs:[0], ecx", 7),
+    ins(EPILOG4 + 10, "pop", "ecx", 1),
+    ins(EPILOG4 + 11, "pop", "edi", 1),
+    ins(EPILOG4 + 12, "pop", "edi", 1),
+    ins(EPILOG4 + 13, "pop", "esi", 1),
+    ins(EPILOG4 + 14, "pop", "ebx", 1),
+    ins(EPILOG4 + 15, "mov", "esp, ebp", 2),
+    ins(EPILOG4 + 17, "pop", "ebp", 1),
+    ins(EPILOG4 + 18, "push", "ecx", 1),
+    ins(EPILOG4 + 19, "ret", "", 1),
+  ];
+  /** t32's `__SEH_prolog4` body (69 bytes). */
+  const prolog4 = (): Instruction[] => {
+    const rows: [string, string, number][] = [
+      ["push", "0x4041d0", 5],
+      ["push", "dword ptr fs:[0]", 7],
+      ["mov", "eax, dword ptr [esp + 0x10]", 4],
+      ["mov", "dword ptr [esp + 0x10], ebp", 4],
+      ["lea", "ebp, [esp + 0x10]", 4],
+      ["sub", "esp, eax", 2],
+      ["push", "ebx", 1],
+      ["push", "esi", 1],
+      ["push", "edi", 1],
+      ["mov", "eax, dword ptr [0x412284]", 5],
+      ["xor", "dword ptr [ebp - 4], eax", 3],
+      ["xor", "eax, ebp", 2],
+      ["push", "eax", 1],
+      ["mov", "dword ptr [ebp - 0x18], esp", 3],
+      ["push", "dword ptr [ebp - 8]", 3],
+      ["mov", "eax, dword ptr [ebp - 4]", 3],
+      ["mov", "dword ptr [ebp - 4], 0xfffffffe", 7],
+      ["mov", "dword ptr [ebp - 8], eax", 3],
+      ["lea", "eax, [ebp - 0x10]", 3],
+      ["mov", "dword ptr fs:[0], eax", 6],
+      ["ret", "", 1],
+    ];
+    let at = PROLOG4;
+    return rows.map(([mn, ops, size]) => {
+      const i = ins(at, mn, ops, size);
+      at += size;
+      return i;
+    });
+  };
+
+  const facts = (): CalleeClobbers => ({
+    byAddress: new Map(),
+    unresolved: [],
+    idioms: recogniseCrtIdioms(
+      new Map<number, Instruction[]>([
+        [EPILOG4, epilog4()],
+        [PROLOG4, prolog4()],
+      ]),
+      false,
+    ),
+  });
+  /** As function detection names them (`functionDetect.ts`'s naming pass). */
+  const named = () =>
+    new Map([
+      [EPILOG4, { name: "__SEH_epilog4", address: EPILOG4 }],
+      [PROLOG4, { name: "__SEH_prolog4", address: PROLOG4 }],
+    ]);
+
+  function decompile(instructions: Instruction[], clobbers: CalleeClobbers | undefined): string {
+    const start = instructions[0].address;
+    const last = instructions[instructions.length - 1];
+    const func: DisasmFunction = {
+      name: "sub_401000",
+      address: start,
+      size: last.address + last.size - start,
+    };
+    return decompileFunction(
+      func,
+      instructions,
+      new Map<number, Xref[]>(),
+      null,
+      null,
+      false,
+      new Map(),
+      new Map(),
+      new Map(),
+      named(),
+      undefined,
+      undefined,
+      undefined,
+      clobbers,
+    ).code;
+  }
+
+  /**
+   * The tail of t32!sub_40C9DE, in shape: the result lives in `[ebp - 0x1c]`,
+   * is loaded into EAX, and the function leaves through the helper.
+   */
+  const tail = (): Instruction[] =>
+    seq(0x401000, [
+      ["mov", "eax, dword ptr [ebp + 8]"],
+      ["add", "eax, 1"],
+      ["mov", "dword ptr [ebp - 0x1c], eax"],
+      ["mov", "eax, dword ptr [ebp - 0x1c]"],
+      ["call", `0x${EPILOG4.toString(16)}`],
+      ["ret"],
+    ]);
+
+  const returnLine = (code: string) =>
+    (code.split("\n").find((l) => l.trim().startsWith("return")) ?? "").trim();
+
+  it("calls the helper as a statement with no arguments, and returns the value loaded above it", () => {
+    const code = decompile(tail(), facts());
+    // Named, argument-less, and a statement: the helper is real control flow.
+    expect(code).toMatch(/^\s*__SEH_epilog4\(\);$/m);
+    expect(code).not.toMatch(/=\s*__SEH_epilog4\(/);
+    // The return is the value computed above the call, not the helper's EAX.
+    expect(returnLine(code)).not.toContain("__SEH_epilog4");
+    expect(returnLine(code)).not.toBe("return;");
+    expect(returnLine(code)).toMatch(/^return (eax|var_1C|arg_0 \+ 1);$/);
+  });
+
+  it("NEGATIVE CONTROL: with the call still defining EAX, the tail returns the helper", () => {
+    // Keep the resultDest on the recognised call — here by withholding the idiom
+    // map, the only thing that removes it — and the return reverts to the helper.
+    const noIdioms: CalleeClobbers = { byAddress: new Map(), unresolved: [], idioms: new Map() };
+    const code = decompile(tail(), noIdioms);
+    expect(returnLine(code)).toBe("return __SEH_epilog4();");
+  });
+
+  it("__SEH_prolog4 keeps its two pushed arguments and its result: name only", () => {
+    const code = decompile(
+      seq(0x401000, [
+        ["push", "0x28"],
+        ["push", "0x411228"],
+        ["call", `0x${PROLOG4.toString(16)}`],
+        ["mov", "eax, dword ptr [ebp + 8]"],
+        ["call", `0x${EPILOG4.toString(16)}`],
+        ["ret"],
+      ]),
+      facts(),
+    );
+    const line = code.split("\n").find((l) => l.includes("__SEH_prolog4(")) ?? "";
+    // Both immediates reach the call: the routine published no register
+    // signature, so the call-site walk was left to find them.
+    expect(line).toContain("0x411228");
+    expect(line).toContain("0x28");
+    // And it is not the return value even though it is the last call before
+    // the (result-preserving) epilogue: the accumulator is reloaded between.
+    expect(returnLine(code)).not.toContain("__SEH_prolog4");
+    expect(returnLine(code)).toMatch(/^return (eax|arg_0);$/);
+  });
+});

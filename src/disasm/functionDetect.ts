@@ -2704,9 +2704,10 @@ export function detectFunctions(
   // exemption.
   //
   // Two namings share the decode. A CRT routine (`crtIdioms.ts` — the `/GS`
-  // cookie check today) is named from its instructions alone, so it needs no
-  // IAT; an import thunk is a single `jmp [iat slot]` and needs one. Naming
-  // here, at detection, is what puts `__security_check_cookie` in the function
+  // cookie check and the two x86 EH4 helpers) is named from its instructions
+  // alone, so it needs no IAT; an import thunk is a single `jmp [iat slot]` and
+  // needs one. Naming here, at detection, is what puts `__security_check_cookie`
+  // and `__SEH_epilog4` in the function
   // list, the decompiled C and `corpus/sweep.ts`'s expected-callee set from ONE
   // source, so `distinct callees lost` stays 0 by construction rather than by a
   // second spelling of the rename in the lifter.

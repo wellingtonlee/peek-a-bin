@@ -57,11 +57,33 @@
  * widths), which is what keeps the `xor ecx, ebp` above the call alive on x86,
  * where nothing else reads ECX and the xor was being deleted as dead.
  *
- * DESIGNED TO GROW. {@link CRT_RECOGNISERS} is a table; the second entry it is
- * built for is x86 `__SEH_epilog4` (epic 3: `t32!sub_40C9DE` returns its unlock
- * helper's result for the same reason). A new routine is a new recogniser and
- * a new member of the {@link CrtIdiom} union — nothing here dispatches on the
- * name.
+ * THE SECOND ROUTINE: x86 `__SEH_epilog4` (peek-a-bin-s1f6.3). MSVC's EH4
+ * epilogue helper — every `__try` function on PE32 ends `call __SEH_epilog4;
+ * ret` — and it, too, is inserted after the return value has been computed and
+ * leaves EAX alone: its body restores `fs:[0]`, pops the callee-saved
+ * registers and the caller's frame, and returns through the return address it
+ * parked in ECX. With the call defining EAX, `var_1C` (the real result,
+ * computed on every path of `t32!sub_40C9DE`) was dead and the tail printed
+ * `return sub_4041B5();` at all 31 / 29 call sites on t32 / w32. One shape,
+ * byte-identical in both binaries (`t32!0x4041B5`, `w32!0x404415`, 20 bytes):
+ *
+ *     mov ecx, [ebp - 0x10] ; mov fs:[0], ecx ; pop ecx ; pop edi ; pop edi ;
+ *     pop esi ; pop ebx ; mov esp, ebp ; pop ebp ; push ecx ; ret
+ *
+ * Its counterpart `__SEH_prolog4` (`t32!0x404170`, `w32!0x4043D0`, 21
+ * instructions, 69 bytes) is recognised for its NAME only: it writes EAX
+ * (`mov eax, [esp + 0x10]` and the cookie load), so `preservesResult` is
+ * `false` there and the call keeps its `resultDest`; and it takes its two
+ * arguments on the stack (`push <framesize>; push <scopetable>`), so it
+ * publishes no register signature and the lifter's call-site walk is left to
+ * find them. The frame it establishes is `stack.ts`'s business, recognised
+ * there by arithmetic rather than by this template, and the scope table it is
+ * handed is `seh32.ts`'s. Only the pushed handler address and the cookie
+ * address vary between binaries, and the template reads both as shapes.
+ *
+ * DESIGNED TO GROW. {@link CRT_RECOGNISERS} is a table. A new routine is a new
+ * recogniser and a new member of the {@link CrtIdiom} union — nothing here
+ * dispatches on the name.
  *
  * WHAT IT DOES NOT DO. It does not delete the check call or the `x ^ rsp` xor:
  * compiler instrumentation is real control flow (a `jne` to
@@ -102,8 +124,40 @@ export interface SecurityCheckCookieIdiom {
   args: readonly string[];
 }
 
-/** A recognised CRT routine. A union so a second routine is a new member. */
-export type CrtIdiom = SecurityCheckCookieIdiom;
+/**
+ * `__SEH_epilog4` — MSVC's x86 EH4 epilogue helper.
+ *
+ * `preservesResult` is a literal `true` for the same reason as the cookie
+ * check's: the template names every instruction and none writes EAX. `args` is
+ * empty because the routine takes nothing — it reads the caller's frame
+ * through EBP, which a call-site walk would otherwise decorate with whatever
+ * `push` happens to precede the call.
+ */
+export interface SehEpilog4Idiom {
+  kind: "seh-epilog4";
+  name: "__SEH_epilog4";
+  preservesResult: true;
+  args: readonly [];
+}
+
+/**
+ * `__SEH_prolog4` — MSVC's x86 EH4 prologue helper, recognised for its NAME.
+ *
+ * `preservesResult` is a literal `false`: the body writes EAX, and a type that
+ * could say otherwise would let a template edit change the lifter's behaviour
+ * silently. No `args`: its two arguments (`framesize`, `scopetable`) are pushed
+ * immediates, which `collectArgs32` already recovers at the call site, and a
+ * published register signature would REPLACE that walk with an empty list.
+ */
+export interface SehProlog4Idiom {
+  kind: "seh-prolog4";
+  name: "__SEH_prolog4";
+  preservesResult: false;
+  args?: undefined;
+}
+
+/** A recognised CRT routine. A union so a new routine is a new member. */
+export type CrtIdiom = SecurityCheckCookieIdiom | SehEpilog4Idiom | SehProlog4Idiom;
 
 /** The name the emitted C gives the global the cookie check compares against. */
 export const SECURITY_COOKIE_NAME = "__security_cookie";
@@ -111,15 +165,20 @@ export const SECURITY_COOKIE_NAME = "__security_cookie";
 /**
  * Functions longer than this are not decoded by the recognisers at all.
  *
- * The hardened shape is 31 bytes; an x86 extent that runs to the next start can
- * carry up to 15 bytes of alignment padding on top of the classic shape's 15.
+ * The longest admitted body is `__SEH_prolog4` at 69 bytes; an x86 extent that
+ * runs to the next start can carry up to 15 bytes of alignment padding on top
+ * of that (the hardened cookie check is 31, the classic 15, the epilogue 20).
  * A generous bound costs nothing — the decode is per candidate and tiny — and
- * a tight one silently refuses a real routine.
+ * a tight one silently refuses a real routine. Raising it from 48 to 96 also
+ * widens the population `functionDetect.ts`'s naming pass decodes, which is
+ * where the cost of a looser bound would land; every template still names its
+ * first instruction exactly, so nothing in that wider population can match by
+ * accident.
  */
-export const CRT_IDIOM_MAX_BYTES = 48;
+export const CRT_IDIOM_MAX_BYTES = 96;
 
-/** The longest admitted template, after padding is stripped. */
-const MAX_INSNS = 8;
+/** The longest admitted template, after padding is stripped (`__SEH_prolog4`). */
+const MAX_INSNS = 21;
 
 const PADDING = new Set(["int3", "nop"]);
 
@@ -248,15 +307,123 @@ function recogniseSecurityCheckCookie(
   return null;
 }
 
+// ── Exact-text templates: the two EH4 helpers ────────────────────────────────
+
+/**
+ * One instruction of an exact-text template: the base mnemonic and either the
+ * operand string it must carry (after lowercasing and whitespace collapsing) or
+ * a predicate for the one operand that legitimately varies between images.
+ */
+type TemplateRow = readonly [mnemonic: string, operands: string | ((ops: string) => boolean)];
+
+/** Operand text normalised for comparison: lowercase, single spaces. */
+function normOps(opStr: string): string {
+  return opStr.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Does `body` match `template` instruction for instruction, with nothing over?
+ *
+ * Every row is checked — an extra instruction, a missing one, a different
+ * mnemonic or a different operand all refuse — and the base mnemonic is taken
+ * so a `rep ret` still reads as `ret`. Nothing else is normalised: `dword ptr`
+ * is part of what MSVC emitted and part of what is matched.
+ */
+function matchesTemplate(body: readonly IdiomInsn[], template: readonly TemplateRow[]): boolean {
+  if (body.length !== template.length) return false;
+  for (let i = 0; i < template.length; i++) {
+    const [mn, ops] = template[i];
+    if (baseMnemonic(body[i].mnemonic) !== mn) return false;
+    const have = normOps(body[i].opStr);
+    if (typeof ops === "string" ? have !== ops : !ops(have)) return false;
+  }
+  return true;
+}
+
+/**
+ * `__SEH_epilog4`, exactly as MSVC's 32-bit CRT ships it. See the module
+ * docstring. Read off `t32!0x4041B5` and `w32!0x404415` at 21fbfa3 through
+ * Capstone (so `fs:[0]` is spelled `dword ptr fs:[0]`, as the lifter sees it).
+ *
+ * No row writes EAX and no row is a `call`, which is what licenses
+ * `preservesResult: true` — and the template being exact is what makes that a
+ * property of the type rather than of an inspection nobody re-runs.
+ */
+const SEH_EPILOG4: readonly TemplateRow[] = [
+  ["mov", "ecx, dword ptr [ebp - 0x10]"],
+  ["mov", "dword ptr fs:[0], ecx"],
+  ["pop", "ecx"],
+  ["pop", "edi"],
+  ["pop", "edi"],
+  ["pop", "esi"],
+  ["pop", "ebx"],
+  ["mov", "esp, ebp"],
+  ["pop", "ebp"],
+  ["push", "ecx"],
+  ["ret", ""],
+];
+
+/** `push 0x4041d0` — the `_except_handler4` address, which varies per image. */
+const isPushedAddress = (ops: string): boolean => /^0x[0-9a-f]+$/.test(ops);
+
+/** `mov eax, dword ptr [0x412284]` — the cookie load; the address varies per image. */
+const isCookieLoad = (ops: string): boolean => /^eax, dword ptr \[0x[0-9a-f]+\]$/.test(ops);
+
+/**
+ * `__SEH_prolog4`, exactly as shipped (`t32!0x404170`, `w32!0x4043D0` at
+ * 21fbfa3). Two rows carry a per-image address and are matched as shapes; the
+ * other nineteen are literal. The frame arithmetic this body performs is what
+ * `stack.ts`'s `hasHelperFramePointerPrologue` checks — that check does not
+ * depend on this template and this template does not replace it.
+ */
+const SEH_PROLOG4: readonly TemplateRow[] = [
+  ["push", isPushedAddress],
+  ["push", "dword ptr fs:[0]"],
+  ["mov", "eax, dword ptr [esp + 0x10]"],
+  ["mov", "dword ptr [esp + 0x10], ebp"],
+  ["lea", "ebp, [esp + 0x10]"],
+  ["sub", "esp, eax"],
+  ["push", "ebx"],
+  ["push", "esi"],
+  ["push", "edi"],
+  ["mov", isCookieLoad],
+  ["xor", "dword ptr [ebp - 4], eax"],
+  ["xor", "eax, ebp"],
+  ["push", "eax"],
+  ["mov", "dword ptr [ebp - 0x18], esp"],
+  ["push", "dword ptr [ebp - 8]"],
+  ["mov", "eax, dword ptr [ebp - 4]"],
+  ["mov", "dword ptr [ebp - 4], 0xfffffffe"],
+  ["mov", "dword ptr [ebp - 8], eax"],
+  ["lea", "eax, [ebp - 0x10]"],
+  ["mov", "dword ptr fs:[0], eax"],
+  ["ret", ""],
+];
+
+/** x86 only: there is no 64-bit EH4, and these register names do not exist there. */
+function recogniseSehEpilog4(body: readonly IdiomInsn[], is64: boolean): SehEpilog4Idiom | null {
+  if (is64 || !matchesTemplate(body, SEH_EPILOG4)) return null;
+  return { kind: "seh-epilog4", name: "__SEH_epilog4", preservesResult: true, args: [] };
+}
+
+function recogniseSehProlog4(body: readonly IdiomInsn[], is64: boolean): SehProlog4Idiom | null {
+  if (is64 || !matchesTemplate(body, SEH_PROLOG4)) return null;
+  return { kind: "seh-prolog4", name: "__SEH_prolog4", preservesResult: false };
+}
+
 /** One recogniser per routine; each returns a match or null. */
 export type CrtRecogniser = (body: readonly IdiomInsn[], is64: boolean) => CrtIdiom | null;
 
 /**
  * The table. Order is irrelevant — the templates are disjoint by construction
- * (each names its first instruction exactly) — but a second entry belongs
- * here and nowhere else.
+ * (each names its first instruction exactly: `cmp`, `mov ecx, …`, `push <imm>`)
+ * — but a new entry belongs here and nowhere else.
  */
-export const CRT_RECOGNISERS: readonly CrtRecogniser[] = [recogniseSecurityCheckCookie];
+export const CRT_RECOGNISERS: readonly CrtRecogniser[] = [
+  recogniseSecurityCheckCookie,
+  recogniseSehEpilog4,
+  recogniseSehProlog4,
+];
 
 /**
  * The CRT routine `insns` is the body of, or null.

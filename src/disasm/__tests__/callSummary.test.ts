@@ -290,7 +290,10 @@ describe("CallSummaryCache — the CRT idiom map rides with the summaries", () =
     const facts = new CallSummaryCache().forToken(1, extents, section(), new Map(), false);
     expect(facts.byAddress.size).toBe(0);
     expect(facts.idioms?.get(CHECK)?.name).toBe("__security_check_cookie");
-    expect(facts.idioms?.get(CHECK)?.cookieAddress).toBe(0x412284);
+    const check = facts.idioms?.get(CHECK);
+    expect(check?.kind === "security-check-cookie" ? check.cookieAddress : undefined).toBe(
+      0x412284,
+    );
     expect(facts.idioms?.has(CALLER)).toBe(false);
   });
 
